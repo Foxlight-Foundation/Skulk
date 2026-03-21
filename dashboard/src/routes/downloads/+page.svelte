@@ -13,6 +13,7 @@
     fetchStoreHealth,
     fetchStoreRegistry,
     deleteStoreModel,
+    requestStoreDownload,
     instances,
     type StoreRegistryEntry,
   } from "$lib/stores/app.svelte";
@@ -23,6 +24,9 @@
   } from "$lib/utils/downloads";
   import HeaderNav from "$lib/components/HeaderNav.svelte";
   import StoreRegistryTable from "$lib/components/StoreRegistryTable.svelte";
+  import { ModelPickerModal } from "$lib/components";
+  import { favorites, toggleFavorite, getFavoritesSet } from "$lib/stores/favorites.svelte";
+  import { hasRecents, getRecentModelIds } from "$lib/stores/recents.svelte";
 
   type CellStatus =
     | { kind: "completed"; totalBytes: number; modelDirectory?: string }
@@ -358,6 +362,35 @@
   let deleteConfirmEntry = $state<{ entry: StoreRegistryEntry; isActive: boolean } | null>(null);
   let deleting = $state(false);
 
+  // Model picker for "Find Models" — download to store
+  let isModelPickerOpen = $state(false);
+  let pickerModels = $state<{ id: string; name?: string; storage_size_megabytes?: number; base_model?: string; quantization?: string; family?: string; capabilities?: string[]; supports_tensor?: boolean }[]>([]);
+  const favoritesSet = $derived(getFavoritesSet());
+  const recentModelIds = $derived(getRecentModelIds());
+  const showRecentsTab = $derived(hasRecents());
+  const storeModelIds = $derived(new Set(registryEntries.map((e) => e.model_id)));
+
+  async function fetchPickerModels() {
+    try {
+      const resp = await fetch("/models");
+      if (resp.ok) {
+        const data = await resp.json();
+        pickerModels = data.data || [];
+      }
+    } catch { /* ignore */ }
+  }
+
+  async function handleStoreDownload(modelId: string) {
+    isModelPickerOpen = false;
+    try {
+      await requestStoreDownload(modelId);
+      // Refresh registry after a short delay to show new entry
+      setTimeout(() => loadRegistry(), 2000);
+    } catch (err) {
+      console.error("Store download request failed:", err);
+    }
+  }
+
   // Active model IDs (from running instances)
   const activeModelIds = $derived.by(() => {
     const inst = instances();
@@ -494,6 +527,23 @@
     {/if}
 
     {#if activeTab === "store" && storeAvailable}
+      <div class="flex items-center justify-between">
+        <div></div>
+        <button
+          type="button"
+          class="px-4 py-1.5 text-xs font-mono uppercase tracking-wider bg-exo-yellow text-exo-black rounded hover:bg-exo-yellow/90 transition-colors flex items-center gap-2"
+          onclick={() => {
+            fetchPickerModels();
+            isModelPickerOpen = true;
+          }}
+        >
+          <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          Find Models
+        </button>
+      </div>
       <StoreRegistryTable
         entries={registryEntries}
         loading={registryLoading}
@@ -1009,6 +1059,36 @@
     </div>
   </div>
 {/if}
+
+<!-- Model picker for store downloads -->
+<ModelPickerModal
+  isOpen={isModelPickerOpen}
+  models={pickerModels}
+  selectedModelId={null}
+  favorites={favoritesSet}
+  recentModelIds={recentModelIds}
+  hasRecents={showRecentsTab}
+  existingModelIds={storeModelIds}
+  canModelFit={() => true}
+  getModelFitStatus={() => "fits_now"}
+  onSelect={handleStoreDownload}
+  onClose={() => (isModelPickerOpen = false)}
+  onToggleFavorite={toggleFavorite}
+  onAddModel={async (modelId) => {
+    await fetch("/models/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model_id: modelId }),
+    });
+    await fetchPickerModels();
+  }}
+  onDeleteModel={async (modelId) => {
+    await fetch(`/models/custom/${encodeURIComponent(modelId)}`, { method: "DELETE" });
+    await fetchPickerModels();
+  }}
+  totalMemoryGB={0}
+  usedMemoryGB={0}
+/>
 
 <style>
   table {

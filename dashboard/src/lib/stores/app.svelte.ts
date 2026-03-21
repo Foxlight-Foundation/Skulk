@@ -3455,6 +3455,25 @@ export const fetchNodeIdentity =
     if (!resp.ok) throw new Error(`Failed to fetch node identity: ${resp.status}`);
     return await resp.json();
   };
+export const requestStoreDownload = async (
+  modelId: string,
+): Promise<{ status: string; progress?: number; error?: string }> => {
+  const resp = await fetch(
+    `/store/models/${encodeURIComponent(modelId)}/download`,
+    { method: "POST" },
+  );
+  if (!resp.ok) throw new Error(`Store download request failed: ${resp.status}`);
+  return await resp.json();
+};
+export const getStoreDownloadStatus = async (
+  modelId: string,
+): Promise<{ status: string; progress?: number; error?: string }> => {
+  const resp = await fetch(
+    `/store/models/${encodeURIComponent(modelId)}/download/status`,
+  );
+  if (!resp.ok) return { status: "not_found" };
+  return await resp.json();
+};
 export const deleteStoreModel = async (modelId: string): Promise<boolean> => {
   const resp = await fetch(`/store/models/${encodeURIComponent(modelId)}`, {
     method: "DELETE",

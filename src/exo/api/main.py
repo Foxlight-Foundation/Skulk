@@ -370,6 +370,8 @@ class API:
         self.app.get("/store/health")(self.get_store_health)
         self.app.get("/store/registry")(self.get_store_registry)
         self.app.delete("/store/models/{model_id:path}")(self.delete_store_model)
+        self.app.post("/store/models/{model_id:path}/download")(self.request_store_download)
+        self.app.get("/store/models/{model_id:path}/download/status")(self.get_store_download_status)
         self.app.get("/filesystem/browse")(self.browse_filesystem)
         self.app.get("/node/identity")(self.get_node_identity)
 
@@ -2003,6 +2005,18 @@ class API:
             "hostname": hostname,
             "ipAddress": ip,
         })
+
+    async def request_store_download(self, model_id: str) -> JSONResponse:
+        if self._store_client is None:
+            raise HTTPException(status_code=503, detail="Store not configured")
+        result = await self._store_client.request_store_download(model_id)
+        return JSONResponse(result)
+
+    async def get_store_download_status(self, model_id: str) -> JSONResponse:
+        if self._store_client is None:
+            raise HTTPException(status_code=503, detail="Store not configured")
+        result = await self._store_client.get_store_download_status(model_id)
+        return JSONResponse(result)
 
     async def delete_store_model(self, model_id: str) -> JSONResponse:
         if self._store_client is None:

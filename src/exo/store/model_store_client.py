@@ -326,6 +326,42 @@ class ModelStoreClient:
             logger.debug(f"ModelStoreClient: fetch_registry failed: {exc}")
             return []
 
+    async def request_store_download(self, model_id: str) -> dict[str, object]:
+        """Request the store host start downloading a model. Non-blocking."""
+        url = _make_store_url(
+            self._store_host, self._store_port,
+            f"/models/{quote(model_id, safe='')}/download",
+        )
+        try:
+            async with (
+                create_http_session(timeout_profile="short") as session,
+                session.post(url) as resp,
+            ):
+                if resp.status not in (200, 201):
+                    return {"status": "error", "error": f"HTTP {resp.status}"}
+                data: object = await resp.json()
+                return data if isinstance(data, dict) else {"status": "unknown"}
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
+    async def get_store_download_status(self, model_id: str) -> dict[str, object]:
+        """Poll store-side download status for a model."""
+        url = _make_store_url(
+            self._store_host, self._store_port,
+            f"/models/{quote(model_id, safe='')}/download/status",
+        )
+        try:
+            async with (
+                create_http_session(timeout_profile="short") as session,
+                session.get(url) as resp,
+            ):
+                if resp.status != 200:
+                    return {"status": "not_found"}
+                data: object = await resp.json()
+                return data if isinstance(data, dict) else {"status": "unknown"}
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
     async def delete_store_model(self, model_id: str) -> bool:
         """Delete a model from the store registry and disk.
 
