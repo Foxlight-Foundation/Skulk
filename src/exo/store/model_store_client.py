@@ -165,6 +165,11 @@ class ModelStoreClient:
         self._store_port = store_port
         self._local_store_path = local_store_path
 
+    @property
+    def local_store_path(self) -> Path | None:
+        """The local store path, or ``None`` if this is not the store host."""
+        return self._local_store_path
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -573,18 +578,41 @@ class ModelStoreDownloader(ShardDownloader):
         model_id = str(shard.model_card.model_id)
 
         if not self._staging_config.enabled:
+            # When staging is disabled but the store client has a local store
+            # path (i.e. this is the store host), serve directly from the
+            # canonical store directory instead of re-downloading from HF.
+            if self._store_client.local_store_path is not None:
+                direct_path = self._store_client.local_store_path / _sanitize_model_id(model_id)
+                if direct_path.exists() and any(direct_path.iterdir()):
+                    logger.info(
+                        f"ModelStoreDownloader: staging disabled — loading {model_id} directly from store at {direct_path}"
+                    )
+                    await self._emit_progress(shard, status="complete")
+                    return direct_path
             return await self._inner.ensure_shard(shard, config_only)
 
         # Fast path: if the model is already fully staged locally, skip the
         # HTTP availability probe.  This keeps inference working when the store
         # server is temporarily unreachable (e.g. still starting up) and avoids
         # an unnecessary round-trip for the warm-cache case.
+        #
+        # We only consider the cache valid when it contains at least one real
+        # file and no leftover ``.partial`` temporaries (which indicate an
+        # interrupted download).
         dest_path = _staging_dir(self._staging_config.node_cache_path, model_id)
-        if dest_path.exists() and any(dest_path.iterdir()):
-            logger.info(
-                f"ModelStoreDownloader: {model_id} already staged at {dest_path} — skipping availability probe"
+        if dest_path.exists():
+            has_real_files = any(
+                p for p in dest_path.rglob("*") if p.is_file() and not p.name.endswith(".partial")
             )
-            return dest_path
+            has_partial_files = any(
+                p for p in dest_path.rglob("*.partial") if p.is_file()
+            )
+            if has_real_files and not has_partial_files:
+                logger.info(
+                    f"ModelStoreDownloader: {model_id} already staged at {dest_path} — skipping availability probe"
+                )
+                await self._emit_progress(shard, status="complete")
+                return dest_path
 
         available = await self._store_client.is_model_available(model_id)
 

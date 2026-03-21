@@ -117,12 +117,24 @@ class Node:
             else:
                 shard_downloader = base_downloader
 
+            # On the store host, protect the canonical store directory from
+            # deletion by the download coordinator's cleanup logic.
+            _protected_store = (
+                Path(exo_config.model_store.store_path)
+                if exo_config is not None
+                and exo_config.model_store is not None
+                and exo_config.model_store.enabled
+                and store_client is not None
+                and store_client.local_store_path is not None
+                else None
+            )
             download_coordinator = DownloadCoordinator(
                 node_id,
                 shard_downloader,
                 event_sender=event_router.sender(),
                 download_command_receiver=router.receiver(topics.DOWNLOAD_COMMANDS),
                 offline=args.offline,
+                protected_store_path=_protected_store,
             )
         else:
             download_coordinator = None

@@ -46,6 +46,7 @@ class DownloadCoordinator:
     download_command_receiver: Receiver[ForwarderDownloadCommand]
     event_sender: Sender[Event]
     offline: bool = False
+    protected_store_path: Path | None = None
 
     # Local state
     download_status: dict[ModelId, DownloadProgress] = field(default_factory=dict)
@@ -308,14 +309,26 @@ class DownloadCoordinator:
         # store into a non-default location (e.g. ~/.exo/staging/<model>).
         # delete_model() only removes EXO_MODELS_DIR, so the staged copy would
         # otherwise survive and make the model reappear on the next activation.
+        #
+        # Guard: never delete a path that lives inside the canonical store —
+        # on store hosts the staging path may point directly at the store's
+        # own model directory, and removing it would destroy the shared copy.
         if model_id in self.download_status:
             current_status = self.download_status[model_id]
             if isinstance(current_status, DownloadCompleted):
-                staging_dir = Path(current_status.model_directory)
-                standard_dir = Path(self._model_dir(model_id))
-                if staging_dir != standard_dir and staging_dir.exists():
+                staging_dir = Path(current_status.model_directory).resolve()
+                standard_dir = Path(self._model_dir(model_id)).resolve()
+                is_protected = (
+                    self.protected_store_path is not None
+                    and staging_dir.is_relative_to(self.protected_store_path.resolve())
+                )
+                if staging_dir != standard_dir and staging_dir.exists() and not is_protected:
                     logger.info(f"Deleting staged model files at {staging_dir}")
                     await asyncio.to_thread(shutil.rmtree, staging_dir, True)
+                elif is_protected:
+                    logger.info(
+                        f"Skipping deletion of {staging_dir} — inside protected store path"
+                    )
 
         # Emit pending status to reset UI state, then remove from local tracking
         if model_id in self.download_status:
