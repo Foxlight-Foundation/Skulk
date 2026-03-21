@@ -326,6 +326,82 @@ class ModelStoreClient:
             logger.debug(f"ModelStoreClient: fetch_registry failed: {exc}")
             return []
 
+    async def request_and_wait_for_download(
+        self,
+        model_id: str,
+        on_progress: Callable[[float], Awaitable[None]] | None = None,
+        timeout: float = 7200,
+        poll_interval: float = 5.0,
+    ) -> bool:
+        """Request the store host download a model from HuggingFace, then wait.
+
+        Posts to ``/models/{id}/download`` to start the download, then polls
+        ``/models/{id}/download/status`` until complete or failed.
+
+        Args:
+            model_id: HuggingFace model ID.
+            on_progress: Called with progress (0.0-1.0) on each poll.
+            timeout: Maximum wait time in seconds.
+            poll_interval: Seconds between status polls.
+
+        Returns:
+            ``True`` if download completed successfully.
+
+        Raises:
+            RuntimeError: If the download failed on the store host.
+            TimeoutError: If the download didn't complete within *timeout*.
+        """
+        import asyncio as _asyncio
+
+        encoded_id = quote(model_id, safe="")
+
+        # Request download
+        url = _make_store_url(self._store_host, self._store_port, f"/models/{encoded_id}/download")
+        async with (
+            create_http_session(timeout_profile="short") as session,
+            session.post(url) as resp,
+        ):
+            if resp.status not in (200, 201):
+                raise RuntimeError(f"Store download request failed: HTTP {resp.status}")
+            data: object = await resp.json()
+            if isinstance(data, dict) and data.get("status") == "complete":
+                return True
+
+        # Poll for completion
+        status_url = _make_store_url(
+            self._store_host, self._store_port, f"/models/{encoded_id}/download/status"
+        )
+        elapsed = 0.0
+        while elapsed < timeout:
+            await _asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+            try:
+                async with (
+                    create_http_session(timeout_profile="short") as session,
+                    session.get(status_url) as resp,
+                ):
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+                    if not isinstance(data, dict):
+                        continue
+                    status = data.get("status", "")
+                    progress = float(data.get("progress", 0.0))
+                    if on_progress is not None:
+                        await on_progress(progress)
+                    if status == "complete":
+                        return True
+                    if status == "failed":
+                        raise RuntimeError(
+                            f"Store download of {model_id} failed: {data.get('error', 'unknown')}"
+                        )
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                logger.debug(f"ModelStoreClient: download status poll failed: {exc}")
+
+        raise TimeoutError(f"Store download of {model_id} timed out after {timeout}s")
+
     # ------------------------------------------------------------------
     # Local copy path (store host → same filesystem)
     # ------------------------------------------------------------------
@@ -656,11 +732,29 @@ class ModelStoreDownloader(ShardDownloader):
                 )
 
         if self._allow_hf_fallback:
+            # Ask the store host to download from HuggingFace on our behalf.
+            # Workers never download from HF directly — the store is the
+            # single source of truth for model files.
             logger.info(
-                f"ModelStoreDownloader: {model_id} not in store, "
-                "falling back to HuggingFace"
+                f"ModelStoreDownloader: {model_id} not in store — "
+                "requesting store host to download from HuggingFace"
             )
-            return await self._inner.ensure_shard(shard, config_only)
+            await self._emit_progress(shard, status="in_progress")
+            try:
+                await self._store_client.request_and_wait_for_download(
+                    model_id,
+                    on_progress=lambda _p: self._emit_progress(shard, status="in_progress"),
+                )
+            except (RuntimeError, TimeoutError) as exc:
+                raise ModelNotInStoreError(
+                    f"Store host failed to download {model_id}: {exc}"
+                )
+            # Model now in store — stage it
+            path = await self._store_client.stage_shard(
+                model_id, dest_path, on_progress=None,
+            )
+            await self._emit_progress(shard, status="complete")
+            return path
 
         raise ModelNotInStoreError(
             f"Model {model_id} is not in the store and HuggingFace fallback is disabled"

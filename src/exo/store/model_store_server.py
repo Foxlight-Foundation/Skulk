@@ -128,6 +128,8 @@ class ModelStoreServer:
         self._app.router.add_get("/registry", self._handle_registry)
         self._app.router.add_get("/models", self._handle_models)
         self._app.router.add_get("/models/{model_id}/files", self._handle_model_files)
+        self._app.router.add_post("/models/{model_id}/download", self._handle_download_request)
+        self._app.router.add_get("/models/{model_id}/download/status", self._handle_download_status)
         self._app.router.add_get("/models/{model_id}/{path:.*}", self._handle_file)
 
     async def start(self) -> None:
@@ -258,3 +260,26 @@ class ModelStoreServer:
 
         await response.write_eof()
         return response
+
+    async def _handle_download_request(self, request: web.Request) -> web.Response:
+        """``POST /models/{model_id}/download`` — request store-side HF download."""
+        model_id = _sanitize_model_id(request.match_info["model_id"])
+        status = await self._store.request_download(model_id)
+        return web.json_response({
+            "modelId": status.model_id,
+            "status": status.status,
+            "progress": status.progress,
+        })
+
+    async def _handle_download_status(self, request: web.Request) -> web.Response:
+        """``GET /models/{model_id}/download/status`` — poll download progress."""
+        model_id = _sanitize_model_id(request.match_info["model_id"])
+        status = self._store.get_download_status(model_id)
+        if status is None:
+            raise web.HTTPNotFound(reason=f"No download in progress for {model_id}")
+        return web.json_response({
+            "modelId": status.model_id,
+            "status": status.status,
+            "progress": status.progress,
+            "error": status.error,
+        })

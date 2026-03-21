@@ -58,11 +58,14 @@ when a new model is registered, so this is not a hot path.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import final
+from typing import Literal, final
 
+import aiofiles.os as aios
 from loguru import logger
 from pydantic import BaseModel, ConfigDict
 
@@ -96,6 +99,15 @@ class StoreModelEntry(BaseModel):
     total_bytes: int
 
 
+@dataclass
+class StoreDownloadStatus:
+    """Tracks the progress of a store-side HuggingFace download."""
+    model_id: str
+    status: Literal["pending", "downloading", "complete", "failed"] = "pending"
+    progress: float = 0.0
+    error: str | None = None
+
+
 @final
 class ModelStore:
     """Manages the model registry on the store host node.
@@ -127,6 +139,8 @@ class ModelStore:
         """
         self._store_path = store_path
         self._registry_path = store_path / "registry.json"
+        self._active_downloads: dict[str, StoreDownloadStatus] = {}
+        self._download_lock = asyncio.Lock()
 
     @property
     def store_path(self) -> Path:
@@ -248,3 +262,91 @@ class ModelStore:
                 indent=2,
             )
         )
+
+    # ------------------------------------------------------------------
+    # Store-side HuggingFace downloads
+    # ------------------------------------------------------------------
+
+    async def request_download(self, model_id: str) -> StoreDownloadStatus:
+        """Request that the store download a model from HuggingFace.
+
+        Deduplicates: if the model is already downloading, returns the
+        existing status.  If already in the store, returns "complete".
+        """
+        async with self._download_lock:
+            existing = self._active_downloads.get(model_id)
+            if existing is not None:
+                # Allow retrying failed downloads
+                if existing.status == "failed":
+                    del self._active_downloads[model_id]
+                else:
+                    return existing
+            if self.is_in_store(model_id):
+                return StoreDownloadStatus(model_id=model_id, status="complete", progress=1.0)
+            status = StoreDownloadStatus(model_id=model_id, status="pending")
+            self._active_downloads[model_id] = status
+        asyncio.create_task(self._do_download(model_id))
+        return status
+
+    def get_download_status(self, model_id: str) -> StoreDownloadStatus | None:
+        """Return the download status for *model_id*, or None."""
+        if model_id in self._active_downloads:
+            return self._active_downloads[model_id]
+        if self.is_in_store(model_id):
+            return StoreDownloadStatus(model_id=model_id, status="complete", progress=1.0)
+        return None
+
+    async def _do_download(self, model_id: str) -> None:
+        """Download a model from HuggingFace into the store and register it."""
+        from exo.download.download_utils import (
+            download_file_with_retry,
+            fetch_file_list_with_cache,
+        )
+        from exo.shared.models.model_cards import ModelId
+
+        status = self._active_downloads[model_id]
+        status.status = "downloading"
+        sanitized = model_id.replace("/", "--")
+        target_dir = self._store_path / sanitized
+
+        try:
+            await aios.makedirs(str(target_dir), exist_ok=True)
+
+            file_list = await fetch_file_list_with_cache(
+                ModelId(model_id), "main", recursive=True
+            )
+            total_bytes = sum(f.size or 0 for f in file_list)
+            downloaded_bytes = 0
+
+            for f in file_list:
+                file_size = f.size or 0
+
+                def make_progress_cb(fsize: int):
+                    def cb(curr: int, total: int, is_renamed: bool) -> None:
+                        nonlocal downloaded_bytes
+                        status.progress = (downloaded_bytes + curr) / max(total_bytes, 1)
+                    return cb
+
+                await download_file_with_retry(
+                    ModelId(model_id),
+                    "main",
+                    f.path,
+                    target_dir,
+                    make_progress_cb(file_size),
+                )
+                downloaded_bytes += file_size
+                status.progress = downloaded_bytes / max(total_bytes, 1)
+
+            # Register in the store
+            files = [str(p.relative_to(target_dir)) for p in target_dir.rglob("*") if p.is_file()]
+            total = sum(p.stat().st_size for p in target_dir.rglob("*") if p.is_file())
+            self.register_model(model_id, target_dir, files, total)
+
+            status.status = "complete"
+            status.progress = 1.0
+            logger.info(f"ModelStore: downloaded {model_id} from HuggingFace ({total:,} bytes)")
+
+        except Exception as exc:
+            status.status = "failed"
+            status.error = str(exc)
+            logger.error(f"ModelStore: download of {model_id} failed: {exc}")
