@@ -41,6 +41,7 @@ exo: Run frontier AI locally. Maintained by [exo labs](https://x.com/exolabs).
 > - **Cross-platform support** — Linux CUDA and CPU support for the model store, with platform-aware filesystem browsing
 
 ---
+## About EXO
 
 exo connects all your devices into an AI cluster. Not only does exo enable running models larger than would fit on a single device, but with [day-0 support for RDMA over Thunderbolt](https://x.com/exolabs/status/2001817749744476256?s=20), makes models run faster as you add more devices.
 
