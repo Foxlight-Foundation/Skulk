@@ -86,7 +86,6 @@ from exo.shared.types.worker.shards import ShardMetadata
 from exo.store.config import StagingNodeConfig
 
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB per read/write chunk
-_STORE_MANIFEST = ".store_manifest"  # written after successful staging
 _CONNECT_TIMEOUT = 10.0          # seconds — abort if store host unreachable
 _READ_TIMEOUT = 120.0            # seconds — abort if no data for 2 minutes
 
@@ -341,11 +340,6 @@ class ModelStoreClient:
             if on_progress is not None:
                 await on_progress(staged_bytes, total_bytes)
 
-        # Write a manifest so the warm-cache check can verify completeness.
-        rel_files = [str(p.relative_to(source_dir)) for p in files]
-        manifest_path = dest_path / _STORE_MANIFEST
-        manifest_path.write_text("\n".join(rel_files) + "\n")
-
         logger.info(
             f"ModelStoreClient: staged {model_id} locally to {dest_path} "
             f"({total_bytes:,} bytes)"
@@ -490,11 +484,6 @@ class ModelStoreClient:
             )
             bytes_done += file_bytes
 
-        # Write a manifest so the warm-cache check can verify completeness
-        # without hitting the store server.
-        manifest_path = dest_path / _STORE_MANIFEST
-        manifest_path.write_text("\n".join(file_list) + "\n")
-
         logger.info(
             f"ModelStoreClient: staged {model_id} to {dest_path} ({bytes_done:,} bytes)"
         )
@@ -611,37 +600,16 @@ class ModelStoreDownloader(ShardDownloader):
                     return direct_path
             return await self._inner.ensure_shard(shard, config_only)
 
-        # Fast path: if the model is already fully staged locally, skip the
-        # HTTP availability probe.  We verify completeness using the manifest
-        # written after a successful stage — this prevents treating a partially
-        # staged directory (e.g. crash after config.json but before safetensors)
-        # as ready.
+        # Fast path: if the model is already staged locally, skip the
+        # HTTP availability probe.  This keeps inference working when the store
+        # server is temporarily unreachable and avoids an unnecessary round-trip.
         dest_path = _staging_dir(self._staging_config.node_cache_path, model_id)
-        manifest_path = dest_path / _STORE_MANIFEST
-        if manifest_path.exists():
-            expected_files = [f for f in manifest_path.read_text().strip().splitlines() if f]
-            all_present = all((dest_path / f).exists() for f in expected_files)
-            no_partials = not any(dest_path.rglob("*.partial"))
-            if expected_files and all_present and no_partials:
-                logger.info(
-                    f"ModelStoreDownloader: {model_id} already staged at {dest_path} — skipping availability probe"
-                )
-                await self._emit_progress(shard, status="complete")
-                return dest_path
-
-        # Store-host fast path: if this node has the local store and the model
-        # exists there, stage directly without an HTTP probe.  This avoids
-        # failing when the store server hasn't started yet.
-        if self._store_client.local_store_path is not None:
-            local_model = self._store_client.local_store_path / _sanitize_model_id(model_id)
-            if local_model.exists() and any(local_model.iterdir()):
-                logger.info(
-                    f"ModelStoreDownloader: {model_id} available in local store — staging locally"
-                )
-                await self._emit_progress(shard, status="in_progress")
-                path = await self._store_client.stage_shard(model_id, dest_path, on_progress=None)
-                await self._emit_progress(shard, status="complete")
-                return path
+        if dest_path.exists() and any(dest_path.iterdir()):
+            logger.info(
+                f"ModelStoreDownloader: {model_id} already staged at {dest_path} — skipping availability probe"
+            )
+            await self._emit_progress(shard, status="complete")
+            return dest_path
 
         available = await self._store_client.is_model_available(model_id)
 
@@ -687,59 +655,7 @@ class ModelStoreDownloader(ShardDownloader):
     async def get_shard_download_status_for_shard(
         self, shard: ShardMetadata
     ) -> RepoDownloadProgress:
-        """Check store-staged or direct-from-store paths before inner downloader.
-
-        This ensures that models already available via the store (either staged
-        locally or accessible directly on the store host) report as "complete"
-        so that offline/air-gapped nodes can load them without requiring the
-        files to also exist under ``EXO_MODELS_DIR``.
-        """
-        model_id = str(shard.model_card.model_id)
-
-        # Check direct-from-store path (store host with staging disabled)
-        if (
-            not self._staging_config.enabled
-            and self._store_client.local_store_path is not None
-        ):
-            direct_path = self._store_client.local_store_path / _sanitize_model_id(model_id)
-            if direct_path.exists() and any(direct_path.iterdir()):
-                return RepoDownloadProgress(
-                    repo_id=model_id,
-                    repo_revision="store",
-                    shard=shard,
-                    completed_files=1,
-                    total_files=1,
-                    downloaded=shard.model_card.storage_size,
-                    downloaded_this_session=Memory.from_bytes(0),
-                    total=shard.model_card.storage_size,
-                    overall_speed=0.0,
-                    overall_eta=timedelta(seconds=0),
-                    status="complete",
-                )
-
-        # Check staged cache path (manifest-verified)
-        if self._staging_config.enabled:
-            dest_path = _staging_dir(self._staging_config.node_cache_path, model_id)
-            manifest_path = dest_path / _STORE_MANIFEST
-            if manifest_path.exists():
-                expected = [f for f in manifest_path.read_text().strip().splitlines() if f]
-                all_present = all((dest_path / f).exists() for f in expected)
-                no_partials = not any(dest_path.rglob("*.partial"))
-                if expected and all_present and no_partials:
-                    return RepoDownloadProgress(
-                        repo_id=model_id,
-                        repo_revision="store",
-                        shard=shard,
-                        completed_files=1,
-                        total_files=1,
-                        downloaded=shard.model_card.storage_size,
-                        downloaded_this_session=Memory.from_bytes(0),
-                        total=shard.model_card.storage_size,
-                        overall_speed=0.0,
-                        overall_eta=timedelta(seconds=0),
-                        status="complete",
-                    )
-
+        """Forward to the inner downloader's per-shard status query."""
         return await self._inner.get_shard_download_status_for_shard(shard)
 
     # ------------------------------------------------------------------

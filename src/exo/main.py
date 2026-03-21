@@ -49,7 +49,6 @@ class Node:
     exo_config: ExoConfig | None
     store_client: ModelStoreClient | None
     store_server: ModelStoreServer | None
-    _protected_store_path: Path | None
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
 
     @classmethod
@@ -118,28 +117,15 @@ class Node:
             else:
                 shard_downloader = base_downloader
 
-            # On the store host, protect the canonical store directory from
-            # deletion by the download coordinator's cleanup logic.
-            _protected_store = (
-                Path(exo_config.model_store.store_path)
-                if exo_config is not None
-                and exo_config.model_store is not None
-                and exo_config.model_store.enabled
-                and store_client is not None
-                and store_client.local_store_path is not None
-                else None
-            )
             download_coordinator = DownloadCoordinator(
                 node_id,
                 shard_downloader,
                 event_sender=event_router.sender(),
                 download_command_receiver=router.receiver(topics.DOWNLOAD_COMMANDS),
                 offline=args.offline,
-                protected_store_path=_protected_store,
             )
         else:
             download_coordinator = None
-            _protected_store = None
 
         if args.spawn_api:
             api = API(
@@ -212,7 +198,6 @@ class Node:
             exo_config,
             store_client,
             store_server,
-            _protected_store,
         )
 
     async def run(self):
@@ -326,7 +311,6 @@ class Node:
                                 topics.DOWNLOAD_COMMANDS
                             ),
                             offline=self.offline,
-                            protected_store_path=self._protected_store_path,
                         )
                         self._tg.start_soon(self.download_coordinator.run)
                     if self.worker:

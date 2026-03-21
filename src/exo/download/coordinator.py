@@ -46,7 +46,6 @@ class DownloadCoordinator:
     download_command_receiver: Receiver[ForwarderDownloadCommand]
     event_sender: Sender[Event]
     offline: bool = False
-    protected_store_path: Path | None = None
 
     # Local state
     download_status: dict[ModelId, DownloadProgress] = field(default_factory=dict)
@@ -187,20 +186,11 @@ class DownloadCoordinator:
         )
 
         if initial_progress.status == "complete":
-            # For store-backed downloads the actual model directory may differ
-            # from the default EXO_MODELS_DIR (e.g. ~/.exo/staging/...).  Call
-            # ensure_shard() to resolve the real path — for warm caches this is
-            # essentially free (just a manifest check).
-            try:
-                actual_path = await self.shard_downloader.ensure_shard(shard)
-                actual_dir = str(actual_path) if actual_path else self._model_dir(model_id)
-            except Exception:
-                actual_dir = self._model_dir(model_id)
             completed = DownloadCompleted(
                 shard_metadata=shard,
                 node_id=self.node_id,
                 total=initial_progress.total,
-                model_directory=actual_dir,
+                model_directory=self._model_dir(model_id),
             )
             self.download_status[model_id] = completed
             await self.event_sender.send(
@@ -318,26 +308,14 @@ class DownloadCoordinator:
         # store into a non-default location (e.g. ~/.exo/staging/<model>).
         # delete_model() only removes EXO_MODELS_DIR, so the staged copy would
         # otherwise survive and make the model reappear on the next activation.
-        #
-        # Guard: never delete a path that lives inside the canonical store —
-        # on store hosts the staging path may point directly at the store's
-        # own model directory, and removing it would destroy the shared copy.
         if model_id in self.download_status:
             current_status = self.download_status[model_id]
             if isinstance(current_status, DownloadCompleted):
-                staging_dir = Path(current_status.model_directory).resolve()
-                standard_dir = Path(self._model_dir(model_id)).resolve()
-                is_protected = (
-                    self.protected_store_path is not None
-                    and staging_dir.is_relative_to(self.protected_store_path.resolve())
-                )
-                if staging_dir != standard_dir and staging_dir.exists() and not is_protected:
+                staging_dir = Path(current_status.model_directory)
+                standard_dir = Path(self._model_dir(model_id))
+                if staging_dir != standard_dir and staging_dir.exists():
                     logger.info(f"Deleting staged model files at {staging_dir}")
                     await asyncio.to_thread(shutil.rmtree, staging_dir, True)
-                elif is_protected:
-                    logger.info(
-                        f"Skipping deletion of {staging_dir} — inside protected store path"
-                    )
 
         # Emit pending status to reset UI state, then remove from local tracking
         if model_id in self.download_status:
