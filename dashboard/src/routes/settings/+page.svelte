@@ -34,6 +34,7 @@
   let stagingEnabled = $state(true);
   let nodeCachePath = $state("~/.exo/staging");
   let cleanupOnDeactivate = $state(true);
+  let showAdvanced = $state(false);
 
   // Node overrides as editable list
   let overrides = $state<
@@ -76,6 +77,7 @@
           cleanupOnDeactivate: (s?.cleanup_on_deactivate as boolean) ?? true,
         };
       });
+      if (overrides.length > 0) showAdvanced = true;
     }
   }
 
@@ -358,11 +360,33 @@
           </label>
         </fieldset>
 
-        <!-- Node Overrides -->
+        <!-- Advanced — Node Overrides -->
+        <div>
+          <button
+            type="button"
+            class="flex items-center gap-2 text-xs font-mono uppercase tracking-widest text-exo-light-gray hover:text-exo-yellow transition-colors"
+            onclick={() => (showAdvanced = !showAdvanced)}
+          >
+            <svg
+              class="w-3 h-3 transition-transform {showAdvanced ? 'rotate-90' : ''}"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path d="M9 18l6-6-6-6" />
+            </svg>
+            Advanced
+          </button>
+        </div>
+        {#if showAdvanced}
         <fieldset class="rounded border border-exo-medium-gray/30 bg-exo-black/30 p-4 space-y-4">
           <legend class="text-xs font-mono uppercase tracking-widest text-exo-light-gray px-2">
             Node Overrides
           </legend>
+          <p class="text-xs text-exo-light-gray/60">
+            Per-node staging overrides. Most clusters don't need this — the base staging config above applies to all nodes.
+          </p>
           {#each overrides as override, i}
             <div class="rounded border border-exo-medium-gray/20 bg-exo-dark-gray p-3 space-y-3">
               <div class="flex items-center gap-3">
@@ -407,6 +431,7 @@
             + Add Override
           </button>
         </fieldset>
+        {/if}
 
         <!-- Save -->
         <div class="flex items-center gap-4">
