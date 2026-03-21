@@ -425,6 +425,12 @@ class ModelStoreClient:
                 raise ModelNotInStoreError(
                     f"File not found in store: {model_id}/{file_path}"
                 )
+            # 416 Range Not Satisfiable means the partial file already
+            # contains all bytes (process died after writing but before
+            # the atomic rename).  Just promote it to final.
+            if resp.status == 416 and resume_from > 0:
+                await aios.rename(partial, target)
+                return resume_from
             if resp.status not in (200, 206):
                 raise RuntimeError(
                     f"ModelStoreClient: GET {url} returned {resp.status}"

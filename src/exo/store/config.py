@@ -251,7 +251,7 @@ def resolve_node_staging(
             # from the base rather than silently resetting to defaults.
             base = config.staging.model_dump()
             override_data = override.staging.model_dump(
-                exclude_defaults=True,
+                exclude_unset=True,
             )
             base.update(override_data)
             return StagingNodeConfig.model_validate(base)
