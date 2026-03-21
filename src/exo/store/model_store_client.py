@@ -65,6 +65,7 @@ file already exists (from a previous complete run), the file is skipped.
 """
 from __future__ import annotations
 
+import asyncio
 import shutil
 from collections.abc import Awaitable
 from datetime import timedelta
@@ -330,9 +331,11 @@ class ModelStoreClient:
             rel = src_file.relative_to(source_dir)
             dst_file = dest_path / rel
             dst_file.parent.mkdir(parents=True, exist_ok=True)
-            # Skip copy if destination already matches source size
+            # Skip copy if destination already matches source size.
+            # Run on a thread to avoid blocking the async event loop
+            # during multi-GB safetensor copies.
             if not dst_file.exists() or dst_file.stat().st_size != src_file.stat().st_size:
-                shutil.copy2(src_file, dst_file)
+                await asyncio.to_thread(shutil.copy2, src_file, dst_file)
             staged_bytes += src_file.stat().st_size
             if on_progress is not None:
                 await on_progress(staged_bytes, total_bytes)
@@ -619,6 +622,20 @@ class ModelStoreDownloader(ShardDownloader):
                 )
                 await self._emit_progress(shard, status="complete")
                 return dest_path
+
+        # Store-host fast path: if this node has the local store and the model
+        # exists there, stage directly without an HTTP probe.  This avoids
+        # failing when the store server hasn't started yet.
+        if self._store_client.local_store_path is not None:
+            local_model = self._store_client.local_store_path / _sanitize_model_id(model_id)
+            if local_model.exists() and any(local_model.iterdir()):
+                logger.info(
+                    f"ModelStoreDownloader: {model_id} available in local store — staging locally"
+                )
+                await self._emit_progress(shard, status="in_progress")
+                path = await self._store_client.stage_shard(model_id, dest_path, on_progress=None)
+                await self._emit_progress(shard, status="complete")
+                return path
 
         available = await self._store_client.is_model_available(model_id)
 
