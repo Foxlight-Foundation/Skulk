@@ -301,27 +301,20 @@ class ModelStore:
         Deduplicates: if the model is already downloading, returns the
         existing status.  If already in the store, returns "complete".
         """
-        logger.info(f"ModelStore.request_download called for {model_id}")
         async with self._download_lock:
             existing = self._active_downloads.get(model_id)
             if existing is not None:
-                # Allow retrying failed downloads
                 if existing.status == "failed":
-                    logger.info(f"ModelStore: clearing failed download for {model_id}, will retry")
                     del self._active_downloads[model_id]
                 else:
-                    logger.info(f"ModelStore: download already in progress for {model_id}: {existing.status}")
                     return existing
             if self.is_in_store(model_id):
-                logger.info(f"ModelStore: {model_id} already in store")
                 return StoreDownloadStatus(model_id=model_id, status="complete", progress=1.0)
             status = StoreDownloadStatus(model_id=model_id, status="pending")
             self._active_downloads[model_id] = status
-        logger.info(f"ModelStore: creating download task for {model_id}")
         task = asyncio.create_task(self._do_download(model_id))
         self._download_tasks.add(task)
         task.add_done_callback(self._download_tasks.discard)
-        logger.info(f"ModelStore: download task created for {model_id}, task={task}")
         return status
 
     def get_download_status(self, model_id: str) -> StoreDownloadStatus | None:
@@ -348,16 +341,14 @@ class ModelStore:
         status.status = "downloading"
         sanitized = model_id.replace("/", "--")
         target_dir = self._store_path / sanitized
-        logger.info(f"ModelStore: starting download of {model_id} to {target_dir}")
+        logger.info(f"ModelStore: downloading {model_id} from HuggingFace to {target_dir}")
 
         try:
             await aios.makedirs(str(target_dir), exist_ok=True)
 
-            logger.info(f"ModelStore: fetching file list for {model_id}")
             file_list = await fetch_file_list_with_cache(
                 ModelId(model_id), "main", recursive=True
             )
-            logger.info(f"ModelStore: {model_id} has {len(file_list)} files")
             total_bytes = sum(f.size or 0 for f in file_list)
             downloaded_bytes = 0
 
@@ -393,5 +384,3 @@ class ModelStore:
             status.status = "failed"
             status.error = str(exc)
             logger.error(f"ModelStore: download of {model_id} failed: {exc}")
-            import traceback
-            logger.error(traceback.format_exc())
