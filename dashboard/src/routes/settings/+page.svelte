@@ -37,7 +37,7 @@
 
   // Node overrides as editable list
   let overrides = $state<
-    { key: string; nodeCachePath: string; cleanupOnDeactivate: boolean }[]
+    { key: string; stagingEnabled: boolean; nodeCachePath: string; cleanupOnDeactivate: boolean }[]
   >([]);
 
   function loadConfig(data: ConfigResponse) {
@@ -71,6 +71,7 @@
         const s = val.staging as Record<string, unknown> | undefined;
         return {
           key,
+          stagingEnabled: (s?.enabled as boolean) ?? true,
           nodeCachePath: (s?.node_cache_path as string) ?? "",
           cleanupOnDeactivate: (s?.cleanup_on_deactivate as boolean) ?? true,
         };
@@ -84,6 +85,7 @@
       if (o.key.trim()) {
         nodeOverrides[o.key.trim()] = {
           staging: {
+            enabled: o.stagingEnabled,
             node_cache_path: o.nodeCachePath,
             cleanup_on_deactivate: o.cleanupOnDeactivate,
           },
@@ -132,7 +134,7 @@
   function addOverride() {
     overrides = [
       ...overrides,
-      { key: "", nodeCachePath: "~/.exo/staging", cleanupOnDeactivate: true },
+      { key: "", stagingEnabled: true, nodeCachePath: "~/.exo/staging", cleanupOnDeactivate: true },
     ];
   }
 
@@ -378,9 +380,15 @@
                   Remove
                 </button>
               </div>
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <DirectoryBrowser bind:value={override.nodeCachePath} onselect={(p) => (override.nodeCachePath = p)} label="Cache Path" />
-              </div>
+              <label class="flex items-center gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  bind:checked={override.stagingEnabled}
+                  class="w-4 h-4 accent-exo-yellow"
+                />
+                <span class="text-sm">Staging enabled</span>
+              </label>
+              <DirectoryBrowser bind:value={override.nodeCachePath} onselect={(p) => (override.nodeCachePath = p)} label="Cache Path" />
               <label class="flex items-center gap-3 cursor-pointer">
                 <input
                   type="checkbox"
