@@ -245,5 +245,14 @@ def resolve_node_staging(
     for key in (node_id, hostname):
         override = config.node_overrides.get(key)
         if override is not None and override.staging is not None:
-            return override.staging
+            # Merge: start from the base config and overlay only the fields
+            # that the override explicitly sets, so a partial override like
+            # ``cleanup_on_deactivate: false`` inherits node_cache_path etc.
+            # from the base rather than silently resetting to defaults.
+            base = config.staging.model_dump()
+            override_data = override.staging.model_dump(
+                exclude_defaults=True,
+            )
+            base.update(override_data)
+            return StagingNodeConfig.model_validate(base)
     return config.staging

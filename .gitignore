@@ -1,6 +1,9 @@
 # gitingest
 digest.txt
 
+# cluster config (copy exo.yaml.example to exo.yaml and edit)
+exo.yaml
+
 # python
 **/__pycache__
 

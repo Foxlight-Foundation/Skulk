@@ -49,6 +49,7 @@ class Node:
     exo_config: ExoConfig | None
     store_client: ModelStoreClient | None
     store_server: ModelStoreServer | None
+    _protected_store_path: Path | None
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
 
     @classmethod
@@ -138,6 +139,7 @@ class Node:
             )
         else:
             download_coordinator = None
+            _protected_store = None
 
         if args.spawn_api:
             api = API(
@@ -210,6 +212,7 @@ class Node:
             exo_config,
             store_client,
             store_server,
+            _protected_store,
         )
 
     async def run(self):
@@ -323,6 +326,7 @@ class Node:
                                 topics.DOWNLOAD_COMMANDS
                             ),
                             offline=self.offline,
+                            protected_store_path=self._protected_store_path,
                         )
                         self._tg.start_soon(self.download_coordinator.run)
                     if self.worker:

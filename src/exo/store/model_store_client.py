@@ -658,7 +658,61 @@ class ModelStoreDownloader(ShardDownloader):
     async def get_shard_download_status_for_shard(
         self, shard: ShardMetadata
     ) -> RepoDownloadProgress:
-        """Forward to the inner downloader's per-shard status query."""
+        """Check store-staged or direct-from-store paths before inner downloader.
+
+        This ensures that models already available via the store (either staged
+        locally or accessible directly on the store host) report as "complete"
+        so that offline/air-gapped nodes can load them without requiring the
+        files to also exist under ``EXO_MODELS_DIR``.
+        """
+        model_id = str(shard.model_card.model_id)
+
+        # Check direct-from-store path (store host with staging disabled)
+        if (
+            not self._staging_config.enabled
+            and self._store_client.local_store_path is not None
+        ):
+            direct_path = self._store_client.local_store_path / _sanitize_model_id(model_id)
+            if direct_path.exists() and any(direct_path.iterdir()):
+                return RepoDownloadProgress(
+                    repo_id=model_id,
+                    repo_revision="store",
+                    shard=shard,
+                    completed_files=1,
+                    total_files=1,
+                    downloaded=shard.model_card.storage_size,
+                    downloaded_this_session=Memory.from_bytes(0),
+                    total=shard.model_card.storage_size,
+                    overall_speed=0.0,
+                    overall_eta=timedelta(seconds=0),
+                    status="complete",
+                )
+
+        # Check staged cache path
+        if self._staging_config.enabled:
+            dest_path = _staging_dir(self._staging_config.node_cache_path, model_id)
+            if dest_path.exists():
+                has_real = any(
+                    p for p in dest_path.rglob("*") if p.is_file() and not p.name.endswith(".partial")
+                )
+                has_partial = any(
+                    p for p in dest_path.rglob("*.partial") if p.is_file()
+                )
+                if has_real and not has_partial:
+                    return RepoDownloadProgress(
+                        repo_id=model_id,
+                        repo_revision="store",
+                        shard=shard,
+                        completed_files=1,
+                        total_files=1,
+                        downloaded=shard.model_card.storage_size,
+                        downloaded_this_session=Memory.from_bytes(0),
+                        total=shard.model_card.storage_size,
+                        overall_speed=0.0,
+                        overall_eta=timedelta(seconds=0),
+                        status="complete",
+                    )
+
         return await self._inner.get_shard_download_status_for_shard(shard)
 
     # ------------------------------------------------------------------

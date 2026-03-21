@@ -2,7 +2,7 @@
 
 > **Status:** Phase 1 — centralized LAN model distribution
 > **Branch:** `claude/review-artifact-gRhSf`
-> **Config file:** `exo.yaml` (optional, zero-config compatible)
+> **Config file:** `exo.yaml` (copy from `exo.yaml.example`, optional, zero-config compatible)
 
 ---
 
