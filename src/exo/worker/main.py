@@ -1,5 +1,6 @@
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 
 import anyio
 from anyio import fail_after
@@ -40,6 +41,9 @@ from exo.shared.types.tasks import (
 from exo.shared.types.topology import Connection, SocketConnection
 from exo.shared.types.worker.downloads import DownloadCompleted
 from exo.shared.types.worker.runners import RunnerId
+from exo.shared.types.worker.shards import ShardMetadata
+from exo.store.config import StagingNodeConfig
+from exo.store.model_store_client import ModelStoreClient
 from exo.utils.channels import Receiver, Sender, channel
 from exo.utils.info_gatherer.info_gatherer import GatheredInfo, InfoGatherer
 from exo.utils.info_gatherer.net_profile import check_reachable
@@ -60,12 +64,16 @@ class Worker:
         # but I think it's the correct way to be thinking about commands
         command_sender: Sender[ForwarderCommand],
         download_command_sender: Sender[ForwarderDownloadCommand],
+        store_client: ModelStoreClient | None = None,
+        staging_config: StagingNodeConfig | None = None,
     ):
         self.node_id: NodeId = node_id
         self.event_receiver = event_receiver
         self.event_sender = event_sender
         self.command_sender = command_sender
         self.download_command_sender = download_command_sender
+        self._store_client = store_client
+        self._staging_config = staging_config
 
         self.state: State = State()
         self.runners: dict[RunnerId, RunnerSupervisor] = {}
@@ -210,6 +218,7 @@ class Worker:
                         )
                 case Shutdown(runner_id=runner_id):
                     runner = self.runners.pop(runner_id)
+                    shard_for_eviction = runner.shard_metadata
                     try:
                         with fail_after(3):
                             await runner.start_task(task)
@@ -221,6 +230,7 @@ class Worker:
                         )
                     finally:
                         runner.shutdown()
+                        await self._maybe_evict_shard(shard_for_eviction)
                 case CancelTask(
                     cancelled_task_id=cancelled_task_id, runner_id=runner_id
                 ):
@@ -289,6 +299,35 @@ class Worker:
         self.runners[task.bound_instance.bound_runner_id] = runner
         self._tg.start_soon(runner.run)
         return runner
+
+    async def _maybe_evict_shard(
+        self, shard: ShardMetadata | None
+    ) -> None:
+        """Evict staged shard files after runner teardown if configured."""
+        if (
+            shard is None
+            or self._store_client is None
+            or self._staging_config is None
+            or not self._staging_config.cleanup_on_deactivate
+        ):
+            return
+        model_id = str(shard.model_card.model_id)
+        # Skip eviction if another runner for the same model is still active —
+        # MLX loads weights lazily, so tearing down a sibling's staged files
+        # would corrupt the live runner.
+        if any(
+            str(r.shard_metadata.model_card.model_id) == model_id
+            for r in self.runners.values()
+        ):
+            logger.debug(
+                f"Worker: skipping eviction for {model_id} — another runner is still active"
+            )
+            return
+        cache_path = Path(self._staging_config.node_cache_path).expanduser()
+        try:
+            await self._store_client.evict_shard(model_id, cache_path)
+        except Exception as exc:
+            logger.warning(f"Worker: evict_shard failed for {model_id}: {exc}")
 
     async def _poll_connection_updates(self):
         while True:

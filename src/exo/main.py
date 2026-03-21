@@ -3,7 +3,9 @@ import multiprocessing as mp
 import os
 import resource
 import signal
+import socket
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Self
 
 import anyio
@@ -21,6 +23,10 @@ from exo.shared.constants import EXO_LOG
 from exo.shared.election import Election, ElectionResult
 from exo.shared.logging import logger_cleanup, logger_setup
 from exo.shared.types.common import NodeId, SessionId
+from exo.store.config import ExoConfig, load_exo_config, resolve_node_staging
+from exo.store.model_store import ModelStore
+from exo.store.model_store_client import ModelStoreClient, ModelStoreDownloader
+from exo.store.model_store_server import ModelStoreServer
 from exo.utils.channels import Receiver, channel
 from exo.utils.pydantic_ext import CamelCaseModel
 from exo.utils.task_group import TaskGroup
@@ -40,6 +46,9 @@ class Node:
 
     node_id: NodeId
     offline: bool
+    exo_config: ExoConfig | None
+    store_client: ModelStoreClient | None
+    store_server: ModelStoreServer | None
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
 
     @classmethod
@@ -63,11 +72,54 @@ class Node:
 
         logger.info(f"Starting node {node_id}")
 
+        # Load exo.yaml (returns None if absent — zero-config compatibility:
+        # when exo.yaml is missing, all store references stay None and exo
+        # behaves identically to the upstream default).
+        exo_config = load_exo_config(Path("exo.yaml"))
+        store_client: ModelStoreClient | None = None
+        store_server: ModelStoreServer | None = None
+
+        if exo_config is not None and exo_config.model_store is not None and exo_config.model_store.enabled:
+            ms = exo_config.model_store
+            local_hostname = socket.gethostname()
+            is_store_host = ms.store_host in (str(node_id), local_hostname)
+
+            # Store host gets a local path so the client uses shutil instead of HTTP.
+            # Use store_http_host (when set) as the HTTP hostname so that a PeerId
+            # in store_host does not get used as a DNS name by worker nodes.
+            local_store_path: Path | None = Path(ms.store_path) if is_store_host else None
+            store_client = ModelStoreClient(
+                store_host=ms.store_http_host or ms.store_host,
+                store_port=ms.store_port,
+                local_store_path=local_store_path,
+            )
+
+            if is_store_host:
+                model_store = ModelStore(Path(ms.store_path))
+                store_server = ModelStoreServer(model_store, port=ms.store_port)
+                logger.info(
+                    f"ModelStore: this node is the store host — "
+                    f"store at {ms.store_path}, server on port {ms.store_port}"
+                )
+
         # Create DownloadCoordinator (unless --no-downloads)
         if not args.no_downloads:
+            base_downloader = exo_shard_downloader(offline=args.offline)
+            if exo_config is not None and exo_config.model_store is not None and exo_config.model_store.enabled and store_client is not None:
+                ms = exo_config.model_store
+                staging_cfg = resolve_node_staging(ms, str(node_id))
+                shard_downloader = ModelStoreDownloader(
+                    inner=base_downloader,
+                    store_client=store_client,
+                    staging_config=staging_cfg,
+                    allow_hf_fallback=ms.download.allow_hf_fallback,
+                )
+            else:
+                shard_downloader = base_downloader
+
             download_coordinator = DownloadCoordinator(
                 node_id,
-                exo_shard_downloader(offline=args.offline),
+                shard_downloader,
                 event_sender=event_router.sender(),
                 download_command_receiver=router.receiver(topics.DOWNLOAD_COMMANDS),
                 offline=args.offline,
@@ -88,12 +140,21 @@ class Node:
             api = None
 
         if not args.no_worker:
+            worker_store_client: ModelStoreClient | None = store_client
+            if exo_config is not None and exo_config.model_store is not None and exo_config.model_store.enabled:
+                worker_staging_cfg = resolve_node_staging(
+                    exo_config.model_store, str(node_id)
+                )
+            else:
+                worker_staging_cfg = None
             worker = Worker(
                 node_id,
                 event_receiver=event_router.receiver(),
                 event_sender=event_router.sender(),
                 command_sender=router.sender(topics.COMMANDS),
                 download_command_sender=router.sender(topics.DOWNLOAD_COMMANDS),
+                store_client=worker_store_client,
+                staging_config=worker_staging_cfg,
             )
         else:
             worker = None
@@ -134,6 +195,9 @@ class Node:
             api,
             node_id,
             args.offline,
+            exo_config,
+            store_client,
+            store_server,
         )
 
     async def run(self):
@@ -143,6 +207,8 @@ class Node:
             tg.start_soon(self.router.run)
             tg.start_soon(self.event_router.run)
             tg.start_soon(self.election.run)
+            if self.store_server:
+                tg.start_soon(self.store_server.start)
             if self.download_coordinator:
                 tg.start_soon(self.download_coordinator.run)
             if self.worker:
@@ -225,9 +291,21 @@ class Node:
                 if result.is_new_master:
                     if self.download_coordinator:
                         self.download_coordinator.shutdown()
+                        base_dl = exo_shard_downloader(offline=self.offline)
+                        ms = self.exo_config.model_store if self.exo_config is not None else None
+                        if ms is not None and ms.enabled and self.store_client is not None:
+                            elect_staging = resolve_node_staging(ms, str(self.node_id))
+                            elect_downloader = ModelStoreDownloader(
+                                inner=base_dl,
+                                store_client=self.store_client,
+                                staging_config=elect_staging,
+                                allow_hf_fallback=ms.download.allow_hf_fallback,
+                            )
+                        else:
+                            elect_downloader = base_dl
                         self.download_coordinator = DownloadCoordinator(
                             self.node_id,
-                            exo_shard_downloader(offline=self.offline),
+                            elect_downloader,
                             event_sender=self.event_router.sender(),
                             download_command_receiver=self.router.receiver(
                                 topics.DOWNLOAD_COMMANDS
@@ -237,6 +315,12 @@ class Node:
                         self._tg.start_soon(self.download_coordinator.run)
                     if self.worker:
                         self.worker.shutdown()
+                        ms2 = self.exo_config.model_store if self.exo_config is not None else None
+                        elect_staging2 = (
+                            resolve_node_staging(ms2, str(self.node_id))
+                            if ms2 is not None and ms2.enabled
+                            else None
+                        )
                         # TODO: add profiling etc to resource monitor
                         self.worker = Worker(
                             self.node_id,
@@ -246,6 +330,8 @@ class Node:
                             download_command_sender=self.router.sender(
                                 topics.DOWNLOAD_COMMANDS
                             ),
+                            store_client=self.store_client,
+                            staging_config=elect_staging2,
                         )
                         self._tg.start_soon(self.worker.run)
                     if self.api:
