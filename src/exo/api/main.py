@@ -1986,9 +1986,16 @@ class API:
         ip = hostname
         network = self.state.node_network.get(self.node_id)
         if network:
+            # Prefer IPv4 LAN addresses — skip loopback, IPv6, and link-local
             for iface in network.interfaces:
-                if iface.ip_address and not iface.ip_address.startswith("127."):
-                    ip = iface.ip_address
+                addr = iface.ip_address
+                if (
+                    addr
+                    and not addr.startswith("127.")
+                    and ":" not in addr  # skip IPv6
+                    and not addr.startswith("169.254.")  # skip link-local
+                ):
+                    ip = addr
                     break
         return JSONResponse({
             "nodeId": str(self.node_id),
