@@ -218,6 +218,10 @@ def load_exo_config(
         return None
     with path.open() as f:
         raw = yaml.safe_load(f)
+    # An empty or comment-only file yields None from safe_load — treat
+    # it the same as a missing file to preserve zero-config compatibility.
+    if raw is None:
+        return None
     return ExoConfig.model_validate(raw)
 
 
