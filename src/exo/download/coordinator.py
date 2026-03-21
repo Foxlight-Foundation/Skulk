@@ -187,11 +187,20 @@ class DownloadCoordinator:
         )
 
         if initial_progress.status == "complete":
+            # For store-backed downloads the actual model directory may differ
+            # from the default EXO_MODELS_DIR (e.g. ~/.exo/staging/...).  Call
+            # ensure_shard() to resolve the real path — for warm caches this is
+            # essentially free (just a manifest check).
+            try:
+                actual_path = await self.shard_downloader.ensure_shard(shard)
+                actual_dir = str(actual_path) if actual_path else self._model_dir(model_id)
+            except Exception:
+                actual_dir = self._model_dir(model_id)
             completed = DownloadCompleted(
                 shard_metadata=shard,
                 node_id=self.node_id,
                 total=initial_progress.total,
-                model_directory=self._model_dir(model_id),
+                model_directory=actual_dir,
             )
             self.download_status[model_id] = completed
             await self.event_sender.send(
