@@ -181,6 +181,33 @@ class ModelStore:
         """Return all :class:`StoreModelEntry` objects currently in the registry."""
         return list(self._read_registry().values())
 
+    def delete_model(self, model_id: str) -> bool:
+        """Remove *model_id* from the registry and delete its files from disk.
+
+        Returns ``True`` if the model was found and deleted, ``False`` if not
+        in the registry.
+        """
+        import shutil
+
+        registry = self._read_registry()
+        entry = registry.pop(model_id, None)
+        if entry is None:
+            return False
+        # Remove files from disk
+        model_path = self._store_path / entry.store_path
+        if model_path.exists():
+            shutil.rmtree(model_path, ignore_errors=True)
+            logger.info(f"ModelStore: deleted {model_id} from {model_path}")
+        # Update registry
+        self._store_path.mkdir(parents=True, exist_ok=True)
+        self._registry_path.write_text(
+            json.dumps(
+                {k: v.model_dump() for k, v in registry.items()},
+                indent=2,
+            )
+        )
+        return True
+
     def register_model(
         self,
         model_id: str,

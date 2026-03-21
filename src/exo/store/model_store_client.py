@@ -326,6 +326,25 @@ class ModelStoreClient:
             logger.debug(f"ModelStoreClient: fetch_registry failed: {exc}")
             return []
 
+    async def delete_store_model(self, model_id: str) -> bool:
+        """Delete a model from the store registry and disk.
+
+        Returns ``True`` if deleted, ``False`` if not found.
+        """
+        url = _make_store_url(
+            self._store_host, self._store_port,
+            f"/models/{quote(model_id, safe='')}",
+        )
+        try:
+            async with (
+                create_http_session(timeout_profile="short") as session,
+                session.delete(url) as resp,
+            ):
+                return resp.status == 200
+        except Exception as exc:
+            logger.warning(f"ModelStoreClient: delete_store_model failed: {exc}")
+            return False
+
     async def request_and_wait_for_download(
         self,
         model_id: str,

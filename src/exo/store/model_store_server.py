@@ -130,6 +130,7 @@ class ModelStoreServer:
         self._app.router.add_get("/models/{model_id}/files", self._handle_model_files)
         self._app.router.add_post("/models/{model_id}/download", self._handle_download_request)
         self._app.router.add_get("/models/{model_id}/download/status", self._handle_download_status)
+        self._app.router.add_delete("/models/{model_id}", self._handle_delete_model)
         self._app.router.add_get("/models/{model_id}/{path:.*}", self._handle_file)
 
     async def start(self) -> None:
@@ -260,6 +261,14 @@ class ModelStoreServer:
 
         await response.write_eof()
         return response
+
+    async def _handle_delete_model(self, request: web.Request) -> web.Response:
+        """``DELETE /models/{model_id}`` — remove model from store."""
+        model_id = _sanitize_model_id(request.match_info["model_id"])
+        deleted = self._store.delete_model(model_id)
+        if not deleted:
+            raise web.HTTPNotFound(reason=f"Model {model_id} not in store")
+        return web.json_response({"modelId": model_id, "deleted": True})
 
     async def _handle_download_request(self, request: web.Request) -> web.Response:
         """``POST /models/{model_id}/download`` — request store-side HF download."""

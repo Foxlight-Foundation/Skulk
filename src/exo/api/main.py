@@ -369,6 +369,7 @@ class API:
         self.app.put("/config")(self.update_config)
         self.app.get("/store/health")(self.get_store_health)
         self.app.get("/store/registry")(self.get_store_registry)
+        self.app.delete("/store/models/{model_id:path}")(self.delete_store_model)
         self.app.get("/filesystem/browse")(self.browse_filesystem)
         self.app.get("/node/identity")(self.get_node_identity)
 
@@ -2002,3 +2003,11 @@ class API:
             "hostname": hostname,
             "ipAddress": ip,
         })
+
+    async def delete_store_model(self, model_id: str) -> JSONResponse:
+        if self._store_client is None:
+            raise HTTPException(status_code=503, detail="Store not configured")
+        deleted = await self._store_client.delete_store_model(model_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"Model {model_id} not in store")
+        return JSONResponse({"modelId": model_id, "deleted": True})

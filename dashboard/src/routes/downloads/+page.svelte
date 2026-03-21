@@ -12,6 +12,8 @@
     deleteDownload,
     fetchStoreHealth,
     fetchStoreRegistry,
+    deleteStoreModel,
+    instances,
     type StoreRegistryEntry,
   } from "$lib/stores/app.svelte";
   import {
@@ -353,6 +355,29 @@
   let storeAvailable = $state(false);
   let registryEntries = $state<StoreRegistryEntry[]>([]);
   let registryLoading = $state(false);
+  let deleteConfirmEntry = $state<{ entry: StoreRegistryEntry; isActive: boolean } | null>(null);
+  let deleting = $state(false);
+
+  // Active model IDs (from running instances)
+  const activeModelIds = $derived.by(() => {
+    const inst = instances();
+    if (!inst || typeof inst !== "object") return [] as string[];
+    const ids = new Set<string>();
+    for (const val of Object.values(inst)) {
+      const v = val as Record<string, unknown>;
+      const sa = v?.shardAssignments as Record<string, unknown> | undefined;
+      const rts = sa?.runnerToShard as Record<string, unknown> | undefined;
+      if (rts) {
+        for (const shard of Object.values(rts)) {
+          const s = shard as Record<string, unknown>;
+          const mc = s?.modelCard as Record<string, unknown> | undefined;
+          const mid = mc?.modelId as string | undefined;
+          if (mid) ids.add(mid);
+        }
+      }
+    }
+    return [...ids];
+  });
 
   async function loadRegistry() {
     registryLoading = true;
@@ -365,11 +390,47 @@
     }
   }
 
+  function handleStoreInfo(entry: StoreRegistryEntry) {
+    // Reuse the existing info modal by creating a ModelRow-compatible object
+    infoRow = {
+      modelId: entry.model_id,
+      prettyName: null,
+      cells: {},
+      shardMetadata: null,
+      modelCard: {
+        family: "",
+        quantization: "",
+        baseModel: "",
+        capabilities: [],
+        storageSize: entry.total_bytes,
+        nLayers: 0,
+        supportsTensor: false,
+      },
+    };
+  }
+
+  function handleStoreDelete(entry: StoreRegistryEntry, isActive: boolean) {
+    deleteConfirmEntry = { entry, isActive };
+  }
+
+  async function confirmDelete() {
+    if (!deleteConfirmEntry) return;
+    deleting = true;
+    try {
+      await deleteStoreModel(deleteConfirmEntry.entry.model_id);
+      await loadRegistry();
+    } finally {
+      deleting = false;
+      deleteConfirmEntry = null;
+    }
+  }
+
   onMount(async () => {
     refreshState();
     const health = await fetchStoreHealth();
     if (health) {
       storeAvailable = true;
+      activeTab = "store";
       await loadRegistry();
     }
   });
@@ -436,7 +497,10 @@
       <StoreRegistryTable
         entries={registryEntries}
         loading={registryLoading}
+        activeModelIds={activeModelIds}
         onrefresh={loadRegistry}
+        oninfo={handleStoreInfo}
+        ondelete={handleStoreDelete}
       />
     {:else if !hasDownloads}
       <div
@@ -893,6 +957,55 @@
           </div>
         </div>
       {/if}
+    </div>
+  </div>
+{/if}
+
+<!-- Delete confirmation modal -->
+{#if deleteConfirmEntry}
+  <div
+    class="fixed inset-0 z-[60] bg-black/60"
+    transition:fade={{ duration: 150 }}
+    onclick={() => (deleteConfirmEntry = null)}
+    role="presentation"
+  ></div>
+  <div
+    class="fixed z-[60] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[min(90vw,420px)] bg-exo-dark-gray border border-red-500/20 rounded-lg shadow-2xl p-5"
+    transition:fly={{ y: 10, duration: 200, easing: cubicOut }}
+    role="dialog"
+    aria-modal="true"
+  >
+    <h3 class="font-mono text-lg text-white mb-3">
+      Delete from store
+    </h3>
+    <p class="text-sm text-exo-light-gray mb-2 font-mono">
+      {deleteConfirmEntry.entry.model_id}
+    </p>
+    {#if deleteConfirmEntry.isActive}
+      <div class="rounded bg-red-500/10 border border-red-500/20 p-3 mb-4 text-xs text-red-300">
+        Warning: This model is currently active. Deleting it will terminate the running model, evict it from participating nodes, and permanently remove it from the model store.
+      </div>
+    {:else}
+      <p class="text-xs text-exo-light-gray/70 mb-4">
+        This will permanently remove the model files from the store. Nodes that have staged this model will keep their local copies until evicted.
+      </p>
+    {/if}
+    <div class="flex items-center justify-end gap-3">
+      <button
+        type="button"
+        class="px-4 py-1.5 text-xs font-mono uppercase tracking-wider text-white/70 hover:text-white border border-exo-medium-gray/40 rounded transition-colors"
+        onclick={() => (deleteConfirmEntry = null)}
+      >
+        Cancel
+      </button>
+      <button
+        type="button"
+        disabled={deleting}
+        class="px-4 py-1.5 text-xs font-mono uppercase tracking-wider bg-red-500/80 text-white rounded hover:bg-red-500 disabled:opacity-50 transition-colors"
+        onclick={confirmDelete}
+      >
+        {deleting ? "Deleting..." : "Delete"}
+      </button>
     </div>
   </div>
 {/if}

@@ -3455,3 +3455,9 @@ export const fetchNodeIdentity =
     if (!resp.ok) throw new Error(`Failed to fetch node identity: ${resp.status}`);
     return await resp.json();
   };
+export const deleteStoreModel = async (modelId: string): Promise<boolean> => {
+  const resp = await fetch(`/store/models/${encodeURIComponent(modelId)}`, {
+    method: "DELETE",
+  });
+  return resp.ok;
+};
