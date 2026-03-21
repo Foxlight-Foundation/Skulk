@@ -312,7 +312,8 @@ class ModelStore:
                 return StoreDownloadStatus(model_id=model_id, status="complete", progress=1.0)
             status = StoreDownloadStatus(model_id=model_id, status="pending")
             self._active_downloads[model_id] = status
-        asyncio.create_task(self._do_download(model_id))
+        task = asyncio.create_task(self._do_download(model_id))
+        task.add_done_callback(lambda t: t.result() if not t.cancelled() and t.exception() is None else logger.error(f"ModelStore: download task for {model_id} failed: {t.exception()}") if t.exception() else None)
         return status
 
     def get_download_status(self, model_id: str) -> StoreDownloadStatus | None:
@@ -339,13 +340,16 @@ class ModelStore:
         status.status = "downloading"
         sanitized = model_id.replace("/", "--")
         target_dir = self._store_path / sanitized
+        logger.info(f"ModelStore: starting download of {model_id} to {target_dir}")
 
         try:
             await aios.makedirs(str(target_dir), exist_ok=True)
 
+            logger.info(f"ModelStore: fetching file list for {model_id}")
             file_list = await fetch_file_list_with_cache(
                 ModelId(model_id), "main", recursive=True
             )
+            logger.info(f"ModelStore: {model_id} has {len(file_list)} files")
             total_bytes = sum(f.size or 0 for f in file_list)
             downloaded_bytes = 0
 
@@ -381,3 +385,5 @@ class ModelStore:
             status.status = "failed"
             status.error = str(exc)
             logger.error(f"ModelStore: download of {model_id} failed: {exc}")
+            import traceback
+            logger.error(traceback.format_exc())
