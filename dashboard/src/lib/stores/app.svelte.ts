@@ -3359,3 +3359,99 @@ export const getTraceRawUrl = (taskId: string) =>
   appStore.getTraceRawUrl(taskId);
 export const deleteTraces = (taskIds: string[]) =>
   appStore.deleteTraces(taskIds);
+
+// Config & Store API
+export interface ConfigResponse {
+  config: Record<string, unknown>;
+  configPath: string;
+  fileExists: boolean;
+}
+export interface ConfigUpdateResponse {
+  success: boolean;
+  message: string;
+  requiresRestart: boolean;
+}
+export interface StoreHealthResponse {
+  storePath: string;
+  freeBytes: number;
+  totalBytes: number;
+  usedBytes: number;
+}
+export interface StoreRegistryEntry {
+  model_id: string;
+  store_path: string;
+  files: string[];
+  downloaded_at: string;
+  total_bytes: number;
+}
+
+export const fetchConfig = async (): Promise<ConfigResponse> => {
+  const resp = await fetch("/config");
+  if (!resp.ok) throw new Error(`Failed to fetch config: ${resp.status}`);
+  return await resp.json();
+};
+export const updateConfig = async (
+  config: Record<string, unknown>,
+): Promise<ConfigUpdateResponse> => {
+  const resp = await fetch("/config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ config }),
+  });
+  if (!resp.ok) {
+    const detail = await resp.json().catch(() => ({}));
+    throw new Error(detail.detail || `Failed to update config: ${resp.status}`);
+  }
+  return await resp.json();
+};
+export const fetchStoreHealth =
+  async (): Promise<StoreHealthResponse | null> => {
+    try {
+      const resp = await fetch("/store/health");
+      if (!resp.ok) return null;
+      return await resp.json();
+    } catch {
+      return null;
+    }
+  };
+export const fetchStoreRegistry = async (): Promise<StoreRegistryEntry[]> => {
+  try {
+    const resp = await fetch("/store/registry");
+    if (!resp.ok) return [];
+    const data = await resp.json();
+    return data.entries ?? [];
+  } catch {
+    return [];
+  }
+};
+
+// Filesystem & Node Identity
+export interface DirectoryEntry {
+  name: string;
+  path: string;
+}
+export interface BrowseResponse {
+  path: string;
+  directories: DirectoryEntry[];
+}
+export interface NodeIdentityResponse {
+  nodeId: string;
+  hostname: string;
+  ipAddress: string;
+}
+
+export const browseFilesystem = async (
+  path = "/Volumes",
+): Promise<BrowseResponse> => {
+  const resp = await fetch(
+    `/filesystem/browse?path=${encodeURIComponent(path)}`,
+  );
+  if (!resp.ok) throw new Error(`Browse failed: ${resp.status}`);
+  return await resp.json();
+};
+export const fetchNodeIdentity =
+  async (): Promise<NodeIdentityResponse> => {
+    const resp = await fetch("/node/identity");
+    if (!resp.ok) throw new Error(`Failed to fetch node identity: ${resp.status}`);
+    return await resp.json();
+  };

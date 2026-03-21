@@ -21,6 +21,7 @@ from exo.shared.types.commands import (
     DeleteDownload,
     ForwarderDownloadCommand,
     StartDownload,
+    SyncConfig,
 )
 from exo.shared.types.common import NodeId
 from exo.shared.types.events import (
@@ -113,7 +114,13 @@ class DownloadCoordinator:
     async def _command_processor(self) -> None:
         with self.download_command_receiver as commands:
             async for cmd in commands:
-                # Only process commands targeting this node
+                # SyncConfig is cluster-wide — every node handles it
+                match cmd.command:
+                    case SyncConfig(config_yaml=config_yaml):
+                        await self._sync_config(config_yaml)
+                        continue
+
+                # Only process targeted commands for this node
                 if cmd.command.target_node_id != self.node_id:
                     continue
 
@@ -139,6 +146,15 @@ class DownloadCoordinator:
             await self.event_sender.send(
                 NodeDownloadProgress(download_progress=pending)
             )
+
+    async def _sync_config(self, config_yaml: str) -> None:
+        """Write received config YAML to the local exo.yaml file."""
+        config_path = Path("exo.yaml")
+        try:
+            config_path.write_text(config_yaml)
+            logger.info(f"DownloadCoordinator: synced exo.yaml from cluster ({len(config_yaml)} bytes)")
+        except Exception as exc:
+            logger.warning(f"DownloadCoordinator: failed to sync exo.yaml: {exc}")
 
     async def _start_download(self, shard: ShardMetadata) -> None:
         model_id = shard.model_card.model_id

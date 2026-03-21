@@ -81,7 +81,12 @@ class CancelDownload(BaseCommand):
     model_id: ModelId
 
 
-DownloadCommand = StartDownload | DeleteDownload | CancelDownload
+class SyncConfig(BaseCommand):
+    """Broadcast updated exo.yaml content to all nodes in the cluster."""
+    config_yaml: str
+
+
+DownloadCommand = StartDownload | DeleteDownload | CancelDownload | SyncConfig
 
 
 Command = (

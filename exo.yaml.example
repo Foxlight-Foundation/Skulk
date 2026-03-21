@@ -1,8 +1,12 @@
 # exo.yaml — cluster configuration for exo
 #
-# Place this file alongside the exo project root on every node in your cluster.
-# If this file is absent, exo behaves identically to the upstream default
-# (zero-config compatibility — no changes to existing deployments).
+# TIP: You can configure the model store visually from the dashboard at
+# http://localhost:52415/#/settings — the Settings page writes this file
+# and syncs it to all nodes automatically.
+#
+# If editing manually, place this file alongside the exo project root on
+# every node in your cluster.  If this file is absent, exo behaves
+# identically to the upstream default (zero-config compatibility).
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # MODEL STORE

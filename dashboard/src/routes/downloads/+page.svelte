@@ -10,6 +10,9 @@
     lastUpdate as lastUpdateStore,
     startDownload,
     deleteDownload,
+    fetchStoreHealth,
+    fetchStoreRegistry,
+    type StoreRegistryEntry,
   } from "$lib/stores/app.svelte";
   import {
     getDownloadTag,
@@ -17,6 +20,7 @@
     extractShardMetadata,
   } from "$lib/utils/downloads";
   import HeaderNav from "$lib/components/HeaderNav.svelte";
+  import StoreRegistryTable from "$lib/components/StoreRegistryTable.svelte";
 
   type CellStatus =
     | { kind: "completed"; totalBytes: number; modelDirectory?: string }
@@ -344,8 +348,30 @@
   const lastUpdateTs = $derived(lastUpdateStore());
   const downloadKeys = $derived(Object.keys(downloadsData || {}));
 
-  onMount(() => {
+  // Store registry state
+  let activeTab = $state<"nodes" | "store">("nodes");
+  let storeAvailable = $state(false);
+  let registryEntries = $state<StoreRegistryEntry[]>([]);
+  let registryLoading = $state(false);
+
+  async function loadRegistry() {
+    registryLoading = true;
+    try {
+      registryEntries = await fetchStoreRegistry();
+    } catch {
+      registryEntries = [];
+    } finally {
+      registryLoading = false;
+    }
+  }
+
+  onMount(async () => {
     refreshState();
+    const health = await fetchStoreHealth();
+    if (health) {
+      storeAvailable = true;
+      await loadRegistry();
+    }
   });
 </script>
 
@@ -380,7 +406,39 @@
       </div>
     </div>
 
-    {#if !hasDownloads}
+    {#if storeAvailable}
+      <div class="flex rounded overflow-hidden border border-exo-medium-gray/40 w-fit">
+        <button
+          type="button"
+          class="px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors {activeTab === 'nodes'
+            ? 'bg-exo-yellow text-exo-black'
+            : 'bg-exo-black/30 text-white/70 hover:text-white'}"
+          onclick={() => (activeTab = "nodes")}
+        >
+          Node Downloads
+        </button>
+        <button
+          type="button"
+          class="px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors {activeTab === 'store'
+            ? 'bg-exo-yellow text-exo-black'
+            : 'bg-exo-black/30 text-white/70 hover:text-white'}"
+          onclick={() => {
+            activeTab = "store";
+            if (registryEntries.length === 0 && !registryLoading) loadRegistry();
+          }}
+        >
+          Store Registry
+        </button>
+      </div>
+    {/if}
+
+    {#if activeTab === "store" && storeAvailable}
+      <StoreRegistryTable
+        entries={registryEntries}
+        loading={registryLoading}
+        onrefresh={loadRegistry}
+      />
+    {:else if !hasDownloads}
       <div
         class="rounded border border-exo-medium-gray/30 bg-exo-black/30 p-6 text-center text-exo-light-gray space-y-2"
       >

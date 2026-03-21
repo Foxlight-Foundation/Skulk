@@ -10,6 +10,11 @@ export default defineConfig({
       "/state": "http://localhost:52415",
       "/models": "http://localhost:52415",
       "/instance": "http://localhost:52415",
+      "/config": "http://localhost:52415",
+      "/store": "http://localhost:52415",
+      "/download": "http://localhost:52415",
+      "/filesystem": "http://localhost:52415",
+      "/node": "http://localhost:52415",
     },
   },
 });

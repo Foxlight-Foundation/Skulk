@@ -1,8 +1,7 @@
 # exo Model Store
 
-> **Status:** Phase 1 — centralized LAN model distribution
-> **Branch:** `claude/review-artifact-gRhSf`
-> **Config file:** `exo.yaml` (copy from `exo.yaml.example`, optional, zero-config compatible)
+> **Status:** Phase 1+3 — centralized LAN distribution with dashboard integration
+> **Config file:** `exo.yaml` (optional, zero-config compatible — can be configured via the dashboard)
 
 ---
 
@@ -97,26 +96,49 @@ src/exo/store/
 
 | File | What was added |
 |---|---|
-| `src/exo/main.py` | Load `exo.yaml`; build `ModelStore`, `ModelStoreServer`, `ModelStoreClient`; wrap `exo_shard_downloader()` with `ModelStoreDownloader`; start server on store host; re-wrap on election transitions |
+| `src/exo/main.py` | Load `exo.yaml`; build `ModelStore`, `ModelStoreServer`, `ModelStoreClient`; wrap `exo_shard_downloader()` with `ModelStoreDownloader`; start server on store host; re-wrap on election transitions; pass `exo_config`/`store_client` to API |
+| `src/exo/api/main.py` | `GET/PUT /config` (read/write `exo.yaml`), `GET /store/health` and `/store/registry` (proxy to store server), `GET /filesystem/browse` (directory browser), `GET /node/identity` (hostname + LAN IP); config saves broadcast to cluster via `SyncConfig` |
 | `src/exo/worker/main.py` | Accept `store_client` and `staging_config` in `Worker.__init__`; call `evict_shard()` in the `Shutdown` task handler |
+| `src/exo/download/coordinator.py` | Handle `SyncConfig` command — write received config to local `exo.yaml` |
+| `src/exo/shared/types/commands.py` | `SyncConfig` command type for cluster-wide config distribution |
 | `pyproject.toml` | Added `pyyaml` and `types-PyYAML` dependencies |
+| `dashboard/src/routes/settings/+page.svelte` | Settings page: store host toggle, directory browser, config form |
+| `dashboard/src/routes/downloads/+page.svelte` | Segmented control toggling between Node Downloads and Store Registry |
+| `dashboard/src/lib/components/DirectoryBrowser.svelte` | Filesystem browser with breadcrumbs for path selection |
+| `dashboard/src/lib/components/StoreRegistryTable.svelte` | Table showing models in the central store |
+| `dashboard/src/lib/components/HeaderNav.svelte` | Settings gear icon + nav link |
 
 ---
 
 ## Prerequisites
 
-- All nodes running the same exo build (this branch or a merged version)
+- All nodes running the same exo build
 - The store host node has the storage device mounted and accessible at `store_path`
-- Port `58080` (or your configured `store_port`) is reachable from all worker
-  nodes — no firewall blocking
-- `exo.yaml` present at the project root on **every node** in the cluster
-  (or absent to fall back to standard behaviour on that node)
+- Config is distributed automatically when using the dashboard Settings page.
+  If configuring manually, `exo.yaml` must be present at the project root on
+  **every node** (or absent to fall back to standard behaviour on that node)
+
+The store server uses port `58080` for model file transfers over the same
+Thunderbolt/ethernet links that exo already uses for the cluster ring network.
+No additional network configuration is needed.
 
 ---
 
 ## Quick start
 
-### 1 — Create `exo.yaml` in the project root
+There are two ways to configure the model store: via the **dashboard** (recommended) or by editing `exo.yaml` manually.
+
+### Option A — Configure via the dashboard (recommended)
+
+1. Start exo on all nodes: `uv run exo`
+2. Open the dashboard on the node you want to be the store host: `http://localhost:52415`
+3. Navigate to **Settings** (gear icon in the header)
+4. Toggle **"This node is the store host"** — hostname and IP are filled in automatically
+5. Click the folder icon next to **Store Path** and browse to your storage volume (e.g. `/Volumes/ModelStore/models`)
+6. Click **Save** — the config is written to `exo.yaml` and synced to all nodes in the cluster automatically
+7. Restart exo on all nodes for changes to take effect
+
+### Option B — Edit `exo.yaml` manually
 
 The minimum viable config:
 
@@ -130,7 +152,7 @@ model_store:
 Copy this to the same path on every node.  Use `node_overrides` to tune
 per-node staging (see [Configuration reference](#configuration-reference)).
 
-### 2 — Run exo normally
+### After configuration — run exo normally
 
 ```bash
 uv run exo
@@ -269,6 +291,59 @@ curl -H "Range: bytes=1073741824-" \
   http://mac-studio-1:58080/models/mlx-community%2FQwen3-30B-A3B-4bit/model-00001-of-00008.safetensors \
   -o model-00001.partial
 ```
+
+---
+
+## Dashboard API (FastAPI, port 52415)
+
+These endpoints are served by the main exo API alongside all existing
+endpoints.  The dashboard uses them for the Settings page and Store
+Registry view.
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/config` | GET | Read current `exo.yaml` as JSON. Returns `{config, configPath, fileExists}` |
+| `/config` | PUT | Validate and write new config to `exo.yaml`. Broadcasts to all nodes via gossipsub. Body: `{config: {...}}` |
+| `/store/health` | GET | Proxy store server `/health`. Returns `{storePath, freeBytes, totalBytes, usedBytes}`. 503 if store not configured/unreachable |
+| `/store/registry` | GET | Proxy store server `/registry`. Returns `{entries: [...]}`. 503 if store not configured |
+| `/filesystem/browse` | GET | List subdirectories at `?path=/Volumes`. Restricted to `/Volumes`, `/home`, `/mnt`, `/tmp`, `/opt`. Returns `{path, directories: [{name, path}]}` |
+| `/node/identity` | GET | Current node's hostname and LAN IP. Returns `{nodeId, hostname, ipAddress}` |
+
+### Config sync across the cluster
+
+When `PUT /config` saves a new config, it also broadcasts the YAML content
+to all nodes in the cluster via a `SyncConfig` command on the
+`DOWNLOAD_COMMANDS` gossipsub topic.  Each node's `DownloadCoordinator`
+receives the message and writes it to its local `exo.yaml`.
+
+This ensures all nodes stay in sync when config is changed from the
+dashboard.  A restart is still required on all nodes for the new config to
+take effect at runtime.
+
+---
+
+## Dashboard UI
+
+### Settings page (`/#/settings`)
+
+The settings page provides a visual editor for `exo.yaml`:
+
+- **Store Status**: shows connection status (green/red dot), store path, and disk usage bar
+- **Store Host toggle**: "This node is the store host" — automatically fills hostname and LAN IP. When off, shows manual host/IP fields for pointing at a remote store.
+- **Directory Browser**: click the folder icon next to any path field to browse the filesystem starting at `/Volumes`. Navigate through directories and select one — no need to type paths.
+- **Config form**: all `model_store` fields are editable — enable/disable, port, download policy, staging settings, node overrides with per-node staging toggles.
+- **Save**: validates via Pydantic, writes to disk, syncs to cluster. Shows restart reminder.
+
+### Downloads page — Store Registry tab
+
+When the model store is configured and reachable, the downloads page shows a
+segmented control: **Node Downloads** (existing grid) and **Store Registry**.
+
+The Store Registry tab shows all models in the central store with:
+- Model ID
+- Total size
+- File count
+- Date added
 
 ---
 
@@ -434,7 +509,7 @@ byte received.  No manual cleanup needed.
 This is a phased feature.  Each phase is a self-contained improvement that
 can be reviewed and merged independently.
 
-### Phase 1 — Centralized LAN distribution *(this branch)*
+### Phase 1 — Centralized LAN distribution *(done)*
 
 - `ModelStore`: registry + path resolution on the store host
 - `ModelStoreServer`: HTTP file server with Range/resume support
@@ -442,13 +517,6 @@ can be reviewed and merged independently.
 - `ModelStoreDownloader`: `ShardDownloader` wrapper; transparent HF fallback
 - `exo.yaml`: optional cluster config file; zero-config when absent
 - Manual store population via `huggingface-cli` + `register_model()`
-
-**What Phase 1 does not do:**
-- Automatic population when a model is first downloaded from HuggingFace
-  (models downloaded via HF fallback land in `~/.exo/models/`, not the store)
-- Store host failover
-- Dashboard integration
-- Parallel file downloads within a single model
 
 ---
 
@@ -468,22 +536,12 @@ Scope:
 
 ---
 
-### Phase 3 — Dashboard integration
+### Phase 3 — Dashboard integration *(done)*
 
-Surface store status in the Svelte dashboard so users can see at a glance
-what models are in the store, which nodes have staged which models, and
-how much space remains on the store device.
-
-Scope:
-- Add store health and registry endpoints to the FastAPI layer (proxying
-  `ModelStoreServer`'s `/health` and `/registry`).
-- Extend the existing state or add a new dashboard-specific event type
-  for store status.
-- Dashboard: "Store" panel showing:
-  - Store host, connection status, disk usage
-  - Model list with file counts and sizes
-  - Per-node staging status (which models are staged, how much local space used)
-- Provide `curl`-friendly API so the panel can be built incrementally.
+- **Settings page** (`/#/settings`): read-write config editor with store health display, "this node is the store host" toggle, filesystem directory browser for path selection, node override management. Config saves are broadcast to all nodes via gossipsub.
+- **Downloads page**: segmented control toggling between node downloads grid and store registry catalog (model list with sizes, file counts, timestamps).
+- **Navigation**: Settings gear icon in header nav.
+- **API endpoints**: `GET/PUT /config`, `GET /store/health`, `GET /store/registry`, `GET /filesystem/browse`, `GET /node/identity`.
 
 ---
 

@@ -2,13 +2,16 @@ import base64
 import contextlib
 import json
 import random
+import socket
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
-from typing import Annotated, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 from uuid import uuid4
+
+import yaml
 
 import anyio
 from anyio import BrokenResourceError
@@ -177,6 +180,10 @@ from exo.utils.disk_event_log import DiskEventLog
 from exo.utils.power_sampler import PowerSampler
 from exo.utils.task_group import TaskGroup
 
+if TYPE_CHECKING:
+    from exo.store.config import ExoConfig
+    from exo.store.model_store_client import ModelStoreClient
+
 _API_EVENT_LOG_DIR = EXO_EVENT_LOG_DIR / "api"
 ONBOARDING_COMPLETE_FILE = EXO_CACHE_HOME / "onboarding_complete"
 
@@ -205,6 +212,8 @@ class API:
         download_command_sender: Sender[ForwarderDownloadCommand],
         # This lets us pause the API if an election is running
         election_receiver: Receiver[ElectionMessage],
+        exo_config: "ExoConfig | None" = None,
+        store_client: "ModelStoreClient | None" = None,
     ) -> None:
         self.state = State()
         self._event_log = DiskEventLog(_API_EVENT_LOG_DIR)
@@ -216,6 +225,9 @@ class API:
         self.node_id: NodeId = node_id
         self.last_completed_election: int = 0
         self.port = port
+        self._exo_config = exo_config
+        self._store_client = store_client
+        self._config_path = Path("exo.yaml")
 
         self.paused: bool = False
         self.paused_ev: anyio.Event = anyio.Event()
@@ -351,6 +363,14 @@ class API:
         self.app.get("/v1/traces/{task_id}/raw")(self.get_trace_raw)
         self.app.get("/onboarding")(self.get_onboarding)
         self.app.post("/onboarding")(self.complete_onboarding)
+
+        # Config & store endpoints
+        self.app.get("/config")(self.get_config)
+        self.app.put("/config")(self.update_config)
+        self.app.get("/store/health")(self.get_store_health)
+        self.app.get("/store/registry")(self.get_store_registry)
+        self.app.get("/filesystem/browse")(self.browse_filesystem)
+        self.app.get("/node/identity")(self.get_node_identity)
 
     async def place_instance(self, payload: PlaceInstanceParams):
         command = PlaceInstance(
@@ -1885,3 +1905,93 @@ class API:
         ONBOARDING_COMPLETE_FILE.parent.mkdir(parents=True, exist_ok=True)
         ONBOARDING_COMPLETE_FILE.write_text("true")
         return JSONResponse({"completed": True})
+
+    # ------------------------------------------------------------------
+    # Config & Store endpoints
+    # ------------------------------------------------------------------
+
+    async def get_config(self) -> JSONResponse:
+        if not self._config_path.exists():
+            return JSONResponse({"config": {}, "configPath": str(self._config_path), "fileExists": False})
+        with self._config_path.open() as f:
+            raw = yaml.safe_load(f)
+        if raw is None:
+            raw = {}
+        return JSONResponse({"config": raw, "configPath": str(self._config_path), "fileExists": True})
+
+    async def update_config(self, request: Request) -> JSONResponse:
+        body = await request.json()
+        config_data = body.get("config", body)
+        # Validate by attempting to parse with Pydantic
+        from exo.store.config import ExoConfig
+        try:
+            ExoConfig.model_validate(config_data)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        config_yaml = yaml.safe_dump(config_data, default_flow_style=False, sort_keys=False)
+        # Write locally
+        with self._config_path.open("w") as f:
+            f.write(config_yaml)
+        # Broadcast to all nodes via the download commands topic (gossipsub)
+        from exo.shared.types.commands import SyncConfig
+        await self._send_download(SyncConfig(config_yaml=config_yaml))
+        return JSONResponse({
+            "success": True,
+            "message": "Config saved and synced to cluster. Restart exo for changes to take effect.",
+            "requiresRestart": True,
+        })
+
+    async def get_store_health(self) -> JSONResponse:
+        if self._store_client is None:
+            raise HTTPException(status_code=503, detail="Store not configured")
+        health = await self._store_client.health_check()
+        if health is None:
+            raise HTTPException(status_code=503, detail="Store unreachable")
+        return JSONResponse({
+            "storePath": health.store_path,
+            "freeBytes": health.free_bytes,
+            "totalBytes": health.total_bytes,
+            "usedBytes": health.used_bytes,
+        })
+
+    async def get_store_registry(self) -> JSONResponse:
+        if self._store_client is None:
+            raise HTTPException(status_code=503, detail="Store not configured")
+        entries = await self._store_client.fetch_registry()
+        return JSONResponse({"entries": entries})
+
+    _ALLOWED_BROWSE_ROOTS = ["/Volumes", "/home", "/mnt", "/tmp", "/opt"]
+
+    async def browse_filesystem(self, path: str = "/Volumes") -> JSONResponse:
+        resolved = Path(path).resolve()
+        if not any(resolved.is_relative_to(root) for root in self._ALLOWED_BROWSE_ROOTS):
+            raise HTTPException(status_code=400, detail="Path outside allowed roots")
+        if not resolved.is_dir():
+            raise HTTPException(status_code=400, detail="Path is not a directory")
+        try:
+            dirs = sorted(
+                [
+                    {"name": d.name, "path": str(d)}
+                    for d in resolved.iterdir()
+                    if d.is_dir() and not d.name.startswith(".")
+                ],
+                key=lambda d: d["name"],
+            )
+        except PermissionError:
+            raise HTTPException(status_code=403, detail="Permission denied")
+        return JSONResponse({"path": str(resolved), "directories": dirs})
+
+    async def get_node_identity(self) -> JSONResponse:
+        hostname = socket.gethostname()
+        ip = hostname
+        network = self.state.node_network.get(self.node_id)
+        if network:
+            for iface in network.interfaces:
+                if iface.ip_address and not iface.ip_address.startswith("127."):
+                    ip = iface.ip_address
+                    break
+        return JSONResponse({
+            "nodeId": str(self.node_id),
+            "hostname": hostname,
+            "ipAddress": ip,
+        })

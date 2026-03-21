@@ -305,6 +305,27 @@ class ModelStoreClient:
             logger.debug(f"ModelStoreClient: list_models failed: {exc}")
             return []
 
+    async def fetch_registry(self) -> list[dict[str, object]]:
+        """Fetch the full store registry from the store server.
+
+        Returns a list of registry entry dicts, or an empty list on error.
+        """
+        url = _make_store_url(self._store_host, self._store_port, "/registry")
+        try:
+            async with (
+                create_http_session(timeout_profile="short") as session,
+                session.get(url) as resp,
+            ):
+                if resp.status != 200:
+                    return []
+                data: object = await resp.json()
+                if not isinstance(data, list):
+                    return []
+                return [entry for entry in data if isinstance(entry, dict)]
+        except Exception as exc:
+            logger.debug(f"ModelStoreClient: fetch_registry failed: {exc}")
+            return []
+
     # ------------------------------------------------------------------
     # Local copy path (store host → same filesystem)
     # ------------------------------------------------------------------
