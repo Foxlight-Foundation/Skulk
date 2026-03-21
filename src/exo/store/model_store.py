@@ -274,8 +274,13 @@ class ModelStore:
         existing status.  If already in the store, returns "complete".
         """
         async with self._download_lock:
-            if model_id in self._active_downloads:
-                return self._active_downloads[model_id]
+            existing = self._active_downloads.get(model_id)
+            if existing is not None:
+                # Allow retrying failed downloads
+                if existing.status == "failed":
+                    del self._active_downloads[model_id]
+                else:
+                    return existing
             if self.is_in_store(model_id):
                 return StoreDownloadStatus(model_id=model_id, status="complete", progress=1.0)
             status = StoreDownloadStatus(model_id=model_id, status="pending")
