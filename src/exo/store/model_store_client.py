@@ -326,6 +326,24 @@ class ModelStoreClient:
             logger.debug(f"ModelStoreClient: fetch_registry failed: {exc}")
             return []
 
+    async def list_active_downloads(self) -> list[dict[str, object]]:
+        """Fetch the list of active store-side downloads."""
+        url = _make_store_url(self._store_host, self._store_port, "/downloads")
+        try:
+            async with (
+                create_http_session(timeout_profile="short") as session,
+                session.get(url) as resp,
+            ):
+                if resp.status != 200:
+                    return []
+                data: object = await resp.json()
+                if not isinstance(data, list):
+                    return []
+                return [d for d in data if isinstance(d, dict)]
+        except Exception as exc:
+            logger.debug(f"ModelStoreClient: list_active_downloads failed: {exc}")
+            return []
+
     async def request_store_download(self, model_id: str) -> dict[str, object]:
         """Request the store host start downloading a model. Non-blocking."""
         url = _make_store_url(

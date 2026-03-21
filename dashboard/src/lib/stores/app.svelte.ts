@@ -3455,6 +3455,22 @@ export const fetchNodeIdentity =
     if (!resp.ok) throw new Error(`Failed to fetch node identity: ${resp.status}`);
     return await resp.json();
   };
+export interface StoreDownloadProgress {
+  modelId: string;
+  status: "pending" | "downloading" | "complete" | "failed";
+  progress: number;
+  error?: string | null;
+}
+export const fetchStoreDownloads = async (): Promise<StoreDownloadProgress[]> => {
+  try {
+    const resp = await fetch("/store/downloads");
+    if (!resp.ok) return [];
+    const data = await resp.json();
+    return data.downloads ?? [];
+  } catch {
+    return [];
+  }
+};
 export const requestStoreDownload = async (
   modelId: string,
 ): Promise<{ status: string; progress?: number; error?: string }> => {

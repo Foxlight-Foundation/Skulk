@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { fade, fly } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import {
@@ -12,10 +12,12 @@
     deleteDownload,
     fetchStoreHealth,
     fetchStoreRegistry,
+    fetchStoreDownloads,
     deleteStoreModel,
     requestStoreDownload,
     instances,
     type StoreRegistryEntry,
+    type StoreDownloadProgress,
   } from "$lib/stores/app.svelte";
   import {
     getDownloadTag,
@@ -359,6 +361,8 @@
   let storeAvailable = $state(false);
   let registryEntries = $state<StoreRegistryEntry[]>([]);
   let registryLoading = $state(false);
+  let storeDownloads = $state<StoreDownloadProgress[]>([]);
+  let downloadPollInterval: ReturnType<typeof setInterval> | null = null;
   let deleteConfirmEntry = $state<{ entry: StoreRegistryEntry; isActive: boolean } | null>(null);
   let deleting = $state(false);
 
@@ -384,7 +388,8 @@
     isModelPickerOpen = false;
     try {
       await requestStoreDownload(modelId);
-      setTimeout(() => loadRegistry(), 3000);
+      // Immediately refresh to show the new download in progress
+      await loadRegistry();
     } catch (err) {
       console.error("Store download request failed:", err);
     }
@@ -414,12 +419,43 @@
   async function loadRegistry() {
     registryLoading = true;
     try {
-      registryEntries = await fetchStoreRegistry();
+      const [entries, downloads] = await Promise.all([
+        fetchStoreRegistry(),
+        fetchStoreDownloads(),
+      ]);
+      registryEntries = entries;
+      storeDownloads = downloads;
+      // Start polling if there are active downloads
+      if (downloads.length > 0 && !downloadPollInterval) {
+        downloadPollInterval = setInterval(pollDownloads, 2000);
+      }
+      // Stop polling if no more active downloads
+      if (downloads.length === 0 && downloadPollInterval) {
+        clearInterval(downloadPollInterval);
+        downloadPollInterval = null;
+      }
     } catch {
       registryEntries = [];
+      storeDownloads = [];
     } finally {
       registryLoading = false;
     }
+  }
+
+  async function pollDownloads() {
+    try {
+      const [downloads, entries] = await Promise.all([
+        fetchStoreDownloads(),
+        fetchStoreRegistry(),
+      ]);
+      storeDownloads = downloads;
+      registryEntries = entries;
+      // Stop polling when no more active downloads
+      if (downloads.length === 0 && downloadPollInterval) {
+        clearInterval(downloadPollInterval);
+        downloadPollInterval = null;
+      }
+    } catch { /* ignore */ }
   }
 
   function handleStoreInfo(entry: StoreRegistryEntry) {
@@ -456,6 +492,13 @@
       deleteConfirmEntry = null;
     }
   }
+
+  onDestroy(() => {
+    if (downloadPollInterval) {
+      clearInterval(downloadPollInterval);
+      downloadPollInterval = null;
+    }
+  });
 
   onMount(async () => {
     refreshState();
@@ -545,6 +588,7 @@
       </div>
       <StoreRegistryTable
         entries={registryEntries}
+        activeDownloads={storeDownloads}
         loading={registryLoading}
         activeModelIds={activeModelIds}
         onrefresh={loadRegistry}

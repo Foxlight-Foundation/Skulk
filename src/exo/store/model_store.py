@@ -323,6 +323,10 @@ class ModelStore:
             return StoreDownloadStatus(model_id=model_id, status="complete", progress=1.0)
         return None
 
+    def list_active_downloads(self) -> list[StoreDownloadStatus]:
+        """Return all in-progress or pending downloads."""
+        return [s for s in self._active_downloads.values() if s.status in ("pending", "downloading")]
+
     async def _do_download(self, model_id: str) -> None:
         """Download a model from HuggingFace into the store and register it."""
         from exo.download.download_utils import (

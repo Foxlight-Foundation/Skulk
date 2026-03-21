@@ -1,8 +1,9 @@
 <script lang="ts">
-  import type { StoreRegistryEntry } from "$lib/stores/app.svelte";
+  import type { StoreRegistryEntry, StoreDownloadProgress } from "$lib/stores/app.svelte";
 
   let {
     entries,
+    activeDownloads = [],
     loading,
     activeModelIds = [],
     onrefresh,
@@ -10,6 +11,7 @@
     ondelete,
   }: {
     entries: StoreRegistryEntry[];
+    activeDownloads: StoreDownloadProgress[];
     loading: boolean;
     activeModelIds: string[];
     onrefresh: () => void;
@@ -39,12 +41,22 @@
   function isActive(modelId: string): boolean {
     return activeModelIds.includes(modelId);
   }
+
+  // Merge registry entries with active downloads that aren't yet registered
+  const registeredIds = $derived(new Set(entries.map(e => e.model_id)));
+  const pendingDownloads = $derived(
+    activeDownloads.filter(d => !registeredIds.has(d.modelId))
+  );
+  // Download progress lookup for registered models still downloading
+  const downloadProgressMap = $derived(
+    new Map(activeDownloads.map(d => [d.modelId, d]))
+  );
 </script>
 
 <div class="space-y-4">
   <div class="flex items-center justify-between">
     <div class="text-sm text-exo-light-gray">
-      {entries.length} model{entries.length !== 1 ? "s" : ""} in store
+      {entries.length} model{entries.length !== 1 ? "s" : ""} in store{#if pendingDownloads.length > 0}, {pendingDownloads.length} downloading{/if}
     </div>
     <button
       type="button"
@@ -58,15 +70,11 @@
   {#if loading}
     <div class="space-y-2">
       {#each Array(4) as _}
-        <div
-          class="h-12 rounded bg-exo-medium-gray/20 animate-pulse"
-        ></div>
+        <div class="h-12 rounded bg-exo-medium-gray/20 animate-pulse"></div>
       {/each}
     </div>
-  {:else if entries.length === 0}
-    <div
-      class="rounded border border-exo-medium-gray/30 bg-exo-black/30 p-6 text-center text-exo-light-gray"
-    >
+  {:else if entries.length === 0 && pendingDownloads.length === 0}
+    <div class="rounded border border-exo-medium-gray/30 bg-exo-black/30 p-6 text-center text-exo-light-gray">
       No models in store.
     </div>
   {:else}
@@ -77,16 +85,40 @@
             <th class="text-left px-4 py-3">Model</th>
             <th class="text-right px-4 py-3">Size</th>
             <th class="text-right px-4 py-3">Files</th>
-            <th class="text-right px-4 py-3">Added</th>
+            <th class="text-right px-4 py-3">Status</th>
             <th class="w-20 px-4 py-3"></th>
           </tr>
         </thead>
         <tbody>
+          <!-- Active downloads not yet in registry -->
+          {#each pendingDownloads as dl}
+            <tr class="border-t border-exo-medium-gray/20 bg-exo-yellow/5">
+              <td class="px-4 py-3">
+                <div class="font-mono text-white">{dl.modelId}</div>
+              </td>
+              <td class="px-4 py-3 text-right font-mono text-exo-light-gray">—</td>
+              <td class="px-4 py-3 text-right font-mono text-exo-light-gray">—</td>
+              <td class="px-4 py-3">
+                <div class="flex items-center justify-end gap-2">
+                  <div class="w-24 h-1.5 rounded bg-exo-medium-gray/30 overflow-hidden">
+                    <div
+                      class="h-full bg-exo-yellow rounded transition-all duration-300"
+                      style="width: {(dl.progress * 100).toFixed(1)}%"
+                    ></div>
+                  </div>
+                  <span class="text-xs font-mono text-exo-yellow">
+                    {(dl.progress * 100).toFixed(0)}%
+                  </span>
+                </div>
+              </td>
+              <td class="px-4 py-3"></td>
+            </tr>
+          {/each}
+          <!-- Registered models -->
           {#each entries as entry}
             {@const active = isActive(entry.model_id)}
-            <tr
-              class="border-t border-exo-medium-gray/20 hover:bg-exo-medium-gray/10 transition-colors group"
-            >
+            {@const dlProgress = downloadProgressMap.get(entry.model_id)}
+            <tr class="border-t border-exo-medium-gray/20 hover:bg-exo-medium-gray/10 transition-colors group">
               <td class="px-4 py-3">
                 <div class="flex items-center gap-2">
                   <span class="font-mono text-white">{entry.model_id}</span>
@@ -104,15 +136,25 @@
               <td class="px-4 py-3 text-right font-mono text-exo-light-gray">
                 {entry.files.length}
               </td>
-              <td
-                class="px-4 py-3 text-right font-mono text-exo-light-gray"
-                title={entry.downloaded_at}
-              >
-                {timeAgo(entry.downloaded_at)}
+              <td class="px-4 py-3 text-right font-mono text-exo-light-gray" title={entry.downloaded_at}>
+                {#if dlProgress && dlProgress.status === "downloading"}
+                  <div class="flex items-center justify-end gap-2">
+                    <div class="w-24 h-1.5 rounded bg-exo-medium-gray/30 overflow-hidden">
+                      <div
+                        class="h-full bg-exo-yellow rounded transition-all duration-300"
+                        style="width: {(dlProgress.progress * 100).toFixed(1)}%"
+                      ></div>
+                    </div>
+                    <span class="text-xs font-mono text-exo-yellow">
+                      {(dlProgress.progress * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                {:else}
+                  {timeAgo(entry.downloaded_at)}
+                {/if}
               </td>
               <td class="px-4 py-3">
                 <div class="flex items-center justify-end gap-1 opacity-40 group-hover:opacity-100 transition-opacity">
-                  <!-- Info icon -->
                   <button
                     type="button"
                     class="p-1 rounded hover:bg-white/10 transition-colors"
@@ -123,7 +165,6 @@
                       <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z" />
                     </svg>
                   </button>
-                  <!-- Delete icon -->
                   <button
                     type="button"
                     class="p-1 rounded hover:bg-red-500/10 transition-colors"

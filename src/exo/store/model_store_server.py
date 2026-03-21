@@ -130,6 +130,7 @@ class ModelStoreServer:
         self._app.router.add_get("/models/{model_id}/files", self._handle_model_files)
         self._app.router.add_post("/models/{model_id}/download", self._handle_download_request)
         self._app.router.add_get("/models/{model_id}/download/status", self._handle_download_status)
+        self._app.router.add_get("/downloads", self._handle_list_downloads)
         self._app.router.add_delete("/models/{model_id}", self._handle_delete_model)
         self._app.router.add_get("/models/{model_id}/{path:.*}", self._handle_file)
 
@@ -261,6 +262,14 @@ class ModelStoreServer:
 
         await response.write_eof()
         return response
+
+    async def _handle_list_downloads(self, request: web.Request) -> web.Response:
+        """``GET /downloads`` — list active store-side downloads."""
+        downloads = self._store.list_active_downloads()
+        return web.json_response([
+            {"modelId": d.model_id, "status": d.status, "progress": d.progress, "error": d.error}
+            for d in downloads
+        ])
 
     async def _handle_delete_model(self, request: web.Request) -> web.Response:
         """``DELETE /models/{model_id}`` — remove model from store."""
