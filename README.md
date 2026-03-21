@@ -36,6 +36,7 @@ exo: Run frontier AI locally. Maintained by [exo labs](https://x.com/exolabs).
 > - **Offline/air-gapped hardening** — CLI commands for store management (`exo store list`, `exo store pull`), store integrity checks with hash verification, and cleaner error messaging
 > - **Auto-detect existing models** — scan a selected store path for existing model directories and auto-register them
 > - **Storage recommendations** — show available disk space per volume in the directory browser, highlight the best option, warn on low space
+> - **Manual shard placement** — control which layers run on which nodes, adjust sharding to target specific machines and manage memory pressure on a per-node basis
 > - **Cross-platform support** — Linux CUDA and CPU support for the model store, with platform-aware filesystem browsing
 
 ---
