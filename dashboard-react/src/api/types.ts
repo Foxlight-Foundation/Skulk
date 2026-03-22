@@ -117,6 +117,11 @@ export interface RawRdmaCtlInfo {
   interfaces?: string[];
 }
 
+export interface NodeDiskInfo {
+  total: { inBytes: number };
+  available: { inBytes: number };
+}
+
 export interface StateResponse {
   topology?: TopologyData;
   instances?: Record<string, Instance>;
@@ -126,6 +131,9 @@ export interface StateResponse {
   nodePerformanceProfiles?: Record<string, RawSystemPerformanceProfile>;
   nodeNetworkConnectivity?: Record<string, RawNetworkConnectivity>;
   nodeDownloads?: Record<string, RawNodeDownloads>;
+  /** Raw tagged download entries per node, as returned by /state */
+  downloads?: Record<string, unknown[]>;
+  nodeDisk?: Record<string, NodeDiskInfo>;
   nodeThunderbolt?: Record<string, RawThunderboltInfo>;
   nodeThunderboltBridge?: Record<string, unknown>;
   nodeRdmaCtl?: Record<string, RawRdmaCtlInfo>;
@@ -234,6 +242,58 @@ export interface ModelStoreConfig {
   registeredStores?: string[];
 }
 
+export interface ConfigResponse {
+  config: Record<string, unknown>;
+  configPath: string;
+  fileExists: boolean;
+}
+
+export interface ConfigUpdateResponse {
+  success: boolean;
+  message: string;
+  requiresRestart: boolean;
+}
+
+export interface StoreHealthResponse {
+  storePath: string;
+  freeBytes: number;
+  totalBytes: number;
+  usedBytes: number;
+}
+
+export interface StoreRegistryEntry {
+  model_id: string;
+  store_path: string;
+  files: string[];
+  downloaded_at: string;
+  total_bytes: number;
+}
+
+export interface StoreDownloadProgress {
+  modelId: string;
+  status: 'pending' | 'downloading' | 'complete' | 'failed';
+  progress: number;
+  error?: string | null;
+}
+
+// ─── Filesystem / Node Identity ───────────────────────────────────────────────
+
+export interface DirectoryEntry {
+  name: string;
+  path: string;
+}
+
+export interface BrowseResponse {
+  path: string;
+  directories: DirectoryEntry[];
+}
+
+export interface NodeIdentityResponse {
+  nodeId: string;
+  hostname: string;
+  ipAddress: string;
+}
+
 // ─── HuggingFace search ───────────────────────────────────────────────────────
 
 export interface HuggingFaceModel {
@@ -253,4 +313,33 @@ export interface TraceEntry {
   model?: string;
   durationMs?: number;
   tokens?: number;
+}
+
+export interface TraceListItem {
+  taskId: string;
+  createdAt: string;
+  fileSize: number;
+}
+
+export interface TraceListResponse {
+  traces: TraceListItem[];
+}
+
+export interface TraceCategoryStats {
+  totalUs: number;
+  count: number;
+  minUs: number;
+  maxUs: number;
+  avgUs: number;
+}
+
+export interface TraceRankStats {
+  byCategory: Record<string, TraceCategoryStats>;
+}
+
+export interface TraceStatsResponse {
+  taskId: string;
+  totalWallTimeUs: number;
+  byCategory: Record<string, TraceCategoryStats>;
+  byRank: Record<number, TraceRankStats>;
 }

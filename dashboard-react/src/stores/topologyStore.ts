@@ -24,6 +24,7 @@ import type {
   RawNodeDownloads,
   RawThunderboltInfo,
   RawRdmaCtlInfo,
+  NodeDiskInfo,
 } from '../api/types';
 
 const POLL_INTERVAL_MS = 2000;
@@ -55,6 +56,9 @@ interface TopologyState {
   nodePerformanceProfiles: Record<string, RawSystemPerformanceProfile>;
   nodeNetworkConnectivity: Record<string, RawNetworkConnectivity>;
   nodeDownloads: Record<string, RawNodeDownloads>;
+  /** Raw tagged download entries per node (e.g. DownloadCompleted, DownloadOngoing) */
+  downloads: Record<string, unknown[]>;
+  nodeDisk: Record<string, NodeDiskInfo>;
   nodeThunderbolt: Record<string, RawThunderboltInfo>;
   nodeThunderboltBridge: Record<string, unknown>;
   nodeRdmaCtl: Record<string, RawRdmaCtlInfo>;
@@ -83,6 +87,8 @@ export const useTopologyStore = create<TopologyState>((set, get) => ({
   nodePerformanceProfiles: {},
   nodeNetworkConnectivity: {},
   nodeDownloads: {},
+  downloads: {},
+  nodeDisk: {},
   nodeThunderbolt: {},
   nodeThunderboltBridge: {},
   nodeRdmaCtl: {},
@@ -109,6 +115,8 @@ export const useTopologyStore = create<TopologyState>((set, get) => ({
           nodePerformanceProfiles: state.nodePerformanceProfiles ?? {},
           nodeNetworkConnectivity: state.nodeNetworkConnectivity ?? {},
           nodeDownloads: state.nodeDownloads ?? {},
+          downloads: state.downloads ?? {},
+          nodeDisk: state.nodeDisk ?? {},
           nodeThunderbolt: state.nodeThunderbolt ?? {},
           nodeThunderboltBridge: state.nodeThunderboltBridge ?? {},
           nodeRdmaCtl: state.nodeRdmaCtl ?? {},
