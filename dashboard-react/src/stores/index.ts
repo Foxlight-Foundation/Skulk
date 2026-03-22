@@ -2,6 +2,8 @@
  * Store barrel export
  */
 export { useChatStore } from './chatStore';
+export { useModelsStore } from './modelsStore';
+export type { ModelEntry } from './modelsStore';
 export { useFavoritesStore } from './favoritesStore';
 export { usePlacementStore } from './placementStore';
 export { useRecentsStore } from './recentsStore';

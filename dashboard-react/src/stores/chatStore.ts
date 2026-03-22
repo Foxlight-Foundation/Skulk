@@ -2,7 +2,7 @@
  * Chat Store
  *
  * All conversation state: messages, active conversation, active model,
- * SSE streaming, image generation/editing.
+ * SSE streaming, image generation/editing, image generation params.
  * Replaces the chat slices of app.svelte.ts.
  */
 import { create } from 'zustand';
@@ -26,6 +26,46 @@ function deriveTitle(content: MessageContent): string {
 
 export type ChatMode = 'chat' | 'image-gen' | 'image-edit';
 
+// ─── Image generation params ──────────────────────────────────────────────────
+
+export type ImageSize =
+  | 'auto' | '512x512' | '768x768' | '1024x1024'
+  | '1024x768' | '768x1024' | '1024x1536' | '1536x1024';
+
+export type ImageQuality = 'low' | 'medium' | 'high';
+export type ImageOutputFormat = 'png' | 'jpeg';
+export type ImageInputFidelity = 'low' | 'high';
+
+export interface ImageGenerationParams {
+  size: ImageSize;
+  quality: ImageQuality;
+  outputFormat: ImageOutputFormat;
+  numImages: number;
+  stream: boolean;
+  partialImages: number;
+  inputFidelity: ImageInputFidelity;
+  seed: number | null;
+  numInferenceSteps: number | null;
+  guidance: number | null;
+  negativePrompt: string | null;
+  numSyncSteps: number | null;
+}
+
+export const DEFAULT_IMAGE_PARAMS: ImageGenerationParams = {
+  size: 'auto',
+  quality: 'medium',
+  outputFormat: 'png',
+  numImages: 1,
+  stream: true,
+  partialImages: 3,
+  inputFidelity: 'high',
+  seed: null,
+  numInferenceSteps: null,
+  guidance: null,
+  negativePrompt: null,
+  numSyncSteps: null,
+};
+
 // ─── Store shape ──────────────────────────────────────────────────────────────
 
 interface ChatState {
@@ -35,6 +75,7 @@ interface ChatState {
   mode: ChatMode;
   isStreaming: boolean;
   editingImageBase64: string | null;
+  imageGenerationParams: ImageGenerationParams;
 
   // Stream abort controller — not persisted
   _abortController: AbortController | null;
@@ -43,12 +84,15 @@ interface ChatState {
   getActiveConversation: () => Conversation | null;
   getMessages: () => ChatMessage[];
   hasStartedChat: () => boolean;
+  getLastTtft: () => number | null;
+  getLastTps: () => number | null;
 
   // ── Conversation management ────────────────────────────────────────────────
   createConversation: () => string;
   deleteConversation: (id: string) => void;
   clearAllConversations: () => void;
   setActiveConversation: (id: string) => void;
+  renameConversation: (id: string, title: string) => void;
 
   // ── Model ──────────────────────────────────────────────────────────────────
   setSelectedModel: (modelId: string | null) => void;
@@ -56,6 +100,13 @@ interface ChatState {
   // ── Mode ───────────────────────────────────────────────────────────────────
   setMode: (mode: ChatMode) => void;
   setEditingImage: (base64: string | null) => void;
+
+  // ── Thinking ──────────────────────────────────────────────────────────────
+  setConversationThinking: (enabled: boolean) => void;
+
+  // ── Image params ──────────────────────────────────────────────────────────
+  setImageGenerationParams: (partial: Partial<ImageGenerationParams>) => void;
+  resetImageGenerationParams: () => void;
 
   // ── Sending messages ───────────────────────────────────────────────────────
   sendMessage: (content: MessageContent) => Promise<void>;
@@ -77,6 +128,7 @@ export const useChatStore = create<ChatState>()(
       mode: 'chat',
       isStreaming: false,
       editingImageBase64: null,
+      imageGenerationParams: DEFAULT_IMAGE_PARAMS,
       _abortController: null,
 
       // ── Selectors ────────────────────────────────────────────────────────────
@@ -89,6 +141,26 @@ export const useChatStore = create<ChatState>()(
       getMessages: () => get().getActiveConversation()?.messages ?? [],
 
       hasStartedChat: () => (get().getMessages().length ?? 0) > 0,
+
+      getLastTtft: () => {
+        const messages = get().getMessages();
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const m = messages[i];
+          if (m != null && m.role === 'assistant' && (m.ttft != null || m.ttftMs != null)) {
+            return m.ttft ?? m.ttftMs ?? null;
+          }
+        }
+        return null;
+      },
+
+      getLastTps: () => {
+        const messages = get().getMessages();
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const m = messages[i];
+          if (m != null && m.role === 'assistant' && m.tps != null) return m.tps;
+        }
+        return null;
+      },
 
       // ── Conversation management ───────────────────────────────────────────────
 
@@ -128,6 +200,14 @@ export const useChatStore = create<ChatState>()(
         set({ activeConversationId: id });
       },
 
+      renameConversation: (id, title) => {
+        set((state) => ({
+          conversations: state.conversations.map((c) =>
+            c.id === id ? { ...c, title } : c,
+          ),
+        }));
+      },
+
       // ── Model ─────────────────────────────────────────────────────────────────
 
       setSelectedModel: (modelId) => {
@@ -138,6 +218,30 @@ export const useChatStore = create<ChatState>()(
 
       setMode: (mode) => set({ mode }),
       setEditingImage: (base64) => set({ editingImageBase64: base64 }),
+
+      // ── Thinking ──────────────────────────────────────────────────────────────
+
+      setConversationThinking: (enabled) => {
+        const { activeConversationId } = get();
+        if (!activeConversationId) return;
+        set((state) => ({
+          conversations: state.conversations.map((c) =>
+            c.id === activeConversationId ? { ...c, thinkingEnabled: enabled } : c,
+          ),
+        }));
+      },
+
+      // ── Image params ──────────────────────────────────────────────────────────
+
+      setImageGenerationParams: (partial) => {
+        set((state) => ({
+          imageGenerationParams: { ...state.imageGenerationParams, ...partial },
+        }));
+      },
+
+      resetImageGenerationParams: () => {
+        set({ imageGenerationParams: DEFAULT_IMAGE_PARAMS });
+      },
 
       // ── Message sending ───────────────────────────────────────────────────────
 
@@ -509,6 +613,7 @@ export const useChatStore = create<ChatState>()(
         conversations: state.conversations,
         activeConversationId: state.activeConversationId,
         selectedModelId: state.selectedModelId,
+        imageGenerationParams: state.imageGenerationParams,
       }),
     },
   ),

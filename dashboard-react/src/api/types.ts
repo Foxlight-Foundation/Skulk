@@ -179,6 +179,8 @@ export interface ChatMessage {
   isStreaming?: boolean;
   /** Time-to-first-token in ms */
   ttft?: number;
+  /** Alias for ttft used in persisted data */
+  ttftMs?: number;
   /** Tokens per second */
   tps?: number;
   /** Whether prefill is in progress */
@@ -194,6 +196,12 @@ export interface Conversation {
   updatedAt: number;
   messages: ChatMessage[];
   modelId?: string;
+  /** Sharding strategy label, e.g. "Pipeline" */
+  sharding?: string;
+  /** Instance type label, e.g. "MLX Ring" */
+  instanceType?: string;
+  /** Whether thinking/reasoning mode is enabled for this conversation */
+  thinkingEnabled?: boolean;
 }
 
 export interface ChatCompletionRequest {
