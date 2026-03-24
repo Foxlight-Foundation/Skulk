@@ -229,7 +229,7 @@ function HexagonDefault({ cx, cy, width, height, wireColor, strokeWidth, fillCol
           <polygon points={points} />
         </clipPath>
       </defs>
-      <polygon points={points} fill={fillColor} stroke={wireColor} strokeWidth={strokeWidth} />
+      <polygon points={points} fill="#1a1a1a" stroke={wireColor} strokeWidth={strokeWidth} />
       {ramPercent > 0 && (
         <rect x={hexLeft} y={hexTop + (hexH - memFillH)} width={hexW} height={memFillH}
           fill="rgba(255,215,0,0.75)" clipPath={`url(#${clipId}-hex)`} />
