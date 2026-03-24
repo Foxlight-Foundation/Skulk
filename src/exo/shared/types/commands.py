@@ -93,8 +93,16 @@ class PurgeStagingCache(BaseCommand):
     model_id: ModelId | None = None
 
 
+class AddCustomModelCard(BaseCommand):
+    model_card: ModelCard
+
+
+class DeleteCustomModelCard(BaseCommand):
+    model_id: ModelId
+
+
 DownloadCommand = (
-    StartDownload | DeleteDownload | CancelDownload | SyncConfig | PurgeStagingCache
+    StartDownload | DeleteDownload | CancelDownload | SyncConfig | PurgeStagingCache | AddCustomModelCard | DeleteCustomModelCard
 )
 
 
@@ -110,6 +118,8 @@ Command = (
     | TaskCancelled
     | TaskFinished
     | SendInputChunk
+    | AddCustomModelCard
+    | DeleteCustomModelCard
 )
 
 
