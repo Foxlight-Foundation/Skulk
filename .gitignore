@@ -32,12 +32,20 @@ dashboard/build/
 dashboard/node_modules/
 dashboard/.svelte-kit/
 
+# react dashboard
+dashboard-react/node_modules/
+dashboard-react/build/
+dashboard-react/dist/
+
 # host config snapshots
 hosts_*.json
 .swp
 
 # bench files
 bench/**/*.json
+
+# claude code
+.claude/
 
 # tmp
 tmp/models
