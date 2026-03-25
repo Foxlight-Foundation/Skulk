@@ -3,7 +3,7 @@ import { detectDeviceModel } from '../../types/topology';
 import { DeviceIcon } from './DeviceIcon';
 import { GpuStatsBar } from './GpuStatsBar';
 import { NodeLabel } from './NodeLabel';
-import { InfoTooltip } from '../common/InfoTooltip';
+
 
 export interface ClusterNodeProps {
   nodeId: string;
@@ -131,9 +131,7 @@ export function ClusterNode({
   const iconLeft = -iconW / 2;
   const iconTop = -iconH / 2;
 
-  // Info icon position: upper-right of the GPU bar
-  const infoX = iconW / 2 + barGap + barW + 4;
-  const infoY = iconTop - 2;
+  const debugContent = debug ? buildDebugContent(nodeId, nodeInfo, edges, allNodes) : undefined;
 
   return (
     <g transform={`translate(${x}, ${y}) scale(${scale})`}>
@@ -146,6 +144,7 @@ export function ClusterNode({
         fontSize={labelFontSize}
         nameY={iconTop - nameOffset}
         memoryY={iconTop + iconH + memoryOffset}
+        debugContent={debugContent}
       />
 
       {/* Device icon — centered at origin */}
@@ -170,16 +169,6 @@ export function ClusterNode({
         />
       </g>
 
-      {/* Debug info icon — upper right, uses foreignObject to host HTML tooltip */}
-      {debug && (
-        <foreignObject x={infoX} y={infoY} width={20} height={20} style={{ overflow: 'visible' }}>
-          <InfoTooltip
-            filled
-            placement="right"
-            content={buildDebugContent(nodeId, nodeInfo, edges, allNodes)}
-          />
-        </foreignObject>
-      )}
     </g>
   );
 }

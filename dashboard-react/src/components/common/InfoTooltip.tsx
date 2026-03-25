@@ -60,8 +60,8 @@ const TooltipBox = styled.div`
 
 const ARROW_SIZE = 8;
 
-const InfoIcon = ({ filled = false }: { filled?: boolean }) => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill={filled ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+const InfoIcon = ({ filled = false, size = 16 }: { filled?: boolean; size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill={filled ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <circle cx="12" cy="12" r="10" />
     <path d="M12 16v-4" stroke={filled ? '#000' : 'currentColor'} />
     <path d="M12 8h.01" stroke={filled ? '#000' : 'currentColor'} />
