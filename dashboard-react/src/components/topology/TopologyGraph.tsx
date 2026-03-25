@@ -123,36 +123,6 @@ function getConnectionDetails(
   return details;
 }
 
-/* ---- debug: quadrant grouping ---- */
-
-interface QuadrantedDetail {
-  detail: ConnectionDetail;
-  midX: number;
-  midY: number;
-}
-
-function groupByQuadrant(
-  items: QuadrantedDetail[],
-  cx: number,
-  cy: number,
-): { topLeft: QuadrantedDetail[]; topRight: QuadrantedDetail[]; bottomLeft: QuadrantedDetail[]; bottomRight: QuadrantedDetail[] } {
-  const topLeft: QuadrantedDetail[] = [];
-  const topRight: QuadrantedDetail[] = [];
-  const bottomLeft: QuadrantedDetail[] = [];
-  const bottomRight: QuadrantedDetail[] = [];
-
-  for (const item of items) {
-    if (item.midX < cx) {
-      if (item.midY < cy) topLeft.push(item);
-      else bottomLeft.push(item);
-    } else {
-      if (item.midY < cy) topRight.push(item);
-      else bottomRight.push(item);
-    }
-  }
-
-  return { topLeft, topRight, bottomLeft, bottomRight };
-}
 
 /* ---- styles ---- */
 
@@ -221,28 +191,6 @@ export function TopologyGraph({ data }: TopologyGraphProps) {
     return Math.max(0.6, 1 - (n - 1) * 0.08);
   }, [nodeIds.length]);
 
-  // Debug: collect all connection details grouped by quadrant
-  const debugDetails = useMemo(() => {
-    if (!debug) return null;
-    const allDetails: QuadrantedDetail[] = [];
-    const cx = width / 2;
-    const cy = height / 2;
-
-    for (const pair of edgePairs) {
-      const pA = posById.get(pair.a);
-      const pB = posById.get(pair.b);
-      if (!pA || !pB) continue;
-
-      const midX = (pA.x + pB.x) / 2;
-      const midY = (pA.y + pB.y) / 2;
-      const details = getConnectionDetails(data.edges, pair.a, pair.b, data.nodes);
-      for (const detail of details) {
-        allDetails.push({ detail, midX, midY });
-      }
-    }
-
-    return groupByQuadrant(allDetails, cx, cy);
-  }, [debug, edgePairs, posById, data.edges, data.nodes, width, height]);
 
   if (width === 0 || height === 0) {
     return (
@@ -254,9 +202,6 @@ export function TopologyGraph({ data }: TopologyGraphProps) {
       </Container>
     );
   }
-
-  const LINE_H = 12;
-  const PAD = 8;
 
   return (
     <Container>
@@ -368,21 +313,17 @@ export function TopologyGraph({ data }: TopologyGraphProps) {
         {debug && positions.map((pos) => {
           const info = data.nodes[pos.id];
           if (!info) return null;
-          const tb = info.thunderbolt_bridge ? 'ON' : 'OFF';
           const rdma = info.rdma_enabled ? 'ON' : 'OFF';
           const os = info.os_version ? `macOS ${info.os_version}${info.os_build_version ? ` (${info.os_build_version})` : ''}` : '';
           const baseY = pos.y + 75 * nodeScale;
 
           return (
             <g key={`debug-${pos.id}`}>
-              <text x={pos.x} y={baseY} textAnchor="middle" fontSize="8" fontFamily="SF Mono, Monaco, monospace" fill="rgba(179,179,179,0.5)">
-                TB:{tb}
-              </text>
-              <text x={pos.x} y={baseY + LINE_H} textAnchor="middle" fontSize="8" fontFamily="SF Mono, Monaco, monospace" fill="rgba(179,179,179,0.5)">
+              <text x={pos.x} y={baseY} textAnchor="middle" fontSize="11" fontFamily="SF Mono, Monaco, monospace" fill="rgba(179,179,179,0.8)">
                 RDMA:{rdma}
               </text>
               {os && (
-                <text x={pos.x} y={baseY + LINE_H * 2} textAnchor="middle" fontSize="8" fontFamily="SF Mono, Monaco, monospace" fill="rgba(179,179,179,0.4)">
+                <text x={pos.x} y={baseY + 14} textAnchor="middle" fontSize="11" fontFamily="SF Mono, Monaco, monospace" fill="rgba(179,179,179,0.7)">
                   {os}
                 </text>
               )}
@@ -390,39 +331,48 @@ export function TopologyGraph({ data }: TopologyGraphProps) {
           );
         })}
 
-        {/* Debug: connection details in corners */}
-        {debug && debugDetails && (
-          <g>
-            {/* Top Left */}
-            {debugDetails.topLeft.map((item, i) => (
-              <text key={`tl-${i}`} x={PAD} y={PAD + i * LINE_H} textAnchor="start" dominantBaseline="hanging" fontSize="7" fontFamily="SF Mono, Monaco, monospace"
-                fill={item.detail.label.startsWith('RDMA') ? 'rgba(255,215,0,0.7)' : 'rgba(255,255,255,0.6)'}>
-                ↗ {item.detail.label}
-              </text>
-            ))}
-            {/* Top Right */}
-            {debugDetails.topRight.map((item, i) => (
-              <text key={`tr-${i}`} x={width - PAD} y={PAD + i * LINE_H} textAnchor="end" dominantBaseline="hanging" fontSize="7" fontFamily="SF Mono, Monaco, monospace"
-                fill={item.detail.label.startsWith('RDMA') ? 'rgba(255,215,0,0.7)' : 'rgba(255,255,255,0.6)'}>
-                ↗ {item.detail.label}
-              </text>
-            ))}
-            {/* Bottom Left */}
-            {debugDetails.bottomLeft.map((item, i) => (
-              <text key={`bl-${i}`} x={PAD} y={height - PAD - (debugDetails.bottomLeft.length - 1 - i) * LINE_H} textAnchor="start" dominantBaseline="auto" fontSize="7" fontFamily="SF Mono, Monaco, monospace"
-                fill={item.detail.label.startsWith('RDMA') ? 'rgba(255,215,0,0.7)' : 'rgba(255,255,255,0.6)'}>
-                → {item.detail.label}
-              </text>
-            ))}
-            {/* Bottom Right */}
-            {debugDetails.bottomRight.map((item, i) => (
-              <text key={`br-${i}`} x={width - PAD} y={height - PAD - (debugDetails.bottomRight.length - 1 - i) * LINE_H} textAnchor="end" dominantBaseline="auto" fontSize="7" fontFamily="SF Mono, Monaco, monospace"
-                fill={item.detail.label.startsWith('RDMA') ? 'rgba(255,215,0,0.7)' : 'rgba(255,255,255,0.6)'}>
-                → {item.detail.label}
-              </text>
-            ))}
-          </g>
-        )}
+        {/* Debug: connection details near edge midpoints */}
+        {debug && edgePairs.map((pair) => {
+          const pA = posById.get(pair.a);
+          const pB = posById.get(pair.b);
+          if (!pA || !pB) return null;
+
+          const details = getConnectionDetails(data.edges, pair.a, pair.b, data.nodes);
+          if (details.length === 0) return null;
+
+          const mx = (pA.x + pB.x) / 2;
+          const my = (pA.y + pB.y) / 2;
+
+          // Offset perpendicular to the edge so text doesn't sit on the line
+          const dx = pB.x - pA.x;
+          const dy = pB.y - pA.y;
+          const len = Math.hypot(dx, dy) || 1;
+          const perpX = -dy / len * 20;
+          const perpY = dx / len * 20;
+          const tx = mx + perpX;
+          const ty = my + perpY;
+
+          // Determine text-anchor based on position relative to center
+          const anchor = tx < width / 2 ? 'start' : 'end';
+
+          return (
+            <g key={`conn-${pair.a}-${pair.b}`}>
+              {details.map((d, i) => (
+                <text
+                  key={i}
+                  x={tx}
+                  y={ty + i * 14}
+                  textAnchor={anchor}
+                  fontSize="10"
+                  fontFamily="SF Mono, Monaco, monospace"
+                  fill={d.label.startsWith('RDMA') ? 'rgba(255,215,0,0.9)' : 'rgba(255,255,255,0.8)'}
+                >
+                  → {d.label}
+                </text>
+              ))}
+            </g>
+          );
+        })}
       </svg>
     </Container>
   );
