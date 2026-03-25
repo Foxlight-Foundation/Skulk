@@ -18,6 +18,7 @@ exo.yaml
 *.xcuserdata
 *.xcuserdatad/
 **/.DS_Store
+**/._*
 app/EXO/build/
 dist/
 
