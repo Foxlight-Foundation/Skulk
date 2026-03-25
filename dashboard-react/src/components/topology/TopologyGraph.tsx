@@ -302,7 +302,7 @@ export function TopologyGraph({ data }: TopologyGraphProps) {
           const lineHeight = 16;
 
           // Compute cluster bounding box from node positions + margin
-          const margin = 220;
+          const margin = 170;
           const xs = positions.map(p => p.x);
           const ys = positions.map(p => p.y);
           const clusterLeft = Math.min(...xs) - margin;
