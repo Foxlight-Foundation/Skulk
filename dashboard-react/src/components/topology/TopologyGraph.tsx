@@ -331,64 +331,60 @@ export function TopologyGraph({ data }: TopologyGraphProps) {
           );
         })}
 
-        {/* Debug: connection details positioned by orbit angle */}
+        {/* Debug: connection details aggregated per node, one block per node */}
         {debug && (() => {
           const gcx = width / 2;
           const topPad = 70;
           const bottomPad = 70;
           const gcy = topPad + (height - topPad - bottomPad) / 2;
 
-          return edgePairs.map((pair) => {
-            const pA = posById.get(pair.a);
-            const pB = posById.get(pair.b);
-            if (!pA || !pB) return null;
+          // Collect all outbound connection labels per node
+          const perNode = new Map<string, ConnectionDetail[]>();
+          for (const e of data.edges) {
+            const detail = (() => {
+              if (e.sourceRdmaIface && e.sinkRdmaIface) {
+                return `RDMA ${e.sourceRdmaIface} → ${e.sinkRdmaIface}`;
+              } else if (e.sendBackIp) {
+                const iface = e.sendBackInterface ?? data.nodes[e.source]?.ip_to_interface?.[e.sendBackIp] ?? data.nodes[e.target]?.ip_to_interface?.[e.sendBackIp];
+                return `${e.sendBackIp}${iface ? ` ${iface}` : ''}`;
+              }
+              return null;
+            })();
+            if (!detail) continue;
+            const list = perNode.get(e.source) ?? [];
+            list.push({ label: detail, from: e.source, to: e.target });
+            perNode.set(e.source, list);
+          }
 
-            const details = getConnectionDetails(data.edges, pair.a, pair.b, data.nodes);
-            if (details.length === 0) return null;
+          return Array.from(perNode.entries()).map(([nodeId, details]) => {
+            const pos = posById.get(nodeId);
+            if (!pos) return null;
 
-            const mx = (pA.x + pB.x) / 2;
-            const my = (pA.y + pB.y) / 2;
+            // Push outward from graph center through this node
+            const toNodeX = pos.x - gcx;
+            const toNodeY = pos.y - gcy;
+            const toNodeLen = Math.hypot(toNodeX, toNodeY) || 1;
+            const pushDist = 130;
+            const tx = gcx + (toNodeX / toNodeLen) * (toNodeLen + pushDist);
+            const ty = gcy + (toNodeY / toNodeLen) * (toNodeLen + pushDist);
 
-            // Split details by direction, position each group near
-            // the outer side of its source node
-            const aToBDetails = details.filter(d => d.from === pair.a);
-            const bToADetails = details.filter(d => d.from === pair.b);
-            // For undirected or unmatched, fall back to grouping near nodeA
-            const ungrouped = details.filter(d => d.from !== pair.a && d.from !== pair.b);
-            aToBDetails.push(...ungrouped);
-
-            const groups: Array<{ items: ConnectionDetail[]; near: NodePosition }> = [];
-            if (aToBDetails.length > 0) groups.push({ items: aToBDetails, near: pA });
-            if (bToADetails.length > 0) groups.push({ items: bToADetails, near: pB });
-            if (groups.length === 0) return null;
+            const anchor = tx < gcx - 20 ? 'end' : tx > gcx + 20 ? 'start' : 'middle';
 
             return (
-              <g key={`conn-${pair.a}-${pair.b}`}>
-                {groups.map((group, gi) => {
-                  // Push from graph center through the node, then beyond
-                  const toNodeX = group.near.x - gcx;
-                  const toNodeY = group.near.y - gcy;
-                  const toNodeLen = Math.hypot(toNodeX, toNodeY) || 1;
-                  const pushDist = 130;
-                  const tx = gcx + (toNodeX / toNodeLen) * (toNodeLen + pushDist);
-                  const ty = gcy + (toNodeY / toNodeLen) * (toNodeLen + pushDist);
-
-                  const anchor = tx < gcx - 20 ? 'end' : tx > gcx + 20 ? 'start' : 'middle';
-
-                  return group.items.map((d, i) => (
-                    <text
-                      key={`${gi}-${i}`}
-                      x={tx}
-                      y={ty + i * 16}
-                      textAnchor={anchor}
-                      fontSize="12"
-                      fontFamily="SF Mono, Monaco, monospace"
-                      fill={d.label.startsWith('RDMA') ? 'rgba(255,215,0,0.9)' : 'rgba(255,255,255,0.8)'}
-                    >
-                      → {d.label}
-                    </text>
-                  ));
-                })}
+              <g key={`conn-${nodeId}`}>
+                {details.map((d, i) => (
+                  <text
+                    key={i}
+                    x={tx}
+                    y={ty + i * 16}
+                    textAnchor={anchor}
+                    fontSize="12"
+                    fontFamily="SF Mono, Monaco, monospace"
+                    fill={d.label.startsWith('RDMA') ? 'rgba(255,215,0,0.9)' : 'rgba(255,255,255,0.8)'}
+                  >
+                    → {d.label}
+                  </text>
+                ))}
               </g>
             );
           });
