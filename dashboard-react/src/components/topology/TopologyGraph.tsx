@@ -319,11 +319,11 @@ export function TopologyGraph({ data }: TopologyGraphProps) {
 
           return (
             <g key={`debug-${pos.id}`}>
-              <text x={pos.x} y={baseY} textAnchor="middle" fontSize="11" fontFamily="SF Mono, Monaco, monospace" fill="rgba(179,179,179,0.8)">
+              <text x={pos.x} y={baseY} textAnchor="middle" fontSize="12" fontFamily="SF Mono, Monaco, monospace" fill="rgba(179,179,179,0.8)">
                 RDMA:{rdma}
               </text>
               {os && (
-                <text x={pos.x} y={baseY + 14} textAnchor="middle" fontSize="11" fontFamily="SF Mono, Monaco, monospace" fill="rgba(179,179,179,0.7)">
+                <text x={pos.x} y={baseY + 14} textAnchor="middle" fontSize="12" fontFamily="SF Mono, Monaco, monospace" fill="rgba(179,179,179,0.7)">
                   {os}
                 </text>
               )}
@@ -331,48 +331,51 @@ export function TopologyGraph({ data }: TopologyGraphProps) {
           );
         })}
 
-        {/* Debug: connection details near edge midpoints */}
-        {debug && edgePairs.map((pair) => {
-          const pA = posById.get(pair.a);
-          const pB = posById.get(pair.b);
-          if (!pA || !pB) return null;
+        {/* Debug: connection details pushed outward from center along each edge */}
+        {debug && (() => {
+          const gcx = width / 2;
+          const gcy = height / 2;
 
-          const details = getConnectionDetails(data.edges, pair.a, pair.b, data.nodes);
-          if (details.length === 0) return null;
+          return edgePairs.map((pair) => {
+            const pA = posById.get(pair.a);
+            const pB = posById.get(pair.b);
+            if (!pA || !pB) return null;
 
-          const mx = (pA.x + pB.x) / 2;
-          const my = (pA.y + pB.y) / 2;
+            const details = getConnectionDetails(data.edges, pair.a, pair.b, data.nodes);
+            if (details.length === 0) return null;
 
-          // Offset perpendicular to the edge so text doesn't sit on the line
-          const dx = pB.x - pA.x;
-          const dy = pB.y - pA.y;
-          const len = Math.hypot(dx, dy) || 1;
-          const perpX = -dy / len * 20;
-          const perpY = dx / len * 20;
-          const tx = mx + perpX;
-          const ty = my + perpY;
+            const mx = (pA.x + pB.x) / 2;
+            const my = (pA.y + pB.y) / 2;
 
-          // Determine text-anchor based on position relative to center
-          const anchor = tx < width / 2 ? 'start' : 'end';
+            // Push outward from graph center through the midpoint
+            const toMidX = mx - gcx;
+            const toMidY = my - gcy;
+            const toMidLen = Math.hypot(toMidX, toMidY) || 1;
+            const pushDist = 60;
+            const tx = mx + (toMidX / toMidLen) * pushDist;
+            const ty = my + (toMidY / toMidLen) * pushDist;
 
-          return (
-            <g key={`conn-${pair.a}-${pair.b}`}>
-              {details.map((d, i) => (
-                <text
-                  key={i}
-                  x={tx}
-                  y={ty + i * 14}
-                  textAnchor={anchor}
-                  fontSize="10"
-                  fontFamily="SF Mono, Monaco, monospace"
-                  fill={d.label.startsWith('RDMA') ? 'rgba(255,215,0,0.9)' : 'rgba(255,255,255,0.8)'}
-                >
-                  → {d.label}
-                </text>
-              ))}
-            </g>
-          );
-        })}
+            const anchor = tx < gcx ? 'end' : 'start';
+
+            return (
+              <g key={`conn-${pair.a}-${pair.b}`}>
+                {details.map((d, i) => (
+                  <text
+                    key={i}
+                    x={tx}
+                    y={ty + i * 16}
+                    textAnchor={anchor}
+                    fontSize="12"
+                    fontFamily="SF Mono, Monaco, monospace"
+                    fill={d.label.startsWith('RDMA') ? 'rgba(255,215,0,0.9)' : 'rgba(255,255,255,0.8)'}
+                  >
+                    → {d.label}
+                  </text>
+                ))}
+              </g>
+            );
+          });
+        })()}
       </svg>
     </Container>
   );
