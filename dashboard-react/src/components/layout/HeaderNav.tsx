@@ -24,6 +24,7 @@ const Nav = styled.header`
   padding: 16px 24px 12px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
 `;
 
@@ -31,12 +32,6 @@ const LeftGroup = styled.div`
   display: flex;
   align-items: center;
   gap: 8px;
-`;
-
-const CenterGroup = styled.div`
-  flex: 1;
-  display: flex;
-  justify-content: center;
 `;
 
 const RightGroup = styled.div`
@@ -208,13 +203,10 @@ export function HeaderNav({
             <SidebarIcon />
           </ToggleBtn>
         )}
-      </LeftGroup>
-
-      <CenterGroup>
         <LogoBtn $disabled={!showHome} onClick={showHome ? onHome : undefined}>
           <LogoText>EXO</LogoText>
         </LogoBtn>
-      </CenterGroup>
+      </LeftGroup>
 
       <RightGroup>
         {downloadProgress && <ProgressCircle count={downloadProgress.count} percentage={downloadProgress.percentage} />}
