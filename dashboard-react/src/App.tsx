@@ -6,8 +6,11 @@ import { HeaderNav } from './components/layout/HeaderNav';
 import { TopologyGraph } from './components/topology/TopologyGraph';
 import { ConnectionBanner } from './components/status/ConnectionBanner';
 import { ToastContainer } from './components/status/ToastContainer';
+import { NetworkMesh } from './components/common/NetworkMesh';
 
 const Shell = styled.div`
+  position: relative;
+  z-index: 1;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -24,6 +27,7 @@ export function App() {
   return (
     <ThemeProvider theme={theme}>
       <GlobalStyle />
+      <NetworkMesh />
       <Shell>
         <ConnectionBanner connected={connected} />
         <HeaderNav
