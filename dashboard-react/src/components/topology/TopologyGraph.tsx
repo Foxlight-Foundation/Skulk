@@ -349,34 +349,46 @@ export function TopologyGraph({ data }: TopologyGraphProps) {
             const mx = (pA.x + pB.x) / 2;
             const my = (pA.y + pB.y) / 2;
 
-            // Vector from graph center to edge midpoint
-            const toMidX = mx - gcx;
-            const toMidY = my - gcy;
-            const toMidLen = Math.hypot(toMidX, toMidY) || 1;
+            // Split details by direction, position each group near
+            // the outer side of its source node
+            const aToBDetails = details.filter(d => d.from === pair.a);
+            const bToADetails = details.filter(d => d.from === pair.b);
+            // For undirected or unmatched, fall back to grouping near nodeA
+            const ungrouped = details.filter(d => d.from !== pair.a && d.from !== pair.b);
+            aToBDetails.push(...ungrouped);
 
-            // Push outward from center
-            const pushDist = 100;
-            const tx = mx + (toMidX / toMidLen) * pushDist;
-            const ty = my + (toMidY / toMidLen) * pushDist;
-
-            // Anchor based on which side of center the label lands
-            const anchor = tx < gcx - 20 ? 'end' : tx > gcx + 20 ? 'start' : 'middle';
+            const groups: Array<{ items: ConnectionDetail[]; near: NodePosition }> = [];
+            if (aToBDetails.length > 0) groups.push({ items: aToBDetails, near: pA });
+            if (bToADetails.length > 0) groups.push({ items: bToADetails, near: pB });
+            if (groups.length === 0) return null;
 
             return (
               <g key={`conn-${pair.a}-${pair.b}`}>
-                {details.map((d, i) => (
-                  <text
-                    key={i}
-                    x={tx}
-                    y={ty + i * 16}
-                    textAnchor={anchor}
-                    fontSize="12"
-                    fontFamily="SF Mono, Monaco, monospace"
-                    fill={d.label.startsWith('RDMA') ? 'rgba(255,215,0,0.9)' : 'rgba(255,255,255,0.8)'}
-                  >
-                    → {d.label}
-                  </text>
-                ))}
+                {groups.map((group, gi) => {
+                  // Push from graph center through the node, then beyond
+                  const toNodeX = group.near.x - gcx;
+                  const toNodeY = group.near.y - gcy;
+                  const toNodeLen = Math.hypot(toNodeX, toNodeY) || 1;
+                  const pushDist = 130;
+                  const tx = gcx + (toNodeX / toNodeLen) * (toNodeLen + pushDist);
+                  const ty = gcy + (toNodeY / toNodeLen) * (toNodeLen + pushDist);
+
+                  const anchor = tx < gcx - 20 ? 'end' : tx > gcx + 20 ? 'start' : 'middle';
+
+                  return group.items.map((d, i) => (
+                    <text
+                      key={`${gi}-${i}`}
+                      x={tx}
+                      y={ty + i * 16}
+                      textAnchor={anchor}
+                      fontSize="12"
+                      fontFamily="SF Mono, Monaco, monospace"
+                      fill={d.label.startsWith('RDMA') ? 'rgba(255,215,0,0.9)' : 'rgba(255,255,255,0.8)'}
+                    >
+                      → {d.label}
+                    </text>
+                  ));
+                })}
               </g>
             );
           });
