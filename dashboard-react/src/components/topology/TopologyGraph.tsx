@@ -83,45 +83,6 @@ function computePositions(
   });
 }
 
-/* ---- debug: connection info per edge pair ---- */
-
-interface ConnectionDetail {
-  label: string;
-  from: string;
-  to: string;
-}
-
-function getConnectionDetails(
-  edges: TopologyEdge[],
-  nodeA: string,
-  nodeB: string,
-  nodes: Record<string, NodeInfo>,
-): ConnectionDetail[] {
-  const details: ConnectionDetail[] = [];
-
-  for (const e of edges) {
-    const isAB = e.source === nodeA && e.target === nodeB;
-    const isBA = e.source === nodeB && e.target === nodeA;
-    if (!isAB && !isBA) continue;
-
-    if (e.sourceRdmaIface && e.sinkRdmaIface) {
-      details.push({
-        label: `RDMA ${e.sourceRdmaIface} → ${e.sinkRdmaIface}`,
-        from: e.source,
-        to: e.target,
-      });
-    } else if (e.sendBackIp) {
-      const iface = e.sendBackInterface ?? nodes[e.source]?.ip_to_interface?.[e.sendBackIp] ?? nodes[e.target]?.ip_to_interface?.[e.sendBackIp];
-      details.push({
-        label: `${e.sendBackIp}${iface ? ` ${iface}` : ''}`,
-        from: e.source,
-        to: e.target,
-      });
-    }
-  }
-
-  return details;
-}
 
 
 /* ---- styles ---- */
@@ -331,63 +292,107 @@ export function TopologyGraph({ data }: TopologyGraphProps) {
           );
         })}
 
-        {/* Debug: connection details aggregated per node, one block per node */}
+        {/* Debug: connection details in viewport quadrants (matching EXO layout) */}
         {debug && (() => {
           const gcx = width / 2;
           const topPad = 70;
           const bottomPad = 70;
           const gcy = topPad + (height - topPad - bottomPad) / 2;
+          const fontSize = 12;
+          const lineHeight = 16;
+          const pad = 10;
 
-          // Collect all outbound connection labels per node
-          const perNode = new Map<string, ConnectionDetail[]>();
-          for (const e of data.edges) {
-            const detail = (() => {
-              if (e.sourceRdmaIface && e.sinkRdmaIface) {
-                return `RDMA ${e.sourceRdmaIface} → ${e.sinkRdmaIface}`;
-              } else if (e.sendBackIp) {
-                const iface = e.sendBackInterface ?? data.nodes[e.source]?.ip_to_interface?.[e.sendBackIp] ?? data.nodes[e.target]?.ip_to_interface?.[e.sendBackIp];
-                return `${e.sendBackIp}${iface ? ` ${iface}` : ''}`;
-              }
-              return null;
-            })();
-            if (!detail) continue;
-            const list = perNode.get(e.source) ?? [];
-            list.push({ label: detail, from: e.source, to: e.target });
-            perNode.set(e.source, list);
+          // Directional arrow based on node positions
+          function getArrow(fromId: string, toId: string): string {
+            const fp = posById.get(fromId);
+            const tp = posById.get(toId);
+            if (!fp || !tp) return '→';
+            const dx = tp.x - fp.x;
+            const dy = tp.y - fp.y;
+            const ax = Math.abs(dx);
+            const ay = Math.abs(dy);
+            if (ax > ay * 2) return dx > 0 ? '→' : '←';
+            if (ay > ax * 2) return dy > 0 ? '↓' : '↑';
+            if (dx > 0 && dy > 0) return '↘';
+            if (dx > 0 && dy < 0) return '↗';
+            if (dx < 0 && dy > 0) return '↙';
+            return '↖';
           }
 
-          return Array.from(perNode.entries()).map(([nodeId, details]) => {
-            const pos = posById.get(nodeId);
-            if (!pos) return null;
+          // Group edges by pair, collect connections
+          type ConnLine = { arrow: string; label: string; isRdma: boolean };
+          const quadrants: { topLeft: ConnLine[]; topRight: ConnLine[]; bottomLeft: ConnLine[]; bottomRight: ConnLine[] } = {
+            topLeft: [], topRight: [], bottomLeft: [], bottomRight: [],
+          };
 
-            // Push outward from graph center through this node
-            const toNodeX = pos.x - gcx;
-            const toNodeY = pos.y - gcy;
-            const toNodeLen = Math.hypot(toNodeX, toNodeY) || 1;
-            const pushDist = 130;
-            const tx = gcx + (toNodeX / toNodeLen) * (toNodeLen + pushDist);
-            const ty = gcy + (toNodeY / toNodeLen) * (toNodeLen + pushDist);
+          const pairSeen = new Map<string, { mx: number; my: number; lines: ConnLine[] }>();
+          for (const e of data.edges) {
+            const a = e.source < e.target ? e.source : e.target;
+            const b = e.source < e.target ? e.target : e.source;
+            const key = `${a}|${b}`;
 
-            const anchor = tx < gcx - 20 ? 'end' : tx > gcx + 20 ? 'start' : 'middle';
+            let entry = pairSeen.get(key);
+            if (!entry) {
+              const pA = posById.get(a);
+              const pB = posById.get(b);
+              if (!pA || !pB) continue;
+              entry = { mx: (pA.x + pB.x) / 2, my: (pA.y + pB.y) / 2, lines: [] };
+              pairSeen.set(key, entry);
+            }
 
-            return (
-              <g key={`conn-${nodeId}`}>
-                {details.map((d, i) => (
-                  <text
-                    key={i}
-                    x={tx}
-                    y={ty + i * 16}
-                    textAnchor={anchor}
-                    fontSize="12"
-                    fontFamily="SF Mono, Monaco, monospace"
-                    fill={d.label.startsWith('RDMA') ? 'rgba(255,215,0,0.9)' : 'rgba(255,255,255,0.8)'}
-                  >
-                    → {d.label}
-                  </text>
-                ))}
-              </g>
-            );
-          });
+            const arrow = getArrow(e.source, e.target);
+            if (e.sourceRdmaIface && e.sinkRdmaIface) {
+              entry.lines.push({ arrow, label: `RDMA ${e.sourceRdmaIface} → ${e.sinkRdmaIface}`, isRdma: true });
+            } else if (e.sendBackIp) {
+              const iface = e.sendBackInterface ?? data.nodes[e.source]?.ip_to_interface?.[e.sendBackIp] ?? data.nodes[e.target]?.ip_to_interface?.[e.sendBackIp];
+              entry.lines.push({ arrow, label: `${e.sendBackIp}${iface ? ` ${iface}` : ''}`, isRdma: false });
+            }
+          }
+
+          // Assign each pair to a quadrant based on midpoint
+          for (const entry of pairSeen.values()) {
+            const isLeft = entry.mx < gcx;
+            const isTop = entry.my < gcy;
+            const q = isTop ? (isLeft ? 'topLeft' : 'topRight') : (isLeft ? 'bottomLeft' : 'bottomRight');
+            quadrants[q].push(...entry.lines);
+          }
+
+          return (
+            <g>
+              {/* Top Left */}
+              {quadrants.topLeft.map((line, i) => (
+                <text key={`tl-${i}`} x={pad} y={pad + i * lineHeight} textAnchor="start" dominantBaseline="hanging"
+                  fontSize={fontSize} fontFamily="SF Mono, Monaco, monospace"
+                  fill={line.isRdma ? 'rgba(255,215,0,0.9)' : 'rgba(255,255,255,0.85)'}>
+                  {line.arrow} {line.label}
+                </text>
+              ))}
+              {/* Top Right */}
+              {quadrants.topRight.map((line, i) => (
+                <text key={`tr-${i}`} x={width - pad} y={pad + i * lineHeight} textAnchor="end" dominantBaseline="hanging"
+                  fontSize={fontSize} fontFamily="SF Mono, Monaco, monospace"
+                  fill={line.isRdma ? 'rgba(255,215,0,0.9)' : 'rgba(255,255,255,0.85)'}>
+                  {line.arrow} {line.label}
+                </text>
+              ))}
+              {/* Bottom Left */}
+              {quadrants.bottomLeft.map((line, i) => (
+                <text key={`bl-${i}`} x={pad} y={height - pad - (quadrants.bottomLeft.length - 1 - i) * lineHeight} textAnchor="start" dominantBaseline="auto"
+                  fontSize={fontSize} fontFamily="SF Mono, Monaco, monospace"
+                  fill={line.isRdma ? 'rgba(255,215,0,0.9)' : 'rgba(255,255,255,0.85)'}>
+                  {line.arrow} {line.label}
+                </text>
+              ))}
+              {/* Bottom Right */}
+              {quadrants.bottomRight.map((line, i) => (
+                <text key={`br-${i}`} x={width - pad} y={height - pad - (quadrants.bottomRight.length - 1 - i) * lineHeight} textAnchor="end" dominantBaseline="auto"
+                  fontSize={fontSize} fontFamily="SF Mono, Monaco, monospace"
+                  fill={line.isRdma ? 'rgba(255,215,0,0.9)' : 'rgba(255,255,255,0.85)'}>
+                  {line.arrow} {line.label}
+                </text>
+              ))}
+            </g>
+          );
         })()}
       </svg>
     </Container>
