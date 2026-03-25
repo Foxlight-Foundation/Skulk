@@ -9,6 +9,12 @@ export interface StepSliderProps<T extends string | number = number> {
   options: StepSliderOption<T>[] | T[];
   value: T;
   onChange: (value: T) => void;
+  /** Track line thickness in px. Default 2. */
+  trackWidth?: number;
+  /** Active dot diameter in px. Default 18. */
+  dotSize?: number;
+  /** Inactive dot diameter in px. Default 14. */
+  inactiveDotSize?: number;
   className?: string;
 }
 
@@ -19,37 +25,35 @@ const Container = styled.div`
   user-select: none;
 `;
 
-/** The grey background track line, inset so it starts/ends at dot centers. */
-const TrackLine = styled.div<{ $inset: number }>`
+const TrackLine = styled.div<{ $inset: number; $height: number }>`
   position: absolute;
   top: 12px;
   left: ${({ $inset }) => $inset}px;
   right: ${({ $inset }) => $inset}px;
-  height: 2px;
+  height: ${({ $height }) => $height}px;
+  margin-top: ${({ $height }) => -$height / 2}px;
   background: rgba(80, 80, 80, 0.6);
-  border-radius: 1px;
+  border-radius: ${({ $height }) => $height / 2}px;
 `;
 
-/** The gold active portion of the track. */
-const ActiveLine = styled.div<{ $inset: number; $pct: number }>`
+const ActiveLine = styled.div<{ $inset: number; $pct: number; $height: number }>`
   position: absolute;
   top: 12px;
   left: ${({ $inset }) => $inset}px;
-  height: 2px;
+  height: ${({ $height }) => $height}px;
+  margin-top: ${({ $height }) => -$height / 2}px;
   width: calc((100% - ${({ $inset }) => $inset * 2}px) * ${({ $pct }) => $pct / 100});
   background: #FFD700;
-  border-radius: 1px;
+  border-radius: ${({ $height }) => $height / 2}px;
   transition: width 0.15s ease-out;
 `;
 
-/** Flex row holding all step columns. */
 const Steps = styled.div`
   position: relative;
   display: flex;
   justify-content: space-between;
 `;
 
-/** A single step: dot on top, label below, both centered. */
 const StepCol = styled.button`
   all: unset;
   cursor: pointer;
@@ -60,17 +64,22 @@ const StepCol = styled.button`
   z-index: 1;
 `;
 
-const Dot = styled.span<{ $active: boolean }>`
-  width: ${({ $active }) => ($active ? '18px' : '14px')};
-  height: ${({ $active }) => ($active ? '18px' : '14px')};
-  margin: ${({ $active }) => ($active ? '3px 0' : '5px 0')};
+const Dot = styled.span<{ $active: boolean; $size: number; $inactiveSize: number }>`
+  width: ${({ $active, $size, $inactiveSize }) => ($active ? $size : $inactiveSize)}px;
+  height: ${({ $active, $size, $inactiveSize }) => ($active ? $size : $inactiveSize)}px;
+  margin: ${({ $active, $size, $inactiveSize }) => {
+    const maxSize = $size;
+    const thisSize = $active ? $size : $inactiveSize;
+    const pad = (maxSize - thisSize) / 2;
+    return `${pad}px 0`;
+  }};
   border-radius: 50%;
-  background: ${({ $active }) => ($active ? '#FFD700' : 'rgba(120, 120, 120, 0.7)')};
+  background: ${({ $active }) => ($active ? '#FFD700' : '#787878')};
   transition: all 0.15s ease-out;
   box-shadow: ${({ $active }) => ($active ? '0 0 8px rgba(255, 215, 0, 0.4)' : 'none')};
 
   ${StepCol}:hover & {
-    background: ${({ $active }) => ($active ? '#FFD700' : 'rgba(160, 160, 160, 0.8)')};
+    background: ${({ $active }) => ($active ? '#FFD700' : '#a0a0a0')};
   }
 `;
 
@@ -95,20 +104,22 @@ export function StepSlider<T extends string | number = number>({
   options: rawOptions,
   value,
   onChange,
+  trackWidth = 2,
+  dotSize = 18,
+  inactiveDotSize = 14,
   className,
 }: StepSliderProps<T>) {
   const options = rawOptions.map(normalizeOption);
   const activeIndex = options.findIndex((o) => o.value === value);
   const pct = options.length <= 1 ? 0 : (activeIndex / (options.length - 1)) * 100;
 
-  // Inset the track lines so they start/end at the center of the first/last dot.
-  // Each dot hit area is roughly 18px wide; half = 9.
-  const trackInset = 9;
+  // Inset track lines to start/end at dot centers.
+  const trackInset = dotSize / 2;
 
   return (
     <Container className={className}>
-      <TrackLine $inset={trackInset} />
-      <ActiveLine $inset={trackInset} $pct={pct} />
+      <TrackLine $inset={trackInset} $height={trackWidth} />
+      <ActiveLine $inset={trackInset} $pct={pct} $height={trackWidth} />
       <Steps>
         {options.map((opt, i) => (
           <StepCol
@@ -116,7 +127,7 @@ export function StepSlider<T extends string | number = number>({
             onClick={() => onChange(opt.value)}
             aria-label={opt.label}
           >
-            <Dot $active={i === activeIndex} />
+            <Dot $active={i === activeIndex} $size={dotSize} $inactiveSize={inactiveDotSize} />
             <Label $active={i === activeIndex}>{opt.label}</Label>
           </StepCol>
         ))}
