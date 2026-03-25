@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react';
-import styled, { css } from 'styled-components';
-import type { TopologyData, TopologyEdge, NodeInfo } from '../../types/topology';
+import { useMemo } from 'react';
+import styled from 'styled-components';
+import type { TopologyData, TopologyEdge } from '../../types/topology';
 import { useResizeObserver } from '../../hooks/useResizeObserver';
 import { ClusterNode } from './ClusterNode';
 
@@ -83,45 +83,6 @@ function computePositions(
   });
 }
 
-/* ---- debug: connection info per edge pair ---- */
-
-interface ConnectionDetail {
-  label: string;
-  from: string;
-  to: string;
-}
-
-function getConnectionDetails(
-  edges: TopologyEdge[],
-  nodeA: string,
-  nodeB: string,
-  nodes: Record<string, NodeInfo>,
-): ConnectionDetail[] {
-  const details: ConnectionDetail[] = [];
-
-  for (const e of edges) {
-    const isAB = e.source === nodeA && e.target === nodeB;
-    const isBA = e.source === nodeB && e.target === nodeA;
-    if (!isAB && !isBA) continue;
-
-    if (e.sourceRdmaIface && e.sinkRdmaIface) {
-      details.push({
-        label: `RDMA ${e.sourceRdmaIface} → ${e.sinkRdmaIface}`,
-        from: e.source,
-        to: e.target,
-      });
-    } else if (e.sendBackIp) {
-      const iface = e.sendBackInterface ?? nodes[e.source]?.ip_to_interface?.[e.sendBackIp] ?? nodes[e.target]?.ip_to_interface?.[e.sendBackIp];
-      details.push({
-        label: `${e.sendBackIp}${iface ? ` ${iface}` : ''}`,
-        from: e.source,
-        to: e.target,
-      });
-    }
-  }
-
-  return details;
-}
 
 
 /* ---- styles ---- */
@@ -132,43 +93,10 @@ const Container = styled.div`
   height: 100%;
 `;
 
-const DebugToggle = styled.button<{ $active: boolean }>`
-  all: unset;
-  cursor: pointer;
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 5;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 6px;
-  border: 1px solid ${({ $active }) => ($active ? 'rgba(255,215,0,0.5)' : 'rgba(80,80,80,0.4)')};
-  color: ${({ $active }) => ($active ? '#FFD700' : 'rgba(179,179,179,0.6)')};
-  background: ${({ $active }) => ($active ? 'rgba(255,215,0,0.08)' : 'rgba(17,17,17,0.6)')};
-  transition: all 0.15s;
-
-  &:hover {
-    border-color: rgba(255, 215, 0, 0.5);
-    color: #FFD700;
-  }
-`;
-
-const BugIcon = () => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M8 2l1.88 1.88M14.12 3.88L16 2M9 7.13v-1a3.003 3.003 0 116 0v1" />
-    <path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 014-4h4a4 4 0 014 4v3c0 3.3-2.7 6-6 6z" />
-    <path d="M12 20v-9M6.53 9C4.6 8.8 3 7.1 3 5M6 13H2M3 21c0-2.1 1.7-3.9 3.8-4M20.97 5c0 2.1-1.6 3.8-3.5 4M22 13h-4M17.2 17c2.1.1 3.8 1.9 3.8 4" />
-  </svg>
-);
-
 /* ---- component ---- */
 
 export function TopologyGraph({ data }: TopologyGraphProps) {
   const [svgRef, { width, height }] = useResizeObserver<SVGSVGElement>();
-  const [debug, setDebug] = useState(false);
 
   const nodeIds = useMemo(() => Object.keys(data.nodes), [data.nodes]);
 
@@ -195,9 +123,6 @@ export function TopologyGraph({ data }: TopologyGraphProps) {
   if (width === 0 || height === 0) {
     return (
       <Container>
-        <DebugToggle $active={debug} onClick={() => setDebug(!debug)} aria-label="Toggle debug info" title="Debug overlay">
-          <BugIcon />
-        </DebugToggle>
         <svg ref={svgRef} style={{ width: '100%', height: '100%', background: 'transparent' }} />
       </Container>
     );
@@ -205,9 +130,6 @@ export function TopologyGraph({ data }: TopologyGraphProps) {
 
   return (
     <Container>
-      <DebugToggle $active={debug} onClick={() => setDebug(!debug)} aria-label="Toggle debug info" title="Debug overlay">
-        <BugIcon />
-      </DebugToggle>
       <svg
         ref={svgRef}
         style={{ width: '100%', height: '100%', background: 'transparent' }}
@@ -305,90 +227,11 @@ export function TopologyGraph({ data }: TopologyGraphProps) {
               x={pos.x}
               y={pos.y}
               scale={nodeScale}
+              edges={data.edges}
+              allNodes={data.nodes}
             />
           ))}
         </g>
-
-        {/* Debug: node metadata below each node */}
-        {debug && positions.map((pos) => {
-          const info = data.nodes[pos.id];
-          if (!info) return null;
-          const rdma = info.rdma_enabled ? 'ON' : 'OFF';
-          const os = info.os_version ? `macOS ${info.os_version}${info.os_build_version ? ` (${info.os_build_version})` : ''}` : '';
-          const baseY = pos.y + 95 * nodeScale;
-
-          return (
-            <g key={`debug-${pos.id}`}>
-              <text x={pos.x} y={baseY} textAnchor="middle" fontSize="12" fontFamily="SF Mono, Monaco, monospace" fill="rgba(179,179,179,0.8)">
-                RDMA:{rdma}
-              </text>
-              {os && (
-                <text x={pos.x} y={baseY + 14} textAnchor="middle" fontSize="12" fontFamily="SF Mono, Monaco, monospace" fill="rgba(179,179,179,0.7)">
-                  {os}
-                </text>
-              )}
-            </g>
-          );
-        })}
-
-        {/* Debug: connection details aggregated per node, one block per node */}
-        {debug && (() => {
-          const gcx = width / 2;
-          const topPad = 70;
-          const bottomPad = 70;
-          const gcy = topPad + (height - topPad - bottomPad) / 2;
-
-          // Collect all outbound connection labels per node
-          const perNode = new Map<string, ConnectionDetail[]>();
-          for (const e of data.edges) {
-            const detail = (() => {
-              if (e.sourceRdmaIface && e.sinkRdmaIface) {
-                return `RDMA ${e.sourceRdmaIface} → ${e.sinkRdmaIface}`;
-              } else if (e.sendBackIp) {
-                const iface = e.sendBackInterface ?? data.nodes[e.source]?.ip_to_interface?.[e.sendBackIp] ?? data.nodes[e.target]?.ip_to_interface?.[e.sendBackIp];
-                return `${e.sendBackIp}${iface ? ` ${iface}` : ''}`;
-              }
-              return null;
-            })();
-            if (!detail) continue;
-            const list = perNode.get(e.source) ?? [];
-            list.push({ label: detail, from: e.source, to: e.target });
-            perNode.set(e.source, list);
-          }
-
-          return Array.from(perNode.entries()).map(([nodeId, details]) => {
-            const pos = posById.get(nodeId);
-            if (!pos) return null;
-
-            // Push outward from graph center through this node
-            const toNodeX = pos.x - gcx;
-            const toNodeY = pos.y - gcy;
-            const toNodeLen = Math.hypot(toNodeX, toNodeY) || 1;
-            const pushDist = 130;
-            const tx = gcx + (toNodeX / toNodeLen) * (toNodeLen + pushDist);
-            const ty = gcy + (toNodeY / toNodeLen) * (toNodeLen + pushDist);
-
-            const anchor = tx < gcx - 20 ? 'end' : tx > gcx + 20 ? 'start' : 'middle';
-
-            return (
-              <g key={`conn-${nodeId}`}>
-                {details.map((d, i) => (
-                  <text
-                    key={i}
-                    x={tx}
-                    y={ty + i * 16}
-                    textAnchor={anchor}
-                    fontSize="12"
-                    fontFamily="SF Mono, Monaco, monospace"
-                    fill={d.label.startsWith('RDMA') ? 'rgba(255,215,0,0.9)' : 'rgba(255,255,255,0.8)'}
-                  >
-                    → {d.label}
-                  </text>
-                ))}
-              </g>
-            );
-          });
-        })()}
       </svg>
     </Container>
   );

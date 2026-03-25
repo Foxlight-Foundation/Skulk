@@ -14,6 +14,7 @@ export interface HeaderNavProps {
   mobileRightOpen?: boolean;
   onToggleMobileRight?: () => void;
   downloadProgress?: { count: number; percentage: number } | null;
+  onOpenSettings?: () => void;
   className?: string;
 }
 
@@ -22,6 +23,11 @@ export interface HeaderNavProps {
 const Nav = styled.header`
   z-index: 20;
   background: ${({ theme }) => theme.colors.surface};
+  border-bottom: none;
+  background-image: linear-gradient(to right, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.03));
+  background-size: 100% 1px;
+  background-position: bottom;
+  background-repeat: no-repeat;
   padding: 16px 24px 12px;
   display: flex;
   align-items: center;
@@ -178,6 +184,7 @@ export function HeaderNav({
   mobileRightOpen = false,
   onToggleMobileRight,
   downloadProgress = null,
+  onOpenSettings,
   className,
 }: HeaderNavProps) {
   return (
@@ -194,7 +201,7 @@ export function HeaderNav({
           </ToggleBtn>
         )}
         <LogoBtn $disabled={!showHome} onClick={showHome ? onHome : undefined}>
-          <LogoText>EXOCluster</LogoText>
+          <LogoText>FoxmemEX0</LogoText>
         </LogoBtn>
       </LeftGroup>
 
@@ -205,9 +212,9 @@ export function HeaderNav({
           <DownloadIcon /> Downloads
         </NavLink>
 
-        <NavLink href="/#/settings">
-          <SettingsIcon /> Settings
-        </NavLink>
+        <Button variant="ghost" size="lg" icon onClick={onOpenSettings} aria-label="Settings">
+          <SettingsIcon />
+        </Button>
 
         {showMobileRightToggle && (
           <ToggleBtn variant="outline" size="lg" icon $active={mobileRightOpen} onClick={onToggleMobileRight} aria-label="Toggle right panel" aria-pressed={mobileRightOpen}>

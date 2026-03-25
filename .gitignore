@@ -37,6 +37,8 @@ dashboard/.svelte-kit/
 dashboard-react/node_modules/
 dashboard-react/build/
 dashboard-react/dist/
+dashboard-react/storybook-static/
+**/.vite/
 
 # host config snapshots
 hosts_*.json
