@@ -6,6 +6,7 @@ import { MarkdownContent } from '../display/MarkdownContent';
 import { TokenHeatmap } from '../display/TokenHeatmap';
 import { PrefillProgressBar, type PrefillProgress } from '../display/PrefillProgressBar';
 import { ImageLightbox } from '../display/ImageLightbox';
+import { Button } from '../common/Button';
 
 export interface ChatMessagesProps {
   messages: ChatMessage[];
@@ -146,25 +147,12 @@ const Actions = styled.div`
   ${MessageCard}:hover & { opacity: 1; }
 `;
 
-const ActionBtn = styled.button<{ $danger?: boolean; $active?: boolean }>`
-  all: unset;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
-  border-radius: ${({ theme }) => theme.radii.sm};
-  font-size: 11px;
-  font-family: ${({ theme }) => theme.fonts.mono};
-  color: ${({ theme }) => theme.colors.textMuted};
-  transition: all 0.15s;
-
-  ${({ $danger }) => $danger && css`&:hover { color: #ef4444; background: rgba(239,68,68,0.1); }`}
-  ${({ $danger, $active }) =>
-    !$danger &&
+const ActiveGhostBtn = styled(Button)<{ $active?: boolean }>`
+  ${({ $active }) =>
+    $active &&
     css`
-      &:hover { color: #FFD700; background: rgba(255,215,0,0.1); }
-      ${$active && css`color: #FFD700; background: rgba(255,215,0,0.1);`}
+      color: #FFD700;
+      background: rgba(255, 215, 0, 0.1);
     `}
 `;
 
@@ -190,22 +178,6 @@ const BtnRow = styled.div`
   margin-top: 6px;
 `;
 
-const SmallBtn = styled.button<{ $primary?: boolean }>`
-  all: unset;
-  cursor: pointer;
-  font-size: 10px;
-  font-family: ${({ theme }) => theme.fonts.mono};
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  padding: 4px 10px;
-  border-radius: ${({ theme }) => theme.radii.sm};
-  transition: all 0.15s;
-
-  ${({ $primary }) =>
-    $primary
-      ? css`color: #FFD700; border: 1px solid rgba(255,215,0,0.4); &:hover { background: rgba(255,215,0,0.1); }`
-      : css`color: #999; border: 1px solid rgba(80,80,80,0.3); &:hover { color: #e5e5e5; }`}
-`;
 
 const ConfirmBox = styled.div`
   padding: 8px;
@@ -217,20 +189,6 @@ const ConfirmBox = styled.div`
   color: #fca5a5;
 `;
 
-const DangerBtn = styled.button`
-  all: unset;
-  cursor: pointer;
-  font-size: 10px;
-  font-family: ${({ theme }) => theme.fonts.mono};
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  padding: 4px 10px;
-  border-radius: ${({ theme }) => theme.radii.sm};
-  color: #fca5a5;
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  transition: all 0.15s;
-  &:hover { background: rgba(239, 68, 68, 0.2); }
-`;
 
 const ThinkingBlock = styled.div<{ $open: boolean }>`
   margin: 8px 0;
@@ -459,16 +417,16 @@ export function ChatMessages({
                 autoFocus
               />
               <BtnRow>
-                <SmallBtn $primary onClick={saveEdit}>Save</SmallBtn>
-                <SmallBtn onClick={() => setEditingId(null)}>Cancel</SmallBtn>
+                <Button variant="primary" size="sm" onClick={saveEdit}>Save</Button>
+                <Button variant="outline" size="sm" onClick={() => setEditingId(null)}>Cancel</Button>
               </BtnRow>
             </div>
           ) : deleteConfirmId === msg.id ? (
             <ConfirmBox>
               Delete this message?
               <BtnRow>
-                <DangerBtn onClick={() => { onDelete?.(msg.id); setDeleteConfirmId(null); }}>Delete</DangerBtn>
-                <SmallBtn onClick={() => setDeleteConfirmId(null)}>Cancel</SmallBtn>
+                <Button variant="danger" size="sm" onClick={() => { onDelete?.(msg.id); setDeleteConfirmId(null); }}>Delete</Button>
+                <Button variant="outline" size="sm" onClick={() => setDeleteConfirmId(null)}>Cancel</Button>
               </BtnRow>
             </ConfirmBox>
           ) : (
@@ -534,27 +492,29 @@ export function ChatMessages({
 
               {/* Action buttons */}
               <Actions>
-                <ActionBtn onClick={() => copyMessage(msg.id, msg.content)}>
+                <Button variant="ghost" size="sm" onClick={() => copyMessage(msg.id, msg.content)}>
                   {copiedId === msg.id ? '✓' : 'Copy'}
-                </ActionBtn>
+                </Button>
                 {msg.role === 'assistant' && msg.tokens && (
-                  <ActionBtn
+                  <ActiveGhostBtn
+                    variant="ghost"
+                    size="sm"
                     $active={heatmapVisible.has(msg.id)}
                     onClick={() => toggleHeatmap(msg.id)}
                   >
                     Heatmap
-                  </ActionBtn>
+                  </ActiveGhostBtn>
                 )}
                 {msg.role === 'user' && onEdit && (
-                  <ActionBtn onClick={() => { setEditingId(msg.id); setEditContent(msg.content); }}>
+                  <Button variant="ghost" size="sm" onClick={() => { setEditingId(msg.id); setEditContent(msg.content); }}>
                     Edit
-                  </ActionBtn>
+                  </Button>
                 )}
                 {msg.role === 'assistant' && isLastAssistant(i) && !isLoading && onRegenerate && (
-                  <ActionBtn onClick={onRegenerate}>Regenerate</ActionBtn>
+                  <Button variant="ghost" size="sm" onClick={onRegenerate}>Regenerate</Button>
                 )}
                 {onDelete && (
-                  <ActionBtn $danger onClick={() => setDeleteConfirmId(msg.id)}>Delete</ActionBtn>
+                  <Button variant="danger" size="sm" onClick={() => setDeleteConfirmId(msg.id)}>Delete</Button>
                 )}
               </Actions>
             </>

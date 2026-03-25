@@ -1,4 +1,5 @@
 import styled, { css } from 'styled-components';
+import { Button } from '../common/Button';
 
 export interface HeaderNavProps {
   showHome?: boolean;
@@ -40,23 +41,13 @@ const RightGroup = styled.div`
   gap: 8px;
 `;
 
-const ToggleBtn = styled.button<{ $active: boolean }>`
-  all: unset;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: ${({ theme }) => theme.radii.md};
-  border: 1px solid rgba(179, 179, 179, 0.3);
-  color: ${({ $active }) => ($active ? '#FFD700' : 'rgba(179,179,179,0.8)')};
-  transition: all 0.15s;
-
-  &:hover {
-    border-color: rgba(255, 215, 0, 0.5);
-    color: #FFD700;
-  }
+const ToggleBtn = styled(Button)<{ $active: boolean }>`
+  ${({ $active }) =>
+    $active &&
+    css`
+      color: #FFD700;
+      border-color: rgba(255, 215, 0, 0.4);
+    `}
 `;
 
 const LogoBtn = styled.button<{ $disabled: boolean }>`
@@ -194,12 +185,12 @@ export function HeaderNav({
     <Nav className={className}>
       <LeftGroup>
         {showMobileMenuToggle && (
-          <ToggleBtn $active={mobileMenuOpen} onClick={onToggleMobileMenu} aria-label="Toggle mobile menu" aria-pressed={mobileMenuOpen}>
+          <ToggleBtn variant="outline" size="lg" icon $active={mobileMenuOpen} onClick={onToggleMobileMenu} aria-label="Toggle mobile menu" aria-pressed={mobileMenuOpen}>
             {mobileMenuOpen ? <CloseIcon /> : <MenuIcon />}
           </ToggleBtn>
         )}
         {showSidebarToggle && (
-          <ToggleBtn $active={sidebarVisible} onClick={onToggleSidebar} aria-label="Toggle sidebar" aria-pressed={sidebarVisible}>
+          <ToggleBtn variant="outline" size="lg" icon $active={sidebarVisible} onClick={onToggleSidebar} aria-label="Toggle sidebar" aria-pressed={sidebarVisible}>
             <SidebarIcon />
           </ToggleBtn>
         )}
@@ -220,7 +211,7 @@ export function HeaderNav({
         </NavLink>
 
         {showMobileRightToggle && (
-          <ToggleBtn $active={mobileRightOpen} onClick={onToggleMobileRight} aria-label="Toggle right panel" aria-pressed={mobileRightOpen}>
+          <ToggleBtn variant="outline" size="lg" icon $active={mobileRightOpen} onClick={onToggleMobileRight} aria-label="Toggle right panel" aria-pressed={mobileRightOpen}>
             <PanelIcon />
           </ToggleBtn>
         )}

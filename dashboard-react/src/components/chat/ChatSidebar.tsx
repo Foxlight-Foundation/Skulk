@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
-import styled, { css, keyframes } from 'styled-components';
+import styled, { css } from 'styled-components';
 import type { Conversation } from '../../types/chat';
+import { Button } from '../common/Button';
 
 export interface ChatSidebarProps {
   conversations: Conversation[];
@@ -45,30 +46,6 @@ const Header = styled.div`
   padding: 16px;
 `;
 
-const NewChatBtn = styled.button`
-  all: unset;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  width: 100%;
-  padding: 10px;
-  border: 1px solid rgba(255, 215, 0, 0.3);
-  border-radius: ${({ theme }) => theme.radii.md};
-  font-size: 12px;
-  font-family: ${({ theme }) => theme.fonts.mono};
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  color: #FFD700;
-  transition: all 0.15s;
-  box-sizing: border-box;
-
-  &:hover {
-    background: rgba(255, 215, 0, 0.1);
-    border-color: rgba(255, 215, 0, 0.5);
-  }
-`;
 
 const SearchWrap = styled.div`
   padding: 0 16px 12px;
@@ -147,18 +124,6 @@ const HoverActions = styled.div`
   ${ConvItem}:hover & { opacity: 1; }
 `;
 
-const ActionBtn = styled.button<{ $danger?: boolean }>`
-  all: unset;
-  cursor: pointer;
-  padding: 4px;
-  border-radius: 4px;
-  color: ${({ theme }) => theme.colors.textMuted};
-  transition: all 0.15s;
-  &:hover {
-    color: ${({ $danger }) => ($danger ? '#ef4444' : '#FFD700')};
-    background: ${({ $danger }) => ($danger ? 'rgba(239,68,68,0.1)' : 'rgba(255,215,0,0.1)')};
-  }
-`;
 
 const EditInput = styled.input`
   all: unset;
@@ -189,50 +154,12 @@ const BtnRow = styled.div`
   margin-top: 6px;
 `;
 
-const SmallBtn = styled.button<{ $danger?: boolean }>`
-  all: unset;
-  cursor: pointer;
-  font-size: 10px;
-  font-family: ${({ theme }) => theme.fonts.mono};
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  padding: 4px 8px;
-  border-radius: ${({ theme }) => theme.radii.sm};
-  transition: all 0.15s;
-
-  ${({ $danger }) =>
-    $danger
-      ? css`
-          color: #fca5a5;
-          border: 1px solid rgba(239,68,68,0.3);
-          &:hover { background: rgba(239,68,68,0.2); }
-        `
-      : css`
-          color: ${({ theme }: any) => theme?.colors?.textMuted ?? '#666'};
-          border: 1px solid rgba(80,80,80,0.3);
-          &:hover { color: #e5e5e5; }
-        `}
-`;
 
 const Footer = styled.div`
   border-top: 1px solid ${({ theme }) => theme.colors.border};
   padding: 12px 16px;
 `;
 
-const DeleteAllBtn = styled.button`
-  all: unset;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  font-family: ${({ theme }) => theme.fonts.mono};
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  color: ${({ theme }) => theme.colors.textMuted};
-  transition: color 0.15s;
-  &:hover { color: #ef4444; }
-`;
 
 const ConvCount = styled.div`
   font-size: 10px;
@@ -301,7 +228,7 @@ export function ChatSidebar({
   return (
     <Sidebar className={className}>
       <Header>
-        <NewChatBtn onClick={onNewChat}>+ New Chat</NewChatBtn>
+        <Button variant="primary" size="md" block onClick={onNewChat}>+ New Chat</Button>
       </Header>
 
       <SearchWrap>
@@ -339,16 +266,16 @@ export function ChatSidebar({
                     onClick={(e) => e.stopPropagation()}
                   />
                   <BtnRow>
-                    <SmallBtn onClick={(e) => { e.stopPropagation(); saveRename(); }}>Save</SmallBtn>
-                    <SmallBtn onClick={(e) => { e.stopPropagation(); setEditingId(null); }}>Cancel</SmallBtn>
+                    <Button variant="primary" size="sm" onClick={(e) => { e.stopPropagation(); saveRename(); }}>Save</Button>
+                    <Button variant="outline" size="sm" onClick={(e) => { e.stopPropagation(); setEditingId(null); }}>Cancel</Button>
                   </BtnRow>
                 </div>
               ) : deleteConfirmId === conv.id ? (
                 <ConfirmBox $danger onClick={(e) => e.stopPropagation()}>
                   Delete "{conv.name}"?
                   <BtnRow>
-                    <SmallBtn $danger onClick={(e) => { e.stopPropagation(); confirmDelete(conv.id); }}>Delete</SmallBtn>
-                    <SmallBtn onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(null); }}>Cancel</SmallBtn>
+                    <Button variant="danger" size="sm" onClick={(e) => { e.stopPropagation(); confirmDelete(conv.id); }}>Delete</Button>
+                    <Button variant="outline" size="sm" onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(null); }}>Cancel</Button>
                   </BtnRow>
                 </ConfirmBox>
               ) : (
@@ -356,17 +283,17 @@ export function ChatSidebar({
                   <ConvName $active={conv.id === activeId}>{conv.name}</ConvName>
                   <ConvDate>{formatDate(conv.updatedAt)}</ConvDate>
                   <HoverActions>
-                    <ActionBtn onClick={(e) => startRename(conv.id, conv.name, e)} title="Rename">
+                    <Button variant="ghost" size="sm" icon onClick={(e) => startRename(conv.id, conv.name, e)} title="Rename">
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                         <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
                         <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
                       </svg>
-                    </ActionBtn>
-                    <ActionBtn $danger onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(conv.id); }} title="Delete">
+                    </Button>
+                    <Button variant="danger" size="sm" icon onClick={(e) => { e.stopPropagation(); setDeleteConfirmId(conv.id); }} title="Delete">
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                         <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
                       </svg>
-                    </ActionBtn>
+                    </Button>
                   </HoverActions>
                 </>
               )}
@@ -380,17 +307,17 @@ export function ChatSidebar({
           <ConfirmBox $danger>
             Delete all {conversations.length} conversations?
             <BtnRow>
-              <SmallBtn $danger onClick={() => { onDeleteAllConversations(); setShowDeleteAll(false); }}>Delete All</SmallBtn>
-              <SmallBtn onClick={() => setShowDeleteAll(false)}>Cancel</SmallBtn>
+              <Button variant="danger" size="sm" onClick={() => { onDeleteAllConversations(); setShowDeleteAll(false); }}>Delete All</Button>
+              <Button variant="outline" size="sm" onClick={() => setShowDeleteAll(false)}>Cancel</Button>
             </BtnRow>
           </ConfirmBox>
         ) : conversations.length > 0 ? (
-          <DeleteAllBtn onClick={() => setShowDeleteAll(true)}>
+          <Button variant="danger" size="sm" onClick={() => setShowDeleteAll(true)}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
             </svg>
             Delete all chats
-          </DeleteAllBtn>
+          </Button>
         ) : null}
         <ConvCount>{conversations.length} conversation{conversations.length !== 1 ? 's' : ''}</ConvCount>
       </Footer>

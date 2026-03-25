@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import styled, { css } from 'styled-components';
 import { CAPABILITIES, SIZE_RANGES, type FilterState } from '../../types/models';
+import { Button } from '../common/Button';
 
 export interface ModelFilterPopoverProps {
   filters: FilterState;
@@ -40,21 +41,7 @@ const ChipRow = styled.div`
   gap: 6px;
 `;
 
-const Chip = styled.button<{ $active: boolean }>`
-  all: unset;
-  cursor: pointer;
-  font-size: 12px;
-  padding: 4px 10px;
-  border-radius: ${({ theme }) => theme.radii.sm};
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  color: ${({ theme }) => theme.colors.textSecondary};
-  transition: all 0.15s;
-
-  &:hover {
-    border-color: ${({ theme }) => theme.colors.borderLight};
-    color: ${({ theme }) => theme.colors.text};
-  }
-
+const Chip = styled(Button)<{ $active: boolean }>`
   ${({ $active }) =>
     $active &&
     css`
@@ -64,15 +51,8 @@ const Chip = styled.button<{ $active: boolean }>`
     `}
 `;
 
-const ClearButton = styled.button`
-  all: unset;
-  cursor: pointer;
-  font-size: 12px;
-  color: ${({ theme }) => theme.colors.textMuted};
+const ClearBtn = styled(Button)`
   align-self: flex-end;
-  &:hover {
-    color: ${({ theme }) => theme.colors.text};
-  }
 `;
 
 const CAPABILITY_LABELS: Record<string, string> = {
@@ -128,6 +108,8 @@ export function ModelFilterPopover({ filters, onChange, onClear, onClose }: Mode
           {CAPABILITIES.map((cap) => (
             <Chip
               key={cap}
+              variant="outline"
+              size="sm"
               $active={filters.capabilities.includes(cap)}
               onClick={() => toggleCapability(cap)}
             >
@@ -144,6 +126,8 @@ export function ModelFilterPopover({ filters, onChange, onClear, onClose }: Mode
           {SIZE_RANGES.map((r) => (
             <Chip
               key={r.label}
+              variant="outline"
+              size="sm"
               $active={filters.sizeRange?.min === r.min && filters.sizeRange?.max === r.max}
               onClick={() => toggleSizeRange(r.min, r.max)}
             >
@@ -158,12 +142,16 @@ export function ModelFilterPopover({ filters, onChange, onClear, onClose }: Mode
         <SectionLabel>Availability</SectionLabel>
         <ChipRow>
           <Chip
+            variant="outline"
+            size="sm"
             $active={filters.downloadedOnly}
             onClick={() => onChange({ ...filters, downloadedOnly: !filters.downloadedOnly })}
           >
             Downloaded
           </Chip>
           <Chip
+            variant="outline"
+            size="sm"
             $active={filters.readyOnly}
             onClick={() => onChange({ ...filters, readyOnly: !filters.readyOnly })}
           >
@@ -172,7 +160,7 @@ export function ModelFilterPopover({ filters, onChange, onClear, onClose }: Mode
         </ChipRow>
       </div>
 
-      {hasActiveFilters && <ClearButton onClick={onClear}>Clear all</ClearButton>}
+      {hasActiveFilters && <ClearBtn variant="ghost" size="sm" onClick={onClear}>Clear all</ClearBtn>}
     </Panel>
   );
 }

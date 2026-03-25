@@ -2,6 +2,7 @@ import styled, { css, keyframes } from 'styled-components';
 import type { NodeInfo } from '../../types/topology';
 import type { DownloadProgress, PlacementPreview } from '../../types/models';
 import { formatBytes } from '../../utils/format';
+import { Button } from '../common/Button';
 
 /* ================================================================
    Types
@@ -307,52 +308,31 @@ const PreviewBox = styled.div`
   }
 `;
 
-const LaunchBtn = styled.button<{ $canFit: boolean; $launching: boolean }>`
-  all: unset;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
+const LaunchBtn = styled(Button)<{ $canFit: boolean; $launching: boolean }>`
   width: 100%;
-  padding: 8px 0;
-  font-size: 13px;
-  font-family: ${({ theme }) => theme.fonts.mono};
   letter-spacing: 2px;
-  text-transform: uppercase;
-  text-align: center;
-  border: 1px solid;
-  transition: all 0.2s;
-  box-sizing: border-box;
+  font-size: 13px;
 
-  ${({ $canFit, $launching }) => {
-    if ($launching) {
-      return css`
-        color: #FFD700;
-        border-color: rgba(255,215,0,0.5);
-        cursor: wait;
-      `;
-    }
-    if (!$canFit) {
-      return css`
-        background: rgba(239,68,68,0.1);
-        color: rgba(248,113,113,0.7);
-        border-color: rgba(239,68,68,0.3);
-        cursor: not-allowed;
-      `;
-    }
-    return css`
-      color: rgba(179,179,179,0.9);
-      border-color: rgba(179,179,179,0.4);
-      cursor: pointer;
-      &:hover {
-        color: #FFD700;
-        border-color: rgba(255,215,0,0.5);
-      }
-    `;
-  }}
+  ${({ $launching }) =>
+    $launching &&
+    css`
+      color: #FFD700;
+      border-color: rgba(255, 215, 0, 0.5);
+      cursor: wait;
+    `}
+
+  ${({ $canFit, $launching }) =>
+    !$canFit &&
+    !$launching &&
+    css`
+      background: rgba(239, 68, 68, 0.1);
+      color: rgba(248, 113, 113, 0.7);
+      border-color: rgba(239, 68, 68, 0.3);
+      cursor: not-allowed;
+    `}
 `;
 
-const Spinner = styled.span`
+const LaunchSpinner = styled.span`
   display: inline-block;
   width: 8px;
   height: 8px;
@@ -533,13 +513,16 @@ export function ModelCard({
 
       {/* Launch button */}
       <LaunchBtn
+        variant="outline"
+        size="lg"
+        block
         $canFit={canFit}
         $launching={isLaunching}
         disabled={isLaunching || !canFit}
         onClick={onLaunch}
       >
         {isLaunching ? (
-          <><Spinner /> LAUNCHING...</>
+          <><LaunchSpinner /> LAUNCHING...</>
         ) : !canFit ? (
           'INSUFFICIENT MEMORY'
         ) : (

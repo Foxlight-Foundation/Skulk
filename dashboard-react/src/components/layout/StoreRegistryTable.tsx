@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import styled, { css, keyframes } from 'styled-components';
 import { formatBytes } from '../../utils/format';
+import { Button } from '../common/Button';
 
 /* ================================================================
    Types
@@ -74,20 +75,6 @@ const HeaderText = styled.span`
   color: ${({ theme }) => theme.colors.textSecondary};
 `;
 
-const RefreshBtn = styled.button`
-  all: unset;
-  cursor: pointer;
-  font-size: 11px;
-  font-family: ${({ theme }) => theme.fonts.mono};
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  padding: 4px 8px;
-  border: 1px solid rgba(80, 80, 80, 0.4);
-  border-radius: ${({ theme }) => theme.radii.sm};
-  color: ${({ theme }) => theme.colors.textMuted};
-  transition: all 0.15s;
-  &:hover { color: #FFD700; border-color: rgba(255, 215, 0, 0.4); }
-`;
 
 const ShimmerRow = styled.div`
   height: 48px;
@@ -219,23 +206,6 @@ const ActionsCell = styled.div`
   ${TRow}:hover & { opacity: 1; }
 `;
 
-const IconBtn = styled.button<{ $danger?: boolean }>`
-  all: unset;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: ${({ theme }) => theme.radii.sm};
-  color: ${({ theme }) => theme.colors.textMuted};
-  transition: all 0.15s;
-
-  ${({ $danger }) =>
-    $danger
-      ? css`&:hover { background: rgba(239,68,68,0.1); color: #ef4444; }`
-      : css`&:hover { background: rgba(255,255,255,0.1); color: #FFD700; }`}
-`;
 
 /* ================================================================
    Component
@@ -271,7 +241,7 @@ export function StoreRegistryTable({
           {entries.length} model{entries.length !== 1 ? 's' : ''} in store
           {downloadingCount > 0 && `, ${downloadingCount} downloading`}
         </HeaderText>
-        <RefreshBtn onClick={onRefresh}>Refresh</RefreshBtn>
+        <Button variant="outline" size="sm" onClick={onRefresh}>Refresh</Button>
       </HeaderRow>
 
       {loading ? (
@@ -337,16 +307,16 @@ export function StoreRegistryTable({
                   )}
                 </Cell>
                 <ActionsCell>
-                  <IconBtn onClick={() => onInfo(entry)} title="Model info">
+                  <Button variant="ghost" size="sm" icon onClick={() => onInfo(entry)} title="Model info">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" />
                     </svg>
-                  </IconBtn>
-                  <IconBtn $danger onClick={() => onDelete(entry, active)} title="Delete model">
+                  </Button>
+                  <Button variant="danger" size="sm" icon onClick={() => onDelete(entry, active)} title="Delete model">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
                     </svg>
-                  </IconBtn>
+                  </Button>
                 </ActionsCell>
               </TRow>
             );

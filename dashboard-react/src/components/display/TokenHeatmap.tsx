@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 import styled, { css } from 'styled-components';
+import { Button } from '../common/Button';
 
 export interface TokenData {
   token: string;
@@ -109,19 +110,10 @@ const AltRow = styled.div`
   color: rgba(209, 213, 219, 0.8);
 `;
 
-const RegenButton = styled.button`
-  all: unset;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 6px;
+const RegenButton = styled(Button)`
   margin-top: 8px;
-  padding: 4px 0;
-  font-size: 11px;
   color: rgba(156, 163, 175, 0.8);
-  transition: color 0.15s;
-
-  &:hover {
+  &:hover:not(:disabled) {
     color: #FFD700;
   }
 `;
@@ -218,6 +210,8 @@ export function TokenHeatmap({
 
           {onRegenerateFrom && (
             <RegenButton
+              variant="ghost"
+              size="sm"
               onClick={() => {
                 setHovered(null);
                 onRegenerateFrom(hovered.index);

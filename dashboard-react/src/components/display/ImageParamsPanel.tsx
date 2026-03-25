@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import styled, { css } from 'styled-components';
+import { Button } from '../common/Button';
 
 /* ================================================================
    Types
@@ -169,20 +170,7 @@ const Divider = styled.div`
   padding-top: 8px;
 `;
 
-const AdvancedToggle = styled.button<{ $hasParams: boolean }>`
-  all: unset;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font: inherit;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  font-size: 10px;
-  color: ${({ theme }) => theme.colors.textMuted};
-  transition: color 0.15s;
-  &:hover { color: ${({ theme }) => theme.colors.text}; }
-
+const AdvancedToggle = styled(Button)<{ $hasParams: boolean }>`
   ${({ $hasParams }) =>
     $hasParams &&
     css`
@@ -237,13 +225,6 @@ const RangeInput = styled.input`
   }
 `;
 
-const ClearBtn = styled.button`
-  all: unset;
-  cursor: pointer;
-  font-size: 10px;
-  color: ${({ theme }) => theme.colors.textMuted};
-  &:hover { color: ${({ theme }) => theme.colors.text}; }
-`;
 
 const TextArea = styled.textarea`
   all: unset;
@@ -260,16 +241,8 @@ const TextArea = styled.textarea`
   &:focus { border-color: rgba(255, 215, 0, 0.7); outline: none; }
 `;
 
-const ResetBtn = styled.button`
-  all: unset;
-  cursor: pointer;
+const ResetBtn = styled(Button)`
   align-self: flex-end;
-  font: inherit;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  color: ${({ theme }) => theme.colors.textMuted};
-  &:hover { color: #FFD700; }
 `;
 
 /* ================================================================
@@ -370,6 +343,8 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
       {/* Advanced section */}
       <Divider />
       <AdvancedToggle
+        variant="ghost"
+        size="sm"
         $hasParams={hasAdvancedParams && !showAdvanced}
         onClick={() => setShowAdvanced(!showAdvanced)}
       >
@@ -397,7 +372,7 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
               />
               <span>{params.numInferenceSteps ?? '—'}</span>
               {params.numInferenceSteps !== null && (
-                <ClearBtn onClick={() => update({ numInferenceSteps: null })}>✕</ClearBtn>
+                <Button variant="ghost" size="sm" onClick={() => update({ numInferenceSteps: null })}>✕</Button>
               )}
             </SliderRow>
           </ParamGroup>
@@ -413,7 +388,7 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
               />
               <span>{params.guidance?.toFixed(1) ?? '—'}</span>
               {params.guidance !== null && (
-                <ClearBtn onClick={() => update({ guidance: null })}>✕</ClearBtn>
+                <Button variant="ghost" size="sm" onClick={() => update({ guidance: null })}>✕</Button>
               )}
             </SliderRow>
           </ParamGroup>
@@ -430,7 +405,7 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
           </div>
 
           {/* Reset */}
-          <ResetBtn onClick={() => {
+          <ResetBtn variant="ghost" size="sm" onClick={() => {
             onChange({ ...DEFAULT_IMAGE_PARAMS });
             setShowAdvanced(false);
           }}>

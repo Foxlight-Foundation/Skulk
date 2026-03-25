@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import styled, { css, keyframes } from 'styled-components';
 import type { ChatUploadedFile } from '../../types/chat';
 import { ChatAttachments } from './ChatAttachments';
+import { Button } from '../common/Button';
 
 export interface ChatFormProps {
   onSend: (message: string, files: ChatUploadedFile[]) => void;
@@ -106,16 +107,8 @@ const InputRow = styled.div`
   padding: 8px 12px;
 `;
 
-const AttachBtn = styled.button`
-  all: unset;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  padding: 4px;
-  color: ${({ theme }) => theme.colors.textMuted};
-  transition: color 0.15s;
+const AttachBtn = styled(Button)`
   flex-shrink: 0;
-  &:hover { color: #FFD700; }
 `;
 
 const Prompt = styled.span`
@@ -140,35 +133,8 @@ const TextArea = styled.textarea`
   &::placeholder { color: ${({ theme }) => theme.colors.textMuted}; }
 `;
 
-const SendBtn = styled.button<{ $cancel?: boolean }>`
-  all: unset;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+const SendBtn = styled(Button)`
   flex-shrink: 0;
-  width: 32px;
-  height: 32px;
-  border-radius: ${({ theme }) => theme.radii.md};
-  transition: all 0.15s;
-
-  ${({ $cancel }) =>
-    $cancel
-      ? css`
-          color: #ef4444;
-          border: 1px solid rgba(239,68,68,0.3);
-          &:hover { background: rgba(239,68,68,0.1); }
-        `
-      : css`
-          color: #FFD700;
-          border: 1px solid rgba(255,215,0,0.3);
-          &:hover { background: rgba(255,215,0,0.1); }
-        `}
-
-  &:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
 `;
 
 const DragOverlay = styled.div`
@@ -345,6 +311,9 @@ export function ChatForm({
       {/* Input row */}
       <InputRow>
         <AttachBtn
+          variant="ghost"
+          size="sm"
+          icon
           type="button"
           onClick={() => fileInputRef.current?.click()}
           aria-label="Attach file"
@@ -367,13 +336,13 @@ export function ChatForm({
           autoFocus={autoFocus}
         />
         {isLoading ? (
-          <SendBtn type="button" $cancel onClick={onCancel} aria-label="Cancel generation">
+          <SendBtn variant="danger" size="sm" icon type="button" onClick={onCancel} aria-label="Cancel generation">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
               <rect x="6" y="6" width="12" height="12" rx="2" />
             </svg>
           </SendBtn>
         ) : (
-          <SendBtn type="submit" disabled={!canSend} aria-label="Send message">
+          <SendBtn variant="primary" size="sm" icon type="submit" disabled={!canSend} aria-label="Send message">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <line x1="22" y1="2" x2="11" y2="13" />
               <polygon points="22 2 15 22 11 13 2 9 22 2" />

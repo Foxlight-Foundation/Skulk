@@ -1,5 +1,6 @@
 import { useCallback, useEffect } from 'react';
 import styled, { keyframes } from 'styled-components';
+import { Button } from '../common/Button';
 
 export interface ImageLightboxProps {
   src: string | null;
@@ -68,23 +69,10 @@ const ButtonBar = styled.div`
   z-index: 10;
 `;
 
-const IconButton = styled.button`
-  all: unset;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: ${({ theme }) => theme.radii.md};
+const IconButton = styled(Button)`
   background: rgba(30, 30, 30, 0.8);
-  border: 1px solid rgba(255, 215, 0, 0.3);
-  color: #FFD700;
-  transition: all 0.15s;
-
-  &:hover {
+  &:hover:not(:disabled) {
     background: rgba(40, 40, 40, 0.9);
-    border-color: rgba(255, 215, 0, 0.5);
   }
 `;
 
@@ -115,6 +103,9 @@ export function ImageLightbox({ src, onClose }: ImageLightboxProps) {
     <Overlay onClick={onClose}>
       <ButtonBar>
         <IconButton
+          variant="primary"
+          size="lg"
+          icon
           onClick={(e) => { e.stopPropagation(); downloadImage(src); }}
           aria-label="Download image"
         >
@@ -125,6 +116,9 @@ export function ImageLightbox({ src, onClose }: ImageLightboxProps) {
           </svg>
         </IconButton>
         <IconButton
+          variant="primary"
+          size="lg"
+          icon
           onClick={(e) => { e.stopPropagation(); onClose(); }}
           aria-label="Close lightbox"
         >

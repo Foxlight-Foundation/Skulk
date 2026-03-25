@@ -1,5 +1,6 @@
-import styled, { css, keyframes } from 'styled-components';
+import styled, { keyframes } from 'styled-components';
 import { useToast, type Toast } from '../../hooks/useToast';
+import { Button } from '../common/Button';
 
 /* ---- type config ---- */
 
@@ -91,14 +92,10 @@ const Message = styled.p`
   margin: 0;
 `;
 
-const DismissBtn = styled.button`
-  all: unset;
-  cursor: pointer;
+const DismissBtn = styled(Button)`
   flex-shrink: 0;
-  padding: 2px;
   color: rgba(255, 255, 255, 0.4);
-  transition: color 0.15s;
-  &:hover { color: rgba(255, 255, 255, 0.8); }
+  &:hover:not(:disabled) { color: rgba(255, 255, 255, 0.8); background: transparent; }
 `;
 
 const ProgressTrack = styled.div`
@@ -137,7 +134,7 @@ export function ToastContainer() {
                 <path d={style.iconPath} />
               </svg>
               <Message>{toast.message}</Message>
-              <DismissBtn onClick={() => dismissToast(toast.id)} aria-label="Dismiss notification">
+              <DismissBtn variant="ghost" size="sm" icon onClick={() => dismissToast(toast.id)} aria-label="Dismiss notification">
                 <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
                   <path d="M6 18L18 6M6 6l12 12" />
                 </svg>

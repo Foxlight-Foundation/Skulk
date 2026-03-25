@@ -1,6 +1,7 @@
 import { useMemo, useState, useCallback, useRef } from 'react';
 import styled, { css } from 'styled-components';
 import type { ChatModelInfo } from '../../types/chat';
+import { Button } from '../common/Button';
 
 export interface ChatModelSelectorProps {
   models: ChatModelInfo[];
@@ -178,21 +179,6 @@ const ModelMeta = styled.div`
   color: ${({ theme }) => theme.colors.textMuted};
 `;
 
-const AddButton = styled.button`
-  all: unset;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-family: ${({ theme }) => theme.fonts.mono};
-  color: ${({ theme }) => theme.colors.textMuted};
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.md};
-  padding: 6px 14px;
-  transition: all 0.15s;
-  &:hover { color: #FFD700; border-color: rgba(255, 215, 0, 0.4); }
-`;
 
 const Hint = styled.div`
   font-size: 11px;
@@ -321,7 +307,7 @@ export function ChatModelSelector({
         ))}
       </Grid>
 
-      <AddButton onClick={onAddModel}>+ Add Model</AddButton>
+      <Button variant="outline" size="sm" onClick={onAddModel}>+ Add Model</Button>
       <Hint>Or just start typing — we'll pick the best model automatically</Hint>
 
       {tooltip && (

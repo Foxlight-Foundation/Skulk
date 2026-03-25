@@ -1,5 +1,6 @@
-import styled, { css } from 'styled-components';
+import styled from 'styled-components';
 import type { HuggingFaceModel } from '../../types/models';
+import { Button } from '../common/Button';
 
 export interface HuggingFaceResultItemProps {
   model: HuggingFaceModel;
@@ -64,32 +65,10 @@ const AddedBadge = styled.span`
   color: #22c55e;
 `;
 
-const ActionButton = styled.button<{ $variant: 'add' | 'select' }>`
-  all: unset;
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 500;
-  padding: 4px 12px;
-  border-radius: ${({ theme }) => theme.radii.sm};
-  transition: all 0.15s;
-
-  ${({ $variant }) =>
-    $variant === 'add'
-      ? css`
-          border: 1px solid #555;
-          color: #ccc;
-          &:hover { border-color: #888; color: #fff; }
-        `
-      : css`
-          background: rgba(255, 215, 0, 0.15);
-          color: #ffd700;
-          &:hover { background: rgba(255, 215, 0, 0.25); }
-        `}
-
-  &:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
+const SelectBtn = styled(Button)`
+  background: rgba(255, 215, 0, 0.15);
+  color: #ffd700;
+  &:hover:not(:disabled) { background: rgba(255, 215, 0, 0.25); }
 `;
 
 const DownloadIcon = () => (
@@ -128,14 +107,14 @@ export function HuggingFaceResultItem({
       {isAdded ? (
         <>
           <AddedBadge>Added</AddedBadge>
-          <ActionButton $variant="select" onClick={onSelect}>
+          <SelectBtn variant="primary" size="sm" onClick={onSelect}>
             Select
-          </ActionButton>
+          </SelectBtn>
         </>
       ) : (
-        <ActionButton $variant="add" onClick={onAdd} disabled={isAdding}>
+        <Button variant="outline" size="sm" onClick={onAdd} disabled={isAdding}>
           {isAdding ? '…' : '+ Add'}
-        </ActionButton>
+        </Button>
       )}
     </Row>
   );

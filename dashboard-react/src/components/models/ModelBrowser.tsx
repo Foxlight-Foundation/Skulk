@@ -1,4 +1,5 @@
 import styled from 'styled-components';
+import { Button } from '../common/Button';
 import type {
   ModelInfo,
   ModelFitStatus,
@@ -65,23 +66,13 @@ const Toolbar = styled.div`
   flex-shrink: 0;
 `;
 
-const FilterButton = styled.button<{ $active: boolean }>`
-  all: unset;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  padding: 6px 10px;
-  border-radius: ${({ theme }) => theme.radii.md};
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  color: ${({ $active }) => ($active ? '#ffd700' : '#999')};
-  transition: all 0.15s;
-
-  &:hover {
-    border-color: ${({ theme }) => theme.colors.borderLight};
-    color: ${({ theme }) => theme.colors.text};
-  }
+const FilterBtn = styled(Button)<{ $active: boolean }>`
+  ${({ $active }) =>
+    $active &&
+    `
+      color: #ffd700;
+      border-color: rgba(255, 215, 0, 0.4);
+    `}
 `;
 
 const ListArea = styled.div`
@@ -179,13 +170,15 @@ export function ModelBrowser({
             autoFocus
           />
           {!isHf && (
-            <FilterButton
+            <FilterBtn
+              variant="outline"
+              size="sm"
               $active={hasActiveFilters}
               onClick={() => picker.setShowFilters(!picker.showFilters)}
             >
               <FilterIcon />
               Filters
-            </FilterButton>
+            </FilterBtn>
           )}
           {picker.showFilters && !isHf && (
             <ModelFilterPopover
