@@ -16,6 +16,7 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/state': 'http://localhost:52415',
+      '/config': 'http://localhost:52415',
     },
   },
   test: {
