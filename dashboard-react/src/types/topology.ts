@@ -33,6 +33,9 @@ export interface NodeInfo {
   last_macmon_update: number;
   friendly_name?: string;
   os_version?: string;
+  os_build_version?: string;
+  thunderbolt_bridge?: boolean;
+  rdma_enabled?: boolean;
 }
 
 export interface TopologyEdge {

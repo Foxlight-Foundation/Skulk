@@ -49,6 +49,16 @@ interface RawTopology {
   connections?: Record<string, Record<string, RawConnectionEdge[]>>;
 }
 
+interface RawThunderboltBridge {
+  enabled: boolean;
+  exists: boolean;
+  serviceName?: string | null;
+}
+
+interface RawRdmaCtl {
+  enabled: boolean;
+}
+
 interface RawStateResponse {
   topology?: RawTopology;
   instances?: Record<string, unknown>;
@@ -59,6 +69,8 @@ interface RawStateResponse {
   nodeSystem?: Record<string, RawSystemPerformanceProfile>;
   nodeNetwork?: Record<string, RawNodeNetworkInfo>;
   nodeDisk?: Record<string, { total: { inBytes: number }; available: { inBytes: number } }>;
+  nodeThunderboltBridge?: Record<string, RawThunderboltBridge>;
+  nodeRdmaCtl?: Record<string, RawRdmaCtl>;
 }
 
 /* ================================================================
@@ -91,6 +103,8 @@ function transformTopology(
   memory: Record<string, RawMemoryUsage>,
   system: Record<string, RawSystemPerformanceProfile>,
   network: Record<string, RawNodeNetworkInfo>,
+  tbBridge: Record<string, RawThunderboltBridge>,
+  rdmaCtl: Record<string, RawRdmaCtl>,
 ): TopologyData {
   const nodes: Record<string, NodeInfo> = {};
   const edges: TopologyEdge[] = [];
@@ -137,6 +151,9 @@ function transformTopology(
       last_macmon_update: Date.now() / 1000,
       friendly_name: identity?.friendlyName,
       os_version: identity?.osVersion,
+      os_build_version: identity?.osBuildVersion,
+      thunderbolt_bridge: tbBridge[nodeId]?.enabled ?? false,
+      rdma_enabled: rdmaCtl[nodeId]?.enabled ?? false,
     };
   }
 
@@ -163,7 +180,14 @@ function transformTopology(
           }
 
           if (nodes[source] && nodes[sink] && source !== sink) {
-            edges.push({ source, target: sink, sendBackIp, sourceRdmaIface, sinkRdmaIface });
+            // Resolve interface name from IP
+            let sendBackInterface: string | undefined;
+            if (sendBackIp) {
+              sendBackInterface =
+                nodes[source]?.ip_to_interface?.[sendBackIp] ??
+                nodes[sink]?.ip_to_interface?.[sendBackIp];
+            }
+            edges.push({ source, target: sink, sendBackIp, sendBackInterface, sourceRdmaIface, sinkRdmaIface });
           }
         }
       }
@@ -205,6 +229,8 @@ export function useClusterState(): ClusterState {
           data.nodeMemory ?? {},
           data.nodeSystem ?? {},
           data.nodeNetwork ?? {},
+          data.nodeThunderboltBridge ?? {},
+          data.nodeRdmaCtl ?? {},
         );
         setTopology(topo);
       }
