@@ -58,12 +58,24 @@ function buildDebugContent(
     byTarget.set(targetName, list);
   }
 
+  const rdmaStatus = nodeInfo.rdma_enabled
+    ? (nodeInfo.rdma_interfaces_present === false ? 'Enabled (no HW support)' : 'Enabled')
+    : 'Disabled';
+  const rdmaColor = nodeInfo.rdma_enabled
+    ? (nodeInfo.rdma_interfaces_present === false ? '#f59e0b' : '#4ade80')
+    : '#888';
+  const version = nodeInfo.exo_version && nodeInfo.exo_version !== 'Unknown'
+    ? `v${nodeInfo.exo_version}${nodeInfo.exo_commit && nodeInfo.exo_commit !== 'Unknown' ? ` (${nodeInfo.exo_commit})` : ''}`
+    : '';
+
   return (
     <div style={{ fontSize: 11, lineHeight: 1.6 }}>
       <div style={{ color: '#FFD700', fontWeight: 600, marginBottom: 4 }}>
         {modelId}{chip ? ` · ${chip}` : ''}
       </div>
-      {os && <div style={{ color: '#999', marginBottom: 6 }}>{os}</div>}
+      {os && <div style={{ color: '#999' }}>{os}</div>}
+      {version && <div style={{ color: '#999' }}>{version}</div>}
+      <div style={{ color: rdmaColor, marginBottom: 6 }}>RDMA: {rdmaStatus}</div>
       {byTarget.size > 0 && (
         <>
           <div style={{ color: '#888', fontSize: 10, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
