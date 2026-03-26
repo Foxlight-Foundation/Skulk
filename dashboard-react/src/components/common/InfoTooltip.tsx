@@ -45,8 +45,8 @@ const Trigger = styled.span`
 `;
 
 const TooltipBox = styled.div`
-  max-width: 280px;
-  padding: 8px 12px;
+  max-width: 360px;
+  padding: 10px 14px;
   background: #1a1a1a;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: ${({ theme }) => theme.radii.md};

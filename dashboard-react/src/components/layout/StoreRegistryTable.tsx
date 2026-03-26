@@ -214,24 +214,24 @@ const ActionsCell = styled.div`
 
 function ModelInfoContent({ entry }: { entry: StoreRegistryEntry }) {
   return (
-    <div style={{ minWidth: 220 }}>
-      <div style={{ color: '#FFD700', fontWeight: 600, marginBottom: 6, fontSize: 11 }}>
+    <div style={{ minWidth: 240 }}>
+      <div style={{ color: '#FFD700', fontWeight: 600, marginBottom: 6 }}>
         {entry.model_id}
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '2px 12px', fontSize: 11 }}>
-        <span style={{ color: '#888' }}>Size</span>
+      <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
+        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Size</span>
         <span>{formatBytes(entry.total_bytes)}</span>
-        <span style={{ color: '#888' }}>Files</span>
+        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Files</span>
         <span>{entry.files.length}</span>
-        <span style={{ color: '#888' }}>Downloaded</span>
+        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Downloaded</span>
         <span>{new Date(entry.downloaded_at).toLocaleString()}</span>
       </div>
       {entry.files.length > 0 && (
         <div style={{ marginTop: 8, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 6 }}>
-          <div style={{ color: '#888', fontSize: 10, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
+          <div style={{ color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
             Files
           </div>
-          <div style={{ fontSize: 10, color: '#aaa', maxHeight: 120, overflowY: 'auto' }}>
+          <div style={{ color: 'rgba(255,255,255,0.6)', maxHeight: 120, overflowY: 'auto' }}>
             {entry.files.map((f) => (
               <div key={f}>{f}</div>
             ))}
