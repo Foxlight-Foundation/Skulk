@@ -3,6 +3,7 @@ import styled, { css } from 'styled-components';
 import type { TopologyData } from '../../types/topology';
 import type { RawDownloads, NodeDiskInfo } from '../../hooks/useClusterState';
 import { StoreRegistryTable, type StoreRegistryEntry, type ModelCardInfo } from '../layout/StoreRegistryTable';
+import { ModelSearchModal } from './ModelSearchModal';
 import { Button } from '../common/Button';
 import { addToast } from '../../hooks/useToast';
 
@@ -260,10 +261,12 @@ export function DownloadsPage({ topology, downloads, nodeDisk }: DownloadsPagePr
     }
   }, []);
 
-  const handleFindModels = useCallback(() => {
-    // TODO: wire up model picker modal
-    addToast({ type: 'info', message: 'Model search coming soon' });
-  }, []);
+  const [searchOpen, setSearchOpen] = useState(false);
+
+  const storeModelIds = useMemo(
+    () => new Set(storeEntries.map((e) => e.model_id)),
+    [storeEntries],
+  );
 
   const activeTab = tab ?? 'nodes';
 
@@ -356,7 +359,7 @@ export function DownloadsPage({ topology, downloads, nodeDisk }: DownloadsPagePr
               <Button variant="danger" size="sm" onClick={() => setPurgeConfirm(true)}>
                 <TrashIcon /> Purge Node Caches
               </Button>
-              <Button variant="primary" size="sm" onClick={handleFindModels}>
+              <Button variant="primary" size="sm" onClick={() => setSearchOpen(true)}>
                 <SearchIcon /> Find Models
               </Button>
             </>
@@ -365,6 +368,12 @@ export function DownloadsPage({ topology, downloads, nodeDisk }: DownloadsPagePr
           onDelete={() => {}}
         />
       )}
+      <ModelSearchModal
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        existingModelIds={storeModelIds}
+        onDownloadStarted={loadRegistry}
+      />
     </Container>
   );
 }

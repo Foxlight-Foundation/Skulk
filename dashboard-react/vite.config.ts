@@ -19,6 +19,7 @@ export default defineConfig({
       '/config': 'http://localhost:52415',
       '/store': 'http://localhost:52415',
       '/download': 'http://localhost:52415',
+      '/models': 'http://localhost:52415',
     },
   },
   test: {
