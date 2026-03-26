@@ -312,6 +312,8 @@ def apply_node_gathered_info(event: NodeGatheredInfo, state: State) -> State:
                     "chip_id": info.chip,
                     "os_version": info.os_version,
                     "os_build_version": info.os_build_version,
+                    "exo_version": info.exo_version,
+                    "exo_commit": info.exo_commit,
                 }
             )
             update["node_identities"] = {
