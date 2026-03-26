@@ -5,6 +5,7 @@ import { theme, GlobalStyle } from './theme';
 import { useClusterState } from './hooks/useClusterState';
 import { HeaderNav } from './components/layout/HeaderNav';
 import { TopologyGraph } from './components/topology/TopologyGraph';
+import { ClusterWarnings } from './components/status/ClusterWarnings';
 import { ConnectionBanner } from './components/status/ConnectionBanner';
 import { ToastContainer } from './components/status/ToastContainer';
 import { NetworkMesh } from './components/common/NetworkMesh';
@@ -33,6 +34,7 @@ export function App() {
       <NetworkMesh radius={2.5} lineColor="rgba(255,215,0,0.35)" />
       <Shell>
         <ConnectionBanner connected={connected} />
+        <ClusterWarnings topology={topology} />
         <HeaderNav
           showHome
           showSidebarToggle

@@ -11,6 +11,8 @@ interface RawNodeIdentity {
   friendlyName?: string;
   osVersion?: string;
   osBuildVersion?: string;
+  exoVersion?: string;
+  exoCommit?: string;
 }
 
 interface RawMemoryUsage {
@@ -57,6 +59,7 @@ interface RawThunderboltBridge {
 
 interface RawRdmaCtl {
   enabled: boolean;
+  interfacesPresent?: boolean;
 }
 
 interface RawStateResponse {
@@ -152,8 +155,11 @@ function transformTopology(
       friendly_name: identity?.friendlyName,
       os_version: identity?.osVersion,
       os_build_version: identity?.osBuildVersion,
+      exo_version: identity?.exoVersion,
+      exo_commit: identity?.exoCommit,
       thunderbolt_bridge: tbBridge[nodeId]?.enabled ?? false,
       rdma_enabled: rdmaCtl[nodeId]?.enabled ?? false,
+      rdma_interfaces_present: rdmaCtl[nodeId]?.interfacesPresent ?? true,
     };
   }
 
