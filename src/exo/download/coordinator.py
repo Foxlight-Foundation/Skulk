@@ -165,56 +165,67 @@ class DownloadCoordinator:
         except Exception as exc:
             logger.warning(f"DownloadCoordinator: failed to sync exo.yaml: {exc}")
 
-    async def _purge_staging_cache(self, model_id: ModelId | None) -> None:
-        """Remove staged model files from the local node cache."""
-        if self.staging_cache_path is None:
-            logger.warning(
-                "PurgeStagingCache: no staging_cache_path configured, skipping"
-            )
-            return
+    async def _purge_dir(self, path: Path, label: str) -> int:
+        """Remove all model subdirectories from *path*. Returns count purged."""
+        if not path.exists():
+            return 0
+        purged = 0
+        for entry in path.iterdir():
+            if entry.is_dir():
+                logger.info(f"PurgeStagingCache: removing {entry} ({label})")
+                await asyncio.to_thread(shutil.rmtree, entry, True)
+                purged += 1
+        return purged
 
-        cache_path = self.staging_cache_path.expanduser()
-        if not cache_path.exists():
-            logger.info(
-                f"PurgeStagingCache: staging path {cache_path} does not exist, nothing to purge"
-            )
-            return
+    async def _purge_staging_cache(self, model_id: ModelId | None) -> None:
+        """Remove staged and downloaded model files from the local node."""
+        # Collect all directories to purge: staging cache + standard models dir
+        purge_dirs: list[tuple[Path, str]] = []
+        if self.staging_cache_path is not None:
+            purge_dirs.append((self.staging_cache_path.expanduser(), "staging"))
+        purge_dirs.append((EXO_MODELS_DIR, "models"))
 
         if model_id is not None:
             # Purge a specific model
+            if model_id in self.active_downloads:
+                self.active_downloads[model_id].cancel()
             sanitized = str(model_id).replace("/", "--")
-            model_dir = cache_path / sanitized
-            if model_dir.exists():
-                # Cancel active download if any
-                if model_id in self.active_downloads:
-                    self.active_downloads[model_id].cancel()
-                logger.info(f"PurgeStagingCache: removing {model_dir}")
-                await asyncio.to_thread(shutil.rmtree, model_dir, True)
-                if model_id in self.download_status:
-                    current = self.download_status[model_id]
-                    pending = DownloadPending(
-                        shard_metadata=current.shard_metadata,
-                        node_id=self.node_id,
-                        model_directory=self._model_dir(model_id),
-                    )
-                    await self.event_sender.send(
-                        NodeDownloadProgress(download_progress=pending)
-                    )
-                    del self.download_status[model_id]
-            else:
-                logger.info(f"PurgeStagingCache: model {model_id} not found in staging")
+            found = False
+            for dir_path, label in purge_dirs:
+                model_dir = dir_path / sanitized
+                if model_dir.exists():
+                    logger.info(f"PurgeStagingCache: removing {model_dir} ({label})")
+                    await asyncio.to_thread(shutil.rmtree, model_dir, True)
+                    found = True
+            if not found:
+                # Also try the normalized form used by EXO_MODELS_DIR
+                norm_dir = EXO_MODELS_DIR / model_id.normalize()
+                if norm_dir.exists():
+                    logger.info(f"PurgeStagingCache: removing {norm_dir} (models)")
+                    await asyncio.to_thread(shutil.rmtree, norm_dir, True)
+                    found = True
+            if found and model_id in self.download_status:
+                current = self.download_status[model_id]
+                pending = DownloadPending(
+                    shard_metadata=current.shard_metadata,
+                    node_id=self.node_id,
+                    model_directory=self._model_dir(model_id),
+                )
+                await self.event_sender.send(
+                    NodeDownloadProgress(download_progress=pending)
+                )
+                del self.download_status[model_id]
+            elif not found:
+                logger.info(f"PurgeStagingCache: model {model_id} not found")
         else:
-            # Purge all staged models
+            # Purge all models from all directories
             # Cancel all active downloads first
             for _mid, scope in list(self.active_downloads.items()):
                 scope.cancel()
 
-            purged = 0
-            for entry in cache_path.iterdir():
-                if entry.is_dir():
-                    logger.info(f"PurgeStagingCache: removing {entry}")
-                    await asyncio.to_thread(shutil.rmtree, entry, True)
-                    purged += 1
+            total_purged = 0
+            for dir_path, label in purge_dirs:
+                total_purged += await self._purge_dir(dir_path, label)
 
             # Reset all download statuses
             for mid, status in list(self.download_status.items()):
@@ -230,9 +241,7 @@ class DownloadCoordinator:
                 )
                 del self.download_status[mid]
 
-            logger.info(
-                f"PurgeStagingCache: purged {purged} model directories from {cache_path}"
-            )
+            logger.info(f"PurgeStagingCache: purged {total_purged} model directories")
 
     async def _start_download(self, shard: ShardMetadata) -> None:
         model_id = shard.model_card.model_id

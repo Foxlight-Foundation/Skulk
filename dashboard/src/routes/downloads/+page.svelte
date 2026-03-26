@@ -1148,7 +1148,7 @@
         Purge all node caches
       </h3>
       <p class="text-sm text-exo-light-gray mb-4 font-mono">
-        This will remove all staged model files from every node in the cluster. Models will need to be re-staged from the store before they can run again.
+        This will remove all staged model files and partial downloads from every node in the cluster. Models will need to be re-downloaded before they can run again.
       </p>
       <p class="text-xs text-white/40 mb-4 font-mono">
         Nodes that are currently offline will not receive this command.
