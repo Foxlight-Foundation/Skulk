@@ -210,16 +210,23 @@ function transformTopology(
 const CONNECTION_LOST_THRESHOLD = 3;
 const POLL_INTERVAL = 1000;
 
+export type RawDownloads = Record<string, unknown[]>;
+export type NodeDiskInfo = Record<string, { total: { inBytes: number }; available: { inBytes: number } }>;
+
 export interface ClusterState {
   topology: TopologyData | null;
   connected: boolean;
   lastUpdate: number | null;
+  downloads: RawDownloads;
+  nodeDisk: NodeDiskInfo;
 }
 
 export function useClusterState(): ClusterState {
   const [topology, setTopology] = useState<TopologyData | null>(null);
   const [connected, setConnected] = useState(false);
   const [lastUpdate, setLastUpdate] = useState<number | null>(null);
+  const [downloads, setDownloads] = useState<RawDownloads>({});
+  const [nodeDisk, setNodeDisk] = useState<NodeDiskInfo>({});
   const failuresRef = useRef(0);
 
   const fetchState = useCallback(async () => {
@@ -241,6 +248,8 @@ export function useClusterState(): ClusterState {
         setTopology(topo);
       }
 
+      setDownloads(data.downloads ?? {});
+      setNodeDisk(data.nodeDisk ?? {});
       setLastUpdate(Date.now());
       failuresRef.current = 0;
       setConnected(true);
@@ -258,5 +267,5 @@ export function useClusterState(): ClusterState {
     return () => clearInterval(id);
   }, [fetchState]);
 
-  return { topology, connected, lastUpdate };
+  return { topology, connected, lastUpdate, downloads, nodeDisk };
 }

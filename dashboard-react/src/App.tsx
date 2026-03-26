@@ -10,6 +10,7 @@ import { ConnectionBanner } from './components/status/ConnectionBanner';
 import { ToastContainer } from './components/status/ToastContainer';
 import { NetworkMesh } from './components/common/NetworkMesh';
 import { SettingsPanel } from './components/layout/SettingsPanel';
+import { DownloadsPage } from './components/pages/DownloadsPage';
 
 const Shell = styled.div`
   position: relative;
@@ -25,7 +26,7 @@ const Main = styled.main`
 `;
 
 export function App() {
-  const { topology, connected } = useClusterState();
+  const { topology, connected, lastUpdate, downloads, nodeDisk } = useClusterState();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activeRoute, setActiveRoute] = useState<NavRoute>('home');
 
@@ -43,7 +44,14 @@ export function App() {
         />
         <ClusterWarnings topology={topology} />
         <Main>
-          {topology ? (
+          {activeRoute === 'downloads' ? (
+            <DownloadsPage
+              topology={topology}
+              downloads={downloads}
+              nodeDisk={nodeDisk}
+              lastUpdate={lastUpdate}
+            />
+          ) : topology ? (
             <TopologyGraph data={topology} />
           ) : (
             <EmptyState>
