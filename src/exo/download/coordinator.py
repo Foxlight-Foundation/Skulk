@@ -227,6 +227,14 @@ class DownloadCoordinator:
             for dir_path, label in purge_dirs:
                 total_purged += await self._purge_dir(dir_path, label)
 
+            # Also clear the HF file list cache so stale entries don't linger
+            hf_cache = EXO_MODELS_DIR / "caches"
+            if hf_cache.exists():
+                logger.info(
+                    f"PurgeStagingCache: clearing file list cache at {hf_cache}"
+                )
+                await asyncio.to_thread(shutil.rmtree, hf_cache, True)
+
             # Reset all download statuses
             for mid, status in list(self.download_status.items()):
                 if isinstance(status, DownloadCompleted) and status.read_only:
@@ -459,6 +467,10 @@ class DownloadCoordinator:
                             ),
                         )
                     elif progress.status in ["in_progress", "not_started"]:
+                        # Skip models with no local bytes — they were never
+                        # downloaded and shouldn't appear in the downloads list.
+                        if progress.downloaded.in_bytes == 0:
+                            continue
                         if progress.downloaded_this_session.in_bytes == 0:
                             status = DownloadPending(
                                 node_id=self.node_id,
