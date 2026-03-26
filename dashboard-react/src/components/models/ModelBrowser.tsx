@@ -64,6 +64,11 @@ const Toolbar = styled.div`
   padding: 12px 16px;
   position: relative;
   flex-shrink: 0;
+
+  & > *:first-child {
+    flex: 1;
+    min-width: 0;
+  }
 `;
 
 const FilterBtn = styled(Button)<{ $active: boolean }>`
@@ -166,7 +171,7 @@ export function ModelBrowser({
               picker.setSearchQuery(q);
               if (isHf && onHfSearch) onHfSearch(q);
             }}
-            placeholder={isHf ? 'Search HuggingFace Hub…' : 'Search models…'}
+            placeholder={isHf ? 'Search mlx-community models…' : 'Search models…'}
             autoFocus
           />
           {!isHf && (
@@ -196,12 +201,8 @@ export function ModelBrowser({
             /* HuggingFace results */
             <>
               {hfIsSearching && <EmptyMsg>Searching…</EmptyMsg>}
-              {!hfIsSearching && hfModels.length === 0 && (
-                <EmptyMsg>
-                  {picker.searchQuery
-                    ? 'No results found'
-                    : 'Search for models on HuggingFace Hub'}
-                </EmptyMsg>
+              {!hfIsSearching && hfModels.length === 0 && picker.searchQuery && (
+                <EmptyMsg>No results found</EmptyMsg>
               )}
               {hfModels.map((m) => (
                 <HuggingFaceResultItem
