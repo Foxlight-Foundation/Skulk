@@ -229,7 +229,7 @@ export function HeaderNav({
         {downloadProgress && <ProgressCircle count={downloadProgress.count} percentage={downloadProgress.percentage} />}
 
         <NavLink $active={activeRoute === 'home'} onClick={() => navigate('home')}>
-          <HomeIcon /> Topology
+          <HomeIcon /> Home
         </NavLink>
 
         <NavLink $active={activeRoute === 'downloads'} onClick={() => navigate('downloads')}>
