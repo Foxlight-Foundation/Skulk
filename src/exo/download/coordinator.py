@@ -452,6 +452,12 @@ class DownloadCoordinator:
                 ) in self.shard_downloader.get_shard_download_status():
                     model_id = progress.shard.model_card.model_id
 
+                    logger.info(
+                        f"DownloadCoordinator scan: {model_id} status={progress.status} "
+                        f"downloaded={progress.downloaded.in_bytes} total={progress.total.in_bytes} "
+                        f"completed_files={progress.completed_files}/{progress.total_files}"
+                    )
+
                     # Active downloads emit progress via the callback — don't overwrite
                     if model_id in self.active_downloads:
                         continue
@@ -499,6 +505,9 @@ class DownloadCoordinator:
                         NodeDownloadProgress(download_progress=status)
                     )
                 # Scan EXO_MODELS_PATH for pre-downloaded models
+                import exo.shared.constants as _dbg_constants
+                _search_paths = _dbg_constants.EXO_MODELS_PATH
+                logger.info(f"DownloadCoordinator: EXO_MODELS_PATH={_search_paths}")
                 if EXO_MODELS_PATH is not None:
                     for card in await get_model_cards():
                         mid = card.model_id
@@ -511,6 +520,7 @@ class DownloadCoordinator:
                             continue
                         found = resolve_model_in_path(mid)
                         if found is not None:
+                            logger.info(f"DownloadCoordinator: EXO_MODELS_PATH hit: {mid} -> {found}")
                             path_shard = PipelineShardMetadata(
                                 model_card=card,
                                 device_rank=0,
