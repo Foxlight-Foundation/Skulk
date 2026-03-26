@@ -129,10 +129,16 @@ class DownloadCoordinator:
 
                 # Only process targeted commands for this node
                 if cmd.command.target_node_id != self.node_id:
+                    logger.debug(
+                        f"DownloadCoordinator: ignoring command for {cmd.command.target_node_id} (we are {self.node_id})"
+                    )
                     continue
 
                 match cmd.command:
                     case StartDownload(shard_metadata=shard):
+                        logger.info(
+                            f"DownloadCoordinator: received StartDownload for {shard.model_card.model_id}"
+                        )
                         await self._start_download(shard)
                     case DeleteDownload(model_id=model_id):
                         await self._delete_download(model_id)
@@ -257,8 +263,8 @@ class DownloadCoordinator:
         if model_id in self.download_status:
             status = self.download_status[model_id]
             if isinstance(status, (DownloadOngoing, DownloadCompleted, DownloadFailed)):
-                logger.debug(
-                    f"Download for {model_id} already in progress, complete, or failed, skipping"
+                logger.info(
+                    f"DownloadCoordinator: {model_id} already {type(status).__name__}, skipping"
                 )
                 return
 
