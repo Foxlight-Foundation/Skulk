@@ -235,10 +235,9 @@ class DownloadCoordinator:
                 )
                 await asyncio.to_thread(shutil.rmtree, hf_cache, True)
 
-            # Reset all download statuses
+            # Reset all download statuses (including read-only entries —
+            # their files have been deleted so they are no longer valid)
             for mid, status in list(self.download_status.items()):
-                if isinstance(status, DownloadCompleted) and status.read_only:
-                    continue  # Don't reset EXO_MODELS_PATH entries
                 pending = DownloadPending(
                     shard_metadata=status.shard_metadata,
                     node_id=self.node_id,
