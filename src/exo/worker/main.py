@@ -39,7 +39,7 @@ from exo.shared.types.tasks import (
     TaskStatus,
 )
 from exo.shared.types.topology import Connection, SocketConnection
-from exo.shared.types.worker.downloads import DownloadCompleted
+from exo.shared.types.worker.downloads import DownloadCompleted, DownloadPending
 from exo.shared.types.worker.runners import RunnerId
 from exo.shared.types.worker.shards import ShardMetadata
 from exo.store.config import StagingNodeConfig
@@ -300,9 +300,7 @@ class Worker:
         self._tg.start_soon(runner.run)
         return runner
 
-    async def _maybe_evict_shard(
-        self, shard: ShardMetadata | None
-    ) -> None:
+    async def _maybe_evict_shard(self, shard: ShardMetadata | None) -> None:
         """Evict staged shard files after runner teardown if configured."""
         if (
             shard is None
@@ -326,6 +324,17 @@ class Worker:
         cache_path = Path(self._staging_config.node_cache_path).expanduser()
         try:
             await self._store_client.evict_shard(model_id, cache_path)
+            logger.info(f"Worker: evicted staged files for {model_id}")
+            # Reset download status so the dashboard no longer shows
+            # this model as downloaded on this node.
+            pending = DownloadPending(
+                shard_metadata=shard,
+                node_id=self.node_id,
+                model_directory=str(cache_path / model_id.replace("/", "--")),
+            )
+            await self.event_sender.send(
+                NodeDownloadProgress(download_progress=pending)
+            )
         except Exception as exc:
             logger.warning(f"Worker: evict_shard failed for {model_id}: {exc}")
 
