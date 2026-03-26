@@ -121,6 +121,7 @@ def resolve_model_in_path(model_id: ModelId) -> Path | None:
     paths added at runtime (e.g. by the model store) are picked up.
     """
     import exo.shared.constants as _constants
+
     search_path = _constants.EXO_MODELS_PATH
     if search_path is None:
         return None
@@ -133,10 +134,24 @@ def resolve_model_in_path(model_id: ModelId) -> Path | None:
 
 
 def build_model_path(model_id: ModelId) -> Path:
+    """Resolve a local filesystem path for *model_id*.
+
+    Checks ``EXO_MODELS_PATH`` (staging, store, etc.) first, then falls
+    back to the standard ``EXO_MODELS_DIR``.  Raises ``FileNotFoundError``
+    if no valid model directory is found — this prevents the runner from
+    attempting to load from a path that doesn't exist.
+    """
     found = resolve_model_in_path(model_id)
     if found is not None:
         return found
-    return EXO_MODELS_DIR / model_id.normalize()
+    default = EXO_MODELS_DIR / model_id.normalize()
+    if default.is_dir() and (default / "config.json").exists():
+        return default
+    raise FileNotFoundError(
+        f"Model {model_id} not found on disk. "
+        f"Checked EXO_MODELS_PATH and {default}. "
+        f"Ensure the model is downloaded before loading."
+    )
 
 
 async def resolve_model_path_for_repo(model_id: ModelId) -> Path:

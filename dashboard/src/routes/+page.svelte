@@ -140,6 +140,24 @@
     }));
   });
 
+  // Detect exo version/commit mismatches across cluster nodes
+  const exoVersionMismatch = $derived.by(() => {
+    if (!identitiesData) return null;
+    const entries = Object.entries(identitiesData);
+    const nodesWithCommit = entries.filter(
+      ([_, id]) => id.exoCommit && id.exoCommit !== "Unknown" && id.exoCommit !== "unknown",
+    );
+    if (nodesWithCommit.length < 2) return null;
+    const commits = new Set(nodesWithCommit.map(([_, id]) => id.exoCommit));
+    if (commits.size <= 1) return null;
+    return nodesWithCommit.map(([nodeId, id]) => ({
+      nodeId,
+      friendlyName: getNodeName(nodeId),
+      version: id.exoVersion ?? "Unknown",
+      commit: id.exoCommit!,
+    }));
+  });
+
   // Detect TB5 nodes where RDMA is not enabled
   const tb5WithoutRdma = $derived.by(() => {
     const rdmaCtl = rdmaCtlData;
@@ -3225,7 +3243,7 @@
 </script>
 
 {#snippet clusterWarnings()}
-  {#if tbBridgeCycles.length > 0 || macosVersionMismatch || (tb5WithoutRdma && !tb5InfoDismissed) || (macStudioEn2RdmaWarning && !macStudioEn2Dismissed)}
+  {#if tbBridgeCycles.length > 0 || macosVersionMismatch || exoVersionMismatch || (tb5WithoutRdma && !tb5InfoDismissed) || (macStudioEn2RdmaWarning && !macStudioEn2Dismissed)}
     <div class="absolute top-4 left-4 flex flex-col gap-2 z-40">
       {#if tbBridgeCycles.length > 0}
         {@const cycle = tbBridgeCycles[0]}
@@ -3344,6 +3362,53 @@
             <p class="text-xs text-white/60">
               <span class="text-yellow-300">Suggested action:</span> Update all nodes
               to the same macOS version for best compatibility.
+            </p>
+          </div>
+        </div>
+      {/if}
+
+      {#if exoVersionMismatch}
+        <div class="group relative" role="alert">
+          <div
+            class="flex items-center gap-2 px-3 py-2 rounded border border-red-500/50 bg-red-500/10 backdrop-blur-sm cursor-help"
+          >
+            <svg
+              class="w-5 h-5 text-red-400 flex-shrink-0"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d={warningIconPath}
+              />
+            </svg>
+            <span class="text-sm font-mono text-red-200">
+              EXO VERSION MISMATCH
+            </span>
+          </div>
+
+          <!-- Tooltip on hover -->
+          <div
+            class="absolute top-full left-0 mt-2 w-80 p-3 rounded border border-red-500/30 bg-exo-dark-gray/95 backdrop-blur-sm opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 shadow-lg"
+          >
+            <p class="text-xs text-white/80 mb-2">
+              Nodes in this cluster are running different versions of exo. This
+              will cause inference failures and unexpected behavior.
+            </p>
+            <div class="text-xs text-white/60 mb-2">
+              <span class="text-red-300">Node versions:</span>
+              {#each exoVersionMismatch as node}
+                <div class="ml-2">
+                  {node.friendlyName} — v{node.version} ({node.commit})
+                </div>
+              {/each}
+            </div>
+            <p class="text-xs text-white/60">
+              <span class="text-red-300">Action required:</span> Update all nodes
+              to the same version with <code class="text-red-200">git pull && uv sync</code>.
             </p>
           </div>
         </div>
@@ -3674,7 +3739,7 @@
 {/snippet}
 
 {#snippet clusterWarningsCompact()}
-  {#if tbBridgeCycles.length > 0 || macosVersionMismatch || (tb5WithoutRdma && !tb5InfoDismissed) || (macStudioEn2RdmaWarning && !macStudioEn2Dismissed)}
+  {#if tbBridgeCycles.length > 0 || macosVersionMismatch || exoVersionMismatch || (tb5WithoutRdma && !tb5InfoDismissed) || (macStudioEn2RdmaWarning && !macStudioEn2Dismissed)}
     <div class="absolute top-2 left-2 flex flex-col gap-1">
       {#if tbBridgeCycles.length > 0}
         <div

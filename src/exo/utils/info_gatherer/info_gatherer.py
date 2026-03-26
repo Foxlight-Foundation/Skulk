@@ -186,6 +186,8 @@ class StaticNodeInformation(TaggedModel):
     chip: str
     os_version: str
     os_build_version: str
+    exo_version: str
+    exo_commit: str
 
     @classmethod
     async def gather(cls) -> Self:
@@ -195,7 +197,37 @@ class StaticNodeInformation(TaggedModel):
             chip=chip,
             os_version=get_os_version(),
             os_build_version=await get_os_build_version(),
+            exo_version=_get_exo_version(),
+            exo_commit=_get_git_commit(),
         )
+
+
+def _get_exo_version() -> str:
+    """Get exo version from package metadata."""
+    try:
+        from importlib.metadata import version
+
+        return version("exo")
+    except Exception:
+        return "unknown"
+
+
+def _get_git_commit() -> str:
+    """Get the current git commit hash."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
 
 
 class NodeNetworkInterfaces(TaggedModel):
