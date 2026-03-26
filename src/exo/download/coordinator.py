@@ -264,7 +264,12 @@ class DownloadCoordinator:
             status = self.download_status[model_id]
             if isinstance(status, (DownloadOngoing, DownloadCompleted, DownloadFailed)):
                 logger.info(
-                    f"DownloadCoordinator: {model_id} already {type(status).__name__}, skipping"
+                    f"DownloadCoordinator: {model_id} already {type(status).__name__}, re-emitting"
+                )
+                # Re-emit so the global state picks it up (the planner may
+                # not have seen the original event, e.g. after election).
+                await self.event_sender.send(
+                    NodeDownloadProgress(download_progress=status)
                 )
                 return
 
@@ -512,6 +517,7 @@ class DownloadCoordinator:
                     )
                 # Scan EXO_MODELS_PATH for pre-downloaded models
                 import exo.shared.constants as _dbg_constants
+
                 _search_paths = _dbg_constants.EXO_MODELS_PATH
                 logger.info(f"DownloadCoordinator: EXO_MODELS_PATH={_search_paths}")
                 if EXO_MODELS_PATH is not None:
@@ -526,7 +532,9 @@ class DownloadCoordinator:
                             continue
                         found = resolve_model_in_path(mid)
                         if found is not None:
-                            logger.info(f"DownloadCoordinator: EXO_MODELS_PATH hit: {mid} -> {found}")
+                            logger.info(
+                                f"DownloadCoordinator: EXO_MODELS_PATH hit: {mid} -> {found}"
+                            )
                             path_shard = PipelineShardMetadata(
                                 model_card=card,
                                 device_rank=0,
