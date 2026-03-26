@@ -3,6 +3,8 @@ import styled, { css } from 'styled-components';
 import type { TopologyData } from '../../types/topology';
 import type { RawDownloads, NodeDiskInfo } from '../../hooks/useClusterState';
 import { StoreRegistryTable, type StoreRegistryEntry, type ModelCardInfo } from '../layout/StoreRegistryTable';
+import { Button } from '../common/Button';
+import { addToast } from '../../hooks/useToast';
 
 type Tab = 'nodes' | 'store';
 
@@ -136,6 +138,20 @@ function formatBytes(bytes: number): string {
   return `${val.toFixed(val >= 10 ? 0 : 1)}${units[i]}`;
 }
 
+const TrashIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <polyline points="3 6 5 6 21 6" />
+    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+  </svg>
+);
+
+const SearchIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="11" cy="11" r="8" />
+    <line x1="21" y1="21" x2="16.65" y2="16.65" />
+  </svg>
+);
+
 function formatSpeed(bps: number): string {
   if (!bps || bps <= 0) return '--';
   const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
@@ -220,12 +236,41 @@ export function DownloadsPage({ topology, downloads, nodeDisk }: DownloadsPagePr
     if (tab === 'store') loadRegistry();
   }, [tab, loadRegistry]);
 
+  const [purgeConfirm, setPurgeConfirm] = useState(false);
+  const [purging, setPurging] = useState(false);
+
+  const handlePurge = useCallback(async () => {
+    setPurging(true);
+    try {
+      const res = await fetch('/store/purge-staging', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ modelId: null }),
+      });
+      if (res.ok) {
+        addToast({ type: 'success', message: 'Purge command sent to all nodes' });
+      } else {
+        addToast({ type: 'error', message: 'Failed to send purge command' });
+      }
+    } catch {
+      addToast({ type: 'error', message: 'Failed to send purge command' });
+    } finally {
+      setPurging(false);
+      setPurgeConfirm(false);
+    }
+  }, []);
+
+  const handleFindModels = useCallback(() => {
+    // TODO: wire up model picker modal
+    addToast({ type: 'info', message: 'Model search coming soon' });
+  }, []);
+
   const activeTab = tab ?? 'nodes';
 
   return (
     <Container>
-      {storeAvailable && (
-        <TopBar>
+      <TopBar>
+        {storeAvailable && (
           <SegmentedToggle>
             <SegmentBtn $active={activeTab === 'nodes'} onClick={() => setTab('nodes')}>
               Node Downloads
@@ -234,7 +279,44 @@ export function DownloadsPage({ topology, downloads, nodeDisk }: DownloadsPagePr
               Store Registry
             </SegmentBtn>
           </SegmentedToggle>
-        </TopBar>
+        )}
+        <ActionButtons>
+          {storeAvailable && (
+            <Button variant="danger" size="sm" onClick={() => setPurgeConfirm(true)}>
+              <TrashIcon /> Purge All Node Caches
+            </Button>
+          )}
+          {storeAvailable && activeTab === 'store' && (
+            <Button variant="primary" size="md" onClick={handleFindModels}>
+              <SearchIcon /> Find Models
+            </Button>
+          )}
+        </ActionButtons>
+      </TopBar>
+
+      {purgeConfirm && (
+        <PurgeModal>
+          <ModalBackdrop onClick={() => setPurgeConfirm(false)} />
+          <ModalBox>
+            <ModalTitle>Purge all node caches</ModalTitle>
+            <ModalText>
+              This will remove all staged model files and partial downloads from
+              every node in the cluster. Models will need to be re-downloaded
+              before they can run again.
+            </ModalText>
+            <ModalNote>
+              Nodes that are currently offline will not receive this command.
+            </ModalNote>
+            <ModalActions>
+              <Button variant="outline" size="md" onClick={() => setPurgeConfirm(false)}>
+                Cancel
+              </Button>
+              <Button variant="danger" size="md" loading={purging} onClick={handlePurge}>
+                {purging ? 'Purging...' : 'Purge All'}
+              </Button>
+            </ModalActions>
+          </ModalBox>
+        </PurgeModal>
       )}
 
       {activeTab === 'nodes' ? (
@@ -343,8 +425,72 @@ const Container = styled.div`
 
 const TopBar = styled.div`
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
   margin-bottom: 20px;
+  gap: 12px;
+`;
+
+const ActionButtons = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+`;
+
+const PurgeModal = styled.div`
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+`;
+
+const ModalBackdrop = styled.div`
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+`;
+
+const ModalBox = styled.div`
+  position: relative;
+  background: ${({ theme }) => theme.colors.surface};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radii.lg};
+  padding: 24px;
+  width: 420px;
+  max-width: 90vw;
+`;
+
+const ModalTitle = styled.h3`
+  font-family: ${({ theme }) => theme.fonts.mono};
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: ${({ theme }) => theme.colors.error};
+  margin: 0 0 12px;
+`;
+
+const ModalText = styled.p`
+  font-family: ${({ theme }) => theme.fonts.mono};
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  line-height: 1.5;
+  margin: 0 0 8px;
+`;
+
+const ModalNote = styled.p`
+  font-family: ${({ theme }) => theme.fonts.mono};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textMuted};
+  margin: 0 0 16px;
+`;
+
+const ModalActions = styled.div`
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
 `;
 
 const SegmentedToggle = styled.div`
