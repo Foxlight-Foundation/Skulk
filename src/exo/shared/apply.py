@@ -369,7 +369,10 @@ def apply_node_gathered_info(event: NodeGatheredInfo, state: State) -> State:
         case RdmaCtlStatus():
             update["node_rdma_ctl"] = {
                 **state.node_rdma_ctl,
-                event.node_id: NodeRdmaCtlStatus(enabled=info.enabled),
+                event.node_id: NodeRdmaCtlStatus(
+                    enabled=info.enabled,
+                    interfaces_present=info.interfaces_present,
+                ),
             }
 
     return state.model_copy(update=update)

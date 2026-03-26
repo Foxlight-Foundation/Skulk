@@ -103,6 +103,7 @@ class NodeRdmaCtlStatus(CamelCaseModel):
     """Whether RDMA is enabled on this node (via rdma_ctl)."""
 
     enabled: bool
+    interfaces_present: bool = True
 
 
 class ThunderboltBridgeStatus(CamelCaseModel):

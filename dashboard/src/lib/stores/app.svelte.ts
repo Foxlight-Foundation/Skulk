@@ -245,7 +245,7 @@ interface RawStateResponse {
     }
   >;
   // RDMA ctl status per node
-  nodeRdmaCtl?: Record<string, { enabled: boolean }>;
+  nodeRdmaCtl?: Record<string, { enabled: boolean; interfacesPresent?: boolean }>;
   // Thunderbolt bridge status per node
   nodeThunderboltBridge?: Record<
     string,
@@ -572,7 +572,7 @@ class AppStore {
       }
     >
   >({});
-  nodeRdmaCtl = $state<Record<string, { enabled: boolean }>>({});
+  nodeRdmaCtl = $state<Record<string, { enabled: boolean; interfacesPresent?: boolean }>>({});
   nodeThunderboltBridge = $state<
     Record<
       string,

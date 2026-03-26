@@ -244,6 +244,7 @@ class MacThunderboltConnections(TaggedModel):
 
 class RdmaCtlStatus(TaggedModel):
     enabled: bool
+    interfaces_present: bool
 
     @classmethod
     async def gather(cls) -> Self | None:
@@ -258,10 +259,24 @@ class RdmaCtlStatus(TaggedModel):
             return None
         output = proc.stdout.decode("utf-8").lower().strip()
         if "enabled" in output:
-            return cls(enabled=True)
+            return cls(enabled=True, interfaces_present=_rdma_interfaces_exist())
         if "disabled" in output:
-            return cls(enabled=False)
+            return cls(enabled=False, interfaces_present=False)
         return None
+
+
+def _rdma_interfaces_exist() -> bool:
+    """Check if any rdma_* network interfaces actually exist at the OS level.
+
+    On TB4 hardware, rdma_ctl may report enabled but no rdma_* interfaces
+    are created because the hardware doesn't support RDMA.
+    """
+    import socket
+
+    try:
+        return any(name.startswith("rdma_") for _, name in socket.if_nameindex())
+    except OSError:
+        return False
 
 
 class ThunderboltBridgeInfo(TaggedModel):
@@ -481,11 +496,27 @@ class InfoGatherer:
                     idents = [
                         it for i in data if (it := i.ident(iface_map)) is not None
                     ]
+
+                    # Filter to only interfaces that actually exist at the OS level.
+                    # On TB4 hardware, system_profiler reports rdma_* identifiers
+                    # but the interfaces are never created — RDMA requires TB5.
+                    if idents and not _rdma_interfaces_exist():
+                        logger.info(
+                            "Thunderbolt: rdma_ctl reports RDMA but no rdma_* interfaces "
+                            "exist (TB4 hardware?) — suppressing RDMA identifiers"
+                        )
+                        idents = []
+
                     await self.info_sender.send(
                         MacThunderboltIdentifiers(idents=idents)
                     )
 
-                    conns = [it for i in data if (it := i.conn()) is not None]
+                    # Only emit connections if we have valid identifiers
+                    conns = (
+                        [it for i in data if (it := i.conn()) is not None]
+                        if idents
+                        else []
+                    )
                     await self.info_sender.send(MacThunderboltConnections(conns=conns))
             except Exception as e:
                 logger.warning(f"Error gathering Thunderbolt data: {e}")
