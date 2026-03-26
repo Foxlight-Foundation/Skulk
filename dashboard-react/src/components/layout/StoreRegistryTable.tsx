@@ -21,11 +21,20 @@ export interface StoreDownloadProgress {
   status: string;
 }
 
+export interface ModelCardInfo {
+  family?: string;
+  quantization?: string;
+  baseModel?: string;
+  supportsTensor?: boolean;
+  capabilities?: string[];
+}
+
 export interface StoreRegistryTableProps {
   entries: StoreRegistryEntry[];
   activeDownloads?: StoreDownloadProgress[];
   loading?: boolean;
   activeModelIds?: string[];
+  modelCards?: Record<string, ModelCardInfo>;
   onRefresh: () => void;
   onDelete: (entry: StoreRegistryEntry, isActive: boolean) => void;
 }
@@ -220,7 +229,7 @@ const LinkIcon = () => (
   </svg>
 );
 
-function ModelInfoContent({ entry }: { entry: StoreRegistryEntry }) {
+function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: ModelCardInfo }) {
   const hfUrl = entry.model_id.includes('/')
     ? `https://huggingface.co/${entry.model_id}`
     : null;
@@ -248,6 +257,34 @@ function ModelInfoContent({ entry }: { entry: StoreRegistryEntry }) {
       <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
         <span style={{ color: 'rgba(255,255,255,0.45)' }}>Size</span>
         <span>{formatBytes(entry.total_bytes)}</span>
+        {card?.baseModel && (
+          <>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Base model</span>
+            <span>{card.baseModel}</span>
+          </>
+        )}
+        {card?.family && (
+          <>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Family</span>
+            <span>{card.family}</span>
+          </>
+        )}
+        {card?.quantization && (
+          <>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Quantization</span>
+            <span>{card.quantization}</span>
+          </>
+        )}
+        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Tensor parallel</span>
+        <span style={{ color: card?.supportsTensor ? '#4ade80' : 'rgba(255,255,255,0.7)' }}>
+          {card?.supportsTensor ? 'Yes' : 'No'}
+        </span>
+        {card?.capabilities && card.capabilities.length > 0 && (
+          <>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Capabilities</span>
+            <span>{card.capabilities.join(', ')}</span>
+          </>
+        )}
         <span style={{ color: 'rgba(255,255,255,0.45)' }}>Files</span>
         <span>{entry.files.length}</span>
         <span style={{ color: 'rgba(255,255,255,0.45)' }}>Downloaded</span>
@@ -274,6 +311,7 @@ export function StoreRegistryTable({
   activeDownloads = [],
   loading = false,
   activeModelIds = [],
+  modelCards = {},
   onRefresh,
   onDelete,
 }: StoreRegistryTableProps) {
@@ -365,7 +403,7 @@ export function StoreRegistryTable({
                 </Cell>
                 <ActionsCell>
                   <InfoTooltip
-                    content={<ModelInfoContent entry={entry} />}
+                    content={<ModelInfoContent entry={entry} card={modelCards[entry.model_id]} />}
                     placement="left"
                     filled
                     delay={100}

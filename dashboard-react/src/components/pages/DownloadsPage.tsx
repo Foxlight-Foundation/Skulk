@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import styled, { css } from 'styled-components';
 import type { TopologyData } from '../../types/topology';
 import type { RawDownloads, NodeDiskInfo } from '../../hooks/useClusterState';
-import { StoreRegistryTable, type StoreRegistryEntry } from '../layout/StoreRegistryTable';
+import { StoreRegistryTable, type StoreRegistryEntry, type ModelCardInfo } from '../layout/StoreRegistryTable';
 
 type Tab = 'nodes' | 'store';
 
@@ -157,6 +157,37 @@ export function DownloadsPage({ topology, downloads, nodeDisk }: DownloadsPagePr
     [downloads, topology, nodeDisk],
   );
 
+  // Extract model card info from download data for the store table tooltips
+  const modelCards = useMemo<Record<string, ModelCardInfo>>(() => {
+    const cards: Record<string, ModelCardInfo> = {};
+    for (const entries of Object.values(downloads)) {
+      const list = Array.isArray(entries) ? entries : Object.values(entries);
+      for (const entry of list) {
+        const tagged = getTag(entry);
+        if (!tagged) continue;
+        const [, payload] = tagged;
+        const shard = (payload.shardMetadata ?? payload.shard_metadata) as Record<string, unknown> | undefined;
+        if (!shard) continue;
+        for (const val of Object.values(shard)) {
+          if (!val || typeof val !== 'object') continue;
+          const inner = val as Record<string, unknown>;
+          const raw = (inner.modelCard ?? inner.model_card) as Record<string, unknown> | undefined;
+          if (!raw) continue;
+          const mid = (raw.modelId ?? raw.model_id) as string | undefined;
+          if (!mid || cards[mid]) continue;
+          cards[mid] = {
+            family: raw.family as string | undefined,
+            quantization: raw.quantization as string | undefined,
+            baseModel: (raw.baseModel ?? raw.base_model) as string | undefined,
+            supportsTensor: (raw.supportsTensor ?? raw.supports_tensor) as boolean | undefined,
+            capabilities: raw.capabilities as string[] | undefined,
+          };
+        }
+      }
+    }
+    return cards;
+  }, [downloads]);
+
   const loadRegistry = useCallback(async () => {
     setStoreLoading(true);
     try {
@@ -249,6 +280,7 @@ export function DownloadsPage({ topology, downloads, nodeDisk }: DownloadsPagePr
         <StoreRegistryTable
           entries={storeEntries}
           loading={storeLoading}
+          modelCards={modelCards}
           onRefresh={loadRegistry}
           onDelete={() => {}}
         />
