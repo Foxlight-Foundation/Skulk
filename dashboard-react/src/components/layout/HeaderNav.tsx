@@ -1,7 +1,7 @@
 import styled, { css } from 'styled-components';
 import { Button } from '../common/Button';
 
-export type NavRoute = 'home' | 'downloads' | 'settings';
+export type NavRoute = 'home' | 'downloads';
 
 export interface HeaderNavProps {
   showHome?: boolean;
@@ -204,7 +204,6 @@ export function HeaderNav({
   const navigate = (route: NavRoute) => {
     onNavigate?.(route);
     if (route === 'home') onHome?.();
-    if (route === 'settings') onOpenSettings?.();
   };
 
   return (
@@ -236,9 +235,9 @@ export function HeaderNav({
           <DownloadIcon /> Downloads
         </NavLink>
 
-        <NavLink $active={activeRoute === 'settings'} onClick={() => navigate('settings')}>
-          <SettingsIcon /> Settings
-        </NavLink>
+        <Button variant="ghost" size="lg" icon onClick={() => onOpenSettings?.()} aria-label="Settings">
+          <SettingsIcon />
+        </Button>
 
         {showMobileRightToggle && (
           <ToggleBtn variant="outline" size="lg" icon $active={mobileRightOpen} onClick={onToggleMobileRight} aria-label="Toggle right panel" aria-pressed={mobileRightOpen}>

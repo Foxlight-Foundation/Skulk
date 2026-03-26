@@ -29,11 +29,6 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activeRoute, setActiveRoute] = useState<NavRoute>('home');
 
-  const handleNavigate = (route: NavRoute) => {
-    setActiveRoute(route);
-    if (route === 'settings') setSettingsOpen(true);
-  };
-
   return (
     <ThemeProvider theme={theme}>
       <GlobalStyle />
@@ -43,7 +38,8 @@ export function App() {
         <HeaderNav
           showHome
           activeRoute={activeRoute}
-          onNavigate={handleNavigate}
+          onNavigate={setActiveRoute}
+          onOpenSettings={() => setSettingsOpen(true)}
         />
         <ClusterWarnings topology={topology} />
         <Main>
