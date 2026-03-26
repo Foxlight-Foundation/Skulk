@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import styled from 'styled-components';
 import type { TopologyData } from '../../types/topology';
 
@@ -13,9 +13,12 @@ interface VersionEntry {
 }
 
 const WARNING_ICON = 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z';
+const CLOSE_ICON = 'M6 18L18 6M6 6l12 12';
 
 export function ClusterWarnings({ topology }: ClusterWarningsProps) {
   const nodes = topology?.nodes;
+  const [versionDismissed, setVersionDismissed] = useState(false);
+  const [rdmaDismissed, setRdmaDismissed] = useState(false);
 
   const versionMismatch = useMemo<VersionEntry[] | null>(() => {
     if (!nodes) return null;
@@ -39,15 +42,23 @@ export function ClusterWarnings({ topology }: ClusterWarningsProps) {
     );
   }, [nodes]);
 
-  if (!versionMismatch && !rdmaPhantom) return null;
+  const showVersion = versionMismatch && !versionDismissed;
+  const showRdma = rdmaPhantom && !rdmaDismissed;
+
+  if (!showVersion && !showRdma) return null;
 
   return (
     <WarningsBar>
-      {versionMismatch && (
+      {showVersion && (
         <WarningPill $color="error">
           <WarningIcon d={WARNING_ICON} $color="error" />
           <WarningLabel $color="error">EXO VERSION MISMATCH</WarningLabel>
-          <Tooltip $color="error">
+          <DismissButton $color="error" onClick={() => setVersionDismissed(true)} aria-label="Dismiss">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d={CLOSE_ICON} />
+            </svg>
+          </DismissButton>
+          <Tooltip className="warning-tooltip" $color="error">
             <p>
               Nodes in this cluster are running different versions of exo.
               This will cause inference failures and unexpected behavior.
@@ -68,11 +79,16 @@ export function ClusterWarnings({ topology }: ClusterWarningsProps) {
         </WarningPill>
       )}
 
-      {rdmaPhantom && (
+      {showRdma && (
         <WarningPill $color="warning">
           <WarningIcon d={WARNING_ICON} $color="warning" />
           <WarningLabel $color="warning">RDMA NOT AVAILABLE</WarningLabel>
-          <Tooltip $color="warning">
+          <DismissButton $color="warning" onClick={() => setRdmaDismissed(true)} aria-label="Dismiss">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d={CLOSE_ICON} />
+            </svg>
+          </DismissButton>
+          <Tooltip className="warning-tooltip" $color="warning">
             <p>
               macOS reports RDMA as enabled but no RDMA network interfaces
               exist. This typically means your hardware has Thunderbolt 4
@@ -129,7 +145,7 @@ const WarningPill = styled.div<{ $color: ColorKey }>`
   backdrop-filter: blur(8px);
   cursor: help;
 
-  &:hover > div:last-child {
+  &:hover > .warning-tooltip {
     opacity: 1;
     visibility: visible;
   }
@@ -160,6 +176,25 @@ function WarningIcon({ d, $color }: { d: string; $color: ColorKey }) {
     </svg>
   );
 }
+
+const DismissButton = styled.button<{ $color: ColorKey }>`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  padding: 2px;
+  margin-left: 4px;
+  cursor: pointer;
+  color: ${({ $color }) => colorMap[$color].text};
+  opacity: 0.6;
+  transition: opacity 0.15s;
+  flex-shrink: 0;
+
+  &:hover {
+    opacity: 1;
+  }
+`;
 
 const Tooltip = styled.div<{ $color: ColorKey }>`
   position: absolute;
