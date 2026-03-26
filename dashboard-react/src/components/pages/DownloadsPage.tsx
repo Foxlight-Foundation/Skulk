@@ -148,7 +148,8 @@ function formatSpeed(bps: number): string {
 /* ── Component ────────────────────────────────────────── */
 
 export function DownloadsPage({ topology, downloads, nodeDisk, lastUpdate }: DownloadsPageProps) {
-  const [tab, setTab] = useState<Tab>('nodes');
+  const [tab, setTab] = useState<Tab | null>(null);
+  const [storeAvailable, setStoreAvailable] = useState(false);
   const [storeEntries, setStoreEntries] = useState<StoreRegistryEntry[]>([]);
   const [storeLoading, setStoreLoading] = useState(false);
 
@@ -168,10 +169,28 @@ export function DownloadsPage({ topology, downloads, nodeDisk, lastUpdate }: Dow
     finally { setStoreLoading(false); }
   }, []);
 
+  // Detect store availability and set default tab
+  useEffect(() => {
+    if (tab !== null) return;
+    (async () => {
+      try {
+        const res = await fetch('/store/health');
+        if (res.ok) {
+          setStoreAvailable(true);
+          setTab('store');
+          return;
+        }
+      } catch { /* ignore */ }
+      setTab('nodes');
+    })();
+  }, [tab]);
+
   // Load store registry when switching to store tab
   useEffect(() => {
     if (tab === 'store') loadRegistry();
   }, [tab, loadRegistry]);
+
+  const activeTab = tab ?? 'nodes';
 
   return (
     <Container>
@@ -185,16 +204,18 @@ export function DownloadsPage({ topology, downloads, nodeDisk, lastUpdate }: Dow
         </LastUpdate>
       </Header>
 
-      <SegmentedToggle>
-        <SegmentBtn $active={tab === 'nodes'} onClick={() => setTab('nodes')}>
-          Node Downloads
-        </SegmentBtn>
-        <SegmentBtn $active={tab === 'store'} onClick={() => setTab('store')}>
-          Store Registry
-        </SegmentBtn>
-      </SegmentedToggle>
+      {storeAvailable && (
+        <SegmentedToggle>
+          <SegmentBtn $active={activeTab === 'nodes'} onClick={() => setTab('nodes')}>
+            Node Downloads
+          </SegmentBtn>
+          <SegmentBtn $active={activeTab === 'store'} onClick={() => setTab('store')}>
+            Store Registry
+          </SegmentBtn>
+        </SegmentedToggle>
+      )}
 
-      {tab === 'nodes' ? (
+      {activeTab === 'nodes' ? (
         rows.length === 0 ? (
           <EmptyState>
             No downloads found. Start a model download to see progress here.
