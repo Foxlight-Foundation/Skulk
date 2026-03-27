@@ -346,14 +346,14 @@ export function ModelPickerGroup({
           <Badge>{timeAgo(launchedAt)}</Badge>
         )}
 
-        {/* Download indicator */}
-        {groupDownload && <DownloadIcon />}
+        {/* Download / in-store indicator */}
+        {groupDownload ? <CheckMark /> : <DownloadIcon />}
 
         {/* Instance status dot */}
         {instanceStatus && <StatusDot $class={instanceStatus.statusClass} />}
 
         {/* Selected check */}
-        {isSelected && <CheckMark />}
+        {isSelected && !groupDownload && <CheckMark />}
 
         {/* Favorite */}
         <FavStar
@@ -394,9 +394,8 @@ export function ModelPickerGroup({
                 <span style={{ color: fitColor(vFit), flex: 1 }}>
                   {sizeText(v.storage_size_megabytes)}
                 </span>
-                {vDownload?.available && <DownloadIcon />}
+                {vDownload?.available ? <CheckMark /> : <DownloadIcon />}
                 {vInstance && <StatusDot $class={vInstance.statusClass} />}
-                {vSelected && <CheckMark />}
               </VariantRow>
             );
           })}
