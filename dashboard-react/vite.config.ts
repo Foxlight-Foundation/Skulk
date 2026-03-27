@@ -21,6 +21,7 @@ export default defineConfig({
       '/download': 'http://localhost:52415',
       '/models': 'http://localhost:52415',
       '/place_instance': 'http://localhost:52415',
+      '/instance': 'http://localhost:52415',
     },
   },
   test: {

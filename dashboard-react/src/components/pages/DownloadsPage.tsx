@@ -312,16 +312,19 @@ export function DownloadsPage({ topology, downloads, nodeDisk, instances }: Down
     [storeEntries],
   );
 
-  // Derive active model IDs from running instances
-  const activeModelIds = useMemo(() => {
+  // Derive active model IDs and model→instanceId mapping from running instances
+  const { activeModelIds, modelToInstanceId } = useMemo(() => {
     const ids: string[] = [];
-    for (const inst of Object.values(instances)) {
-      const modelId =
-        inst.MlxRingInstance?.shardAssignments?.modelId ??
-        inst.MlxJacclInstance?.shardAssignments?.modelId;
-      if (modelId) ids.push(modelId);
+    const mapping: Record<string, string> = {};
+    for (const [iid, inst] of Object.entries(instances)) {
+      const inner = inst.MlxRingInstance ?? inst.MlxJacclInstance;
+      const modelId = inner?.shardAssignments?.modelId;
+      if (modelId) {
+        ids.push(modelId);
+        mapping[modelId] = (inner as Record<string, unknown>).instanceId as string ?? iid;
+      }
     }
-    return ids;
+    return { activeModelIds: ids, modelToInstanceId: mapping };
   }, [instances]);
 
   const handleLaunch = useCallback(async (modelId: string) => {
@@ -346,6 +349,24 @@ export function DownloadsPage({ topology, downloads, nodeDisk, instances }: Down
       addToast({ type: 'error', message: `Failed to launch model` });
     }
   }, []);
+
+  const handleStop = useCallback(async (modelId: string) => {
+    const instanceId = modelToInstanceId[modelId];
+    if (!instanceId) {
+      addToast({ type: 'error', message: `No running instance found for ${modelId}` });
+      return;
+    }
+    try {
+      const res = await fetch(`/instance/${encodeURIComponent(instanceId)}`, { method: 'DELETE' });
+      if (res.ok) {
+        addToast({ type: 'success', message: `Stopping ${modelId}` });
+      } else {
+        addToast({ type: 'error', message: `Failed to stop ${modelId}` });
+      }
+    } catch {
+      addToast({ type: 'error', message: `Failed to stop model` });
+    }
+  }, [modelToInstanceId]);
 
   const activeTab = tab ?? 'nodes';
 
@@ -448,6 +469,7 @@ export function DownloadsPage({ topology, downloads, nodeDisk, instances }: Down
           onRefresh={loadRegistry}
           onDelete={() => {}}
           onLaunch={handleLaunch}
+          onStop={handleStop}
         />
       )}
       <ModelSearchModal

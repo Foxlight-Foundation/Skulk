@@ -39,6 +39,7 @@ export interface StoreRegistryTableProps {
   onRefresh: () => void;
   onDelete: (entry: StoreRegistryEntry, isActive: boolean) => void;
   onLaunch?: (modelId: string) => void;
+  onStop?: (modelId: string) => void;
 }
 
 /* ---- helpers ---- */
@@ -120,7 +121,7 @@ const Table = styled.div`
 
 const THead = styled.div`
   display: grid;
-  grid-template-columns: 1fr 80px 60px 100px 60px;
+  grid-template-columns: 36px 1fr 80px 60px 100px 60px;
   gap: 8px;
   padding: 8px 12px;
   background: rgba(0, 0, 0, 0.4);
@@ -133,7 +134,7 @@ const THead = styled.div`
 
 const TRow = styled.div<{ $highlight?: boolean }>`
   display: grid;
-  grid-template-columns: 1fr 80px 60px 100px 60px;
+  grid-template-columns: 36px 1fr 80px 60px 100px 60px;
   gap: 8px;
   padding: 10px 12px;
   align-items: center;
@@ -213,6 +214,48 @@ const ProgressText = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: #FFD700;
+`;
+
+const PlayCell = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+`;
+
+const PlayBtn = styled.button`
+  all: unset;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  color: ${({ theme }) => theme.colors.gold};
+  transition: background 0.15s, transform 0.1s;
+
+  &:hover {
+    background: ${({ theme }) => theme.colors.goldBg};
+    transform: scale(1.1);
+  }
+`;
+
+const StopBtn = styled.button`
+  all: unset;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  color: ${({ theme }) => theme.colors.error};
+  transition: background 0.15s, transform 0.1s;
+
+  &:hover {
+    background: rgba(239, 68, 68, 0.1);
+    transform: scale(1.1);
+  }
 `;
 
 const ActionsCell = styled.div`
@@ -324,6 +367,7 @@ export function StoreRegistryTable({
   onRefresh,
   onDelete,
   onLaunch,
+  onStop,
 }: StoreRegistryTableProps) {
   const registeredIds = useMemo(() => new Set(entries.map((e) => e.model_id)), [entries]);
   const pendingDownloads = useMemo(
@@ -361,6 +405,7 @@ export function StoreRegistryTable({
       ) : (
         <Table>
           <THead>
+            <div />
             <div>Model</div>
             <div style={{ textAlign: 'right' }}>Size</div>
             <div style={{ textAlign: 'right' }}>Files</div>
@@ -371,6 +416,7 @@ export function StoreRegistryTable({
           {/* Pending downloads (not yet registered) */}
           {pendingDownloads.map((dl) => (
             <TRow key={dl.modelId} $highlight>
+              <Cell />
               <ModelCell>
                 <ModelId title={dl.modelId}>{dl.modelId}</ModelId>
               </ModelCell>
@@ -394,6 +440,21 @@ export function StoreRegistryTable({
             const active = isActive(entry.model_id);
             return (
               <TRow key={entry.model_id}>
+                <PlayCell>
+                  {active && onStop ? (
+                    <StopBtn onClick={() => onStop(entry.model_id)} title="Stop model">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M18 6L6 18M6 6l12 12" />
+                      </svg>
+                    </StopBtn>
+                  ) : !active && !dl && onLaunch ? (
+                    <PlayBtn onClick={() => onLaunch(entry.model_id)} title="Launch model">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                        <polygon points="5 3 19 12 5 21 5 3" />
+                      </svg>
+                    </PlayBtn>
+                  ) : null}
+                </PlayCell>
                 <ModelCell>
                   <ModelId title={entry.model_id}>{entry.model_id}</ModelId>
                   {active && (
@@ -415,13 +476,6 @@ export function StoreRegistryTable({
                   )}
                 </Cell>
                 <ActionsCell>
-                  {onLaunch && !active && !dl && (
-                    <Button variant="primary" size="sm" icon onClick={() => onLaunch(entry.model_id)} title="Launch model">
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                        <polygon points="5 3 19 12 5 21 5 3" />
-                      </svg>
-                    </Button>
-                  )}
                   <InfoTooltip
                     content={<ModelInfoContent entry={entry} card={modelCards[entry.model_id]} />}
                     placement="left"
