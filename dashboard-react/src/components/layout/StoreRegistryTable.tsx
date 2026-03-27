@@ -38,6 +38,7 @@ export interface StoreRegistryTableProps {
   actions?: React.ReactNode;
   onRefresh: () => void;
   onDelete: (entry: StoreRegistryEntry, isActive: boolean) => void;
+  onLaunch?: (modelId: string) => void;
 }
 
 /* ---- helpers ---- */
@@ -322,6 +323,7 @@ export function StoreRegistryTable({
   actions,
   onRefresh,
   onDelete,
+  onLaunch,
 }: StoreRegistryTableProps) {
   const registeredIds = useMemo(() => new Set(entries.map((e) => e.model_id)), [entries]);
   const pendingDownloads = useMemo(
@@ -413,6 +415,13 @@ export function StoreRegistryTable({
                   )}
                 </Cell>
                 <ActionsCell>
+                  {onLaunch && !active && !dl && (
+                    <Button variant="primary" size="sm" icon onClick={() => onLaunch(entry.model_id)} title="Launch model">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                        <polygon points="5 3 19 12 5 21 5 3" />
+                      </svg>
+                    </Button>
+                  )}
                   <InfoTooltip
                     content={<ModelInfoContent entry={entry} card={modelCards[entry.model_id]} />}
                     placement="left"

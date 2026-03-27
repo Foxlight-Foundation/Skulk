@@ -26,7 +26,7 @@ const Main = styled.main`
 `;
 
 export function App() {
-  const { topology, connected, downloads, nodeDisk } = useClusterState();
+  const { topology, connected, downloads, nodeDisk, instances } = useClusterState();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activeRoute, setActiveRoute] = useState<NavRoute>('home');
 
@@ -49,6 +49,7 @@ export function App() {
               topology={topology}
               downloads={downloads}
               nodeDisk={nodeDisk}
+              instances={instances}
             />
           ) : topology ? (
             <TopologyGraph data={topology} />

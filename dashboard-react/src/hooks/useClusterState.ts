@@ -213,12 +213,15 @@ const POLL_INTERVAL = 1000;
 export type RawDownloads = Record<string, unknown[]>;
 export type NodeDiskInfo = Record<string, { total: { inBytes: number }; available: { inBytes: number } }>;
 
+export type RawInstances = Record<string, { MlxRingInstance?: { shard_assignments?: { model_id?: string } }; MlxJacclInstance?: { shard_assignments?: { model_id?: string } } }>;
+
 export interface ClusterState {
   topology: TopologyData | null;
   connected: boolean;
   lastUpdate: number | null;
   downloads: RawDownloads;
   nodeDisk: NodeDiskInfo;
+  instances: RawInstances;
 }
 
 export function useClusterState(): ClusterState {
@@ -227,6 +230,7 @@ export function useClusterState(): ClusterState {
   const [lastUpdate, setLastUpdate] = useState<number | null>(null);
   const [downloads, setDownloads] = useState<RawDownloads>({});
   const [nodeDisk, setNodeDisk] = useState<NodeDiskInfo>({});
+  const [instances, setInstances] = useState<RawInstances>({});
   const failuresRef = useRef(0);
 
   const fetchState = useCallback(async () => {
@@ -250,6 +254,7 @@ export function useClusterState(): ClusterState {
 
       setDownloads(data.downloads ?? {});
       setNodeDisk(data.nodeDisk ?? {});
+      setInstances((data.instances ?? {}) as RawInstances);
       setLastUpdate(Date.now());
       failuresRef.current = 0;
       setConnected(true);
@@ -267,5 +272,5 @@ export function useClusterState(): ClusterState {
     return () => clearInterval(id);
   }, [fetchState]);
 
-  return { topology, connected, lastUpdate, downloads, nodeDisk };
+  return { topology, connected, lastUpdate, downloads, nodeDisk, instances };
 }

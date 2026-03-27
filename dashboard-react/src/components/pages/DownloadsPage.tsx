@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styled, { css } from 'styled-components';
 import type { TopologyData } from '../../types/topology';
-import type { RawDownloads, NodeDiskInfo } from '../../hooks/useClusterState';
+import type { RawDownloads, NodeDiskInfo, RawInstances } from '../../hooks/useClusterState';
 import { StoreRegistryTable, type StoreRegistryEntry, type StoreDownloadProgress, type ModelCardInfo } from '../layout/StoreRegistryTable';
 import { ModelSearchModal } from './ModelSearchModal';
 import { Button } from '../common/Button';
@@ -13,6 +13,7 @@ interface DownloadsPageProps {
   topology: TopologyData | null;
   downloads: RawDownloads;
   nodeDisk: NodeDiskInfo;
+  instances: RawInstances;
 }
 
 /* ── Data extraction helpers ──────────────────────────── */
@@ -163,7 +164,7 @@ function formatSpeed(bps: number): string {
 
 /* ── Component ────────────────────────────────────────── */
 
-export function DownloadsPage({ topology, downloads, nodeDisk }: DownloadsPageProps) {
+export function DownloadsPage({ topology, downloads, nodeDisk, instances }: DownloadsPageProps) {
   const [tab, setTab] = useState<Tab | null>(null);
   const [storeAvailable, setStoreAvailable] = useState(false);
   const [storeEntries, setStoreEntries] = useState<StoreRegistryEntry[]>([]);
@@ -311,6 +312,41 @@ export function DownloadsPage({ topology, downloads, nodeDisk }: DownloadsPagePr
     [storeEntries],
   );
 
+  // Derive active model IDs from running instances
+  const activeModelIds = useMemo(() => {
+    const ids: string[] = [];
+    for (const inst of Object.values(instances)) {
+      const modelId =
+        inst.MlxRingInstance?.shard_assignments?.model_id ??
+        inst.MlxJacclInstance?.shard_assignments?.model_id;
+      if (modelId) ids.push(modelId);
+    }
+    return ids;
+  }, [instances]);
+
+  const handleLaunch = useCallback(async (modelId: string) => {
+    try {
+      const res = await fetch('/place_instance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model_id: modelId,
+          sharding: 'Pipeline',
+          instance_meta: 'MlxRing',
+          min_nodes: 1,
+        }),
+      });
+      if (res.ok) {
+        addToast({ type: 'success', message: `Launching ${modelId}` });
+      } else {
+        const err = await res.json().catch(() => ({}));
+        addToast({ type: 'error', message: (err as Record<string, string>).detail ?? `Failed to launch ${modelId}` });
+      }
+    } catch {
+      addToast({ type: 'error', message: `Failed to launch model` });
+    }
+  }, []);
+
   const activeTab = tab ?? 'nodes';
 
   return (
@@ -397,6 +433,7 @@ export function DownloadsPage({ topology, downloads, nodeDisk }: DownloadsPagePr
           entries={storeEntries}
           activeDownloads={storeDownloads}
           loading={storeLoading}
+          activeModelIds={activeModelIds}
           modelCards={modelCards}
           actions={
             <>
@@ -410,6 +447,7 @@ export function DownloadsPage({ topology, downloads, nodeDisk }: DownloadsPagePr
           }
           onRefresh={loadRegistry}
           onDelete={() => {}}
+          onLaunch={handleLaunch}
         />
       )}
       <ModelSearchModal
