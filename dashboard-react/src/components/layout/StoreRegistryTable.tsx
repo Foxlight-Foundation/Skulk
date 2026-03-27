@@ -1,5 +1,7 @@
 import { useMemo } from 'react';
 import styled, { css, keyframes } from 'styled-components';
+import { FiTrash2, FiExternalLink } from 'react-icons/fi';
+import { MdPlayArrow, MdClose } from 'react-icons/md';
 import { formatBytes } from '../../utils/format';
 import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
@@ -274,13 +276,7 @@ const ActionsCell = styled.div`
    Component
    ================================================================ */
 
-const LinkIcon = () => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-    <polyline points="15 3 21 3 21 9" />
-    <line x1="10" y1="14" x2="21" y2="3" />
-  </svg>
-);
+const LinkIcon = () => <FiExternalLink size={14} style={{ flexShrink: 0 }} />;
 
 function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: ModelCardInfo }) {
   const hfUrl = entry.model_id.includes('/')
@@ -445,15 +441,11 @@ export function StoreRegistryTable({
                 <PlayCell>
                   {active && onStop ? (
                     <StopBtn onClick={() => onStop(entry.model_id)} title="Stop model">
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M18 6L6 18M6 6l12 12" />
-                      </svg>
+                      <MdClose size={20} />
                     </StopBtn>
                   ) : !active && !dl && onLaunch ? (
                     <PlayBtn onClick={() => onLaunch(entry.model_id)} title="Launch model">
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                        <polygon points="5 3 19 12 5 21 5 3" />
-                      </svg>
+                      <MdPlayArrow size={20} />
                     </PlayBtn>
                   ) : null}
                 </PlayCell>
@@ -485,9 +477,7 @@ export function StoreRegistryTable({
                     delay={100}
                   />
                   <Button variant="danger" size="sm" icon onClick={() => onDelete(entry, active)} title="Delete model">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                    </svg>
+                    <FiTrash2 size={18} />
                   </Button>
                 </ActionsCell>
               </TRow>

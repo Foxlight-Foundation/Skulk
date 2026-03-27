@@ -4,6 +4,7 @@ import type { TopologyData } from '../../types/topology';
 import type { RawDownloads, NodeDiskInfo, RawInstances } from '../../hooks/useClusterState';
 import { StoreRegistryTable, type StoreRegistryEntry, type StoreDownloadProgress, type ModelCardInfo } from '../layout/StoreRegistryTable';
 import { ModelSearchModal } from './ModelSearchModal';
+import { FiTrash2, FiSearch, FiCheck } from 'react-icons/fi';
 import { Button } from '../common/Button';
 import { addToast } from '../../hooks/useToast';
 
@@ -140,19 +141,8 @@ function formatBytes(bytes: number): string {
   return `${val.toFixed(val >= 10 ? 0 : 1)}${units[i]}`;
 }
 
-const TrashIcon = () => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <polyline points="3 6 5 6 21 6" />
-    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-  </svg>
-);
-
-const SearchIcon = () => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="11" cy="11" r="8" />
-    <line x1="21" y1="21" x2="16.65" y2="16.65" />
-  </svg>
-);
+const TrashIcon = () => <FiTrash2 size={14} />;
+const SearchIcon = () => <FiSearch size={14} />;
 
 function formatSpeed(bps: number): string {
   if (!bps || bps <= 0) return '--';
@@ -519,11 +509,7 @@ function CellContent({ cell }: { cell: CellStatus }) {
 }
 
 function CheckIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="20 6 9 17 4 12" />
-    </svg>
-  );
+  return <FiCheck size={20} color="#4ade80" strokeWidth={2.5} />;
 }
 
 /* ── Styles ───────────────────────────────────────────── */

@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import styled from 'styled-components';
+import { FiAlertTriangle, FiX } from 'react-icons/fi';
 import type { TopologyData } from '../../types/topology';
 
 interface ClusterWarningsProps {
@@ -12,8 +13,7 @@ interface VersionEntry {
   commit: string;
 }
 
-const WARNING_ICON = 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z';
-const CLOSE_ICON = 'M6 18L18 6M6 6l12 12';
+// Icons now from react-icons
 
 export function ClusterWarnings({ topology }: ClusterWarningsProps) {
   const nodes = topology?.nodes;
@@ -51,12 +51,10 @@ export function ClusterWarnings({ topology }: ClusterWarningsProps) {
     <WarningsBar>
       {showVersion && (
         <WarningPill $color="error">
-          <WarningIcon d={WARNING_ICON} $color="error" />
+          <WarningIcon $color="error" />
           <WarningLabel $color="error">VERSION MISMATCH</WarningLabel>
           <DismissButton $color="error" onClick={() => setVersionDismissed(true)} aria-label="Dismiss">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d={CLOSE_ICON} />
-            </svg>
+            <FiX size={14} />
           </DismissButton>
           <Tooltip className="warning-tooltip" $color="error">
             <TooltipInner $color="error">
@@ -83,12 +81,10 @@ export function ClusterWarnings({ topology }: ClusterWarningsProps) {
 
       {showRdma && (
         <WarningPill $color="warning">
-          <WarningIcon d={WARNING_ICON} $color="warning" />
+          <WarningIcon $color="warning" />
           <WarningLabel $color="warning">RDMA NOT AVAILABLE</WarningLabel>
           <DismissButton $color="warning" onClick={() => setRdmaDismissed(true)} aria-label="Dismiss">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d={CLOSE_ICON} />
-            </svg>
+            <FiX size={14} />
           </DismissButton>
           <Tooltip className="warning-tooltip" $color="warning">
             <TooltipInner $color="warning">
@@ -164,21 +160,9 @@ const WarningLabel = styled.span<{ $color: ColorKey }>`
   letter-spacing: 0.5px;
 `;
 
-function WarningIcon({ d, $color }: { d: string; $color: ColorKey }) {
+function WarningIcon({ $color }: { d?: string; $color: ColorKey }) {
   return (
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke={colorMap[$color].emphasis}
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      style={{ flexShrink: 0 }}
-    >
-      <path d={d} />
-    </svg>
+    <FiAlertTriangle size={18} color={colorMap[$color].emphasis} style={{ flexShrink: 0 }} />
   );
 }
 

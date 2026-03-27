@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styled from 'styled-components';
+import { FiX } from 'react-icons/fi';
 import { ModelBrowser } from '../models/ModelBrowser';
 import type { ModelInfo, HuggingFaceModel, DownloadAvailability } from '../../types/models';
 import { addToast } from '../../hooks/useToast';
@@ -126,9 +127,7 @@ export function ModelSearchModal({
         <ModalHeader>
           <ModalTitle>Find Models</ModalTitle>
           <CloseButton onClick={onClose} aria-label="Close">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            <FiX size={20} />
           </CloseButton>
         </ModalHeader>
         <ModalBody>

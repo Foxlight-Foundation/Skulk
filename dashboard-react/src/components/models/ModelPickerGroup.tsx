@@ -1,4 +1,5 @@
 import styled, { css, keyframes } from 'styled-components';
+import { FiDownload, FiCheck } from 'react-icons/fi';
 import type {
   ModelGroup,
   ModelInfo,
@@ -170,19 +171,8 @@ const FavStar = styled.button<{ $active: boolean }>`
   }
 `;
 
-const DownloadIcon = () => (
-  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2">
-    <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
-    <polyline points="7 10 12 15 17 10" />
-    <line x1="12" y1="15" x2="12" y2="3" />
-  </svg>
-);
-
-const CheckMark = () => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5">
-    <polyline points="20 6 9 17 4 12" />
-  </svg>
-);
+const DownloadIcon = () => <FiDownload size={14} color="#22c55e" />;
+const CheckMark = () => <FiCheck size={16} color="#22c55e" strokeWidth={2.5} />;
 
 const VariantList = styled.div`
   padding: 4px 0 4px 32px;
