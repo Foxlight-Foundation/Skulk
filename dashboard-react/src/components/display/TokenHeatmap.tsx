@@ -67,7 +67,7 @@ const Tooltip = styled.div<{ $x: number; $y: number }>`
   border-radius: 12px;
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
   padding: 10px 12px;
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
 
   &::after {
     content: '';
@@ -94,7 +94,7 @@ const TooltipToken = styled.span`
 `;
 
 const LogprobText = styled.div`
-  font-size: 10px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: rgba(156, 163, 175, 0.8);
   margin-bottom: 8px;
@@ -105,7 +105,7 @@ const AltRow = styled.div`
   align-items: center;
   justify-content: space-between;
   font-family: ${({ theme }) => theme.fonts.mono};
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   padding: 2px 0;
   color: rgba(209, 213, 219, 0.8);
 `;

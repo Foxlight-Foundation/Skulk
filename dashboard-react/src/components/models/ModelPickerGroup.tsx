@@ -8,6 +8,7 @@ import type {
   PickerMode,
 } from '../../types/models';
 import { formatBytes } from '../../utils/format';
+import { InfoTooltip } from '../common/InfoTooltip';
 
 export interface ModelPickerGroupProps {
   group: ModelGroup;
@@ -114,7 +115,7 @@ const Row = styled.div<{ $disabled: boolean; $highlighted: boolean }>`
 `;
 
 const Chevron = styled.span<{ $open: boolean }>`
-  font-size: 10px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
   color: ${({ theme }) => theme.colors.textMuted};
   transition: transform 0.15s;
   width: 14px;
@@ -124,7 +125,7 @@ const Chevron = styled.span<{ $open: boolean }>`
 
 const Name = styled.span`
   flex: 1;
-  font-size: 13px;
+  font-size: ${({ theme }) => theme.fontSizes.tableBody};
   font-weight: 500;
   color: ${({ theme }) => theme.colors.text};
   white-space: nowrap;
@@ -133,12 +134,12 @@ const Name = styled.span`
 `;
 
 const Caps = styled.span`
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
   margin-left: 4px;
 `;
 
 const Badge = styled.span<{ $color?: string }>`
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   padding: 2px 6px;
   border-radius: ${({ theme }) => theme.radii.sm};
   background: ${({ theme }) => theme.colors.surfaceHover};
@@ -161,21 +162,11 @@ const StatusDot = styled.span<{ $class: string }>`
 const FavStar = styled.button<{ $active: boolean }>`
   all: unset;
   cursor: pointer;
-  font-size: 14px;
+  font-size: ${({ theme }) => theme.fontSizes.md};
   color: ${({ $active }) => ($active ? '#fbbf24' : '#555')};
   transition: color 0.15s;
   &:hover {
     color: #fbbf24;
-  }
-`;
-
-const InfoBtn = styled.button`
-  all: unset;
-  cursor: pointer;
-  font-size: 12px;
-  color: ${({ theme }) => theme.colors.textMuted};
-  &:hover {
-    color: ${({ theme }) => theme.colors.text};
   }
 `;
 
@@ -207,7 +198,7 @@ const VariantRow = styled.div`
   padding: 6px 12px;
   border-radius: ${({ theme }) => theme.radii.sm};
   cursor: pointer;
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
   color: ${({ theme }) => theme.colors.textSecondary};
   transition: background 0.15s;
 
@@ -216,7 +207,56 @@ const VariantRow = styled.div`
   }
 `;
 
+const InfoIconWrapper = styled.span`
+  transform: translateY(2px);
+`;
+
 /* ---------- component ---------- */
+
+function ModelGroupInfo({ group }: { group: ModelGroup }) {
+  const v = group.smallestVariant;
+  return (
+    <div style={{ minWidth: 220 }}>
+      <div style={{ color: '#FFD700', fontWeight: 600, marginBottom: 6 }}>
+        {group.name}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
+        {v.family && (
+          <>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Family</span>
+            <span>{v.family}</span>
+          </>
+        )}
+        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Variants</span>
+        <span>{group.variants.length}</span>
+        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Smallest</span>
+        <span>{v.storage_size_megabytes ? formatBytes(v.storage_size_megabytes * 1024 * 1024) : '—'}</span>
+        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Tensor parallel</span>
+        <span style={{ color: v.supports_tensor ? '#4ade80' : 'rgba(255,255,255,0.7)' }}>
+          {v.supports_tensor ? 'Yes' : 'No'}
+        </span>
+        {group.capabilities.length > 0 && (
+          <>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Capabilities</span>
+            <span>{group.capabilities.join(', ')}</span>
+          </>
+        )}
+      </div>
+      {group.hasMultipleVariants && (
+        <div style={{ marginTop: 8, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 6 }}>
+          <div style={{ color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
+            Quantizations
+          </div>
+          {group.variants.map((variant) => (
+            <div key={variant.id} style={{ color: 'rgba(255,255,255,0.6)' }}>
+              {variant.quantization || '—'} · {variant.storage_size_megabytes ? formatBytes(variant.storage_size_megabytes * 1024 * 1024) : '—'}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function ModelPickerGroup({
   group,
@@ -229,11 +269,11 @@ export function ModelPickerGroup({
   onToggleExpand,
   onSelectModel,
   onToggleFavorite,
-  onShowInfo,
+  onShowInfo: _onShowInfo,
   downloadStatusMap,
   launchedAt,
   instanceStatuses,
-  mode = 'launch',
+  mode: _mode = 'launch',
 }: ModelPickerGroupProps) {
   const { variants, hasMultipleVariants } = group;
   const singleVariant = !hasMultipleVariants ? variants[0] : null;
@@ -306,14 +346,14 @@ export function ModelPickerGroup({
           <Badge>{timeAgo(launchedAt)}</Badge>
         )}
 
-        {/* Download indicator */}
-        {groupDownload && <DownloadIcon />}
+        {/* Download / in-store indicator */}
+        {groupDownload ? <CheckMark /> : <DownloadIcon />}
 
         {/* Instance status dot */}
         {instanceStatus && <StatusDot $class={instanceStatus.statusClass} />}
 
         {/* Selected check */}
-        {isSelected && <CheckMark />}
+        {isSelected && !groupDownload && <CheckMark />}
 
         {/* Favorite */}
         <FavStar
@@ -328,17 +368,15 @@ export function ModelPickerGroup({
         </FavStar>
 
         {/* Info */}
-        {onShowInfo && (
-          <InfoBtn
-            onClick={(e) => {
-              e.stopPropagation();
-              onShowInfo(group);
-            }}
-            title="Model info"
-          >
-            ⓘ
-          </InfoBtn>
-        )}
+        <InfoIconWrapper onClick={(e) => e.stopPropagation()}>
+          <InfoTooltip
+            filled
+            size={16}
+            placement="right"
+            delay={100}
+            content={<ModelGroupInfo group={group} />}
+          />
+        </InfoIconWrapper>
       </Row>
 
       {/* Expanded variants */}
@@ -356,9 +394,8 @@ export function ModelPickerGroup({
                 <span style={{ color: fitColor(vFit), flex: 1 }}>
                   {sizeText(v.storage_size_megabytes)}
                 </span>
-                {vDownload?.available && <DownloadIcon />}
+                {vDownload?.available ? <CheckMark /> : <DownloadIcon />}
                 {vInstance && <StatusDot $class={vInstance.statusClass} />}
-                {vSelected && <CheckMark />}
               </VariantRow>
             );
           })}

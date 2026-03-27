@@ -18,9 +18,15 @@ export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElemen
 /* ---- size tokens ---- */
 
 const sizeTokens = {
-  sm: { height: '28px', padding: '0 8px', fontSize: '10px', iconSize: '28px' },
-  md: { height: '34px', padding: '0 12px', fontSize: '11px', iconSize: '34px' },
-  lg: { height: '40px', padding: '0 16px', fontSize: '12px', iconSize: '40px' },
+  sm: { height: '30px', padding: '0 10px', iconSize: '30px' },
+  md: { height: '36px', padding: '0 14px', iconSize: '36px' },
+  lg: { height: '42px', padding: '0 18px', iconSize: '42px' },
+};
+
+const sizeFontMap: Record<ButtonSize, string> = {
+  sm: 'xs',
+  md: 'sm',
+  lg: 'nav',
 };
 
 /* ---- variant styles ---- */
@@ -126,7 +132,7 @@ const StyledButton = styled.button<{
 
   /* Size */
   height: ${({ $size }) => sizeTokens[$size].height};
-  font-size: ${({ $size }) => sizeTokens[$size].fontSize};
+  font-size: ${({ $size, theme }) => theme.fontSizes[sizeFontMap[$size] as keyof typeof theme.fontSizes]};
   ${({ $icon, $size }) =>
     $icon
       ? css`

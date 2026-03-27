@@ -107,8 +107,6 @@ export function FamilySidebar({
         <FamilyLogos family="huggingface" />
       </NavButton>
 
-      <Divider />
-
       {/* Model families */}
       {families.map((f) => (
         <NavButton

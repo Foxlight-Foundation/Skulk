@@ -54,7 +54,7 @@ const Panel = styled.div`
   flex-wrap: wrap;
   align-items: center;
   gap: 12px;
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.textSecondary};
 `;
@@ -68,7 +68,7 @@ const ParamGroup = styled.div`
 const Label = styled.span`
   text-transform: uppercase;
   letter-spacing: 1px;
-  font-size: 10px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
   color: ${({ theme }) => theme.colors.textMuted};
 `;
 

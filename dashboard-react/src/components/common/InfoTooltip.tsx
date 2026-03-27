@@ -11,6 +11,7 @@ import {
   useDismiss,
   useRole,
   useInteractions,
+  safePolygon,
   FloatingPortal,
   FloatingArrow,
   type Placement,
@@ -26,6 +27,8 @@ export interface InfoTooltipProps {
   delay?: number;
   /** Fill the default info icon. Default false (outline only). */
   filled?: boolean;
+  /** Icon size in px. Default 20. */
+  size?: number;
   /** Custom trigger element. Defaults to info icon. */
   children?: React.ReactNode;
   className?: string;
@@ -45,13 +48,13 @@ const Trigger = styled.span`
 `;
 
 const TooltipBox = styled.div`
-  max-width: 280px;
-  padding: 8px 12px;
+  max-width: 360px;
+  padding: 10px 14px;
   background: #1a1a1a;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: ${({ theme }) => theme.radii.md};
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.textSecondary};
   line-height: 1.5;
@@ -73,6 +76,7 @@ export function InfoTooltip({
   placement = 'top',
   delay = 200,
   filled = false,
+  size = 20,
   children,
   className,
 }: InfoTooltipProps) {
@@ -92,7 +96,10 @@ export function InfoTooltip({
     ],
   });
 
-  const hover = useHover(context, { delay: { open: delay, close: 0 } });
+  const hover = useHover(context, {
+    delay: { open: delay, close: 150 },
+    handleClose: safePolygon({ blockPointerEvents: false }),
+  });
   const focus = useFocus(context);
   const dismiss = useDismiss(context);
   const role = useRole(context, { role: 'tooltip' });
@@ -112,7 +119,7 @@ export function InfoTooltip({
         className={className}
         tabIndex={0}
       >
-        {children ?? <InfoIcon filled={filled} />}
+        {children ?? <InfoIcon filled={filled} size={size} />}
       </Trigger>
 
       {isOpen && (

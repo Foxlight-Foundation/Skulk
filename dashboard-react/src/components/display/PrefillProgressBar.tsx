@@ -44,7 +44,7 @@ const LabelRow = styled.div`
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   color: ${({ theme }) => theme.colors.textSecondary};
   margin-bottom: 4px;
 `;
@@ -72,7 +72,7 @@ const FooterRow = styled.div`
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: rgba(179, 179, 179, 0.7);
   margin-top: 4px;

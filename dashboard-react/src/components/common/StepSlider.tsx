@@ -84,7 +84,7 @@ const Dot = styled.span<{ $active: boolean; $size: number; $inactiveSize: number
 `;
 
 const Label = styled.span<{ $active: boolean }>`
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ $active }) => ($active ? '#FFD700' : 'rgba(179, 179, 179, 0.6)')};
   font-weight: ${({ $active }) => ($active ? 600 : 400)};

@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import styled, { css, keyframes } from 'styled-components';
 import { formatBytes } from '../../utils/format';
 import { Button } from '../common/Button';
+import { InfoTooltip } from '../common/InfoTooltip';
 
 /* ================================================================
    Types
@@ -10,7 +11,7 @@ import { Button } from '../common/Button';
 export interface StoreRegistryEntry {
   model_id: string;
   total_bytes: number;
-  files: Array<{ name: string }>;
+  files: string[];
   downloaded_at: string;
 }
 
@@ -20,13 +21,22 @@ export interface StoreDownloadProgress {
   status: string;
 }
 
+export interface ModelCardInfo {
+  family?: string;
+  quantization?: string;
+  baseModel?: string;
+  supportsTensor?: boolean;
+  capabilities?: string[];
+}
+
 export interface StoreRegistryTableProps {
   entries: StoreRegistryEntry[];
   activeDownloads?: StoreDownloadProgress[];
   loading?: boolean;
   activeModelIds?: string[];
+  modelCards?: Record<string, ModelCardInfo>;
+  actions?: React.ReactNode;
   onRefresh: () => void;
-  onInfo: (entry: StoreRegistryEntry) => void;
   onDelete: (entry: StoreRegistryEntry, isActive: boolean) => void;
 }
 
@@ -69,8 +79,14 @@ const HeaderRow = styled.div`
   justify-content: space-between;
 `;
 
+const HeaderActions = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+`;
+
 const HeaderText = styled.span`
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.textSecondary};
 `;
@@ -90,7 +106,7 @@ const EmptyBox = styled.div`
   background: rgba(0, 0, 0, 0.3);
   padding: 24px;
   text-align: center;
-  font-size: 13px;
+  font-size: ${({ theme }) => theme.fontSizes.tableBody};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.textMuted};
 `;
@@ -107,7 +123,7 @@ const THead = styled.div`
   gap: 8px;
   padding: 8px 12px;
   background: rgba(0, 0, 0, 0.4);
-  font-size: 10px;
+  font-size: ${({ theme }) => theme.fontSizes.tableHead};
   font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   letter-spacing: 1.5px;
@@ -138,7 +154,7 @@ const ModelCell = styled.div`
 `;
 
 const ModelId = styled.span`
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.tableBody};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.text};
   white-space: nowrap;
@@ -151,7 +167,7 @@ const ActiveBadge = styled.span`
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   color: #4ade80;
@@ -170,7 +186,7 @@ const PulseDot = styled.span`
 `;
 
 const Cell = styled.div<{ $align?: string }>`
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.tableBody};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.textSecondary};
   text-align: ${({ $align }) => $align ?? 'left'};
@@ -193,15 +209,16 @@ const ProgressFill = styled.div<{ $pct: number }>`
 `;
 
 const ProgressText = styled.span`
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: #FFD700;
 `;
 
 const ActionsCell = styled.div`
   display: flex;
-  gap: 4px;
-  opacity: 0.4;
+  align-items: center;
+  gap: 6px;
+  opacity: 0.7;
   transition: opacity 0.15s;
   ${TRow}:hover & { opacity: 1; }
 `;
@@ -211,13 +228,99 @@ const ActionsCell = styled.div`
    Component
    ================================================================ */
 
+const LinkIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+    <polyline points="15 3 21 3 21 9" />
+    <line x1="10" y1="14" x2="21" y2="3" />
+  </svg>
+);
+
+function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: ModelCardInfo }) {
+  const hfUrl = entry.model_id.includes('/')
+    ? `https://huggingface.co/${entry.model_id}`
+    : null;
+
+  return (
+    <div style={{ minWidth: 240 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+        <span style={{ color: '#FFD700', fontWeight: 600 }}>
+          {entry.model_id}
+        </span>
+        {hfUrl && (
+          <a
+            href={hfUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: 'rgba(255,255,255,0.5)', display: 'flex', transition: 'color 0.15s' }}
+            onMouseEnter={(e) => { e.currentTarget.style.color = '#FFD700'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.5)'; }}
+            title="Open on HuggingFace"
+          >
+            <LinkIcon />
+          </a>
+        )}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
+        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Size</span>
+        <span>{formatBytes(entry.total_bytes)}</span>
+        {card?.baseModel && (
+          <>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Base model</span>
+            <span>{card.baseModel}</span>
+          </>
+        )}
+        {card?.family && (
+          <>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Family</span>
+            <span>{card.family}</span>
+          </>
+        )}
+        {card?.quantization && (
+          <>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Quantization</span>
+            <span>{card.quantization}</span>
+          </>
+        )}
+        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Tensor parallel</span>
+        <span style={{ color: card?.supportsTensor ? '#4ade80' : 'rgba(255,255,255,0.7)' }}>
+          {card?.supportsTensor ? 'Yes' : 'No'}
+        </span>
+        {card?.capabilities && card.capabilities.length > 0 && (
+          <>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Capabilities</span>
+            <span>{card.capabilities.join(', ')}</span>
+          </>
+        )}
+        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Files</span>
+        <span>{entry.files.length}</span>
+        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Downloaded</span>
+        <span>{new Date(entry.downloaded_at).toLocaleString()}</span>
+      </div>
+      {entry.files.length > 0 && (
+        <div style={{ marginTop: 8, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 6 }}>
+          <div style={{ color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
+            Files
+          </div>
+          <div style={{ color: 'rgba(255,255,255,0.6)', maxHeight: 120, overflowY: 'auto' }}>
+            {entry.files.map((f) => (
+              <div key={f}>{f}</div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function StoreRegistryTable({
   entries,
   activeDownloads = [],
   loading = false,
   activeModelIds = [],
+  modelCards = {},
+  actions,
   onRefresh,
-  onInfo,
   onDelete,
 }: StoreRegistryTableProps) {
   const registeredIds = useMemo(() => new Set(entries.map((e) => e.model_id)), [entries]);
@@ -241,7 +344,10 @@ export function StoreRegistryTable({
           {entries.length} model{entries.length !== 1 ? 's' : ''} in store
           {downloadingCount > 0 && `, ${downloadingCount} downloading`}
         </HeaderText>
-        <Button variant="outline" size="sm" onClick={onRefresh}>Refresh</Button>
+        <HeaderActions>
+          {actions}
+          <Button variant="outline" size="sm" onClick={onRefresh}>Refresh</Button>
+        </HeaderActions>
       </HeaderRow>
 
       {loading ? (
@@ -266,8 +372,8 @@ export function StoreRegistryTable({
               <ModelCell>
                 <ModelId title={dl.modelId}>{dl.modelId}</ModelId>
               </ModelCell>
-              <Cell $align="right">—</Cell>
-              <Cell $align="right">—</Cell>
+              <Cell />
+              <Cell />
               <Cell $align="right">
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
                   <ProgressTrack>
@@ -307,13 +413,14 @@ export function StoreRegistryTable({
                   )}
                 </Cell>
                 <ActionsCell>
-                  <Button variant="ghost" size="sm" icon onClick={() => onInfo(entry)} title="Model info">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" />
-                    </svg>
-                  </Button>
+                  <InfoTooltip
+                    content={<ModelInfoContent entry={entry} card={modelCards[entry.model_id]} />}
+                    placement="left"
+                    filled
+                    delay={100}
+                  />
                   <Button variant="danger" size="sm" icon onClick={() => onDelete(entry, active)} title="Delete model">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
                     </svg>
                   </Button>

@@ -29,7 +29,7 @@ const ClearButton = styled.button`
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   color: ${({ theme }) => theme.colors.textMuted};
   transition: color 0.15s;
 

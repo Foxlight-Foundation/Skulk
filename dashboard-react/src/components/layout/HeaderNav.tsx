@@ -73,7 +73,7 @@ const LogoBtn = styled.button<{ $disabled: boolean }>`
 `;
 
 const LogoText = styled.span`
-  font-size: 24px;
+  font-size: ${({ theme }) => theme.fontSizes.xxl};
   font-weight: 700;
   font-family: ${({ theme }) => theme.fonts.mono};
   color: #FFD700;
@@ -88,18 +88,18 @@ const NavLink = styled.button<{ $active?: boolean }>`
   gap: 6px;
   padding: 6px 12px;
   border-radius: ${({ theme }) => theme.radii.md};
-  border: 1px solid ${({ $active }) => $active ? 'rgba(255, 215, 0, 0.5)' : 'rgba(179, 179, 179, 0.3)'};
-  background: ${({ $active }) => $active ? 'rgba(255, 215, 0, 0.08)' : 'transparent'};
-  font-size: 11px;
+  border: 1px solid ${({ $active, theme }) => $active ? theme.colors.goldDim : theme.colors.border};
+  background: ${({ $active, theme }) => $active ? theme.colors.goldBg : 'transparent'};
+  font-size: ${({ theme }) => theme.fontSizes.nav};
   font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   letter-spacing: 1px;
-  color: ${({ $active }) => $active ? '#FFD700' : 'rgba(179, 179, 179, 0.8)'};
+  color: ${({ $active, theme }) => $active ? theme.colors.gold : theme.colors.textSecondary};
   transition: all 0.15s;
 
   &:hover {
-    border-color: rgba(255, 215, 0, 0.5);
-    color: #FFD700;
+    border-color: ${({ theme }) => theme.colors.goldDim};
+    color: ${({ theme }) => theme.colors.gold};
   }
 `;
 
@@ -220,7 +220,7 @@ export function HeaderNav({
           </ToggleBtn>
         )}
         <LogoBtn $disabled={!showHome} onClick={showHome ? () => navigate('home') : undefined}>
-          <LogoText>FoxmemEX0</LogoText>
+          <LogoText>Skulk</LogoText>
         </LogoBtn>
       </LeftGroup>
 

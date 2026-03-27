@@ -55,7 +55,7 @@ const EmptyState = styled.div`
   font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   letter-spacing: 2px;
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
 `;
 
 const Circle = styled.div<{ $size: number; $opacity: number }>`
@@ -90,7 +90,7 @@ const MsgHeader = styled.div`
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
-  font-size: 10px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   letter-spacing: 1px;
@@ -122,7 +122,7 @@ const Spacer = styled.span`flex: 1;`;
 
 const UserContent = styled.div`
   font-family: ${({ theme }) => theme.fonts.mono};
-  font-size: 14px;
+  font-size: ${({ theme }) => theme.fontSizes.md};
   white-space: pre-wrap;
   line-height: 1.5;
   color: ${({ theme }) => theme.colors.text};
@@ -160,7 +160,7 @@ const EditArea = styled.textarea`
   all: unset;
   width: 100%;
   font-family: ${({ theme }) => theme.fonts.mono};
-  font-size: 14px;
+  font-size: ${({ theme }) => theme.fontSizes.md};
   color: ${({ theme }) => theme.colors.text};
   background: ${({ theme }) => theme.colors.bg};
   border: 1px solid rgba(255, 215, 0, 0.4);
@@ -184,7 +184,7 @@ const ConfirmBox = styled.div`
   margin-top: 8px;
   border: 1px solid rgba(239, 68, 68, 0.3);
   border-radius: ${({ theme }) => theme.radii.sm};
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: #fca5a5;
 `;
@@ -205,7 +205,7 @@ const ThinkingHeader = styled.button`
   gap: 6px;
   width: 100%;
   padding: 6px 10px;
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: rgba(255, 215, 0, 0.6);
   transition: background 0.15s;
@@ -220,7 +220,7 @@ const ThinkingChevron = styled.span<{ $open: boolean }>`
 
 const ThinkingContent = styled.div`
   padding: 8px 10px;
-  font-size: 13px;
+  font-size: ${({ theme }) => theme.fontSizes.tableBody};
   color: ${({ theme }) => theme.colors.textSecondary};
   border-top: 1px solid rgba(255, 215, 0, 0.1);
 `;
@@ -259,7 +259,7 @@ const AttachThumb = styled.img`
 `;
 
 const AttachFile = styled.span`
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
   color: ${({ theme }) => theme.colors.textMuted};
 `;
 
@@ -392,7 +392,7 @@ export function ChatMessages({
             {msg.role === 'assistant' ? (
               <>
                 <Dot $color="#FFD700" />
-                <RoleLabel $role="assistant">EXO</RoleLabel>
+                <RoleLabel $role="assistant">SKULK</RoleLabel>
                 <Timestamp>{formatTime(msg.timestamp)}</Timestamp>
                 {msg.ttftMs != null && <StatLabel>TTFT <span>{Math.round(msg.ttftMs)}ms</span></StatLabel>}
                 {msg.tps != null && <StatLabel>TPS <span>{msg.tps.toFixed(1)}</span></StatLabel>}
@@ -527,7 +527,7 @@ export function ChatMessages({
         <MessageCard $role="assistant">
           <MsgHeader>
             <Dot $color="#FFD700" />
-            <RoleLabel $role="assistant">EXO</RoleLabel>
+            <RoleLabel $role="assistant">SKULK</RoleLabel>
           </MsgHeader>
           <MarkdownContent content={streamingContent} />
           <Cursor />

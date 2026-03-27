@@ -119,7 +119,7 @@ function processMarkdown(content: string): ProcessedMarkdown {
 const Container = styled.div`
   line-height: 1.6;
   color: ${({ theme }) => theme.colors.text};
-  font-size: 14px;
+  font-size: ${({ theme }) => theme.fontSizes.md};
 
   /* Headings */
   h1, h2 { color: #FFD700; }
@@ -149,7 +149,7 @@ const Container = styled.div`
   /* Tables */
   table { width: 100%; border-collapse: collapse; margin: 8px 0; }
   th { background: rgba(255, 215, 0, 0.1); text-align: left; }
-  th, td { border: 1px solid ${({ theme }) => theme.colors.border}; padding: 6px 10px; font-size: 13px; }
+  th, td { border: 1px solid ${({ theme }) => theme.colors.border}; padding: 6px 10px; font-size: ${({ theme }) => theme.fontSizes.tableBody}; }
 
   /* Inline code */
   .mc-inline-code {
@@ -181,7 +181,7 @@ const Container = styled.div`
   }
 
   .mc-code-lang {
-    font-size: 11px;
+    font-size: ${({ theme }) => theme.fontSizes.label};
     font-family: ${({ theme }) => theme.fonts.mono};
     text-transform: uppercase;
     letter-spacing: 1px;
@@ -191,7 +191,7 @@ const Container = styled.div`
   .mc-copy-btn {
     all: unset;
     cursor: pointer;
-    font-size: 11px;
+    font-size: ${({ theme }) => theme.fontSizes.label};
     font-family: ${({ theme }) => theme.fonts.mono};
     color: rgba(255, 255, 255, 0.4);
     transition: color 0.15s;
@@ -203,7 +203,7 @@ const Container = styled.div`
     padding: 12px;
     overflow-x: auto;
     font-family: ${({ theme }) => theme.fonts.mono};
-    font-size: 13px;
+    font-size: ${({ theme }) => theme.fontSizes.tableBody};
     line-height: 1.5;
   }
 
@@ -235,7 +235,7 @@ const Container = styled.div`
   .mc-math-error {
     color: #f87171;
     font-family: ${({ theme }) => theme.fonts.mono};
-    font-size: 12px;
+    font-size: ${({ theme }) => theme.fontSizes.sm};
     background: rgba(239, 68, 68, 0.1);
     padding: 2px 6px;
     border-radius: 3px;

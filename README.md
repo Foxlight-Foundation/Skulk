@@ -1,37 +1,29 @@
-# **Foxmemory EXO**
+# **Skulk**
 
 <div align="center">
-<picture>
-  <source media="(prefers-color-scheme: light)" srcset="/docs/imgs/exo-logo-black-bg.jpg">
-  <img alt="exo logo" src="/docs/imgs/exo-logo-transparent.png" width="50%" height="50%">
-</picture>
+
 </div>
 
+### **Skulk** (*noun*): A group of foxes.
+>*A skulk moves together without a central authority telling each fox what to do; the skulk coordinates naturally, quietly, with each member contributing to the whole.*
 
-**This is the Foxlight fork of exo.** It extends upstream exo with a
-**centralized model store** — one node in your cluster holds all model
-files and serves them to every other node over the local network. No
-more redundant HuggingFace downloads, no wasted storage on every
-machine, and full offline capability after the first download.
+### **What is it?**
 
-**What this fork adds:**
-- **Model Store** — designate one node as the store host; all other nodes stage models from it over Thunderbolt/LAN instead of downloading from HuggingFace independently
-- **Store-first downloads** — when a model is launched that isn't in the store, the store host downloads it from HuggingFace on behalf of the entire cluster (nodes never download from HF directly)
-- **Settings page** (`/#/settings`) — configure the store from the dashboard with a one-click "this node is the store host" toggle and a filesystem browser for selecting the store path
-- **Store Registry** (`/#/downloads`) — browse models in the store, see download progress, find and download new models, delete models, see which models are active
-- **Cluster-wide config sync** — config changes made from the dashboard are broadcast to all nodes automatically via gossipsub
+**Skulk is a fork of EXO.** It extends upstream exo with a **model store** allowing a node in your cluster to hold all model files and serve them to every other node over the local network. This prevents wasted storage and allows for the use of either locally or network attached storage, and also provides for full offline capability after the first download.
 
-See [docs/model-store.md](docs/model-store.md) for full documentation.
+### **What else does Skulk do?**
+- **Store-first downloads:** when a model is launched that isn't in the store, Skulk downloads it once and then locally distributes it to the nodes at time of invokation.
+- **Settings panel:** you can configure the store from the dashboard with a one-click "this node is the store host" toggle and a filesystem browser for selecting the store path.
+- **Store Registry:** you can browse models in the store, see download progress, find and download new models, delete models, and see which models are active.
+- **Cluster-wide config sync:** config changes made from the dashboard are broadcast to all skulk nodes automatically via gossipsub.
 
-**Coming soon:**
-- **Store host failover** — automatic fallback when the store host goes offline, with optional secondary store host and registry replication
-- **Shard-aware staging** — only stage the safetensors files needed for a node's assigned layers, reducing local storage requirements and enabling models on nodes with less RAM
-- **Offline/air-gapped hardening** — CLI commands for store management (`exo store list`, `exo store pull`), store integrity checks with hash verification, and cleaner error messaging
-- **Auto-detect existing models** — scan a selected store path for existing model directories and auto-register them
-- **Storage recommendations** — show available disk space per volume in the directory browser, highlight the best option, warn on low space
-- **Manual shard placement** — control which layers run on which nodes, adjust sharding to target specific machines and manage memory pressure on a per-node basis
-- **Sub-cluster definitions** — define node groups so a model can be targeted to only certain nodes, enabling model-specific sub-clusters within a single physical cluster (e.g. dedicate 2 nodes to a coding model and 2 to a chat model simultaneously)
-- **Cross-platform support** — Linux CUDA and CPU support for the model store, with platform-aware filesystem browsing
+- **Store failover:** Skulk can automatically failover to a new store host when the current store host goes offline with automated store host and registry replication.
+- **Shard-aware staging:** Skulk only stages the safetensors files needed for a node's assigned layers, reducing local storage requirements and enabling models on nodes with less RAM.
+- **Offline/air-gapped hardening:** Skulk adds CLI commands for store management (`skulk store list`, `skulk store pull`), adds store integrity checks with hash verification, and cleaner error messaging.
+- **Auto-detect existing models:** Skulk can scan a selected store path for existing model directories and auto-register them.
+- **Storage recommendations:** Skulk can show available disk space per volume in the directory browser, highlight the best option, and warn on low space.
+- **Manual shard placement:** Skulk allows youu to control which layers run on which nodes, and you can adjust sharding to target specific machines and manage memory pressure on a per-node basis.
+- **Sub-cluster definitions:** Skulk allows you to define node groups so a model can be targeted to only certain nodes, enabling model-specific sub-clusters within a single physical cluster (e.g. dedicate 2 nodes to a coding model and 2 to a chat model simultaneously).
 
 ---
 ## About EXO

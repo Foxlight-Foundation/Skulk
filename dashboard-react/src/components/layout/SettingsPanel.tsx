@@ -58,7 +58,7 @@ const Header = styled.div`
 `;
 
 const Title = styled.h2`
-  font-size: 14px;
+  font-size: ${({ theme }) => theme.fontSizes.md};
   font-family: ${({ theme }) => theme.fonts.mono};
   font-weight: 600;
   text-transform: uppercase;
@@ -93,7 +93,7 @@ const Fieldset = styled.fieldset`
 `;
 
 const Legend = styled.legend`
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.mono};
   font-weight: 600;
   text-transform: uppercase;
@@ -113,7 +113,7 @@ const FieldLabel = styled.span`
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.textSecondary};
   white-space: nowrap;
@@ -153,13 +153,13 @@ const StyledField = styled(Field)`
 `;
 
 const ConfigPath = styled.div`
-  font-size: 10px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.textMuted};
 `;
 
 const ErrorText = styled.div`
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: #ef4444;
 `;
@@ -169,7 +169,7 @@ const LoadingText = styled.div`
   align-items: center;
   justify-content: center;
   height: 200px;
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.textMuted};
   text-transform: uppercase;

@@ -4,9 +4,9 @@ import { StoreRegistryTable, type StoreRegistryEntry, type StoreDownloadProgress
 const GB = 1024 * 1024 * 1024;
 
 const sampleEntries: StoreRegistryEntry[] = [
-  { model_id: 'mlx-community/Qwen3-30B-A3B-4bit', total_bytes: 18 * GB, files: [{ name: 'model.safetensors' }, { name: 'config.json' }, { name: 'tokenizer.json' }], downloaded_at: new Date(Date.now() - 3600000).toISOString() },
-  { model_id: 'mlx-community/Llama-3.1-8B-Instruct-4bit', total_bytes: 5 * GB, files: [{ name: 'model.safetensors' }, { name: 'config.json' }], downloaded_at: new Date(Date.now() - 86400000).toISOString() },
-  { model_id: 'mlx-community/DeepSeek-R1-8B-4bit', total_bytes: 5.2 * GB, files: [{ name: 'model-00001.safetensors' }, { name: 'model-00002.safetensors' }, { name: 'config.json' }], downloaded_at: new Date(Date.now() - 604800000).toISOString() },
+  { model_id: 'mlx-community/Qwen3-30B-A3B-4bit', total_bytes: 18 * GB, files: ['model.safetensors', 'config.json', 'tokenizer.json'], downloaded_at: new Date(Date.now() - 3600000).toISOString() },
+  { model_id: 'mlx-community/Llama-3.1-8B-Instruct-4bit', total_bytes: 5 * GB, files: ['model.safetensors', 'config.json'], downloaded_at: new Date(Date.now() - 86400000).toISOString() },
+  { model_id: 'mlx-community/DeepSeek-R1-8B-4bit', total_bytes: 5.2 * GB, files: ['model-00001.safetensors', 'model-00002.safetensors', 'config.json'], downloaded_at: new Date(Date.now() - 604800000).toISOString() },
 ];
 
 const activeDownloads: StoreDownloadProgress[] = [
@@ -29,7 +29,6 @@ export const Default: Story = {
     entries: sampleEntries,
     activeModelIds: ['mlx-community/Qwen3-30B-A3B-4bit'],
     onRefresh: () => {},
-    onInfo: (e) => alert(`Info: ${e.model_id}`),
     onDelete: (e) => alert(`Delete: ${e.model_id}`),
   },
 };
@@ -40,7 +39,6 @@ export const WithDownloads: Story = {
     activeDownloads,
     activeModelIds: ['mlx-community/Qwen3-30B-A3B-4bit'],
     onRefresh: () => {},
-    onInfo: () => {},
     onDelete: () => {},
   },
 };
@@ -50,7 +48,6 @@ export const Loading: Story = {
     entries: [],
     loading: true,
     onRefresh: () => {},
-    onInfo: () => {},
     onDelete: () => {},
   },
 };
@@ -59,7 +56,6 @@ export const Empty: Story = {
   args: {
     entries: [],
     onRefresh: () => {},
-    onInfo: () => {},
     onDelete: () => {},
   },
 };

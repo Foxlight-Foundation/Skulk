@@ -42,7 +42,7 @@ const Thumbnail = styled.img`
 `;
 
 const IconEmoji = styled.span`
-  font-size: 20px;
+  font-size: ${({ theme }) => theme.fontSizes.xl};
   line-height: 1;
 `;
 
@@ -53,7 +53,7 @@ const FileInfo = styled.div`
 `;
 
 const FileName = styled.span`
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: #FFD700;
   white-space: nowrap;
@@ -63,7 +63,7 @@ const FileName = styled.span`
 `;
 
 const FileSize = styled.span`
-  font-size: 10px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
   color: ${({ theme }) => theme.colors.textMuted};
 `;
 

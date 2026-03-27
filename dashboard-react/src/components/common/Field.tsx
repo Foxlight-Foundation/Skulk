@@ -15,19 +15,19 @@ export interface FieldProps extends Omit<React.InputHTMLAttributes<HTMLInputElem
 const sizeStyles: Record<FieldSize, ReturnType<typeof css>> = {
   sm: css`
     height: 30px;
-    font-size: 12px;
+    font-size: ${({ theme }) => theme.fontSizes.sm};
     padding: 0 8px;
     gap: 6px;
   `,
   md: css`
     height: 36px;
-    font-size: 14px;
+    font-size: ${({ theme }) => theme.fontSizes.md};
     padding: 0 10px;
     gap: 8px;
   `,
   lg: css`
     height: 42px;
-    font-size: 15px;
+    font-size: ${({ theme }) => theme.fontSizes.md};
     padding: 0 12px;
     gap: 10px;
   `,

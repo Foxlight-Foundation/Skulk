@@ -27,7 +27,7 @@ const Panel = styled.div`
 `;
 
 const SectionLabel = styled.div`
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;

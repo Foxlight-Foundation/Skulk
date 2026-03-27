@@ -58,7 +58,7 @@ const SearchInput = styled.input`
   background: ${({ theme }) => theme.colors.bg};
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.md};
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.text};
   box-sizing: border-box;
@@ -68,7 +68,7 @@ const SearchInput = styled.input`
 `;
 
 const SectionLabel = styled.div`
-  font-size: 10px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   letter-spacing: 2px;
@@ -98,7 +98,7 @@ const ConvItem = styled.div<{ $active: boolean }>`
 `;
 
 const ConvName = styled.div<{ $active: boolean }>`
-  font-size: 13px;
+  font-size: ${({ theme }) => theme.fontSizes.tableBody};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ $active }) => ($active ? '#FFD700' : '#e5e5e5')};
   white-space: nowrap;
@@ -107,7 +107,7 @@ const ConvName = styled.div<{ $active: boolean }>`
 `;
 
 const ConvDate = styled.div`
-  font-size: 10px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
   color: ${({ theme }) => theme.colors.textMuted};
   margin-top: 2px;
 `;
@@ -132,7 +132,7 @@ const EditInput = styled.input`
   background: ${({ theme }) => theme.colors.bg};
   border: 1px solid rgba(255, 215, 0, 0.4);
   border-radius: ${({ theme }) => theme.radii.sm};
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.text};
   box-sizing: border-box;
@@ -143,7 +143,7 @@ const ConfirmBox = styled.div<{ $danger?: boolean }>`
   margin-top: 4px;
   border: 1px solid ${({ $danger }) => ($danger ? 'rgba(239,68,68,0.3)' : 'rgba(255,215,0,0.2)')};
   border-radius: ${({ theme }) => theme.radii.sm};
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ $danger, theme }) => ($danger ? '#fca5a5' : theme.colors.textSecondary)};
 `;
@@ -162,7 +162,7 @@ const Footer = styled.div`
 
 
 const ConvCount = styled.div`
-  font-size: 10px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.textMuted};
   text-transform: uppercase;
@@ -177,7 +177,7 @@ const EmptyState = styled.div`
   justify-content: center;
   padding: 32px 16px;
   color: ${({ theme }) => theme.colors.textMuted};
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   letter-spacing: 1px;

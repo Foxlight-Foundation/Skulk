@@ -52,29 +52,31 @@ export function ClusterWarnings({ topology }: ClusterWarningsProps) {
       {showVersion && (
         <WarningPill $color="error">
           <WarningIcon d={WARNING_ICON} $color="error" />
-          <WarningLabel $color="error">EXO VERSION MISMATCH</WarningLabel>
+          <WarningLabel $color="error">VERSION MISMATCH</WarningLabel>
           <DismissButton $color="error" onClick={() => setVersionDismissed(true)} aria-label="Dismiss">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d={CLOSE_ICON} />
             </svg>
           </DismissButton>
           <Tooltip className="warning-tooltip" $color="error">
-            <p>
-              Nodes in this cluster are running different versions of exo.
-              This will cause inference failures and unexpected behavior.
-            </p>
-            <NodeList>
-              {versionMismatch.map((n) => (
-                <li key={n.friendlyName}>
-                  {n.friendlyName} — v{n.version} ({n.commit})
-                </li>
-              ))}
-            </NodeList>
-            <p>
-              <Emphasis $color="error">Action required:</Emphasis> Update all
-              nodes to the same version with{' '}
-              <Code>git pull && uv sync</Code>.
-            </p>
+            <TooltipInner $color="error">
+              <p>
+                Nodes in this cluster are running different versions.
+                This will cause inference failures and unexpected behavior.
+              </p>
+              <NodeList>
+                {versionMismatch.map((n) => (
+                  <li key={n.friendlyName}>
+                    {n.friendlyName} — v{n.version} ({n.commit})
+                  </li>
+                ))}
+              </NodeList>
+              <p>
+                <Emphasis $color="error">Action required:</Emphasis> Update all
+                nodes to the same version with{' '}
+                <Code>git pull && uv sync</Code>.
+              </p>
+            </TooltipInner>
           </Tooltip>
         </WarningPill>
       )}
@@ -89,17 +91,19 @@ export function ClusterWarnings({ topology }: ClusterWarningsProps) {
             </svg>
           </DismissButton>
           <Tooltip className="warning-tooltip" $color="warning">
-            <p>
-              macOS reports RDMA as enabled but no RDMA network interfaces
-              exist. This typically means your hardware has Thunderbolt 4
-              ports, which do not support RDMA. Thunderbolt 5 (M4 Pro/Max
-              or newer) is required.
-            </p>
-            <p>
-              <Emphasis $color="warning">Impact:</Emphasis> Tensor parallel
-              (MlxJaccl) is not available. Pipeline parallel (MlxRing) works
-              normally over Thunderbolt.
-            </p>
+            <TooltipInner $color="warning">
+              <p>
+                macOS reports RDMA as enabled but no RDMA network interfaces
+                exist. This typically means your hardware has Thunderbolt 4
+                ports, which do not support RDMA. Thunderbolt 5 (M4 Pro/Max
+                or newer) is required.
+              </p>
+              <p>
+                <Emphasis $color="warning">Impact:</Emphasis> Tensor parallel
+                (MlxJaccl) is not available. Pipeline parallel (MlxRing) works
+                normally over Thunderbolt.
+              </p>
+            </TooltipInner>
           </Tooltip>
         </WarningPill>
       )}
@@ -145,7 +149,8 @@ const WarningPill = styled.div<{ $color: ColorKey }>`
   backdrop-filter: blur(8px);
   cursor: help;
 
-  &:hover > .warning-tooltip {
+  &:hover > .warning-tooltip,
+  & > .warning-tooltip:hover {
     opacity: 1;
     visibility: visible;
   }
@@ -153,7 +158,7 @@ const WarningPill = styled.div<{ $color: ColorKey }>`
 
 const WarningLabel = styled.span<{ $color: ColorKey }>`
   font-family: ${({ theme }) => theme.fonts.mono};
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
   color: ${({ $color }) => colorMap[$color].text};
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -200,21 +205,25 @@ const Tooltip = styled.div<{ $color: ColorKey }>`
   position: absolute;
   top: 100%;
   left: 0;
-  margin-top: 8px;
+  /* padding-top creates an invisible hover bridge between trigger and content */
+  padding-top: 6px;
   width: 320px;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.2s ease, visibility 0.2s ease;
+  z-index: 50;
+`;
+
+const TooltipInner = styled.div<{ $color: ColorKey }>`
   padding: 12px;
   border-radius: 8px;
   border: 1px solid ${({ $color }) => colorMap[$color].border};
   background: rgba(17, 17, 17, 0.95);
   backdrop-filter: blur(8px);
-  opacity: 0;
-  visibility: hidden;
-  transition: all 0.2s ease;
-  z-index: 50;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
 
   p {
-    font-size: 11px;
+    font-size: ${({ theme }) => theme.fontSizes.sm};
     color: rgba(255, 255, 255, 0.8);
     margin: 0 0 8px;
     line-height: 1.5;
@@ -229,7 +238,7 @@ const NodeList = styled.ul`
   list-style: none;
   padding: 0;
   margin: 0 0 8px;
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   color: rgba(255, 255, 255, 0.6);
 
   li {
@@ -243,5 +252,5 @@ const Emphasis = styled.span<{ $color: ColorKey }>`
 
 const Code = styled.code`
   font-family: ${({ theme }) => theme.fonts.mono};
-  font-size: 10px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
 `;

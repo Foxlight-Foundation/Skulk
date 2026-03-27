@@ -64,6 +64,11 @@ const Toolbar = styled.div`
   padding: 12px 16px;
   position: relative;
   flex-shrink: 0;
+
+  & > *:first-child {
+    flex: 1;
+    min-width: 0;
+  }
 `;
 
 const FilterBtn = styled(Button)<{ $active: boolean }>`
@@ -82,7 +87,7 @@ const ListArea = styled.div`
 `;
 
 const SectionHeader = styled.div`
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -94,7 +99,7 @@ const EmptyMsg = styled.div`
   padding: 24px;
   text-align: center;
   color: ${({ theme }) => theme.colors.textMuted};
-  font-size: 13px;
+  font-size: ${({ theme }) => theme.fontSizes.tableBody};
 `;
 
 const FilterIcon = () => (
@@ -143,7 +148,9 @@ export function ModelBrowser({
     picker.filters.downloadedOnly ||
     picker.filters.readyOnly;
 
-  const hfModels = hfSearchResults ?? hfTrendingModels ?? [];
+  const hfModels = (hfSearchResults && hfSearchResults.length > 0)
+    ? hfSearchResults
+    : (picker.searchQuery.trim() ? [] : hfTrendingModels ?? []);
 
   return (
     <Container>
@@ -166,7 +173,7 @@ export function ModelBrowser({
               picker.setSearchQuery(q);
               if (isHf && onHfSearch) onHfSearch(q);
             }}
-            placeholder={isHf ? 'Search HuggingFace Hub…' : 'Search models…'}
+            placeholder={isHf ? 'Search mlx-community models…' : 'Search models…'}
             autoFocus
           />
           {!isHf && (
@@ -196,20 +203,23 @@ export function ModelBrowser({
             /* HuggingFace results */
             <>
               {hfIsSearching && <EmptyMsg>Searching…</EmptyMsg>}
-              {!hfIsSearching && hfModels.length === 0 && (
-                <EmptyMsg>
-                  {picker.searchQuery
-                    ? 'No results found'
-                    : 'Search for models on HuggingFace Hub'}
-                </EmptyMsg>
+              {!hfIsSearching && hfModels.length === 0 && picker.searchQuery && (
+                <EmptyMsg>No results found</EmptyMsg>
+              )}
+              {!picker.searchQuery.trim() && hfModels.length > 0 && (
+                <SectionHeader>Trending</SectionHeader>
               )}
               {hfModels.map((m) => (
                 <HuggingFaceResultItem
                   key={m.id}
                   model={m}
-                  isAdded={existingModelIds.has(m.id)}
+                  isAdded={models.some((mod) => mod.id === m.id)}
+                  isInStore={existingModelIds.has(m.id)}
                   isAdding={false}
-                  onAdd={() => onAddModel?.(m.id)}
+                  onAdd={async () => {
+                    await onAddModel?.(m.id);
+                    onSelect(m.id);
+                  }}
                   onSelect={() => onSelect(m.id)}
                 />
               ))}

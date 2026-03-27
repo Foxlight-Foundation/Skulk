@@ -191,7 +191,7 @@ const Header = styled.div`
 `;
 
 const ModelName = styled.div<{ $canFit: boolean }>`
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.mono};
   letter-spacing: 0.5px;
   color: ${({ $canFit }) => ($canFit ? '#FFD700' : '#f87171')};
@@ -201,7 +201,7 @@ const ModelName = styled.div<{ $canFit: boolean }>`
 `;
 
 const ModelId = styled.div`
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: rgba(179, 179, 179, 0.8);
   white-space: nowrap;
@@ -211,7 +211,7 @@ const ModelId = styled.div`
 `;
 
 const MemorySize = styled.div<{ $canFit: boolean }>`
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ $canFit }) => ($canFit ? '#FFD700' : '#f87171')};
   flex-shrink: 0;
@@ -232,7 +232,7 @@ const BadgeRow = styled.div`
 `;
 
 const Badge = styled.span<{ $color?: string }>`
-  font-size: 10px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.mono};
   letter-spacing: 1px;
   text-transform: uppercase;
@@ -243,7 +243,7 @@ const Badge = styled.span<{ $color?: string }>`
 `;
 
 const TagBadge = styled.span<{ $variant: 'green' | 'purple' }>`
-  font-size: 10px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.mono};
   letter-spacing: 1px;
   text-transform: uppercase;
@@ -256,7 +256,7 @@ const TagBadge = styled.span<{ $variant: 'green' | 'purple' }>`
 `;
 
 const SectionTitle = styled.div`
-  font-size: 10px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.mono};
   letter-spacing: 2px;
   text-transform: uppercase;
@@ -268,7 +268,7 @@ const DownloadRow = styled.div`
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.mono};
 `;
 
@@ -311,7 +311,7 @@ const PreviewBox = styled.div`
 const LaunchBtn = styled(Button)<{ $canFit: boolean; $launching: boolean }>`
   width: 100%;
   letter-spacing: 2px;
-  font-size: 13px;
+  font-size: ${({ theme }) => theme.fontSizes.tableBody};
 
   ${({ $launching }) =>
     $launching &&

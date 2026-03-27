@@ -30,7 +30,7 @@ const Dot = styled.div`
 `;
 
 const Text = styled.span`
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.mono};
   letter-spacing: 1px;
   text-transform: uppercase;

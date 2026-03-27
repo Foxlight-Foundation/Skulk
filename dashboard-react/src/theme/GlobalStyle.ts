@@ -14,6 +14,7 @@ export const GlobalStyle = createGlobalStyle`
 
   body {
     font-family: ${({ theme }) => theme.fonts.body};
+    font-size: ${({ theme }) => theme.fontSizes.md};
     background:
       radial-gradient(ellipse at 0% 0%, #141428 0%, transparent 50%),
       radial-gradient(ellipse at 100% 100%, #141428 0%, transparent 50%),

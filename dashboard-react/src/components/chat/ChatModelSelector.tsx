@@ -101,12 +101,12 @@ const Container = styled.div`
 `;
 
 const Header = styled.div`
-  font-size: 12px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
   color: ${({ theme }) => theme.colors.textSecondary};
 `;
 
 const ClusterName = styled.div`
-  font-size: 16px;
+  font-size: ${({ theme }) => theme.fontSizes.lg};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: #FFD700;
   margin-top: 4px;
@@ -152,7 +152,7 @@ const CardHeader = styled.div`
 `;
 
 const CategoryLabel = styled.span`
-  font-size: 10px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.mono};
   text-transform: uppercase;
   letter-spacing: 1px;
@@ -162,26 +162,26 @@ const CategoryLabel = styled.span`
 
 const InfoBtn = styled.span`
   cursor: help;
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   color: ${({ theme }) => theme.colors.textMuted};
   &:hover { color: ${({ theme }) => theme.colors.text}; }
 `;
 
 const ModelName = styled.div`
-  font-size: 13px;
+  font-size: ${({ theme }) => theme.fontSizes.tableBody};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.text};
 `;
 
 const ModelMeta = styled.div`
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.textMuted};
 `;
 
 
 const Hint = styled.div`
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   color: ${({ theme }) => theme.colors.textMuted};
   max-width: 300px;
 `;
@@ -196,7 +196,7 @@ const Tooltip = styled.div<{ $x: number; $y: number }>`
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 4px 8px;
-  font-size: 11px;
+  font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.mono};
   color: ${({ theme }) => theme.colors.textSecondary};
   white-space: nowrap;
