@@ -232,10 +232,11 @@ const PlayBtn = styled.button`
   height: 28px;
   border-radius: 50%;
   color: ${({ theme }) => theme.colors.gold};
+  background: rgba(255, 215, 0, 0.15);
   transition: background 0.15s, transform 0.1s;
 
   &:hover {
-    background: ${({ theme }) => theme.colors.goldBg};
+    background: rgba(255, 215, 0, 0.3);
     transform: scale(1.1);
   }
 `;
@@ -250,10 +251,11 @@ const StopBtn = styled.button`
   height: 28px;
   border-radius: 50%;
   color: ${({ theme }) => theme.colors.error};
+  background: rgba(239, 68, 68, 0.15);
   transition: background 0.15s, transform 0.1s;
 
   &:hover {
-    background: rgba(239, 68, 68, 0.1);
+    background: rgba(239, 68, 68, 0.3);
     transform: scale(1.1);
   }
 `;
