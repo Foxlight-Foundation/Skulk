@@ -13,6 +13,7 @@ export interface ClusterCardNode {
 }
 
 export interface ClusterCardDownload {
+  nodeId: string;
   nodeName: string;
   percent: number;
 }
@@ -161,7 +162,7 @@ export function ClusterCard({
         <DownloadSection>
           <SectionLabel>Download Progress</SectionLabel>
           {downloads.map((dl) => (
-            <DownloadRow key={dl.nodeName}>
+            <DownloadRow key={dl.nodeId}>
               <DownloadNode>{dl.nodeName}</DownloadNode>
               <DownloadBar>
                 <DownloadFill $pct={dl.percent} />

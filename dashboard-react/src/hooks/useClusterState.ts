@@ -213,7 +213,21 @@ const POLL_INTERVAL = 1000;
 export type RawDownloads = Record<string, unknown[]>;
 export type NodeDiskInfo = Record<string, { total: { inBytes: number }; available: { inBytes: number } }>;
 
-export type RawInstances = Record<string, { MlxRingInstance?: { shardAssignments?: { modelId?: string } }; MlxJacclInstance?: { shardAssignments?: { modelId?: string } } }>;
+export interface RawShardAssignments {
+  modelId?: string;
+  nodeToRunner?: Record<string, string>;
+  runnerToShard?: Record<string, Record<string, unknown>>;
+}
+
+export interface RawInstanceInner {
+  instanceId?: string;
+  shardAssignments?: RawShardAssignments;
+}
+
+export type RawInstances = Record<string, { MlxRingInstance?: RawInstanceInner; MlxJacclInstance?: RawInstanceInner }>;
+
+/** Runner status is a tagged union: e.g. { "RunnerReady": {} } or { "RunnerLoading": { layersLoaded: 5, totalLayers: 32 } } */
+export type RawRunners = Record<string, Record<string, unknown>>;
 
 export interface ClusterState {
   topology: TopologyData | null;
@@ -222,6 +236,7 @@ export interface ClusterState {
   downloads: RawDownloads;
   nodeDisk: NodeDiskInfo;
   instances: RawInstances;
+  runners: RawRunners;
 }
 
 export function useClusterState(): ClusterState {
@@ -231,6 +246,7 @@ export function useClusterState(): ClusterState {
   const [downloads, setDownloads] = useState<RawDownloads>({});
   const [nodeDisk, setNodeDisk] = useState<NodeDiskInfo>({});
   const [instances, setInstances] = useState<RawInstances>({});
+  const [runners, setRunners] = useState<RawRunners>({});
   const failuresRef = useRef(0);
 
   const fetchState = useCallback(async () => {
@@ -255,6 +271,7 @@ export function useClusterState(): ClusterState {
       setDownloads(data.downloads ?? {});
       setNodeDisk(data.nodeDisk ?? {});
       setInstances((data.instances ?? {}) as RawInstances);
+      setRunners((data.runners ?? {}) as RawRunners);
       setLastUpdate(Date.now());
       failuresRef.current = 0;
       setConnected(true);
@@ -272,5 +289,5 @@ export function useClusterState(): ClusterState {
     return () => clearInterval(id);
   }, [fetchState]);
 
-  return { topology, connected, lastUpdate, downloads, nodeDisk, instances };
+  return { topology, connected, lastUpdate, downloads, nodeDisk, instances, runners };
 }

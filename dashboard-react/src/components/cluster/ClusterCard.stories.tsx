@@ -72,9 +72,9 @@ export const Downloading: Story = {
     nodes: threeNodes,
     isRunning: false,
     downloads: [
-      { nodeName: 'kite1', percent: 45 },
-      { nodeName: 'kite2', percent: 100 },
-      { nodeName: 'kite3', percent: 78 },
+      { nodeId: 'node-1', nodeName: 'kite1', percent: 45 },
+      { nodeId: 'node-2', nodeName: 'kite2', percent: 100 },
+      { nodeId: 'node-3', nodeName: 'kite3', percent: 78 },
     ],
   },
 };

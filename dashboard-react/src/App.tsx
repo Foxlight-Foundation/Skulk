@@ -32,7 +32,7 @@ interface StoreDownload {
 }
 
 export function App() {
-  const { topology, connected, downloads, nodeDisk, instances } = useClusterState();
+  const { topology, connected, downloads, nodeDisk, instances, runners } = useClusterState();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activeRoute, setActiveRoute] = useState<NavRoute>('cluster');
   const [storeDownloads, setStoreDownloads] = useState<StoreDownload[]>([]);
@@ -82,6 +82,7 @@ export function App() {
               downloads={downloads}
               nodeDisk={nodeDisk}
               instances={instances}
+              runners={runners}
             />
           ) : topology ? (
             <TopologyGraph data={topology} />

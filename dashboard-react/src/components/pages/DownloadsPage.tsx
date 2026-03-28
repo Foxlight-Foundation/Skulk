@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styled, { css } from 'styled-components';
 import type { TopologyData } from '../../types/topology';
-import type { RawDownloads, NodeDiskInfo, RawInstances } from '../../hooks/useClusterState';
+import type { RawDownloads, NodeDiskInfo, RawInstances, RawRunners } from '../../hooks/useClusterState';
 import { StoreRegistryTable, type StoreRegistryEntry, type StoreDownloadProgress, type ModelCardInfo } from '../layout/StoreRegistryTable';
 import type { ClusterCardProps, ClusterCardNode } from '../cluster/ClusterCard';
 import { ModelSearchModal } from './ModelSearchModal';
@@ -14,6 +14,7 @@ interface ModelStorePageProps {
   downloads: RawDownloads;
   nodeDisk: NodeDiskInfo;
   instances: RawInstances;
+  runners: RawRunners;
 }
 
 /* ── Data extraction helpers ──────────────────────────── */
@@ -153,7 +154,7 @@ function formatSpeed(bps: number): string {
 
 /* ── Component ────────────────────────────────────────── */
 
-export function ModelStorePage({ topology, downloads, nodeDisk, instances }: ModelStorePageProps) {
+export function ModelStorePage({ topology, downloads, nodeDisk, instances, runners }: ModelStorePageProps) {
   const [storeEntries, setStoreEntries] = useState<StoreRegistryEntry[]>([]);
   const [storeDownloads, setStoreDownloads] = useState<StoreDownloadProgress[]>([]);
   const [storeLoading, setStoreLoading] = useState(false);
@@ -304,8 +305,26 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances }: Mod
       const modelId = sa?.modelId;
       if (!modelId) continue;
 
-      const nodeToRunner = (sa as Record<string, unknown>).nodeToRunner as Record<string, string> | undefined;
+      const nodeToRunner = sa?.nodeToRunner;
       const nodeIds = nodeToRunner ? Object.keys(nodeToRunner) : [];
+      const runnerIds = nodeToRunner ? Object.values(nodeToRunner) : [];
+
+      // Derive sharding from shard metadata (tagged union: { "PipelineShardMetadata": {...} } etc.)
+      const runnerToShard = sa?.runnerToShard;
+      let sharding: 'Pipeline' | 'Tensor' = 'Pipeline';
+      if (runnerToShard) {
+        const firstShard = Object.values(runnerToShard)[0];
+        if (firstShard && 'TensorShardMetadata' in firstShard) {
+          sharding = 'Tensor';
+        }
+      }
+
+      // Gate isReady on all runners being in RunnerReady or RunnerRunning state
+      const isReady = runnerIds.length > 0 && runnerIds.every((rid) => {
+        const status = runners[rid];
+        if (!status) return false;
+        return 'RunnerReady' in status || 'RunnerRunning' in status;
+      });
 
       const cardNodes: ClusterCardNode[] = nodeIds.map((nid) => {
         const nodeInfo = topology?.nodes[nid];
@@ -325,14 +344,14 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances }: Mod
       cards[modelId] = {
         modelId,
         sizeBytes: storeEntry?.total_bytes,
-        sharding: 'Pipeline',
+        sharding,
         instanceType: isRing ? 'MlxRing' : 'MlxJaccl',
         nodes: cardNodes,
-        isReady: true,
+        isReady,
       };
     }
     return cards;
-  }, [instances, topology, storeEntries]);
+  }, [instances, runners, topology, storeEntries]);
 
   const handleLaunch = useCallback(async (modelId: string) => {
     try {
