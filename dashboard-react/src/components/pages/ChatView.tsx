@@ -78,6 +78,27 @@ export function ChatView({ readyInstances, initialModelId, className }: ChatView
   const [ttftMs, setTtftMs] = useState<number | null>(null);
   const [tps, setTps] = useState<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const [modelCapabilities, setModelCapabilities] = useState<Record<string, string[]>>({});
+
+  // Fetch model capabilities
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/models');
+        if (!res.ok) return;
+        const data = await res.json();
+        const caps: Record<string, string[]> = {};
+        for (const m of data.data ?? []) {
+          if (m.id && m.capabilities) caps[m.id] = m.capabilities;
+        }
+        setModelCapabilities(caps);
+      } catch { /* ignore */ }
+    })();
+  }, []);
+
+  const supportsThinking = selectedModelId
+    ? (modelCapabilities[selectedModelId]?.includes('thinking_toggle') ?? false)
+    : false;
 
   // Auto-select first ready model if none selected
   const readyModels = useMemo(
@@ -127,9 +148,10 @@ export function ChatView({ readyInstances, initialModelId, className }: ChatView
     const startTime = performance.now();
     let firstTokenTime: number | null = null;
     let tokenCount = 0;
-    let fullContent = '';
+    let rawContent = '';
     let fullThinking = '';
     let lastTps: number | undefined;
+    let inThinkTag = false;
 
     try {
       const res = await fetch('/v1/chat/completions', {
@@ -184,16 +206,46 @@ export function ChatView({ readyInstances, initialModelId, className }: ChatView
               setTtftMs(firstTokenTime - startTime);
             }
 
-            // Thinking/reasoning content
+            // Thinking via reasoning_content field
             if (delta?.reasoning_content) {
               fullThinking += delta.reasoning_content;
               setStreamingThinking(fullThinking);
             }
 
-            // Regular content
+            // Content — parse out inline <think> tags
             if (delta?.content) {
-              fullContent += delta.content;
-              setStreamingContent(fullContent);
+              rawContent += delta.content;
+
+              // Process <think> tags incrementally
+              let displayContent = '';
+              let thinkContent = '';
+              let i = 0;
+              let inTag = false;
+              const raw = rawContent;
+
+              while (i < raw.length) {
+                if (!inTag && raw.startsWith('<think>', i)) {
+                  inTag = true;
+                  i += 7;
+                } else if (inTag && raw.startsWith('</think>', i)) {
+                  inTag = false;
+                  i += 8;
+                } else if (inTag) {
+                  thinkContent += raw[i];
+                  i++;
+                } else {
+                  displayContent += raw[i];
+                  i++;
+                }
+              }
+              inThinkTag = inTag;
+
+              // If we found think tags, route to thinking
+              if (thinkContent) {
+                fullThinking = thinkContent;
+                setStreamingThinking(fullThinking);
+              }
+              setStreamingContent(displayContent || null);
             }
 
             // Update TPS on every token (thinking or content)
@@ -216,7 +268,7 @@ export function ChatView({ readyInstances, initialModelId, className }: ChatView
       if ((err as Error).name === 'AbortError') {
         // User cancelled
       } else {
-        fullContent = fullContent || `Error: ${(err as Error).message}`;
+        rawContent = rawContent || `Error: ${(err as Error).message}`;
       }
     }
 
@@ -224,7 +276,7 @@ export function ChatView({ readyInstances, initialModelId, className }: ChatView
     const assistantMsg: ChatMessage = {
       id: `msg-${Date.now()}-assistant`,
       role: 'assistant',
-      content: fullContent,
+      content: rawContent.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<think>[\s\S]*/i, '').trim(),
       timestamp: Date.now(),
       ttftMs: firstTokenTime ? firstTokenTime - startTime : undefined,
       tps: lastTps,
@@ -276,7 +328,7 @@ export function ChatView({ readyInstances, initialModelId, className }: ChatView
     );
   }
 
-  const modelPicker = readyModels.length > 1 ? (
+  const modelSelector = readyModels.length > 1 ? (
     <ModelSelect value={selectedModelId ?? ''} onChange={(e) => setSelectedModelId(e.target.value)}>
       {readyModels.map((m) => (
         <option key={m.instanceId} value={m.modelId}>
@@ -305,10 +357,10 @@ export function ChatView({ readyInstances, initialModelId, className }: ChatView
           onCancel={handleCancel}
           isLoading={isLoading}
           modelLabel={selectedLabel}
-          onOpenModelPicker={modelPicker ? undefined : undefined}
+          modelSelector={modelSelector}
           ttftMs={ttftMs}
           tps={tps}
-          showThinkingToggle
+          showThinkingToggle={supportsThinking}
           thinkingEnabled={thinkingEnabled}
           onToggleThinking={() => setThinkingEnabled((v) => !v)}
           placeholder={selectedModelId ? `Message ${selectedLabel}…` : 'Select a model to chat'}

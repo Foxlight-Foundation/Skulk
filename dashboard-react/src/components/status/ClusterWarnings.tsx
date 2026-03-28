@@ -127,6 +127,8 @@ const colorMap: Record<ColorKey, { border: string; bg: string; text: string; emp
 };
 
 const WarningsBar = styled.div`
+  position: relative;
+  z-index: 10;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;

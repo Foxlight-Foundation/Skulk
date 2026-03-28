@@ -13,6 +13,8 @@ export interface ChatFormProps {
   /** Current model label shown in header. */
   modelLabel?: string;
   onOpenModelPicker?: () => void;
+  /** Optional inline model selector element (replaces modelLabel click). */
+  modelSelector?: React.ReactNode;
   /** TTFT in ms. */
   ttftMs?: number | null;
   /** Tokens per second. */
@@ -168,6 +170,7 @@ export function ChatForm({
   autoFocus = true,
   modelLabel,
   onOpenModelPicker,
+  modelSelector,
   ttftMs,
   tps,
   showThinkingToggle = false,
@@ -258,7 +261,7 @@ export function ChatForm({
     });
   }, []);
 
-  const showHeader = modelLabel || showThinkingToggle || ttftMs != null || tps != null;
+  const showHeader = modelLabel || modelSelector || showThinkingToggle || ttftMs != null || tps != null;
 
   return (
     <Form
@@ -276,10 +279,10 @@ export function ChatForm({
       {/* Header: model + thinking + stats */}
       {showHeader && (
         <HeaderRow>
-          {modelLabel && (
+          {(modelLabel || modelSelector) && (
             <>
-              <span>Model</span>
-              <ModelBtn onClick={onOpenModelPicker}>{modelLabel}</ModelBtn>
+              <span>Model:</span>
+              {modelSelector ?? <ModelBtn onClick={onOpenModelPicker}>{modelLabel}</ModelBtn>}
             </>
           )}
           {showThinkingToggle && (

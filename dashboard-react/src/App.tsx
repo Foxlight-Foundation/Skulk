@@ -212,9 +212,9 @@ export function App() {
           mobileRightOpen={panelOpen}
           onToggleMobileRight={() => setPanelOpen((o) => !o)}
         />
+        <ClusterWarnings topology={topology} />
         <ContentRow>
           <Main>
-            <ClusterWarnings topology={topology} />
             {activeRoute === 'model-store' ? (
               <ModelStorePage
                 topology={topology}
