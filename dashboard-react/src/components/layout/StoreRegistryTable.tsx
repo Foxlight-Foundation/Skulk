@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import styled, { css, keyframes } from 'styled-components';
 import { FiTrash2, FiExternalLink, FiRefreshCw } from 'react-icons/fi';
 import { MdPlayArrow, MdClose } from 'react-icons/md';
+import { BsChatDotsFill } from 'react-icons/bs';
 import { formatBytes } from '../../utils/format';
 import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
@@ -43,6 +44,7 @@ export interface StoreRegistryTableProps {
   onDelete: (entry: StoreRegistryEntry, isActive: boolean) => void;
   onLaunch?: (modelId: string) => void;
   onStop?: (modelId: string) => void;
+  onChat?: (modelId: string) => void;
   clusterCards?: Record<string, Omit<ClusterCardProps, 'onLaunch'>>;
 }
 
@@ -208,6 +210,22 @@ const ActiveDot = styled.span`
   border-radius: 50%;
   background: ${({ theme }) => theme.colors.gold};
   animation: ${pulse} 1.5s ease-in-out infinite;
+`;
+
+const ChatBubble = styled.button`
+  all: unset;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  color: #4ade80;
+  padding: 2px;
+  border-radius: ${({ theme }) => theme.radii.sm};
+  transition: all 0.15s;
+
+  &:hover {
+    color: #86efac;
+    filter: drop-shadow(0 0 4px rgba(74, 222, 128, 0.4));
+  }
 `;
 
 const Cell = styled.div<{ $align?: string }>`
@@ -414,6 +432,7 @@ export function StoreRegistryTable({
   onDelete,
   onLaunch,
   onStop,
+  onChat,
   clusterCards = {},
 }: StoreRegistryTableProps) {
   const registeredIds = useMemo(() => new Set(entries.map((e) => e.model_id)), [entries]);
@@ -508,15 +527,22 @@ export function StoreRegistryTable({
                     const badge = ready
                       ? <ReadyBadge><PulseDot /> Ready</ReadyBadge>
                       : <ActiveBadge><ActiveDot /> Loading</ActiveBadge>;
-                    return card ? (
-                      <InfoTooltip
-                        placement="bottom"
-                        delay={100}
-                        content={<ClusterCard {...card} />}
-                      >
-                        {badge}
-                      </InfoTooltip>
-                    ) : badge;
+                    return <>
+                      {card ? (
+                        <InfoTooltip
+                          placement="bottom"
+                          delay={100}
+                          content={<ClusterCard {...card} />}
+                        >
+                          {badge}
+                        </InfoTooltip>
+                      ) : badge}
+                      {ready && onChat && (
+                        <ChatBubble onClick={() => onChat(entry.model_id)} title="Chat with model">
+                          <BsChatDotsFill size={14} />
+                        </ChatBubble>
+                      )}
+                    </>;
                   })()}
                 </ModelCell>
                 <Cell $align="right">{formatBytes(entry.total_bytes)}</Cell>

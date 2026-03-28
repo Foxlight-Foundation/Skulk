@@ -15,6 +15,7 @@ interface ModelStorePageProps {
   nodeDisk: NodeDiskInfo;
   instances: RawInstances;
   runners: RawRunners;
+  onChat?: (modelId: string) => void;
 }
 
 /* ── Data extraction helpers ──────────────────────────── */
@@ -154,7 +155,7 @@ function formatSpeed(bps: number): string {
 
 /* ── Component ────────────────────────────────────────── */
 
-export function ModelStorePage({ topology, downloads, nodeDisk, instances, runners }: ModelStorePageProps) {
+export function ModelStorePage({ topology, downloads, nodeDisk, instances, runners, onChat }: ModelStorePageProps) {
   const [storeEntries, setStoreEntries] = useState<StoreRegistryEntry[]>([]);
   const [storeDownloads, setStoreDownloads] = useState<StoreDownloadProgress[]>([]);
   const [storeLoading, setStoreLoading] = useState(false);
@@ -441,6 +442,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
           onDelete={() => {}}
           onLaunch={handleLaunch}
           onStop={handleStop}
+          onChat={onChat}
           clusterCards={clusterCards}
         />
       <ModelSearchModal

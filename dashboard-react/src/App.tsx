@@ -11,6 +11,10 @@ import { ToastContainer } from './components/status/ToastContainer';
 import { NetworkMesh } from './components/common/NetworkMesh';
 import { SettingsPanel } from './components/layout/SettingsPanel';
 import { ModelStorePage } from './components/pages/DownloadsPage';
+import { ChatView } from './components/pages/ChatView';
+import { InstancePanel, type InstanceCardData } from './components/layout/InstancePanel';
+import { addToast } from './hooks/useToast';
+import type { InstanceStatus } from './components/cluster/RunningInstanceCard';
 
 const Shell = styled.div`
   position: relative;
@@ -20,9 +24,20 @@ const Shell = styled.div`
   height: 100%;
 `;
 
-const Main = styled.main`
+const ContentRow = styled.div`
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: row;
+`;
+
+const Main = styled.main`
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 `;
 
 interface StoreDownload {
@@ -31,11 +46,66 @@ interface StoreDownload {
   status: string;
 }
 
+/* ── Runner status → InstanceStatus mapping ───────────── */
+
+function deriveInstanceStatus(
+  runnerIds: string[],
+  runners: Record<string, Record<string, unknown>>,
+): { status: InstanceStatus; message?: string; progress?: number } {
+  if (runnerIds.length === 0) return { status: 'loading', message: 'Waiting for runners...' };
+
+  const statuses = runnerIds.map((rid) => runners[rid]);
+
+  // If any runner has failed, the instance is failed
+  const failed = statuses.find((s) => s && 'RunnerFailed' in s);
+  if (failed) {
+    const inner = failed.RunnerFailed as Record<string, unknown> | undefined;
+    return { status: 'failed', message: inner?.errorMessage as string | undefined };
+  }
+
+  // If any runner is shutting down
+  if (statuses.some((s) => s && ('RunnerShuttingDown' in s || 'RunnerShutdown' in s))) {
+    return { status: 'shutting_down' };
+  }
+
+  // If all runners are ready or running
+  const allReady = statuses.every((s) => s && ('RunnerReady' in s || 'RunnerRunning' in s));
+  if (allReady) {
+    const anyRunning = statuses.some((s) => s && 'RunnerRunning' in s);
+    return { status: anyRunning ? 'running' : 'ready' };
+  }
+
+  // If any runner is warming up
+  if (statuses.some((s) => s && 'RunnerWarmingUp' in s)) {
+    return { status: 'warming_up' };
+  }
+
+  // Loading — try to extract progress from RunnerLoading
+  const loading = statuses.find((s) => s && 'RunnerLoading' in s);
+  if (loading) {
+    const inner = loading.RunnerLoading as Record<string, unknown> | undefined;
+    const loaded = inner?.layersLoaded as number | undefined;
+    const total = inner?.totalLayers as number | undefined;
+    const progress = loaded != null && total != null && total > 0
+      ? Math.round((loaded / total) * 100)
+      : undefined;
+    const message = loaded != null && total != null
+      ? `Downloading layers ${loaded}/${total}...`
+      : 'Loading model...';
+    return { status: 'loading', message, progress };
+  }
+
+  // Connecting or idle
+  return { status: 'loading', message: 'Connecting...' };
+}
+
 export function App() {
   const { topology, connected, downloads, nodeDisk, instances, runners } = useClusterState();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activeRoute, setActiveRoute] = useState<NavRoute>('cluster');
   const [storeDownloads, setStoreDownloads] = useState<StoreDownload[]>([]);
+  const [panelOpen, setPanelOpen] = useState(true);
+  const [chatModelId, setChatModelId] = useState<string | undefined>(undefined);
 
   // Poll store downloads for the header progress indicator
   const pollStoreDownloads = useCallback(async () => {
@@ -61,6 +131,70 @@ export function App() {
     return { count: storeDownloads.length, percentage: avgPct };
   }, [storeDownloads]);
 
+  // Derive instance card data for the right panel
+  const instanceCards = useMemo<InstanceCardData[]>(() => {
+    const cards: InstanceCardData[] = [];
+    for (const [iid, inst] of Object.entries(instances)) {
+      const isRing = !!inst.MlxRingInstance;
+      const inner = inst.MlxRingInstance ?? inst.MlxJacclInstance;
+      if (!inner) continue;
+      const sa = inner.shardAssignments;
+      const modelId = sa?.modelId;
+      if (!modelId) continue;
+
+      const instanceId = inner.instanceId ?? iid;
+      const nodeToRunner = sa?.nodeToRunner;
+      const runnerIds = nodeToRunner ? Object.values(nodeToRunner) : [];
+      const nodeIds = nodeToRunner ? Object.keys(nodeToRunner) : [];
+
+      // Derive sharding
+      const runnerToShard = sa?.runnerToShard;
+      let sharding: 'Pipeline' | 'Tensor' = 'Pipeline';
+      if (runnerToShard) {
+        const firstShard = Object.values(runnerToShard)[0];
+        if (firstShard && 'TensorShardMetadata' in firstShard) {
+          sharding = 'Tensor';
+        }
+      }
+
+      // Derive status from runners
+      const derived = deriveInstanceStatus(runnerIds, runners);
+
+      // Get first node's friendly name
+      const firstNodeId = nodeIds[0];
+      const nodeName = firstNodeId && topology?.nodes[firstNodeId]?.friendly_name
+        ? topology.nodes[firstNodeId].friendly_name
+        : firstNodeId?.slice(0, 8) ?? 'unknown';
+
+      cards.push({
+        instanceId,
+        modelId,
+        sharding,
+        instanceType: isRing ? 'MlxRing' : 'MlxJaccl',
+        nodeName,
+        status: derived.status,
+        statusMessage: derived.message,
+        loadProgress: derived.progress,
+      });
+    }
+    return cards;
+  }, [instances, runners, topology]);
+
+  const hasInstances = instanceCards.length > 0;
+
+  const handleDeleteInstance = useCallback(async (instanceId: string) => {
+    try {
+      const res = await fetch(`/instance/${instanceId}`, { method: 'DELETE' });
+      if (res.ok) {
+        addToast({ type: 'success', message: 'Instance deleted' });
+      } else {
+        addToast({ type: 'error', message: 'Failed to delete instance' });
+      }
+    } catch {
+      addToast({ type: 'error', message: 'Failed to delete instance' });
+    }
+  }, []);
+
   return (
     <ThemeProvider theme={theme}>
       <GlobalStyle />
@@ -73,25 +207,41 @@ export function App() {
           onNavigate={setActiveRoute}
           onOpenSettings={() => setSettingsOpen(true)}
           downloadProgress={downloadProgress}
+          instanceCount={instanceCards.length}
+          instancesHealthy={instanceCards.every((c) => c.status !== 'failed')}
+          mobileRightOpen={panelOpen}
+          onToggleMobileRight={() => setPanelOpen((o) => !o)}
         />
         <ClusterWarnings topology={topology} />
-        <Main>
-          {activeRoute === 'model-store' ? (
-            <ModelStorePage
-              topology={topology}
-              downloads={downloads}
-              nodeDisk={nodeDisk}
-              instances={instances}
-              runners={runners}
+        <ContentRow>
+          <Main>
+            {activeRoute === 'model-store' ? (
+              <ModelStorePage
+                topology={topology}
+                downloads={downloads}
+                nodeDisk={nodeDisk}
+                instances={instances}
+                runners={runners}
+                onChat={(modelId) => { setChatModelId(modelId); setActiveRoute('chat'); }}
+              />
+            ) : activeRoute === 'chat' ? (
+              <ChatView readyInstances={instanceCards} initialModelId={chatModelId} />
+            ) : topology ? (
+              <TopologyGraph data={topology} />
+            ) : (
+              <EmptyState>
+                {connected ? 'Loading cluster state…' : 'Connecting to backend…'}
+              </EmptyState>
+            )}
+          </Main>
+          {hasInstances && panelOpen && (
+            <InstancePanel
+              instances={instanceCards}
+              onDelete={handleDeleteInstance}
+              onChat={(modelId) => { setChatModelId(modelId); setActiveRoute('chat'); }}
             />
-          ) : topology ? (
-            <TopologyGraph data={topology} />
-          ) : (
-            <EmptyState>
-              {connected ? 'Loading cluster state…' : 'Connecting to backend…'}
-            </EmptyState>
           )}
-        </Main>
+        </ContentRow>
         <ToastContainer />
         <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       </Shell>

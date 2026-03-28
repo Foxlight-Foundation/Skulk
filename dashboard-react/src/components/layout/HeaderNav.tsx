@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import styled, { css, keyframes } from 'styled-components';
-import { FiSettings, FiMenu, FiX, FiSidebar, FiDatabase } from 'react-icons/fi';
+import { FiSettings, FiMenu, FiX, FiSidebar, FiDatabase, FiMessageSquare } from 'react-icons/fi';
 import { MdHub } from 'react-icons/md';
 import { MdOutlineViewSidebar } from 'react-icons/md';
 import { Button } from '../common/Button';
 import SkulkIcon from '../icons/SkulkIcon';
 
-export type NavRoute = 'cluster' | 'model-store';
+export type NavRoute = 'cluster' | 'model-store' | 'chat';
 
 export interface HeaderNavProps {
   showHome?: boolean;
@@ -22,6 +22,8 @@ export interface HeaderNavProps {
   showMobileRightToggle?: boolean;
   mobileRightOpen?: boolean;
   onToggleMobileRight?: () => void;
+  instanceCount?: number;
+  instancesHealthy?: boolean;
   downloadProgress?: { count: number; percentage: number } | null;
   onOpenSettings?: () => void;
   className?: string;
@@ -82,8 +84,18 @@ const LogoText = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xxl};
   font-weight: 700;
   font-family: ${({ theme }) => theme.fonts.body};
-  color: #FFD700;
-  filter: drop-shadow(0 0 4px rgba(255, 215, 0, 0.3));
+  color: #ffffff;
+  filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.2));
+`;
+
+const VersionTag = styled.sup`
+  font-size: 10px;
+  font-weight: 400;
+  font-family: ${({ theme }) => theme.fonts.body};
+  color: rgba(255, 255, 255, 0.88);
+  margin-left: 2px;
+  position: relative;
+  top: -4px;
 `;
 
 const NavLink = styled.button<{ $active?: boolean }>`
@@ -113,6 +125,21 @@ const DownloadBadge = styled.div`
   height: 28px;
 `;
 
+const InstanceToggle = styled.button<{ $healthy: boolean; $active: boolean }>`
+  all: unset;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border-radius: 50%;
+  transition: all 0.15s;
+
+  &:hover {
+    filter: brightness(1.2);
+  }
+`;
+
 /* ---- icons (react-icons) ---- */
 
 const MenuIcon = () => <FiMenu size={18} />;
@@ -121,6 +148,7 @@ const SidebarIcon = () => <FiSidebar size={18} />;
 const PanelIcon = () => <MdOutlineViewSidebar size={18} />;
 const ClusterIcon = () => <MdHub size={16} />;
 const StoreIcon = () => <FiDatabase size={16} />;
+const ChatIcon = () => <FiMessageSquare size={16} />;
 const SettingsIcon = () => <FiSettings size={16} />;
 
 function ProgressCircle({ count, percentage }: { count: number; percentage: number }) {
@@ -164,6 +192,8 @@ export function HeaderNav({
   showMobileRightToggle = false,
   mobileRightOpen = false,
   onToggleMobileRight,
+  instanceCount = 0,
+  instancesHealthy = true,
   downloadProgress = null,
   onOpenSettings,
   className,
@@ -187,8 +217,8 @@ export function HeaderNav({
           </ToggleBtn>
         )}
         <LogoBtn $disabled={!showHome} onClick={showHome ? () => navigate('cluster') : undefined}>
-          <SkulkIcon size={32} color="#FFD700" />
-          <LogoText>Skulk</LogoText>
+          <SkulkIcon size={32} color="#ffffff" />
+          <LogoText>Skulk<VersionTag>{__APP_VERSION__}</VersionTag></LogoText>
         </LogoBtn>
       </LeftGroup>
 
@@ -203,15 +233,44 @@ export function HeaderNav({
           <StoreIcon /> Model Store
         </NavLink>
 
+        <NavLink $active={activeRoute === 'chat'} onClick={() => navigate('chat')}>
+          <ChatIcon /> Chat
+        </NavLink>
+
+        {instanceCount > 0 && (
+          <InstanceToggle
+            $healthy={instancesHealthy}
+            $active={mobileRightOpen}
+            onClick={onToggleMobileRight}
+            aria-label="Toggle instances panel"
+            aria-pressed={mobileRightOpen}
+          >
+            <svg width="28" height="28" viewBox="0 0 28 28">
+              <circle
+                cx="14" cy="14" r="11"
+                fill="none"
+                stroke={instancesHealthy ? '#4ade80' : '#ef4444'}
+                strokeWidth="2"
+                opacity={mobileRightOpen ? 1 : 0.7}
+              />
+              <text
+                x="14" y="14"
+                textAnchor="middle"
+                dominantBaseline="central"
+                fill={instancesHealthy ? '#4ade80' : '#ef4444'}
+                fontSize="13"
+                fontFamily="'Outfit', sans-serif"
+                fontWeight="700"
+              >
+                {instanceCount}
+              </text>
+            </svg>
+          </InstanceToggle>
+        )}
+
         <Button variant="ghost" size="lg" icon onClick={() => onOpenSettings?.()} aria-label="Settings">
           <SettingsIcon />
         </Button>
-
-        {showMobileRightToggle && (
-          <ToggleBtn variant="outline" size="lg" icon $active={mobileRightOpen} onClick={onToggleMobileRight} aria-label="Toggle right panel" aria-pressed={mobileRightOpen}>
-            <PanelIcon />
-          </ToggleBtn>
-        )}
       </RightGroup>
     </Nav>
   );

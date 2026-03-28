@@ -1,6 +1,7 @@
 /// <reference types="vitest/config" />
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import pkg from './package.json' with { type: 'json' };
 
 // https://vite.dev/config/
 import path from 'node:path';
@@ -11,6 +12,9 @@ const dirname = typeof __dirname !== 'undefined' ? __dirname : path.dirname(file
 
 // More info at: https://storybook.js.org/docs/next/writing-tests/integrations/vitest-addon
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   plugins: [react()],
   server: {
     port: 3000,
@@ -21,6 +25,7 @@ export default defineConfig({
       '/download': 'http://localhost:52415',
       '/models': 'http://localhost:52415',
       '/place_instance': 'http://localhost:52415',
+      '/v1': 'http://localhost:52415',
       '/instance': 'http://localhost:52415',
     },
   },

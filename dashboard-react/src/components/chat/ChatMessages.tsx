@@ -12,6 +12,8 @@ export interface ChatMessagesProps {
   messages: ChatMessage[];
   /** Current streaming response text, or null if not streaming. */
   streamingContent?: string | null;
+  /** Current streaming thinking text, or null if not streaming thinking. */
+  streamingThinking?: string | null;
   isLoading?: boolean;
   prefillProgress?: PrefillProgress | null;
   onDelete?: (messageId: string) => void;
@@ -221,6 +223,23 @@ const ThinkingContent = styled.div`
   border-top: 1px solid rgba(255, 215, 0, 0.1);
 `;
 
+const ShowHideBtn = styled.button`
+  all: unset;
+  cursor: pointer;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-family: ${({ theme }) => theme.fonts.body};
+  color: ${({ theme }) => theme.colors.textMuted};
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  transition: color 0.15s;
+  &:hover { color: ${({ theme }) => theme.colors.text}; }
+`;
+
+const StreamThinkingBody = styled.div`
+  max-height: 400px;
+  overflow-y: auto;
+`;
+
 const ImageGrid = styled.div`
   display: flex;
   flex-wrap: wrap;
@@ -289,6 +308,7 @@ const ScrollBtn = styled.button`
 export function ChatMessages({
   messages,
   streamingContent,
+  streamingThinking,
   isLoading = false,
   prefillProgress,
   onDelete,
@@ -306,7 +326,17 @@ export function ChatMessages({
   const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set());
   const [heatmapVisible, setHeatmapVisible] = useState<Set<string>>(new Set());
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [streamThinkingOpen, setStreamThinkingOpen] = useState(false);
   const lastCountRef = useRef(messages.length);
+
+  // Reset streaming thinking toggle when new stream starts
+  const prevStreamingThinking = useRef(streamingThinking);
+  useEffect(() => {
+    if (streamingThinking && !prevStreamingThinking.current) {
+      setStreamThinkingOpen(false);
+    }
+    prevStreamingThinking.current = streamingThinking;
+  }, [streamingThinking]);
 
   // Auto-scroll on new messages
   useEffect(() => {
@@ -446,9 +476,13 @@ export function ChatMessages({
                   <ThinkingHeader onClick={() => toggleThinking(msg.id)}>
                     <ThinkingChevron $open={expandedThinking.has(msg.id)}>▶</ThinkingChevron>
                     Thinking
+                    <Spacer />
+                    <ShowHideBtn onClick={(e) => { e.stopPropagation(); toggleThinking(msg.id); }}>
+                      {expandedThinking.has(msg.id) ? 'Hide' : 'Show'}
+                    </ShowHideBtn>
                   </ThinkingHeader>
                   {expandedThinking.has(msg.id) && (
-                    <ThinkingContent>{msg.thinkingContent}</ThinkingContent>
+                    <ThinkingContent><MarkdownContent content={msg.thinkingContent} /></ThinkingContent>
                   )}
                 </ThinkingBlock>
               )}
@@ -519,14 +553,37 @@ export function ChatMessages({
       ))}
 
       {/* Streaming response (not yet a full message) */}
-      {streamingContent && (
+      {(streamingContent != null || streamingThinking) && (
         <MessageCard $role="assistant">
           <MsgHeader>
             <Dot $color="#FFD700" />
             <RoleLabel $role="assistant">Skulk</RoleLabel>
           </MsgHeader>
-          <MarkdownContent content={streamingContent} />
-          <Cursor />
+          {streamingThinking && (
+            <ThinkingBlock $open={streamThinkingOpen}>
+              <ThinkingHeader onClick={() => setStreamThinkingOpen((v) => !v)}>
+                <ThinkingChevron $open={streamThinkingOpen}>▶</ThinkingChevron>
+                Thinking...
+                <Spacer />
+                <ShowHideBtn onClick={(e) => { e.stopPropagation(); setStreamThinkingOpen((v) => !v); }}>
+                  {streamThinkingOpen ? 'Hide' : 'Show'}
+                </ShowHideBtn>
+              </ThinkingHeader>
+              {streamThinkingOpen && (
+                <StreamThinkingBody>
+                  <ThinkingContent><MarkdownContent content={streamingThinking} /></ThinkingContent>
+                </StreamThinkingBody>
+              )}
+            </ThinkingBlock>
+          )}
+          {streamingContent ? (
+            <>
+              <MarkdownContent content={streamingContent} />
+              <Cursor />
+            </>
+          ) : (
+            <Cursor />
+          )}
         </MessageCard>
       )}
 
