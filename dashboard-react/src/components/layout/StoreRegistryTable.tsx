@@ -129,8 +129,6 @@ const THead = styled.div`
   background: rgba(0, 0, 0, 0.4);
   font-size: ${({ theme }) => theme.fontSizes.tableHead};
   font-family: ${({ theme }) => theme.fonts.body};
-  text-transform: uppercase;
-  letter-spacing: 1.5px;
   color: ${({ theme }) => theme.colors.textMuted};
 `;
 
@@ -173,7 +171,6 @@ const ActiveBadge = styled.span`
   flex-shrink: 0;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  text-transform: uppercase;
   color: #4ade80;
   background: rgba(34, 197, 94, 0.1);
   border: 1px solid rgba(34, 197, 94, 0.2);

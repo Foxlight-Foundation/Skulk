@@ -193,7 +193,6 @@ const Header = styled.div`
 const ModelName = styled.div<{ $canFit: boolean }>`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  letter-spacing: 0.5px;
   color: ${({ $canFit }) => ($canFit ? '#FFD700' : '#f87171')};
   white-space: nowrap;
   overflow: hidden;
@@ -234,8 +233,6 @@ const BadgeRow = styled.div`
 const Badge = styled.span<{ $color?: string }>`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  letter-spacing: 1px;
-  text-transform: uppercase;
   padding: 2px 6px;
   background: rgba(80, 80, 80, 0.3);
   border: 1px solid rgba(80, 80, 80, 0.4);
@@ -245,8 +242,6 @@ const Badge = styled.span<{ $color?: string }>`
 const TagBadge = styled.span<{ $variant: 'green' | 'purple' }>`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  letter-spacing: 1px;
-  text-transform: uppercase;
   padding: 2px 6px;
   border-radius: ${({ theme }) => theme.radii.sm};
   ${({ $variant }) =>
@@ -258,8 +253,6 @@ const TagBadge = styled.span<{ $variant: 'green' | 'purple' }>`
 const SectionTitle = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  letter-spacing: 2px;
-  text-transform: uppercase;
   color: rgba(255, 255, 255, 0.2);
   margin-bottom: 4px;
 `;
@@ -310,7 +303,6 @@ const PreviewBox = styled.div`
 
 const LaunchBtn = styled(Button)<{ $canFit: boolean; $launching: boolean }>`
   width: 100%;
-  letter-spacing: 2px;
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
 
   ${({ $launching }) =>

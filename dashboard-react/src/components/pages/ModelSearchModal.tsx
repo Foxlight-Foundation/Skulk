@@ -193,8 +193,6 @@ const ModalTitle = styled.h2`
   font-weight: 600;
   color: ${({ theme }) => theme.colors.gold};
   margin: 0;
-  text-transform: uppercase;
-  letter-spacing: 1px;
 `;
 
 const CloseButton = styled.button`

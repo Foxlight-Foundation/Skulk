@@ -123,8 +123,6 @@ const StyledButton = styled.button<{
   justify-content: center;
   gap: 6px;
   font-family: ${({ theme }) => theme.fonts.body};
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
   border-radius: ${({ theme }) => theme.radii.md};
   transition: all 0.15s;
   white-space: nowrap;

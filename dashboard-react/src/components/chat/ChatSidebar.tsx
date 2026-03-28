@@ -70,8 +70,6 @@ const SearchInput = styled.input`
 const SectionLabel = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  text-transform: uppercase;
-  letter-spacing: 2px;
   color: ${({ theme }) => theme.colors.textMuted};
   padding: 8px 16px 4px;
 `;
@@ -165,8 +163,6 @@ const ConvCount = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.textMuted};
-  text-transform: uppercase;
-  letter-spacing: 1px;
   margin-top: 8px;
 `;
 
@@ -179,8 +175,6 @@ const EmptyState = styled.div`
   color: ${({ theme }) => theme.colors.textMuted};
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  text-transform: uppercase;
-  letter-spacing: 1px;
 `;
 
 /* ---- component ---- */

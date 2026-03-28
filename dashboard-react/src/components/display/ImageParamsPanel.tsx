@@ -66,8 +66,6 @@ const ParamGroup = styled.div`
 `;
 
 const Label = styled.span`
-  text-transform: uppercase;
-  letter-spacing: 1px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   color: ${({ theme }) => theme.colors.textMuted};
 `;
@@ -81,7 +79,6 @@ const Select = styled.select`
   font: inherit;
   color: ${({ theme }) => theme.colors.text};
   cursor: pointer;
-  text-transform: uppercase;
 
   &:focus {
     border-color: rgba(255, 215, 0, 0.7);
@@ -101,7 +98,6 @@ const ToggleBtn = styled.button<{ $active: boolean }>`
   cursor: pointer;
   padding: 4px 10px;
   font: inherit;
-  text-transform: uppercase;
   transition: all 0.15s;
 
   ${({ $active }) =>

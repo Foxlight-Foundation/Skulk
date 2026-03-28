@@ -53,8 +53,6 @@ const EmptyState = styled.div`
   gap: 16px;
   color: ${({ theme }) => theme.colors.textMuted};
   font-family: ${({ theme }) => theme.fonts.body};
-  text-transform: uppercase;
-  letter-spacing: 2px;
   font-size: ${({ theme }) => theme.fontSizes.sm};
 `;
 
@@ -92,8 +90,6 @@ const MsgHeader = styled.div`
   margin-bottom: 8px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  text-transform: uppercase;
-  letter-spacing: 1px;
 `;
 
 const RoleLabel = styled.span<{ $role: 'user' | 'assistant' }>`

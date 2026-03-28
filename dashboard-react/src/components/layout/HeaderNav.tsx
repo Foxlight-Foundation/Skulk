@@ -95,8 +95,6 @@ const NavLink = styled.button<{ $active?: boolean }>`
   background: ${({ $active, theme }) => $active ? theme.colors.goldBg : 'transparent'};
   font-size: ${({ theme }) => theme.fontSizes.nav};
   font-family: ${({ theme }) => theme.fonts.body};
-  text-transform: uppercase;
-  letter-spacing: 1px;
   color: ${({ $active, theme }) => $active ? theme.colors.gold : theme.colors.textSecondary};
   transition: all 0.15s;
 

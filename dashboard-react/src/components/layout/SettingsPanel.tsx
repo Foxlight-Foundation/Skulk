@@ -61,8 +61,6 @@ const Title = styled.h2`
   font-size: ${({ theme }) => theme.fontSizes.md};
   font-family: ${({ theme }) => theme.fonts.body};
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 1.5px;
   color: #FFD700;
 `;
 
@@ -96,8 +94,6 @@ const Legend = styled.legend`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 1px;
   color: ${({ theme }) => theme.colors.textSecondary};
   padding: 0 6px;
 `;
@@ -172,8 +168,6 @@ const LoadingText = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.textMuted};
-  text-transform: uppercase;
-  letter-spacing: 1px;
 `;
 
 const Spacer = styled.span`

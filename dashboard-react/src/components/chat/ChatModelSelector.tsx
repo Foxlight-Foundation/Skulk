@@ -154,8 +154,6 @@ const CardHeader = styled.div`
 const CategoryLabel = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  text-transform: uppercase;
-  letter-spacing: 1px;
   color: ${({ theme }) => theme.colors.textMuted};
   flex: 1;
 `;

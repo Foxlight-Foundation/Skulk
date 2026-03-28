@@ -473,8 +473,6 @@ const ModalBox = styled.div`
 const ModalTitle = styled.h3`
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.sm};
-  text-transform: uppercase;
-  letter-spacing: 1px;
   color: ${({ theme }) => theme.colors.error};
   margin: 0 0 12px;
 `;
@@ -512,8 +510,6 @@ const SegmentBtn = styled.button<{ $active: boolean }>`
   padding: 8px 20px;
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.nav};
-  text-transform: uppercase;
-  letter-spacing: 1px;
   transition: all 0.15s;
 
   ${({ $active, theme }) =>
@@ -570,8 +566,6 @@ const ModelHeader = styled.th`
   color: ${({ theme }) => theme.colors.gold};
   font-size: ${({ theme }) => theme.fontSizes.tableHead};
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 1px;
   border-bottom: 1px solid ${({ theme }) => theme.colors.border};
 `;
 
@@ -585,7 +579,6 @@ const NodeName = styled.div`
   color: ${({ theme }) => theme.colors.text};
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
   font-weight: 600;
-  letter-spacing: 0.5px;
 `;
 
 const DiskFree = styled.div`
@@ -630,7 +623,6 @@ const FailedText = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-weight: 600;
   color: ${({ theme }) => theme.colors.error};
-  text-transform: uppercase;
 `;
 
 const NotPresent = styled.div`

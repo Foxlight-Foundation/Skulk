@@ -58,8 +58,6 @@ const HeaderRow = styled.div`
   padding: 8px 12px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  text-transform: uppercase;
-  letter-spacing: 1px;
   color: ${({ theme }) => theme.colors.textMuted};
 `;
 
@@ -149,8 +147,6 @@ const DragOverlay = styled.div`
   border-radius: ${({ theme }) => theme.radii.lg};
   font-size: ${({ theme }) => theme.fontSizes.md};
   font-family: ${({ theme }) => theme.fonts.body};
-  text-transform: uppercase;
-  letter-spacing: 2px;
   color: #FFD700;
 `;
 

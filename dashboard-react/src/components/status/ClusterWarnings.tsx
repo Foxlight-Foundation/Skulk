@@ -156,8 +156,6 @@ const WarningLabel = styled.span<{ $color: ColorKey }>`
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.sm};
   color: ${({ $color }) => colorMap[$color].text};
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
 `;
 
 function WarningIcon({ $color }: { d?: string; $color: ColorKey }) {
