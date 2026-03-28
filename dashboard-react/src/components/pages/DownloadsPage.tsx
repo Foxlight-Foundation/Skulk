@@ -328,7 +328,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances }: Mod
         sharding: 'Pipeline',
         instanceType: isRing ? 'MlxRing' : 'MlxJaccl',
         nodes: cardNodes,
-        isRunning: true,
+        isReady: true,
       };
     }
     return cards;
@@ -360,7 +360,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances }: Mod
   const handleStop = useCallback(async (modelId: string) => {
     const instanceId = modelToInstanceId[modelId];
     if (!instanceId) {
-      addToast({ type: 'error', message: `No running instance found for ${modelId}` });
+      addToast({ type: 'error', message: `No active instance found for ${modelId}` });
       return;
     }
     try {

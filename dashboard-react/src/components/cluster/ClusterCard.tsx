@@ -24,7 +24,7 @@ export interface ClusterCardProps {
   sharding: 'Pipeline' | 'Tensor';
   instanceType: 'MlxRing' | 'MlxJaccl';
   nodes: ClusterCardNode[];
-  isRunning?: boolean;
+  isReady?: boolean;
   downloads?: ClusterCardDownload[];
   onLaunch?: () => void;
   className?: string;
@@ -123,15 +123,15 @@ export function ClusterCard({
   sharding,
   instanceType,
   nodes,
-  isRunning = false,
+  isReady = false,
   downloads,
   onLaunch,
   className,
 }: ClusterCardProps) {
   const link = hfUrl(modelId);
   const displayName = modelName ?? modelId.split('/').pop() ?? modelId;
-  const showDownloads = !isRunning && downloads && downloads.length > 0;
-  const showLaunch = !isRunning && onLaunch;
+  const showDownloads = !isReady && downloads && downloads.length > 0;
+  const showLaunch = !isReady && onLaunch;
 
   return (
     <Card className={className}>
@@ -153,7 +153,7 @@ export function ClusterCard({
       <BadgeRow>
         <TypeBadge>{sharding}</TypeBadge>
         <TypeBadge>{instanceType === 'MlxRing' ? 'MLX Ring' : 'MLX Jaccl'}</TypeBadge>
-        {isRunning && <RunningBadge><PulseDot /> Running</RunningBadge>}
+        {isReady && <ReadyBadge><PulseDot /> Ready</ReadyBadge>}
       </BadgeRow>
 
       {/* Download progress */}
@@ -273,7 +273,7 @@ const TypeBadge = styled.span`
   padding: 3px 10px;
 `;
 
-const RunningBadge = styled.span`
+const ReadyBadge = styled.span`
   display: flex;
   align-items: center;
   gap: 5px;

@@ -166,7 +166,7 @@ const ModelId = styled.span`
   text-overflow: ellipsis;
 `;
 
-const ActiveBadge = styled.span`
+const ReadyBadge = styled.span`
   display: flex;
   align-items: center;
   gap: 4px;
@@ -487,10 +487,10 @@ export function StoreRegistryTable({
                         delay={100}
                         content={<ClusterCard {...clusterCards[entry.model_id]} />}
                       >
-                        <ActiveBadge><PulseDot /> Active</ActiveBadge>
+                        <ReadyBadge><PulseDot /> Ready</ReadyBadge>
                       </InfoTooltip>
                     ) : (
-                      <ActiveBadge><PulseDot /> Active</ActiveBadge>
+                      <ReadyBadge><PulseDot /> Ready</ReadyBadge>
                     )
                   )}
                 </ModelCell>
