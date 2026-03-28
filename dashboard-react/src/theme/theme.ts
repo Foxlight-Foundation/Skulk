@@ -2,6 +2,7 @@ export const theme = {
   colors: {
     bg: '#000000',
     surface: '#111111',
+    header: 'rgba(5, 2, 31, 0.16)',
     surfaceHover: '#1a1a1a',
     border: 'rgba(255, 255, 255, 0.21)',
     borderLight: 'rgba(255, 255, 255, 0.18)',

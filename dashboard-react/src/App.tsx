@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { ThemeProvider } from 'styled-components';
 import { theme, GlobalStyle } from './theme';
@@ -25,10 +25,41 @@ const Main = styled.main`
   min-height: 0;
 `;
 
+interface StoreDownload {
+  modelId: string;
+  progress: number;
+  status: string;
+}
+
 export function App() {
-  const { topology, connected, downloads, nodeDisk, instances } = useClusterState();
+  const { topology, connected, downloads, nodeDisk, instances, runners } = useClusterState();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activeRoute, setActiveRoute] = useState<NavRoute>('cluster');
+  const [storeDownloads, setStoreDownloads] = useState<StoreDownload[]>([]);
+
+  // Poll store downloads for the header progress indicator
+  const pollStoreDownloads = useCallback(async () => {
+    try {
+      const res = await fetch('/store/downloads');
+      if (res.ok) {
+        const data = await res.json();
+        setStoreDownloads(data.downloads ?? []);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    pollStoreDownloads();
+    const id = setInterval(pollStoreDownloads, 3000);
+    return () => clearInterval(id);
+  }, [pollStoreDownloads]);
+
+  const downloadProgress = useMemo(() => {
+    if (storeDownloads.length === 0) return null;
+    const totalPct = storeDownloads.reduce((sum, d) => sum + (d.progress * 100), 0);
+    const avgPct = Math.round(totalPct / storeDownloads.length);
+    return { count: storeDownloads.length, percentage: avgPct };
+  }, [storeDownloads]);
 
   return (
     <ThemeProvider theme={theme}>
@@ -41,6 +72,7 @@ export function App() {
           activeRoute={activeRoute}
           onNavigate={setActiveRoute}
           onOpenSettings={() => setSettingsOpen(true)}
+          downloadProgress={downloadProgress}
         />
         <ClusterWarnings topology={topology} />
         <Main>
@@ -50,6 +82,7 @@ export function App() {
               downloads={downloads}
               nodeDisk={nodeDisk}
               instances={instances}
+              runners={runners}
             />
           ) : topology ? (
             <TopologyGraph data={topology} />

@@ -1,8 +1,10 @@
-import styled, { css } from 'styled-components';
+import { useEffect, useRef, useState } from 'react';
+import styled, { css, keyframes } from 'styled-components';
 import { FiSettings, FiMenu, FiX, FiSidebar, FiDatabase } from 'react-icons/fi';
 import { MdHub } from 'react-icons/md';
 import { MdOutlineViewSidebar } from 'react-icons/md';
 import { Button } from '../common/Button';
+import SkulkIcon from '../icons/SkulkIcon';
 
 export type NavRoute = 'cluster' | 'model-store';
 
@@ -29,7 +31,7 @@ export interface HeaderNavProps {
 
 const Nav = styled.header`
   z-index: 20;
-  background: ${({ theme }) => theme.colors.surface};
+  background: ${({ theme }) => theme.colors.header};
   border-bottom: none;
   background-image: linear-gradient(to right, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.03));
   background-size: 100% 1px;
@@ -68,6 +70,7 @@ const LogoBtn = styled.button<{ $disabled: boolean }>`
   cursor: ${({ $disabled }) => ($disabled ? 'default' : 'pointer')};
   display: flex;
   align-items: center;
+  gap: 8px;
   transition: opacity 0.15s;
 
   &:hover {
@@ -184,6 +187,7 @@ export function HeaderNav({
           </ToggleBtn>
         )}
         <LogoBtn $disabled={!showHome} onClick={showHome ? () => navigate('cluster') : undefined}>
+          <SkulkIcon size={32} color="#FFD700" />
           <LogoText>Skulk</LogoText>
         </LogoBtn>
       </LeftGroup>

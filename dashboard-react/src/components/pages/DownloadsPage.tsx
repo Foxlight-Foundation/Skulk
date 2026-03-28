@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styled, { css } from 'styled-components';
 import type { TopologyData } from '../../types/topology';
-import type { RawDownloads, NodeDiskInfo, RawInstances } from '../../hooks/useClusterState';
+import type { RawDownloads, NodeDiskInfo, RawInstances, RawRunners } from '../../hooks/useClusterState';
 import { StoreRegistryTable, type StoreRegistryEntry, type StoreDownloadProgress, type ModelCardInfo } from '../layout/StoreRegistryTable';
+import type { ClusterCardProps, ClusterCardNode } from '../cluster/ClusterCard';
 import { ModelSearchModal } from './ModelSearchModal';
 import { FiTrash2, FiSearch, FiCheck } from 'react-icons/fi';
 import { Button } from '../common/Button';
@@ -13,6 +14,7 @@ interface ModelStorePageProps {
   downloads: RawDownloads;
   nodeDisk: NodeDiskInfo;
   instances: RawInstances;
+  runners: RawRunners;
 }
 
 /* ── Data extraction helpers ──────────────────────────── */
@@ -152,7 +154,7 @@ function formatSpeed(bps: number): string {
 
 /* ── Component ────────────────────────────────────────── */
 
-export function ModelStorePage({ topology, downloads, nodeDisk, instances }: ModelStorePageProps) {
+export function ModelStorePage({ topology, downloads, nodeDisk, instances, runners }: ModelStorePageProps) {
   const [storeEntries, setStoreEntries] = useState<StoreRegistryEntry[]>([]);
   const [storeDownloads, setStoreDownloads] = useState<StoreDownloadProgress[]>([]);
   const [storeLoading, setStoreLoading] = useState(false);
@@ -292,6 +294,65 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances }: Mod
     return { activeModelIds: ids, modelToInstanceId: mapping };
   }, [instances]);
 
+  // Build ClusterCard data for active models
+  const clusterCards = useMemo<Record<string, Omit<ClusterCardProps, 'onLaunch'>>>(() => {
+    const cards: Record<string, Omit<ClusterCardProps, 'onLaunch'>> = {};
+    for (const [, inst] of Object.entries(instances)) {
+      const isRing = !!inst.MlxRingInstance;
+      const inner = inst.MlxRingInstance ?? inst.MlxJacclInstance;
+      if (!inner) continue;
+      const sa = inner.shardAssignments;
+      const modelId = sa?.modelId;
+      if (!modelId) continue;
+
+      const nodeToRunner = sa?.nodeToRunner;
+      const nodeIds = nodeToRunner ? Object.keys(nodeToRunner) : [];
+      const runnerIds = nodeToRunner ? Object.values(nodeToRunner) : [];
+
+      // Derive sharding from shard metadata (tagged union: { "PipelineShardMetadata": {...} } etc.)
+      const runnerToShard = sa?.runnerToShard;
+      let sharding: 'Pipeline' | 'Tensor' = 'Pipeline';
+      if (runnerToShard) {
+        const firstShard = Object.values(runnerToShard)[0];
+        if (firstShard && 'TensorShardMetadata' in firstShard) {
+          sharding = 'Tensor';
+        }
+      }
+
+      // Gate isReady on all runners being in RunnerReady or RunnerRunning state
+      const isReady = runnerIds.length > 0 && runnerIds.every((rid) => {
+        const status = runners[rid];
+        if (!status) return false;
+        return 'RunnerReady' in status || 'RunnerRunning' in status;
+      });
+
+      const cardNodes: ClusterCardNode[] = nodeIds.map((nid) => {
+        const nodeInfo = topology?.nodes[nid];
+        const mem = nodeInfo?.macmon_info?.memory;
+        const pct = mem && mem.ram_total > 0
+          ? Math.round((mem.ram_usage / mem.ram_total) * 100)
+          : 0;
+        return {
+          nodeId: nid,
+          name: nodeInfo?.friendly_name ?? nid.slice(0, 8),
+          memoryUsedPercent: pct,
+        };
+      });
+
+      const storeEntry = storeEntries.find((e) => e.model_id === modelId);
+
+      cards[modelId] = {
+        modelId,
+        sizeBytes: storeEntry?.total_bytes,
+        sharding,
+        instanceType: isRing ? 'MlxRing' : 'MlxJaccl',
+        nodes: cardNodes,
+        isReady,
+      };
+    }
+    return cards;
+  }, [instances, runners, topology, storeEntries]);
+
   const handleLaunch = useCallback(async (modelId: string) => {
     try {
       const res = await fetch('/place_instance', {
@@ -318,7 +379,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances }: Mod
   const handleStop = useCallback(async (modelId: string) => {
     const instanceId = modelToInstanceId[modelId];
     if (!instanceId) {
-      addToast({ type: 'error', message: `No running instance found for ${modelId}` });
+      addToast({ type: 'error', message: `No active instance found for ${modelId}` });
       return;
     }
     try {
@@ -380,6 +441,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances }: Mod
           onDelete={() => {}}
           onLaunch={handleLaunch}
           onStop={handleStop}
+          clusterCards={clusterCards}
         />
       <ModelSearchModal
         open={searchOpen}

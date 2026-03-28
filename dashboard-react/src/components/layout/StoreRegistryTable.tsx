@@ -5,6 +5,7 @@ import { MdPlayArrow, MdClose } from 'react-icons/md';
 import { formatBytes } from '../../utils/format';
 import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
+import { ClusterCard, type ClusterCardProps } from '../cluster/ClusterCard';
 
 /* ================================================================
    Types
@@ -42,6 +43,7 @@ export interface StoreRegistryTableProps {
   onDelete: (entry: StoreRegistryEntry, isActive: boolean) => void;
   onLaunch?: (modelId: string) => void;
   onStop?: (modelId: string) => void;
+  clusterCards?: Record<string, Omit<ClusterCardProps, 'onLaunch'>>;
 }
 
 /* ---- helpers ---- */
@@ -164,7 +166,7 @@ const ModelId = styled.span`
   text-overflow: ellipsis;
 `;
 
-const ActiveBadge = styled.span`
+const ReadyBadge = styled.span`
   display: flex;
   align-items: center;
   gap: 4px;
@@ -178,11 +180,33 @@ const ActiveBadge = styled.span`
   padding: 1px 6px;
 `;
 
+const ActiveBadge = styled.span`
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-family: ${({ theme }) => theme.fonts.body};
+  color: ${({ theme }) => theme.colors.gold};
+  background: ${({ theme }) => theme.colors.goldBg};
+  border: 1px solid ${({ theme }) => theme.colors.goldDim};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  padding: 1px 6px;
+`;
+
 const PulseDot = styled.span`
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: #4ade80;
+  animation: ${pulse} 1.5s ease-in-out infinite;
+`;
+
+const ActiveDot = styled.span`
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: ${({ theme }) => theme.colors.gold};
   animation: ${pulse} 1.5s ease-in-out infinite;
 `;
 
@@ -390,6 +414,7 @@ export function StoreRegistryTable({
   onDelete,
   onLaunch,
   onStop,
+  clusterCards = {},
 }: StoreRegistryTableProps) {
   const registeredIds = useMemo(() => new Set(entries.map((e) => e.model_id)), [entries]);
   const pendingDownloads = useMemo(
@@ -477,9 +502,22 @@ export function StoreRegistryTable({
                 </PlayCell>
                 <ModelCell>
                   <ModelId title={entry.model_id}>{entry.model_id}</ModelId>
-                  {active && (
-                    <ActiveBadge><PulseDot /> Active</ActiveBadge>
-                  )}
+                  {active && (() => {
+                    const card = clusterCards[entry.model_id];
+                    const ready = card?.isReady ?? false;
+                    const badge = ready
+                      ? <ReadyBadge><PulseDot /> Ready</ReadyBadge>
+                      : <ActiveBadge><ActiveDot /> Loading</ActiveBadge>;
+                    return card ? (
+                      <InfoTooltip
+                        placement="bottom"
+                        delay={100}
+                        content={<ClusterCard {...card} />}
+                      >
+                        {badge}
+                      </InfoTooltip>
+                    ) : badge;
+                  })()}
                 </ModelCell>
                 <Cell $align="right">{formatBytes(entry.total_bytes)}</Cell>
                 <Cell $align="right">{entry.files.length}</Cell>
