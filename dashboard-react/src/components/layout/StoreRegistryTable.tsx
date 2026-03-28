@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import styled, { css, keyframes } from 'styled-components';
-import { FiTrash2, FiExternalLink } from 'react-icons/fi';
+import { FiTrash2, FiExternalLink, FiRefreshCw } from 'react-icons/fi';
 import { MdPlayArrow, MdClose } from 'react-icons/md';
 import { formatBytes } from '../../utils/format';
 import { Button } from '../common/Button';
@@ -218,6 +218,33 @@ const ProgressText = styled.span`
   color: #FFD700;
 `;
 
+const spin = keyframes`
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+`;
+
+const RefreshBtn = styled.button<{ $spinning: boolean }>`
+  all: unset;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  color: ${({ theme }) => theme.colors.textSecondary};
+  transition: color 0.15s, background 0.15s;
+
+  &:hover {
+    color: ${({ theme }) => theme.colors.gold};
+    background: ${({ theme }) => theme.colors.goldBg};
+  }
+
+  svg {
+    ${({ $spinning }) => $spinning && css`animation: ${spin} 0.8s linear infinite;`}
+  }
+`;
+
 const PlayCell = styled.div`
   display: flex;
   align-items: center;
@@ -390,7 +417,9 @@ export function StoreRegistryTable({
         </HeaderText>
         <HeaderActions>
           {actions}
-          <Button variant="outline" size="sm" onClick={onRefresh}>Refresh</Button>
+          <RefreshBtn onClick={onRefresh} $spinning={loading} title="Refresh">
+            <FiRefreshCw size={16} />
+          </RefreshBtn>
         </HeaderActions>
       </HeaderRow>
 
