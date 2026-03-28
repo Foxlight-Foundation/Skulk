@@ -52,7 +52,7 @@ export function ClusterWarnings({ topology }: ClusterWarningsProps) {
       {showVersion && (
         <WarningPill $color="error">
           <WarningIcon $color="error" />
-          <WarningLabel $color="error">VERSION MISMATCH</WarningLabel>
+          <WarningLabel $color="error">Version Mismatch</WarningLabel>
           <DismissButton $color="error" onClick={() => setVersionDismissed(true)} aria-label="Dismiss">
             <FiX size={14} />
           </DismissButton>
@@ -82,7 +82,7 @@ export function ClusterWarnings({ topology }: ClusterWarningsProps) {
       {showRdma && (
         <WarningPill $color="warning">
           <WarningIcon $color="warning" />
-          <WarningLabel $color="warning">RDMA NOT AVAILABLE</WarningLabel>
+          <WarningLabel $color="warning">RDMA Not Available</WarningLabel>
           <DismissButton $color="warning" onClick={() => setRdmaDismissed(true)} aria-label="Dismiss">
             <FiX size={14} />
           </DismissButton>

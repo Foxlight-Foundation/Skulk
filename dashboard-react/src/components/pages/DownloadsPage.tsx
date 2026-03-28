@@ -421,7 +421,7 @@ function CellContent({ cell }: { cell: CellStatus }) {
         </CellInner>
       );
     case 'failed':
-      return <FailedText>FAILED</FailedText>;
+      return <FailedText>Failed</FailedText>;
     default:
       return <NotPresent>--</NotPresent>;
   }
