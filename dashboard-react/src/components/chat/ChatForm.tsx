@@ -19,6 +19,8 @@ export interface ChatFormProps {
   ttftMs?: number | null;
   /** Tokens per second. */
   tps?: number | null;
+  /** Context window size in tokens (0 = unknown). */
+  contextLength?: number;
   /** Enable thinking toggle. */
   showThinkingToggle?: boolean;
   thinkingEnabled?: boolean;
@@ -173,6 +175,7 @@ export function ChatForm({
   modelSelector,
   ttftMs,
   tps,
+  contextLength = 0,
   showThinkingToggle = false,
   thinkingEnabled = false,
   onToggleThinking,
@@ -284,6 +287,9 @@ export function ChatForm({
               <span>Model:</span>
               {modelSelector ?? <ModelBtn onClick={onOpenModelPicker}>{modelLabel}</ModelBtn>}
             </>
+          )}
+          {contextLength > 0 && (
+            <Stat>{(contextLength / 1024).toFixed(0)}K ctx</Stat>
           )}
           {showThinkingToggle && (
             <ThinkingBtn $active={thinkingEnabled} onClick={onToggleThinking}>

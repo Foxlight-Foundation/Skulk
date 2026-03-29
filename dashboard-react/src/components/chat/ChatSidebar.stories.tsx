@@ -6,11 +6,11 @@ import type { Conversation } from '../../types/chat';
 const now = Date.now();
 
 const sampleConversations: Conversation[] = [
-  { id: '1', name: 'Distributed inference setup', modelId: 'qwen3-30b-4bit', updatedAt: now - 1000, messages: [] },
-  { id: '2', name: 'Python async patterns', modelId: 'llama-8b-4bit', updatedAt: now - 3600000, messages: [] },
-  { id: '3', name: 'Debugging RDMA connections', modelId: 'qwen3-30b-4bit', updatedAt: now - 86400000, messages: [] },
-  { id: '4', name: 'MLX optimization tips', updatedAt: now - 172800000, messages: [] },
-  { id: '5', name: 'Kubernetes cluster design', updatedAt: now - 604800000, messages: [] },
+  { id: '1', name: 'Distributed inference setup', modelId: 'qwen3-30b-4bit', createdAt: now - 2000, updatedAt: now - 1000, messages: [] },
+  { id: '2', name: 'Python async patterns', modelId: 'llama-8b-4bit', createdAt: now - 7200000, updatedAt: now - 3600000, messages: [] },
+  { id: '3', name: 'Debugging RDMA connections', modelId: 'qwen3-30b-4bit', createdAt: now - 90000000, updatedAt: now - 86400000, messages: [] },
+  { id: '4', name: 'MLX optimization tips', modelId: 'qwen3-30b-4bit', createdAt: now - 200000000, updatedAt: now - 172800000, messages: [] },
+  { id: '5', name: 'Kubernetes cluster design', modelId: 'llama-8b-4bit', createdAt: now - 700000000, updatedAt: now - 604800000, messages: [] },
 ];
 
 const meta: Meta<typeof ChatSidebar> = {

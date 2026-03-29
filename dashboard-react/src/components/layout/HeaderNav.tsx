@@ -125,6 +125,18 @@ const DownloadBadge = styled.div`
   height: 28px;
 `;
 
+const IconToggle = styled.span<{ $active: boolean }>`
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  color: ${({ $active, theme }) => $active ? theme.colors.gold : theme.colors.textMuted};
+  transition: color 0.15s;
+
+  &:hover {
+    color: ${({ theme }) => theme.colors.text};
+  }
+`;
+
 const InstanceToggle = styled.button<{ $healthy: boolean; $active: boolean }>`
   all: unset;
   cursor: pointer;
@@ -212,9 +224,9 @@ export function HeaderNav({
           </ToggleBtn>
         )}
         {showSidebarToggle && (
-          <ToggleBtn variant="outline" size="lg" icon $active={sidebarVisible} onClick={onToggleSidebar} aria-label="Toggle sidebar" aria-pressed={sidebarVisible}>
+          <IconToggle $active={sidebarVisible} onClick={onToggleSidebar} aria-label="Toggle sidebar">
             <SidebarIcon />
-          </ToggleBtn>
+          </IconToggle>
         )}
         <LogoBtn $disabled={!showHome} onClick={showHome ? () => navigate('cluster') : undefined}>
           <SkulkIcon size={32} color="#ffffff" />

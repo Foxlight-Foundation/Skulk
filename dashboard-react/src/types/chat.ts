@@ -37,9 +37,12 @@ export interface ChatMessage {
 export interface Conversation {
   id: string;
   name: string;
-  modelId?: string;
+  modelId: string;
+  createdAt: number;
   updatedAt: number;
   messages: ChatMessage[];
+  summary?: string;
+  originNodeId?: string;
 }
 
 export interface ChatModelInfo {

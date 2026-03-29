@@ -90,6 +90,7 @@ class ModelCard(CamelCaseModel):
     quantization: str = ""
     base_model: str = ""
     capabilities: list[str] = []
+    context_length: int = 0
     uses_cfg: bool = False
     trust_remote_code: bool = True
 
@@ -139,6 +140,7 @@ class ModelCard(CamelCaseModel):
             hidden_size=config_data.hidden_size or 0,
             supports_tensor=config_data.supports_tensor,
             num_key_value_heads=config_data.num_key_value_heads,
+            context_length=config_data.max_position_embeddings or 0,
             tasks=[ModelTask.TextGeneration],
             trust_remote_code=False,
         )
@@ -183,6 +185,7 @@ class ConfigData(BaseModel):
             "decoder_layers",
         )
     )
+    max_position_embeddings: int | None = None
 
     @property
     def supports_tensor(self) -> bool:
@@ -219,6 +222,7 @@ class ConfigData(BaseModel):
             "n_layers",
             "num_decoder_layers",
             "decoder_layers",
+            "max_position_embeddings",
         ]:
             if (val := text_config.get(field)) is not None:  # pyright: ignore[reportAny]
                 data[field] = val

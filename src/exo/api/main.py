@@ -1594,6 +1594,7 @@ class API:
                     quantization=card.quantization,
                     base_model=card.base_model,
                     capabilities=card.capabilities,
+                    context_length=card.context_length,
                 )
                 for card in cards
             ]
@@ -1618,6 +1619,7 @@ class API:
             supports_tensor=card.supports_tensor,
             tasks=[task.value for task in card.tasks],
             is_custom=True,
+            context_length=card.context_length,
         )
 
     async def delete_custom_model(self, model_id: ModelId) -> JSONResponse:

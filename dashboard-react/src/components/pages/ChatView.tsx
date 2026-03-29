@@ -5,16 +5,18 @@ import { ChatForm } from '../chat/ChatForm';
 import type { ChatMessage } from '../../types/chat';
 import type { ChatUploadedFile } from '../../types/chat';
 import type { InstanceCardData } from '../layout/InstancePanel';
+import { useChatStore } from '../../stores/chatStore';
+import { useUIStore } from '../../stores/uiStore';
 
 /* ── Types ────────────────────────────────────────────── */
 
 export interface ChatViewProps {
   /** Ready instances the user can chat with. */
   readyInstances: InstanceCardData[];
-  /** Pre-selected model ID (e.g. from clicking Chat on a card). */
-  initialModelId?: string;
   className?: string;
 }
+
+/* ── AI Summary ───────────────────────────────────────── */
 
 /* ── Styles ───────────────────────────────────────────── */
 
@@ -66,21 +68,71 @@ const ModelSelect = styled.select`
   }
 `;
 
+const EMPTY_MESSAGES: ChatMessage[] = [];
+
 /* ── Component ────────────────────────────────────────── */
 
-export function ChatView({ readyInstances, initialModelId, className }: ChatViewProps) {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+export function ChatView({ readyInstances, className }: ChatViewProps) {
+  // Store state
+  const selectedModelId = useChatStore((s) => s.selectedModelId);
+  const activeConversationId = useChatStore((s) => s.activeConversationId);
+  const messages = useChatStore((s) =>
+    s.activeConversationId ? s.conversations[s.activeConversationId]?.messages ?? EMPTY_MESSAGES : EMPTY_MESSAGES,
+  );
+  const selectModel = useChatStore((s) => s.selectModel);
+  const addMessage = useChatStore((s) => s.addMessage);
+  const deleteMessageAction = useChatStore((s) => s.deleteMessage);
+  const editMessageAction = useChatStore((s) => s.editMessage);
+  const removeLastAssistantMessages = useChatStore((s) => s.removeLastAssistantMessages);
+
+  // Local transient state
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
   const [streamingThinking, setStreamingThinking] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [selectedModelId, setSelectedModelId] = useState<string | null>(initialModelId ?? null);
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [ttftMs, setTtftMs] = useState<number | null>(null);
   const [tps, setTps] = useState<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const [modelCapabilities, setModelCapabilities] = useState<Record<string, string[]>>({});
+  const [modelContextLengths, setModelContextLengths] = useState<Record<string, number>>({});
 
-  // Fetch model capabilities
+  // Restore scroll position after store hydration + DOM render
+  const chatScrollTop = useUIStore((s) => s.chatScrollTop);
+  const setChatScrollTop = useUIStore((s) => s.setChatScrollTop);
+  const scrollRestored = useRef(false);
+  useEffect(() => {
+    if (scrollRestored.current || chatScrollTop <= 0) return;
+
+    // Wait for store to hydrate and DOM to render messages
+    const tryRestore = () => {
+      const el = scrollRef.current;
+      if (!el) return;
+      // Only restore once the scroll container has enough content
+      if (el.scrollHeight > el.clientHeight) {
+        scrollRestored.current = true;
+        el.scrollTop = chatScrollTop;
+      }
+    };
+
+    // Poll briefly — store hydration + DOM render may take a few frames
+    const attempts = [0, 50, 100, 200, 500];
+    const timers = attempts.map((ms) => setTimeout(tryRestore, ms));
+    return () => timers.forEach(clearTimeout);
+  }, [messages.length, chatScrollTop]);
+
+  // Save scroll position on scroll (throttled to avoid jank)
+  const scrollRaf = useRef<number>(0);
+  const handleScroll = useCallback(() => {
+    cancelAnimationFrame(scrollRaf.current);
+    scrollRaf.current = requestAnimationFrame(() => {
+      if (scrollRef.current) {
+        setChatScrollTop(scrollRef.current.scrollTop);
+      }
+    });
+  }, [setChatScrollTop]);
+
+  // Fetch model capabilities and context lengths
   useEffect(() => {
     (async () => {
       try {
@@ -88,34 +140,35 @@ export function ChatView({ readyInstances, initialModelId, className }: ChatView
         if (!res.ok) return;
         const data = await res.json();
         const caps: Record<string, string[]> = {};
+        const ctxLens: Record<string, number> = {};
         for (const m of data.data ?? []) {
           if (m.id && m.capabilities) caps[m.id] = m.capabilities;
+          if (m.id && m.context_length) ctxLens[m.id] = m.context_length;
         }
         setModelCapabilities(caps);
+        setModelContextLengths(ctxLens);
       } catch { /* ignore */ }
     })();
   }, []);
+
+  const contextLength = selectedModelId ? modelContextLengths[selectedModelId] ?? 0 : 0;
 
   const supportsThinking = selectedModelId
     ? (modelCapabilities[selectedModelId]?.includes('thinking_toggle') ?? false)
     : false;
 
-  // Auto-select first ready model if none selected
+  // Ready models
   const readyModels = useMemo(
     () => readyInstances.filter((i) => i.status === 'ready' || i.status === 'running'),
     [readyInstances],
   );
 
+  // Auto-select first ready model if none selected
   useEffect(() => {
     if (!selectedModelId && readyModels.length > 0) {
-      setSelectedModelId(readyModels[0].modelId);
+      selectModel(readyModels[0].modelId);
     }
-  }, [selectedModelId, readyModels]);
-
-  // If initialModelId changes (e.g. user clicked Chat on a different card), update
-  useEffect(() => {
-    if (initialModelId) setSelectedModelId(initialModelId);
-  }, [initialModelId]);
+  }, [selectedModelId, readyModels, selectModel]);
 
   const selectedLabel = useMemo(() => {
     if (!selectedModelId) return undefined;
@@ -127,20 +180,30 @@ export function ChatView({ readyInstances, initialModelId, className }: ChatView
     if (!selectedModelId || isLoading) return;
 
     const userMsg: ChatMessage = {
-      id: `msg-${Date.now()}-user`,
+      id: crypto.randomUUID(),
       role: 'user',
       content: text,
       timestamp: Date.now(),
     };
 
-    setMessages((prev) => [...prev, userMsg]);
+    addMessage(userMsg);
     setIsLoading(true);
     setStreamingContent('');
     setStreamingThinking(null);
     setTtftMs(null);
     setTps(null);
 
-    const allMessages = [...messages, userMsg];
+    // Read messages from store (includes the user message we just added)
+    const storeState = useChatStore.getState();
+    const activeConvo = storeState.activeConversationId
+      ? storeState.conversations[storeState.activeConversationId]
+      : undefined;
+    if (!activeConvo) {
+      setIsLoading(false);
+      setStreamingContent(null);
+      return;
+    }
+    const allMessages = activeConvo.messages;
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -151,7 +214,6 @@ export function ChatView({ readyInstances, initialModelId, className }: ChatView
     let rawContent = '';
     let fullThinking = '';
     let lastTps: number | undefined;
-    let inThinkTag = false;
 
     try {
       const res = await fetch('/v1/chat/completions', {
@@ -238,7 +300,6 @@ export function ChatView({ readyInstances, initialModelId, className }: ChatView
                   i++;
                 }
               }
-              inThinkTag = inTag;
 
               // If we found think tags, route to thinking
               if (thinkContent) {
@@ -274,7 +335,7 @@ export function ChatView({ readyInstances, initialModelId, className }: ChatView
 
     // Finalize assistant message
     const assistantMsg: ChatMessage = {
-      id: `msg-${Date.now()}-assistant`,
+      id: crypto.randomUUID(),
       role: 'assistant',
       content: rawContent.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<think>[\s\S]*/i, '').trim(),
       timestamp: Date.now(),
@@ -283,42 +344,57 @@ export function ChatView({ readyInstances, initialModelId, className }: ChatView
       thinkingContent: fullThinking || undefined,
     };
 
-    setMessages((prev) => [...prev, assistantMsg]);
+    addMessage(assistantMsg);
     setStreamingContent(null);
     setStreamingThinking(null);
     setIsLoading(false);
     abortRef.current = null;
-  }, [selectedModelId, isLoading, messages, thinkingEnabled]);
+
+  }, [selectedModelId, isLoading, thinkingEnabled, addMessage]);
 
   const handleCancel = useCallback(() => {
     abortRef.current?.abort();
   }, []);
 
   const handleDelete = useCallback((id: string) => {
-    setMessages((prev) => prev.filter((m) => m.id !== id));
-  }, []);
+    deleteMessageAction(id);
+  }, [deleteMessageAction]);
 
   const handleEdit = useCallback((id: string, content: string) => {
-    setMessages((prev) => prev.map((m) => m.id === id ? { ...m, content } : m));
-  }, []);
+    editMessageAction(id, content);
+  }, [editMessageAction]);
 
   const handleRegenerate = useCallback(() => {
-    // Remove last assistant message, re-send last user message
-    setMessages((prev) => {
-      const withoutLast = [...prev];
-      while (withoutLast.length > 0 && withoutLast[withoutLast.length - 1].role === 'assistant') {
-        withoutLast.pop();
-      }
-      return withoutLast;
-    });
-    // Trigger re-send on next tick after state updates
+    removeLastAssistantMessages();
+    // Re-send last user message on next tick after store updates
     setTimeout(() => {
-      const lastUser = messages.filter((m) => m.role === 'user').pop();
+      const state = useChatStore.getState();
+      const convo = state.activeConversationId
+        ? state.conversations[state.activeConversationId]
+        : undefined;
+      if (!convo) return;
+      const lastUser = convo.messages.filter((m) => m.role === 'user').pop();
       if (lastUser) {
         handleSend(lastUser.content, []);
       }
     }, 50);
-  }, [messages, handleSend]);
+  }, [handleSend, removeLastAssistantMessages]);
+
+  // Thinking expansion state — persisted per conversation in session store
+  const expandedThinkingMap = useUIStore((s) => s.expandedThinking);
+  const setExpandedThinking = useUIStore((s) => s.setExpandedThinking);
+  const expandedThinkingIds = useMemo(
+    () => new Set(activeConversationId ? expandedThinkingMap[activeConversationId] ?? [] : []),
+    [expandedThinkingMap, activeConversationId],
+  );
+  const handleToggleThinking = useCallback((messageId: string) => {
+    if (!activeConversationId) return;
+    const current = expandedThinkingMap[activeConversationId] ?? [];
+    const next = current.includes(messageId)
+      ? current.filter((id) => id !== messageId)
+      : [...current, messageId];
+    setExpandedThinking(activeConversationId, next);
+  }, [activeConversationId, expandedThinkingMap, setExpandedThinking]);
 
   if (readyModels.length === 0) {
     return (
@@ -329,7 +405,7 @@ export function ChatView({ readyInstances, initialModelId, className }: ChatView
   }
 
   const modelSelector = readyModels.length > 1 ? (
-    <ModelSelect value={selectedModelId ?? ''} onChange={(e) => setSelectedModelId(e.target.value)}>
+    <ModelSelect value={selectedModelId ?? ''} onChange={(e) => selectModel(e.target.value)}>
       {readyModels.map((m) => (
         <option key={m.instanceId} value={m.modelId}>
           {m.modelId.split('/').pop()}
@@ -340,7 +416,7 @@ export function ChatView({ readyInstances, initialModelId, className }: ChatView
 
   return (
     <Container className={className}>
-      <MessagesScroll>
+      <MessagesScroll ref={scrollRef} onScroll={handleScroll}>
         <ChatMessages
           messages={messages}
           streamingContent={streamingContent}
@@ -349,6 +425,8 @@ export function ChatView({ readyInstances, initialModelId, className }: ChatView
           onDelete={handleDelete}
           onEdit={handleEdit}
           onRegenerate={handleRegenerate}
+          expandedThinkingIds={expandedThinkingIds}
+          onToggleThinking={handleToggleThinking}
         />
       </MessagesScroll>
       <InputArea>
@@ -360,6 +438,7 @@ export function ChatView({ readyInstances, initialModelId, className }: ChatView
           modelSelector={modelSelector}
           ttftMs={ttftMs}
           tps={tps}
+          contextLength={contextLength}
           showThinkingToggle={supportsThinking}
           thinkingEnabled={thinkingEnabled}
           onToggleThinking={() => setThinkingEnabled((v) => !v)}
@@ -369,4 +448,3 @@ export function ChatView({ readyInstances, initialModelId, className }: ChatView
     </Container>
   );
 }
-

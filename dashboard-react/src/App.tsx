@@ -13,8 +13,11 @@ import { SettingsPanel } from './components/layout/SettingsPanel';
 import { ModelStorePage } from './components/pages/DownloadsPage';
 import { ChatView } from './components/pages/ChatView';
 import { InstancePanel, type InstanceCardData } from './components/layout/InstancePanel';
+import { ConversationPanel } from './components/layout/ConversationPanel';
 import { addToast } from './hooks/useToast';
 import type { InstanceStatus } from './components/cluster/RunningInstanceCard';
+import { useChatStore } from './stores/chatStore';
+import { useUIStore } from './stores/uiStore';
 
 const Shell = styled.div`
   position: relative;
@@ -37,7 +40,8 @@ const Main = styled.main`
   min-height: 0;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 `;
 
 interface StoreDownload {
@@ -102,10 +106,23 @@ function deriveInstanceStatus(
 export function App() {
   const { topology, connected, downloads, nodeDisk, instances, runners } = useClusterState();
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [activeRoute, setActiveRoute] = useState<NavRoute>('cluster');
   const [storeDownloads, setStoreDownloads] = useState<StoreDownload[]>([]);
-  const [panelOpen, setPanelOpen] = useState(true);
-  const [chatModelId, setChatModelId] = useState<string | undefined>(undefined);
+  const activeRoute = useUIStore((s) => s.activeRoute);
+  const panelOpen = useUIStore((s) => s.panelOpen);
+  const historyPanelOpen = useUIStore((s) => s.historyPanelOpen);
+  const setActiveRoute = useUIStore((s) => s.setActiveRoute);
+  const togglePanel = useUIStore((s) => s.togglePanel);
+  const toggleHistoryPanel = useUIStore((s) => s.toggleHistoryPanel);
+  const conversationsMap = useChatStore((s) => s.conversations);
+  const allConversations = useMemo(
+    () => Object.values(conversationsMap).sort((a, b) => b.updatedAt - a.updatedAt),
+    [conversationsMap],
+  );
+  const activeConversationId = useChatStore((s) => s.activeConversationId);
+  const selectedModelId = useChatStore((s) => s.selectedModelId);
+  const selectConversation = useChatStore((s) => s.selectConversation);
+  const deleteConversation = useChatStore((s) => s.deleteConversation);
+  const newConversation = useChatStore((s) => s.newConversation);
 
   // Poll store downloads for the header progress indicator
   const pollStoreDownloads = useCallback(async () => {
@@ -207,14 +224,26 @@ export function App() {
           onNavigate={setActiveRoute}
           onOpenSettings={() => setSettingsOpen(true)}
           downloadProgress={downloadProgress}
+          showSidebarToggle={activeRoute === 'chat' && allConversations.length > 0}
+          sidebarVisible={historyPanelOpen}
+          onToggleSidebar={toggleHistoryPanel}
           instanceCount={instanceCards.length}
           instancesHealthy={instanceCards.every((c) => c.status !== 'failed')}
           mobileRightOpen={panelOpen}
-          onToggleMobileRight={() => setPanelOpen((o) => !o)}
+          onToggleMobileRight={togglePanel}
         />
-        <ClusterWarnings topology={topology} />
         <ContentRow>
+          {activeRoute === 'chat' && allConversations.length > 0 && historyPanelOpen && (
+            <ConversationPanel
+              conversations={allConversations}
+              activeConversationId={activeConversationId}
+              onSelect={selectConversation}
+              onDelete={deleteConversation}
+              onNewChat={() => { if (selectedModelId) newConversation(selectedModelId); }}
+            />
+          )}
           <Main>
+            <ClusterWarnings topology={topology} />
             {activeRoute === 'model-store' ? (
               <ModelStorePage
                 topology={topology}
@@ -222,10 +251,10 @@ export function App() {
                 nodeDisk={nodeDisk}
                 instances={instances}
                 runners={runners}
-                onChat={(modelId) => { setChatModelId(modelId); setActiveRoute('chat'); }}
+                onChat={(modelId) => { useChatStore.getState().selectModel(modelId); setActiveRoute('chat'); }}
               />
             ) : activeRoute === 'chat' ? (
-              <ChatView readyInstances={instanceCards} initialModelId={chatModelId} />
+              <ChatView readyInstances={instanceCards} />
             ) : topology ? (
               <TopologyGraph data={topology} />
             ) : (
@@ -238,7 +267,7 @@ export function App() {
             <InstancePanel
               instances={instanceCards}
               onDelete={handleDeleteInstance}
-              onChat={(modelId) => { setChatModelId(modelId); setActiveRoute('chat'); }}
+              onChat={(modelId) => { useChatStore.getState().selectModel(modelId); setActiveRoute('chat'); }}
             />
           )}
         </ContentRow>

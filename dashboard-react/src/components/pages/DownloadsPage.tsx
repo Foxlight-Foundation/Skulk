@@ -395,6 +395,24 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
     }
   }, [modelToInstanceId]);
 
+  const handleDelete = useCallback(async (entry: { model_id: string }, isActive: boolean) => {
+    if (isActive) {
+      addToast({ type: 'error', message: 'Stop the model before deleting' });
+      return;
+    }
+    try {
+      const res = await fetch(`/store/models/${encodeURIComponent(entry.model_id)}`, { method: 'DELETE' });
+      if (res.ok) {
+        addToast({ type: 'success', message: `Deleted ${entry.model_id}` });
+        loadRegistry();
+      } else {
+        addToast({ type: 'error', message: `Failed to delete ${entry.model_id}` });
+      }
+    } catch {
+      addToast({ type: 'error', message: 'Failed to delete model' });
+    }
+  }, [loadRegistry]);
+
   return (
     <Container>
       {purgeConfirm && (
@@ -439,7 +457,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
             </>
           }
           onRefresh={loadRegistry}
-          onDelete={() => {}}
+          onDelete={handleDelete}
           onLaunch={handleLaunch}
           onStop={handleStop}
           onChat={onChat}

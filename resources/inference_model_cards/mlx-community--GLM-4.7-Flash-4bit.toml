@@ -8,6 +8,7 @@ family = "glm"
 quantization = "4bit"
 base_model = "GLM 4.7 Flash"
 capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 202752
 
 [storage_size]
 in_bytes = 19327352832

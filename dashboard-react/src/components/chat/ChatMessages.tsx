@@ -20,6 +20,9 @@ export interface ChatMessagesProps {
   onEdit?: (messageId: string, content: string) => void;
   onRegenerate?: () => void;
   onRegenerateFromToken?: (tokenIndex: number) => void;
+  /** Externally controlled expanded thinking message IDs */
+  expandedThinkingIds?: Set<string>;
+  onToggleThinking?: (messageId: string) => void;
   className?: string;
 }
 
@@ -53,9 +56,10 @@ const EmptyState = styled.div`
   justify-content: center;
   padding: 80px 0;
   gap: 16px;
-  color: ${({ theme }) => theme.colors.textMuted};
+  color: ${({ theme }) => theme.colors.textSecondary};
   font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.sm};
+  font-size: ${({ theme }) => theme.fontSizes.md};
+  letter-spacing: 1px;
 `;
 
 const Circle = styled.div<{ $size: number; $opacity: number }>`
@@ -63,7 +67,8 @@ const Circle = styled.div<{ $size: number; $opacity: number }>`
   width: ${({ $size }) => $size}px;
   height: ${({ $size }) => $size}px;
   border-radius: 50%;
-  border: 1px solid rgba(255, 215, 0, ${({ $opacity }) => $opacity});
+  border: 1.5px solid rgba(255, 215, 0, ${({ $opacity }) => $opacity});
+  box-shadow: 0 0 8px rgba(255, 215, 0, ${({ $opacity }) => $opacity * 0.5});
 `;
 
 const MessageCard = styled.div<{ $role: 'user' | 'assistant' }>`
@@ -219,12 +224,15 @@ const ThinkingChevron = styled.span<{ $open: boolean }>`
 const ThinkingContent = styled.div`
   padding: 8px 10px;
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
-  color: ${({ theme }) => theme.colors.textSecondary};
+  color: ${({ theme }) => theme.colors.textMuted};
   border-top: 1px solid rgba(255, 215, 0, 0.1);
+
+  & * {
+    color: inherit;
+  }
 `;
 
-const ShowHideBtn = styled.button`
-  all: unset;
+const ShowHideBtn = styled.span`
   cursor: pointer;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
@@ -315,6 +323,8 @@ export function ChatMessages({
   onEdit,
   onRegenerate,
   onRegenerateFromToken,
+  expandedThinkingIds: externalExpanded,
+  onToggleThinking: externalToggle,
   className,
 }: ChatMessagesProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -323,7 +333,8 @@ export function ChatMessages({
   const [editContent, setEditContent] = useState('');
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set());
+  const [internalExpanded, setInternalExpanded] = useState<Set<string>>(new Set());
+  const expandedThinking = externalExpanded ?? internalExpanded;
   const [heatmapVisible, setHeatmapVisible] = useState<Set<string>>(new Set());
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const [streamThinkingOpen, setStreamThinkingOpen] = useState(false);
@@ -376,12 +387,16 @@ export function ChatMessages({
   }, [editingId, editContent, onEdit]);
 
   const toggleThinking = useCallback((id: string) => {
-    setExpandedThinking((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }, []);
+    if (externalToggle) {
+      externalToggle(id);
+    } else {
+      setInternalExpanded((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id); else next.add(id);
+        return next;
+      });
+    }
+  }, [externalToggle]);
 
   const toggleHeatmap = useCallback((id: string) => {
     setHeatmapVisible((prev) => {
@@ -399,9 +414,9 @@ export function ChatMessages({
       <Container ref={containerRef} className={className}>
         <EmptyState>
           <div style={{ position: 'relative', width: 80, height: 80 }}>
-            <Circle $size={80} $opacity={0.15} />
-            <Circle $size={56} $opacity={0.1} style={{ top: 12, left: 12 }} />
-            <Circle $size={32} $opacity={0.08} style={{ top: 24, left: 24 }} />
+            <Circle $size={80} $opacity={0.35} />
+            <Circle $size={56} $opacity={0.25} style={{ top: 12, left: 12 }} />
+            <Circle $size={32} $opacity={0.18} style={{ top: 24, left: 24 }} />
           </div>
           Awaiting Input
         </EmptyState>
