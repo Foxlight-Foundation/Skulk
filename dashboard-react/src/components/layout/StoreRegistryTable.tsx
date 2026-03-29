@@ -47,6 +47,8 @@ export interface StoreRegistryTableProps {
   onChat?: (modelId: string) => void;
   onPlacement?: (modelId: string) => void;
   clusterCards?: Record<string, Omit<ClusterCardProps, 'onLaunch'>>;
+  /** Total available cluster RAM in bytes — used to disable launch for models that won't fit */
+  totalClusterMemoryBytes?: number;
 }
 
 /* ---- helpers ---- */
@@ -128,7 +130,7 @@ const Table = styled.div`
 
 const THead = styled.div`
   display: grid;
-  grid-template-columns: 36px 1fr 80px 60px 100px 60px;
+  grid-template-columns: 36px 32px 1fr 80px 60px 100px 60px;
   gap: 8px;
   padding: 8px 12px;
   background: rgba(0, 0, 0, 0.4);
@@ -139,7 +141,7 @@ const THead = styled.div`
 
 const TRow = styled.div<{ $highlight?: boolean }>`
   display: grid;
-  grid-template-columns: 36px 1fr 80px 60px 100px 60px;
+  grid-template-columns: 36px 32px 1fr 80px 60px 100px 60px;
   gap: 8px;
   padding: 10px 12px;
   align-items: center;
@@ -310,6 +312,18 @@ const PlayBtn = styled.button`
   }
 `;
 
+const DisabledBtn = styled.span`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  color: ${({ theme }) => theme.colors.textMuted};
+  opacity: 0.4;
+  cursor: not-allowed;
+`;
+
 const PlacementBtn = styled.button`
   all: unset;
   cursor: pointer;
@@ -454,6 +468,7 @@ export function StoreRegistryTable({
   onChat,
   onPlacement,
   clusterCards = {},
+  totalClusterMemoryBytes = 0,
 }: StoreRegistryTableProps) {
   const registeredIds = useMemo(() => new Set(entries.map((e) => e.model_id)), [entries]);
   const pendingDownloads = useMemo(
@@ -494,6 +509,7 @@ export function StoreRegistryTable({
         <Table>
           <THead>
             <div />
+            <div />
             <div>Model</div>
             <div style={{ textAlign: 'right' }}>Size</div>
             <div style={{ textAlign: 'right' }}>Files</div>
@@ -504,6 +520,7 @@ export function StoreRegistryTable({
           {/* Pending downloads (not yet registered) */}
           {pendingDownloads.map((dl) => (
             <TRow key={dl.modelId} $highlight>
+              <Cell />
               <Cell />
               <ModelCell>
                 <ModelId title={dl.modelId}>{dl.modelId}</ModelId>
@@ -526,6 +543,7 @@ export function StoreRegistryTable({
           {entries.map((entry) => {
             const dl = downloadMap.get(entry.model_id);
             const active = isActive(entry.model_id);
+            const tooLarge = totalClusterMemoryBytes > 0 && entry.total_bytes > totalClusterMemoryBytes;
             return (
               <TRow key={entry.model_id}>
                 <PlayCell>
@@ -533,19 +551,25 @@ export function StoreRegistryTable({
                     <StopBtn onClick={() => onStop(entry.model_id)} title="Stop model">
                       <MdClose size={20} />
                     </StopBtn>
-                  ) : !active && !dl ? (
-                    <>
-                      {onLaunch && (
-                        <PlayBtn onClick={() => onLaunch(entry.model_id)} title="Launch model">
+                  ) : !active && !dl && onLaunch ? (
+                    tooLarge ? (
+                      <InfoTooltip content="Insufficient cluster memory" placement="right" delay={0}>
+                        <DisabledBtn aria-label="Insufficient memory">
                           <MdPlayArrow size={20} />
-                        </PlayBtn>
-                      )}
-                      {onPlacement && (
-                        <PlacementBtn onClick={() => onPlacement(entry.model_id)} title="Configure placement">
-                          <MdTune size={18} />
-                        </PlacementBtn>
-                      )}
-                    </>
+                        </DisabledBtn>
+                      </InfoTooltip>
+                    ) : (
+                      <PlayBtn onClick={() => onLaunch(entry.model_id)} title="Launch model">
+                        <MdPlayArrow size={20} />
+                      </PlayBtn>
+                    )
+                  ) : null}
+                </PlayCell>
+                <PlayCell>
+                  {!active && !dl && onPlacement ? (
+                    <PlacementBtn onClick={() => onPlacement(entry.model_id)} title="Configure placement">
+                      <MdTune size={18} />
+                    </PlacementBtn>
                   ) : null}
                 </PlayCell>
                 <ModelCell>

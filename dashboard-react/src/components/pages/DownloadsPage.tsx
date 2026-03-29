@@ -282,6 +282,17 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
     [storeEntries],
   );
 
+  // Total cluster available (free) RAM
+  const totalClusterMemoryBytes = useMemo(() => {
+    if (!topology?.nodes) return 0;
+    return Object.values(topology.nodes).reduce((sum, node) => {
+      const mem = node.macmon_info?.memory;
+      if (!mem) return sum;
+      const available = mem.ram_total - mem.ram_usage;
+      return sum + Math.max(available, 0);
+    }, 0);
+  }, [topology]);
+
   // Derive active model IDs and model→instanceId mapping from running instances
   const { activeModelIds, modelToInstanceId } = useMemo(() => {
     const ids: string[] = [];
@@ -469,6 +480,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
           onChat={onChat}
           onPlacement={setPlacementModelId}
           clusterCards={clusterCards}
+          totalClusterMemoryBytes={totalClusterMemoryBytes}
         />
       <ModelSearchModal
         open={searchOpen}
@@ -479,6 +491,9 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
       {placementModelId && topology && (
         <PlacementManager
           modelId={placementModelId}
+          modelSizeMb={storeEntries.find((e) => e.model_id === placementModelId)?.total_bytes
+            ? Math.round(storeEntries.find((e) => e.model_id === placementModelId)!.total_bytes / 1e6)
+            : undefined}
           topology={topology}
           open={!!placementModelId}
           onClose={() => setPlacementModelId(null)}

@@ -33,6 +33,7 @@ export interface ModelCardProps {
   tags?: string[];
   apiPreview?: PlacementPreview | null;
   modelIdOverride?: string | null;
+  hideActions?: boolean;
 }
 
 /* ================================================================
@@ -149,15 +150,8 @@ const pulseSlow = keyframes`
 
 const Card = styled.div<{ $canFit: boolean }>`
   position: relative;
-  background: rgba(17, 17, 17, 0.6);
-  border: 1px solid ${({ $canFit }) => ($canFit ? 'rgba(255,215,0,0.2)' : 'rgba(239,68,68,0.2)')};
+  background: transparent;
   padding: 12px;
-  transition: all 0.2s;
-
-  &:hover {
-    border-color: ${({ $canFit }) => ($canFit ? 'rgba(255,215,0,0.4)' : 'rgba(239,68,68,0.3)')};
-    box-shadow: ${({ $canFit }) => ($canFit ? '0 0 15px rgba(255,215,0,0.1)' : 'none')};
-  }
 `;
 
 const Corner = styled.div<{ $canFit: boolean; $pos: string }>`
@@ -285,7 +279,7 @@ const ProgressFill = styled.div<{ $status: string }>`
 
 const PreviewBox = styled.div`
   margin-bottom: 12px;
-  background: rgba(0, 0, 0, 0.6);
+  background: rgba(0, 0, 0, 0.3);
   border: 1px solid rgba(80, 80, 80, 0.2);
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 8px;
@@ -318,9 +312,10 @@ const LaunchBtn = styled(Button)<{ $canFit: boolean; $launching: boolean }>`
     !$launching &&
     css`
       background: rgba(239, 68, 68, 0.1);
-      color: rgba(248, 113, 113, 0.7);
+      color: rgba(248, 113, 113, 1);
       border-color: rgba(239, 68, 68, 0.3);
       cursor: not-allowed;
+      opacity: 1;
     `}
 `;
 
@@ -354,6 +349,7 @@ export function ModelCard({
   tags = [],
   apiPreview = null,
   modelIdOverride = null,
+  hideActions = false,
 }: ModelCardProps) {
   const estimatedMemory = model.storage_size_megabytes
     ? Math.round(model.storage_size_megabytes / 1024)
@@ -369,11 +365,6 @@ export function ModelCard({
 
   return (
     <Card $canFit={canFit}>
-      <Corner $canFit={canFit} $pos="tl" />
-      <Corner $canFit={canFit} $pos="tr" />
-      <Corner $canFit={canFit} $pos="bl" />
-      <Corner $canFit={canFit} $pos="br" />
-
       {/* Header: name + memory */}
       <Header>
         <div style={{ flex: 1, minWidth: 0 }}>
@@ -474,7 +465,7 @@ export function ModelCard({
                   stroke={n.isUsed && n2.isUsed ? '#FFD700' : '#374151'}
                   strokeWidth={1}
                   strokeDasharray={n.isUsed && n2.isUsed ? '4,2' : '2,4'}
-                  opacity={n.isUsed && n2.isUsed ? 0.4 : 0.15}
+                  opacity={n.isUsed && n2.isUsed ? 0.5 : 0.25}
                 />
               )),
             )}
@@ -484,7 +475,7 @@ export function ModelCard({
               <g
                 key={node.id}
                 transform={`translate(${node.x}, ${node.y})`}
-                opacity={node.isUsed ? 1 : 0.25}
+                opacity={node.isUsed ? 1 : 0.7}
                 filter={node.isUsed ? `url(#nodeGlow-${filterId})` : undefined}
               >
                 <PlacementDeviceIcon node={node} filterId={filterId} />
@@ -493,7 +484,7 @@ export function ModelCard({
                   textAnchor="middle"
                   fontSize={8}
                   fontFamily="SF Mono, Monaco, monospace"
-                  fill={node.isUsed ? (node.newPercent > 90 ? '#f87171' : '#FFD700') : '#4B5563'}
+                  fill={node.isUsed ? (node.newPercent > 90 ? '#f87171' : '#FFD700') : '#9CA3AF'}
                 >
                   {node.newPercent.toFixed(0)}%
                 </text>
@@ -504,23 +495,25 @@ export function ModelCard({
       )}
 
       {/* Launch button */}
-      <LaunchBtn
-        variant="outline"
-        size="lg"
-        block
-        $canFit={canFit}
-        $launching={isLaunching}
-        disabled={isLaunching || !canFit}
-        onClick={onLaunch}
-      >
-        {isLaunching ? (
-          <><LaunchSpinner /> LAUNCHING...</>
-        ) : !canFit ? (
-          'INSUFFICIENT MEMORY'
-        ) : (
-          '▸ LAUNCH'
-        )}
-      </LaunchBtn>
+      {!hideActions && (
+        <LaunchBtn
+          variant="outline"
+          size="lg"
+          block
+          $canFit={canFit}
+          $launching={isLaunching}
+          disabled={isLaunching || !canFit}
+          onClick={onLaunch}
+        >
+          {isLaunching ? (
+            <><LaunchSpinner /> LAUNCHING...</>
+          ) : !canFit ? (
+            'INSUFFICIENT MEMORY'
+          ) : (
+            '▸ LAUNCH'
+          )}
+        </LaunchBtn>
+      )}
     </Card>
   );
 }
@@ -532,7 +525,7 @@ export function ModelCard({
 function PlacementDeviceIcon({ node, filterId }: { node: PlacementNode; filterId: string }) {
   const s = node.iconSize;
   const half = s / 2;
-  const stroke = node.isUsed ? '#FFD700' : '#4B5563';
+  const stroke = node.isUsed ? '#FFD700' : '#6B7280';
   const screenH = s * 0.58;
   const currentFillH = screenH * (node.currentPercent / 100);
   const modelFillH = screenH * ((node.newPercent - node.currentPercent) / 100);
@@ -542,8 +535,8 @@ function PlacementDeviceIcon({ node, filterId }: { node: PlacementNode; filterId
       return (
         <g transform={`translate(${-half}, ${-half})`}>
           <rect x={2} y={0} width={s - 4} height={s * 0.65} rx={2} fill="none" stroke={stroke} strokeWidth={1.5} />
-          <rect x={4} y={2} width={s - 8} height={screenH} fill="#0a0a0a" />
-          <rect x={4} y={2 + screenH - currentFillH} width={s - 8} height={currentFillH} fill="#374151" />
+          <rect x={4} y={2} width={s - 8} height={screenH} fill="#1a1a1a" />
+          <rect x={4} y={2 + screenH - currentFillH} width={s - 8} height={currentFillH} fill="#4B5563" />
           {node.modelUsageGB > 0 && node.isUsed && (
             <ModelFill x={4} y={2 + screenH - currentFillH - modelFillH} width={s - 8} height={modelFillH} fill="#FFD700" filter={`url(#memGlow-${filterId})`} />
           )}
@@ -554,8 +547,8 @@ function PlacementDeviceIcon({ node, filterId }: { node: PlacementNode; filterId
       return (
         <g transform={`translate(${-half}, ${-half})`}>
           <rect x={2} y={2} width={s - 4} height={s - 4} rx={4} fill="none" stroke={stroke} strokeWidth={1.5} />
-          <rect x={4} y={4} width={s - 8} height={s - 8} fill="#0a0a0a" />
-          <rect x={4} y={4 + (s - 8) * (1 - node.currentPercent / 100)} width={s - 8} height={(s - 8) * (node.currentPercent / 100)} fill="#374151" />
+          <rect x={4} y={4} width={s - 8} height={s - 8} fill="#1a1a1a" />
+          <rect x={4} y={4 + (s - 8) * (1 - node.currentPercent / 100)} width={s - 8} height={(s - 8) * (node.currentPercent / 100)} fill="#4B5563" />
           {node.modelUsageGB > 0 && node.isUsed && (
             <ModelFill x={4} y={4 + (s - 8) * (1 - node.newPercent / 100)} width={s - 8} height={(s - 8) * ((node.newPercent - node.currentPercent) / 100)} fill="#FFD700" filter={`url(#memGlow-${filterId})`} />
           )}
@@ -565,8 +558,8 @@ function PlacementDeviceIcon({ node, filterId }: { node: PlacementNode; filterId
       return (
         <g transform={`translate(${-half}, ${-half})`}>
           <rect x={2} y={s * 0.3} width={s - 4} height={s * 0.4} rx={3} fill="none" stroke={stroke} strokeWidth={1.5} />
-          <rect x={4} y={s * 0.32} width={s - 8} height={s * 0.36} fill="#0a0a0a" />
-          <rect x={4} y={s * 0.32 + s * 0.36 * (1 - node.currentPercent / 100)} width={s - 8} height={s * 0.36 * (node.currentPercent / 100)} fill="#374151" />
+          <rect x={4} y={s * 0.32} width={s - 8} height={s * 0.36} fill="#1a1a1a" />
+          <rect x={4} y={s * 0.32 + s * 0.36 * (1 - node.currentPercent / 100)} width={s - 8} height={s * 0.36 * (node.currentPercent / 100)} fill="#4B5563" />
           {node.modelUsageGB > 0 && node.isUsed && (
             <ModelFill x={4} y={s * 0.32 + s * 0.36 * (1 - node.newPercent / 100)} width={s - 8} height={s * 0.36 * ((node.newPercent - node.currentPercent) / 100)} fill="#FFD700" filter={`url(#memGlow-${filterId})`} />
           )}
