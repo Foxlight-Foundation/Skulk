@@ -194,9 +194,16 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     setTps(null);
 
     // Read messages from store (includes the user message we just added)
-    const allMessages = useChatStore.getState().conversations[
-      useChatStore.getState().activeConversationId!
-    ]?.messages ?? [];
+    const storeState = useChatStore.getState();
+    const activeConvo = storeState.activeConversationId
+      ? storeState.conversations[storeState.activeConversationId]
+      : undefined;
+    if (!activeConvo) {
+      setIsLoading(false);
+      setStreamingContent(null);
+      return;
+    }
+    const allMessages = activeConvo.messages;
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -361,10 +368,12 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     removeLastAssistantMessages();
     // Re-send last user message on next tick after store updates
     setTimeout(() => {
-      const convo = useChatStore.getState().conversations[
-        useChatStore.getState().activeConversationId!
-      ];
-      const lastUser = convo?.messages.filter((m) => m.role === 'user').pop();
+      const state = useChatStore.getState();
+      const convo = state.activeConversationId
+        ? state.conversations[state.activeConversationId]
+        : undefined;
+      if (!convo) return;
+      const lastUser = convo.messages.filter((m) => m.role === 'user').pop();
       if (lastUser) {
         handleSend(lastUser.content, []);
       }
