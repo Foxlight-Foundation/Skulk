@@ -1,3 +1,6 @@
+import os
+from typing import Literal, cast
+
 # TODO: Do we want so many constants?
 #  I think we want a lot of these as parameters?
 
@@ -9,7 +12,31 @@ MAX_KV_SIZE: int | None = 3200
 KEEP_KV_SIZE: int | None = 1600
 QUANTIZE_MODEL_MODE: str | None = "affine"
 CACHE_GROUP_SIZE: int = 64
-KV_CACHE_BITS: int | None = None
+KV_CACHE_BITS: int | None = (
+    int(os.environ["EXO_KV_CACHE_BITS"])
+    if "EXO_KV_CACHE_BITS" in os.environ
+    else None
+)
+KVCacheBackend = Literal[
+    "default",
+    "mlx_quantized",
+    "turboquant",
+    "turboquant_adaptive",
+]
+DEFAULT_KV_CACHE_BACKEND: KVCacheBackend = "default"
+KV_CACHE_BACKEND: KVCacheBackend = cast(
+    KVCacheBackend,
+    os.environ.get("EXO_KV_CACHE_BACKEND", DEFAULT_KV_CACHE_BACKEND),
+)
+TURBOQUANT_K_BITS: int | None = (
+    int(os.environ["EXO_TQ_K_BITS"]) if "EXO_TQ_K_BITS" in os.environ else None
+)
+TURBOQUANT_V_BITS: int | None = (
+    int(os.environ["EXO_TQ_V_BITS"]) if "EXO_TQ_V_BITS" in os.environ else None
+)
+TURBOQUANT_FP16_LAYERS: int = int(os.environ.get("EXO_TQ_FP16_LAYERS", "4"))
+DEFAULT_TURBOQUANT_K_BITS: int = 3
+DEFAULT_TURBOQUANT_V_BITS: int = 4
 
 DEFAULT_TOP_LOGPROBS: int = 5
 

@@ -47,6 +47,7 @@ from exo.worker.engines.mlx.cache import (
 from exo.worker.engines.mlx.constants import (
     DEFAULT_TOP_LOGPROBS,
     KV_BITS,
+    KV_CACHE_BACKEND,
     KV_GROUP_SIZE,
     MAX_TOKENS,
 )
@@ -64,6 +65,10 @@ _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
 
 class PrefillCancelled(BaseException):
     """Raised when prefill is cancelled via the progress callback."""
+
+
+def _noop_quantize_cache(_cache: KVCacheType) -> None:
+    return None
 
 
 def _has_pipeline_communication_layer(model: Model):
@@ -106,12 +111,19 @@ def pipeline_parallel_prefill(
     """
     prefill_step_size = prefill_step_size // min(4, group.size())
 
-    quantize_cache_fn: Callable[..., None] = functools.partial(
-        maybe_quantize_kv_cache,
-        quantized_kv_start=0,
-        kv_group_size=kv_group_size,
-        kv_bits=kv_bits,
-    )
+    quantize_cache_fn: Callable[[KVCacheType], None]
+    if KV_CACHE_BACKEND == "mlx_quantized":
+        quantize_cache_fn = cast(
+            Callable[[KVCacheType], None],
+            functools.partial(
+            maybe_quantize_kv_cache,
+            quantized_kv_start=0,
+            kv_group_size=kv_group_size,
+            kv_bits=kv_bits,
+            ),
+        )
+    else:
+        quantize_cache_fn = _noop_quantize_cache
 
     _prompt_cache: KVCacheType = prompt_cache
     rank = group.rank()
@@ -293,7 +305,9 @@ def prefill(
                 cache[i] = deepcopy(pre_gen.states[i])  # type: ignore
         else:
             assert not isinstance(c, (ArraysCache, RotatingKVCache))
-            c.trim(2)
+            trim_fn = getattr(c, "trim", None)
+            assert callable(trim_fn)
+            trim_fn(2)
 
     elapsed = time.perf_counter() - start_time
     tokens_per_sec = num_tokens / elapsed if elapsed > 0 else 0.0

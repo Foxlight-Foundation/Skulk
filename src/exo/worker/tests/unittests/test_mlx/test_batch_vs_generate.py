@@ -140,8 +140,8 @@ def _compare_cache_arrays(
         assert type(a) is type(b), (
             f"{label}Layer {i}: type {type(a).__name__} vs {type(b).__name__}"
         )
-        states_a = a.state
-        states_b = b.state
+        states_a = _safe_state(a)
+        states_b = _safe_state(b)
         assert len(states_a) == len(states_b), (
             f"{label}Layer {i}: state count {len(states_a)} vs {len(states_b)}"
         )

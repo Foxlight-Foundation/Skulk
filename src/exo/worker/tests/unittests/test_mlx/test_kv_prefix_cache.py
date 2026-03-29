@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import mlx.core as mx
 import pytest
-from mlx_lm.models.cache import KVCache
+from mlx_lm.models.cache import KVCache, QuantizedKVCache
 from mlx_lm.sample_utils import make_sampler
 
 from exo.shared.types.common import ModelId
@@ -15,6 +15,7 @@ from exo.worker.engines.mlx.cache import (
     KVPrefixCache,
     cache_length,
     encode_prompt,
+    get_kv_cache_backend,
     get_prefix_length,
     make_kv_cache,
 )
@@ -104,6 +105,82 @@ class TestKVPrefix:
         cache = KVPrefixCache(None)
         cache.clear()
         assert len(cache.prompts) == 0
+
+
+class TestKVCacheBackends:
+    def test_unknown_backend_falls_back_to_default(self):
+        with patch(
+            "exo.worker.engines.mlx.cache.KV_CACHE_BACKEND",
+            cast(object, "mystery"),
+        ):
+            assert get_kv_cache_backend() == "default"
+
+    def test_make_kv_cache_default_backend(self):
+        model = cast(Model, type("FakeModel", (), {"layers": [object(), object()]})())
+        with patch("exo.worker.engines.mlx.cache.KV_CACHE_BACKEND", "default"):
+            cache = make_kv_cache(model)
+
+        assert len(cache) == 2
+        assert all(isinstance(layer, KVCache) for layer in cache)
+
+    def test_make_kv_cache_mlx_quantized_backend(self):
+        model = cast(Model, type("FakeModel", (), {"layers": [object(), object()]})())
+        with (
+            patch("exo.worker.engines.mlx.cache.KV_CACHE_BACKEND", "mlx_quantized"),
+            patch("exo.worker.engines.mlx.cache.KV_CACHE_BITS", 4),
+            patch("exo.worker.engines.mlx.cache.CACHE_GROUP_SIZE", 32),
+        ):
+            cache = make_kv_cache(model)
+
+        assert len(cache) == 2
+        assert all(isinstance(layer, QuantizedKVCache) for layer in cache)
+
+    def test_make_kv_cache_mlx_quantized_backend_requires_bits(self):
+        model = cast(Model, type("FakeModel", (), {"layers": [object()]})())
+        with (
+            patch("exo.worker.engines.mlx.cache.KV_CACHE_BACKEND", "mlx_quantized"),
+            patch("exo.worker.engines.mlx.cache.KV_CACHE_BITS", None),
+            pytest.raises(ValueError, match="EXO_KV_CACHE_BITS"),
+        ):
+            _ = make_kv_cache(model)
+
+    def test_make_kv_cache_turboquant_backend(self):
+        class FakeModel:
+            layers = [object(), object()]
+
+            def make_cache(self):
+                return [KVCache(), KVCache()]
+
+        model = cast(Model, FakeModel())
+        with (
+            patch("exo.worker.engines.mlx.cache.KV_CACHE_BACKEND", "turboquant"),
+            patch("exo.worker.engines.mlx.cache.TURBOQUANT_K_BITS", 3),
+            patch("exo.worker.engines.mlx.cache.TURBOQUANT_V_BITS", 4),
+        ):
+            cache = make_kv_cache(model)
+
+        assert len(cache) == 2
+
+    def test_make_kv_cache_turboquant_adaptive_backend(self):
+        class FakeModel:
+            layers = [object(), object(), object(), object()]
+
+            def make_cache(self):
+                return [KVCache(), KVCache(), KVCache(), KVCache()]
+
+        model = cast(Model, FakeModel())
+        with (
+            patch(
+                "exo.worker.engines.mlx.cache.KV_CACHE_BACKEND",
+                "turboquant_adaptive",
+            ),
+            patch("exo.worker.engines.mlx.cache.TURBOQUANT_K_BITS", 3),
+            patch("exo.worker.engines.mlx.cache.TURBOQUANT_V_BITS", 4),
+            patch("exo.worker.engines.mlx.cache.TURBOQUANT_FP16_LAYERS", 1),
+        ):
+            cache = make_kv_cache(model)
+
+        assert len(cache) == 4
 
 
 def _load_gpt_oss() -> tuple[Model, object]:

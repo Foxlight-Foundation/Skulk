@@ -39,6 +39,7 @@ exo connects all your devices into an AI cluster. Not only does exo enable runni
 - **MLX Support**: exo uses [MLX](https://github.com/ml-explore/mlx) as an inference backend and [MLX distributed](https://ml-explore.github.io/mlx/build/html/usage/distributed.html) for distributed communication.
 - **Multiple API Compatibility**: Compatible with OpenAI Chat Completions API, Claude Messages API, OpenAI Responses API, and Ollama API - use your existing tools and clients.
 - **Custom Model Support**: Load custom models from HuggingFace hub to expand the range of available models.
+- **Experimental KV Cache Backends**: Skulk includes opt-in MLX quantized and TurboQuant-inspired KV cache backends for long-context memory experiments. See [docs/kv-cache-backends.md](docs/kv-cache-backends.md).
 
 ## Dashboard
 
@@ -133,6 +134,33 @@ uv run exo
 ```
 
 This starts the exo dashboard and API at http://localhost:52415/
+
+## Experimental KV Cache Backends
+
+Skulk includes opt-in KV cache backends for MLX text generation:
+
+- `default`: current behavior, unchanged unless you explicitly opt in
+- `mlx_quantized`: MLX LM's built-in `QuantizedKVCache`
+- `turboquant`: a correctness-first TurboQuant-inspired KV cache for standard `KVCache` layers
+- `turboquant_adaptive`: keeps the first and last KV layers in FP16 and applies TurboQuant only to middle KV layers
+
+Current recommended experimental setting:
+
+```bash
+EXO_KV_CACHE_BACKEND=turboquant_adaptive \
+EXO_TQ_K_BITS=3 \
+EXO_TQ_V_BITS=4 \
+EXO_TQ_FP16_LAYERS=4 \
+uv run exo
+```
+
+Important notes:
+
+- These backends are opt-in. If `EXO_KV_CACHE_BACKEND` is unset, behavior remains the same as before.
+- The current implementation is primarily a memory optimization for long-context experiments, not a guaranteed tokens-per-second optimization.
+- Quantized KV cache backends currently force sequential generation because batch/history mode is not supported yet.
+
+More detail, current limitations, and testing guidance live in [docs/kv-cache-backends.md](docs/kv-cache-backends.md).
 
 
 *Please view the section on RDMA to enable this feature on MacOS >=26.2!*
@@ -303,6 +331,12 @@ exo supports several environment variables for configuration:
 | `EXO_LIBP2P_NAMESPACE` | Custom namespace for cluster isolation | None |
 | `EXO_FAST_SYNCH` | Control MLX_METAL_FAST_SYNCH behavior (for JACCL backend) | Auto |
 | `EXO_TRACING_ENABLED` | Enable distributed tracing for performance analysis | `false` |
+| `EXO_KV_CACHE_BACKEND` | Select KV cache backend: `default`, `mlx_quantized`, `turboquant`, or `turboquant_adaptive` | `default` |
+| `EXO_KV_CACHE_BITS` | Bit width for MLX built-in quantized KV cache. Required when `EXO_KV_CACHE_BACKEND=mlx_quantized` | None |
+| `EXO_TQ_K_BITS` | Key-cache bit width for TurboQuant backends | `3` |
+| `EXO_TQ_V_BITS` | Value-cache bit width for TurboQuant backends | `4` |
+| `EXO_TQ_FP16_LAYERS` | Number of KV layers at each edge kept in FP16 for `turboquant_adaptive` | `4` |
+| `EXO_NO_BATCH` | Disable batch generation. Quantized KV backends currently force this behavior automatically as a temporary fallback | `false` |
 
 **Example usage:**
 
@@ -318,7 +352,15 @@ EXO_ENABLE_IMAGE_MODELS=true uv run exo
 
 # Use custom namespace for cluster isolation
 EXO_LIBP2P_NAMESPACE=my-dev-cluster uv run exo
+
+# Use MLX built-in quantized KV cache
+EXO_KV_CACHE_BACKEND=mlx_quantized EXO_KV_CACHE_BITS=4 uv run exo
+
+# Use the current recommended TurboQuant adaptive setting
+EXO_KV_CACHE_BACKEND=turboquant_adaptive EXO_TQ_K_BITS=3 EXO_TQ_V_BITS=4 EXO_TQ_FP16_LAYERS=4 uv run exo
 ```
+
+For more detail on KV cache backends, supported model cache layouts, current limitations, and testing guidance, see [docs/kv-cache-backends.md](docs/kv-cache-backends.md).
 
 ---
 

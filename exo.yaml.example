@@ -8,6 +8,11 @@
 # every node in your cluster.  If this file is absent, exo behaves
 # identically to the upstream default (zero-config compatibility).
 #
+# NOTE: Experimental KV cache backend controls such as
+# EXO_KV_CACHE_BACKEND, EXO_KV_CACHE_BITS, EXO_TQ_K_BITS,
+# EXO_TQ_V_BITS, and EXO_TQ_FP16_LAYERS are currently environment
+# variables, not exo.yaml settings. See docs/kv-cache-backends.md.
+#
 # ─────────────────────────────────────────────────────────────────────────────
 # MODEL STORE
 # ─────────────────────────────────────────────────────────────────────────────

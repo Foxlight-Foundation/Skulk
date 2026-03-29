@@ -19,6 +19,7 @@ There are currently 5 major systems:
 - Runner
     
     Executes inference jobs (for now) in an isolated process from the worker for fault-tolerance.
+    The runner is also where MLX inference generators and KV cache backends are selected. Experimental KV cache backend selection is process-local and opt-in via environment variables.
 
 - API
     

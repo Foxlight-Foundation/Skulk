@@ -4,18 +4,9 @@ from collections.abc import Sequence
 
 from mlx import core as mx
 from mlx import nn as nn
-from mlx_lm.models.cache import (
-    ArraysCache,
-    CacheList,
-    KVCache,
-    QuantizedKVCache,
-    RotatingKVCache,
-)
 
 # This list contains one cache entry per transformer layer
-KVCacheType = Sequence[
-    KVCache | RotatingKVCache | QuantizedKVCache | ArraysCache | CacheList
-]
+KVCacheType = Sequence[object]
 
 
 # Model is a wrapper function to fix the fact that mlx is not strongly typed in the same way that EXO is.

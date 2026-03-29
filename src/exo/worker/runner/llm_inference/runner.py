@@ -52,7 +52,7 @@ from exo.shared.types.worker.runners import (
     RunnerWarmingUp,
 )
 from exo.utils.channels import MpReceiver, MpSender
-from exo.worker.engines.mlx.cache import KVPrefixCache
+from exo.worker.engines.mlx.cache import KVPrefixCache, get_kv_cache_backend
 from exo.worker.engines.mlx.utils_mlx import (
     initialize_mlx,
     load_mlx_items,
@@ -405,8 +405,24 @@ class Builder:
         kv_prefix_cache = KVPrefixCache(self.group)
 
         device_rank = 0 if self.group is None else self.group.rank()
-        if os.environ.get("EXO_NO_BATCH"):
-            logger.info("using SequentialGenerator (batching disabled)")
+        kv_backend = get_kv_cache_backend()
+        # TODO: Remove this forced sequential fallback once quantized KV cache
+        # backends support BatchGenerator history merge/extract semantics.
+        force_sequential = kv_backend in (
+            "mlx_quantized",
+            "turboquant",
+            "turboquant_adaptive",
+        )
+        if os.environ.get("EXO_NO_BATCH") or force_sequential:
+            if force_sequential and not os.environ.get("EXO_NO_BATCH"):
+                logger.warning(
+                    "Quantized KV cache backend does not yet support "
+                    "batch/history mode; forcing SequentialGenerator "
+                    f"(kv_backend={kv_backend})"
+                )
+                logger.info(f"using SequentialGenerator (kv_backend={kv_backend})")
+            else:
+                logger.info("using SequentialGenerator (batching disabled)")
             return SequentialGenerator(
                 model=self.inference_model,
                 tokenizer=self.tokenizer,
