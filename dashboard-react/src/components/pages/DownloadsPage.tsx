@@ -8,6 +8,7 @@ import { ModelSearchModal } from './ModelSearchModal';
 import { FiTrash2, FiSearch, FiCheck } from 'react-icons/fi';
 import { Button } from '../common/Button';
 import { addToast } from '../../hooks/useToast';
+import { PlacementManager } from '../cluster/PlacementManager';
 
 interface ModelStorePageProps {
   topology: TopologyData | null;
@@ -159,6 +160,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
   const [storeEntries, setStoreEntries] = useState<StoreRegistryEntry[]>([]);
   const [storeDownloads, setStoreDownloads] = useState<StoreDownloadProgress[]>([]);
   const [storeLoading, setStoreLoading] = useState(false);
+  const [placementModelId, setPlacementModelId] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval>>(undefined);
 
   // Extract model card info from download data for the store table tooltips
@@ -354,28 +356,32 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
     return cards;
   }, [instances, runners, topology, storeEntries]);
 
-  const handleLaunch = useCallback(async (modelId: string) => {
+  const handleLaunchWithParams = useCallback(async (params: { modelId: string; sharding: string; instanceMeta: string; minNodes: number }) => {
     try {
       const res = await fetch('/place_instance', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model_id: modelId,
-          sharding: 'Pipeline',
-          instance_meta: 'MlxRing',
-          min_nodes: 1,
+          model_id: params.modelId,
+          sharding: params.sharding,
+          instance_meta: params.instanceMeta,
+          min_nodes: params.minNodes,
         }),
       });
       if (res.ok) {
-        addToast({ type: 'success', message: `Launching ${modelId}` });
+        addToast({ type: 'success', message: `Launching ${params.modelId}` });
       } else {
         const err = await res.json().catch(() => ({}));
-        addToast({ type: 'error', message: (err as Record<string, string>).detail ?? `Failed to launch ${modelId}` });
+        addToast({ type: 'error', message: (err as Record<string, string>).detail ?? `Failed to launch ${params.modelId}` });
       }
     } catch {
       addToast({ type: 'error', message: `Failed to launch model` });
     }
   }, []);
+
+  const handleLaunch = useCallback((modelId: string) => {
+    handleLaunchWithParams({ modelId, sharding: 'Pipeline', instanceMeta: 'MlxRing', minNodes: 1 });
+  }, [handleLaunchWithParams]);
 
   const handleStop = useCallback(async (modelId: string) => {
     const instanceId = modelToInstanceId[modelId];
@@ -461,6 +467,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
           onLaunch={handleLaunch}
           onStop={handleStop}
           onChat={onChat}
+          onPlacement={setPlacementModelId}
           clusterCards={clusterCards}
         />
       <ModelSearchModal
@@ -469,6 +476,15 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
         existingModelIds={storeModelIds}
         onDownloadStarted={loadRegistry}
       />
+      {placementModelId && topology && (
+        <PlacementManager
+          modelId={placementModelId}
+          topology={topology}
+          open={!!placementModelId}
+          onClose={() => setPlacementModelId(null)}
+          onLaunch={handleLaunchWithParams}
+        />
+      )}
     </Container>
   );
 }

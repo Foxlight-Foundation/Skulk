@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import styled, { css, keyframes } from 'styled-components';
 import { FiTrash2, FiExternalLink, FiRefreshCw } from 'react-icons/fi';
-import { MdPlayArrow, MdClose } from 'react-icons/md';
+import { MdPlayArrow, MdClose, MdTune } from 'react-icons/md';
 import { BsChatDotsFill } from 'react-icons/bs';
 import { formatBytes } from '../../utils/format';
 import { Button } from '../common/Button';
@@ -45,6 +45,7 @@ export interface StoreRegistryTableProps {
   onLaunch?: (modelId: string) => void;
   onStop?: (modelId: string) => void;
   onChat?: (modelId: string) => void;
+  onPlacement?: (modelId: string) => void;
   clusterCards?: Record<string, Omit<ClusterCardProps, 'onLaunch'>>;
 }
 
@@ -309,6 +310,24 @@ const PlayBtn = styled.button`
   }
 `;
 
+const PlacementBtn = styled.button`
+  all: unset;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  color: ${({ theme }) => theme.colors.textMuted};
+  transition: all 0.15s;
+
+  &:hover {
+    color: ${({ theme }) => theme.colors.gold};
+    background: rgba(255, 215, 0, 0.1);
+  }
+`;
+
 const StopBtn = styled.button`
   all: unset;
   cursor: pointer;
@@ -433,6 +452,7 @@ export function StoreRegistryTable({
   onLaunch,
   onStop,
   onChat,
+  onPlacement,
   clusterCards = {},
 }: StoreRegistryTableProps) {
   const registeredIds = useMemo(() => new Set(entries.map((e) => e.model_id)), [entries]);
@@ -513,10 +533,19 @@ export function StoreRegistryTable({
                     <StopBtn onClick={() => onStop(entry.model_id)} title="Stop model">
                       <MdClose size={20} />
                     </StopBtn>
-                  ) : !active && !dl && onLaunch ? (
-                    <PlayBtn onClick={() => onLaunch(entry.model_id)} title="Launch model">
-                      <MdPlayArrow size={20} />
-                    </PlayBtn>
+                  ) : !active && !dl ? (
+                    <>
+                      {onLaunch && (
+                        <PlayBtn onClick={() => onLaunch(entry.model_id)} title="Launch model">
+                          <MdPlayArrow size={20} />
+                        </PlayBtn>
+                      )}
+                      {onPlacement && (
+                        <PlacementBtn onClick={() => onPlacement(entry.model_id)} title="Configure placement">
+                          <MdTune size={18} />
+                        </PlacementBtn>
+                      )}
+                    </>
                   ) : null}
                 </PlayCell>
                 <ModelCell>
