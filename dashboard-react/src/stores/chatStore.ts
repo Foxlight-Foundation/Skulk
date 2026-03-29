@@ -317,16 +317,19 @@ export const useChatStore = create<ChatState>()(
         getItem: (name: string) => {
           const durable = localStorage.getItem(name);
           const session = sessionStorage.getItem(name + '-session');
-          const d = durable ? JSON.parse(durable) : {};
-          const s = session ? JSON.parse(session) : {};
+          let d: Record<string, unknown> = {};
+          let s: Record<string, unknown> = {};
+          try { if (durable) d = JSON.parse(durable); } catch { /* corrupted — reset */ }
+          try { if (session) s = JSON.parse(session); } catch { /* corrupted — reset */ }
           return JSON.stringify({
-            state: { ...(d.state ?? {}), ...(s.state ?? {}) },
-            version: d.version ?? s.version ?? 1,
+            state: { ...((d as Record<string, unknown>).state ?? {}), ...((s as Record<string, unknown>).state ?? {}) },
+            version: (d as Record<string, unknown>).version ?? (s as Record<string, unknown>).version ?? 1,
           });
         },
         setItem: (name: string, value: string) => {
-          const parsed = JSON.parse(value);
-          const state = parsed.state ?? {};
+          let parsed: Record<string, unknown>;
+          try { parsed = JSON.parse(value); } catch { return; }
+          const state = (parsed.state ?? {}) as Record<string, unknown>;
           const { activeConversationId, selectedModelId, ...rest } = state;
           localStorage.setItem(name, JSON.stringify({
             state: {

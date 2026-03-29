@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styled from 'styled-components';
 import { ChatMessages } from '../chat/ChatMessages';
 import { ChatForm } from '../chat/ChatForm';
@@ -17,47 +17,6 @@ export interface ChatViewProps {
 }
 
 /* ── AI Summary ───────────────────────────────────────── */
-
-async function generateSummary(convoId: string, modelId: string, messages: ChatMessage[]) {
-  try {
-    // Build a condensed transcript for the summary prompt
-    const transcript = messages
-      .slice(0, 6)
-      .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.slice(0, 200)}`)
-      .join('\n');
-
-    const res = await fetch('/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: modelId,
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a summarizer. Given a conversation transcript, reply with ONLY a short title (max 8 words) that describes the topic. No thinking, no explanation, no punctuation except what is needed. Just the title.',
-          },
-          {
-            role: 'user',
-            content: transcript,
-          },
-        ],
-        max_tokens: 50,
-      }),
-    });
-    if (!res.ok) return;
-    const data = await res.json();
-    let summary = data.choices?.[0]?.message?.content?.trim() ?? '';
-    // Strip any <think> tags that thinking models might emit
-    summary = summary.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<think>[\s\S]*/i, '').trim();
-    // Remove surrounding quotes if present
-    summary = summary.replace(/^["']|["']$/g, '').trim();
-    if (summary && summary.length > 0 && summary.length < 80) {
-      useChatStore.getState().setSummary(convoId, summary);
-    }
-  } catch {
-    // silent failure
-  }
-}
 
 /* ── Styles ───────────────────────────────────────────── */
 
@@ -162,11 +121,15 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     return () => timers.forEach(clearTimeout);
   }, [messages.length, chatScrollTop]);
 
-  // Save scroll position on scroll
+  // Save scroll position on scroll (throttled to avoid jank)
+  const scrollRaf = useRef<number>(0);
   const handleScroll = useCallback(() => {
-    if (scrollRef.current) {
-      setChatScrollTop(scrollRef.current.scrollTop);
-    }
+    cancelAnimationFrame(scrollRaf.current);
+    scrollRaf.current = requestAnimationFrame(() => {
+      if (scrollRef.current) {
+        setChatScrollTop(scrollRef.current.scrollTop);
+      }
+    });
   }, [setChatScrollTop]);
 
   // Fetch model capabilities and context lengths
@@ -380,8 +343,6 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     setIsLoading(false);
     abortRef.current = null;
 
-    // AI summary disabled for now — small models produce low-quality results
-    // TODO: revisit when larger models or smarter extraction is available
   }, [selectedModelId, isLoading, thinkingEnabled, addMessage]);
 
   const handleCancel = useCallback(() => {
