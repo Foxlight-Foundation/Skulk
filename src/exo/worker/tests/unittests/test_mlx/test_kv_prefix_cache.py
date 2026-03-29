@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import mlx.core as mx
 import pytest
-from mlx_lm.models.cache import KVCache, QuantizedKVCache
+from mlx_lm.models.cache import ArraysCache, KVCache, QuantizedKVCache, RotatingKVCache
 from mlx_lm.sample_utils import make_sampler
 
 from exo.shared.types.common import ModelId
@@ -134,6 +134,44 @@ class TestKVCacheBackends:
 
         assert len(cache) == 2
         assert all(isinstance(layer, QuantizedKVCache) for layer in cache)
+
+    def test_make_kv_cache_mlx_quantized_backend_preserves_arrays_cache(self):
+        class FakeModel:
+            layers = [object(), object(), object()]
+
+            def make_cache(self):
+                return [ArraysCache(1), KVCache(), KVCache()]
+
+        model = cast(Model, FakeModel())
+        with (
+            patch("exo.worker.engines.mlx.cache.KV_CACHE_BACKEND", "mlx_quantized"),
+            patch("exo.worker.engines.mlx.cache.KV_CACHE_BITS", 4),
+            patch("exo.worker.engines.mlx.cache.CACHE_GROUP_SIZE", 32),
+        ):
+            cache = make_kv_cache(model)
+
+        assert isinstance(cache[0], ArraysCache)
+        assert isinstance(cache[1], QuantizedKVCache)
+        assert isinstance(cache[2], QuantizedKVCache)
+
+    def test_make_kv_cache_mlx_quantized_backend_preserves_rotating_cache(self):
+        class FakeModel:
+            layers = [object(), object(), object()]
+
+            def make_cache(self):
+                return [RotatingKVCache(max_size=32), KVCache(), KVCache()]
+
+        model = cast(Model, FakeModel())
+        with (
+            patch("exo.worker.engines.mlx.cache.KV_CACHE_BACKEND", "mlx_quantized"),
+            patch("exo.worker.engines.mlx.cache.KV_CACHE_BITS", 4),
+            patch("exo.worker.engines.mlx.cache.CACHE_GROUP_SIZE", 32),
+        ):
+            cache = make_kv_cache(model)
+
+        assert isinstance(cache[0], RotatingKVCache)
+        assert isinstance(cache[1], QuantizedKVCache)
+        assert isinstance(cache[2], QuantizedKVCache)
 
     def test_make_kv_cache_mlx_quantized_backend_requires_bits(self):
         model = cast(Model, type("FakeModel", (), {"layers": [object()]})())

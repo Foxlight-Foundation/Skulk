@@ -1,5 +1,6 @@
 import os
 from copy import deepcopy
+from typing import cast
 
 import mlx.core as mx
 import psutil
@@ -342,6 +343,23 @@ def make_kv_cache(
         logger.info(
             f"Using MLX quantized KV cache with bits={KV_CACHE_BITS} group_size={CACHE_GROUP_SIZE}"
         )
+        if hasattr(model, "make_cache"):
+            template_cache = cast(
+                list[object],
+                model.make_cache(),  # type: ignore[reportUnknownMemberType]
+            )
+            caches: list[object] = []
+            for entry in template_cache:
+                if isinstance(entry, KVCache):
+                    caches.append(
+                        QuantizedKVCache(
+                            group_size=CACHE_GROUP_SIZE,
+                            bits=KV_CACHE_BITS,
+                        )
+                    )
+                else:
+                    caches.append(entry)
+            return caches
         return [
             QuantizedKVCache(group_size=CACHE_GROUP_SIZE, bits=KV_CACHE_BITS)
             for _ in model.layers
