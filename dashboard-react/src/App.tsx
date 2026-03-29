@@ -16,6 +16,7 @@ import { InstancePanel, type InstanceCardData } from './components/layout/Instan
 import { addToast } from './hooks/useToast';
 import type { InstanceStatus } from './components/cluster/RunningInstanceCard';
 import { useChatStore } from './stores/chatStore';
+import { useUIStore } from './stores/uiStore';
 
 const Shell = styled.div`
   position: relative;
@@ -104,9 +105,10 @@ function deriveInstanceStatus(
 export function App() {
   const { topology, connected, downloads, nodeDisk, instances, runners } = useClusterState();
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [activeRoute, setActiveRoute] = useState<NavRoute>('cluster');
   const [storeDownloads, setStoreDownloads] = useState<StoreDownload[]>([]);
-  const [panelOpen, setPanelOpen] = useState(true);
+  const { activeRoute, panelOpen } = useUIStore();
+  const setActiveRoute = useUIStore((s) => s.setActiveRoute);
+  const togglePanel = useUIStore((s) => s.togglePanel);
 
   // Poll store downloads for the header progress indicator
   const pollStoreDownloads = useCallback(async () => {
@@ -211,7 +213,7 @@ export function App() {
           instanceCount={instanceCards.length}
           instancesHealthy={instanceCards.every((c) => c.status !== 'failed')}
           mobileRightOpen={panelOpen}
-          onToggleMobileRight={() => setPanelOpen((o) => !o)}
+          onToggleMobileRight={togglePanel}
         />
         <ContentRow>
           <Main>

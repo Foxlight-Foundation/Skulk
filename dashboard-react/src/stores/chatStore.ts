@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { devtools, persist, createJSONStorage } from 'zustand/middleware';
 import type { ChatMessage, Conversation } from '../types/chat';
 
 /* ── Helpers ──────────────────────────────────────────── */
@@ -72,6 +72,7 @@ export const selectConversationsForModel = (modelId: string) => (state: ChatStat
 /* ── Store ────────────────────────────────────────────── */
 
 export const useChatStore = create<ChatState>()(
+  devtools(
   persist(
     (set, get) => ({
       conversations: {},
@@ -291,14 +292,48 @@ export const useChatStore = create<ChatState>()(
       },
     }),
     {
-      name: 'skulk-conversations',
+      name: 'skulk-chat',
       version: 1,
+      storage: createJSONStorage(() => ({
+        getItem: (name: string) => {
+          const durable = localStorage.getItem(name);
+          const session = sessionStorage.getItem(name + '-session');
+          const d = durable ? JSON.parse(durable) : {};
+          const s = session ? JSON.parse(session) : {};
+          return JSON.stringify({
+            state: { ...(d.state ?? {}), ...(s.state ?? {}) },
+            version: d.version ?? s.version ?? 1,
+          });
+        },
+        setItem: (name: string, value: string) => {
+          const parsed = JSON.parse(value);
+          const state = parsed.state ?? {};
+          const { activeConversationId, selectedModelId, ...rest } = state;
+          localStorage.setItem(name, JSON.stringify({
+            state: {
+              conversations: rest.conversations,
+              modelToConversationId: rest.modelToConversationId,
+            },
+            version: parsed.version,
+          }));
+          sessionStorage.setItem(name + '-session', JSON.stringify({
+            state: { activeConversationId, selectedModelId },
+            version: parsed.version,
+          }));
+        },
+        removeItem: (name: string) => {
+          localStorage.removeItem(name);
+          sessionStorage.removeItem(name + '-session');
+        },
+      })),
       partialize: (state) => ({
         conversations: stripTransientFields(state.conversations),
+        modelToConversationId: state.modelToConversationId,
         activeConversationId: state.activeConversationId,
         selectedModelId: state.selectedModelId,
-        modelToConversationId: state.modelToConversationId,
       }),
     },
+  ),
+  { name: 'ChatStore' },
   ),
 );

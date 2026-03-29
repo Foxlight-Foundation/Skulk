@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import styled from 'styled-components';
 import { ChatMessages } from '../chat/ChatMessages';
 import { ChatForm } from '../chat/ChatForm';
 import type { ChatMessage } from '../../types/chat';
 import type { ChatUploadedFile } from '../../types/chat';
 import type { InstanceCardData } from '../layout/InstancePanel';
-import { useChatStore, selectActiveMessages, selectActiveConversation } from '../../stores/chatStore';
+import { useChatStore } from '../../stores/chatStore';
+import { useUIStore } from '../../stores/uiStore';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -95,14 +96,22 @@ const ModelSelect = styled.select`
   }
 `;
 
+const EMPTY_MESSAGES: ChatMessage[] = [];
+
 /* ── Component ────────────────────────────────────────── */
 
 export function ChatView({ readyInstances, className }: ChatViewProps) {
   // Store state
   const selectedModelId = useChatStore((s) => s.selectedModelId);
-  const messages = useChatStore(selectActiveMessages);
-  const activeConversation = useChatStore(selectActiveConversation);
-  const { selectModel, addMessage, deleteMessage, editMessage, removeLastAssistantMessages } = useChatStore();
+  const activeConversationId = useChatStore((s) => s.activeConversationId);
+  const messages = useChatStore((s) =>
+    s.activeConversationId ? s.conversations[s.activeConversationId]?.messages ?? EMPTY_MESSAGES : EMPTY_MESSAGES,
+  );
+  const selectModel = useChatStore((s) => s.selectModel);
+  const addMessage = useChatStore((s) => s.addMessage);
+  const deleteMessageAction = useChatStore((s) => s.deleteMessage);
+  const editMessageAction = useChatStore((s) => s.editMessage);
+  const removeLastAssistantMessages = useChatStore((s) => s.removeLastAssistantMessages);
 
   // Local transient state
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
@@ -112,7 +121,39 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   const [ttftMs, setTtftMs] = useState<number | null>(null);
   const [tps, setTps] = useState<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const [modelCapabilities, setModelCapabilities] = useState<Record<string, string[]>>({});
+
+  // Restore scroll position after store hydration + DOM render
+  const chatScrollTop = useUIStore((s) => s.chatScrollTop);
+  const setChatScrollTop = useUIStore((s) => s.setChatScrollTop);
+  const scrollRestored = useRef(false);
+  useEffect(() => {
+    if (scrollRestored.current || chatScrollTop <= 0) return;
+
+    // Wait for store to hydrate and DOM to render messages
+    const tryRestore = () => {
+      const el = scrollRef.current;
+      if (!el) return;
+      // Only restore once the scroll container has enough content
+      if (el.scrollHeight > el.clientHeight) {
+        scrollRestored.current = true;
+        el.scrollTop = chatScrollTop;
+      }
+    };
+
+    // Poll briefly — store hydration + DOM render may take a few frames
+    const attempts = [0, 50, 100, 200, 500];
+    const timers = attempts.map((ms) => setTimeout(tryRestore, ms));
+    return () => timers.forEach(clearTimeout);
+  }, [messages.length, chatScrollTop]);
+
+  // Save scroll position on scroll
+  const handleScroll = useCallback(() => {
+    if (scrollRef.current) {
+      setChatScrollTop(scrollRef.current.scrollTop);
+    }
+  }, [setChatScrollTop]);
 
   // Fetch model capabilities
   useEffect(() => {
@@ -334,12 +375,12 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   }, []);
 
   const handleDelete = useCallback((id: string) => {
-    deleteMessage(id);
-  }, [deleteMessage]);
+    deleteMessageAction(id);
+  }, [deleteMessageAction]);
 
   const handleEdit = useCallback((id: string, content: string) => {
-    editMessage(id, content);
-  }, [editMessage]);
+    editMessageAction(id, content);
+  }, [editMessageAction]);
 
   const handleRegenerate = useCallback(() => {
     removeLastAssistantMessages();
@@ -354,6 +395,22 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
       }
     }, 50);
   }, [handleSend, removeLastAssistantMessages]);
+
+  // Thinking expansion state — persisted per conversation in session store
+  const expandedThinkingMap = useUIStore((s) => s.expandedThinking);
+  const setExpandedThinking = useUIStore((s) => s.setExpandedThinking);
+  const expandedThinkingIds = useMemo(
+    () => new Set(activeConversationId ? expandedThinkingMap[activeConversationId] ?? [] : []),
+    [expandedThinkingMap, activeConversationId],
+  );
+  const handleToggleThinking = useCallback((messageId: string) => {
+    if (!activeConversationId) return;
+    const current = expandedThinkingMap[activeConversationId] ?? [];
+    const next = current.includes(messageId)
+      ? current.filter((id) => id !== messageId)
+      : [...current, messageId];
+    setExpandedThinking(activeConversationId, next);
+  }, [activeConversationId, expandedThinkingMap, setExpandedThinking]);
 
   if (readyModels.length === 0) {
     return (
@@ -375,7 +432,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
 
   return (
     <Container className={className}>
-      <MessagesScroll>
+      <MessagesScroll ref={scrollRef} onScroll={handleScroll}>
         <ChatMessages
           messages={messages}
           streamingContent={streamingContent}
@@ -384,6 +441,8 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
           onDelete={handleDelete}
           onEdit={handleEdit}
           onRegenerate={handleRegenerate}
+          expandedThinkingIds={expandedThinkingIds}
+          onToggleThinking={handleToggleThinking}
         />
       </MessagesScroll>
       <InputArea>
