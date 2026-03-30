@@ -1,4 +1,6 @@
-# exo Model Store
+<!-- Copyright 2025 Foxlight Foundation -->
+
+# Skulk Model Store
 
 > **Status:** Phase 1+3 — centralized LAN distribution with dashboard integration
 > **Config file:** `exo.yaml` (optional, zero-config compatible — can be configured via the dashboard)
@@ -7,13 +9,13 @@
 
 ## What problem does this solve?
 
-In a standard exo cluster every node independently downloads its assigned
+In a standard Skulk cluster every node independently downloads its assigned
 model shard from HuggingFace at inference time.  For a small home cluster
-(2–8 machines) this creates four pain points:
+(2-8 machines) this creates four pain points:
 
 | Pain point | Impact |
 |---|---|
-| Redundant downloads | Every node pulls the same model files; a 30B model may mean 20 GB × N nodes of internet traffic |
+| Redundant downloads | Every node pulls the same model files; a 30B model may mean 20 GB x N nodes of internet traffic |
 | Slow cold starts | A node that hasn't seen a model yet blocks inference for the whole cluster |
 | Version drift | Each node downloads on its own schedule; model files can diverge |
 | No offline mode | The cluster is dead without an internet connection after the first run |
@@ -26,17 +28,17 @@ instead of from HuggingFace.
 
 ---
 
-## How it extends EXO
+## How it extends Skulk
 
-This is a **non-breaking opt-in extension** to the existing exo architecture.
+This is a **non-breaking opt-in extension** to the existing architecture.
 If `exo.yaml` is absent (the default for any existing deployment), the model
-store is not active and exo behaves identically to the upstream default.
+store is not active and Skulk behaves identically to the upstream default.
 
 ### What changes when the model store is enabled
 
 | Component | Without store | With store |
 |---|---|---|
-| `DownloadCoordinator` | Uses `ResumableShardDownloader` → HuggingFace | Uses `ModelStoreDownloader` wrapping `ResumableShardDownloader` |
+| `DownloadCoordinator` | Uses `ResumableShardDownloader` -> HuggingFace | Uses `ModelStoreDownloader` wrapping `ResumableShardDownloader` |
 | `ModelStoreDownloader` | n/a | Intercepts `ensure_shard()`, stages from store; falls back to inner downloader if model not present |
 | Store host startup | n/a | `ModelStore` (registry) + `ModelStoreServer` (HTTP) started alongside other node components |
 | Worker shutdown | n/a | `ModelStoreClient.evict_shard()` removes staged files when `cleanup_on_deactivate: true` |
@@ -112,14 +114,14 @@ src/exo/store/
 
 ## Prerequisites
 
-- All nodes running the same exo build
+- All nodes running the same Skulk build
 - The store host node has the storage device mounted and accessible at `store_path`
 - Config is distributed automatically when using the dashboard Settings page.
   If configuring manually, `exo.yaml` must be present at the project root on
   **every node** (or absent to fall back to standard behaviour on that node)
 
 The store server uses port `58080` for model file transfers over the same
-Thunderbolt/ethernet links that exo already uses for the cluster ring network.
+Thunderbolt/ethernet links that the cluster already uses for the ring network.
 No additional network configuration is needed.
 
 ---
@@ -130,13 +132,13 @@ There are two ways to configure the model store: via the **dashboard** (recommen
 
 ### Option A — Configure via the dashboard (recommended)
 
-1. Start exo on all nodes: `uv run exo`
+1. Start Skulk on all nodes: `uv run exo`
 2. Open the dashboard on the node you want to be the store host: `http://localhost:52415`
 3. Navigate to **Settings** (gear icon in the header)
 4. Toggle **"This node is the store host"** — hostname and IP are filled in automatically
 5. Click the folder icon next to **Store Path** and browse to your storage volume (e.g. `/Volumes/ModelStore/models`)
 6. Click **Save** — the config is written to `exo.yaml` and synced to all nodes in the cluster automatically
-7. Restart exo on all nodes for changes to take effect
+7. Restart Skulk on all nodes for changes to take effect
 
 ### Option B — Edit `exo.yaml` manually
 
@@ -152,7 +154,7 @@ model_store:
 Copy this to the same path on every node.  Use `node_overrides` to tune
 per-node staging (see [Configuration reference](#configuration-reference)).
 
-### After configuration — run exo normally
+### After configuration — run Skulk normally
 
 ```bash
 uv run exo
@@ -238,7 +240,7 @@ Set it to the **hostname** of your store node for simplest configuration.
 #### `model_store.staging.node_cache_path`
 
 MLX loads the model from this path.  Default is `~/.exo/staging/`, which
-sits alongside the existing `~/.exo/models/` cache exo already uses.
+sits alongside the existing `~/.exo/models/` cache already in use.
 
 For the store host, point this at the same directory as `store_path` so that
 no local copy is made — MLX loads directly from the store device:
@@ -296,7 +298,7 @@ curl -H "Range: bytes=1073741824-" \
 
 ## Dashboard API (FastAPI, port 52415)
 
-These endpoints are served by the main exo API alongside all existing
+These endpoints are served by the main Skulk API alongside all existing
 endpoints.  The dashboard uses them for the Settings page and Store
 Registry view.
 
@@ -569,7 +571,7 @@ then loads only the relevant shard.  This wastes local staging space.
 Scope:
 - Accept a `ShardMetadata` in `stage_shard()` and filter the file list to
   only the safetensors files that correspond to the assigned layer range.
-- Requires understanding the safetensors index to map layers → files.
+- Requires understanding the safetensors index to map layers -> files.
 - Unlocks running models on nodes with less RAM than the full shard.
 - Directly enables "Manual shard control" as a user-facing feature.
 

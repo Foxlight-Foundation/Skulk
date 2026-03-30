@@ -179,8 +179,17 @@ class ModelStore:
         return model_path
 
     def list_models(self) -> list[StoreModelEntry]:
-        """Return all :class:`StoreModelEntry` objects currently in the registry."""
-        return list(self._read_registry().values())
+        """Return all :class:`StoreModelEntry` objects currently in the registry
+        whose directories still exist on disk.
+
+        Entries whose model directory has been removed are silently excluded.
+        """
+        registry = self._read_registry()
+        return [
+            entry
+            for entry in registry.values()
+            if (self._store_path / entry.store_path).exists()
+        ]
 
     def delete_model(self, model_id: str) -> bool:
         """Remove *model_id* from the registry and delete its files from disk.

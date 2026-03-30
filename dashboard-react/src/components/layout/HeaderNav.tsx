@@ -25,6 +25,7 @@ export interface HeaderNavProps {
   instanceCount?: number;
   instancesHealthy?: boolean;
   downloadProgress?: { count: number; percentage: number } | null;
+  warnings?: { level: 'error' | 'warning'; items: { level: 'error' | 'warning'; message: string }[] } | null;
   onOpenSettings?: () => void;
   className?: string;
 }
@@ -137,6 +138,74 @@ const IconToggle = styled.span<{ $active: boolean }>`
   }
 `;
 
+const WarningDot = styled.div<{ $level: 'error' | 'warning' }>`
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: help;
+
+  &:hover > .warning-tooltip {
+    opacity: 1;
+    visibility: visible;
+  }
+`;
+
+const WarningCircle = styled.div<{ $level: 'error' | 'warning' }>`
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: ${({ $level }) => $level === 'error' ? '#ef4444' : '#f59e0b'};
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  font-family: ${({ theme }) => theme.fonts.body};
+  color: #ffffff;
+`;
+
+const WarningTooltip = styled.div`
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  padding-top: 8px;
+  width: 300px;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.2s, visibility 0.2s;
+  z-index: 50;
+`;
+
+const WarningTooltipInner = styled.div`
+  background: rgba(17, 17, 17, 0.95);
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radii.md};
+  padding: 10px 12px;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+`;
+
+const WarningItem = styled.div<{ $level: 'error' | 'warning' }>`
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  font-family: ${({ theme }) => theme.fonts.body};
+  color: ${({ $level }) => $level === 'error' ? '#fca5a5' : '#fcd34d'};
+  line-height: 1.4;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+
+  &::before {
+    content: '${({ $level }) => $level === 'error' ? '●' : '●'}';
+    color: ${({ $level }) => $level === 'error' ? '#ef4444' : '#f59e0b'};
+    flex-shrink: 0;
+  }
+`;
+
 const InstanceToggle = styled.button<{ $healthy: boolean; $active: boolean }>`
   all: unset;
   cursor: pointer;
@@ -207,6 +276,7 @@ export function HeaderNav({
   instanceCount = 0,
   instancesHealthy = true,
   downloadProgress = null,
+  warnings = null,
   onOpenSettings,
   className,
 }: HeaderNavProps) {
@@ -232,6 +302,18 @@ export function HeaderNav({
           <SkulkIcon size={32} color="#ffffff" />
           <LogoText>Skulk<VersionTag>{__APP_VERSION__}</VersionTag></LogoText>
         </LogoBtn>
+        {warnings && warnings.items.length > 0 && (
+          <WarningDot $level={warnings.level}>
+            <WarningCircle $level={warnings.level}>!</WarningCircle>
+            <WarningTooltip className="warning-tooltip">
+              <WarningTooltipInner>
+                {warnings.items.map((item, i) => (
+                  <WarningItem key={i} $level={item.level}>{item.message}</WarningItem>
+                ))}
+              </WarningTooltipInner>
+            </WarningTooltip>
+          </WarningDot>
+        )}
       </LeftGroup>
 
       <RightGroup>

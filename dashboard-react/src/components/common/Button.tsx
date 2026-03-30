@@ -149,7 +149,7 @@ const StyledButton = styled.button<{
 
   /* Disabled */
   &:disabled {
-    opacity: 0.35;
+    opacity: 0.88;
     cursor: not-allowed;
   }
 `;

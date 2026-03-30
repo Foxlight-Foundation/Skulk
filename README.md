@@ -1,11 +1,15 @@
 # **Skulk**
 
+<!-- Copyright 2025 Foxlight Foundation -->
+
 <div align="center">
 
 </div>
 
 ### **Skulk** (*noun*): A group of foxes.
 >*A skulk moves together without a central authority telling each fox what to do; the skulk coordinates naturally, quietly, with each member contributing to the whole.*
+
+> Skulk is maintained by [Foxlight Foundation](https://github.com/foxlight-foundation) and forked from [exo](https://github.com/exo-explore/exo).
 
 ### **What is it?**
 
@@ -28,25 +32,25 @@
 ---
 ## About EXO
 
-exo connects all your devices into an AI cluster. Not only does exo enable running models larger than would fit on a single device, but with [day-0 support for RDMA over Thunderbolt](https://x.com/exolabs/status/2001817749744476256?s=20), makes models run faster as you add more devices.
+EXO is the upstream project from which Skulk is forked. EXO connects all your devices into an AI cluster. Not only does it enable running models larger than would fit on a single device, but with [day-0 support for RDMA over Thunderbolt](https://x.com/exolabs/status/2001817749744476256?s=20), makes models run faster as you add more devices.
 
 ## Features
 
-- **Automatic Device Discovery**: Devices running exo automatically discover each other - no manual configuration.
-- **RDMA over Thunderbolt**: exo ships with [day-0 support for RDMA over Thunderbolt 5](https://x.com/exolabs/status/2001817749744476256?s=20), enabling 99% reduction in latency between devices.
-- **Topology-Aware Auto Parallel**: exo figures out the best way to split your model across all available devices based on a realtime view of your device topology. It takes into account device resources and network latency/bandwidth between each link.
-- **Tensor Parallelism**: exo supports sharding models, for up to 1.8x speedup on 2 devices and 3.2x speedup on 4 devices.
-- **MLX Support**: exo uses [MLX](https://github.com/ml-explore/mlx) as an inference backend and [MLX distributed](https://ml-explore.github.io/mlx/build/html/usage/distributed.html) for distributed communication.
+- **Automatic Device Discovery**: Devices running Skulk automatically discover each other - no manual configuration.
+- **RDMA over Thunderbolt**: Skulk ships with [day-0 support for RDMA over Thunderbolt 5](https://x.com/exolabs/status/2001817749744476256?s=20), enabling 99% reduction in latency between devices.
+- **Topology-Aware Auto Parallel**: Skulk figures out the best way to split your model across all available devices based on a realtime view of your device topology. It takes into account device resources and network latency/bandwidth between each link.
+- **Tensor Parallelism**: Skulk supports sharding models, for up to 1.8x speedup on 2 devices and 3.2x speedup on 4 devices.
+- **MLX Support**: Skulk uses [MLX](https://github.com/ml-explore/mlx) as an inference backend and [MLX distributed](https://ml-explore.github.io/mlx/build/html/usage/distributed.html) for distributed communication.
 - **Multiple API Compatibility**: Compatible with OpenAI Chat Completions API, Claude Messages API, OpenAI Responses API, and Ollama API - use your existing tools and clients.
 - **Custom Model Support**: Load custom models from HuggingFace hub to expand the range of available models.
 - **Experimental KV Cache Backends**: Skulk includes opt-in MLX quantized and TurboQuant-inspired KV cache backends for long-context memory experiments. See [docs/kv-cache-backends.md](docs/kv-cache-backends.md).
 
 ## Dashboard
 
-exo includes a built-in dashboard for managing your cluster and chatting with models.
+Skulk includes a built-in dashboard for managing your cluster and chatting with models.
 
 <p align="center">
-  <img src="docs/imgs/dashboard-cluster-view.png" alt="exo dashboard - cluster view showing 4 x M3 Ultra Mac Studio with DeepSeek v3.1 and Kimi-K2-Thinking loaded" width="80%" />
+  <img src="docs/imgs/dashboard-cluster-view.png" alt="Skulk dashboard - cluster view showing 4 x M3 Ultra Mac Studio with DeepSeek v3.1 and Kimi-K2-Thinking loaded" width="80%" />
 </p>
 <p align="center"><em>4 × 512GB M3 Ultra Mac Studio running DeepSeek v3.1 (8-bit) and Kimi-K2-Thinking (4-bit)</em></p>
 
@@ -80,13 +84,13 @@ exo includes a built-in dashboard for managing your cluster and chatting with mo
 
 ## Quick Start
 
-Devices running exo automatically discover each other, without needing any manual configuration. Each device provides an API and a dashboard for interacting with your cluster (runs at `http://localhost:52415`).
+Devices running Skulk automatically discover each other, without needing any manual configuration. Each device provides an API and a dashboard for interacting with your cluster (runs at `http://localhost:52415`).
 
-There are two ways to run exo:
+There are two ways to run Skulk:
 
 ### Run from Source (macOS)
 
-If you have [Nix](https://nixos.org/) installed, you can skip most of the steps below and run exo directly:
+If you have [Nix](https://nixos.org/) installed, you can skip most of the steps below and run directly:
 
 ```bash
 nix run .#exo
@@ -120,20 +124,20 @@ Then restart the Nix daemon: `sudo launchctl kickstart -k system/org.nixos.nix-d
   rustup toolchain install nightly
   ```
 
-Clone the repo, build the dashboard, and run exo:
+Clone the repo, build the dashboard, and run Skulk:
 
 ```bash
-# Clone exo
-git clone https://github.com/exo-explore/exo
+# Clone the repo
+git clone https://github.com/foxlight-foundation/skulk
 
 # Build dashboard
-cd exo/dashboard && npm install && npm run build && cd ..
+cd skulk/dashboard && npm install && npm run build && cd ..
 
-# Run exo
+# Run Skulk
 uv run exo
 ```
 
-This starts the exo dashboard and API at http://localhost:52415/
+This starts the Skulk dashboard and API at http://localhost:52415/
 
 ## Experimental KV Cache Backends
 
@@ -205,26 +209,26 @@ rustup toolchain install nightly
 
 **Note:** The `macmon` package is macOS-only and not required for Linux.
 
-Clone the repo, build the dashboard, and run exo:
+Clone the repo, build the dashboard, and run Skulk:
 
 ```bash
-# Clone exo
-git clone https://github.com/exo-explore/exo
+# Clone the repo
+git clone https://github.com/foxlight-foundation/skulk
 
 # Build dashboard
-cd exo/dashboard && npm install && npm run build && cd ..
+cd skulk/dashboard && npm install && npm run build && cd ..
 
-# Run exo
+# Run Skulk
 uv run exo
 ```
 
-This starts the exo dashboard and API at http://localhost:52415/
+This starts the Skulk dashboard and API at http://localhost:52415/
 
-**Important note for Linux users:** Currently, exo runs on CPU on Linux. GPU support for Linux platforms is under development. If you'd like to see support for your specific Linux hardware, please [search for existing feature requests](https://github.com/exo-explore/exo/issues) or create a new one.
+**Important note for Linux users:** Currently, Skulk runs on CPU on Linux. GPU support for Linux platforms is under development. If you'd like to see support for your specific Linux hardware, please [search for existing feature requests](https://github.com/foxlight-foundation/skulk/issues) or create a new one.
 
 **Configuration Options:**
 
-- `--no-worker`: Run exo without the worker component. Useful for coordinator-only nodes that handle networking and orchestration but don't execute inference tasks. This is helpful for machines without sufficient GPU resources but with good network connectivity.
+- `--no-worker`: Run Skulk without the worker component. Useful for coordinator-only nodes that handle networking and orchestration but don't execute inference tasks. This is helpful for machines without sufficient GPU resources but with good network connectivity.
 
   ```bash
   uv run exo --no-worker
@@ -232,7 +236,7 @@ This starts the exo dashboard and API at http://localhost:52415/
 
 **File Locations (Linux):**
 
-exo follows the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html) on Linux:
+Skulk follows the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html) on Linux:
 
 - **Configuration files**: `~/.config/exo/` (or `$XDG_CONFIG_HOME/exo/`)
 - **Data files**: `~/.local/share/exo/` (or `$XDG_DATA_HOME/exo/`)
@@ -244,9 +248,9 @@ You can override these locations by setting the corresponding XDG environment va
 
 ### macOS App
 
-exo ships a macOS app that runs in the background on your Mac.
+Skulk ships a macOS app that runs in the background on your Mac.
 
-<img src="docs/imgs/macos-app-one-macbook.png" alt="exo macOS App - running on a MacBook" width="35%" />
+<img src="docs/imgs/macos-app-one-macbook.png" alt="Skulk macOS App - running on a MacBook" width="35%" />
 
 The macOS app requires macOS Tahoe 26.2 or later.
 
@@ -256,10 +260,10 @@ The app will ask for permission to modify system settings and install a new Netw
 
 **Custom Namespace for Cluster Isolation:**
 
-The macOS app includes a custom namespace feature that allows you to isolate your exo cluster from others on the same network. This is configured through the `EXO_LIBP2P_NAMESPACE` setting:
+The macOS app includes a custom namespace feature that allows you to isolate your cluster from others on the same network. This is configured through the `EXO_LIBP2P_NAMESPACE` setting:
 
 - **Use cases**:
-  - Running multiple separate exo clusters on the same network
+  - Running multiple separate clusters on the same network
   - Isolating development/testing clusters from production clusters
   - Preventing accidental cluster joining
 
@@ -306,7 +310,7 @@ To enable RDMA on macOS, follow these steps:
    and press Enter.
 6. Reboot your Mac.
 
-After that, RDMA will be enabled in macOS and exo will take care of the rest.
+After that, RDMA will be enabled in macOS and Skulk will take care of the rest.
 
 **Important Caveats**
 
@@ -320,12 +324,12 @@ After that, RDMA will be enabled in macOS and exo will take care of the rest.
 
 ## Environment Variables
 
-exo supports several environment variables for configuration:
+Skulk supports several environment variables for configuration:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `EXO_MODELS_PATH` | Colon-separated paths to search for pre-downloaded models (e.g., on NFS mounts or shared storage) | None |
-| `EXO_MODELS_DIR` | Directory where exo downloads and stores models | `~/.local/share/exo/models` (Linux) or `~/.exo/models` (macOS) |
+| `EXO_MODELS_DIR` | Directory where Skulk downloads and stores models | `~/.local/share/exo/models` (Linux) or `~/.exo/models` (macOS) |
 | `EXO_OFFLINE` | Run without internet connection (uses only local models) | `false` |
 | `EXO_ENABLE_IMAGE_MODELS` | Enable image model support | `false` |
 | `EXO_LIBP2P_NAMESPACE` | Custom namespace for cluster isolation | None |
@@ -366,14 +370,14 @@ For more detail on KV cache backends, supported model cache layouts, current lim
 
 ### Using the API
 
-exo provides multiple API-compatible interfaces for maximum compatibility with existing tools:
+Skulk provides multiple API-compatible interfaces for maximum compatibility with existing tools:
 
 - **OpenAI Chat Completions API** - Compatible with OpenAI clients
 - **Claude Messages API** - Compatible with Anthropic's Claude format
 - **OpenAI Responses API** - Compatible with OpenAI's Responses format
 - **Ollama API** - Compatible with Ollama and tools like OpenWebUI
 
-If you prefer to interact with exo via the API, here is an example creating an instance of a small model (`mlx-community/Llama-3.2-1B-Instruct-4bit`), sending a chat completions request and deleting the instance.
+If you prefer to interact with Skulk via the API, here is an example creating an instance of a small model (`mlx-community/Llama-3.2-1B-Instruct-4bit`), sending a chat completions request and deleting the instance.
 
 ---
 
@@ -497,7 +501,7 @@ curl -N -X POST http://localhost:52415/v1/responses \
 
 ### Ollama API Compatibility
 
-exo supports Ollama API endpoints for compatibility with tools like OpenWebUI:
+Skulk supports Ollama API endpoints for compatibility with tools like OpenWebUI:
 
 ```bash
 # Ollama chat
@@ -593,10 +597,10 @@ The tool outputs performance metrics including prompt tokens per second (prompt_
 
 ## Hardware Accelerator Support
 
-On macOS, exo uses the GPU. On Linux, exo currently runs on CPU. We are working on extending hardware accelerator support. If you'd like support for a new hardware platform, please [search for an existing feature request](https://github.com/exo-explore/exo/issues) and add a thumbs up so we know what hardware is important to the community.
+On macOS, Skulk uses the GPU. On Linux, Skulk currently runs on CPU. We are working on extending hardware accelerator support. If you'd like support for a new hardware platform, please [search for an existing feature request](https://github.com/foxlight-foundation/skulk/issues) and add a thumbs up so we know what hardware is important to the community.
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to contribute to exo.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to contribute to Skulk.

@@ -128,6 +128,20 @@ class Node:
                 f"ModelStore: added staging path {staging_path} to EXO_MODELS_PATH"
             )
 
+            # If this node is the store host, also add the store root to the
+            # search path.  This lets the worker detect store-resident models
+            # as "pre-downloaded" (via resolve_model_in_path), which skips
+            # the redundant staging copy to the system disk.
+            if is_store_host:
+                store_root = str(Path(ms.store_path).expanduser())
+                if store_root not in paths:
+                    paths.append(store_root)
+                    os.environ["EXO_MODELS_PATH"] = ":".join(paths)
+                    add_model_search_path(Path(ms.store_path))
+                    logger.info(
+                        f"ModelStore: store host — added store root {store_root} to EXO_MODELS_PATH (skip staging)"
+                    )
+
         # Create DownloadCoordinator (unless --no-downloads)
         if not args.no_downloads:
             base_downloader = exo_shard_downloader(offline=args.offline)

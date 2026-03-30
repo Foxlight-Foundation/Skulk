@@ -1,10 +1,12 @@
-# Contributing to EXO
+<!-- Copyright 2025 Foxlight Foundation -->
 
-Thank you for your interest in contributing to EXO!
+# Contributing to Skulk
+
+Thank you for your interest in contributing to Skulk! Skulk is maintained by [Foxlight Foundation](https://github.com/foxlight-foundation) and forked from [exo](https://github.com/exo-explore/exo).
 
 ## Getting Started
 
-To run EXO from source:
+To run Skulk from source:
 
 **Prerequisites:**
 - [uv](https://github.com/astral-sh/uv) (for Python dependency management)
@@ -17,15 +19,15 @@ To run EXO from source:
   ```
 
 ```bash
-git clone https://github.com/exo-explore/exo.git
-cd exo/dashboard
+git clone https://github.com/foxlight-foundation/skulk.git
+cd skulk/dashboard
 npm install && npm run build && cd ..
 uv run exo
 ```
 
 ## Development
 
-EXO is built with a mix of Rust, Python, and TypeScript (Svelte for the dashboard), and the codebase is actively evolving. Before starting work:
+Skulk is built with a mix of Rust, Python, and TypeScript (Svelte for the dashboard), and the codebase is actively evolving. Before starting work:
 
 - Pull the latest source to ensure you're working with the most recent code
 - Keep your changes focused - implement one feature or fix per pull request
@@ -41,7 +43,7 @@ Run `nix fmt` to auto-format your code before submitting.
 
 ## Model Cards
 
-EXO uses TOML-based model cards to define model metadata and capabilities. Model cards are stored in:
+Skulk uses TOML-based model cards to define model metadata and capabilities. Model cards are stored in:
 - `resources/inference_model_cards/` for text generation models
 - `resources/image_model_cards/` for image generation models
 - `~/.exo/custom_model_cards/` for user-added custom models
@@ -97,7 +99,7 @@ By default, `trust_remote_code` is set to `false` for security. Only enable it i
 
 ## API Adapters
 
-EXO supports multiple API formats through an adapter pattern. Adapters convert API-specific request formats to the internal `TextGenerationTaskParams` format and convert internal token chunks back to API-specific responses.
+Skulk supports multiple API formats through an adapter pattern. Adapters convert API-specific request formats to the internal `TextGenerationTaskParams` format and convert internal token chunks back to API-specific responses.
 
 ### Adapter Architecture
 
@@ -154,7 +156,7 @@ For detailed API documentation, see [docs/api.md](docs/api.md).
 
 ## Testing
 
-EXO relies heavily on manual testing at this point in the project, but this is evolving. Before submitting a change, test both before and after to demonstrate how your change improves behavior. Do the best you can with the hardware you have available - if you need help testing, ask and we'll do our best to assist. Add automated tests where possible - we're actively working to substantially improve our automated testing story.
+Skulk relies heavily on manual testing at this point in the project, but this is evolving. Before submitting a change, test both before and after to demonstrate how your change improves behavior. Do the best you can with the hardware you have available - if you need help testing, ask and we'll do our best to assist. Add automated tests where possible - we're actively working to substantially improve our automated testing story.
 
 ## Submitting Changes
 
@@ -174,5 +176,4 @@ If you find a bug or have a feature request, please open an issue on GitHub with
 
 ## Questions?
 
-Join our community:
-- [X](https://x.com/exolabs)
+Open an issue or discussion on the [Skulk repository](https://github.com/foxlight-foundation/skulk).

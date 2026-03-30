@@ -1,6 +1,8 @@
+<!-- Copyright 2025 Foxlight Foundation -->
+
 # KV Cache Backends
 
-Skulk now includes several opt-in KV cache backends for MLX text generation. These backends are intended for long-context and memory-pressure experiments, while preserving existing behavior unless explicitly enabled.
+Skulk includes several opt-in KV cache backends for MLX text generation. These backends are intended for long-context and memory-pressure experiments, while preserving existing behavior unless explicitly enabled.
 
 ## Current Status
 

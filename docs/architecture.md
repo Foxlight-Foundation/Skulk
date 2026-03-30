@@ -1,6 +1,8 @@
-# EXO Architecture overview
+<!-- Copyright 2025 Foxlight Foundation -->
 
-EXO uses an _Event Sourcing_ architecture, and Erlang-style _message passing_. To facilitate this, we've written a channel library extending anyio channels with inspiration from tokio::sync::mpsc. 
+# Skulk Architecture Overview
+
+Skulk (forked from exo) uses an _Event Sourcing_ architecture, and Erlang-style _message passing_. To facilitate this, we've written a channel library extending anyio channels with inspiration from tokio::sync::mpsc.
 
 Each logical module - designed to be functional independently of the others - communicates with the rest of the system by sending messages on topics.
 
@@ -9,24 +11,24 @@ Each logical module - designed to be functional independently of the others - co
 There are currently 5 major systems:
 
 - Master
-    
+
     Executes placement and orders events through a single writer
 
 - Worker
-    
+
     Schedules work on a node, gathers system information, etc.#
 
 - Runner
-    
+
     Executes inference jobs (for now) in an isolated process from the worker for fault-tolerance.
     The runner is also where MLX inference generators and KV cache backends are selected. Experimental KV cache backend selection is process-local and opt-in via environment variables.
 
 - API
-    
+
     Runs a python webserver for exposing state and commands to client applications
 
 - Election
-    
+
     Implements a distributed algorithm for master election in unstable networking conditions
 
 ## API Layer
@@ -35,7 +37,7 @@ The API system uses multiple adapters to support multiple API formats, convertin
 
 ### Adapter Pattern
 
-Adapters convert between external API formats and EXO's internal types:
+Adapters convert between external API formats and Skulk's internal types:
 
 ```
 Chat Completions → [adapter] → TextGenerationTaskParams → Application

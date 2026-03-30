@@ -1,4 +1,6 @@
-# EXO Platform support (partial roadmap)
+<!-- Copyright 2025 Foxlight Foundation -->
+
+# Skulk Platform Support (partial roadmap)
 
 ## Tier 1 support - tested and maintained
 
@@ -35,4 +37,3 @@ Linux CUDA Support -- depends heavily on ecosystem
 Windows CUDA Support
 
 Windows CPU Support
-
