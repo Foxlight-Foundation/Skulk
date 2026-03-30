@@ -72,8 +72,7 @@ export const selectConversationsForModel = (modelId: string) => (state: ChatStat
 /* ── Store ────────────────────────────────────────────── */
 
 export const useChatStore = create<ChatState>()(
-  devtools(
-  persist(
+  devtools(persist(
     (set, get) => ({
       conversations: {},
       activeConversationId: null,
@@ -355,7 +354,5 @@ export const useChatStore = create<ChatState>()(
         selectedModelId: state.selectedModelId,
       }),
     },
-  ),
-  { name: 'ChatStore' },
-  ),
+  ), { name: 'ChatStore' }),
 );
