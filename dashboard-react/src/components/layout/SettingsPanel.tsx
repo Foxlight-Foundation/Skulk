@@ -205,7 +205,7 @@ const Spacer = styled.span`
 /* ---- component ---- */
 
 export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
-  const { fullConfig, configPath, loading, saving, error, fetchConfig, saveFullConfig } = useConfig();
+  const { fullConfig, effective, configPath, loading, saving, error, fetchConfig, saveFullConfig } = useConfig();
   const [draft, setDraft] = useState<StoreConfig | null>(null);
   const [kvBackend, setKvBackend] = useState('default');
 
@@ -214,11 +214,14 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     if (open) fetchConfig();
   }, [open, fetchConfig]);
 
-  // Seed draft from fetched config
+  // Seed draft from fetched config — use effective value for KV backend
+  const envOverride = effective != null
+    && effective.kv_cache_backend !== 'default'
+    && effective.kv_cache_backend !== (fullConfig?.inference?.kv_cache_backend ?? 'default');
   useEffect(() => {
     if (fullConfig?.model_store) setDraft({ ...fullConfig.model_store });
-    setKvBackend(fullConfig?.inference?.kv_cache_backend ?? 'default');
-  }, [fullConfig]);
+    setKvBackend(effective?.kv_cache_backend ?? fullConfig?.inference?.kv_cache_backend ?? 'default');
+  }, [fullConfig, effective]);
 
   const update = useCallback((patch: Partial<StoreConfig>) => {
     setDraft((prev) => prev ? { ...prev, ...patch } : prev);
@@ -413,14 +416,18 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                 }
               />
             </FieldLabel>
-            <Select value={kvBackend} onChange={(e) => setKvBackend(e.target.value)}>
+            <Select value={kvBackend} onChange={(e) => setKvBackend(e.target.value)} disabled={!!envOverride}>
               <option value="default">Default (no quantization)</option>
               <option value="optiq">OptiQ (rotation-based)</option>
               <option value="turboquant_adaptive">TurboQuant Adaptive</option>
               <option value="turboquant">TurboQuant</option>
               <option value="mlx_quantized">MLX Quantized</option>
             </Select>
-            <HintText>Changes take effect on the next model launch. Models with incompatible architectures (GQA, non-power-of-two head_dim) will automatically fall back to default.</HintText>
+            {envOverride ? (
+              <HintText>Overridden by EXO_KV_CACHE_BACKEND environment variable. Remove the env var to configure here.</HintText>
+            ) : (
+              <HintText>Changes take effect on the next model launch. Models with incompatible architectures (GQA, non-power-of-two head_dim) will automatically fall back to default.</HintText>
+            )}
           </Fieldset>
         </Body>
 

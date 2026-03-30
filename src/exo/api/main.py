@@ -1961,6 +1961,9 @@ class API:
                     "config": {},
                     "configPath": str(self._config_path),
                     "fileExists": False,
+                    "effective": {
+                        "kv_cache_backend": os.environ.get("EXO_KV_CACHE_BACKEND", "default"),
+                    },
                 }
             )
         with self._config_path.open() as f:
@@ -1968,7 +1971,14 @@ class API:
         if raw is None:
             raw = {}
         return JSONResponse(
-            {"config": raw, "configPath": str(self._config_path), "fileExists": True}
+            {
+                "config": raw,
+                "configPath": str(self._config_path),
+                "fileExists": True,
+                "effective": {
+                    "kv_cache_backend": os.environ.get("EXO_KV_CACHE_BACKEND", "default"),
+                },
+            }
         )
 
     async def update_config(self, request: Request) -> JSONResponse:
