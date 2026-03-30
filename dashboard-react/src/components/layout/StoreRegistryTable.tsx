@@ -132,7 +132,7 @@ const Table = styled.div`
 
 const THead = styled.div`
   display: grid;
-  grid-template-columns: 36px 32px 1fr 80px 60px 100px 60px;
+  grid-template-columns: 36px 32px 1fr 80px 60px 100px 100px;
   gap: 8px;
   padding: 8px 12px;
   background: rgba(0, 0, 0, 0.4);
@@ -143,7 +143,7 @@ const THead = styled.div`
 
 const TRow = styled.div<{ $highlight?: boolean }>`
   display: grid;
-  grid-template-columns: 36px 32px 1fr 80px 60px 100px 60px;
+  grid-template-columns: 36px 32px 1fr 80px 60px 100px 100px;
   gap: 8px;
   padding: 10px 12px;
   align-items: center;
