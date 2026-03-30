@@ -72,7 +72,7 @@ export const selectConversationsForModel = (modelId: string) => (state: ChatStat
 /* ── Store ────────────────────────────────────────────── */
 
 export const useChatStore = create<ChatState>()(
-  devtools(persist(
+  persist(devtools(
     (set, get) => ({
       conversations: {},
       activeConversationId: null,
@@ -309,50 +309,52 @@ export const useChatStore = create<ChatState>()(
         });
       },
     }),
-    {
-      name: 'skulk-chat',
-      version: 1,
-      storage: createJSONStorage(() => ({
-        getItem: (name: string) => {
-          const durable = localStorage.getItem(name);
-          const session = sessionStorage.getItem(name + '-session');
-          let d: Record<string, unknown> = {};
-          let s: Record<string, unknown> = {};
-          try { if (durable) d = JSON.parse(durable); } catch { /* corrupted — reset */ }
-          try { if (session) s = JSON.parse(session); } catch { /* corrupted — reset */ }
-          return JSON.stringify({
-            state: { ...((d as Record<string, unknown>).state ?? {}), ...((s as Record<string, unknown>).state ?? {}) },
-            version: (d as Record<string, unknown>).version ?? (s as Record<string, unknown>).version ?? 1,
-          });
-        },
-        setItem: (name: string, value: string) => {
-          let parsed: Record<string, unknown>;
-          try { parsed = JSON.parse(value); } catch { return; }
-          const state = (parsed.state ?? {}) as Record<string, unknown>;
-          const { activeConversationId, selectedModelId, ...rest } = state;
-          localStorage.setItem(name, JSON.stringify({
-            state: {
-              conversations: rest.conversations,
-              modelToConversationId: rest.modelToConversationId,
-            },
-            version: parsed.version,
-          }));
-          sessionStorage.setItem(name + '-session', JSON.stringify({
-            state: { activeConversationId, selectedModelId },
-            version: parsed.version,
-          }));
-        },
-        removeItem: (name: string) => {
-          localStorage.removeItem(name);
-          sessionStorage.removeItem(name + '-session');
-        },
-      })),
-      partialize: (state) => ({
-        conversations: stripTransientFields(state.conversations),
-        modelToConversationId: state.modelToConversationId,
-        activeConversationId: state.activeConversationId,
-        selectedModelId: state.selectedModelId,
-      }),
-    },
-  ), { name: 'ChatStore' }),
+    { name: 'ChatStore', store: 'ChatStore', enabled: true },
+  ),
+  {
+    name: 'skulk-chat',
+    version: 1,
+    storage: createJSONStorage(() => ({
+      getItem: (name: string) => {
+        const durable = localStorage.getItem(name);
+        const session = sessionStorage.getItem(name + '-session');
+        let d: Record<string, unknown> = {};
+        let s: Record<string, unknown> = {};
+        try { if (durable) d = JSON.parse(durable); } catch { /* corrupted — reset */ }
+        try { if (session) s = JSON.parse(session); } catch { /* corrupted — reset */ }
+        return JSON.stringify({
+          state: { ...((d as Record<string, unknown>).state ?? {}), ...((s as Record<string, unknown>).state ?? {}) },
+          version: (d as Record<string, unknown>).version ?? (s as Record<string, unknown>).version ?? 1,
+        });
+      },
+      setItem: (name: string, value: string) => {
+        let parsed: Record<string, unknown>;
+        try { parsed = JSON.parse(value); } catch { return; }
+        const state = (parsed.state ?? {}) as Record<string, unknown>;
+        const { activeConversationId, selectedModelId, ...rest } = state;
+        localStorage.setItem(name, JSON.stringify({
+          state: {
+            conversations: rest.conversations,
+            modelToConversationId: rest.modelToConversationId,
+          },
+          version: parsed.version,
+        }));
+        sessionStorage.setItem(name + '-session', JSON.stringify({
+          state: { activeConversationId, selectedModelId },
+          version: parsed.version,
+        }));
+      },
+      removeItem: (name: string) => {
+        localStorage.removeItem(name);
+        sessionStorage.removeItem(name + '-session');
+      },
+    })),
+    partialize: (state) => ({
+      conversations: stripTransientFields(state.conversations),
+      modelToConversationId: state.modelToConversationId,
+      activeConversationId: state.activeConversationId,
+      selectedModelId: state.selectedModelId,
+    }),
+  },
+  ),
 );
