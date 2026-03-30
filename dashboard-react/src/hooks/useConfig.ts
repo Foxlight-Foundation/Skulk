@@ -16,26 +16,41 @@ export interface StoreConfig {
   };
 }
 
+export interface InferenceConfig {
+  kv_cache_backend: string;
+}
+
+export interface FullConfig {
+  model_store?: StoreConfig;
+  inference?: InferenceConfig;
+}
+
+export interface EffectiveConfig {
+  kv_cache_backend: string;
+}
+
 export interface ConfigResponse {
-  config: {
-    model_store: StoreConfig;
-  };
+  config: FullConfig;
   configPath: string;
   fileExists: boolean;
+  effective?: EffectiveConfig;
 }
 
 export interface UseConfigReturn {
   config: StoreConfig | null;
+  fullConfig: FullConfig | null;
+  effective: EffectiveConfig | null;
   configPath: string | null;
   loading: boolean;
   saving: boolean;
   error: string | null;
   fetchConfig: () => Promise<void>;
-  saveConfig: (config: StoreConfig) => Promise<boolean>;
+  saveFullConfig: (config: FullConfig) => Promise<boolean>;
 }
 
 export function useConfig(): UseConfigReturn {
-  const [config, setConfig] = useState<StoreConfig | null>(null);
+  const [fullConfig, setFullConfig] = useState<FullConfig | null>(null);
+  const [effective, setEffective] = useState<EffectiveConfig | null>(null);
   const [configPath, setConfigPath] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -48,7 +63,8 @@ export function useConfig(): UseConfigReturn {
       const res = await fetch('/config');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: ConfigResponse = await res.json();
-      setConfig(data.config.model_store);
+      setFullConfig(data.config);
+      setEffective(data.effective ?? null);
       setConfigPath(data.configPath);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to fetch config');
@@ -57,17 +73,17 @@ export function useConfig(): UseConfigReturn {
     }
   }, []);
 
-  const saveConfig = useCallback(async (updated: StoreConfig): Promise<boolean> => {
+  const saveFullConfig = useCallback(async (updated: FullConfig): Promise<boolean> => {
     setSaving(true);
     setError(null);
     try {
       const res = await fetch('/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model_store: updated }),
+        body: JSON.stringify({ config: updated }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setConfig(updated);
+      setFullConfig(updated);
       return true;
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to save config');
@@ -77,5 +93,7 @@ export function useConfig(): UseConfigReturn {
     }
   }, []);
 
-  return { config, configPath, loading, saving, error, fetchConfig, saveConfig };
+  const config = fullConfig?.model_store ?? null;
+
+  return { config, fullConfig, effective, configPath, loading, saving, error, fetchConfig, saveFullConfig };
 }

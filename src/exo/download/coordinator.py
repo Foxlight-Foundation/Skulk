@@ -1,4 +1,5 @@
 import asyncio
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -166,13 +167,30 @@ class DownloadCoordinator:
             )
 
     async def _sync_config(self, config_yaml: str) -> None:
-        """Write received config YAML to the local exo.yaml file."""
+        """Write received config YAML to the local exo.yaml file and
+        apply runtime-effective settings (e.g., KV cache backend)."""
         config_path = Path("exo.yaml")
         try:
             config_path.write_text(config_yaml)
             logger.info(
                 f"DownloadCoordinator: synced exo.yaml from cluster ({len(config_yaml)} bytes)"
             )
+            # Apply inference config to env var so next runner spawn picks it up
+            import yaml
+            raw = yaml.safe_load(config_yaml)
+            if raw and isinstance(raw, dict):
+                inference = raw.get("inference")
+                if isinstance(inference, dict) and "kv_cache_backend" in inference:
+                    # Don't overwrite if user provided the env var at launch
+                    if not os.environ.get("_EXO_KV_BACKEND_USER_SET"):
+                        os.environ["EXO_KV_CACHE_BACKEND"] = str(inference["kv_cache_backend"])
+                        logger.info(
+                            f"DownloadCoordinator: updated EXO_KV_CACHE_BACKEND={inference['kv_cache_backend']}"
+                        )
+                    else:
+                        logger.info(
+                            f"DownloadCoordinator: skipping KV backend update (user env var override active)"
+                        )
         except Exception as exc:
             logger.warning(f"DownloadCoordinator: failed to sync exo.yaml: {exc}")
 

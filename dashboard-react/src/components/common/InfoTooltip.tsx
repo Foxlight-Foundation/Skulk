@@ -58,6 +58,7 @@ const TooltipBox = styled.div`
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.textSecondary};
   line-height: 1.5;
+  white-space: pre-line;
   z-index: 9999;
 `;
 

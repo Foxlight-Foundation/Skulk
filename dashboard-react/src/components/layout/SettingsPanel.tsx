@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import styled, { css, keyframes } from 'styled-components';
-import { useConfig, type StoreConfig } from '../../hooks/useConfig';
+import { useConfig, type StoreConfig, type FullConfig } from '../../hooks/useConfig';
 import { Button } from '../common/Button';
 import { Field } from '../common/Field';
 import { InfoTooltip } from '../common/InfoTooltip';
@@ -148,6 +148,34 @@ const StyledField = styled(Field)`
   min-width: 0;
 `;
 
+const Select = styled.select`
+  background: ${({ theme }) => theme.colors.bg};
+  color: ${({ theme }) => theme.colors.text};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  padding: 4px 8px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  font-family: ${({ theme }) => theme.fonts.body};
+  outline: none;
+  cursor: pointer;
+
+  &:focus {
+    border-color: ${({ theme }) => theme.colors.goldDim};
+  }
+
+  option {
+    background: ${({ theme }) => theme.colors.surface};
+    color: ${({ theme }) => theme.colors.text};
+  }
+`;
+
+const HintText = styled.div`
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-family: ${({ theme }) => theme.fonts.body};
+  color: ${({ theme }) => theme.colors.textMuted};
+  font-style: italic;
+`;
+
 const ConfigPath = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
@@ -177,18 +205,23 @@ const Spacer = styled.span`
 /* ---- component ---- */
 
 export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
-  const { config, configPath, loading, saving, error, fetchConfig, saveConfig } = useConfig();
+  const { fullConfig, effective, configPath, loading, saving, error, fetchConfig, saveFullConfig } = useConfig();
   const [draft, setDraft] = useState<StoreConfig | null>(null);
+  const [kvBackend, setKvBackend] = useState('default');
 
   // Fetch config when panel opens
   useEffect(() => {
     if (open) fetchConfig();
   }, [open, fetchConfig]);
 
-  // Seed draft from fetched config
+  // Seed draft from fetched config — use effective value for KV backend
+  const envOverride = effective != null
+    && effective.kv_cache_backend !== 'default'
+    && effective.kv_cache_backend !== (fullConfig?.inference?.kv_cache_backend ?? 'default');
   useEffect(() => {
-    if (config) setDraft({ ...config });
-  }, [config]);
+    setDraft(fullConfig?.model_store ? { ...fullConfig.model_store } : null);
+    setKvBackend(effective?.kv_cache_backend ?? fullConfig?.inference?.kv_cache_backend ?? 'default');
+  }, [fullConfig, effective]);
 
   const update = useCallback((patch: Partial<StoreConfig>) => {
     setDraft((prev) => prev ? { ...prev, ...patch } : prev);
@@ -203,15 +236,18 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   }, []);
 
   const handleSave = useCallback(async () => {
-    if (!draft) return;
-    const ok = await saveConfig(draft);
+    // Base on the last fetched config to avoid dropping sections
+    const updated: FullConfig = { ...(fullConfig ?? {}) };
+    if (draft) updated.model_store = draft;
+    updated.inference = { kv_cache_backend: kvBackend };
+    const ok = await saveFullConfig(updated);
     if (ok) {
-      addToast({ type: 'success', message: 'Settings saved' });
+      addToast({ type: 'success', message: 'Settings saved — KV cache change takes effect on next model launch' });
       onClose();
     } else {
       addToast({ type: 'error', message: 'Failed to save settings' });
     }
-  }, [draft, saveConfig, onClose]);
+  }, [draft, kvBackend, saveFullConfig, onClose]);
 
   // ESC to close
   useEffect(() => {
@@ -363,12 +399,43 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               {configPath && <ConfigPath>Config: {configPath}</ConfigPath>}
             </>
           )}
+
+          {/* Inference — always shown, not gated on model_store config */}
+          <Fieldset>
+            <Legend>Inference</Legend>
+            <FieldLabel>
+              KV Cache Backend
+              <InfoTooltip
+                filled
+                content={
+                  `• Default — No cache quantization. Best baseline quality, highest memory use.\n` +
+                  `• OptiQ — Rotation-based quantization via mlx-optiq. Best long-context quality.\n` +
+                  `• TurboQuant Adaptive — Quantizes middle KV layers, keeps edge layers in FP16. Proven stable.\n` +
+                  `• TurboQuant — Quantizes all KV layers. Most aggressive compression, higher quality risk.\n` +
+                  `• MLX Quantized — MLX's built-in cache quantization.\n\n` +
+                  `Takes effect on next model launch. Incompatible models fall back to Default automatically.`
+                }
+              />
+            </FieldLabel>
+            <Select value={kvBackend} onChange={(e) => setKvBackend(e.target.value)} disabled={!!envOverride}>
+              <option value="default">Default (no quantization)</option>
+              <option value="optiq">OptiQ (rotation-based)</option>
+              <option value="turboquant_adaptive">TurboQuant Adaptive</option>
+              <option value="turboquant">TurboQuant</option>
+              <option value="mlx_quantized">MLX Quantized (requires EXO_KV_CACHE_BITS env)</option>
+            </Select>
+            {envOverride ? (
+              <HintText>Overridden by EXO_KV_CACHE_BACKEND environment variable. Remove the env var to configure here.</HintText>
+            ) : (
+              <HintText>Changes take effect on the next model launch. Models with incompatible architectures (GQA, non-power-of-two head_dim) will automatically fall back to default.</HintText>
+            )}
+          </Fieldset>
         </Body>
 
         <Footer>
           <Spacer />
           <Button variant="outline" size="md" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" size="md" loading={saving} onClick={handleSave} disabled={!draft}>
+          <Button variant="primary" size="md" loading={saving} onClick={handleSave} disabled={loading}>
             Save
           </Button>
         </Footer>

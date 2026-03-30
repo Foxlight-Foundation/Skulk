@@ -1,6 +1,7 @@
 import base64
 import contextlib
 import json
+import os
 import random
 import socket
 import time
@@ -1961,6 +1962,9 @@ class API:
                     "config": {},
                     "configPath": str(self._config_path),
                     "fileExists": False,
+                    "effective": {
+                        "kv_cache_backend": os.environ.get("EXO_KV_CACHE_BACKEND", "default"),
+                    },
                 }
             )
         with self._config_path.open() as f:
@@ -1968,7 +1972,14 @@ class API:
         if raw is None:
             raw = {}
         return JSONResponse(
-            {"config": raw, "configPath": str(self._config_path), "fileExists": True}
+            {
+                "config": raw,
+                "configPath": str(self._config_path),
+                "fileExists": True,
+                "effective": {
+                    "kv_cache_backend": os.environ.get("EXO_KV_CACHE_BACKEND", "default"),
+                },
+            }
         )
 
     async def update_config(self, request: Request) -> JSONResponse:
@@ -1991,11 +2002,21 @@ class API:
         from exo.shared.types.commands import SyncConfig
 
         await self._send_download(SyncConfig(config_yaml=config_yaml))
+        # Apply inference config to env var immediately so next model launch uses it.
+        # Don't overwrite if user provided the env var at launch.
+        inference = config_data.get("inference")
+        if isinstance(inference, dict) and "kv_cache_backend" in inference:
+            if not os.environ.get("_EXO_KV_BACKEND_USER_SET"):
+                os.environ["EXO_KV_CACHE_BACKEND"] = str(inference["kv_cache_backend"])
+        # model_store changes still require restart; inference-only changes don't
+        has_store_changes = "model_store" in config_data
         return JSONResponse(
             {
                 "success": True,
-                "message": "Config saved and synced to cluster. Restart exo for changes to take effect.",
-                "requiresRestart": True,
+                "message": "Config saved and synced to cluster."
+                + (" KV cache backend takes effect on next model launch." if inference else "")
+                + (" Restart required for model store changes." if has_store_changes else ""),
+                "requiresRestart": has_store_changes,
             }
         )
 
