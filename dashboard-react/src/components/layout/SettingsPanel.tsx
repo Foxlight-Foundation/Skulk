@@ -399,22 +399,27 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
           {/* Inference — always shown, not gated on model_store config */}
           <Fieldset>
             <Legend>Inference</Legend>
-            <Row>
-              <FieldLabel>
-                KV Cache Backend
-                <InfoTooltip
-                  filled
-                  content="Select the KV cache quantization strategy. OptiQ uses rotation-based quantization for best quality. TurboQuant Adaptive is a proven stable alternative. Default uses no cache quantization. Takes effect on next model launch."
-                />
-              </FieldLabel>
-              <Select value={kvBackend} onChange={(e) => setKvBackend(e.target.value)}>
-                <option value="default">Default (no quantization)</option>
-                <option value="optiq">OptiQ (rotation-based)</option>
-                <option value="turboquant_adaptive">TurboQuant Adaptive</option>
-                <option value="turboquant">TurboQuant</option>
-                <option value="mlx_quantized">MLX Quantized</option>
-              </Select>
-            </Row>
+            <FieldLabel>
+              KV Cache Backend
+              <InfoTooltip
+                filled
+                content={
+                  `• Default — No cache quantization. Best baseline quality, highest memory use.\n` +
+                  `• OptiQ — Rotation-based quantization via mlx-optiq. Best long-context quality.\n` +
+                  `• TurboQuant Adaptive — Quantizes middle KV layers, keeps edge layers in FP16. Proven stable.\n` +
+                  `• TurboQuant — Quantizes all KV layers. Most aggressive compression, higher quality risk.\n` +
+                  `• MLX Quantized — MLX's built-in cache quantization.\n\n` +
+                  `Takes effect on next model launch. Incompatible models fall back to Default automatically.`
+                }
+              />
+            </FieldLabel>
+            <Select value={kvBackend} onChange={(e) => setKvBackend(e.target.value)}>
+              <option value="default">Default (no quantization)</option>
+              <option value="optiq">OptiQ (rotation-based)</option>
+              <option value="turboquant_adaptive">TurboQuant Adaptive</option>
+              <option value="turboquant">TurboQuant</option>
+              <option value="mlx_quantized">MLX Quantized</option>
+            </Select>
             <HintText>Changes take effect on the next model launch. Models with incompatible architectures (GQA, non-power-of-two head_dim) will automatically fall back to default.</HintText>
           </Fieldset>
         </Body>
