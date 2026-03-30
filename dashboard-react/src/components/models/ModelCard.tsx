@@ -154,28 +154,6 @@ const Card = styled.div<{ $canFit: boolean }>`
   padding: 12px;
 `;
 
-const Corner = styled.div<{ $canFit: boolean; $pos: string }>`
-  position: absolute;
-  width: 8px;
-  height: 8px;
-  transition: border-color 0.2s;
-
-  ${({ $pos }) => {
-    switch ($pos) {
-      case 'tl': return css`top: -1px; left: -1px; border-left: 1px solid; border-top: 1px solid;`;
-      case 'tr': return css`top: -1px; right: -1px; border-right: 1px solid; border-top: 1px solid;`;
-      case 'bl': return css`bottom: -1px; left: -1px; border-left: 1px solid; border-bottom: 1px solid;`;
-      case 'br': return css`bottom: -1px; right: -1px; border-right: 1px solid; border-bottom: 1px solid;`;
-    }
-  }}
-
-  border-color: ${({ $canFit }) => ($canFit ? 'rgba(255,215,0,0.3)' : 'rgba(239,68,68,0.3)')};
-
-  ${Card}:hover & {
-    border-color: ${({ $canFit }) => ($canFit ? 'rgba(255,215,0,0.6)' : 'rgba(239,68,68,0.4)')};
-  }
-`;
-
 const Header = styled.div`
   display: flex;
   align-items: flex-start;

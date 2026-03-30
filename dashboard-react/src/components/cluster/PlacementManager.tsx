@@ -381,7 +381,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
       <Modal onClick={(e) => e.stopPropagation()}>
         <Header>
           <Title>Place <ModelName>{modelLabel(modelId)}</ModelName></Title>
-          <CloseBtn onClick={onClose}><FiX size={18} /></CloseBtn>
+          <CloseBtn onClick={onClose} aria-label="Close placement manager"><FiX size={18} /></CloseBtn>
         </Header>
 
         <Body>
