@@ -416,15 +416,21 @@ def make_kv_cache(
             # include ArraysCache/RotatingKVCache entries).
             num_kv = sum(1 for entry in template_cache if isinstance(entry, KVCache))
             kv_pos = -1
+            layer_idx = -1
             caches: list[object] = []
-            for i, entry in enumerate(template_cache):
+            for entry in template_cache:
                 if isinstance(entry, KVCache):
                     kv_pos += 1
+                    layer_idx += 1
                     is_edge = kv_pos < OPTIQ_FP16_LAYERS or kv_pos >= max(num_kv - OPTIQ_FP16_LAYERS, 0)
                     if is_edge:
                         caches.append(KVCache())
                     else:
-                        head_dim = getattr(model.layers[i].self_attn, "head_dim", 128) if i < len(model.layers) else 128
+                        if 0 <= layer_idx < len(model.layers):
+                            attn = getattr(model.layers[layer_idx], "self_attn", model.layers[layer_idx])
+                            head_dim = getattr(attn, "head_dim", 128)
+                        else:
+                            head_dim = 128
                         caches.append(OptiqKVCache(head_dim=head_dim, bits=OPTIQ_BITS, seed=42 + kv_pos))
                 else:
                     caches.append(entry)
