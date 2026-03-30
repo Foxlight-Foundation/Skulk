@@ -149,6 +149,8 @@ const StyledField = styled(Field)`
 `;
 
 const Select = styled.select`
+  width: 100%;
+  box-sizing: border-box;
   background: ${({ theme }) => theme.colors.bg};
   color: ${({ theme }) => theme.colors.text};
   border: 1px solid ${({ theme }) => theme.colors.border};
