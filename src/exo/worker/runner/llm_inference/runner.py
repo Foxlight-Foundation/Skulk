@@ -412,6 +412,7 @@ class Builder:
             "mlx_quantized",
             "turboquant",
             "turboquant_adaptive",
+            "optiq",
         )
         if os.environ.get("EXO_NO_BATCH") or force_sequential:
             if force_sequential and not os.environ.get("EXO_NO_BATCH"):

@@ -22,6 +22,7 @@ KVCacheBackend = Literal[
     "mlx_quantized",
     "turboquant",
     "turboquant_adaptive",
+    "optiq",
 ]
 DEFAULT_KV_CACHE_BACKEND: KVCacheBackend = "default"
 KV_CACHE_BACKEND: KVCacheBackend = cast(
@@ -37,6 +38,8 @@ TURBOQUANT_V_BITS: int | None = (
 TURBOQUANT_FP16_LAYERS: int = int(os.environ.get("EXO_TQ_FP16_LAYERS", "4"))
 DEFAULT_TURBOQUANT_K_BITS: int = 3
 DEFAULT_TURBOQUANT_V_BITS: int = 4
+OPTIQ_BITS: int = int(os.environ.get("EXO_OPTIQ_BITS", "4"))
+OPTIQ_FP16_LAYERS: int = int(os.environ.get("EXO_OPTIQ_FP16_LAYERS", "4"))
 
 DEFAULT_TOP_LOGPROBS: int = 5
 
