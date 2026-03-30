@@ -5,7 +5,7 @@ import { theme, GlobalStyle } from './theme';
 import { useClusterState } from './hooks/useClusterState';
 import { HeaderNav, type NavRoute } from './components/layout/HeaderNav';
 import { TopologyGraph } from './components/topology/TopologyGraph';
-import { ClusterWarnings } from './components/status/ClusterWarnings';
+// ClusterWarnings replaced by inline header warning indicator
 import { ConnectionBanner } from './components/status/ConnectionBanner';
 import { ToastContainer } from './components/status/ToastContainer';
 import { NetworkMesh } from './components/common/NetworkMesh';
@@ -124,6 +124,37 @@ export function App() {
   const deleteConversation = useChatStore((s) => s.deleteConversation);
   const newConversation = useChatStore((s) => s.newConversation);
 
+  // Compute cluster warnings from topology
+  const clusterWarnings = useMemo(() => {
+    const nodes = topology?.nodes;
+    if (!nodes) return null;
+    const items: { level: 'error' | 'warning'; message: string }[] = [];
+
+    // Version mismatch (error)
+    const entries = Object.values(nodes).filter(
+      (n) => n.exo_commit && n.exo_commit !== 'Unknown' && n.exo_commit !== 'unknown',
+    );
+    if (entries.length >= 2) {
+      const commits = new Set(entries.map((n) => n.exo_commit));
+      if (commits.size > 1) {
+        const details = entries.map((n) => `${n.friendly_name ?? 'Unknown'} (${n.exo_version ?? '?'})`).join(', ');
+        items.push({ level: 'error', message: `Version mismatch: ${details}. Update all nodes with git pull && uv sync.` });
+      }
+    }
+
+    // RDMA phantom (warning)
+    const hasRdmaPhantom = Object.values(nodes).some(
+      (n) => n.rdma_enabled && n.rdma_interfaces_present === false,
+    );
+    if (hasRdmaPhantom) {
+      items.push({ level: 'warning', message: 'RDMA reported as enabled but no RDMA interfaces exist. Thunderbolt 5 (M4 Pro/Max+) is required for tensor parallel.' });
+    }
+
+    if (items.length === 0) return null;
+    const worstLevel = items.some((i) => i.level === 'error') ? 'error' : 'warning';
+    return { level: worstLevel as 'error' | 'warning', items };
+  }, [topology]);
+
   // Poll store downloads for the header progress indicator
   const pollStoreDownloads = useCallback(async () => {
     try {
@@ -224,6 +255,7 @@ export function App() {
           onNavigate={setActiveRoute}
           onOpenSettings={() => setSettingsOpen(true)}
           downloadProgress={downloadProgress}
+          warnings={clusterWarnings}
           showSidebarToggle={activeRoute === 'chat' && allConversations.length > 0}
           sidebarVisible={historyPanelOpen}
           onToggleSidebar={toggleHistoryPanel}
@@ -243,7 +275,6 @@ export function App() {
             />
           )}
           <Main>
-            <ClusterWarnings topology={topology} />
             {activeRoute === 'model-store' ? (
               <ModelStorePage
                 topology={topology}
