@@ -469,6 +469,22 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
       });
       if (res.ok) {
         addToast({ type: 'success', message: `OptiQ optimization started for ${modelId}` });
+        // Poll for completion/failure
+        const pollInterval = setInterval(async () => {
+          try {
+            const statusRes = await fetch(`/store/models/${encodeURIComponent(modelId)}/optimize/status`);
+            if (!statusRes.ok) { clearInterval(pollInterval); return; }
+            const status = await statusRes.json();
+            if (status.status === 'complete') {
+              clearInterval(pollInterval);
+              addToast({ type: 'success', message: `OptiQ optimization complete: ${status.achievedBpw?.toFixed(2) ?? '?'} BPW` });
+              loadRegistry();
+            } else if (status.status === 'failed') {
+              clearInterval(pollInterval);
+              addToast({ type: 'error', message: status.error ?? 'Optimization failed' });
+            }
+          } catch { clearInterval(pollInterval); }
+        }, 5000);
       } else {
         const err = await res.json().catch(() => ({}));
         addToast({ type: 'error', message: (err as Record<string, string>).detail ?? 'Failed to start optimization' });
@@ -476,7 +492,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
     } catch {
       addToast({ type: 'error', message: 'Failed to start optimization' });
     }
-  }, []);
+  }, [loadRegistry]);
 
   return (
     <Container>
