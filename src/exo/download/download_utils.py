@@ -141,13 +141,6 @@ def build_model_path(model_id: ModelId) -> Path:
     directory.  Raises ``FileNotFoundError`` if no valid model directory
     is found.
     """
-    import exo.shared.constants as _dbg
-    import logging as _log
-    _log.getLogger("exo.download").info(
-        f"build_model_path: model_id={model_id}, "
-        f"EXO_MODELS_PATH={_dbg.EXO_MODELS_PATH}, "
-        f"env={os.environ.get('EXO_MODELS_PATH', 'NOT SET')}"
-    )
     found = resolve_model_in_path(model_id)
     if found is not None:
         return found

@@ -406,16 +406,31 @@ def make_kv_cache(
         def _is_power_of_two(n: int) -> bool:
             return n > 0 and (n & (n - 1)) == 0
 
-        # Check head_dim compatibility before patching attention
+        # Check model compatibility before patching attention.
+        # optiq requires power-of-two head_dim and currently produces
+        # incorrect output with GQA models (num_kv_heads != num_q_heads).
         if len(model.layers) > 0:
             sample_layer = model.layers[0]
             sample_attn = getattr(sample_layer, "self_attn", sample_layer)
             sample_head_dim = getattr(sample_attn, "head_dim", 128)
+            n_heads = getattr(sample_attn, "n_heads", 0)
+            n_kv_heads = getattr(sample_attn, "n_kv_heads", n_heads)
+
+            incompatible = False
             if not _is_power_of_two(sample_head_dim):
                 logger.warning(
                     f"mlx-optiq requires power-of-two head_dim but model has head_dim={sample_head_dim}; "
                     f"falling back to default KV cache"
                 )
+                incompatible = True
+            elif n_kv_heads != 0 and n_kv_heads != n_heads:
+                logger.warning(
+                    f"mlx-optiq does not yet support GQA (n_heads={n_heads}, n_kv_heads={n_kv_heads}); "
+                    f"falling back to default KV cache"
+                )
+                incompatible = True
+
+            if incompatible:
                 if hasattr(model, "make_cache"):
                     return model.make_cache()  # type: ignore
                 return [KVCache() for _ in model.layers]
