@@ -240,6 +240,10 @@ class Worker:
                 case Shutdown(runner_id=runner_id):
                     runner = self.runners.pop(runner_id)
                     shard_for_eviction = runner.shard_metadata
+                    # Only evict staged files if the instance has been deleted.
+                    # If the instance still exists (e.g., runner crashed but will
+                    # be retried), keep the files so the next runner can find them.
+                    instance_deleted = task.instance_id not in self.state.instances
                     try:
                         with fail_after(3):
                             await runner.start_task(task)
@@ -251,7 +255,8 @@ class Worker:
                         )
                     finally:
                         runner.shutdown()
-                        await self._maybe_evict_shard(shard_for_eviction)
+                        if instance_deleted:
+                            await self._maybe_evict_shard(shard_for_eviction)
                 case CancelTask(
                     cancelled_task_id=cancelled_task_id, runner_id=runner_id
                 ):
