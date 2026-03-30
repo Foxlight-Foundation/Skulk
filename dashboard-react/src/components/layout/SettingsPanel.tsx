@@ -236,7 +236,8 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   }, []);
 
   const handleSave = useCallback(async () => {
-    const updated: FullConfig = {};
+    // Base on the last fetched config to avoid dropping sections
+    const updated: FullConfig = { ...(fullConfig ?? {}) };
     if (draft) updated.model_store = draft;
     updated.inference = { kv_cache_backend: kvBackend };
     const ok = await saveFullConfig(updated);
@@ -434,7 +435,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
         <Footer>
           <Spacer />
           <Button variant="outline" size="md" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" size="md" loading={saving} onClick={handleSave}>
+          <Button variant="primary" size="md" loading={saving} onClick={handleSave} disabled={loading}>
             Save
           </Button>
         </Footer>
