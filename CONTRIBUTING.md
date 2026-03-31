@@ -17,29 +17,81 @@ To run Skulk from source:
   ```bash
   brew install macmon
   ```
+- [node](https://github.com/nodejs/node) (for building the dashboard)
+  ```bash
+  brew install node
+  ```
+- [rust](https://github.com/rust-lang/rustup) (to build Rust bindings, nightly for now)
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  rustup toolchain install nightly
+  ```
 
 ```bash
-git clone https://github.com/foxlight-foundation/skulk.git
-cd skulk/dashboard
-npm install && npm run build && cd ..
+git clone https://github.com/ttupper92618/Skulk.git
+cd Skulk/dashboard && npm install && npm run build && cd ..
+uv sync
 uv run exo
 ```
 
-## Development
+## Project Structure
 
-Skulk is built with a mix of Rust, Python, and TypeScript (Svelte for the dashboard), and the codebase is actively evolving. Before starting work:
+Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard), and the codebase is actively evolving.
+
+### Key directories:
+- `src/exo/` — Python backend (inference, API, store, worker, routing)
+- `dashboard-react/` — React dashboard (Skulk UI)
+- `dashboard/` — Legacy Svelte dashboard (upstream EXO)
+- `rust/` — Rust components (networking, libp2p, PyO3 bindings)
+- `resources/inference_model_cards/` — Model metadata TOML files
+- `docs/` — Technical documentation
+
+### Dashboard (React)
+
+The Skulk dashboard is a React + TypeScript + styled-components app in `dashboard-react/`. Key areas:
+
+- `src/components/pages/` — Top-level views (ChatView, DownloadsPage/ModelStore)
+- `src/components/cluster/` — ClusterCard, PlacementManager, RunningInstanceCard
+- `src/components/layout/` — HeaderNav, SettingsPanel, InstancePanel, ConversationPanel, StoreRegistryTable
+- `src/components/chat/` — ChatForm, ChatMessages, ChatModelSelector
+- `src/stores/` — Zustand stores (chatStore, uiStore) with localStorage/sessionStorage persistence
+- `src/hooks/` — useClusterState, useConfig, useModelPicker
+
+To run the dashboard in dev mode:
+```bash
+cd dashboard-react && npm run dev
+```
+This starts a Vite dev server on port 3000 with hot reload. The dev server proxies API calls to `http://localhost:52415` (the Skulk backend).
+
+### Backend
+
+- `src/exo/api/main.py` — FastAPI server (OpenAI, Claude, Ollama API compatibility)
+- `src/exo/master/` — Master node (placement, election, event sourcing)
+- `src/exo/worker/` — Worker node (inference, runner management, download coordination)
+- `src/exo/store/` — Model store (registry, downloads, config, model optimizer)
+- `src/exo/shared/` — Shared types, constants, topology
+
+## Development Guidelines
+
+Before starting work:
 
 - Pull the latest source to ensure you're working with the most recent code
-- Keep your changes focused - implement one feature or fix per pull request
+- Keep your changes focused — implement one feature or fix per pull request
 - Avoid combining unrelated changes, even if they seem small
 
 This makes reviews faster and helps us maintain code quality as the project evolves.
 
 ## Code Style
 
-Write pure functions where possible. When adding new code, prefer Rust unless there's a good reason otherwise. Leverage the type systems available to you - Rust's type system, Python type hints, and TypeScript types. Comments should explain why you're doing something, not what the code does - especially for non-obvious decisions.
+Write pure functions where possible. Leverage the type systems available to you — Rust's type system, Python type hints, and TypeScript types. Comments should explain why you're doing something, not what the code does — especially for non-obvious decisions.
 
 Run `nix fmt` to auto-format your code before submitting.
+
+For the React dashboard:
+- Use styled-components for styling (no CSS modules or Tailwind)
+- Use Zustand for state management (not Redux or Context)
+- Use individual selectors from stores to avoid unnecessary re-renders
+- Follow the existing component patterns (styled components at top, component function at bottom)
 
 ## Model Cards
 
@@ -62,6 +114,7 @@ family = "llama"
 quantization = "4bit"
 base_model = "Llama 3.2 1B"
 capabilities = ["text"]
+context_length = 131072
 
 [storage_size]
 in_bytes = 729808896
@@ -81,6 +134,7 @@ in_bytes = 729808896
 
 ### Optional Fields
 
+- `context_length`: Maximum context window size in tokens (derived from `max_position_embeddings` in config.json)
 - `components`: For multi-component models (like image models with separate text encoders and transformers)
 - `uses_cfg`: Whether the model uses classifier-free guidance (for image models)
 - `trust_remote_code`: Whether to allow remote code execution (defaults to `false` for security)
@@ -97,18 +151,19 @@ The `capabilities` field defines what the model can do:
 
 By default, `trust_remote_code` is set to `false` for security. Only enable it if the model explicitly requires remote code execution from the Hugging Face hub.
 
+## Configuration
+
+Skulk uses `exo.yaml` for cluster configuration. Key sections:
+
+- `model_store` — Store host, paths, staging, download settings
+- `inference` — KV cache backend selection (`default`, `optiq`, `turboquant_adaptive`, etc.)
+- `hf_token` — HuggingFace API token
+
+Configuration can be edited directly in `exo.yaml` or through the dashboard Settings panel. Changes made via the dashboard are synced to all nodes automatically via gossipsub.
+
 ## API Adapters
 
 Skulk supports multiple API formats through an adapter pattern. Adapters convert API-specific request formats to the internal `TextGenerationTaskParams` format and convert internal token chunks back to API-specific responses.
-
-### Adapter Architecture
-
-All adapters live in `src/exo/master/adapters/` and follow the same pattern:
-
-1. Convert API-specific requests to `TextGenerationTaskParams`
-2. Handle both streaming and non-streaming response generation
-3. Convert internal `TokenChunk` objects to API-specific formats
-4. Manage error handling and edge cases
 
 ### Existing Adapters
 
@@ -117,46 +172,16 @@ All adapters live in `src/exo/master/adapters/` and follow the same pattern:
 - `responses.py`: OpenAI Responses API
 - `ollama.py`: Ollama API (for OpenWebUI compatibility)
 
-### Adding a New API Adapter
-
-To add support for a new API format:
-
-1. Create a new adapter file in `src/exo/master/adapters/`
-2. Implement a request conversion function:
-   ```python
-   def your_api_request_to_text_generation(
-       request: YourAPIRequest,
-   ) -> TextGenerationTaskParams:
-       # Convert API request to internal format
-       pass
-   ```
-3. Implement streaming response generation:
-   ```python
-   async def generate_your_api_stream(
-       command_id: CommandId,
-       chunk_stream: AsyncGenerator[TokenChunk | ErrorChunk | ToolCallChunk, None],
-   ) -> AsyncGenerator[str, None]:
-       # Convert internal chunks to API-specific streaming format
-       pass
-   ```
-4. Implement non-streaming response collection:
-   ```python
-   async def collect_your_api_response(
-       command_id: CommandId,
-       chunk_stream: AsyncGenerator[TokenChunk | ErrorChunk | ToolCallChunk, None],
-   ) -> AsyncGenerator[str]:
-       # Collect all chunks and return single response
-       pass
-   ```
-5. Register the adapter endpoints in `src/exo/master/api.py`
-
-The adapter pattern keeps API-specific logic isolated from core inference systems. Internal systems (worker, runner, event sourcing) only see `TextGenerationTaskParams` and `TokenChunk` objects - no API-specific types cross the adapter boundary.
-
 For detailed API documentation, see [docs/api.md](docs/api.md).
 
 ## Testing
 
-Skulk relies heavily on manual testing at this point in the project, but this is evolving. Before submitting a change, test both before and after to demonstrate how your change improves behavior. Do the best you can with the hardware you have available - if you need help testing, ask and we'll do our best to assist. Add automated tests where possible - we're actively working to substantially improve our automated testing story.
+Skulk relies heavily on manual testing at this point in the project, but this is evolving. Before submitting a change, test both before and after to demonstrate how your change improves behavior. Do the best you can with the hardware you have available — if you need help testing, ask and we'll do our best to assist. Add automated tests where possible.
+
+The React dashboard has Storybook stories for key components:
+```bash
+cd dashboard-react && npx storybook dev -p 6007
+```
 
 ## Submitting Changes
 
@@ -176,4 +201,4 @@ If you find a bug or have a feature request, please open an issue on GitHub with
 
 ## Questions?
 
-Open an issue or discussion on the [Skulk repository](https://github.com/foxlight-foundation/skulk).
+Open an issue or discussion on the [Skulk repository](https://github.com/ttupper92618/Skulk).

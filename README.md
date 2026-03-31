@@ -3,17 +3,19 @@
 <!-- Copyright 2025 Foxlight Foundation -->
 
 <div align="center">
-
+  <img src="docs/imgs/skulk-logo.svg" width="200" height="200" alt="Skulk logo">
 </div>
 
+---
 ### **Skulk** (*noun*): A group of foxes.
 >*A skulk moves together without a central authority telling each fox what to do; the skulk coordinates naturally, quietly, with each member contributing to the whole.*
-
-> Skulk is maintained by [Foxlight Foundation](https://github.com/foxlight-foundation) and forked from [exo](https://github.com/exo-explore/exo).
+---
 
 ### **What is it?**
 
 **Skulk is a fork of EXO.** It extends upstream exo with a **model store** allowing a node in your cluster to hold all model files and serve them to every other node over the local network. This prevents wasted storage and allows for the use of either locally or network attached storage, and also provides for full offline capability after the first download.
+
+> Skulk is maintained by [Foxlight Foundation](https://github.com/foxlight-foundation) and forked from [exo](https://github.com/exo-explore/exo).
 
 ### **What else does Skulk do?**
 - **Store-first downloads:** when a model is launched that isn't in the store, Skulk downloads it once and then locally distributes it to the nodes at time of invokation.
@@ -21,20 +23,31 @@
 - **Store Registry:** you can browse models in the store, see download progress, find and download new models, delete models, and see which models are active.
 - **Cluster-wide config sync:** config changes made from the dashboard are broadcast to all skulk nodes automatically via gossipsub.
 
+- **Auto-detect existing models:** Skulk can scan a selected store path for existing model directories and auto-register them.
+- **Skulk Dashboard:** Full-featured React dashboard with cluster topology visualization, model store management, chat interface with streaming, thinking support, conversation persistence, and placement manager.
+- **Chat Interface:** Stream chat with models directly from the dashboard with real-time TTFT/TPS/ms-per-tok stats, thinking block rendering, conversation history with per-model scoping, and session recovery on refresh.
+- **Placement Manager:** Visual cluster placement configurator — select node count, sharding mode (Pipeline/Tensor), and networking (Ring/Jaccl) with real-time availability validation and error explanations.
+- **OptiQ Integration:** Integrated mlx-optiq for rotation-based KV cache quantization (configurable in Settings) and mixed-precision weight optimization via sensitivity analysis.
+- **HuggingFace Token Management:** Configure your HF API token from the settings panel — synced to all nodes automatically.
+- **Smart Model Tags:** Models tagged with OptiQ, Thinking, and Tensor badges in the store registry.
+- **Context Window Display:** Model context window size shown in chat header, derived from config.json.
+- **Cluster Warnings:** Consolidated warning indicator in header for version mismatches and RDMA issues.
+- **Static Peer Discovery:** `--bootstrap-peers` CLI arg for fixed cluster topology.
+
+### **Coming Soon**
+
 - **Store failover:** Skulk can automatically failover to a new store host when the current store host goes offline with automated store host and registry replication.
 - **Shard-aware staging:** Skulk only stages the safetensors files needed for a node's assigned layers, reducing local storage requirements and enabling models on nodes with less RAM.
 - **Offline/air-gapped hardening:** Skulk adds CLI commands for store management (`skulk store list`, `skulk store pull`), adds store integrity checks with hash verification, and cleaner error messaging.
-- **Auto-detect existing models:** Skulk can scan a selected store path for existing model directories and auto-register them.
 - **Storage recommendations:** Skulk can show available disk space per volume in the directory browser, highlight the best option, and warn on low space.
 - **Manual shard placement:** Skulk allows youu to control which layers run on which nodes, and you can adjust sharding to target specific machines and manage memory pressure on a per-node basis.
 - **Sub-cluster definitions:** Skulk allows you to define node groups so a model can be targeted to only certain nodes, enabling model-specific sub-clusters within a single physical cluster (e.g. dedicate 2 nodes to a coding model and 2 to a chat model simultaneously).
+- **macOS App:** A native macOS menu bar app for running Skulk in the background — start/stop your cluster, monitor status, and manage models without the terminal.
+- **Conversation sync:** Conversation history synced across all nodes in the cluster so every node has access to the full chat history.
+- **Context compaction:** Intelligent context window management with sliding window and summarization for long conversations.
+- **Voice input:** Voice-to-text input for the chat interface.
 
----
-## About EXO
-
-EXO is the upstream project from which Skulk is forked. EXO connects all your devices into an AI cluster. Not only does it enable running models larger than would fit on a single device, but with [day-0 support for RDMA over Thunderbolt](https://x.com/exolabs/status/2001817749744476256?s=20), makes models run faster as you add more devices.
-
-## Features
+## **Features**
 
 - **Automatic Device Discovery**: Devices running Skulk automatically discover each other - no manual configuration.
 - **RDMA over Thunderbolt**: Skulk ships with [day-0 support for RDMA over Thunderbolt 5](https://x.com/exolabs/status/2001817749744476256?s=20), enabling 99% reduction in latency between devices.
@@ -45,16 +58,26 @@ EXO is the upstream project from which Skulk is forked. EXO connects all your de
 - **Custom Model Support**: Load custom models from HuggingFace hub to expand the range of available models.
 - **Experimental KV Cache Backends**: Skulk includes opt-in MLX quantized and TurboQuant-inspired KV cache backends for long-context memory experiments. See [docs/kv-cache-backends.md](docs/kv-cache-backends.md).
 
-## Dashboard
+## **Dashboard**
 
 Skulk includes a built-in dashboard for managing your cluster and chatting with models.
 
 <p align="center">
-  <img src="docs/imgs/dashboard-cluster-view.png" alt="Skulk dashboard - cluster view showing 4 x M3 Ultra Mac Studio with DeepSeek v3.1 and Kimi-K2-Thinking loaded" width="80%" />
+  <img src="docs/imgs/dash-1.png" alt="Skulk dashboard showing cluster topology and currently running models" width="80%" />
 </p>
-<p align="center"><em>4 × 512GB M3 Ultra Mac Studio running DeepSeek v3.1 (8-bit) and Kimi-K2-Thinking (4-bit)</em></p>
+<p align="center"><em>The Skulk dashboard showing cluster topology and currently running models.</em></p>
 
-## Benchmarks
+<p align="center">
+  <img src="docs/imgs/dash-2.png" alt="Skulk dashboard model store" width="80%" />
+</p>
+<p align="center"><em>The Skulk dashboard model store, allowing local network staging from a centralized store.</em></p>
+
+<p align="center">
+  <img src="docs/imgs/dash-3.png" alt="Skulk dashboard chat view" width="80%" />
+</p>
+<p align="center"><em>The Skulk dashboard chat view, showing current chat and chat history.</em></p>
+
+## **Benchmarks**
 
 <details>
   <summary>Qwen3-235B (8-bit) on 4 × M3 Ultra Mac Studio with Tensor Parallel RDMA</summary>
@@ -82,13 +105,13 @@ Skulk includes a built-in dashboard for managing your cluster and chatting with 
 
 ---
 
-## Quick Start
+## **Quick Start**
 
 Devices running Skulk automatically discover each other, without needing any manual configuration. Each device provides an API and a dashboard for interacting with your cluster (runs at `http://localhost:52415`).
 
 There are two ways to run Skulk:
 
-### Run from Source (macOS)
+### **Run from Source (macOS)**
 
 If you have [Nix](https://nixos.org/) installed, you can skip most of the steps below and run directly:
 
@@ -128,10 +151,13 @@ Clone the repo, build the dashboard, and run Skulk:
 
 ```bash
 # Clone the repo
-git clone https://github.com/foxlight-foundation/skulk
+git clone https://github.com/ttupper92618/Skulk.git
 
 # Build dashboard
-cd skulk/dashboard && npm install && npm run build && cd ..
+cd Skulk/dashboard && npm install && npm run build && cd ..
+
+# Install Python dependencies
+uv sync
 
 # Run Skulk
 uv run exo
@@ -139,7 +165,7 @@ uv run exo
 
 This starts the Skulk dashboard and API at http://localhost:52415/
 
-## Experimental KV Cache Backends
+## **Experimental KV Cache Backends**
 
 Skulk includes opt-in KV cache backends for MLX text generation:
 
@@ -147,8 +173,18 @@ Skulk includes opt-in KV cache backends for MLX text generation:
 - `mlx_quantized`: MLX LM's built-in `QuantizedKVCache`
 - `turboquant`: a correctness-first TurboQuant-inspired KV cache for standard `KVCache` layers
 - `turboquant_adaptive`: keeps the first and last KV layers in FP16 and applies TurboQuant only to middle KV layers
+- `optiq`: rotation-based KV cache quantization via [mlx-optiq](https://github.com/mlx-explore/mlx-optiq)
 
 Current recommended experimental setting:
+
+```bash
+EXO_KV_CACHE_BACKEND=optiq \
+EXO_OPTIQ_BITS=4 \
+EXO_OPTIQ_FP16_LAYERS=4 \
+uv run exo
+```
+
+The `optiq` backend uses mlx-optiq's rotation-based quantization for the best quality-to-memory tradeoff. As a proven alternative, `turboquant_adaptive` remains a solid choice:
 
 ```bash
 EXO_KV_CACHE_BACKEND=turboquant_adaptive \
@@ -157,6 +193,8 @@ EXO_TQ_V_BITS=4 \
 EXO_TQ_FP16_LAYERS=4 \
 uv run exo
 ```
+
+**Note:** KV cache backends can now also be configured from the Settings panel in the dashboard without needing to set environment variables.
 
 Important notes:
 
@@ -170,7 +208,7 @@ More detail, current limitations, and testing guidance live in [docs/kv-cache-ba
 *Please view the section on RDMA to enable this feature on MacOS >=26.2!*
 
 
-### Run from Source (Linux)
+### **Run from Source (Linux)**
 
 **Prerequisites:**
 
@@ -213,10 +251,13 @@ Clone the repo, build the dashboard, and run Skulk:
 
 ```bash
 # Clone the repo
-git clone https://github.com/foxlight-foundation/skulk
+git clone https://github.com/ttupper92618/Skulk.git
 
 # Build dashboard
-cd skulk/dashboard && npm install && npm run build && cd ..
+cd Skulk/dashboard && npm install && npm run build && cd ..
+
+# Install Python dependencies
+uv sync
 
 # Run Skulk
 uv run exo
@@ -224,7 +265,7 @@ uv run exo
 
 This starts the Skulk dashboard and API at http://localhost:52415/
 
-**Important note for Linux users:** Currently, Skulk runs on CPU on Linux. GPU support for Linux platforms is under development. If you'd like to see support for your specific Linux hardware, please [search for existing feature requests](https://github.com/foxlight-foundation/skulk/issues) or create a new one.
+**Important note for Linux users:** Currently, Skulk runs on CPU on Linux. GPU support for Linux platforms is under development. If you'd like to see support for your specific Linux hardware, please [search for existing feature requests](https://github.com/ttupper92618/Skulk/issues) or create a new one.
 
 **Configuration Options:**
 
@@ -246,52 +287,9 @@ Skulk follows the [XDG Base Directory Specification](https://specifications.free
 
 You can override these locations by setting the corresponding XDG environment variables.
 
-### macOS App
-
-Skulk ships a macOS app that runs in the background on your Mac.
-
-<img src="docs/imgs/macos-app-one-macbook.png" alt="Skulk macOS App - running on a MacBook" width="35%" />
-
-The macOS app requires macOS Tahoe 26.2 or later.
-
-Download the latest build here: [EXO-latest.dmg](https://assets.exolabs.net/EXO-latest.dmg).
-
-The app will ask for permission to modify system settings and install a new Network profile. Improvements to this are being worked on.
-
-**Custom Namespace for Cluster Isolation:**
-
-The macOS app includes a custom namespace feature that allows you to isolate your cluster from others on the same network. This is configured through the `EXO_LIBP2P_NAMESPACE` setting:
-
-- **Use cases**:
-  - Running multiple separate clusters on the same network
-  - Isolating development/testing clusters from production clusters
-  - Preventing accidental cluster joining
-
-- **Configuration**: Access this setting in the app's Advanced settings (or set the `EXO_LIBP2P_NAMESPACE` environment variable when running from source)
-
-The namespace is logged on startup for debugging purposes.
-
-#### Uninstalling the macOS App
-
-The recommended way to uninstall is through the app itself: click the menu bar icon → Advanced → Uninstall. This cleanly removes all system components.
-
-If you've already deleted the app, you can run the standalone uninstaller script:
-
-```bash
-sudo ./app/EXO/uninstall-exo.sh
-```
-
-This removes:
-- Network setup LaunchDaemon
-- Network configuration script
-- Log files
-- The "exo" network location
-
-**Note:** You'll need to manually remove EXO from Login Items in System Settings → General → Login Items.
-
 ---
 
-### Enabling RDMA on macOS
+### **Enabling RDMA on macOS**
 
 RDMA is a new capability added to macOS 26.2. It works on any Mac with Thunderbolt 5 (M4 Pro Mac Mini, M4 Max Mac Studio, M4 Max MacBook Pro, M3 Ultra Mac Studio).
 
@@ -322,7 +320,7 @@ After that, RDMA will be enabled in macOS and Skulk will take care of the rest.
 
 ---
 
-## Environment Variables
+## **Environment Variables**
 
 Skulk supports several environment variables for configuration:
 
@@ -335,12 +333,16 @@ Skulk supports several environment variables for configuration:
 | `EXO_LIBP2P_NAMESPACE` | Custom namespace for cluster isolation | None |
 | `EXO_FAST_SYNCH` | Control MLX_METAL_FAST_SYNCH behavior (for JACCL backend) | Auto |
 | `EXO_TRACING_ENABLED` | Enable distributed tracing for performance analysis | `false` |
-| `EXO_KV_CACHE_BACKEND` | Select KV cache backend: `default`, `mlx_quantized`, `turboquant`, or `turboquant_adaptive` | `default` |
+| `EXO_KV_CACHE_BACKEND` | Select KV cache backend: `default`, `mlx_quantized`, `turboquant`, `turboquant_adaptive`, or `optiq` | `default` |
 | `EXO_KV_CACHE_BITS` | Bit width for MLX built-in quantized KV cache. Required when `EXO_KV_CACHE_BACKEND=mlx_quantized` | None |
 | `EXO_TQ_K_BITS` | Key-cache bit width for TurboQuant backends | `3` |
 | `EXO_TQ_V_BITS` | Value-cache bit width for TurboQuant backends | `4` |
 | `EXO_TQ_FP16_LAYERS` | Number of KV layers at each edge kept in FP16 for `turboquant_adaptive` | `4` |
 | `EXO_NO_BATCH` | Disable batch generation. Quantized KV backends currently force this behavior automatically as a temporary fallback | `false` |
+| `EXO_OPTIQ_BITS` | Bit width for mlx-optiq KV cache | `4` |
+| `EXO_OPTIQ_FP16_LAYERS` | Edge layers kept in FP16 for optiq | `4` |
+| `EXO_BOOTSTRAP_PEERS` | Comma-separated libp2p multiaddrs for static peer discovery | None |
+| `HF_TOKEN` | HuggingFace API token (can also be set in Settings panel) | None |
 
 **Example usage:**
 
@@ -483,7 +485,7 @@ curl -N -X POST http://localhost:52415/v1/messages \
   }'
 ```
 
-### OpenAI Responses API Compatibility
+### **OpenAI Responses API Compatibility**
 
 Use the OpenAI Responses API format with the `/v1/responses` endpoint:
 
@@ -499,7 +501,7 @@ curl -N -X POST http://localhost:52415/v1/responses \
   }'
 ```
 
-### Ollama API Compatibility
+### **Ollama API Compatibility**
 
 Skulk supports Ollama API endpoints for compatibility with tools like OpenWebUI:
 
@@ -519,7 +521,7 @@ curl -X POST http://localhost:52415/ollama/api/chat \
 curl http://localhost:52415/ollama/api/tags
 ```
 
-### Custom Model Loading from HuggingFace
+### **Custom Model Loading from HuggingFace**
 
 You can add custom models from the HuggingFace hub:
 
@@ -549,7 +551,7 @@ For further details, see:
 
 ---
 
-## Benchmarking
+## **Benchmarking**
 
 The `exo-bench` tool measures model prefill and token generation speed across different placement configurations. This helps you optimize model performance and validate improvements.
 
@@ -595,12 +597,18 @@ The tool outputs performance metrics including prompt tokens per second (prompt_
 
 ---
 
-## Hardware Accelerator Support
+## **Hardware Accelerator Support**
 
-On macOS, Skulk uses the GPU. On Linux, Skulk currently runs on CPU. We are working on extending hardware accelerator support. If you'd like support for a new hardware platform, please [search for an existing feature request](https://github.com/foxlight-foundation/skulk/issues) and add a thumbs up so we know what hardware is important to the community.
+On macOS, Skulk uses the GPU. On Linux, Skulk currently runs on CPU. We are working on extending hardware accelerator support. If you'd like support for a new hardware platform, please [search for an existing feature request](https://github.com/ttupper92618/Skulk/issues) and add a thumbs up so we know what hardware is important to the community.
 
 ---
 
-## Contributing
+## **Contributing**
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to contribute to Skulk.
+
+--
+
+## **About EXO**
+
+EXO is the upstream project from which Skulk is forked. EXO connects all your devices into an AI cluster. Not only does it enable running models larger than would fit on a single device, but with [day-0 support for RDMA over Thunderbolt](https://x.com/exolabs/status/2001817749744476256?s=20), makes models run faster as you add more devices.

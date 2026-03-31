@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import styled, { css, keyframes } from 'styled-components';
 import { FiTrash2, FiExternalLink, FiRefreshCw } from 'react-icons/fi';
-import { MdPlayArrow, MdClose, MdTune } from 'react-icons/md';
+import { MdPlayArrow, MdClose, MdTune, MdAutoFixHigh } from 'react-icons/md';
 import { BsChatDotsFill } from 'react-icons/bs';
 import { formatBytes } from '../../utils/format';
 import { Button } from '../common/Button';
@@ -31,6 +31,7 @@ export interface ModelCardInfo {
   baseModel?: string;
   supportsTensor?: boolean;
   capabilities?: string[];
+  tags?: string[];
 }
 
 export interface StoreRegistryTableProps {
@@ -49,6 +50,7 @@ export interface StoreRegistryTableProps {
   clusterCards?: Record<string, Omit<ClusterCardProps, 'onLaunch'>>;
   /** Total available cluster RAM in bytes — used to disable launch for models that won't fit */
   totalClusterMemoryBytes?: number;
+  onOptimize?: (modelId: string) => void;
 }
 
 /* ---- helpers ---- */
@@ -130,7 +132,7 @@ const Table = styled.div`
 
 const THead = styled.div`
   display: grid;
-  grid-template-columns: 36px 32px 1fr 80px 60px 100px 60px;
+  grid-template-columns: 36px 32px 1fr 80px 60px 100px 100px;
   gap: 8px;
   padding: 8px 12px;
   background: rgba(0, 0, 0, 0.4);
@@ -141,7 +143,7 @@ const THead = styled.div`
 
 const TRow = styled.div<{ $highlight?: boolean }>`
   display: grid;
-  grid-template-columns: 36px 32px 1fr 80px 60px 100px 60px;
+  grid-template-columns: 36px 32px 1fr 80px 60px 100px 100px;
   gap: 8px;
   padding: 10px 12px;
   align-items: center;
@@ -158,8 +160,9 @@ const TRow = styled.div<{ $highlight?: boolean }>`
 const ModelCell = styled.div`
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
+  flex-wrap: wrap;
 `;
 
 const ModelId = styled.span`
@@ -213,6 +216,26 @@ const ActiveDot = styled.span`
   border-radius: 50%;
   background: ${({ theme }) => theme.colors.gold};
   animation: ${pulse} 1.5s ease-in-out infinite;
+`;
+
+const TAG_COLORS: Record<string, { color: string; bg: string; border: string }> = {
+  optiq: { color: '#a78bfa', bg: 'rgba(167, 139, 250, 0.1)', border: 'rgba(167, 139, 250, 0.3)' },
+  thinking: { color: '#60a5fa', bg: 'rgba(96, 165, 250, 0.1)', border: 'rgba(96, 165, 250, 0.3)' },
+  tensor: { color: '#34d399', bg: 'rgba(52, 211, 153, 0.1)', border: 'rgba(52, 211, 153, 0.3)' },
+};
+
+const TagBadge = styled.span<{ $color: string; $bg: string; $border: string }>`
+  flex-shrink: 0;
+  font-size: 10px;
+  font-family: ${({ theme }) => theme.fonts.body};
+  font-weight: 500;
+  color: ${({ $color }) => $color};
+  background: ${({ $bg }) => $bg};
+  border: 1px solid ${({ $border }) => $border};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  padding: 0 5px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
 `;
 
 const ChatBubble = styled.button`
@@ -469,6 +492,7 @@ export function StoreRegistryTable({
   onPlacement,
   clusterCards = {},
   totalClusterMemoryBytes = 0,
+  onOptimize,
 }: StoreRegistryTableProps) {
   const registeredIds = useMemo(() => new Set(entries.map((e) => e.model_id)), [entries]);
   const pendingDownloads = useMemo(
@@ -574,6 +598,18 @@ export function StoreRegistryTable({
                 </PlayCell>
                 <ModelCell>
                   <ModelId title={entry.model_id}>{entry.model_id}</ModelId>
+                  {(() => {
+                    let tags = modelCards?.[entry.model_id]?.tags ?? [];
+                    // Fallback: detect from model ID if no card data
+                    if (tags.length === 0 && entry.model_id.toLowerCase().includes('optiq')) {
+                      tags = ['optiq'];
+                    }
+                    return tags.length > 0 ? tags.map((tag) => {
+                      const colors = TAG_COLORS[tag];
+                      if (!colors) return null;
+                      return <TagBadge key={tag} $color={colors.color} $bg={colors.bg} $border={colors.border}>{tag}</TagBadge>;
+                    }) : null;
+                  })()}
                   {active && (() => {
                     const card = clusterCards[entry.model_id];
                     const ready = card?.isReady ?? false;
@@ -619,6 +655,13 @@ export function StoreRegistryTable({
                     filled
                     delay={100}
                   />
+                  {!active && onOptimize && !(modelCards?.[entry.model_id]?.tags ?? []).includes('optiq') && !entry.model_id.toLowerCase().includes('optiq') && (
+                    <InfoTooltip content="Create an OptiQ mixed-precision version. Analyzes each layer's sensitivity and assigns precision individually for better quality." placement="left" delay={0}>
+                      <Button variant="outline" size="sm" icon onClick={() => onOptimize(entry.model_id)} title="Optimize model">
+                        <MdAutoFixHigh size={16} />
+                      </Button>
+                    </InfoTooltip>
+                  )}
                   <Button variant="danger" size="sm" icon onClick={() => onDelete(entry, active)} title="Delete model">
                     <FiTrash2 size={18} />
                   </Button>

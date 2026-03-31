@@ -192,6 +192,7 @@ class ExoConfig(FrozenModel):
 
     model_store: ModelStoreConfig | None = None
     inference: "InferenceConfig | None" = None
+    hf_token: str | None = None
 
 
 @final

@@ -99,6 +99,15 @@ class Node:
                 f"Inference config: kv_cache_backend={exo_config.inference.kv_cache_backend}"
             )
 
+        # Apply HF token from config if not already set via env
+        if (
+            exo_config is not None
+            and exo_config.hf_token
+            and "HF_TOKEN" not in os.environ
+        ):
+            os.environ["HF_TOKEN"] = exo_config.hf_token
+            logger.info("HF token loaded from config")
+
         store_client: ModelStoreClient | None = None
         store_server: ModelStoreServer | None = None
 

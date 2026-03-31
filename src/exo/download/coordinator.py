@@ -191,6 +191,11 @@ class DownloadCoordinator:
                         logger.info(
                             f"DownloadCoordinator: skipping KV backend update (user env var override active)"
                         )
+                # Apply HF token if not user-set
+                hf_token = raw.get("hf_token")
+                if hf_token and "HF_TOKEN" not in os.environ:
+                    os.environ["HF_TOKEN"] = str(hf_token)
+                    logger.info("DownloadCoordinator: updated HF_TOKEN from config sync")
         except Exception as exc:
             logger.warning(f"DownloadCoordinator: failed to sync exo.yaml: {exc}")
 

@@ -232,6 +232,11 @@ class API:
         self._exo_config = exo_config
         self._store_client = store_client
         self._config_path = Path("exo.yaml")
+        self._model_optimizer: "ModelOptimizer | None" = None
+        # Initialize optimizer if store path is available
+        if exo_config and exo_config.model_store and exo_config.model_store.enabled:
+            from exo.store.model_optimizer import ModelOptimizer
+            self._model_optimizer = ModelOptimizer(store_path=Path(exo_config.model_store.store_path))
 
         self.paused: bool = False
         self.paused_ev: anyio.Event = anyio.Event()
@@ -382,6 +387,8 @@ class API:
             self.get_store_download_status
         )
         self.app.post("/store/purge-staging")(self.purge_staging_caches)
+        self.app.post("/store/models/{model_id:path}/optimize")(self.optimize_model)
+        self.app.get("/store/models/{model_id:path}/optimize/status")(self.get_optimize_status)
         self.app.get("/filesystem/browse")(self.browse_filesystem)
         self.app.get("/node/identity")(self.get_node_identity)
 
@@ -1568,6 +1575,23 @@ class API:
 
         return total_available
 
+    @staticmethod
+    def _model_tags(card: "ModelCard") -> list[str]:
+        """Derive display tags from model metadata."""
+        tags: list[str] = []
+        model_id_lower = str(card.model_id).lower()
+        quant_lower = card.quantization.lower()
+        # OptiQ mixed-precision models
+        if "optiq" in model_id_lower or "optiq" in quant_lower:
+            tags.append("optiq")
+        # Thinking capability
+        if "thinking" in card.capabilities:
+            tags.append("thinking")
+        # Tensor parallel support
+        if card.supports_tensor:
+            tags.append("tensor")
+        return tags
+
     async def get_models(self, status: str | None = Query(default=None)) -> ModelList:
         """Returns list of available models, optionally filtered by being downloaded."""
         cards = await get_model_cards()
@@ -1587,7 +1611,7 @@ class API:
                     hugging_face_id=card.model_id,
                     name=card.model_id.short(),
                     description="",
-                    tags=[],
+                    tags=self._model_tags(card),
                     storage_size_megabytes=card.storage_size.in_mb,
                     supports_tensor=card.supports_tensor,
                     tasks=[task.value for task in card.tasks],
@@ -1971,13 +1995,17 @@ class API:
             raw = yaml.safe_load(f)
         if raw is None:
             raw = {}
+        # Remove sensitive fields — token is managed separately
+        safe_raw = dict(raw) if raw else {}
+        has_hf_token = bool(safe_raw.pop("hf_token", None))
         return JSONResponse(
             {
-                "config": raw,
+                "config": safe_raw,
                 "configPath": str(self._config_path),
                 "fileExists": True,
                 "effective": {
                     "kv_cache_backend": os.environ.get("EXO_KV_CACHE_BACKEND", "default"),
+                    "has_hf_token": has_hf_token or "HF_TOKEN" in os.environ,
                 },
             }
         )
@@ -1985,6 +2013,16 @@ class API:
     async def update_config(self, request: Request) -> JSONResponse:
         body = await request.json()
         config_data = body.get("config", body)
+        # Preserve existing hf_token if not provided in this update
+        # (GET /config strips it for security, so saves won't have it)
+        if "hf_token" not in config_data and self._config_path.exists():
+            try:
+                with self._config_path.open() as f:
+                    existing = yaml.safe_load(f) or {}
+                if "hf_token" in existing:
+                    config_data["hf_token"] = existing["hf_token"]
+            except Exception:
+                pass
         # Validate by attempting to parse with Pydantic
         from exo.store.config import ExoConfig
 
@@ -2008,6 +2046,10 @@ class API:
         if isinstance(inference, dict) and "kv_cache_backend" in inference:
             if not os.environ.get("_EXO_KV_BACKEND_USER_SET"):
                 os.environ["EXO_KV_CACHE_BACKEND"] = str(inference["kv_cache_backend"])
+        # Apply HF token immediately
+        hf_token = config_data.get("hf_token")
+        if hf_token and "HF_TOKEN" not in os.environ:
+            os.environ["HF_TOKEN"] = str(hf_token)
         # model_store changes still require restart; inference-only changes don't
         has_store_changes = "model_store" in config_data
         return JSONResponse(
@@ -2115,3 +2157,45 @@ class API:
                 status_code=404, detail=f"Model {model_id} not in store"
             )
         return JSONResponse({"modelId": model_id, "deleted": True})
+
+    async def optimize_model(self, model_id: str, request: Request) -> JSONResponse:
+        """Start an OptiQ mixed-precision optimization for a model."""
+        if self._model_optimizer is None:
+            raise HTTPException(status_code=503, detail="Model optimizer not available (store not configured)")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        target_bpw = float(body.get("target_bpw", 4.5))
+        candidate_bits = body.get("candidate_bits", [4, 8])
+        try:
+            await self._model_optimizer.optimize(
+                model_id=model_id,
+                target_bpw=target_bpw,
+                candidate_bits=candidate_bits,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        return JSONResponse({
+            "modelId": model_id,
+            "status": "started",
+            "targetBpw": target_bpw,
+        })
+
+    async def get_optimize_status(self, model_id: str) -> JSONResponse:
+        """Get optimization status for a model."""
+        if self._model_optimizer is None:
+            raise HTTPException(status_code=503, detail="Model optimizer not available")
+        job = self._model_optimizer.get_status(model_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="No optimization job found")
+        return JSONResponse({
+            "modelId": job.model_id,
+            "status": job.status,
+            "progress": job.progress,
+            "message": job.message,
+            "resultPath": job.result_path,
+            "achievedBpw": job.achieved_bpw,
+            "estimatedSizeMb": job.estimated_size_mb,
+            "error": job.error,
+        })
