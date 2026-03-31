@@ -154,7 +154,7 @@ Clone the repo, build the dashboard, and run Skulk:
 git clone https://github.com/foxlight-foundation/Skulk.git
 
 # Build dashboard
-cd Skulk/dashboard && npm install && npm run build && cd ..
+cd Skulk/dashboard-react && npm install && npm run build && cd ..
 
 # Install Python dependencies
 uv sync
@@ -254,7 +254,7 @@ Clone the repo, build the dashboard, and run Skulk:
 git clone https://github.com/foxlight-foundation/Skulk.git
 
 # Build dashboard
-cd Skulk/dashboard && npm install && npm run build && cd ..
+cd Skulk/dashboard-react && npm install && npm run build && cd ..
 
 # Install Python dependencies
 uv sync

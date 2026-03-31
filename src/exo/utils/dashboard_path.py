@@ -32,15 +32,26 @@ def _find_resources_in_bundle() -> Path | None:
 
 
 def find_dashboard() -> Path:
-    dashboard = _find_dashboard_in_repo() or _find_dashboard_in_bundle()
+    dashboard = _find_react_dashboard_in_repo() or _find_legacy_dashboard_in_repo() or _find_dashboard_in_bundle()
     if not dashboard:
         raise FileNotFoundError(
-            "Unable to locate dashboard assets - you probably forgot to run `cd dashboard && npm install && npm run build && cd ..`"
+            "Unable to locate dashboard assets — run: cd dashboard-react && npm install && npm run build && cd .."
         )
     return dashboard
 
 
-def _find_dashboard_in_repo() -> Path | None:
+def _find_react_dashboard_in_repo() -> Path | None:
+    """Skulk React dashboard (preferred)."""
+    current_module = Path(__file__).resolve()
+    for parent in current_module.parents:
+        build = parent / "dashboard-react" / "dist"
+        if build.is_dir() and (build / "index.html").exists():
+            return build
+    return None
+
+
+def _find_legacy_dashboard_in_repo() -> Path | None:
+    """Legacy Svelte dashboard (fallback)."""
     current_module = Path(__file__).resolve()
     for parent in current_module.parents:
         build = parent / "dashboard" / "build"

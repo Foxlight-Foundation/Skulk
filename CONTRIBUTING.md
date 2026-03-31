@@ -29,7 +29,7 @@ To run Skulk from source:
 
 ```bash
 git clone https://github.com/foxlight-foundation/Skulk.git
-cd Skulk/dashboard && npm install && npm run build && cd ..
+cd Skulk/dashboard-react && npm install && npm run build && cd ..
 uv sync
 uv run exo
 ```
