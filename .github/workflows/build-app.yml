@@ -1,4 +1,4 @@
-name: Build EXO macOS DMG
+name: Build Skulk macOS DMG
 
 # Release workflow:
 # 1. Create a draft GitHub Release with the tag name (e.g. v1.0.0) and write release notes in markdown

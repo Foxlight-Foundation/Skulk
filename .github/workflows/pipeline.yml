@@ -2,6 +2,9 @@ name: ci-pipeline
 
 on:
   push:
+    branches:
+      - staging
+      - main
   pull_request:
     branches:
       - staging
@@ -115,6 +118,6 @@ jobs:
           # Run pytest outside sandbox (needs GPU access for MLX)
           export HOME="$RUNNER_TEMP"
           export EXO_TESTS=1
-          export EXO_DASHBOARD_DIR="$PWD/dashboard/" 
+          export EXO_DASHBOARD_DIR="$PWD/dashboard-react/dist/"
           export EXO_RESOURCES_DIR="$PWD/resources" 
           $TEST_ENV/bin/python -m pytest src -m "not slow" --import-mode=importlib
