@@ -3,7 +3,7 @@ from collections.abc import Generator
 from typing import Annotated, Any, Literal, get_args
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from exo.shared.models.model_cards import ModelCard, ModelId
 from exo.shared.types.common import CommandId, NodeId
@@ -195,6 +195,17 @@ class StreamOptions(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+                "messages": [{"role": "user", "content": "Hello from Skulk"}],
+                "stream": False,
+                "temperature": 0.7,
+            }
+        }
+    )
+
     model: ModelId
     frequency_penalty: float | None = None
     messages: list[ChatCompletionMessage]
@@ -228,6 +239,10 @@ class BenchChatCompletionRequest(ChatCompletionRequest):
 
 
 class AddCustomModelParams(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"model_id": "mlx-community/my-custom-model"}}
+    )
+
     model_id: ModelId
 
 
@@ -241,6 +256,17 @@ class HuggingFaceSearchResult(BaseModel):
 
 
 class PlaceInstanceParams(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "model_id": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+                "sharding": "Pipeline",
+                "instance_meta": "MlxRing",
+                "min_nodes": 1,
+            }
+        }
+    )
+
     model_id: ModelId
     sharding: Sharding = Sharding.Pipeline
     instance_meta: InstanceMeta = InstanceMeta.MlxRing
@@ -248,6 +274,47 @@ class PlaceInstanceParams(BaseModel):
 
 
 class CreateInstanceParams(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "instance": {
+                    "MlxRingInstance": {
+                        "instanceId": "00000000-0000-0000-0000-000000000000",
+                        "shardAssignments": {
+                            "modelId": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+                            "runnerToShard": {
+                                "runner-1": {
+                                    "PipelineShardMetadata": {
+                                        "modelCard": {
+                                            "modelId": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+                                            "storageSize": {"inBytes": 2147483648},
+                                            "nLayers": 32,
+                                            "hiddenSize": 2048,
+                                            "supportsTensor": False,
+                                            "tasks": ["TextGeneration"],
+                                        },
+                                        "deviceRank": 0,
+                                        "worldSize": 1,
+                                        "startLayer": 0,
+                                        "endLayer": 32,
+                                        "nLayers": 32,
+                                    }
+                                }
+                            },
+                            "nodeToRunner": {
+                                "node-1": "runner-1"
+                            }
+                        },
+                        "hostsByNode": {
+                            "node-1": []
+                        },
+                        "ephemeralPort": 52416,
+                    }
+                }
+            }
+        }
+    )
+
     instance: Instance
 
 
@@ -262,6 +329,23 @@ class PlacementPreview(BaseModel):
 
 
 class PlacementPreviewResponse(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "previews": [
+                    {
+                        "model_id": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+                        "sharding": "Pipeline",
+                        "instance_meta": "MlxRing",
+                        "instance": None,
+                        "memory_delta_by_node": None,
+                        "error": None,
+                    }
+                ]
+            }
+        }
+    )
+
     previews: list[PlacementPreview]
 
 
@@ -410,6 +494,31 @@ class ImageListResponse(BaseModel, frozen=True):
 
 
 class StartDownloadParams(CamelCaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "targetNodeId": "12D3KooWExampleNodeId",
+                "shardMetadata": {
+                    "TensorShardMetadata": {
+                        "modelCard": {
+                            "modelId": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+                            "storageSize": {"inBytes": 2147483648},
+                            "nLayers": 32,
+                            "hiddenSize": 2048,
+                            "supportsTensor": True,
+                            "tasks": ["TextGeneration"],
+                        },
+                        "deviceRank": 0,
+                        "worldSize": 1,
+                        "startLayer": 0,
+                        "endLayer": 32,
+                        "nLayers": 32,
+                    }
+                },
+            }
+        }
+    )
+
     target_node_id: NodeId
     shard_metadata: ShardMetadata
 
@@ -423,6 +532,10 @@ class DeleteDownloadResponse(CamelCaseModel):
 
 
 class PurgeStagingRequest(CamelCaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"modelId": "mlx-community/Llama-3.2-1B-Instruct-4bit"}}
+    )
+
     model_id: str | None = None
 
 
@@ -474,6 +587,10 @@ class TraceListResponse(CamelCaseModel):
 
 
 class DeleteTracesRequest(CamelCaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"taskIds": ["chatcmpl-123", "chatcmpl-456"]}}
+    )
+
     task_ids: list[str]
 
 

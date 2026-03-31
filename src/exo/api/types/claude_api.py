@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from exo.shared.types.common import ModelId
 
@@ -103,6 +103,17 @@ class ClaudeThinkingConfig(BaseModel, frozen=True):
 
 class ClaudeMessagesRequest(BaseModel):
     """Request body for Claude Messages API."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+                "max_tokens": 512,
+                "messages": [{"role": "user", "content": "Hello from Claude-compatible Skulk"}],
+                "stream": False,
+            }
+        }
+    )
 
     model: ModelId
     max_tokens: int

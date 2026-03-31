@@ -2,86 +2,175 @@
 
 # Skulk Architecture Overview
 
-Skulk (forked from exo) uses an _Event Sourcing_ architecture, and Erlang-style _message passing_. To facilitate this, we've written a channel library extending anyio channels with inspiration from tokio::sync::mpsc.
+This page is the quick mental model for how Skulk fits together.
 
-Each logical module - designed to be functional independently of the others - communicates with the rest of the system by sending messages on topics.
+You do not need to understand every subsystem to use Skulk, but it helps to know what is happening when you start a node, join a cluster, place a model, and send a request.
 
-## Systems
+## The Short Version
 
-There are currently 5 major systems:
+A single Skulk node runs several cooperating systems:
 
-- Master
+- networking and peer discovery
+- election and master coordination
+- worker execution and model loading
+- the API server
+- the dashboard served by that API server
 
-    Executes placement and orders events through a single writer
+When you add more nodes, Skulk forms a cluster. The master coordinates placement and state, workers do execution, and the API exposes both compatibility endpoints and Skulk-specific control endpoints.
 
-- Worker
+## The Main User Flow
 
-    Schedules work on a node, gathers system information, etc.#
+Most real usage follows this shape:
 
-- Runner
+1. start one or more Skulk nodes
+2. let the cluster discover itself or connect through bootstrap peers
+3. inspect topology in the dashboard or through `/state`
+4. preview or choose a placement for a model
+5. place the model
+6. download or stage the required model files
+7. load the model on the chosen nodes
+8. send chat or other generation requests
 
-    Executes inference jobs (for now) in an isolated process from the worker for fault-tolerance.
-    The runner is also where MLX inference generators and KV cache backends are selected. Experimental KV cache backend selection is process-local and opt-in via environment variables.
+That is why placement is such an important idea in Skulk docs: generation depends on runtime state, not just API calls.
 
-- API
+## The Main Systems
 
-    Runs a python webserver for exposing state and commands to client applications
+### Master
 
-- Election
+The master coordinates cluster state and placement decisions.
 
-    Implements a distributed algorithm for master election in unstable networking conditions
+Responsibilities include:
 
-## API Layer
+- ordering events
+- coordinating placement
+- maintaining the shared view of the cluster
 
-The API system uses multiple adapters to support multiple API formats, converting them to a single request / response type.
+### Worker
 
-### Adapter Pattern
+Each node runs a worker.
 
-Adapters convert between external API formats and Skulk's internal types:
+The worker is responsible for:
 
-```
-Chat Completions → [adapter] → TextGenerationTaskParams → Application
-Claude Messages  → [adapter] → TextGenerationTaskParams → Application
-Responses API    → [adapter] → TextGenerationTaskParams → Application
-Ollama API       → [adapter] → TextGenerationTaskParams → Application
-```
+- gathering node information
+- managing downloads and staging
+- loading and unloading model runners
+- executing inference-related tasks
 
-Each adapter implements two key functions:
-1. **Request conversion**: Converts API-specific requests to `TextGenerationTaskParams`
-2. **Response generation**: Converts internal `TokenChunk` streams back to API-specific formats (streaming and non-streaming)
+### Runner
 
+Runners execute model work in an isolated process.
 
-## Topics
+This is where Skulk selects inference behavior such as:
 
-There are currently 5 topics:
+- model loading strategy
+- MLX execution path
+- KV cache backend choice
 
-- Commands
+### API
 
-    The API and Worker instruct the master when the event log isn't sufficient. Namely placement and catchup requests go through Commands atm.
+The API server exposes:
 
-- Local Events
+- OpenAI-compatible endpoints
+- Claude-compatible endpoints
+- Ollama-compatible endpoints
+- Skulk-specific control endpoints for placement, config, store, state, and tracing
 
-    All nodes write events here, the master reads those events and orders them
+The API server also serves the dashboard.
 
-- Global Events
+### Election
 
-    The master writes events here, all nodes read from this topic and fold the produced events into their `State`
+Election handles who becomes master in a distributed cluster.
 
-- Election Messages
+That lets Skulk keep operating even when connectivity changes or nodes come and go.
 
-    Before establishing a cluster, nodes communicate here to negotiate a master node.
+## Message Flow
 
-- Connection Messages
+Skulk uses explicit message passing between systems.
 
-    The networking system write mdns-discovered hardware connections here.
+At a high level:
 
+- commands ask for something to happen
+- events record what already happened
+- state is rebuilt by applying events in order
+
+This is why the system often feels more like a distributed application platform than a single local inference process.
 
 ## Event Sourcing
 
-Lots has been written about event sourcing, but it lets us centralize faulty connections and message ACKing with the following model.
+Skulk uses an event-sourced state model.
 
-Whenever a device produces side effects, it captures those side effects in an `Event`. `Event`s are then "applied" to their model of `State`, which is globally distributed across the cluster. Whenever a command is received, it is combined with state to produce side effects, captured in yet more events. The rule of thumb is "`Event`s are past tense, `Command`s are imperative". Telling a node to perform some action like "place this model" or "Give me a copy of the event log" is represented by a command (The worker's `Task`s are also commands), while "this node is using 300GB of ram" is an event. Notably, `Event`s SHOULD never cause side effects on their own. There are a few exceptions to this, we're working out the specifics of generalizing the distributed event sourcing model to make it better suit our needs
+In practice, that means:
 
-## Purity
+- cluster changes are represented as events
+- those events are ordered and applied into a shared state object
+- commands and current state together drive future work
 
-A significant goal of the current design is to make data flow explicit. Classes should either represent simple data (`CamelCaseModel`s typically, and `TaggedModel`s for unions) or active `System`s (Erlang `Actor`s), with all transformations of that data being "referentially transparent" - destructure and construct new data, don't mutate in place. We have had varying degrees of success with this, and are still exploring where purity makes sense.
+A simple rule of thumb:
+
+- events are past tense
+- commands are imperative
+
+Examples:
+
+- "place this model" is a command
+- "this instance was created" is an event
+
+## API Adapters
+
+Skulk supports multiple external API styles by adapting them into one internal execution path.
+
+At a high level:
+
+```text
+OpenAI Chat Completions -> adapter -> internal text generation task
+Claude Messages         -> adapter -> internal text generation task
+OpenAI Responses        -> adapter -> internal text generation task
+Ollama APIs             -> adapter -> internal text generation task
+```
+
+This is why one placed model can be accessed through several compatibility formats.
+
+## Topics and Communication
+
+The major communication patterns include:
+
+- command topics for explicit requests
+- local events from workers and nodes
+- global events broadcast by the master
+- election messages for leader coordination
+- connection messages for networking updates
+
+You do not usually need to work with these directly as a user, but they explain why state, placement, and trace behavior look the way they do.
+
+## Where the Model Store Fits
+
+The model store does not replace the cluster architecture.
+
+Instead, it changes how model artifacts are sourced:
+
+- without a store, nodes download independently
+- with a store, one host keeps shared model files and other nodes stage from it
+
+The rest of the system still uses the same master, worker, API, and placement model.
+
+## Where the Dashboard Fits
+
+The dashboard is not a separate product or service.
+
+It is the main operator interface for the same Skulk runtime:
+
+- topology view
+- model store workflows
+- settings and config
+- chat
+- placement workflows
+
+That is why the docs often describe dashboard and API flows as parallel ways of driving the same underlying system.
+
+## When to Read More
+
+If you are:
+
+- trying to get started, go back to the [README](https://github.com/Foxlight-Foundation/Skulk/blob/main/README.md)
+- integrating against the API, read the [API guide](api.md)
+- setting up shared storage, read the [model store guide](model-store.md)

@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
+    "docs:typedoc": "typedoc --options typedoc.json",
     "preview": "vite preview",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build"
@@ -49,7 +50,9 @@
     "eslint-plugin-storybook": "^10.3.3",
     "globals": "^17.4.0",
     "playwright": "^1.58.2",
+    "redoc": "2.5.2",
     "storybook": "^10.3.3",
+    "typedoc": "^0.28.14",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.57.0",
     "vite": "^8.0.1",

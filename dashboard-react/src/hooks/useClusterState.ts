@@ -210,25 +210,32 @@ function transformTopology(
 const CONNECTION_LOST_THRESHOLD = 3;
 const POLL_INTERVAL = 1000;
 
+/** Raw downloads map as returned by `/state`. */
 export type RawDownloads = Record<string, unknown[]>;
+
+/** Disk-capacity information keyed by node id. */
 export type NodeDiskInfo = Record<string, { total: { inBytes: number }; available: { inBytes: number } }>;
 
+/** Raw shard-assignment payload returned by the Skulk state API. */
 export interface RawShardAssignments {
   modelId?: string;
   nodeToRunner?: Record<string, string>;
   runnerToShard?: Record<string, Record<string, unknown>>;
 }
 
+/** Raw inner instance shape returned by the Skulk state API. */
 export interface RawInstanceInner {
   instanceId?: string;
   shardAssignments?: RawShardAssignments;
 }
 
+/** Raw instances keyed by instance id with backend-specific tagged variants. */
 export type RawInstances = Record<string, { MlxRingInstance?: RawInstanceInner; MlxJacclInstance?: RawInstanceInner }>;
 
 /** Runner status is a tagged union: e.g. { "RunnerReady": {} } or { "RunnerLoading": { layersLoaded: 5, totalLayers: 32 } } */
 export type RawRunners = Record<string, Record<string, unknown>>;
 
+/** Normalized cluster-state data exposed to the dashboard UI. */
 export interface ClusterState {
   topology: TopologyData | null;
   connected: boolean;
@@ -239,6 +246,7 @@ export interface ClusterState {
   runners: RawRunners;
 }
 
+/** Poll the Skulk `/state` endpoint and normalize it into dashboard-friendly topology and status data. */
 export function useClusterState(): ClusterState {
   const [topology, setTopology] = useState<TopologyData | null>(null);
   const [connected, setConnected] = useState(false);

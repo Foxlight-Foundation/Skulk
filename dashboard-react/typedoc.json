@@ -1,0 +1,20 @@
+{
+  "entryPoints": ["src/docs-entry.ts"],
+  "entryPointStrategy": "resolve",
+  "tsconfig": "tsconfig.app.json",
+  "out": "../docs/generated/typedoc",
+  "exclude": [
+    "**/*.stories.ts",
+    "**/*.stories.tsx",
+    "**/*.test.ts",
+    "**/*.test.tsx"
+  ],
+  "excludePrivate": true,
+  "excludeProtected": false,
+  "excludeInternal": true,
+  "skipErrorChecking": true,
+  "readme": "none",
+  "categorizeByGroup": false,
+  "sort": ["source-order"],
+  "plugin": []
+}

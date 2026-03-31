@@ -40,6 +40,10 @@ dashboard-react/dist/
 dashboard-react/storybook-static/
 **/.vite/
 
+# generated docs
+docs/generated/
+site/
+
 # host config snapshots
 hosts_*.json
 .swp

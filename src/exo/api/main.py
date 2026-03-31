@@ -191,6 +191,41 @@ if TYPE_CHECKING:
 _API_EVENT_LOG_DIR = EXO_EVENT_LOG_DIR / "api"
 ONBOARDING_COMPLETE_FILE = EXO_CACHE_HOME / "onboarding_complete"
 
+API_TAGS_METADATA = [
+    {
+        "name": "Compatibility APIs",
+        "description": "Endpoints that let existing SDKs and tools talk to Skulk using OpenAI, Claude, or Ollama-style request formats.",
+    },
+    {
+        "name": "Models",
+        "description": "Model discovery, search, listing, and custom model-card management.",
+    },
+    {
+        "name": "Instances",
+        "description": "Placement previews, launch flows, instance lookup, and lifecycle management for running models.",
+    },
+    {
+        "name": "Downloads",
+        "description": "Low-level node download control and staging-cache management.",
+    },
+    {
+        "name": "Store",
+        "description": "Shared model-store health, registry inspection, download workflows, deletion, and optimization.",
+    },
+    {
+        "name": "Config",
+        "description": "Cluster configuration, safe filesystem browsing, and node identity helpers used by the dashboard.",
+    },
+    {
+        "name": "State & Tracing",
+        "description": "Cluster state, event log access, trace inspection/export, and onboarding helpers.",
+    },
+    {
+        "name": "Images",
+        "description": "Image generation, editing, retrieval, and benchmarking endpoints.",
+    },
+]
+
 
 def _format_to_content_type(image_format: Literal["png", "jpeg", "webp"] | None) -> str:
     return f"image/{image_format or 'png'}"
@@ -203,6 +238,37 @@ def _ensure_seed(params: AdvancedImageParams | None) -> AdvancedImageParams:
     if params.seed is None:
         return params.model_copy(update={"seed": random.randint(0, 2**32 - 1)})
     return params
+
+
+def _create_fastapi_app() -> FastAPI:
+    return FastAPI(
+        title="Skulk API",
+        summary="Distributed inference, placement, store, and compatibility APIs for Skulk.",
+        description=(
+            "Skulk exposes OpenAI-compatible inference APIs, cluster placement controls, "
+            "model-store workflows, configuration endpoints, and debugging endpoints. "
+            "Most text-generation requests require the target model to already be placed "
+            "and running on the node or cluster."
+        ),
+        version="0.1.0",
+        openapi_url="/api/openapi.json",
+        docs_url="/api/docs",
+        redoc_url="/api/redoc",
+        openapi_tags=API_TAGS_METADATA,
+    )
+
+
+def _json_request_body(schema: dict[str, object]) -> dict[str, object]:
+    return {
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": schema,
+                }
+            },
+        }
+    }
 
 
 class API:
@@ -218,9 +284,11 @@ class API:
         election_receiver: Receiver[ElectionMessage],
         exo_config: "ExoConfig | None" = None,
         store_client: "ModelStoreClient | None" = None,
+        enable_event_log: bool = True,
+        mount_dashboard: bool = True,
     ) -> None:
         self.state = State()
-        self._event_log = DiskEventLog(_API_EVENT_LOG_DIR)
+        self._event_log = DiskEventLog(_API_EVENT_LOG_DIR) if enable_event_log else None
         self._system_id = SystemId()
         self.command_sender = command_sender
         self.download_command_sender = download_command_sender
@@ -241,7 +309,7 @@ class API:
         self.paused: bool = False
         self.paused_ev: anyio.Event = anyio.Event()
 
-        self.app = FastAPI()
+        self.app = _create_fastapi_app()
 
         @self.app.middleware("http")
         async def _log_requests(  # pyright: ignore[reportUnusedFunction]
@@ -255,14 +323,15 @@ class API:
         self._setup_cors()
         self._setup_routes()
 
-        self.app.mount(
-            "/",
-            StaticFiles(
-                directory=DASHBOARD_DIR,
-                html=True,
-            ),
-            name="dashboard",
-        )
+        if mount_dashboard:
+            self.app.mount(
+                "/",
+                StaticFiles(
+                    directory=DASHBOARD_DIR,
+                    html=True,
+                ),
+                name="dashboard",
+            )
 
         self._text_generation_queues: dict[
             CommandId,
@@ -276,8 +345,9 @@ class API:
 
     def reset(self, result_clock: int, event_receiver: Receiver[IndexedEvent]):
         logger.info("Resetting API State")
-        self._event_log.close()
-        self._event_log = DiskEventLog(_API_EVENT_LOG_DIR)
+        if self._event_log is not None:
+            self._event_log.close()
+            self._event_log = DiskEventLog(_API_EVENT_LOG_DIR)
         self.state = State()
         self._system_id = SystemId()
         self._text_generation_queues = {}
@@ -319,78 +389,334 @@ class API:
         )
 
     def _setup_routes(self) -> None:
-        self.app.get("/node_id")(lambda: self.node_id)
-        self.app.post("/instance")(self.create_instance)
-        self.app.post("/place_instance")(self.place_instance)
-        self.app.get("/instance/placement")(self.get_placement)
-        self.app.get("/instance/previews")(self.get_placement_previews)
-        self.app.get("/instance/{instance_id}")(self.get_instance)
-        self.app.delete("/instance/{instance_id}")(self.delete_instance)
-        self.app.get("/models")(self.get_models)
-        self.app.get("/v1/models")(self.get_models)
-        self.app.post("/models/add")(self.add_custom_model)
-        self.app.delete("/models/custom/{model_id:path}")(self.delete_custom_model)
-        self.app.get("/models/search")(self.search_models)
-        self.app.post("/v1/chat/completions", response_model=None)(
+        self.app.get(
+            "/node_id",
+            tags=["State & Tracing"],
+            summary="Get this API node's ID",
+        )(lambda: self.node_id)
+        self.app.post(
+            "/instance",
+            tags=["Instances"],
+            summary="Create an instance from a fully specified placement",
+            description="Create an instance from an already computed placement object when you want exact control instead of Skulk picking the placement for you.",
+        )(self.create_instance)
+        self.app.post(
+            "/place_instance",
+            tags=["Instances"],
+            summary="Quick-launch a model placement",
+            description=(
+                "Place and launch a model with Skulk choosing a valid concrete placement "
+                "from the requested sharding, instance metadata, and minimum-node constraints."
+            ),
+        )(self.place_instance)
+        self.app.get(
+            "/instance/placement",
+            tags=["Instances"],
+            summary="Compute a concrete placement for one requested combination",
+            description="Return the exact instance shape Skulk would create for one requested model, sharding mode, instance metadata, and node-count combination.",
+        )(self.get_placement)
+        self.app.get(
+            "/instance/previews",
+            tags=["Instances"],
+            summary="Preview valid placements for a model",
+            description=(
+                "Return candidate placements for a model before launch. This is the best first "
+                "step when you want to see what Skulk can place on the current node or cluster."
+            ),
+        )(self.get_placement_previews)
+        self.app.get(
+            "/instance/{instance_id}",
+            tags=["Instances"],
+            summary="Get one running instance",
+        )(self.get_instance)
+        self.app.delete(
+            "/instance/{instance_id}",
+            tags=["Instances"],
+            summary="Delete a running instance",
+        )(self.delete_instance)
+        self.app.get(
+            "/models",
+            tags=["Models"],
+            summary="List known models",
+            description="Return known model cards, including metadata Skulk uses for placement and compatibility decisions.",
+        )(self.get_models)
+        self.app.get(
+            "/v1/models",
+            tags=["Models"],
+            summary="List known models",
+            description="OpenAI-style model listing endpoint backed by Skulk's model catalog rather than only currently running instances.",
+        )(self.get_models)
+        self.app.post(
+            "/models/add",
+            tags=["Models"],
+            summary="Fetch and add a custom model card",
+            description="Add a custom model card to Skulk's model catalog so it becomes searchable and launchable through the API or dashboard.",
+        )(self.add_custom_model)
+        self.app.delete(
+            "/models/custom/{model_id:path}",
+            tags=["Models"],
+            summary="Delete a custom model card",
+            description="Remove a previously added custom model card from Skulk's local catalog.",
+        )(self.delete_custom_model)
+        self.app.get(
+            "/models/search",
+            tags=["Models"],
+            summary="Search Hugging Face for models",
+            description=(
+                "Search for models to add or launch. Skulk prefers MLX-friendly results first, "
+                "then falls back to broader Hugging Face search results."
+            ),
+        )(self.search_models)
+        self.app.post(
+            "/v1/chat/completions",
+            response_model=None,
+            tags=["Compatibility APIs"],
+            summary="OpenAI Chat Completions-compatible text generation",
+            description=(
+                "Generate text with an OpenAI Chat Completions-compatible payload. The requested "
+                "model must already be placed and running or Skulk will return a not-found error."
+            ),
+        )(
             self.chat_completions
         )
-        self.app.post("/bench/chat/completions")(self.bench_chat_completions)
-        self.app.post("/v1/images/generations", response_model=None)(
+        self.app.post(
+            "/bench/chat/completions",
+            tags=["Compatibility APIs"],
+            summary="Benchmark chat completions",
+        )(self.bench_chat_completions)
+        self.app.post(
+            "/v1/images/generations",
+            response_model=None,
+            tags=["Images"],
+            summary="Generate images",
+        )(
             self.image_generations
         )
-        self.app.post("/bench/images/generations")(self.bench_image_generations)
-        self.app.post("/v1/images/edits", response_model=None)(self.image_edits)
-        self.app.post("/bench/images/edits")(self.bench_image_edits)
-        self.app.get("/images")(self.list_images)
-        self.app.get("/images/{image_id}")(self.get_image)
-        self.app.post("/v1/messages", response_model=None)(self.claude_messages)
-        self.app.post("/v1/responses", response_model=None)(self.openai_responses)
-        self.app.post("/v1/cancel/{command_id}")(self.cancel_command)
+        self.app.post(
+            "/bench/images/generations",
+            tags=["Images"],
+            summary="Benchmark image generation",
+        )(self.bench_image_generations)
+        self.app.post(
+            "/v1/images/edits",
+            response_model=None,
+            tags=["Images"],
+            summary="Edit images",
+        )(self.image_edits)
+        self.app.post(
+            "/bench/images/edits",
+            tags=["Images"],
+            summary="Benchmark image editing",
+        )(self.bench_image_edits)
+        self.app.get("/images", tags=["Images"], summary="List stored images")(self.list_images)
+        self.app.get("/images/{image_id}", tags=["Images"], summary="Fetch one stored image")(self.get_image)
+        self.app.post(
+            "/v1/messages",
+            response_model=None,
+            tags=["Compatibility APIs"],
+            summary="Anthropic Claude Messages-compatible endpoint",
+            description=(
+                "Claude Messages-compatible text generation endpoint. As with chat completions, "
+                "the target model must already be placed and ready."
+            ),
+        )(self.claude_messages)
+        self.app.post(
+            "/v1/responses",
+            response_model=None,
+            tags=["Compatibility APIs"],
+            summary="OpenAI Responses-compatible endpoint",
+            description=(
+                "OpenAI Responses-compatible endpoint for text generation and reasoning-style "
+                "workflows backed by a placed Skulk model."
+            ),
+        )(self.openai_responses)
+        self.app.post(
+            "/v1/cancel/{command_id}",
+            tags=["Compatibility APIs"],
+            summary="Cancel an active text or image command",
+            description="Request cancellation for an in-flight text or image generation command by its command ID.",
+        )(self.cancel_command)
 
         # Ollama API
-        self.app.head("/ollama/")(self.ollama_version)
-        self.app.head("/ollama/api/version")(self.ollama_version)
-        self.app.post("/ollama/api/chat", response_model=None)(self.ollama_chat)
-        self.app.post("/ollama/api/api/chat", response_model=None)(self.ollama_chat)
-        self.app.post("/ollama/api/v1/chat", response_model=None)(self.ollama_chat)
-        self.app.post("/ollama/api/generate", response_model=None)(self.ollama_generate)
-        self.app.get("/ollama/api/tags")(self.ollama_tags)
-        self.app.get("/ollama/api/api/tags")(self.ollama_tags)
-        self.app.get("/ollama/api/v1/tags")(self.ollama_tags)
-        self.app.post("/ollama/api/show")(self.ollama_show)
-        self.app.get("/ollama/api/ps")(self.ollama_ps)
-        self.app.get("/ollama/api/version")(self.ollama_version)
+        self.app.head("/ollama/", tags=["Compatibility APIs"], summary="Ollama version check")(self.ollama_version)
+        self.app.head("/ollama/api/version", tags=["Compatibility APIs"], summary="Ollama version check")(self.ollama_version)
+        self.app.post(
+            "/ollama/api/chat",
+            response_model=None,
+            tags=["Compatibility APIs"],
+            summary="Ollama chat",
+            description="Ollama-compatible chat endpoint backed by Skulk model placement and routing.",
+            openapi_extra=_json_request_body(OllamaChatRequest.model_json_schema()),
+        )(self.ollama_chat)
+        self.app.post("/ollama/api/api/chat", response_model=None, tags=["Compatibility APIs"], summary="Ollama chat alias")(self.ollama_chat)
+        self.app.post("/ollama/api/v1/chat", response_model=None, tags=["Compatibility APIs"], summary="Ollama chat alias")(self.ollama_chat)
+        self.app.post(
+            "/ollama/api/generate",
+            response_model=None,
+            tags=["Compatibility APIs"],
+            summary="Ollama generate",
+            description="Ollama-compatible prompt-completion endpoint backed by a placed Skulk model.",
+            openapi_extra=_json_request_body(OllamaGenerateRequest.model_json_schema()),
+        )(self.ollama_generate)
+        self.app.get("/ollama/api/tags", tags=["Compatibility APIs"], summary="List Ollama models")(self.ollama_tags)
+        self.app.get("/ollama/api/api/tags", tags=["Compatibility APIs"], summary="List Ollama models alias")(self.ollama_tags)
+        self.app.get("/ollama/api/v1/tags", tags=["Compatibility APIs"], summary="List Ollama models alias")(self.ollama_tags)
+        self.app.post("/ollama/api/show", tags=["Compatibility APIs"], summary="Show Ollama model details")(self.ollama_show)
+        self.app.get("/ollama/api/ps", tags=["Compatibility APIs"], summary="List running Ollama models")(self.ollama_ps)
+        self.app.get("/ollama/api/version", tags=["Compatibility APIs"], summary="Get Ollama API version")(self.ollama_version)
 
-        self.app.get("/state")(lambda: self.state)
-        self.app.get("/events")(self.stream_events)
-        self.app.post("/download/start")(self.start_download)
-        self.app.delete("/download/{node_id}/{model_id:path}")(self.delete_download)
-        self.app.get("/v1/traces")(self.list_traces)
-        self.app.post("/v1/traces/delete")(self.delete_traces)
-        self.app.get("/v1/traces/{task_id}")(self.get_trace)
-        self.app.get("/v1/traces/{task_id}/stats")(self.get_trace_stats)
-        self.app.get("/v1/traces/{task_id}/raw")(self.get_trace_raw)
-        self.app.get("/onboarding")(self.get_onboarding)
-        self.app.post("/onboarding")(self.complete_onboarding)
+        self.app.get(
+            "/state",
+            tags=["State & Tracing"],
+            summary="Get cluster state",
+            description="Return the current cluster state as seen by this API node, including topology, instances, and node capabilities.",
+        )(lambda: self.state)
+        self.app.get(
+            "/events",
+            tags=["State & Tracing"],
+            summary="Get stored event log",
+            description="Stream or return the API-side event log used for debugging state transitions and cluster behavior.",
+        )(self.stream_events)
+        self.app.post(
+            "/download/start",
+            tags=["Downloads"],
+            summary="Start a node download",
+            description="Start a low-level node download for a specific shard on a specific node.",
+        )(self.start_download)
+        self.app.delete(
+            "/download/{node_id}/{model_id:path}",
+            tags=["Downloads"],
+            summary="Delete a node download",
+            description="Delete or cancel a download associated with a given node and model.",
+        )(self.delete_download)
+        self.app.get(
+            "/v1/traces",
+            tags=["State & Tracing"],
+            summary="List saved traces",
+            description="List saved trace files that can be inspected for debugging and performance analysis.",
+        )(self.list_traces)
+        self.app.post(
+            "/v1/traces/delete",
+            tags=["State & Tracing"],
+            summary="Delete saved traces",
+            description="Delete one or more saved trace artifacts by task ID.",
+        )(self.delete_traces)
+        self.app.get(
+            "/v1/traces/{task_id}",
+            tags=["State & Tracing"],
+            summary="Get one saved trace",
+            description="Return the structured trace events for one saved task trace.",
+        )(self.get_trace)
+        self.app.get(
+            "/v1/traces/{task_id}/stats",
+            tags=["State & Tracing"],
+            summary="Get one trace summary",
+            description="Return aggregated timing statistics for one saved trace.",
+        )(self.get_trace_stats)
+        self.app.get(
+            "/v1/traces/{task_id}/raw",
+            tags=["State & Tracing"],
+            summary="Download raw trace JSON",
+            description="Download the raw Chrome trace JSON artifact for one task.",
+        )(self.get_trace_raw)
+        self.app.get(
+            "/onboarding",
+            tags=["State & Tracing"],
+            summary="Get onboarding completion status",
+            description="Return whether the dashboard onboarding flow has been completed on this node.",
+        )(self.get_onboarding)
+        self.app.post(
+            "/onboarding",
+            tags=["State & Tracing"],
+            summary="Mark onboarding complete",
+            description="Mark the local dashboard onboarding flow as complete.",
+        )(self.complete_onboarding)
 
         # Config & store endpoints
-        self.app.get("/config")(self.get_config)
-        self.app.put("/config")(self.update_config)
-        self.app.get("/store/health")(self.get_store_health)
-        self.app.get("/store/registry")(self.get_store_registry)
-        self.app.get("/store/downloads")(self.get_store_downloads)
-        self.app.delete("/store/models/{model_id:path}")(self.delete_store_model)
-        self.app.post("/store/models/{model_id:path}/download")(
-            self.request_store_download
-        )
-        self.app.get("/store/models/{model_id:path}/download/status")(
-            self.get_store_download_status
-        )
-        self.app.post("/store/purge-staging")(self.purge_staging_caches)
-        self.app.post("/store/models/{model_id:path}/optimize")(self.optimize_model)
-        self.app.get("/store/models/{model_id:path}/optimize/status")(self.get_optimize_status)
-        self.app.get("/filesystem/browse")(self.browse_filesystem)
-        self.app.get("/node/identity")(self.get_node_identity)
+        self.app.get(
+            "/config",
+            tags=["Config"],
+            summary="Get cluster config",
+            description="Return the current cluster-wide config with sensitive fields such as the HF token removed.",
+        )(self.get_config)
+        self.app.put(
+            "/config",
+            tags=["Config"],
+            summary="Update cluster config",
+            description=(
+                "Update cluster-wide config. Some changes apply to future launches immediately, "
+                "while model-store location changes still require a restart."
+            ),
+        )(self.update_config)
+        self.app.get(
+            "/store/health",
+            tags=["Store"],
+            summary="Get model-store health",
+            description="Check whether the configured shared model store is enabled and reachable.",
+        )(self.get_store_health)
+        self.app.get(
+            "/store/registry",
+            tags=["Store"],
+            summary="Get model-store registry",
+            description="List models and metadata known to the shared store registry.",
+        )(self.get_store_registry)
+        self.app.get(
+            "/store/downloads",
+            tags=["Store"],
+            summary="List active store downloads",
+            description="List in-progress downloads being managed by the shared model store.",
+        )(self.get_store_downloads)
+        self.app.delete(
+            "/store/models/{model_id:path}",
+            tags=["Store"],
+            summary="Delete a model from the store",
+            description="Delete a model and its shared-store artifacts from the configured model store.",
+        )(self.delete_store_model)
+        self.app.post(
+            "/store/models/{model_id:path}/download",
+            tags=["Store"],
+            summary="Request a store download",
+            description="Ask the shared model store to download and register a model by model ID.",
+        )(self.request_store_download)
+        self.app.get(
+            "/store/models/{model_id:path}/download/status",
+            tags=["Store"],
+            summary="Get store download status",
+            description="Return current status for a shared-store download request for one model.",
+        )(self.get_store_download_status)
+        self.app.post(
+            "/store/purge-staging",
+            tags=["Downloads"],
+            summary="Purge staging caches",
+            description="Broadcast a staging-cache purge request to nodes, optionally scoped to one model ID.",
+        )(self.purge_staging_caches)
+        self.app.post(
+            "/store/models/{model_id:path}/optimize",
+            tags=["Store"],
+            summary="Start model optimization",
+            description=(
+                "Start an optimization job for a model already present in the shared store. "
+                "Use this for workflows such as OptiQ conversion or alternate artifact generation."
+            ),
+        )(self.optimize_model)
+        self.app.get(
+            "/store/models/{model_id:path}/optimize/status",
+            tags=["Store"],
+            summary="Get model optimization status",
+            description="Return the current status of an optimization job for one shared-store model.",
+        )(self.get_optimize_status)
+        self.app.get(
+            "/filesystem/browse",
+            tags=["Config"],
+            summary="Browse filesystem roots for config selection",
+            description="Browse a safe subset of filesystem roots so the dashboard can help users choose store and staging paths.",
+        )(self.browse_filesystem)
+        self.app.get(
+            "/node/identity",
+            tags=["Config"],
+            summary="Get node identity and preferred IP",
+            description="Return the node ID, hostname, and preferred LAN IP address that the dashboard uses during setup.",
+        )(self.get_node_identity)
 
     async def place_instance(self, payload: PlaceInstanceParams):
         command = PlaceInstance(
@@ -833,7 +1159,9 @@ class API:
             yield "]"
 
         return StreamingResponse(
-            _generate_json_array(self._event_log.read_all()),
+            _generate_json_array(
+                [] if self._event_log is None else self._event_log.read_all()
+            ),
             media_type="application/json",
         )
 
@@ -1729,7 +2057,8 @@ class API:
                     with anyio.CancelScope(shield=True):
                         shutdown_ev.set()
         finally:
-            self._event_log.close()
+            if self._event_log is not None:
+                self._event_log.close()
             self.command_sender.close()
             self.event_receiver.close()
 
@@ -1750,7 +2079,8 @@ class API:
     async def _apply_state(self):
         with self.event_receiver as events:
             async for i_event in events:
-                self._event_log.append(i_event.event)
+                if self._event_log is not None:
+                    self._event_log.append(i_event.event)
                 self.state = apply(self.state, i_event)
                 event = i_event.event
 

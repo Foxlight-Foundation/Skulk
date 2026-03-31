@@ -2,267 +2,390 @@
 
 # Skulk API
 
-Skulk exposes an OpenAI-compatible API at `http://localhost:52415`. You can use it with the OpenAI Python/JS SDK, curl, or any tool that speaks the OpenAI API.
+Skulk serves an API at `http://localhost:52415`.
 
-## Quick Start
+That API has two jobs:
 
-### Using the OpenAI Python SDK
+- compatibility endpoints for tools that already speak OpenAI, Claude, or Ollama-style APIs
+- Skulk-specific control endpoints for placement, downloads, config, tracing, and model-store workflows
+
+## The Most Important Rule
+
+For text generation, Skulk is not just a stateless HTTP server.
+
+**A model has to be placed and running before chat-style requests will work.**
+
+The dashboard enforces this too: it will not let you chat until a model is placed and ready.
+
+If you call `/v1/chat/completions` too early, Skulk will usually return something like:
+
+```json
+{
+  "error": {
+    "message": "No instance found for model mlx-community/...",
+    "type": "Not Found",
+    "code": 404
+  }
+}
+```
+
+## Start Here
+
+If you want your first successful API call, use this flow:
+
+1. Start Skulk with `uv run exo`.
+2. Preview valid placements for a model.
+3. Launch a placement.
+4. Wait for the model to be ready.
+5. Send a chat request.
+
+## Quick Navigation
+
+- First working request: [First Success Flow](#first-success-flow)
+- OpenAI-compatible chat: [OpenAI Chat Completions](#openai-chat-completions)
+- OpenAI Responses format: [OpenAI Responses API](#openai-responses-api)
+- Claude format: [Claude Messages API](#claude-messages-api)
+- Ollama compatibility: [Ollama API](#ollama-api)
+- Placement and launch: [Placement and Instance Management](#placement-and-instance-management)
+- Store and config: [Model Store Endpoints](#model-store-endpoints) and [Configuration Endpoints](#configuration-endpoints)
+- Debugging: [State, Events, and Tracing](#state-events-and-tracing)
+
+## First Success Flow
+
+### 1. Start Skulk
+
+```bash
+uv run exo
+```
+
+### 2. Preview placements
+
+```bash
+curl "http://localhost:52415/instance/previews?model_id=mlx-community/Llama-3.2-1B-Instruct-4bit"
+```
+
+This shows what Skulk can actually place on the current node or cluster.
+
+### 3. Launch a placement
+
+```bash
+curl -X POST http://localhost:52415/place_instance \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model_id": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+    "sharding": "Pipeline",
+    "instance_meta": "MlxRing",
+    "min_nodes": 1
+  }'
+```
+
+### 4. Send a chat request
+
+```bash
+curl -X POST http://localhost:52415/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+    "messages": [{"role": "user", "content": "Hello from Skulk"}]
+  }'
+```
+
+If this fails with `404 No instance found for model ...`, the placement is not ready yet or never launched successfully.
+
+## Endpoint Overview
+
+### Compatibility APIs
+
+- `POST /v1/chat/completions`
+- `POST /v1/responses`
+- `POST /v1/messages`
+- `POST /ollama/api/chat`
+- `POST /ollama/api/generate`
+- `GET /ollama/api/tags`
+- `POST /ollama/api/show`
+- `GET /ollama/api/ps`
+- `GET /ollama/api/version`
+
+### Skulk Control APIs
+
+- `GET /v1/models`
+- `GET /models/search`
+- `POST /models/add`
+- `DELETE /models/custom/{model_id}`
+- `POST /place_instance`
+- `POST /instance`
+- `GET /instance/placement`
+- `GET /instance/previews`
+- `GET /instance/{instance_id}`
+- `DELETE /instance/{instance_id}`
+- `GET /state`
+- `GET /events`
+- `POST /download/start`
+- `DELETE /download/{node_id}/{model_id}`
+- `GET /config`
+- `PUT /config`
+- `GET /store/health`
+- `GET /store/registry`
+- `GET /store/downloads`
+- `POST /store/models/{model_id}/download`
+- `GET /store/models/{model_id}/download/status`
+- `DELETE /store/models/{model_id}`
+- `POST /store/purge-staging`
+- `POST /store/models/{model_id}/optimize`
+- `GET /store/models/{model_id}/optimize/status`
+- `GET /filesystem/browse`
+- `GET /node/identity`
+- `GET /v1/traces`
+- `POST /v1/traces/delete`
+- `GET /v1/traces/{task_id}`
+- `GET /v1/traces/{task_id}/stats`
+- `GET /v1/traces/{task_id}/raw`
+
+## OpenAI Chat Completions
+
+**POST** `/v1/chat/completions`
+
+This is the main text-generation endpoint.
+
+### OpenAI Python SDK Example
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
     base_url="http://localhost:52415/v1",
-    api_key="unused",  # Skulk doesn't require an API key
+    api_key="unused",
 )
 
 response = client.chat.completions.create(
-    model="mlx-community/Qwen3.5-9B-4bit",
+    model="mlx-community/Llama-3.2-1B-Instruct-4bit",
     messages=[{"role": "user", "content": "Hello!"}],
 )
 print(response.choices[0].message.content)
 ```
 
-### Using curl
+### Curl Example
 
 ```bash
 curl -X POST http://localhost:52415/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "mlx-community/Qwen3.5-9B-4bit",
+    "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
 
-### Streaming
+### Streaming Example
 
 ```python
 stream = client.chat.completions.create(
-    model="mlx-community/Qwen3.5-9B-4bit",
+    model="mlx-community/Llama-3.2-1B-Instruct-4bit",
     messages=[{"role": "user", "content": "Tell me a story"}],
     stream=True,
 )
 for chunk in stream:
-    if chunk.choices[0].delta.content:
+    if chunk.choices and chunk.choices[0].delta.content:
         print(chunk.choices[0].delta.content, end="")
 ```
 
----
+### Common Request Fields
 
-## Chat Completions
-
-**POST** `/v1/chat/completions`
-
-This is the main inference endpoint. It's compatible with the OpenAI Chat Completions API.
-
-### Request
-
-```json
-{
-  "model": "mlx-community/Qwen3.5-9B-4bit",
-  "messages": [
-    {"role": "system", "content": "You are a helpful assistant."},
-    {"role": "user", "content": "What is 2+2?"}
-  ],
-  "stream": false,
-  "temperature": 0.7,
-  "max_tokens": 1024
-}
-```
-
-### Parameters
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `model` | string | required | Model ID (e.g., `mlx-community/Qwen3.5-9B-4bit`) |
-| `messages` | array | required | Conversation messages (see Message Format below) |
-| `stream` | boolean | `false` | Stream response as Server-Sent Events |
-| `temperature` | float | `1.0` | Sampling temperature (0.0 = deterministic, 2.0 = very random) |
-| `top_p` | float | `1.0` | Nucleus sampling — only consider tokens with cumulative probability above this |
-| `top_k` | integer | `-1` | Only consider the top K tokens. -1 = disabled |
-| `min_p` | float | `0.0` | Minimum probability threshold. 0.0 = disabled |
-| `max_tokens` | integer | null | Maximum tokens to generate. null = model default |
-| `stop` | string/array | null | Stop generation when these strings are encountered |
-| `seed` | integer | null | Random seed for reproducible output |
-| `frequency_penalty` | float | `0.0` | Penalize tokens based on frequency in output so far |
-| `presence_penalty` | float | `0.0` | Penalize tokens that have appeared at all in output so far |
-| `repetition_penalty` | float | null | Alternative repetition penalty (multiplicative) |
-| `logprobs` | boolean | `false` | Return log probabilities for each token |
-| `top_logprobs` | integer | null | Number of top log probabilities to return per token |
-| `tools` | array | null | Tool/function definitions for function calling (see Tool Use below) |
-| `tool_choice` | string/object | null | Control tool selection (`auto`, `none`, or specific tool) |
-| `enable_thinking` | boolean | `false` | Enable thinking/reasoning mode for capable models |
-| `response_format` | object | null | Requested output format (see Structured Output below) |
+| Field | Type | Notes |
+|-------|------|-------|
+| `model` | string | Required. Must match a placed and running model. |
+| `messages` | array | Required. Supports `system`, `user`, `assistant`, `developer`, `tool`, `function`. |
+| `stream` | boolean | Use `true` for SSE streaming. |
+| `temperature` | number | Sampling temperature. |
+| `top_p` | number | Nucleus sampling. |
+| `top_k` | integer | Top-k sampling. |
+| `min_p` | number | Minimum-probability threshold. |
+| `max_tokens` | integer | Max generated tokens. |
+| `stop` | string or array | Stop sequences. |
+| `seed` | integer | Reproducibility helper. |
+| `frequency_penalty` | number | Frequency penalty. |
+| `presence_penalty` | number | Presence penalty. |
+| `repetition_penalty` | number | Repetition penalty. |
+| `repetition_context_size` | integer | Context window for repetition handling. |
+| `logprobs` | boolean | Return token logprobs when supported. |
+| `top_logprobs` | integer | Number of top logprobs to include. |
+| `tools` | array | OpenAI-style tool definitions. |
+| `tool_choice` | string or object | `auto`, `none`, or a specific tool selection. |
+| `parallel_tool_calls` | boolean | Accepted for compatibility. |
+| `enable_thinking` | boolean | Skulk extension for reasoning-capable models. |
+| `reasoning_effort` | string | Reasoning hint when supported. |
+| `response_format` | object | Accepted for compatibility, not strictly enforced. |
+| `stream_options` | object | Includes `include_usage`. |
+| `user` | string | Optional caller identifier. |
 
 ### Message Format
 
-Each message in the `messages` array has:
-
 ```json
 {
-  "role": "system" | "user" | "assistant" | "tool",
-  "content": "message text",
-  "tool_calls": [...],      // assistant messages with tool calls
-  "tool_call_id": "...",    // tool response messages
-  "name": "..."             // optional function name
+  "role": "user",
+  "content": "hello"
 }
 ```
 
-### Response (Non-Streaming)
-
-```json
-{
-  "id": "chatcmpl-abc123",
-  "object": "chat.completion",
-  "created": 1711500000,
-  "model": "mlx-community/Qwen3.5-9B-4bit",
-  "choices": [
-    {
-      "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": "2+2 equals 4."
-      },
-      "finish_reason": "stop"
-    }
-  ],
-  "usage": {
-    "prompt_tokens": 25,
-    "completion_tokens": 8,
-    "total_tokens": 33
-  }
-}
-```
-
-### Response (Streaming)
-
-When `stream: true`, the response is a stream of Server-Sent Events:
-
-```
-data: {"id":"chatcmpl-abc123","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
-
-data: {"id":"chatcmpl-abc123","choices":[{"index":0,"delta":{"content":"2"},"finish_reason":null}]}
-
-data: {"id":"chatcmpl-abc123","choices":[{"index":0,"delta":{"content":"+2"},"finish_reason":null}]}
-
-data: {"id":"chatcmpl-abc123","choices":[{"index":0,"delta":{"content":" equals 4."},"finish_reason":"stop"}]}
-
-data: [DONE]
-```
+Assistant messages may include `tool_calls`.
+Tool response messages should include `tool_call_id`.
 
 ### Finish Reasons
 
 | Value | Meaning |
 |-------|---------|
-| `stop` | Natural end of response or stop sequence hit |
-| `length` | Hit `max_tokens` limit |
-| `tool_calls` | Model wants to call a tool |
+| `stop` | Natural stop or stop sequence reached |
+| `length` | `max_tokens` limit reached |
+| `tool_calls` | Model is requesting a tool call |
+| `content_filter` | Reserved for compatibility |
+| `function_call` | Reserved for compatibility |
 | `error` | Generation failed |
 
----
+## Tool Use
 
-## Tool Use / Function Calling
-
-Skulk supports OpenAI-style tool calling. Define tools in the request, and the model can choose to call them.
-
-### Example: Weather Tool
+Skulk supports OpenAI-style function calling.
 
 ```python
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get current weather for a city",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "location": {"type": "string"}
+            },
+            "required": ["location"]
+        }
+    }
+}]
+
 response = client.chat.completions.create(
     model="mlx-community/Qwen3.5-9B-4bit",
-    messages=[{"role": "user", "content": "What's the weather in Paris?"}],
-    tools=[{
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get the current weather for a location",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string", "description": "City name"},
-                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
-                },
-                "required": ["location"]
-            }
-        }
-    }],
+    messages=[{"role": "user", "content": "What is the weather in Paris?"}],
+    tools=tools,
     tool_choice="auto",
 )
-
-# Check if the model wants to call a tool
-choice = response.choices[0]
-if choice.finish_reason == "tool_calls":
-    for tool_call in choice.message.tool_calls:
-        print(f"Call: {tool_call.function.name}({tool_call.function.arguments})")
 ```
 
-### Tool Response Flow
+Typical flow:
 
-1. Send messages with tool definitions
-2. Model responds with `finish_reason: "tool_calls"` and tool call details
-3. Execute the tool locally
-4. Send the result back as a `tool` message:
+1. Send messages and tool definitions.
+2. Inspect `finish_reason`.
+3. If it is `tool_calls`, execute the tool in your app.
+4. Send the tool result back as a `tool` message.
+5. Request the final model response.
 
-```python
-messages.append(choice.message)  # The assistant's tool call message
-messages.append({
-    "role": "tool",
-    "tool_call_id": tool_call.id,
-    "content": '{"temperature": 22, "condition": "sunny"}',
-})
-# Send again to get the final response
-response = client.chat.completions.create(
-    model="mlx-community/Qwen3.5-9B-4bit",
-    messages=messages,
-    tools=tools,
-)
-```
+## Thinking / Reasoning
 
-**Note:** Tool calling quality depends on the model. Models like Qwen3, DeepSeek V3, and GLM-4 have good tool calling support. Smaller models may produce unreliable tool calls.
-
----
-
-## Thinking / Reasoning Mode
-
-Some models support "thinking" mode where the model shows its reasoning process before answering.
+Skulk supports reasoning-aware chat for compatible models.
 
 ```python
 response = client.chat.completions.create(
     model="mlx-community/Qwen3.5-9B-4bit",
     messages=[{"role": "user", "content": "What is 127 * 43?"}],
-    enable_thinking=True,  # Skulk extension
+    enable_thinking=True,
 )
 
-# Thinking content is in reasoning_content
 msg = response.choices[0].message
-if hasattr(msg, 'reasoning_content') and msg.reasoning_content:
-    print("Thinking:", msg.reasoning_content)
-print("Answer:", msg.content)
+print(msg.reasoning_content)
+print(msg.content)
 ```
 
-**Supported models:** Models with `thinking` or `thinking_toggle` capability (e.g., Qwen3 with thinking_toggle, Nemotron with always-on thinking).
+Notes:
 
----
+- `enable_thinking` is a Skulk extension.
+- Reasoning support depends on model capabilities.
+- Models with `thinking` or `thinking_toggle` metadata are the likeliest candidates.
 
 ## Structured Output
 
-The `response_format` parameter requests structured output:
+`response_format` is accepted for compatibility, but Skulk does not currently enforce strict JSON mode or JSON schema validation.
 
 ```python
 response = client.chat.completions.create(
     model="mlx-community/Qwen3.5-9B-4bit",
-    messages=[{"role": "user", "content": "List 3 colors as JSON"}],
+    messages=[{"role": "user", "content": "Return valid JSON with three colors"}],
     response_format={"type": "json_object"},
 )
 ```
 
-**Current limitations:** The `response_format` field is accepted but not strictly enforced. The model may or may not produce valid JSON depending on the prompt and model capability. For reliable structured output, include explicit JSON formatting instructions in your prompt.
+For the best results, explicitly instruct the model to return valid JSON.
 
----
+## OpenAI Responses API
 
-## Models
+**POST** `/v1/responses`
 
-### List Models
+Use this when your client expects the OpenAI Responses format instead of Chat Completions.
+
+```bash
+curl -X POST http://localhost:52415/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+    "input": "Hello from the Responses API"
+  }'
+```
+
+## Claude Messages API
+
+**POST** `/v1/messages`
+
+Use this when your client expects Anthropic-style request and response shapes.
+
+```bash
+curl -X POST http://localhost:52415/v1/messages \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "max_tokens": 512
+  }'
+```
+
+## Ollama API
+
+Skulk supports several Ollama-compatible endpoints so tools like OpenWebUI can connect with minimal glue code.
+
+### Chat
+
+```bash
+curl -X POST http://localhost:52415/ollama/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+### Generate
+
+```bash
+curl -X POST http://localhost:52415/ollama/api/generate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+    "prompt": "Write a haiku about foxes"
+  }'
+```
+
+### List models
+
+```bash
+curl http://localhost:52415/ollama/api/tags
+```
+
+### Show model details
+
+```bash
+curl -X POST http://localhost:52415/ollama/api/show \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "mlx-community/Llama-3.2-1B-Instruct-4bit"}'
+```
+
+## Model Discovery
+
+### List models
 
 **GET** `/v1/models`
 
@@ -270,57 +393,26 @@ response = client.chat.completions.create(
 curl http://localhost:52415/v1/models
 ```
 
-Returns all known models with metadata:
+This returns known model cards, not just running instances.
 
-```json
-{
-  "data": [
-    {
-      "id": "mlx-community/Qwen3.5-9B-4bit",
-      "name": "Qwen3.5-9B-4bit",
-      "storage_size_megabytes": 5977,
-      "context_length": 262144,
-      "capabilities": ["text", "thinking", "thinking_toggle"],
-      "family": "qwen",
-      "quantization": "4bit",
-      "supports_tensor": true,
-      "tags": ["thinking", "tensor"]
-    }
-  ]
-}
-```
+### Search Hugging Face
 
-### List Downloaded Models Only
-
-```bash
-curl "http://localhost:52415/v1/models?status=downloaded"
-```
-
-### Search HuggingFace
-
-**GET** `/models/search?query=llama&limit=10`
+**GET** `/models/search?query=...&limit=...`
 
 ```bash
 curl "http://localhost:52415/models/search?query=qwen3&limit=5"
 ```
 
-### Add Custom Model
+Behavior note:
 
-**POST** `/models/add`
+- Skulk searches `mlx-community` first.
+- If that returns nothing, it falls back to a broader Hugging Face search.
 
-```bash
-curl -X POST http://localhost:52415/models/add \
-  -H 'Content-Type: application/json' \
-  -d '{"model_id": "mlx-community/my-custom-model"}'
-```
+## Placement and Instance Management
 
----
+These endpoints are the heart of the Skulk control plane.
 
-## Instance Management
-
-Before you can chat with a model, it needs to be "placed" (loaded onto cluster nodes).
-
-### Quick Launch
+### Quick launch
 
 **POST** `/place_instance`
 
@@ -335,219 +427,163 @@ curl -X POST http://localhost:52415/place_instance \
   }'
 ```
 
-| Parameter | Options | Description |
-|-----------|---------|-------------|
-| `model_id` | string | HuggingFace model ID |
-| `sharding` | `Pipeline`, `Tensor` | How to split the model across nodes |
-| `instance_meta` | `MlxRing`, `MlxJaccl` | Networking backend (Ring = TCP, Jaccl = RDMA/TB5) |
-| `min_nodes` | integer | Minimum number of nodes to use |
+| Field | Meaning |
+|-------|---------|
+| `model_id` | Hugging Face-style model ID |
+| `sharding` | `Pipeline` or `Tensor` |
+| `instance_meta` | `MlxRing` or `MlxJaccl` |
+| `min_nodes` | Minimum nodes required for the placement |
 
-### Preview Placements
+### Preview valid placements
 
-See what placement options are valid before launching:
+**GET** `/instance/previews?model_id=...`
 
-**GET** `/instance/previews?model_id=mlx-community/Qwen3.5-9B-4bit`
+```bash
+curl "http://localhost:52415/instance/previews?model_id=mlx-community/Qwen3.5-9B-4bit"
+```
 
-Returns an array of placement previews showing which combinations of sharding, networking, and node count will work, with error explanations for invalid combinations.
+This is usually the best first Skulk-specific endpoint to call. It shows which combinations of sharding mode, networking mode, and node count are valid, and why invalid combinations fail.
 
-### Delete Instance
+### Build a placement manually
+
+**GET** `/instance/placement`
+
+Use this when you want a specific combination and want to inspect the exact instance shape before launch.
+
+### Create an instance from a fully specified placement
+
+**POST** `/instance`
+
+Use this when you already have an `instance` object and want exact control.
+
+### Inspect one instance
+
+**GET** `/instance/{instance_id}`
+
+### Delete an instance
 
 **DELETE** `/instance/{instance_id}`
 
-```bash
-curl -X DELETE http://localhost:52415/instance/YOUR_INSTANCE_ID
-```
+## Download Management
 
-### Check Running Instances
+### Start a node download
 
-**GET** `/state`
+**POST** `/download/start`
 
-Returns the full cluster state including all running instances, their runners, and download status.
+Lower-level endpoint for explicit node download control.
 
----
+### Delete a node download
 
-## Cluster State
+**DELETE** `/download/{node_id}/{model_id}`
 
-### Get State
+## Model Store Endpoints
 
-**GET** `/state`
+These endpoints are available when the model store is configured.
 
-Returns everything about the cluster: topology, nodes, instances, runners, downloads.
+If it is not configured, Skulk returns `503 Store not configured`.
 
-### Get Events
-
-**GET** `/events`
-
-Returns the event log (for debugging).
-
----
-
-## Model Store
-
-### Store Registry
-
-**GET** `/store/registry`
-
-Lists all models in the store with sizes and file counts.
-
-### Download a Model
-
-**POST** `/store/models/{model_id}/download`
-
-Triggers a download from HuggingFace to the store.
-
-### Delete a Model
-
-**DELETE** `/store/models/{model_id}`
-
-Removes a model from the store and disk.
-
-### Store Health
+### Store health
 
 **GET** `/store/health`
 
-Returns store disk usage and path info.
+Use this to confirm whether the store is configured and reachable.
 
-### Optimize Model (OptiQ)
+### Store registry
+
+**GET** `/store/registry`
+
+Use this to inspect which models the shared store knows about.
+
+### Store downloads
+
+**GET** `/store/downloads`
+
+Use this to inspect in-progress shared-store download activity.
+
+### Request a store download
+
+**POST** `/store/models/{model_id}/download`
+
+Use this when you want the store host to fetch and register a model.
+
+### Store download status
+
+**GET** `/store/models/{model_id}/download/status`
+
+### Delete a model from the store
+
+**DELETE** `/store/models/{model_id}`
+
+### Purge staging caches
+
+**POST** `/store/purge-staging`
+
+Use this to remove staged model artifacts from nodes without deleting the store copy itself.
+
+### Start optimization
 
 **POST** `/store/models/{model_id}/optimize`
 
-Starts an OptiQ mixed-precision optimization job:
+Use this for workflows such as model optimization or alternate artifact generation.
 
-```bash
-curl -X POST http://localhost:52415/store/models/mlx-community/Qwen3.5-9B-4bit/optimize \
-  -H 'Content-Type: application/json' \
-  -d '{"target_bpw": 4.5, "candidate_bits": [4, 8]}'
-```
+## Configuration Endpoints
 
-### Optimization Status
-
-**GET** `/store/models/{model_id}/optimize/status`
-
-Poll for optimization progress.
-
----
-
-## Configuration
-
-### Get Config
+### Get config
 
 **GET** `/config`
 
-Returns the current `exo.yaml` configuration and effective runtime values.
+Returns the current cluster config and config path. Sensitive values such as `hf_token` are stripped from the returned config.
 
-### Update Config
+### Update config
 
 **PUT** `/config`
 
-Update configuration and sync to all cluster nodes:
+Updates cluster-wide config. Important behavior:
 
-```bash
-curl -X PUT http://localhost:52415/config \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "config": {
-      "inference": {"kv_cache_backend": "optiq"},
-      "hf_token": "hf_your_token_here"
-    }
-  }'
-```
+- if you omit `hf_token`, Skulk preserves the existing value
+- inference changes affect future launches
+- model-store location changes generally require restart
 
----
+### Filesystem browse
 
-## Alternative API Formats
+**GET** `/filesystem/browse`
 
-### Claude Messages API
+Used by the dashboard to browse a safe subset of the filesystem when selecting config paths.
 
-**POST** `/v1/messages`
+### Node identity
 
-Compatible with Anthropic's Claude API format. Supports streaming with Claude-specific event types (`message_start`, `content_block_delta`, etc.) and thinking blocks.
+**GET** `/node/identity`
 
-### OpenAI Responses API
+Returns hostname, preferred IP, and node identity information used by the dashboard.
 
-**POST** `/v1/responses`
+## State, Events, and Tracing
 
-Compatible with OpenAI's newer Responses API format. Supports streaming with response-specific events and reasoning items.
+### Cluster state
 
-### Ollama API
+**GET** `/state`
 
-For tools like OpenWebUI:
+Returns the cluster state as Skulk currently sees it.
 
-```bash
-# Chat
-curl -X POST http://localhost:52415/ollama/api/chat \
-  -H 'Content-Type: application/json' \
-  -d '{"model": "mlx-community/Qwen3.5-9B-4bit", "messages": [{"role": "user", "content": "Hello"}]}'
+### Event log
 
-# List models
-curl http://localhost:52415/ollama/api/tags
+**GET** `/events`
 
-# Model info
-curl -X POST http://localhost:52415/ollama/api/show \
-  -d '{"name": "mlx-community/Qwen3.5-9B-4bit"}'
-```
+Returns stored events from the API-side event log.
 
----
+### Traces
 
-## Image Generation
+- `GET /v1/traces`
+- `POST /v1/traces/delete`
+- `GET /v1/traces/{task_id}`
+- `GET /v1/traces/{task_id}/stats`
+- `GET /v1/traces/{task_id}/raw`
 
-**POST** `/v1/images/generations`
+Use these endpoints when you are debugging generation behavior, cluster execution, or performance.
 
-```bash
-curl -X POST http://localhost:52415/v1/images/generations \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "prompt": "a fox in a server room",
-    "model": "exolabs/FLUX.1-dev",
-    "size": "1024x1024",
-    "response_format": "b64_json"
-  }'
-```
+## Helpful Next Docs
 
-Requires an image model to be placed. See [README](../README.md) for supported image models.
-
----
-
-## Benchmarking
-
-**POST** `/bench/chat/completions`
-
-Same as `/v1/chat/completions` but returns performance metrics:
-
-```json
-{
-  "generation_stats": {
-    "prompt_tps": 245.3,
-    "generation_tps": 42.1,
-    "prompt_tokens": 128,
-    "generation_tokens": 256,
-    "peak_memory_usage": 8589934592
-  }
-}
-```
-
----
-
-## What's NOT Supported (Yet)
-
-| Feature | Status |
-|---------|--------|
-| `/v1/embeddings` | Not implemented — planned |
-| JSON mode enforcement | `response_format` accepted but not enforced |
-| JSON schema validation | Not implemented — planned |
-| `/v1/batches` | Not implemented |
-| `/v1/audio` | Not implemented |
-| `/v1/files` | Not implemented |
-| `/v1/fine_tuning` | Not implemented |
-| API key authentication | Not implemented — all requests accepted |
-| Rate limiting | Not implemented |
-
----
-
-## Tips
-
-- **Finding model IDs**: Use `/v1/models?status=downloaded` to see what's available
-- **Streaming is recommended**: For chat use cases, `stream: true` gives much better UX
-- **Cancel stuck requests**: Close the connection or call `/v1/cancel/{command_id}`
-- **Check cluster health**: `GET /state` shows everything — nodes, instances, runners, downloads
-- **HuggingFace token**: Set via Settings panel or `HF_TOKEN` env var for faster downloads and gated model access
+- [README](https://github.com/Foxlight-Foundation/Skulk/blob/main/README.md)
+- [Model store guide](model-store.md)
+- [Architecture overview](architecture.md)
+- [OpenAPI schema](reference/openapi.md)
+- [API Reference (ReDoc)](reference/api-reference.md)

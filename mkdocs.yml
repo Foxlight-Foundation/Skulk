@@ -1,0 +1,20 @@
+site_name: Skulk Developer Docs
+site_description: Generated and hand-written developer documentation for Skulk
+repo_url: https://github.com/Foxlight-Foundation/Skulk
+theme:
+  name: shadcn
+
+docs_dir: docs
+site_dir: site
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - API Guide: api.md
+      - Model Store: model-store.md
+      - KV Cache Backends: kv-cache-backends.md
+      - Architecture: architecture.md
+  - Reference:
+      - OpenAPI Schema: reference/openapi.md
+      - API Reference (ReDoc): reference/api-reference.md
+      - TypeDoc: reference/typedoc.md

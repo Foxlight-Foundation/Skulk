@@ -1,87 +1,73 @@
-# exo.yaml — cluster configuration for exo
+# exo.yaml - optional Skulk cluster configuration
 #
-# TIP: You can configure the model store visually from the dashboard at
-# http://localhost:52415/#/settings — the Settings page writes this file
-# and syncs it to all nodes automatically.
+# You can manage much of this from the dashboard at:
+# http://localhost:52415
 #
-# If editing manually, place this file alongside the exo project root on
-# every node in your cluster.  If this file is absent, exo behaves
-# identically to the upstream default (zero-config compatibility).
+# If this file is absent, Skulk keeps its zero-config behavior.
 #
-# NOTE: Experimental KV cache backend controls such as
-# EXO_KV_CACHE_BACKEND, EXO_KV_CACHE_BITS, EXO_TQ_K_BITS,
-# EXO_TQ_V_BITS, and EXO_TQ_FP16_LAYERS are currently environment
-# variables, not exo.yaml settings. See docs/kv-cache-backends.md.
+# This file is most useful when you want to:
+# - enable the shared model store
+# - choose an inference.kv_cache_backend
+# - persist an hf_token
 #
-# ─────────────────────────────────────────────────────────────────────────────
-# MODEL STORE
-# ─────────────────────────────────────────────────────────────────────────────
-# By default, every exo node independently downloads its model shard from
-# HuggingFace at inference time.  For a small home cluster this means:
-#
-#   • Redundant external bandwidth — every node pulls the same files.
-#   • Slow cold starts on large models (30B+).
-#   • No offline capability after the first run.
-#
-# The model store solves this by designating one node as the store host.
-# The store host serves model files to all other nodes over HTTP on the
-# local network.  Worker nodes stage their assigned shard to node-local
-# storage before MLX loads it.  MLX always receives a local filesystem
-# path — it has no knowledge of the store.
-#
-# Minimum required fields: store_host, store_path
-#
-# See docs/model-store.md for full documentation.
-# ─────────────────────────────────────────────────────────────────────────────
+# If you are using a cluster and editing this manually, keep it at the same
+# relative path on every node.
 
 model_store:
-  # Master switch.  Set false to disable without removing the file.
+  # Set to false to disable the model store without deleting the file.
   enabled: true
 
-  # Hostname (or libp2p node_id) of the node that hosts the model store.
-  # This node must have the storage device mounted at store_path.
+  # Hostname or libp2p node ID of the store host.
+  # For most users, hostname is the simplest choice.
   store_host: mac-studio-1
 
-  # HTTP port for the ModelStoreServer on the store host.
-  # Must be reachable from all worker nodes on the local network.
+  # Optional HTTP hostname or IP address used by worker nodes.
+  # Set this if store_host is a peer ID instead of a resolvable hostname.
+  # store_http_host: 192.168.1.10
+
+  # HTTP port used by the model store server.
   store_port: 58080
 
-  # Absolute path to the model store root on the store host.
-  # Model directories live here as <org>--<model>/ (e.g.
-  # mlx-community--Qwen3-30B-A3B-4bit/).
+  # Absolute path to the directory that holds store-managed models.
   store_path: /Volumes/ModelStore/models
 
   download:
-    # When true (default), nodes fall back to HuggingFace if a model is
-    # not yet in the store.  Set false for air-gapped deployments.
+    # If true, Skulk may fall back to Hugging Face when a model is not yet
+    # present in the store.
     allow_hf_fallback: true
 
   staging:
-    # Default staging config applied to all nodes without a node_override.
+    # Staging is where a node prepares model files before MLX loads them.
     enabled: true
-
-    # Local directory where model files are staged before MLX loads them.
-    # ~ is expanded per-node.  Each model occupies a subdirectory named
-    # <org>--<model> (e.g. mlx-community--Qwen3-30B-A3B-4bit/).
     node_cache_path: ~/.exo/staging
-
-    # Delete staged files when the model instance is deactivated.
-    # Keeps node-local storage lean at the cost of re-staging on next use.
     cleanup_on_deactivate: true
 
-  # Per-node overrides (matched by hostname or libp2p node_id).
-  # Use this to tune staging behaviour for nodes with different storage.
   node_overrides:
-
-    # Store host: point node_cache_path at the store itself so MLX loads
-    # directly from the attached storage — no copy needed.
+    # Store-host example: load directly from the store path instead of
+    # making a local copy.
     mac-studio-1:
       staging:
         node_cache_path: /Volumes/ModelStore/models
-        cleanup_on_deactivate: false   # store IS the cache; never delete it
+        cleanup_on_deactivate: false
 
-    # Node with fast NVMe — use it for staging instead of the home dir.
+    # Example worker with a fast local NVMe cache:
     # mac-mini-2:
     #   staging:
     #     node_cache_path: /Volumes/FastNVMe/exo-staging
     #     cleanup_on_deactivate: true
+
+inference:
+  # Valid values:
+  # - default
+  # - mlx_quantized
+  # - turboquant
+  # - turboquant_adaptive
+  # - optiq
+  #
+  # Environment variables still override this if you set them explicitly
+  # before launch.
+  kv_cache_backend: default
+
+# Optional Hugging Face token.
+# The dashboard Settings UI can manage this too.
+# hf_token: hf_xxxxxxxxxxxxxxxxxxxx

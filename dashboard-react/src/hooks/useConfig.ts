@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react';
 
+/** Shared model-store configuration returned by the Skulk config API. */
 export interface StoreConfig {
   enabled: boolean;
   store_host: string;
@@ -16,21 +17,25 @@ export interface StoreConfig {
   };
 }
 
+/** Inference-related config surfaced to the dashboard. */
 export interface InferenceConfig {
   kv_cache_backend: string;
 }
 
+/** Full editable config document as read from or written to `/config`. */
 export interface FullConfig {
   model_store?: StoreConfig;
   inference?: InferenceConfig;
   hf_token?: string;
 }
 
+/** Effective runtime values derived from config and environment. */
 export interface EffectiveConfig {
   kv_cache_backend: string;
   has_hf_token?: boolean;
 }
 
+/** Response shape returned by the dashboard config endpoint. */
 export interface ConfigResponse {
   config: FullConfig;
   configPath: string;
@@ -38,6 +43,7 @@ export interface ConfigResponse {
   effective?: EffectiveConfig;
 }
 
+/** State and actions exposed by {@link useConfig}. */
 export interface UseConfigReturn {
   config: StoreConfig | null;
   fullConfig: FullConfig | null;
@@ -50,6 +56,7 @@ export interface UseConfigReturn {
   saveFullConfig: (config: FullConfig) => Promise<boolean>;
 }
 
+/** Load and save cluster config through the Skulk dashboard config API. */
 export function useConfig(): UseConfigReturn {
   const [fullConfig, setFullConfig] = useState<FullConfig | null>(null);
   const [effective, setEffective] = useState<EffectiveConfig | null>(null);
