@@ -42,6 +42,10 @@
 - **Storage recommendations:** Skulk can show available disk space per volume in the directory browser, highlight the best option, and warn on low space.
 - **Manual shard placement:** Skulk allows youu to control which layers run on which nodes, and you can adjust sharding to target specific machines and manage memory pressure on a per-node basis.
 - **Sub-cluster definitions:** Skulk allows you to define node groups so a model can be targeted to only certain nodes, enabling model-specific sub-clusters within a single physical cluster (e.g. dedicate 2 nodes to a coding model and 2 to a chat model simultaneously).
+- **macOS App:** A native macOS menu bar app for running Skulk in the background — start/stop your cluster, monitor status, and manage models without the terminal.
+- **Conversation sync:** Conversation history synced across all nodes in the cluster so every node has access to the full chat history.
+- **Context compaction:** Intelligent context window management with sliding window and summarization for long conversations.
+- **Voice input:** Voice-to-text input for the chat interface.
 
 ## **Features**
 
