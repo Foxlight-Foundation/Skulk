@@ -9,7 +9,7 @@ task params type used by the inference pipeline, see
 import time
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from exo.shared.types.common import ModelId
 from exo.shared.types.text_generation import ReasoningEffort
@@ -86,6 +86,16 @@ class ResponsesRequest(BaseModel, frozen=True):
     internal task params type is ``TextGenerationTaskParams``; see the
     ``responses_request_to_text_generation`` adapter for conversion.
     """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+                "input": "Hello from the Responses API",
+                "stream": False,
+            }
+        }
+    )
 
     # --- OpenAI Responses API standard fields ---
     model: ModelId

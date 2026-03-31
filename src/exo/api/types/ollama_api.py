@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from exo.shared.models.model_cards import ModelId
 
@@ -45,6 +45,16 @@ class OllamaOptions(BaseModel, frozen=True):
 
 
 class OllamaChatRequest(BaseModel, frozen=True):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+                "messages": [{"role": "user", "content": "Hello from Ollama-compatible Skulk"}],
+                "stream": False,
+            }
+        }
+    )
+
     model: ModelId
     messages: list[OllamaMessage]
     stream: bool = True
@@ -56,6 +66,16 @@ class OllamaChatRequest(BaseModel, frozen=True):
 
 
 class OllamaGenerateRequest(BaseModel, frozen=True):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+                "prompt": "Write a haiku about foxes",
+                "stream": False,
+            }
+        }
+    )
+
     model: ModelId
     prompt: str = ""
     system: str | None = None

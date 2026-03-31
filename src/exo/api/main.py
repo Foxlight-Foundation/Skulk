@@ -194,31 +194,31 @@ ONBOARDING_COMPLETE_FILE = EXO_CACHE_HOME / "onboarding_complete"
 API_TAGS_METADATA = [
     {
         "name": "Compatibility APIs",
-        "description": "OpenAI, Anthropic Claude, and Ollama-compatible endpoints.",
+        "description": "Endpoints that let existing SDKs and tools talk to Skulk using OpenAI, Claude, or Ollama-style request formats.",
     },
     {
         "name": "Models",
-        "description": "Model discovery, search, and custom model-card management.",
+        "description": "Model discovery, search, listing, and custom model-card management.",
     },
     {
         "name": "Instances",
-        "description": "Placement, launch, lookup, and deletion of model instances.",
+        "description": "Placement previews, launch flows, instance lookup, and lifecycle management for running models.",
     },
     {
         "name": "Downloads",
-        "description": "Low-level node download and staging-cache management.",
+        "description": "Low-level node download control and staging-cache management.",
     },
     {
         "name": "Store",
-        "description": "Central model-store health, registry, downloads, and optimization.",
+        "description": "Shared model-store health, registry inspection, download workflows, deletion, and optimization.",
     },
     {
         "name": "Config",
-        "description": "Cluster configuration and filesystem helpers used by the dashboard.",
+        "description": "Cluster configuration, safe filesystem browsing, and node identity helpers used by the dashboard.",
     },
     {
         "name": "State & Tracing",
-        "description": "Cluster state, event log, trace exports, and onboarding helpers.",
+        "description": "Cluster state, event log access, trace inspection/export, and onboarding helpers.",
     },
     {
         "name": "Images",
@@ -256,6 +256,19 @@ def _create_fastapi_app() -> FastAPI:
         redoc_url="/api/redoc",
         openapi_tags=API_TAGS_METADATA,
     )
+
+
+def _json_request_body(schema: dict[str, object]) -> dict[str, object]:
+    return {
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": schema,
+                }
+            },
+        }
+    }
 
 
 class API:
@@ -385,6 +398,7 @@ class API:
             "/instance",
             tags=["Instances"],
             summary="Create an instance from a fully specified placement",
+            description="Create an instance from an already computed placement object when you want exact control instead of Skulk picking the placement for you.",
         )(self.create_instance)
         self.app.post(
             "/place_instance",
@@ -399,6 +413,7 @@ class API:
             "/instance/placement",
             tags=["Instances"],
             summary="Compute a concrete placement for one requested combination",
+            description="Return the exact instance shape Skulk would create for one requested model, sharding mode, instance metadata, and node-count combination.",
         )(self.get_placement)
         self.app.get(
             "/instance/previews",
@@ -419,17 +434,29 @@ class API:
             tags=["Instances"],
             summary="Delete a running instance",
         )(self.delete_instance)
-        self.app.get("/models", tags=["Models"], summary="List known models")(self.get_models)
-        self.app.get("/v1/models", tags=["Models"], summary="List known models")(self.get_models)
+        self.app.get(
+            "/models",
+            tags=["Models"],
+            summary="List known models",
+            description="Return known model cards, including metadata Skulk uses for placement and compatibility decisions.",
+        )(self.get_models)
+        self.app.get(
+            "/v1/models",
+            tags=["Models"],
+            summary="List known models",
+            description="OpenAI-style model listing endpoint backed by Skulk's model catalog rather than only currently running instances.",
+        )(self.get_models)
         self.app.post(
             "/models/add",
             tags=["Models"],
             summary="Fetch and add a custom model card",
+            description="Add a custom model card to Skulk's model catalog so it becomes searchable and launchable through the API or dashboard.",
         )(self.add_custom_model)
         self.app.delete(
             "/models/custom/{model_id:path}",
             tags=["Models"],
             summary="Delete a custom model card",
+            description="Remove a previously added custom model card from Skulk's local catalog.",
         )(self.delete_custom_model)
         self.app.get(
             "/models/search",
@@ -507,6 +534,7 @@ class API:
             "/v1/cancel/{command_id}",
             tags=["Compatibility APIs"],
             summary="Cancel an active text or image command",
+            description="Request cancellation for an in-flight text or image generation command by its command ID.",
         )(self.cancel_command)
 
         # Ollama API
@@ -518,10 +546,18 @@ class API:
             tags=["Compatibility APIs"],
             summary="Ollama chat",
             description="Ollama-compatible chat endpoint backed by Skulk model placement and routing.",
+            openapi_extra=_json_request_body(OllamaChatRequest.model_json_schema()),
         )(self.ollama_chat)
         self.app.post("/ollama/api/api/chat", response_model=None, tags=["Compatibility APIs"], summary="Ollama chat alias")(self.ollama_chat)
         self.app.post("/ollama/api/v1/chat", response_model=None, tags=["Compatibility APIs"], summary="Ollama chat alias")(self.ollama_chat)
-        self.app.post("/ollama/api/generate", response_model=None, tags=["Compatibility APIs"], summary="Ollama generate")(self.ollama_generate)
+        self.app.post(
+            "/ollama/api/generate",
+            response_model=None,
+            tags=["Compatibility APIs"],
+            summary="Ollama generate",
+            description="Ollama-compatible prompt-completion endpoint backed by a placed Skulk model.",
+            openapi_extra=_json_request_body(OllamaGenerateRequest.model_json_schema()),
+        )(self.ollama_generate)
         self.app.get("/ollama/api/tags", tags=["Compatibility APIs"], summary="List Ollama models")(self.ollama_tags)
         self.app.get("/ollama/api/api/tags", tags=["Compatibility APIs"], summary="List Ollama models alias")(self.ollama_tags)
         self.app.get("/ollama/api/v1/tags", tags=["Compatibility APIs"], summary="List Ollama models alias")(self.ollama_tags)
@@ -529,17 +565,72 @@ class API:
         self.app.get("/ollama/api/ps", tags=["Compatibility APIs"], summary="List running Ollama models")(self.ollama_ps)
         self.app.get("/ollama/api/version", tags=["Compatibility APIs"], summary="Get Ollama API version")(self.ollama_version)
 
-        self.app.get("/state", tags=["State & Tracing"], summary="Get cluster state")(lambda: self.state)
-        self.app.get("/events", tags=["State & Tracing"], summary="Get stored event log")(self.stream_events)
-        self.app.post("/download/start", tags=["Downloads"], summary="Start a node download")(self.start_download)
-        self.app.delete("/download/{node_id}/{model_id:path}", tags=["Downloads"], summary="Delete a node download")(self.delete_download)
-        self.app.get("/v1/traces", tags=["State & Tracing"], summary="List saved traces")(self.list_traces)
-        self.app.post("/v1/traces/delete", tags=["State & Tracing"], summary="Delete saved traces")(self.delete_traces)
-        self.app.get("/v1/traces/{task_id}", tags=["State & Tracing"], summary="Get one saved trace")(self.get_trace)
-        self.app.get("/v1/traces/{task_id}/stats", tags=["State & Tracing"], summary="Get one trace summary")(self.get_trace_stats)
-        self.app.get("/v1/traces/{task_id}/raw", tags=["State & Tracing"], summary="Download raw trace JSON")(self.get_trace_raw)
-        self.app.get("/onboarding", tags=["State & Tracing"], summary="Get onboarding completion status")(self.get_onboarding)
-        self.app.post("/onboarding", tags=["State & Tracing"], summary="Mark onboarding complete")(self.complete_onboarding)
+        self.app.get(
+            "/state",
+            tags=["State & Tracing"],
+            summary="Get cluster state",
+            description="Return the current cluster state as seen by this API node, including topology, instances, and node capabilities.",
+        )(lambda: self.state)
+        self.app.get(
+            "/events",
+            tags=["State & Tracing"],
+            summary="Get stored event log",
+            description="Stream or return the API-side event log used for debugging state transitions and cluster behavior.",
+        )(self.stream_events)
+        self.app.post(
+            "/download/start",
+            tags=["Downloads"],
+            summary="Start a node download",
+            description="Start a low-level node download for a specific shard on a specific node.",
+        )(self.start_download)
+        self.app.delete(
+            "/download/{node_id}/{model_id:path}",
+            tags=["Downloads"],
+            summary="Delete a node download",
+            description="Delete or cancel a download associated with a given node and model.",
+        )(self.delete_download)
+        self.app.get(
+            "/v1/traces",
+            tags=["State & Tracing"],
+            summary="List saved traces",
+            description="List saved trace files that can be inspected for debugging and performance analysis.",
+        )(self.list_traces)
+        self.app.post(
+            "/v1/traces/delete",
+            tags=["State & Tracing"],
+            summary="Delete saved traces",
+            description="Delete one or more saved trace artifacts by task ID.",
+        )(self.delete_traces)
+        self.app.get(
+            "/v1/traces/{task_id}",
+            tags=["State & Tracing"],
+            summary="Get one saved trace",
+            description="Return the structured trace events for one saved task trace.",
+        )(self.get_trace)
+        self.app.get(
+            "/v1/traces/{task_id}/stats",
+            tags=["State & Tracing"],
+            summary="Get one trace summary",
+            description="Return aggregated timing statistics for one saved trace.",
+        )(self.get_trace_stats)
+        self.app.get(
+            "/v1/traces/{task_id}/raw",
+            tags=["State & Tracing"],
+            summary="Download raw trace JSON",
+            description="Download the raw Chrome trace JSON artifact for one task.",
+        )(self.get_trace_raw)
+        self.app.get(
+            "/onboarding",
+            tags=["State & Tracing"],
+            summary="Get onboarding completion status",
+            description="Return whether the dashboard onboarding flow has been completed on this node.",
+        )(self.get_onboarding)
+        self.app.post(
+            "/onboarding",
+            tags=["State & Tracing"],
+            summary="Mark onboarding complete",
+            description="Mark the local dashboard onboarding flow as complete.",
+        )(self.complete_onboarding)
 
         # Config & store endpoints
         self.app.get(
@@ -575,14 +666,30 @@ class API:
             summary="List active store downloads",
             description="List in-progress downloads being managed by the shared model store.",
         )(self.get_store_downloads)
-        self.app.delete("/store/models/{model_id:path}", tags=["Store"], summary="Delete a model from the store")(self.delete_store_model)
-        self.app.post("/store/models/{model_id:path}/download", tags=["Store"], summary="Request a store download")(
-            self.request_store_download
-        )
-        self.app.get("/store/models/{model_id:path}/download/status", tags=["Store"], summary="Get store download status")(
-            self.get_store_download_status
-        )
-        self.app.post("/store/purge-staging", tags=["Downloads"], summary="Purge staging caches")(self.purge_staging_caches)
+        self.app.delete(
+            "/store/models/{model_id:path}",
+            tags=["Store"],
+            summary="Delete a model from the store",
+            description="Delete a model and its shared-store artifacts from the configured model store.",
+        )(self.delete_store_model)
+        self.app.post(
+            "/store/models/{model_id:path}/download",
+            tags=["Store"],
+            summary="Request a store download",
+            description="Ask the shared model store to download and register a model by model ID.",
+        )(self.request_store_download)
+        self.app.get(
+            "/store/models/{model_id:path}/download/status",
+            tags=["Store"],
+            summary="Get store download status",
+            description="Return current status for a shared-store download request for one model.",
+        )(self.get_store_download_status)
+        self.app.post(
+            "/store/purge-staging",
+            tags=["Downloads"],
+            summary="Purge staging caches",
+            description="Broadcast a staging-cache purge request to nodes, optionally scoped to one model ID.",
+        )(self.purge_staging_caches)
         self.app.post(
             "/store/models/{model_id:path}/optimize",
             tags=["Store"],
@@ -592,9 +699,24 @@ class API:
                 "Use this for workflows such as OptiQ conversion or alternate artifact generation."
             ),
         )(self.optimize_model)
-        self.app.get("/store/models/{model_id:path}/optimize/status", tags=["Store"], summary="Get model optimization status")(self.get_optimize_status)
-        self.app.get("/filesystem/browse", tags=["Config"], summary="Browse filesystem roots for config selection")(self.browse_filesystem)
-        self.app.get("/node/identity", tags=["Config"], summary="Get node identity and preferred IP")(self.get_node_identity)
+        self.app.get(
+            "/store/models/{model_id:path}/optimize/status",
+            tags=["Store"],
+            summary="Get model optimization status",
+            description="Return the current status of an optimization job for one shared-store model.",
+        )(self.get_optimize_status)
+        self.app.get(
+            "/filesystem/browse",
+            tags=["Config"],
+            summary="Browse filesystem roots for config selection",
+            description="Browse a safe subset of filesystem roots so the dashboard can help users choose store and staging paths.",
+        )(self.browse_filesystem)
+        self.app.get(
+            "/node/identity",
+            tags=["Config"],
+            summary="Get node identity and preferred IP",
+            description="Return the node ID, hostname, and preferred LAN IP address that the dashboard uses during setup.",
+        )(self.get_node_identity)
 
     async def place_instance(self, payload: PlaceInstanceParams):
         command = PlaceInstance(
