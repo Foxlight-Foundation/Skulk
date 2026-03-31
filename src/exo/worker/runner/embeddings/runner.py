@@ -12,7 +12,7 @@ from typing import Any
 import torch
 from transformers import AutoModel, AutoTokenizer
 
-from exo.shared.types.chunks import EmbeddingChunk
+from exo.shared.types.chunks import EmbeddingChunk, ErrorChunk
 from exo.shared.types.events import (
     ChunkGenerated,
     Event,
@@ -32,7 +32,6 @@ from exo.shared.types.tasks import (
 from exo.shared.types.worker.instances import BoundInstance
 from exo.shared.types.worker.runners import (
     RunnerIdle,
-    RunnerLoaded,
     RunnerLoading,
     RunnerReady,
     RunnerShutdown,
@@ -156,7 +155,6 @@ class Runner:
                 )
                 self.model.eval()
 
-                self.current_status = RunnerLoaded()
                 # Skip straight to Ready — no warmup needed for embedding models
                 self.current_status = RunnerReady()
                 logger.info(
@@ -171,21 +169,33 @@ class Runner:
                 self.acknowledge_task(task)
 
                 assert self.model is not None and self.tokenizer is not None
-                result_embeddings, token_count = _forward(
-                    self.model, self.tokenizer, task_params.input_texts
-                )
-
                 model_id = self.shard_metadata.model_card.model_id
-                self.event_sender.send(
-                    ChunkGenerated(
-                        command_id=command_id,
-                        chunk=EmbeddingChunk(
-                            model=model_id,
-                            embeddings=result_embeddings,
-                            token_count=token_count,
-                        ),
+
+                try:
+                    result_embeddings, token_count = _forward(
+                        self.model, self.tokenizer, task_params.input_texts
                     )
-                )
+                    self.event_sender.send(
+                        ChunkGenerated(
+                            command_id=command_id,
+                            chunk=EmbeddingChunk(
+                                model=model_id,
+                                embeddings=result_embeddings,
+                                token_count=token_count,
+                            ),
+                        )
+                    )
+                except Exception as exc:
+                    logger.opt(exception=exc).warning("embedding forward pass failed")
+                    self.event_sender.send(
+                        ChunkGenerated(
+                            command_id=command_id,
+                            chunk=ErrorChunk(
+                                model=model_id,
+                                error_message=str(exc),
+                            ),
+                        )
+                    )
 
                 self.current_status = RunnerReady()
 
@@ -198,7 +208,10 @@ class Runner:
                 self.current_status = RunnerShutdown()
 
             case _:
-                logger.warning(
-                    f"embedding runner ignoring task {task.__class__.__name__} "
-                    f"in status {self.current_status.__class__.__name__}"
+                message = (
+                    f"embedding runner received unsupported task "
+                    f"{task.__class__.__name__} in status "
+                    f"{self.current_status.__class__.__name__}"
                 )
+                logger.error(message)
+                self.acknowledge_task(task)

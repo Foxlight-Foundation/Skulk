@@ -2566,7 +2566,7 @@ class API:
         if not texts:
             raise HTTPException(status_code=400, detail="input must not be empty")
 
-        model_id = ModelId(request.model)
+        model_id = await self._resolve_and_validate_text_model(ModelId(request.model))
         command = TextEmbedding(
             task_params=TextEmbeddingTaskParams(
                 model=model_id,

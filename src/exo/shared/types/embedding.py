@@ -1,5 +1,7 @@
 """Canonical internal type for text embedding task parameters."""
 
+from typing import Literal
+
 from pydantic import BaseModel
 
 from exo.shared.types.common import ModelId
@@ -14,4 +16,4 @@ class TextEmbeddingTaskParams(BaseModel, frozen=True):
 
     model: ModelId
     input_texts: list[str]
-    encoding_format: str = "float"  # "float" or "base64"
+    encoding_format: Literal["float", "base64"] = "float"
