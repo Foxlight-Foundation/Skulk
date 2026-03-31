@@ -395,6 +395,8 @@ def make_kv_cache(
         try:
             from optiq.core.turbo_kv_cache import (  # type: ignore[import-untyped]
                 TurboQuantKVCache as OptiqKVCache,
+            )
+            from optiq.core.turbo_kv_cache import (
                 patch_attention,
             )
         except ImportError as exc:

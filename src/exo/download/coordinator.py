@@ -189,7 +189,7 @@ class DownloadCoordinator:
                         )
                     else:
                         logger.info(
-                            f"DownloadCoordinator: skipping KV backend update (user env var override active)"
+                            "DownloadCoordinator: skipping KV backend update (user env var override active)"
                         )
                 # Apply HF token if not user-set
                 hf_token = raw.get("hf_token")

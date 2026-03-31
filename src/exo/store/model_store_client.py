@@ -821,7 +821,7 @@ class ModelStoreDownloader(ShardDownloader):
             except (RuntimeError, TimeoutError) as exc:
                 raise ModelNotInStoreError(
                     f"Store host failed to download {model_id}: {exc}"
-                )
+                ) from exc
             # Model now in store — stage it
             path = await self._store_client.stage_shard(
                 model_id, dest_path, on_progress=None,

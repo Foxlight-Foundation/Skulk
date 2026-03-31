@@ -60,7 +60,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, final
@@ -367,7 +367,7 @@ class ModelStore:
                 def make_progress_cb(fsize: int):
                     def cb(curr: int, total: int, is_renamed: bool) -> None:
                         nonlocal downloaded_bytes
-                        status.progress = (downloaded_bytes + curr) / max(total_bytes, 1)
+                        status.progress = (downloaded_bytes + curr) / max(total_bytes, 1)  # noqa: B023
                     return cb
 
                 await download_file_with_retry(

@@ -12,9 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, cast
 from uuid import uuid4
 
-import yaml
-
 import anyio
+import yaml
 from anyio import BrokenResourceError
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -2387,7 +2386,7 @@ class API:
         try:
             ExoConfig.model_validate(config_data)
         except Exception as exc:
-            raise HTTPException(status_code=422, detail=str(exc))
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         config_yaml = yaml.safe_dump(
             config_data, default_flow_style=False, sort_keys=False
         )
@@ -2401,9 +2400,8 @@ class API:
         # Apply inference config to env var immediately so next model launch uses it.
         # Don't overwrite if user provided the env var at launch.
         inference = config_data.get("inference")
-        if isinstance(inference, dict) and "kv_cache_backend" in inference:
-            if not os.environ.get("_EXO_KV_BACKEND_USER_SET"):
-                os.environ["EXO_KV_CACHE_BACKEND"] = str(inference["kv_cache_backend"])
+        if isinstance(inference, dict) and "kv_cache_backend" in inference and not os.environ.get("_EXO_KV_BACKEND_USER_SET"):
+            os.environ["EXO_KV_CACHE_BACKEND"] = str(inference["kv_cache_backend"])
         # Apply HF token immediately
         hf_token = config_data.get("hf_token")
         if hf_token and "HF_TOKEN" not in os.environ:
@@ -2460,8 +2458,8 @@ class API:
                 ],
                 key=lambda d: d["name"],
             )
-        except PermissionError:
-            raise HTTPException(status_code=403, detail="Permission denied")
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail="Permission denied") from exc
         return JSONResponse({"path": str(resolved), "directories": dirs})
 
     async def get_node_identity(self) -> JSONResponse:
@@ -2533,7 +2531,7 @@ class API:
                 candidate_bits=candidate_bits,
             )
         except RuntimeError as exc:
-            raise HTTPException(status_code=409, detail=str(exc))
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return JSONResponse({
             "modelId": model_id,
             "status": "started",
