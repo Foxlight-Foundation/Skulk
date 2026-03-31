@@ -10,6 +10,7 @@ import {
   type InstanceStatus,
 } from '../types/models';
 
+/** Inputs used to build the dashboard's model-picker state machine. */
 export interface UseModelPickerOptions {
   models: ModelInfo[];
   favorites: Set<string>;
@@ -20,6 +21,7 @@ export interface UseModelPickerOptions {
   instanceStatuses?: Record<string, InstanceStatus>;
 }
 
+/** State, setters, and derived groups exposed by {@link useModelPicker}. */
 export interface UseModelPickerReturn {
   /* state */
   searchQuery: string;
@@ -50,6 +52,7 @@ export interface UseModelPickerReturn {
   recentGroups: ModelGroup[];
 }
 
+/** Manage model-picker filtering, grouping, favorites, recents, and fit-based recommendations. */
 export function useModelPicker({
   models,
   favorites,

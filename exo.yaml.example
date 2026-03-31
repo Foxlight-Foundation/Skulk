@@ -1,21 +1,20 @@
-# exo.yaml - cluster configuration for Skulk
+# exo.yaml - optional Skulk cluster configuration
 #
-# You can configure much of this from the dashboard at:
+# You can manage much of this from the dashboard at:
 # http://localhost:52415
 #
-# If this file is absent, Skulk keeps its zero-config behavior and runs
-# without model-store features.
+# If this file is absent, Skulk keeps its zero-config behavior.
 #
-# This file is especially useful for:
-# - model_store
-# - inference.kv_cache_backend
-# - hf_token
+# This file is most useful when you want to:
+# - enable the shared model store
+# - choose an inference.kv_cache_backend
+# - persist an hf_token
 #
-# If you edit it manually for a cluster, keep it at the same relative path
-# on every node.
+# If you are using a cluster and editing this manually, keep it at the same
+# relative path on every node.
 
 model_store:
-  # Set false to disable the model store without deleting the file.
+  # Set to false to disable the model store without deleting the file.
   enabled: true
 
   # Hostname or libp2p node ID of the store host.

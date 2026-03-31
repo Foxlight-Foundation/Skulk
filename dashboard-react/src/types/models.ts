@@ -1,3 +1,4 @@
+/** Dashboard-friendly model metadata derived from the Skulk model catalog. */
 export interface ModelInfo {
   id: string;
   name?: string;
@@ -12,6 +13,7 @@ export interface ModelInfo {
   hugging_face_id?: string;
 }
 
+/** Group of related model variants shown as one family in the picker UI. */
 export interface ModelGroup {
   id: string;
   name: string;
@@ -22,6 +24,7 @@ export interface ModelGroup {
   hasMultipleVariants: boolean;
 }
 
+/** Filter state for the dashboard model picker. */
 export interface FilterState {
   capabilities: string[];
   sizeRange: { min: number; max: number } | null;
@@ -38,17 +41,20 @@ export const EMPTY_FILTERS: FilterState = {
 
 export type ModelFitStatus = 'fits_now' | 'fits_cluster_capacity' | 'too_large';
 
+/** Availability of a model across nodes or store-backed downloads. */
 export interface DownloadAvailability {
   available: boolean;
   nodeNames: string[];
   nodeIds: string[];
 }
 
+/** UI-friendly summary of whether a model is already launched and ready. */
 export interface InstanceStatus {
   status: string;
   statusClass: string;
 }
 
+/** Lightweight search result returned by the Hugging Face search API. */
 export interface HuggingFaceModel {
   id: string;
   author: string;
@@ -58,6 +64,7 @@ export interface HuggingFaceModel {
   tags: string[];
 }
 
+/** Progress snapshot for a download shown in the dashboard. */
 export interface DownloadProgress {
   totalBytes: number;
   downloadedBytes: number;
@@ -73,6 +80,7 @@ export interface DownloadProgress {
   }>;
 }
 
+/** Placement preview returned by the Skulk placement preview endpoint. */
 export interface PlacementPreview {
   model_id: string;
   sharding: 'Pipeline' | 'Tensor';
@@ -105,8 +113,8 @@ export const SIZE_RANGES = [
 export type PickerMode = 'launch' | 'store-download';
 
 /**
- * Group ModelInfo[] by base_model (or model id if no base_model).
- * Variants sorted by size ascending; smallest tracked for group display.
+ * Group model variants by base model (or model id if no base model is present).
+ * Variants are sorted by size ascending so the UI can show the smallest representative first.
  */
 export function groupModels(models: ModelInfo[]): ModelGroup[] {
   const map = new Map<string, ModelInfo[]>();

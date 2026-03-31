@@ -1,3 +1,4 @@
+/** User-selected file staged for chat upload before sending. */
 export interface ChatUploadedFile {
   id: string;
   name: string;
@@ -7,6 +8,7 @@ export interface ChatUploadedFile {
   preview?: string;
 }
 
+/** Attachment persisted on an individual chat message. */
 export interface MessageAttachment {
   id: string;
   name: string;
@@ -16,6 +18,7 @@ export interface MessageAttachment {
   textContent?: string;
 }
 
+/** One chat message in a conversation, including optional reasoning and token metadata. */
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -34,6 +37,7 @@ export interface ChatMessage {
   }>;
 }
 
+/** Conversation thread persisted in the dashboard chat store. */
 export interface Conversation {
   id: string;
   name: string;
@@ -45,6 +49,7 @@ export interface Conversation {
   originNodeId?: string;
 }
 
+/** Model metadata needed by the chat UI. */
 export interface ChatModelInfo {
   id: string;
   name: string;
@@ -55,6 +60,7 @@ export interface ChatModelInfo {
   quantization: string;
 }
 
+/** Classify an uploaded file into the coarse categories used by the chat UI. */
 export function getFileCategory(type: string, name: string): 'image' | 'text' | 'pdf' | 'audio' | 'other' {
   if (type.startsWith('image/')) return 'image';
   if (type.startsWith('text/') || name.endsWith('.txt') || name.endsWith('.md') || name.endsWith('.json') || name.endsWith('.csv')) return 'text';
@@ -63,6 +69,7 @@ export function getFileCategory(type: string, name: string): 'image' | 'text' | 
   return 'other';
 }
 
+/** Return a small emoji icon used by the chat attachments UI. */
 export function getFileIcon(type: string, name: string): string {
   switch (getFileCategory(type, name)) {
     case 'image': return '🖼';
@@ -73,6 +80,7 @@ export function getFileIcon(type: string, name: string): string {
   }
 }
 
+/** Format a byte count into a compact human-readable file-size string. */
 export function formatFileSize(bytes: number): string {
   if (bytes === 0) return '0 B';
   const k = 1024;
@@ -81,6 +89,7 @@ export function formatFileSize(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
+/** Shorten long file names while preserving the extension when possible. */
 export function truncateFileName(name: string, maxLen = 20): string {
   if (name.length <= maxLen) return name;
   const dotIdx = name.lastIndexOf('.');

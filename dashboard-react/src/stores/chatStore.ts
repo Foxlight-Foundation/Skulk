@@ -33,6 +33,7 @@ function autoName(content: string): string {
 
 /* ── Store Interface ──────────────────────────────────── */
 
+/** Persisted chat state keyed by conversation id and selected model. */
 export interface ChatState {
   conversations: Record<string, Conversation>;
   activeConversationId: string | null;
@@ -53,17 +54,21 @@ export interface ChatState {
 
 /* ── Selectors ────────────────────────────────────────── */
 
+/** Return the currently active conversation, if one is selected. */
 export const selectActiveConversation = (state: ChatState): Conversation | null =>
   state.activeConversationId
     ? state.conversations[state.activeConversationId] ?? null
     : null;
 
+/** Return the messages for the active conversation. */
 export const selectActiveMessages = (state: ChatState): ChatMessage[] =>
   selectActiveConversation(state)?.messages ?? [];
 
+/** Return all conversations sorted by last update time, newest first. */
 export const selectAllConversationsSorted = (state: ChatState): Conversation[] =>
   Object.values(state.conversations).sort((a, b) => b.updatedAt - a.updatedAt);
 
+/** Build a selector that returns conversations for one model, newest first. */
 export const selectConversationsForModel = (modelId: string) => (state: ChatState): Conversation[] =>
   Object.values(state.conversations)
     .filter((c) => c.modelId === modelId)
@@ -71,6 +76,7 @@ export const selectConversationsForModel = (modelId: string) => (state: ChatStat
 
 /* ── Store ────────────────────────────────────────────── */
 
+/** Persisted Zustand store that backs the dashboard chat experience. */
 export const useChatStore = create<ChatState>()(
   persist(devtools(
     (set, get) => ({

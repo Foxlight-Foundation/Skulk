@@ -2,18 +2,22 @@
 
 # Skulk API
 
-Skulk exposes an API server at `http://localhost:52415`.
-It serves both compatibility APIs for existing tools and Skulk-specific control endpoints for placement, downloads, store management, config, and debugging.
+Skulk serves an API at `http://localhost:52415`.
 
-## Start Here
+That API has two jobs:
 
-If you are new to Skulk, remember this rule:
+- compatibility endpoints for tools that already speak OpenAI, Claude, or Ollama-style APIs
+- Skulk-specific control endpoints for placement, downloads, config, tracing, and model-store workflows
 
-**A chat request only works after the target model has been placed and is running.**
+## The Most Important Rule
+
+For text generation, Skulk is not just a stateless HTTP server.
+
+**A model has to be placed and running before chat-style requests will work.**
 
 The dashboard enforces this too: it will not let you chat until a model is placed and ready.
 
-If you call `/v1/chat/completions` too early, Skulk will usually return:
+If you call `/v1/chat/completions` too early, Skulk will usually return something like:
 
 ```json
 {
@@ -25,23 +29,26 @@ If you call `/v1/chat/completions` too early, Skulk will usually return:
 }
 ```
 
-The happy path is:
+## Start Here
 
-1. Start Skulk.
-2. Preview or create a placement.
-3. Launch the model.
-4. Then send chat, responses, Claude, or Ollama-style requests.
+If you want your first successful API call, use this flow:
+
+1. Start Skulk with `uv run exo`.
+2. Preview valid placements for a model.
+3. Launch a placement.
+4. Wait for the model to be ready.
+5. Send a chat request.
 
 ## Quick Navigation
 
-- **I want a first successful API call**: [First Success Flow](#first-success-flow)
-- **I want OpenAI SDK compatibility**: [OpenAI Chat Completions](#openai-chat-completions)
-- **I want Claude compatibility**: [Claude Messages API](#claude-messages-api)
-- **I want OpenAI Responses compatibility**: [OpenAI Responses API](#openai-responses-api)
-- **I want Ollama compatibility**: [Ollama API](#ollama-api)
-- **I want placement and launch endpoints**: [Model Placement and Instance Management](#model-placement-and-instance-management)
-- **I want model store or config endpoints**: [Model Store Endpoints](#model-store-endpoints) and [Configuration Endpoints](#configuration-endpoints)
-- **I want debugging endpoints**: [State, Events, and Tracing](#state-events-and-tracing)
+- First working request: [First Success Flow](#first-success-flow)
+- OpenAI-compatible chat: [OpenAI Chat Completions](#openai-chat-completions)
+- OpenAI Responses format: [OpenAI Responses API](#openai-responses-api)
+- Claude format: [Claude Messages API](#claude-messages-api)
+- Ollama compatibility: [Ollama API](#ollama-api)
+- Placement and launch: [Placement and Instance Management](#placement-and-instance-management)
+- Store and config: [Model Store Endpoints](#model-store-endpoints) and [Configuration Endpoints](#configuration-endpoints)
+- Debugging: [State, Events, and Tracing](#state-events-and-tracing)
 
 ## First Success Flow
 
@@ -51,13 +58,15 @@ The happy path is:
 uv run exo
 ```
 
-### 2. Preview placements for a model
+### 2. Preview placements
 
 ```bash
 curl "http://localhost:52415/instance/previews?model_id=mlx-community/Llama-3.2-1B-Instruct-4bit"
 ```
 
-### 3. Launch a simple placement
+This shows what Skulk can actually place on the current node or cluster.
+
+### 3. Launch a placement
 
 ```bash
 curl -X POST http://localhost:52415/place_instance \
@@ -77,9 +86,11 @@ curl -X POST http://localhost:52415/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
-    "messages": [{"role": "user", "content": "Hello!"}]
+    "messages": [{"role": "user", "content": "Hello from Skulk"}]
   }'
 ```
+
+If this fails with `404 No instance found for model ...`, the placement is not ready yet or never launched successfully.
 
 ## Endpoint Overview
 
@@ -95,7 +106,7 @@ curl -X POST http://localhost:52415/v1/chat/completions \
 - `GET /ollama/api/ps`
 - `GET /ollama/api/version`
 
-### Skulk Control Plane APIs
+### Skulk Control APIs
 
 - `GET /v1/models`
 - `GET /models/search`
@@ -181,7 +192,7 @@ for chunk in stream:
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `model` | string | Required. Must match a running instance. |
+| `model` | string | Required. Must match a placed and running model. |
 | `messages` | array | Required. Supports `system`, `user`, `assistant`, `developer`, `tool`, `function`. |
 | `stream` | boolean | Use `true` for SSE streaming. |
 | `temperature` | number | Sampling temperature. |
@@ -201,8 +212,8 @@ for chunk in stream:
 | `tool_choice` | string or object | `auto`, `none`, or a specific tool selection. |
 | `parallel_tool_calls` | boolean | Accepted for compatibility. |
 | `enable_thinking` | boolean | Skulk extension for reasoning-capable models. |
-| `reasoning_effort` | string | Reasoning hint when supported by the model or adapter. |
-| `response_format` | object | Accepted, but not strictly enforced. |
+| `reasoning_effort` | string | Reasoning hint when supported. |
+| `response_format` | object | Accepted for compatibility, not strictly enforced. |
 | `stream_options` | object | Includes `include_usage`. |
 | `user` | string | Optional caller identifier. |
 
@@ -215,7 +226,7 @@ for chunk in stream:
 }
 ```
 
-Assistant messages may also include `tool_calls`.
+Assistant messages may include `tool_calls`.
 Tool response messages should include `tool_call_id`.
 
 ### Finish Reasons
@@ -232,8 +243,6 @@ Tool response messages should include `tool_call_id`.
 ## Tool Use
 
 Skulk supports OpenAI-style function calling.
-
-### Example
 
 ```python
 tools = [{
@@ -318,13 +327,11 @@ curl -X POST http://localhost:52415/v1/responses \
   }'
 ```
 
-Skulk also supports streaming on this endpoint.
-
 ## Claude Messages API
 
 **POST** `/v1/messages`
 
-Use this when you want Anthropic-style request and response shapes.
+Use this when your client expects Anthropic-style request and response shapes.
 
 ```bash
 curl -X POST http://localhost:52415/v1/messages \
@@ -336,11 +343,9 @@ curl -X POST http://localhost:52415/v1/messages \
   }'
 ```
 
-Claude-style streaming events are supported.
-
 ## Ollama API
 
-Skulk supports several Ollama-compatible endpoints to make tools like OpenWebUI easier to connect.
+Skulk supports several Ollama-compatible endpoints so tools like OpenWebUI can connect with minimal glue code.
 
 ### Chat
 
@@ -378,12 +383,6 @@ curl -X POST http://localhost:52415/ollama/api/show \
   -d '{"name": "mlx-community/Llama-3.2-1B-Instruct-4bit"}'
 ```
 
-### Running models
-
-```bash
-curl http://localhost:52415/ollama/api/ps
-```
-
 ## Model Discovery
 
 ### List models
@@ -394,13 +393,7 @@ curl http://localhost:52415/ollama/api/ps
 curl http://localhost:52415/v1/models
 ```
 
-This returns known model cards, not just currently running instances.
-
-### List downloaded models only
-
-```bash
-curl "http://localhost:52415/v1/models?status=downloaded"
-```
+This returns known model cards, not just running instances.
 
 ### Search Hugging Face
 
@@ -415,27 +408,9 @@ Behavior note:
 - Skulk searches `mlx-community` first.
 - If that returns nothing, it falls back to a broader Hugging Face search.
 
-### Add a custom model card
+## Placement and Instance Management
 
-**POST** `/models/add`
-
-```bash
-curl -X POST http://localhost:52415/models/add \
-  -H 'Content-Type: application/json' \
-  -d '{"model_id": "mlx-community/my-custom-model"}'
-```
-
-### Delete a custom model card
-
-**DELETE** `/models/custom/{model_id}`
-
-```bash
-curl -X DELETE http://localhost:52415/models/custom/mlx-community/my-custom-model
-```
-
-## Model Placement and Instance Management
-
-These endpoints are Skulk-specific and matter a lot for first-time users.
+These endpoints are the heart of the Skulk control plane.
 
 ### Quick launch
 
@@ -452,8 +427,6 @@ curl -X POST http://localhost:52415/place_instance \
   }'
 ```
 
-Fields:
-
 | Field | Meaning |
 |-------|---------|
 | `model_id` | Hugging Face-style model ID |
@@ -461,7 +434,7 @@ Fields:
 | `instance_meta` | `MlxRing` or `MlxJaccl` |
 | `min_nodes` | Minimum nodes required for the placement |
 
-### Preview all valid placements
+### Preview valid placements
 
 **GET** `/instance/previews?model_id=...`
 
@@ -469,15 +442,13 @@ Fields:
 curl "http://localhost:52415/instance/previews?model_id=mlx-community/Qwen3.5-9B-4bit"
 ```
 
-This is one of the most useful endpoints in Skulk.
-It shows which combinations of sharding mode, networking mode, and node count are valid.
-Invalid combinations include an error message.
+This is usually the best first Skulk-specific endpoint to call. It shows which combinations of sharding mode, networking mode, and node count are valid, and why invalid combinations fail.
 
 ### Build a placement manually
 
 **GET** `/instance/placement`
 
-Use this if you want to request a specific combination and inspect the exact instance shape.
+Use this when you want a specific combination and want to inspect the exact instance shape before launch.
 
 ### Create an instance from a fully specified placement
 
@@ -493,17 +464,13 @@ Use this when you already have an `instance` object and want exact control.
 
 **DELETE** `/instance/{instance_id}`
 
-```bash
-curl -X DELETE http://localhost:52415/instance/YOUR_INSTANCE_ID
-```
-
 ## Download Management
 
 ### Start a node download
 
 **POST** `/download/start`
 
-This is a lower-level endpoint used when you want explicit download control.
+Lower-level endpoint for explicit node download control.
 
 ### Delete a node download
 
@@ -512,37 +479,34 @@ This is a lower-level endpoint used when you want explicit download control.
 ## Model Store Endpoints
 
 These endpoints are available when the model store is configured.
+
 If it is not configured, Skulk returns `503 Store not configured`.
 
 ### Store health
 
 **GET** `/store/health`
 
-```bash
-curl http://localhost:52415/store/health
-```
+Use this to confirm whether the store is configured and reachable.
 
 ### Store registry
 
 **GET** `/store/registry`
 
-```bash
-curl http://localhost:52415/store/registry
-```
+Use this to inspect which models the shared store knows about.
 
-### Active store downloads
+### Store downloads
 
 **GET** `/store/downloads`
+
+Use this to inspect in-progress shared-store download activity.
 
 ### Request a store download
 
 **POST** `/store/models/{model_id}/download`
 
-```bash
-curl -X POST http://localhost:52415/store/models/mlx-community/Qwen3.5-9B-4bit/download
-```
+Use this when you want the store host to fetch and register a model.
 
-### Check store download status
+### Store download status
 
 **GET** `/store/models/{model_id}/download/status`
 
@@ -554,39 +518,13 @@ curl -X POST http://localhost:52415/store/models/mlx-community/Qwen3.5-9B-4bit/d
 
 **POST** `/store/purge-staging`
 
-```bash
-curl -X POST http://localhost:52415/store/purge-staging \
-  -H 'Content-Type: application/json' \
-  -d '{}'
-```
+Use this to remove staged model artifacts from nodes without deleting the store copy itself.
 
-You can also target one model:
-
-```bash
-curl -X POST http://localhost:52415/store/purge-staging \
-  -H 'Content-Type: application/json' \
-  -d '{"model_id": "mlx-community/Qwen3.5-9B-4bit"}'
-```
-
-### Start OptiQ mixed-precision optimization
+### Start optimization
 
 **POST** `/store/models/{model_id}/optimize`
 
-```bash
-curl -X POST http://localhost:52415/store/models/mlx-community/Qwen3.5-9B-4bit/optimize \
-  -H 'Content-Type: application/json' \
-  -d '{"target_bpw": 4.5, "candidate_bits": [4, 8]}'
-```
-
-### Check optimization status
-
-**GET** `/store/models/{model_id}/optimize/status`
-
-Common responses:
-
-- `404 No optimization job found`
-- `409 ...` if an optimization job is already in progress
-- `503 Model optimizer not available` when the store is not configured
+Use this for workflows such as model optimization or alternate artifact generation.
 
 ## Configuration Endpoints
 
@@ -594,38 +532,29 @@ Common responses:
 
 **GET** `/config`
 
-```bash
-curl http://localhost:52415/config
-```
-
-Behavior:
-
-- Returns the current config file contents.
-- Strips `hf_token` from the visible config for safety.
-- Includes effective runtime values like `kv_cache_backend`.
+Returns the current cluster config and config path. Sensitive values such as `hf_token` are stripped from the returned config.
 
 ### Update config
 
 **PUT** `/config`
 
-```bash
-curl -X PUT http://localhost:52415/config \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "config": {
-      "inference": {"kv_cache_backend": "optiq"},
-      "hf_token": "hf_your_token_here"
-    }
-  }'
-```
+Updates cluster-wide config. Important behavior:
 
-Behavior notes:
+- if you omit `hf_token`, Skulk preserves the existing value
+- inference changes affect future launches
+- model-store location changes generally require restart
 
-- Skulk validates the payload against `exo.yaml` schema.
-- Config is written locally and broadcast to the cluster.
-- If you omit `hf_token`, Skulk preserves the existing saved token.
-- Inference config changes affect future launches.
-- Model store changes still require restart.
+### Filesystem browse
+
+**GET** `/filesystem/browse`
+
+Used by the dashboard to browse a safe subset of the filesystem when selecting config paths.
+
+### Node identity
+
+**GET** `/node/identity`
+
+Returns hostname, preferred IP, and node identity information used by the dashboard.
 
 ## State, Events, and Tracing
 
@@ -633,93 +562,28 @@ Behavior notes:
 
 **GET** `/state`
 
-This is the best general debugging endpoint.
-It includes topology, nodes, instances, runners, and downloads.
+Returns the cluster state as Skulk currently sees it.
 
-### Event stream snapshot
+### Event log
 
 **GET** `/events`
 
-Returns the stored event log as JSON.
+Returns stored events from the API-side event log.
 
 ### Traces
 
 - `GET /v1/traces`
+- `POST /v1/traces/delete`
 - `GET /v1/traces/{task_id}`
 - `GET /v1/traces/{task_id}/stats`
 - `GET /v1/traces/{task_id}/raw`
-- `POST /v1/traces/delete`
 
-Use tracing when you need performance investigation rather than normal day-to-day usage.
+Use these endpoints when you are debugging generation behavior, cluster execution, or performance.
 
-## Filesystem and Identity Helpers
+## Helpful Next Docs
 
-### Browse filesystem
-
-**GET** `/filesystem/browse?path=/Volumes`
-
-Used by the dashboard settings UI for choosing store paths.
-
-Behavior notes:
-
-- Browsing is restricted to allowed roots.
-- Typical allowed roots include `/Volumes`, `/home`, `/mnt`, `/tmp`, and `/opt`.
-- Returns `400` for invalid paths and `403` for permission problems.
-
-### Node identity
-
-**GET** `/node/identity`
-
-Returns:
-
-- `nodeId`
-- `hostname`
-- preferred IPv4 LAN address when available
-
-## Image Endpoints
-
-Skulk also supports image-generation and image-editing APIs.
-These only work when image models are enabled and the relevant image model is already placed.
-
-Endpoints:
-
-- `POST /v1/images/generations`
-- `POST /bench/images/generations`
-- `POST /v1/images/edits`
-- `POST /bench/images/edits`
-- `GET /images`
-- `GET /images/{image_id}`
-
-## Cancellation
-
-**POST** `/v1/cancel/{command_id}`
-
-Use this to cancel an active text or image command when you still know the command ID.
-
-## What Is Not Implemented Yet
-
-| Feature | Status |
-|---------|--------|
-| `/v1/embeddings` | Not implemented |
-| Strict JSON mode enforcement | Not implemented |
-| JSON schema enforcement | Not implemented |
-| API key authentication | Not implemented |
-| Rate limiting | Not implemented |
-| `/v1/audio` | Not implemented |
-| `/v1/files` | Not implemented |
-| `/v1/fine_tuning` | Not implemented |
-| `/v1/batches` | Not implemented |
-
-## Practical Tips
-
-- Use `/instance/previews` early and often. It explains why a placement is invalid.
-- Use `/state` when you are not sure what the cluster thinks is running.
-- Use `/v1/models?status=downloaded` to see what is locally available.
-- Use streaming for better UX in chat clients.
-- Use the dashboard if you are learning the system and the API if you are integrating code.
-
-## Related Docs
-
-- [docs/model-store.md](model-store.md)
-- [docs/kv-cache-backends.md](kv-cache-backends.md)
-- [docs/architecture.md](architecture.md)
+- [README](https://github.com/Foxlight-Foundation/Skulk/blob/main/README.md)
+- [Model store guide](model-store.md)
+- [Architecture overview](architecture.md)
+- [OpenAPI schema](reference/openapi.md)
+- [API Reference (ReDoc)](reference/api-reference.md)

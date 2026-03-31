@@ -8,7 +8,7 @@
 
 Skulk is a fork of EXO for running AI models across one or more machines as a cluster.
 It keeps EXO's distributed inference foundation, then extends it with a central model store,
-a more modern dashboard, richer API workflows, sophisticated cache quantization, support for more model families such as embedding, TTS, etc. and cluster-friendly configuration management.
+a more modern dashboard, richer API workflows, sophisticated cache quantization, support for more model families such as embeddings and TTS, and cluster-friendly configuration management.
 
 > Skulk is maintained by [Foxlight Foundation](https://github.com/foxlight-foundation) and forked from [exo](https://github.com/exo-explore/exo).
 
@@ -19,9 +19,9 @@ a more modern dashboard, richer API workflows, sophisticated cache quantization,
 - Use a central model store so the cluster downloads once and stages locally.
 - Talk to the cluster through OpenAI Chat Completions, OpenAI Responses, Claude Messages, or Ollama-compatible APIs.
 - Experiment with advanced placement modes, RDMA, and KV cache backends when you are ready.
-- Place non-generative models such as embedding.
-- Implement TTS workflows
-- Actually use your cluster for inference workloads.
+- Run non-chat workloads such as embeddings and other specialized model flows.
+- Build TTS-oriented and other API-driven workflows on top of the cluster.
+- Actually use your cluster for real inference workloads instead of treating it as a demo.
 
 ## Prerequisites
 
@@ -53,7 +53,7 @@ rustup toolchain install nightly
 
 ## Getting Started
 
-If you are brand new to Skulk, this is the best order to follow:
+If you are brand new to Skulk, follow this order:
 
 1. Install the prerequisites for your platform.
 2. Clone the repo.
@@ -65,6 +65,14 @@ If you are brand new to Skulk, this is the best order to follow:
 8. Launch a model from the Model Store view, or place one through the API.
 9. Wait until the model is placed and ready.
 10. Then chat in the dashboard or send API requests.
+
+Skulk's core runtime flow is:
+
+1. start one or more nodes
+2. confirm topology
+3. place a model
+4. wait for it to become ready
+5. then use the dashboard or API
 
 Important behavior:
 
@@ -132,7 +140,8 @@ Use the instructions in [Prerequisites](#prerequisites).
 ```bash
 git clone https://github.com/foxlight-foundation/Skulk.git
 cd Skulk
-cd dashboard-react && npm install && npm run build && cd ..
+npm --prefix dashboard-react install
+npm --prefix dashboard-react run build
 uv sync
 uv run exo
 ```
@@ -153,12 +162,7 @@ From there:
 
 ### 4. Launch a Model with the API Instead
 
-If you would rather use the API directly, here is the simplest flow:
-
-You have two easy options:
-
-- Open the dashboard, go to the Model Store view, launch a model there, and wait for it to become ready before opening chat.
-- Use the API directly.
+If you would rather use the API directly, this is the simplest flow.
 
 1. Preview placements:
 
@@ -310,7 +314,7 @@ Remember: that model must already be placed and running.
 
 Skulk supports both environment variables and `exo.yaml`.
 
-Today, `exo.yaml` is especially useful for:
+`exo.yaml` is especially useful for:
 
 - `model_store`
 - `inference.kv_cache_backend`
