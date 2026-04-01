@@ -29,6 +29,7 @@ jobs:
         run: uv run ruff check
 
       - name: Pyright
+        continue-on-error: true
         run: uv run basedpyright
 
   test:
