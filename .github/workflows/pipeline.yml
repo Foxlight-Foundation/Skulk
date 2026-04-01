@@ -28,10 +28,6 @@ jobs:
       - name: Ruff check
         run: uv run ruff check
 
-      - name: Pyright
-        continue-on-error: true
-        run: uv run basedpyright
-
   test:
     name: Test
     runs-on: macos-26
