@@ -49,7 +49,9 @@ class OllamaChatRequest(BaseModel, frozen=True):
         json_schema_extra={
             "example": {
                 "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
-                "messages": [{"role": "user", "content": "Hello from Ollama-compatible Skulk"}],
+                "messages": [
+                    {"role": "user", "content": "Hello from Ollama-compatible Skulk"}
+                ],
                 "stream": False,
             }
         }

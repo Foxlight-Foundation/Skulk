@@ -57,6 +57,7 @@ def add_model_search_path(path: Path) -> None:
     existing = list(EXO_MODELS_PATH) if EXO_MODELS_PATH else []
     EXO_MODELS_PATH = tuple(existing + _extra_model_paths)
 
+
 _RESOURCES_DIR_ENV = os.environ.get("EXO_RESOURCES_DIR", None)
 RESOURCES_DIR = (
     find_resources() if _RESOURCES_DIR_ENV is None else Path.home() / _RESOURCES_DIR_ENV

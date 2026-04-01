@@ -18,7 +18,9 @@ class OptimizationProgress:
     """Current state of an optimization job."""
 
     model_id: str
-    status: str  # "pending", "analyzing", "optimizing", "converting", "complete", "failed"
+    status: (
+        str  # "pending", "analyzing", "optimizing", "converting", "complete", "failed"
+    )
     progress: float = 0.0  # 0.0 - 1.0
     message: str = ""
     result_path: str | None = None
@@ -63,7 +65,9 @@ class ModelOptimizer:
         )
 
         task = asyncio.create_task(
-            self._run_pipeline(model_id, target_bpw, candidate_bits, group_size, n_calibration)
+            self._run_pipeline(
+                model_id, target_bpw, candidate_bits, group_size, n_calibration
+            )
         )
         self._tasks[model_id] = task
 
@@ -104,7 +108,9 @@ class ModelOptimizer:
                 if job.achieved_bpw
                 else "Optimization complete"
             )
-            logger.info(f"ModelOptimizer: {model_id} optimization complete at {job.result_path}")
+            logger.info(
+                f"ModelOptimizer: {model_id} optimization complete at {job.result_path}"
+            )
 
         except Exception as exc:
             job.status = "failed"
@@ -112,7 +118,9 @@ class ModelOptimizer:
             error_str = str(exc)
             # Provide user-friendly messages for known errors
             if "Unrecognized configuration class" in error_str:
-                job.error = "This model architecture is not supported by OptiQ optimization."
+                job.error = (
+                    "This model architecture is not supported by OptiQ optimization."
+                )
                 job.message = "Unsupported model architecture"
             elif "trust_remote_code" in error_str.lower():
                 job.error = "This model requires trust_remote_code which is disabled for security."
@@ -173,7 +181,9 @@ def _run_optiq_pipeline(
     # Extract key metrics from result
     optimization = result.get("optimization")
     achieved_bpw = getattr(optimization, "achieved_bpw", None) if optimization else None
-    estimated_size_mb = getattr(optimization, "estimated_size_mb", None) if optimization else None
+    estimated_size_mb = (
+        getattr(optimization, "estimated_size_mb", None) if optimization else None
+    )
 
     return {
         "optiq_path": result.get("optiq_path", output_dir),

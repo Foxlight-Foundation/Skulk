@@ -451,16 +451,26 @@ def make_kv_cache(
             for layer_i, entry in enumerate(template_cache):
                 if isinstance(entry, KVCache):
                     kv_pos += 1
-                    is_edge = kv_pos < OPTIQ_FP16_LAYERS or kv_pos >= max(num_kv - OPTIQ_FP16_LAYERS, 0)
+                    is_edge = kv_pos < OPTIQ_FP16_LAYERS or kv_pos >= max(
+                        num_kv - OPTIQ_FP16_LAYERS, 0
+                    )
                     if is_edge:
                         caches.append(KVCache())
                     else:
                         if 0 <= layer_i < len(model.layers):
-                            attn = getattr(model.layers[layer_i], "self_attn", model.layers[layer_i])
+                            attn = getattr(
+                                model.layers[layer_i],
+                                "self_attn",
+                                model.layers[layer_i],
+                            )
                             head_dim = getattr(attn, "head_dim", 128)
                         else:
                             head_dim = 128
-                        caches.append(OptiqKVCache(head_dim=head_dim, bits=OPTIQ_BITS, seed=42 + kv_pos))
+                        caches.append(
+                            OptiqKVCache(
+                                head_dim=head_dim, bits=OPTIQ_BITS, seed=42 + kv_pos
+                            )
+                        )
                 else:
                     caches.append(entry)
             return caches
@@ -473,7 +483,8 @@ def make_kv_cache(
             head_dim = 128
         n_layers = len(model.layers)
         return [
-            KVCache() if (i < OPTIQ_FP16_LAYERS or i >= n_layers - OPTIQ_FP16_LAYERS)
+            KVCache()
+            if (i < OPTIQ_FP16_LAYERS or i >= n_layers - OPTIQ_FP16_LAYERS)
             else OptiqKVCache(head_dim=head_dim, bits=OPTIQ_BITS, seed=42 + i)
             for i, _ in enumerate(model.layers)
         ]

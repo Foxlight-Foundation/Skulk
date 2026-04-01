@@ -13,9 +13,7 @@ KEEP_KV_SIZE: int | None = 1600
 QUANTIZE_MODEL_MODE: str | None = "affine"
 CACHE_GROUP_SIZE: int = 64
 KV_CACHE_BITS: int | None = (
-    int(os.environ["EXO_KV_CACHE_BITS"])
-    if "EXO_KV_CACHE_BITS" in os.environ
-    else None
+    int(os.environ["EXO_KV_CACHE_BITS"]) if "EXO_KV_CACHE_BITS" in os.environ else None
 )
 KVCacheBackend = Literal[
     "default",

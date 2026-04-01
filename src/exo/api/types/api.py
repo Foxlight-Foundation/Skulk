@@ -301,13 +301,9 @@ class CreateInstanceParams(BaseModel):
                                     }
                                 }
                             },
-                            "nodeToRunner": {
-                                "node-1": "runner-1"
-                            }
+                            "nodeToRunner": {"node-1": "runner-1"},
                         },
-                        "hostsByNode": {
-                            "node-1": []
-                        },
+                        "hostsByNode": {"node-1": []},
                         "ephemeralPort": 52416,
                     }
                 }
@@ -479,6 +475,7 @@ class ImageGenerationResponse(BaseModel):
 
 # ── Embeddings ──────────────────────────────────────────
 
+
 class EmbeddingRequest(BaseModel):
     model: str
     input: str | list[str]
@@ -561,7 +558,9 @@ class DeleteDownloadResponse(CamelCaseModel):
 
 class PurgeStagingRequest(CamelCaseModel):
     model_config = ConfigDict(
-        json_schema_extra={"example": {"modelId": "mlx-community/Llama-3.2-1B-Instruct-4bit"}}
+        json_schema_extra={
+            "example": {"modelId": "mlx-community/Llama-3.2-1B-Instruct-4bit"}
+        }
     )
 
     model_id: str | None = None

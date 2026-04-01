@@ -56,6 +56,7 @@ would be a concern, callers should wrap in ``anyio.to_thread.run_sync``.
 In practice, registry reads happen once per request and writes happen only
 when a new model is registered, so this is not a hot path.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -102,6 +103,7 @@ class StoreModelEntry(BaseModel):
 @dataclass
 class StoreDownloadStatus:
     """Tracks the progress of a store-side HuggingFace download."""
+
     model_id: str
     status: Literal["pending", "downloading", "complete", "failed"] = "pending"
     progress: float = 0.0
@@ -318,7 +320,9 @@ class ModelStore:
                 else:
                     return existing
             if self.is_in_store(model_id):
-                return StoreDownloadStatus(model_id=model_id, status="complete", progress=1.0)
+                return StoreDownloadStatus(
+                    model_id=model_id, status="complete", progress=1.0
+                )
             status = StoreDownloadStatus(model_id=model_id, status="pending")
             self._active_downloads[model_id] = status
         task = asyncio.create_task(self._do_download(model_id))
@@ -331,12 +335,18 @@ class ModelStore:
         if model_id in self._active_downloads:
             return self._active_downloads[model_id]
         if self.is_in_store(model_id):
-            return StoreDownloadStatus(model_id=model_id, status="complete", progress=1.0)
+            return StoreDownloadStatus(
+                model_id=model_id, status="complete", progress=1.0
+            )
         return None
 
     def list_active_downloads(self) -> list[StoreDownloadStatus]:
         """Return all in-progress or pending downloads."""
-        return [s for s in self._active_downloads.values() if s.status in ("pending", "downloading")]
+        return [
+            s
+            for s in self._active_downloads.values()
+            if s.status in ("pending", "downloading")
+        ]
 
     async def _do_download(self, model_id: str) -> None:
         """Download a model from HuggingFace into the store and register it."""
@@ -350,7 +360,9 @@ class ModelStore:
         status.status = "downloading"
         sanitized = model_id.replace("/", "--")
         target_dir = self._store_path / sanitized
-        logger.info(f"ModelStore: downloading {model_id} from HuggingFace to {target_dir}")
+        logger.info(
+            f"ModelStore: downloading {model_id} from HuggingFace to {target_dir}"
+        )
 
         try:
             await aios.makedirs(str(target_dir), exist_ok=True)
@@ -367,7 +379,10 @@ class ModelStore:
                 def make_progress_cb(fsize: int):
                     def cb(curr: int, total: int, is_renamed: bool) -> None:
                         nonlocal downloaded_bytes
-                        status.progress = (downloaded_bytes + curr) / max(total_bytes, 1)  # noqa: B023
+                        status.progress = (downloaded_bytes + curr) / max(
+                            total_bytes, 1
+                        )  # noqa: B023
+
                     return cb
 
                 await download_file_with_retry(
@@ -381,13 +396,19 @@ class ModelStore:
                 status.progress = downloaded_bytes / max(total_bytes, 1)
 
             # Register in the store
-            files = [str(p.relative_to(target_dir)) for p in target_dir.rglob("*") if p.is_file()]
+            files = [
+                str(p.relative_to(target_dir))
+                for p in target_dir.rglob("*")
+                if p.is_file()
+            ]
             total = sum(p.stat().st_size for p in target_dir.rglob("*") if p.is_file())
             self.register_model(model_id, target_dir, files, total)
 
             status.status = "complete"
             status.progress = 1.0
-            logger.info(f"ModelStore: downloaded {model_id} from HuggingFace ({total:,} bytes)")
+            logger.info(
+                f"ModelStore: downloaded {model_id} from HuggingFace ({total:,} bytes)"
+            )
 
         except Exception as exc:
             status.status = "failed"
