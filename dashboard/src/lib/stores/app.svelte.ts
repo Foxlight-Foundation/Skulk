@@ -245,7 +245,10 @@ interface RawStateResponse {
     }
   >;
   // RDMA ctl status per node
-  nodeRdmaCtl?: Record<string, { enabled: boolean; interfacesPresent?: boolean }>;
+  nodeRdmaCtl?: Record<
+    string,
+    { enabled: boolean; interfacesPresent?: boolean }
+  >;
   // Thunderbolt bridge status per node
   nodeThunderboltBridge?: Record<
     string,
@@ -572,7 +575,9 @@ class AppStore {
       }
     >
   >({});
-  nodeRdmaCtl = $state<Record<string, { enabled: boolean; interfacesPresent?: boolean }>>({});
+  nodeRdmaCtl = $state<
+    Record<string, { enabled: boolean; interfacesPresent?: boolean }>
+  >({});
   nodeThunderboltBridge = $state<
     Record<
       string,
@@ -3455,19 +3460,21 @@ export const browseFilesystem = async (
   if (!resp.ok) throw new Error(`Browse failed: ${resp.status}`);
   return await resp.json();
 };
-export const fetchNodeIdentity =
-  async (): Promise<NodeIdentityResponse> => {
-    const resp = await fetch("/node/identity");
-    if (!resp.ok) throw new Error(`Failed to fetch node identity: ${resp.status}`);
-    return await resp.json();
-  };
+export const fetchNodeIdentity = async (): Promise<NodeIdentityResponse> => {
+  const resp = await fetch("/node/identity");
+  if (!resp.ok)
+    throw new Error(`Failed to fetch node identity: ${resp.status}`);
+  return await resp.json();
+};
 export interface StoreDownloadProgress {
   modelId: string;
   status: "pending" | "downloading" | "complete" | "failed";
   progress: number;
   error?: string | null;
 }
-export const fetchStoreDownloads = async (): Promise<StoreDownloadProgress[]> => {
+export const fetchStoreDownloads = async (): Promise<
+  StoreDownloadProgress[]
+> => {
   try {
     const resp = await fetch("/store/downloads");
     if (!resp.ok) return [];
@@ -3484,7 +3491,8 @@ export const requestStoreDownload = async (
     `/store/models/${encodeURIComponent(modelId)}/download`,
     { method: "POST" },
   );
-  if (!resp.ok) throw new Error(`Store download request failed: ${resp.status}`);
+  if (!resp.ok)
+    throw new Error(`Store download request failed: ${resp.status}`);
   return await resp.json();
 };
 export const getStoreDownloadStatus = async (

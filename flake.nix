@@ -90,25 +90,6 @@
             projectRootFile = "flake.nix";
             programs = {
               nixpkgs-fmt.enable = true;
-              ruff-format = {
-                enable = true;
-                excludes = [ "rust/exo_pyo3_bindings/exo_pyo3_bindings.pyi" ];
-              };
-              rustfmt = {
-                enable = true;
-                package = config.rust.toolchain;
-              };
-              prettier = {
-                enable = true;
-                package = self'.packages.prettier-svelte;
-                includes = [ "*.ts" "*.svelte" ];
-              };
-              swift-format = {
-                enable = true;
-                package = pkgsSwift.swiftPackages.swift-format;
-              };
-              shfmt.enable = true;
-              taplo.enable = true;
             };
           };
 

@@ -30,7 +30,7 @@ from exo.download.huggingface_utils import (
     get_hf_endpoint,
     get_hf_token,
 )
-from exo.shared.constants import EXO_MODELS_DIR, EXO_MODELS_PATH
+from exo.shared.constants import EXO_MODELS_DIR
 from exo.shared.models.model_cards import ModelTask
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory

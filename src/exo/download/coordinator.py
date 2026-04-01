@@ -177,25 +177,30 @@ class DownloadCoordinator:
             )
             # Apply inference config to env var so next runner spawn picks it up
             import yaml
+
             raw = yaml.safe_load(config_yaml)
             if raw and isinstance(raw, dict):
                 inference = raw.get("inference")
                 if isinstance(inference, dict) and "kv_cache_backend" in inference:
                     # Don't overwrite if user provided the env var at launch
                     if not os.environ.get("_EXO_KV_BACKEND_USER_SET"):
-                        os.environ["EXO_KV_CACHE_BACKEND"] = str(inference["kv_cache_backend"])
+                        os.environ["EXO_KV_CACHE_BACKEND"] = str(
+                            inference["kv_cache_backend"]
+                        )
                         logger.info(
                             f"DownloadCoordinator: updated EXO_KV_CACHE_BACKEND={inference['kv_cache_backend']}"
                         )
                     else:
                         logger.info(
-                            f"DownloadCoordinator: skipping KV backend update (user env var override active)"
+                            "DownloadCoordinator: skipping KV backend update (user env var override active)"
                         )
                 # Apply HF token if not user-set
                 hf_token = raw.get("hf_token")
                 if hf_token and "HF_TOKEN" not in os.environ:
                     os.environ["HF_TOKEN"] = str(hf_token)
-                    logger.info("DownloadCoordinator: updated HF_TOKEN from config sync")
+                    logger.info(
+                        "DownloadCoordinator: updated HF_TOKEN from config sync"
+                    )
         except Exception as exc:
             logger.warning(f"DownloadCoordinator: failed to sync exo.yaml: {exc}")
 
@@ -543,7 +548,9 @@ class DownloadCoordinator:
                         else:
                             continue
 
-                        self.download_status[progress.shard.model_card.model_id] = status
+                        self.download_status[progress.shard.model_card.model_id] = (
+                            status
+                        )
                         await self.event_sender.send(
                             NodeDownloadProgress(download_progress=status)
                         )

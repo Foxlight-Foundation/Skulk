@@ -500,7 +500,15 @@
         }}
         title="Download to store"
       >
-        <svg class="w-4 h-4 text-exo-yellow/60 hover:text-exo-yellow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg
+          class="w-4 h-4 text-exo-yellow/60 hover:text-exo-yellow"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
           <path d="M12 3v12" />
           <path d="M7 12l5 5 5-5" />
           <path d="M5 21h14" />
@@ -527,7 +535,10 @@
           role="button"
           tabindex="0"
           onclick={() => {
-            if (mode !== "store-download" && (modelCanFit || variantHasInstance)) {
+            if (
+              mode !== "store-download" &&
+              (modelCanFit || variantHasInstance)
+            ) {
               onSelectModel(variant.id);
             }
           }}
@@ -676,7 +687,15 @@
               }}
               title="Download to store"
             >
-              <svg class="w-4 h-4 text-exo-yellow/60 hover:text-exo-yellow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <svg
+                class="w-4 h-4 text-exo-yellow/60 hover:text-exo-yellow"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
                 <path d="M12 3v12" />
                 <path d="M7 12l5 5 5-5" />
                 <path d="M5 21h14" />

@@ -38,7 +38,12 @@
 
   // Node overrides as editable list
   let overrides = $state<
-    { key: string; stagingEnabled: boolean; nodeCachePath: string; cleanupOnDeactivate: boolean }[]
+    {
+      key: string;
+      stagingEnabled: boolean;
+      nodeCachePath: string;
+      cleanupOnDeactivate: boolean;
+    }[]
   >([]);
 
   function loadConfig(data: ConfigResponse) {
@@ -63,10 +68,9 @@
     stagingEnabled = (stg?.enabled as boolean) ?? true;
     nodeCachePath = (stg?.node_cache_path as string) ?? "~/.exo/staging";
     cleanupOnDeactivate = (stg?.cleanup_on_deactivate as boolean) ?? true;
-    const no = ms.node_overrides as Record<
-      string,
-      Record<string, unknown>
-    > | undefined;
+    const no = ms.node_overrides as
+      | Record<string, Record<string, unknown>>
+      | undefined;
     if (no) {
       overrides = Object.entries(no).map(([key, val]) => {
         const s = val.staging as Record<string, unknown> | undefined;
@@ -136,7 +140,12 @@
   function addOverride() {
     overrides = [
       ...overrides,
-      { key: "", stagingEnabled: true, nodeCachePath: "~/.exo/staging", cleanupOnDeactivate: true },
+      {
+        key: "",
+        stagingEnabled: true,
+        nodeCachePath: "~/.exo/staging",
+        cleanupOnDeactivate: true,
+      },
     ];
   }
 
@@ -184,9 +193,7 @@
   <HeaderNav showHome={true} />
   <div class="max-w-3xl mx-auto px-4 lg:px-8 py-6 space-y-6">
     <div>
-      <h1
-        class="text-2xl font-mono tracking-[0.2em] uppercase text-exo-yellow"
-      >
+      <h1 class="text-2xl font-mono tracking-[0.2em] uppercase text-exo-yellow">
         Settings
       </h1>
       <p class="text-sm text-exo-light-gray">
@@ -205,8 +212,12 @@
       </div>
     {:else}
       <!-- Store Health -->
-      <div class="rounded border border-exo-medium-gray/30 bg-exo-black/30 p-4 space-y-3">
-        <h2 class="text-xs font-mono uppercase tracking-widest text-exo-light-gray">
+      <div
+        class="rounded border border-exo-medium-gray/30 bg-exo-black/30 p-4 space-y-3"
+      >
+        <h2
+          class="text-xs font-mono uppercase tracking-widest text-exo-light-gray"
+        >
           Store Status
         </h2>
         {#if storeHealth}
@@ -216,18 +227,27 @@
           </div>
           <div class="text-sm text-exo-light-gray space-y-1">
             <div>
-              Path: <span class="font-mono text-white">{storeHealth.storePath}</span>
+              Path: <span class="font-mono text-white"
+                >{storeHealth.storePath}</span
+              >
             </div>
             <div class="flex items-center gap-3">
               <span>Disk:</span>
-              <div class="flex-1 h-2 rounded bg-exo-medium-gray/40 overflow-hidden max-w-xs">
+              <div
+                class="flex-1 h-2 rounded bg-exo-medium-gray/40 overflow-hidden max-w-xs"
+              >
                 <div
                   class="h-full bg-exo-yellow rounded"
-                  style="width: {((storeHealth.usedBytes / storeHealth.totalBytes) * 100).toFixed(1)}%"
+                  style="width: {(
+                    (storeHealth.usedBytes / storeHealth.totalBytes) *
+                    100
+                  ).toFixed(1)}%"
                 ></div>
               </div>
               <span class="font-mono text-white text-xs">
-                {formatBytes(storeHealth.usedBytes)} / {formatBytes(storeHealth.totalBytes)}
+                {formatBytes(storeHealth.usedBytes)} / {formatBytes(
+                  storeHealth.totalBytes,
+                )}
               </span>
             </div>
           </div>
@@ -250,8 +270,12 @@
         }}
       >
         <!-- Model Store -->
-        <fieldset class="rounded border border-exo-medium-gray/30 bg-exo-black/30 p-4 space-y-4">
-          <legend class="text-xs font-mono uppercase tracking-widest text-exo-light-gray px-2">
+        <fieldset
+          class="rounded border border-exo-medium-gray/30 bg-exo-black/30 p-4 space-y-4"
+        >
+          <legend
+            class="text-xs font-mono uppercase tracking-widest text-exo-light-gray px-2"
+          >
             Model Store
           </legend>
           <label class="flex items-center gap-3 cursor-pointer">
@@ -273,14 +297,22 @@
             <span class="text-sm">This node is the store host</span>
           </label>
           {#if isThisNodeStoreHost && nodeIdentity}
-            <div class="text-sm text-exo-light-gray bg-exo-black/40 rounded px-3 py-2 font-mono">
+            <div
+              class="text-sm text-exo-light-gray bg-exo-black/40 rounded px-3 py-2 font-mono"
+            >
               Serving as <span class="text-white">{nodeIdentity.hostname}</span>
-              <span class="text-exo-light-gray/50">({nodeIdentity.ipAddress})</span>
+              <span class="text-exo-light-gray/50"
+                >({nodeIdentity.ipAddress})</span
+              >
             </div>
           {:else}
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div class="space-y-1">
-                <label for="store-host" class="text-xs text-exo-light-gray uppercase tracking-wide">Store Host</label>
+                <label
+                  for="store-host"
+                  class="text-xs text-exo-light-gray uppercase tracking-wide"
+                  >Store Host</label
+                >
                 <input
                   id="store-host"
                   type="text"
@@ -290,7 +322,13 @@
                 />
               </div>
               <div class="space-y-1">
-                <label for="store-http-host" class="text-xs text-exo-light-gray uppercase tracking-wide">HTTP Host <span class="text-exo-light-gray/50">(optional)</span></label>
+                <label
+                  for="store-http-host"
+                  class="text-xs text-exo-light-gray uppercase tracking-wide"
+                  >HTTP Host <span class="text-exo-light-gray/50"
+                    >(optional)</span
+                  ></label
+                >
                 <input
                   id="store-http-host"
                   type="text"
@@ -303,7 +341,11 @@
           {/if}
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div class="space-y-1">
-              <label for="store-port" class="text-xs text-exo-light-gray uppercase tracking-wide">Store Port</label>
+              <label
+                for="store-port"
+                class="text-xs text-exo-light-gray uppercase tracking-wide"
+                >Store Port</label
+              >
               <input
                 id="store-port"
                 type="number"
@@ -312,12 +354,20 @@
               />
             </div>
           </div>
-          <DirectoryBrowser bind:value={storePath} onselect={(p) => (storePath = p)} label="Store Path" />
+          <DirectoryBrowser
+            bind:value={storePath}
+            onselect={(p) => (storePath = p)}
+            label="Store Path"
+          />
         </fieldset>
 
         <!-- Download Policy -->
-        <fieldset class="rounded border border-exo-medium-gray/30 bg-exo-black/30 p-4 space-y-4">
-          <legend class="text-xs font-mono uppercase tracking-widest text-exo-light-gray px-2">
+        <fieldset
+          class="rounded border border-exo-medium-gray/30 bg-exo-black/30 p-4 space-y-4"
+        >
+          <legend
+            class="text-xs font-mono uppercase tracking-widest text-exo-light-gray px-2"
+          >
             Download Policy
           </legend>
           <label class="flex items-center gap-3 cursor-pointer">
@@ -334,8 +384,12 @@
         </fieldset>
 
         <!-- Staging -->
-        <fieldset class="rounded border border-exo-medium-gray/30 bg-exo-black/30 p-4 space-y-4">
-          <legend class="text-xs font-mono uppercase tracking-widest text-exo-light-gray px-2">
+        <fieldset
+          class="rounded border border-exo-medium-gray/30 bg-exo-black/30 p-4 space-y-4"
+        >
+          <legend
+            class="text-xs font-mono uppercase tracking-widest text-exo-light-gray px-2"
+          >
             Staging
           </legend>
           <label class="flex items-center gap-3 cursor-pointer">
@@ -346,7 +400,11 @@
             />
             <span class="text-sm">Staging enabled</span>
           </label>
-          <DirectoryBrowser bind:value={nodeCachePath} onselect={(p) => (nodeCachePath = p)} label="Node Cache Path" />
+          <DirectoryBrowser
+            bind:value={nodeCachePath}
+            onselect={(p) => (nodeCachePath = p)}
+            label="Node Cache Path"
+          />
           <label class="flex items-center gap-3 cursor-pointer">
             <input
               type="checkbox"
@@ -368,7 +426,9 @@
             onclick={() => (showAdvanced = !showAdvanced)}
           >
             <svg
-              class="w-3 h-3 transition-transform {showAdvanced ? 'rotate-90' : ''}"
+              class="w-3 h-3 transition-transform {showAdvanced
+                ? 'rotate-90'
+                : ''}"
               viewBox="0 0 24 24"
               fill="none"
               stroke="currentColor"
@@ -380,57 +440,68 @@
           </button>
         </div>
         {#if showAdvanced}
-        <fieldset class="rounded border border-exo-medium-gray/30 bg-exo-black/30 p-4 space-y-4">
-          <legend class="text-xs font-mono uppercase tracking-widest text-exo-light-gray px-2">
-            Node Overrides
-          </legend>
-          <p class="text-xs text-exo-light-gray/60">
-            Per-node staging overrides. Most clusters don't need this — the base staging config above applies to all nodes.
-          </p>
-          {#each overrides as override, i}
-            <div class="rounded border border-exo-medium-gray/20 bg-exo-dark-gray p-3 space-y-3">
-              <div class="flex items-center gap-3">
-                <input
-                  type="text"
-                  bind:value={override.key}
-                  placeholder="hostname or node_id"
-                  class="flex-1 bg-exo-black/40 border border-exo-medium-gray/40 rounded px-3 py-1.5 text-sm font-mono text-white placeholder:text-exo-light-gray/30 focus:border-exo-yellow focus:outline-none"
-                />
-                <button
-                  type="button"
-                  class="text-xs text-red-400 hover:text-red-300 font-mono uppercase"
-                  onclick={() => removeOverride(i)}
-                >
-                  Remove
-                </button>
-              </div>
-              <label class="flex items-center gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  bind:checked={override.stagingEnabled}
-                  class="w-4 h-4 accent-exo-yellow"
-                />
-                <span class="text-sm">Staging enabled</span>
-              </label>
-              <DirectoryBrowser bind:value={override.nodeCachePath} onselect={(p) => (override.nodeCachePath = p)} label="Cache Path" />
-              <label class="flex items-center gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  bind:checked={override.cleanupOnDeactivate}
-                  class="w-4 h-4 accent-exo-yellow"
-                />
-                <span class="text-sm">Cleanup on deactivate</span>
-              </label>
-            </div>
-          {/each}
-          <button
-            type="button"
-            class="text-xs font-mono text-exo-yellow hover:text-exo-yellow/80 uppercase tracking-wide border border-exo-yellow/30 rounded px-3 py-1.5 hover:border-exo-yellow/60 transition-colors"
-            onclick={addOverride}
+          <fieldset
+            class="rounded border border-exo-medium-gray/30 bg-exo-black/30 p-4 space-y-4"
           >
-            + Add Override
-          </button>
-        </fieldset>
+            <legend
+              class="text-xs font-mono uppercase tracking-widest text-exo-light-gray px-2"
+            >
+              Node Overrides
+            </legend>
+            <p class="text-xs text-exo-light-gray/60">
+              Per-node staging overrides. Most clusters don't need this — the
+              base staging config above applies to all nodes.
+            </p>
+            {#each overrides as override, i}
+              <div
+                class="rounded border border-exo-medium-gray/20 bg-exo-dark-gray p-3 space-y-3"
+              >
+                <div class="flex items-center gap-3">
+                  <input
+                    type="text"
+                    bind:value={override.key}
+                    placeholder="hostname or node_id"
+                    class="flex-1 bg-exo-black/40 border border-exo-medium-gray/40 rounded px-3 py-1.5 text-sm font-mono text-white placeholder:text-exo-light-gray/30 focus:border-exo-yellow focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    class="text-xs text-red-400 hover:text-red-300 font-mono uppercase"
+                    onclick={() => removeOverride(i)}
+                  >
+                    Remove
+                  </button>
+                </div>
+                <label class="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    bind:checked={override.stagingEnabled}
+                    class="w-4 h-4 accent-exo-yellow"
+                  />
+                  <span class="text-sm">Staging enabled</span>
+                </label>
+                <DirectoryBrowser
+                  bind:value={override.nodeCachePath}
+                  onselect={(p) => (override.nodeCachePath = p)}
+                  label="Cache Path"
+                />
+                <label class="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    bind:checked={override.cleanupOnDeactivate}
+                    class="w-4 h-4 accent-exo-yellow"
+                  />
+                  <span class="text-sm">Cleanup on deactivate</span>
+                </label>
+              </div>
+            {/each}
+            <button
+              type="button"
+              class="text-xs font-mono text-exo-yellow hover:text-exo-yellow/80 uppercase tracking-wide border border-exo-yellow/30 rounded px-3 py-1.5 hover:border-exo-yellow/60 transition-colors"
+              onclick={addOverride}
+            >
+              + Add Override
+            </button>
+          </fieldset>
         {/if}
 
         <!-- Save -->

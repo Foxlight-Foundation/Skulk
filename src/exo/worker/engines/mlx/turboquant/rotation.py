@@ -15,7 +15,9 @@ def randomized_signs(dim: int, seed: int) -> mx.array:
 def hadamard_transform(x: mx.array) -> mx.array:
     dim = int(x.shape[-1])
     if not is_power_of_two(dim):
-        raise ValueError(f"Hadamard transform requires power-of-two dimension, got {dim}")
+        raise ValueError(
+            f"Hadamard transform requires power-of-two dimension, got {dim}"
+        )
 
     output = x
     step = 1

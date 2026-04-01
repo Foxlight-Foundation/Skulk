@@ -146,7 +146,10 @@
     if (!identitiesData) return null;
     const entries = Object.entries(identitiesData);
     const nodesWithCommit = entries.filter(
-      ([_, id]) => id.exoCommit && id.exoCommit !== "Unknown" && id.exoCommit !== "unknown",
+      ([_, id]) =>
+        id.exoCommit &&
+        id.exoCommit !== "Unknown" &&
+        id.exoCommit !== "unknown",
     );
     if (nodesWithCommit.length < 2) return null;
     const commits = new Set(nodesWithCommit.map(([_, id]) => id.exoCommit));
@@ -3417,8 +3420,9 @@
               {/each}
             </div>
             <p class="text-xs text-white/60">
-              <span class="text-red-300">Action required:</span> Update all nodes
-              to the same version with <code class="text-red-200">git pull && uv sync</code>.
+              <span class="text-red-300">Action required:</span> Update all
+              nodes to the same version with
+              <code class="text-red-200">git pull && uv sync</code>.
             </p>
           </div>
         </div>
@@ -3452,14 +3456,13 @@
           >
             <p class="text-xs text-white/80 mb-2">
               macOS reports RDMA as enabled but no RDMA network interfaces
-              exist. This typically means your hardware has Thunderbolt 4
-              ports, which do not support RDMA. Thunderbolt 5 (M4 Pro/Max
-              or newer) is required for RDMA.
+              exist. This typically means your hardware has Thunderbolt 4 ports,
+              which do not support RDMA. Thunderbolt 5 (M4 Pro/Max or newer) is
+              required for RDMA.
             </p>
             <p class="text-xs text-white/60">
-              <span class="text-orange-300">Impact:</span> Tensor parallel
-              (MlxJaccl) is not available. Pipeline parallel (MlxRing)
-              works normally over Thunderbolt.
+              <span class="text-orange-300">Impact:</span> Tensor parallel (MlxJaccl)
+              is not available. Pipeline parallel (MlxRing) works normally over Thunderbolt.
             </p>
           </div>
         </div>
@@ -3864,14 +3867,13 @@
           >
             <p class="text-xs text-white/80 mb-2">
               macOS reports RDMA as enabled but no RDMA network interfaces
-              exist. This typically means your hardware has Thunderbolt 4
-              ports, which do not support RDMA. Thunderbolt 5 (M4 Pro/Max
-              or newer) is required for RDMA.
+              exist. This typically means your hardware has Thunderbolt 4 ports,
+              which do not support RDMA. Thunderbolt 5 (M4 Pro/Max or newer) is
+              required for RDMA.
             </p>
             <p class="text-xs text-white/60">
-              <span class="text-orange-300">Impact:</span> Tensor parallel
-              (MlxJaccl) is not available. Pipeline parallel (MlxRing)
-              works normally over Thunderbolt.
+              <span class="text-orange-300">Impact:</span> Tensor parallel (MlxJaccl)
+              is not available. Pipeline parallel (MlxRing) works normally over Thunderbolt.
             </p>
           </div>
         </div>
@@ -4889,47 +4891,47 @@
 
           <!-- TB5 RDMA Not Enabled Warning -->
           {#if rdmaPhantom}
-        <div class="group relative" role="alert">
-          <div
-            class="flex items-center gap-2 px-3 py-2 rounded border border-orange-500/50 bg-orange-500/10 backdrop-blur-sm cursor-help"
-          >
-            <svg
-              class="w-5 h-5 text-orange-400 flex-shrink-0"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                d={warningIconPath}
-              />
-            </svg>
-            <span class="text-sm font-mono text-orange-200">
-              RDMA NOT AVAILABLE
-            </span>
-          </div>
+            <div class="group relative" role="alert">
+              <div
+                class="flex items-center gap-2 px-3 py-2 rounded border border-orange-500/50 bg-orange-500/10 backdrop-blur-sm cursor-help"
+              >
+                <svg
+                  class="w-5 h-5 text-orange-400 flex-shrink-0"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <path
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    d={warningIconPath}
+                  />
+                </svg>
+                <span class="text-sm font-mono text-orange-200">
+                  RDMA NOT AVAILABLE
+                </span>
+              </div>
 
-          <div
-            class="absolute top-full left-0 mt-2 w-80 p-3 rounded border border-orange-500/30 bg-exo-dark-gray/95 backdrop-blur-sm opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 shadow-lg"
-          >
-            <p class="text-xs text-white/80 mb-2">
-              macOS reports RDMA as enabled but no RDMA network interfaces
-              exist. This typically means your hardware has Thunderbolt 4
-              ports, which do not support RDMA. Thunderbolt 5 (M4 Pro/Max
-              or newer) is required for RDMA.
-            </p>
-            <p class="text-xs text-white/60">
-              <span class="text-orange-300">Impact:</span> Tensor parallel
-              (MlxJaccl) is not available. Pipeline parallel (MlxRing)
-              works normally over Thunderbolt.
-            </p>
-          </div>
-        </div>
-      {/if}
+              <div
+                class="absolute top-full left-0 mt-2 w-80 p-3 rounded border border-orange-500/30 bg-exo-dark-gray/95 backdrop-blur-sm opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 shadow-lg"
+              >
+                <p class="text-xs text-white/80 mb-2">
+                  macOS reports RDMA as enabled but no RDMA network interfaces
+                  exist. This typically means your hardware has Thunderbolt 4
+                  ports, which do not support RDMA. Thunderbolt 5 (M4 Pro/Max or
+                  newer) is required for RDMA.
+                </p>
+                <p class="text-xs text-white/60">
+                  <span class="text-orange-300">Impact:</span> Tensor parallel (MlxJaccl)
+                  is not available. Pipeline parallel (MlxRing) works normally over
+                  Thunderbolt.
+                </p>
+              </div>
+            </div>
+          {/if}
 
-      {#if tb5WithoutRdma && !tb5InfoDismissed}
+          {#if tb5WithoutRdma && !tb5InfoDismissed}
             <div
               class="absolute left-4 group"
               class:top-16={tbBridgeCycles.length > 0}
@@ -5075,47 +5077,47 @@
 
             <!-- TB5 RDMA Not Enabled Warning -->
             {#if rdmaPhantom}
-        <div class="group relative" role="alert">
-          <div
-            class="flex items-center gap-2 px-3 py-2 rounded border border-orange-500/50 bg-orange-500/10 backdrop-blur-sm cursor-help"
-          >
-            <svg
-              class="w-5 h-5 text-orange-400 flex-shrink-0"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                d={warningIconPath}
-              />
-            </svg>
-            <span class="text-sm font-mono text-orange-200">
-              RDMA NOT AVAILABLE
-            </span>
-          </div>
+              <div class="group relative" role="alert">
+                <div
+                  class="flex items-center gap-2 px-3 py-2 rounded border border-orange-500/50 bg-orange-500/10 backdrop-blur-sm cursor-help"
+                >
+                  <svg
+                    class="w-5 h-5 text-orange-400 flex-shrink-0"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d={warningIconPath}
+                    />
+                  </svg>
+                  <span class="text-sm font-mono text-orange-200">
+                    RDMA NOT AVAILABLE
+                  </span>
+                </div>
 
-          <div
-            class="absolute top-full left-0 mt-2 w-80 p-3 rounded border border-orange-500/30 bg-exo-dark-gray/95 backdrop-blur-sm opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 shadow-lg"
-          >
-            <p class="text-xs text-white/80 mb-2">
-              macOS reports RDMA as enabled but no RDMA network interfaces
-              exist. This typically means your hardware has Thunderbolt 4
-              ports, which do not support RDMA. Thunderbolt 5 (M4 Pro/Max
-              or newer) is required for RDMA.
-            </p>
-            <p class="text-xs text-white/60">
-              <span class="text-orange-300">Impact:</span> Tensor parallel
-              (MlxJaccl) is not available. Pipeline parallel (MlxRing)
-              works normally over Thunderbolt.
-            </p>
-          </div>
-        </div>
-      {/if}
+                <div
+                  class="absolute top-full left-0 mt-2 w-80 p-3 rounded border border-orange-500/30 bg-exo-dark-gray/95 backdrop-blur-sm opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 z-50 shadow-lg"
+                >
+                  <p class="text-xs text-white/80 mb-2">
+                    macOS reports RDMA as enabled but no RDMA network interfaces
+                    exist. This typically means your hardware has Thunderbolt 4
+                    ports, which do not support RDMA. Thunderbolt 5 (M4 Pro/Max
+                    or newer) is required for RDMA.
+                  </p>
+                  <p class="text-xs text-white/60">
+                    <span class="text-orange-300">Impact:</span> Tensor parallel (MlxJaccl)
+                    is not available. Pipeline parallel (MlxRing) works normally over
+                    Thunderbolt.
+                  </p>
+                </div>
+              </div>
+            {/if}
 
-      {#if tb5WithoutRdma && !tb5InfoDismissed}
+            {#if tb5WithoutRdma && !tb5InfoDismissed}
               <div
                 class="absolute left-4 group"
                 class:top-16={tbBridgeCycles.length > 0}

@@ -283,7 +283,9 @@ def ensure_standard_attention(model: Model) -> None:
         isinstance(entry, (KVCache, ArraysCache, RotatingKVCache))
         for entry in sample_cache
     ):
-        cache_types = ", ".join(sorted({type(entry).__name__ for entry in sample_cache}))
+        cache_types = ", ".join(
+            sorted({type(entry).__name__ for entry in sample_cache})
+        )
         raise ValueError(
             "TurboQuant backend currently supports KVCache entries plus optional ArraysCache "
             "and RotatingKVCache entries; "
@@ -359,7 +361,9 @@ def make_turboquant_adaptive_cache(
         model.make_cache(),  # type: ignore[reportUnknownMemberType]
     )
     kv_positions = [
-        index for index, entry in enumerate(template_cache) if isinstance(entry, KVCache)
+        index
+        for index, entry in enumerate(template_cache)
+        if isinstance(entry, KVCache)
     ]
     caches = []
     for index, entry in enumerate(template_cache):

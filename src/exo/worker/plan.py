@@ -16,6 +16,7 @@ from exo.shared.types.tasks import (
     Task,
     TaskId,
     TaskStatus,
+    TextEmbedding,
     TextGeneration,
 )
 from exo.shared.types.worker.downloads import (
@@ -275,9 +276,10 @@ def _pending_tasks(
     input_chunk_buffer: Mapping[CommandId, dict[int, str]],
 ) -> Task | None:
     for task in tasks.values():
-        # for now, just forward chat completions
-        # TODO(ciaran): do this better!
-        if not isinstance(task, (TextGeneration, ImageGeneration, ImageEdits)):
+        # Forward inference tasks to runners
+        if not isinstance(
+            task, (TextGeneration, ImageGeneration, ImageEdits, TextEmbedding)
+        ):
             continue
         if task.task_status not in (TaskStatus.Pending, TaskStatus.Running):
             continue

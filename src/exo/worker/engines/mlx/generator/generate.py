@@ -116,10 +116,10 @@ def pipeline_parallel_prefill(
         quantize_cache_fn = cast(
             Callable[[KVCacheType], None],
             functools.partial(
-            maybe_quantize_kv_cache,
-            quantized_kv_start=0,
-            kv_group_size=kv_group_size,
-            kv_bits=kv_bits,
+                maybe_quantize_kv_cache,
+                quantized_kv_start=0,
+                kv_group_size=kv_group_size,
+                kv_bits=kv_bits,
             ),
         )
     else:

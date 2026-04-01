@@ -77,6 +77,13 @@ class InputImageChunk(BaseChunk):
                 yield name, value
 
 
+class EmbeddingChunk(BaseChunk):
+    """Response chunk for embedding inference — single batch response, no streaming."""
+
+    embeddings: list[list[float]]
+    token_count: int
+
+
 class PrefillProgressChunk(BaseChunk):
     """Data class for prefill progress events during streaming."""
 
@@ -85,5 +92,10 @@ class PrefillProgressChunk(BaseChunk):
 
 
 GenerationChunk = (
-    TokenChunk | ImageChunk | ToolCallChunk | ErrorChunk | PrefillProgressChunk
+    TokenChunk
+    | ImageChunk
+    | ToolCallChunk
+    | ErrorChunk
+    | EmbeddingChunk
+    | PrefillProgressChunk
 )

@@ -1,5 +1,8 @@
 <script lang="ts">
-  import type { StoreRegistryEntry, StoreDownloadProgress } from "$lib/stores/app.svelte";
+  import type {
+    StoreRegistryEntry,
+    StoreDownloadProgress,
+  } from "$lib/stores/app.svelte";
 
   let {
     entries,
@@ -43,20 +46,21 @@
   }
 
   // Merge registry entries with active downloads that aren't yet registered
-  const registeredIds = $derived(new Set(entries.map(e => e.model_id)));
+  const registeredIds = $derived(new Set(entries.map((e) => e.model_id)));
   const pendingDownloads = $derived(
-    activeDownloads.filter(d => !registeredIds.has(d.modelId))
+    activeDownloads.filter((d) => !registeredIds.has(d.modelId)),
   );
   // Download progress lookup for registered models still downloading
   const downloadProgressMap = $derived(
-    new Map(activeDownloads.map(d => [d.modelId, d]))
+    new Map(activeDownloads.map((d) => [d.modelId, d])),
   );
 </script>
 
 <div class="space-y-4">
   <div class="flex items-center justify-between">
     <div class="text-sm text-exo-light-gray">
-      {entries.length} model{entries.length !== 1 ? "s" : ""} in store{#if pendingDownloads.length > 0}, {pendingDownloads.length} downloading{/if}
+      {entries.length} model{entries.length !== 1 ? "s" : ""} in store{#if pendingDownloads.length > 0},
+        {pendingDownloads.length} downloading{/if}
     </div>
     <button
       type="button"
@@ -74,14 +78,18 @@
       {/each}
     </div>
   {:else if entries.length === 0 && pendingDownloads.length === 0}
-    <div class="rounded border border-exo-medium-gray/30 bg-exo-black/30 p-6 text-center text-exo-light-gray">
+    <div
+      class="rounded border border-exo-medium-gray/30 bg-exo-black/30 p-6 text-center text-exo-light-gray"
+    >
       No models in store.
     </div>
   {:else}
     <div class="rounded border border-exo-medium-gray/30 overflow-hidden">
       <table class="w-full text-sm">
         <thead>
-          <tr class="bg-exo-black/40 text-exo-light-gray text-xs font-mono uppercase tracking-wider">
+          <tr
+            class="bg-exo-black/40 text-exo-light-gray text-xs font-mono uppercase tracking-wider"
+          >
             <th class="text-left px-4 py-3">Model</th>
             <th class="text-right px-4 py-3">Size</th>
             <th class="text-right px-4 py-3">Files</th>
@@ -96,11 +104,17 @@
               <td class="px-4 py-3">
                 <div class="font-mono text-white">{dl.modelId}</div>
               </td>
-              <td class="px-4 py-3 text-right font-mono text-exo-light-gray">—</td>
-              <td class="px-4 py-3 text-right font-mono text-exo-light-gray">—</td>
+              <td class="px-4 py-3 text-right font-mono text-exo-light-gray"
+                >—</td
+              >
+              <td class="px-4 py-3 text-right font-mono text-exo-light-gray"
+                >—</td
+              >
               <td class="px-4 py-3">
                 <div class="flex items-center justify-end gap-2">
-                  <div class="w-24 h-1.5 rounded bg-exo-medium-gray/30 overflow-hidden">
+                  <div
+                    class="w-24 h-1.5 rounded bg-exo-medium-gray/30 overflow-hidden"
+                  >
                     <div
                       class="h-full bg-exo-yellow rounded transition-all duration-300"
                       style="width: {(dl.progress * 100).toFixed(1)}%"
@@ -118,13 +132,19 @@
           {#each entries as entry}
             {@const active = isActive(entry.model_id)}
             {@const dlProgress = downloadProgressMap.get(entry.model_id)}
-            <tr class="border-t border-exo-medium-gray/20 hover:bg-exo-medium-gray/10 transition-colors group">
+            <tr
+              class="border-t border-exo-medium-gray/20 hover:bg-exo-medium-gray/10 transition-colors group"
+            >
               <td class="px-4 py-3">
                 <div class="flex items-center gap-2">
                   <span class="font-mono text-white">{entry.model_id}</span>
                   {#if active}
-                    <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-green-500/10 text-green-400 border border-green-500/20">
-                      <span class="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"></span>
+                    <span
+                      class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-green-500/10 text-green-400 border border-green-500/20"
+                    >
+                      <span
+                        class="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"
+                      ></span>
                       active
                     </span>
                   {/if}
@@ -136,10 +156,15 @@
               <td class="px-4 py-3 text-right font-mono text-exo-light-gray">
                 {entry.files.length}
               </td>
-              <td class="px-4 py-3 text-right font-mono text-exo-light-gray" title={entry.downloaded_at}>
+              <td
+                class="px-4 py-3 text-right font-mono text-exo-light-gray"
+                title={entry.downloaded_at}
+              >
                 {#if dlProgress && dlProgress.status === "downloading"}
                   <div class="flex items-center justify-end gap-2">
-                    <div class="w-24 h-1.5 rounded bg-exo-medium-gray/30 overflow-hidden">
+                    <div
+                      class="w-24 h-1.5 rounded bg-exo-medium-gray/30 overflow-hidden"
+                    >
                       <div
                         class="h-full bg-exo-yellow rounded transition-all duration-300"
                         style="width: {(dlProgress.progress * 100).toFixed(1)}%"
@@ -154,15 +179,23 @@
                 {/if}
               </td>
               <td class="px-4 py-3">
-                <div class="flex items-center justify-end gap-1 opacity-40 group-hover:opacity-100 transition-opacity">
+                <div
+                  class="flex items-center justify-end gap-1 opacity-40 group-hover:opacity-100 transition-opacity"
+                >
                   <button
                     type="button"
                     class="p-1 rounded hover:bg-white/10 transition-colors"
                     onclick={() => oninfo(entry)}
                     title="View model details"
                   >
-                    <svg class="w-4 h-4 text-white/60 hover:text-white/80" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z" />
+                    <svg
+                      class="w-4 h-4 text-white/60 hover:text-white/80"
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                    >
+                      <path
+                        d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"
+                      />
                     </svg>
                   </button>
                   <button
@@ -171,9 +204,19 @@
                     onclick={() => ondelete(entry, active)}
                     title="Delete from store"
                   >
-                    <svg class="w-4 h-4 text-white/60 hover:text-red-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <svg
+                      class="w-4 h-4 text-white/60 hover:text-red-400"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
                       <polyline points="3 6 5 6 21 6" />
-                      <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+                      <path
+                        d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"
+                      />
                     </svg>
                   </button>
                 </div>

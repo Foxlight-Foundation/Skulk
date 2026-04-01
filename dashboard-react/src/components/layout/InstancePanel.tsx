@@ -12,6 +12,7 @@ export interface InstanceCardData {
   status: InstanceStatus;
   statusMessage?: string;
   loadProgress?: number;
+  isEmbedding?: boolean;
 }
 
 export interface InstancePanelProps {

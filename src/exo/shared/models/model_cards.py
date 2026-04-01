@@ -33,6 +33,7 @@ _custom_cards_dir = Path(str(EXO_CUSTOM_MODEL_CARDS_DIR))
 _BUILTIN_CARD_DIRS = [
     Path(RESOURCES_DIR) / "inference_model_cards",
     Path(RESOURCES_DIR) / "image_model_cards",
+    Path(RESOURCES_DIR) / "embedding_model_cards",
 ]
 
 _card_cache: dict[ModelId, "ModelCard"] = {}
@@ -61,6 +62,10 @@ def _is_image_card(card: "ModelCard") -> bool:
     return any(t in (ModelTask.TextToImage, ModelTask.ImageToImage) for t in card.tasks)
 
 
+def _is_embedding_card(card: "ModelCard") -> bool:
+    return ModelTask.TextEmbedding in card.tasks
+
+
 def get_card(model_id: ModelId) -> "ModelCard | None":
     """Look up a single model card from the cache by ID."""
     return _card_cache.get(model_id)
@@ -78,6 +83,7 @@ class ModelTask(str, Enum):
     TextGeneration = "TextGeneration"
     TextToImage = "TextToImage"
     ImageToImage = "ImageToImage"
+    TextEmbedding = "TextEmbedding"
 
 
 class ComponentInfo(CamelCaseModel):

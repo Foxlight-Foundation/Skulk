@@ -63,6 +63,7 @@ retry the client checks for an existing partial and sends a
 ``Range: bytes=<size>-`` header to resume from that offset.  If the final
 file already exists (from a previous complete run), the file is skipped.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -86,8 +87,8 @@ from exo.shared.types.worker.shards import ShardMetadata
 from exo.store.config import StagingNodeConfig
 
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB per read/write chunk
-_CONNECT_TIMEOUT = 10.0          # seconds — abort if store host unreachable
-_READ_TIMEOUT = 120.0            # seconds — abort if no data for 2 minutes
+_CONNECT_TIMEOUT = 10.0  # seconds — abort if store host unreachable
+_READ_TIMEOUT = 120.0  # seconds — abort if no data for 2 minutes
 
 
 class ModelNotInStoreError(Exception):
@@ -347,7 +348,8 @@ class ModelStoreClient:
     async def request_store_download(self, model_id: str) -> dict[str, object]:
         """Request the store host start downloading a model. Non-blocking."""
         url = _make_store_url(
-            self._store_host, self._store_port,
+            self._store_host,
+            self._store_port,
             f"/models/{quote(model_id, safe='')}/download",
         )
         try:
@@ -365,7 +367,8 @@ class ModelStoreClient:
     async def get_store_download_status(self, model_id: str) -> dict[str, object]:
         """Poll store-side download status for a model."""
         url = _make_store_url(
-            self._store_host, self._store_port,
+            self._store_host,
+            self._store_port,
             f"/models/{quote(model_id, safe='')}/download/status",
         )
         try:
@@ -386,7 +389,8 @@ class ModelStoreClient:
         Returns ``True`` if deleted, ``False`` if not found.
         """
         url = _make_store_url(
-            self._store_host, self._store_port,
+            self._store_host,
+            self._store_port,
             f"/models/{quote(model_id, safe='')}",
         )
         try:
@@ -429,7 +433,9 @@ class ModelStoreClient:
         encoded_id = quote(model_id, safe="")
 
         # Request download
-        url = _make_store_url(self._store_host, self._store_port, f"/models/{encoded_id}/download")
+        url = _make_store_url(
+            self._store_host, self._store_port, f"/models/{encoded_id}/download"
+        )
         async with (
             create_http_session(timeout_profile="short") as session,
             session.post(url) as resp,
@@ -504,7 +510,10 @@ class ModelStoreClient:
             # Skip copy if destination already matches source size.
             # Run on a thread to avoid blocking the async event loop
             # during multi-GB safetensor copies.
-            if not dst_file.exists() or dst_file.stat().st_size != src_file.stat().st_size:
+            if (
+                not dst_file.exists()
+                or dst_file.stat().st_size != src_file.stat().st_size
+            ):
                 await asyncio.to_thread(shutil.copy2, src_file, dst_file)
             staged_bytes += src_file.stat().st_size
             if on_progress is not None:
@@ -761,7 +770,9 @@ class ModelStoreDownloader(ShardDownloader):
             # path (i.e. this is the store host), serve directly from the
             # canonical store directory instead of re-downloading from HF.
             if self._store_client.local_store_path is not None:
-                direct_path = self._store_client.local_store_path / _sanitize_model_id(model_id)
+                direct_path = self._store_client.local_store_path / _sanitize_model_id(
+                    model_id
+                )
                 if direct_path.exists() and any(direct_path.iterdir()):
                     logger.info(
                         f"ModelStoreDownloader: staging disabled — loading {model_id} directly from store at {direct_path}"
@@ -816,15 +827,19 @@ class ModelStoreDownloader(ShardDownloader):
             try:
                 await self._store_client.request_and_wait_for_download(
                     model_id,
-                    on_progress=lambda _p: self._emit_progress(shard, status="in_progress"),
+                    on_progress=lambda _p: self._emit_progress(
+                        shard, status="in_progress"
+                    ),
                 )
             except (RuntimeError, TimeoutError) as exc:
                 raise ModelNotInStoreError(
                     f"Store host failed to download {model_id}: {exc}"
-                )
+                ) from exc
             # Model now in store — stage it
             path = await self._store_client.stage_shard(
-                model_id, dest_path, on_progress=None,
+                model_id,
+                dest_path,
+                on_progress=None,
             )
             await self._emit_progress(shard, status="complete")
             return path

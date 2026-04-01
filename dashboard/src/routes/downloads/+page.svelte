@@ -28,7 +28,11 @@
   import HeaderNav from "$lib/components/HeaderNav.svelte";
   import StoreRegistryTable from "$lib/components/StoreRegistryTable.svelte";
   import { ModelPickerModal } from "$lib/components";
-  import { favorites, toggleFavorite, getFavoritesSet } from "$lib/stores/favorites.svelte";
+  import {
+    favorites,
+    toggleFavorite,
+    getFavoritesSet,
+  } from "$lib/stores/favorites.svelte";
   import { hasRecents, getRecentModelIds } from "$lib/stores/recents.svelte";
 
   type CellStatus =
@@ -364,18 +368,34 @@
   let registryLoading = $state(false);
   let storeDownloads = $state<StoreDownloadProgress[]>([]);
   let downloadPollInterval: ReturnType<typeof setInterval> | null = null;
-  let deleteConfirmEntry = $state<{ entry: StoreRegistryEntry; isActive: boolean } | null>(null);
+  let deleteConfirmEntry = $state<{
+    entry: StoreRegistryEntry;
+    isActive: boolean;
+  } | null>(null);
   let deleting = $state(false);
   let purgeConfirm = $state(false);
   let purging = $state(false);
 
   // Model picker for "Find Models" — download to store
   let isModelPickerOpen = $state(false);
-  let pickerModels = $state<{ id: string; name?: string; storage_size_megabytes?: number; base_model?: string; quantization?: string; family?: string; capabilities?: string[]; supports_tensor?: boolean }[]>([]);
+  let pickerModels = $state<
+    {
+      id: string;
+      name?: string;
+      storage_size_megabytes?: number;
+      base_model?: string;
+      quantization?: string;
+      family?: string;
+      capabilities?: string[];
+      supports_tensor?: boolean;
+    }[]
+  >([]);
   const favoritesSet = $derived(getFavoritesSet());
   const recentModelIds = $derived(getRecentModelIds());
   const showRecentsTab = $derived(hasRecents());
-  const storeModelIds = $derived(new Set(registryEntries.map((e) => e.model_id)));
+  const storeModelIds = $derived(
+    new Set(registryEntries.map((e) => e.model_id)),
+  );
 
   async function fetchPickerModels() {
     try {
@@ -384,7 +404,9 @@
         const data = await resp.json();
         pickerModels = data.data || [];
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   async function handleStoreDownload(modelId: string) {
@@ -458,7 +480,9 @@
         clearInterval(downloadPollInterval);
         downloadPollInterval = null;
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   function handleStoreInfo(entry: StoreRegistryEntry) {
@@ -556,10 +580,13 @@
     </div>
 
     {#if storeAvailable}
-      <div class="flex rounded overflow-hidden border border-exo-medium-gray/40 w-fit">
+      <div
+        class="flex rounded overflow-hidden border border-exo-medium-gray/40 w-fit"
+      >
         <button
           type="button"
-          class="px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors {activeTab === 'nodes'
+          class="px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors {activeTab ===
+          'nodes'
             ? 'bg-exo-yellow text-exo-black'
             : 'bg-exo-black/30 text-white/70 hover:text-white'}"
           onclick={() => (activeTab = "nodes")}
@@ -568,12 +595,14 @@
         </button>
         <button
           type="button"
-          class="px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors {activeTab === 'store'
+          class="px-4 py-1.5 text-xs font-mono uppercase tracking-wider transition-colors {activeTab ===
+          'store'
             ? 'bg-exo-yellow text-exo-black'
             : 'bg-exo-black/30 text-white/70 hover:text-white'}"
           onclick={() => {
             activeTab = "store";
-            if (registryEntries.length === 0 && !registryLoading) loadRegistry();
+            if (registryEntries.length === 0 && !registryLoading)
+              loadRegistry();
           }}
         >
           Store Registry
@@ -590,9 +619,19 @@
             class="px-4 py-1.5 text-xs font-mono uppercase tracking-wider bg-red-500/20 text-red-300 border border-red-500/30 rounded hover:bg-red-500/30 transition-colors flex items-center gap-2"
             onclick={() => (purgeConfirm = true)}
           >
-            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <svg
+              class="w-3.5 h-3.5"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
               <polyline points="3 6 5 6 21 6" />
-              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              <path
+                d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"
+              />
             </svg>
             Purge All Node Caches
           </button>
@@ -604,7 +643,15 @@
               isModelPickerOpen = true;
             }}
           >
-            <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <svg
+              class="w-3.5 h-3.5"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
               <circle cx="11" cy="11" r="8" />
               <line x1="21" y1="21" x2="16.65" y2="16.65" />
             </svg>
@@ -616,7 +663,7 @@
         entries={registryEntries}
         activeDownloads={storeDownloads}
         loading={registryLoading}
-        activeModelIds={activeModelIds}
+        {activeModelIds}
         onrefresh={loadRegistry}
         oninfo={handleStoreInfo}
         ondelete={handleStoreDelete}
@@ -1094,19 +1141,22 @@
     role="dialog"
     aria-modal="true"
   >
-    <h3 class="font-mono text-lg text-white mb-3">
-      Delete from store
-    </h3>
+    <h3 class="font-mono text-lg text-white mb-3">Delete from store</h3>
     <p class="text-sm text-exo-light-gray mb-2 font-mono">
       {deleteConfirmEntry.entry.model_id}
     </p>
     {#if deleteConfirmEntry.isActive}
-      <div class="rounded bg-red-500/10 border border-red-500/20 p-3 mb-4 text-xs text-red-300">
-        Warning: This model is currently active. Deleting it will terminate the running model, evict it from participating nodes, and permanently remove it from the model store.
+      <div
+        class="rounded bg-red-500/10 border border-red-500/20 p-3 mb-4 text-xs text-red-300"
+      >
+        Warning: This model is currently active. Deleting it will terminate the
+        running model, evict it from participating nodes, and permanently remove
+        it from the model store.
       </div>
     {:else}
       <p class="text-xs text-exo-light-gray/70 mb-4">
-        This will permanently remove the model files from the store. Nodes that have staged this model will keep their local copies until evicted.
+        This will permanently remove the model files from the store. Nodes that
+        have staged this model will keep their local copies until evicted.
       </p>
     {/if}
     <div class="flex items-center justify-end gap-3">
@@ -1148,7 +1198,9 @@
         Purge all node caches
       </h3>
       <p class="text-sm text-exo-light-gray mb-4 font-mono">
-        This will remove all staged model files and partial downloads from every node in the cluster. Models will need to be re-downloaded before they can run again.
+        This will remove all staged model files and partial downloads from every
+        node in the cluster. Models will need to be re-downloaded before they
+        can run again.
       </p>
       <p class="text-xs text-white/40 mb-4 font-mono">
         Nodes that are currently offline will not receive this command.
@@ -1180,7 +1232,7 @@
   models={pickerModels}
   selectedModelId={null}
   favorites={favoritesSet}
-  recentModelIds={recentModelIds}
+  {recentModelIds}
   hasRecents={showRecentsTab}
   existingModelIds={storeModelIds}
   canModelFit={() => true}
@@ -1197,7 +1249,9 @@
     await fetchPickerModels();
   }}
   onDeleteModel={async (modelId) => {
-    await fetch(`/models/custom/${encodeURIComponent(modelId)}`, { method: "DELETE" });
+    await fetch(`/models/custom/${encodeURIComponent(modelId)}`, {
+      method: "DELETE",
+    });
     await fetchPickerModels();
   }}
   totalMemoryGB={0}

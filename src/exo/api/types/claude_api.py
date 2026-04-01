@@ -109,7 +109,9 @@ class ClaudeMessagesRequest(BaseModel):
             "example": {
                 "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
                 "max_tokens": 512,
-                "messages": [{"role": "user", "content": "Hello from Claude-compatible Skulk"}],
+                "messages": [
+                    {"role": "user", "content": "Hello from Claude-compatible Skulk"}
+                ],
                 "stream": False,
             }
         }

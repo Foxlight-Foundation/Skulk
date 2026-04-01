@@ -42,6 +42,13 @@ def entrypoint(
                 bound_instance, event_sender, task_receiver, cancel_receiver
             )
             runner.main()
+        elif bound_instance.is_embedding_model:
+            from exo.worker.runner.embeddings.runner import Runner as EmbeddingRunner
+
+            runner = EmbeddingRunner(
+                bound_instance, event_sender, task_receiver, cancel_receiver
+            )
+            runner.main()
         else:
             from exo.worker.runner.llm_inference.runner import Runner
 

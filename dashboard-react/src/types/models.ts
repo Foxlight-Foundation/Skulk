@@ -98,6 +98,7 @@ export const CAPABILITIES = [
   'vision',
   'image_gen',
   'image_edit',
+  'embedding',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

@@ -195,14 +195,20 @@ export function App() {
       const runnerIds = nodeToRunner ? Object.values(nodeToRunner) : [];
       const nodeIds = nodeToRunner ? Object.keys(nodeToRunner) : [];
 
-      // Derive sharding
+      // Derive sharding and model type from shard metadata
       const runnerToShard = sa?.runnerToShard;
       let sharding: 'Pipeline' | 'Tensor' = 'Pipeline';
+      let isEmbedding = false;
       if (runnerToShard) {
         const firstShard = Object.values(runnerToShard)[0];
         if (firstShard && 'TensorShardMetadata' in firstShard) {
           sharding = 'Tensor';
         }
+        // Check model card tasks for embedding
+        const shardInner = firstShard ? Object.values(firstShard)[0] as Record<string, unknown> | undefined : undefined;
+        const mc = (shardInner?.modelCard ?? shardInner?.model_card) as Record<string, unknown> | undefined;
+        const tasks = mc?.tasks as string[] | undefined;
+        if (tasks?.includes('TextEmbedding')) isEmbedding = true;
       }
 
       // Derive status from runners
@@ -223,6 +229,7 @@ export function App() {
         status: derived.status,
         statusMessage: derived.message,
         loadProgress: derived.progress,
+        isEmbedding,
       });
     }
     return cards;

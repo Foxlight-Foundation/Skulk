@@ -64,6 +64,7 @@ Example ``exo.yaml``::
             node_cache_path: /Volumes/ModelStore/models  # load directly from store
             cleanup_on_deactivate: false
 """
+
 from __future__ import annotations
 
 import socket

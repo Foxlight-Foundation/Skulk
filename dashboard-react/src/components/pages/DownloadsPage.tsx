@@ -203,6 +203,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
           if (mid.toLowerCase().includes('optiq') || (raw.quantization as string ?? '').toLowerCase().includes('optiq')) tags.push('optiq');
           if ((raw.capabilities as string[] ?? []).includes('thinking')) tags.push('thinking');
           if ((raw.supportsTensor ?? raw.supports_tensor) as boolean) tags.push('tensor');
+          if ((raw.capabilities as string[] ?? []).includes('embedding')) tags.push('embedding');
           cards[mid] = {
             family: raw.family as string | undefined,
             quantization: raw.quantization as string | undefined,
@@ -567,6 +568,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
           open={!!placementModelId}
           onClose={() => setPlacementModelId(null)}
           onLaunch={handleLaunchWithParams}
+          isEmbedding={modelCards[placementModelId]?.tags?.includes('embedding')}
         />
       )}
     </Container>

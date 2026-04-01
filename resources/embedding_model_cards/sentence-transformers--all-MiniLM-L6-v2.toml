@@ -1,0 +1,12 @@
+model_id = "sentence-transformers/all-MiniLM-L6-v2"
+n_layers = 6
+hidden_size = 384
+supports_tensor = false
+tasks = ["TextEmbedding"]
+family = "bert"
+quantization = ""
+base_model = "all-MiniLM-L6-v2"
+capabilities = ["embedding"]
+
+[storage_size]
+in_bytes = 80000000

@@ -32,7 +32,11 @@ def _find_resources_in_bundle() -> Path | None:
 
 
 def find_dashboard() -> Path:
-    dashboard = _find_react_dashboard_in_repo() or _find_legacy_dashboard_in_repo() or _find_dashboard_in_bundle()
+    dashboard = (
+        _find_react_dashboard_in_repo()
+        or _find_legacy_dashboard_in_repo()
+        or _find_dashboard_in_bundle()
+    )
     if not dashboard:
         raise FileNotFoundError(
             "Unable to locate dashboard assets — run: cd dashboard-react && npm install && npm run build && cd .."

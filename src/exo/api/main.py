@@ -12,9 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, cast
 from uuid import uuid4
 
-import yaml
-
 import anyio
+import yaml
 from anyio import BrokenResourceError
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -66,6 +65,10 @@ from exo.api.types import (
     DeleteInstanceResponse,
     DeleteTracesRequest,
     DeleteTracesResponse,
+    EmbeddingObject,
+    EmbeddingRequest,
+    EmbeddingResponse,
+    EmbeddingUsage,
     ErrorInfo,
     ErrorResponse,
     FinishReason,
@@ -140,6 +143,7 @@ from exo.shared.models.model_cards import (
 )
 from exo.shared.tracing import TraceEvent, compute_stats, export_trace, load_trace_file
 from exo.shared.types.chunks import (
+    EmbeddingChunk,
     ErrorChunk,
     ImageChunk,
     InputImageChunk,
@@ -164,6 +168,7 @@ from exo.shared.types.commands import (
     StartDownload,
     TaskCancelled,
     TaskFinished,
+    TextEmbedding,
     TextGeneration,
 )
 from exo.shared.types.common import CommandId, Id, NodeId, SystemId
@@ -304,7 +309,10 @@ class API:
         # Initialize optimizer if store path is available
         if exo_config and exo_config.model_store and exo_config.model_store.enabled:
             from exo.store.model_optimizer import ModelOptimizer
-            self._model_optimizer = ModelOptimizer(store_path=Path(exo_config.model_store.store_path))
+
+            self._model_optimizer = ModelOptimizer(
+                store_path=Path(exo_config.model_store.store_path)
+            )
 
         self.paused: bool = False
         self.paused_ev: anyio.Event = anyio.Event()
@@ -340,6 +348,9 @@ class API:
         self._image_generation_queues: dict[
             CommandId, Sender[ImageChunk | ErrorChunk]
         ] = {}
+        self._embedding_queues: dict[
+            CommandId, Sender[EmbeddingChunk | ErrorChunk]
+        ] = {}
         self._image_store = ImageStore(EXO_IMAGE_CACHE_DIR)
         self._tg: TaskGroup = TaskGroup()
 
@@ -352,6 +363,7 @@ class API:
         self._system_id = SystemId()
         self._text_generation_queues = {}
         self._image_generation_queues = {}
+        self._embedding_queues = {}
         self.unpause(result_clock)
         self.event_receiver.close()
         self.event_receiver = event_receiver
@@ -476,9 +488,12 @@ class API:
                 "Generate text with an OpenAI Chat Completions-compatible payload. The requested "
                 "model must already be placed and running or Skulk will return a not-found error."
             ),
-        )(
-            self.chat_completions
-        )
+        )(self.chat_completions)
+        self.app.post(
+            "/v1/embeddings",
+            tags=["Compatibility APIs"],
+            summary="Generate embeddings",
+        )(self.embeddings)
         self.app.post(
             "/bench/chat/completions",
             tags=["Compatibility APIs"],
@@ -489,9 +504,7 @@ class API:
             response_model=None,
             tags=["Images"],
             summary="Generate images",
-        )(
-            self.image_generations
-        )
+        )(self.image_generations)
         self.app.post(
             "/bench/images/generations",
             tags=["Images"],
@@ -508,8 +521,12 @@ class API:
             tags=["Images"],
             summary="Benchmark image editing",
         )(self.bench_image_edits)
-        self.app.get("/images", tags=["Images"], summary="List stored images")(self.list_images)
-        self.app.get("/images/{image_id}", tags=["Images"], summary="Fetch one stored image")(self.get_image)
+        self.app.get("/images", tags=["Images"], summary="List stored images")(
+            self.list_images
+        )
+        self.app.get(
+            "/images/{image_id}", tags=["Images"], summary="Fetch one stored image"
+        )(self.get_image)
         self.app.post(
             "/v1/messages",
             response_model=None,
@@ -538,8 +555,14 @@ class API:
         )(self.cancel_command)
 
         # Ollama API
-        self.app.head("/ollama/", tags=["Compatibility APIs"], summary="Ollama version check")(self.ollama_version)
-        self.app.head("/ollama/api/version", tags=["Compatibility APIs"], summary="Ollama version check")(self.ollama_version)
+        self.app.head(
+            "/ollama/", tags=["Compatibility APIs"], summary="Ollama version check"
+        )(self.ollama_version)
+        self.app.head(
+            "/ollama/api/version",
+            tags=["Compatibility APIs"],
+            summary="Ollama version check",
+        )(self.ollama_version)
         self.app.post(
             "/ollama/api/chat",
             response_model=None,
@@ -548,8 +571,18 @@ class API:
             description="Ollama-compatible chat endpoint backed by Skulk model placement and routing.",
             openapi_extra=_json_request_body(OllamaChatRequest.model_json_schema()),
         )(self.ollama_chat)
-        self.app.post("/ollama/api/api/chat", response_model=None, tags=["Compatibility APIs"], summary="Ollama chat alias")(self.ollama_chat)
-        self.app.post("/ollama/api/v1/chat", response_model=None, tags=["Compatibility APIs"], summary="Ollama chat alias")(self.ollama_chat)
+        self.app.post(
+            "/ollama/api/api/chat",
+            response_model=None,
+            tags=["Compatibility APIs"],
+            summary="Ollama chat alias",
+        )(self.ollama_chat)
+        self.app.post(
+            "/ollama/api/v1/chat",
+            response_model=None,
+            tags=["Compatibility APIs"],
+            summary="Ollama chat alias",
+        )(self.ollama_chat)
         self.app.post(
             "/ollama/api/generate",
             response_model=None,
@@ -558,12 +591,36 @@ class API:
             description="Ollama-compatible prompt-completion endpoint backed by a placed Skulk model.",
             openapi_extra=_json_request_body(OllamaGenerateRequest.model_json_schema()),
         )(self.ollama_generate)
-        self.app.get("/ollama/api/tags", tags=["Compatibility APIs"], summary="List Ollama models")(self.ollama_tags)
-        self.app.get("/ollama/api/api/tags", tags=["Compatibility APIs"], summary="List Ollama models alias")(self.ollama_tags)
-        self.app.get("/ollama/api/v1/tags", tags=["Compatibility APIs"], summary="List Ollama models alias")(self.ollama_tags)
-        self.app.post("/ollama/api/show", tags=["Compatibility APIs"], summary="Show Ollama model details")(self.ollama_show)
-        self.app.get("/ollama/api/ps", tags=["Compatibility APIs"], summary="List running Ollama models")(self.ollama_ps)
-        self.app.get("/ollama/api/version", tags=["Compatibility APIs"], summary="Get Ollama API version")(self.ollama_version)
+        self.app.get(
+            "/ollama/api/tags",
+            tags=["Compatibility APIs"],
+            summary="List Ollama models",
+        )(self.ollama_tags)
+        self.app.get(
+            "/ollama/api/api/tags",
+            tags=["Compatibility APIs"],
+            summary="List Ollama models alias",
+        )(self.ollama_tags)
+        self.app.get(
+            "/ollama/api/v1/tags",
+            tags=["Compatibility APIs"],
+            summary="List Ollama models alias",
+        )(self.ollama_tags)
+        self.app.post(
+            "/ollama/api/show",
+            tags=["Compatibility APIs"],
+            summary="Show Ollama model details",
+        )(self.ollama_show)
+        self.app.get(
+            "/ollama/api/ps",
+            tags=["Compatibility APIs"],
+            summary="List running Ollama models",
+        )(self.ollama_ps)
+        self.app.get(
+            "/ollama/api/version",
+            tags=["Compatibility APIs"],
+            summary="Get Ollama API version",
+        )(self.ollama_version)
 
         self.app.get(
             "/state",
@@ -938,9 +995,11 @@ class API:
 
     async def cancel_command(self, command_id: CommandId) -> CancelCommandResponse:
         """Cancel an active command by closing its stream and notifying workers."""
-        sender = self._text_generation_queues.get(
-            command_id
-        ) or self._image_generation_queues.get(command_id)
+        sender = (
+            self._text_generation_queues.get(command_id)
+            or self._image_generation_queues.get(command_id)
+            or self._embedding_queues.get(command_id)
+        )
         if sender is None:
             raise HTTPException(
                 status_code=404,
@@ -1146,6 +1205,31 @@ class API:
                 status_code=404, detail=f"No instance found for model {resolved_model}"
             )
         return resolved_model
+
+    async def _validate_embedding_model(self, model_id: ModelId) -> ModelId:
+        """Validate an embedding model exists and is the right type.
+
+        Raises HTTPException 404 if no instance, 400 if not an embedding model.
+        """
+        from exo.shared.models.model_cards import ModelTask
+
+        model_card = await ModelCard.load(model_id)
+        resolved = model_card.model_id
+        if ModelTask.TextEmbedding not in model_card.tasks:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {resolved} is not an embedding model",
+            )
+        if not any(
+            instance.shard_assignments.model_id == resolved
+            for instance in self.state.instances.values()
+        ):
+            await self._trigger_notify_user_to_download_model(resolved)
+            raise HTTPException(
+                status_code=404,
+                detail=f"No instance found for model {resolved}",
+            )
+        return resolved
 
     def stream_events(self) -> StreamingResponse:
         def _generate_json_array(events: Iterable[Event]) -> Iterable[str]:
@@ -1918,6 +2002,9 @@ class API:
         # Tensor parallel support
         if card.supports_tensor:
             tags.append("tensor")
+        # Embedding models
+        if "embedding" in card.capabilities:
+            tags.append("embedding")
         return tags
 
     async def get_models(self, status: str | None = Query(default=None)) -> ModelList:
@@ -2096,11 +2183,17 @@ class API:
                     if queue := self._text_generation_queues.get(
                         event.command_id, None
                     ):
-                        assert not isinstance(event.chunk, ImageChunk)
+                        assert not isinstance(event.chunk, (ImageChunk, EmbeddingChunk))
                         try:
                             await queue.send(event.chunk)
                         except BrokenResourceError:
                             self._text_generation_queues.pop(event.command_id, None)
+                    if queue := self._embedding_queues.get(event.command_id, None):
+                        assert isinstance(event.chunk, (EmbeddingChunk, ErrorChunk))
+                        try:
+                            await queue.send(event.chunk)
+                        except BrokenResourceError:
+                            self._embedding_queues.pop(event.command_id, None)
                 if isinstance(event, TracesMerged):
                     self._save_merged_trace(event)
 
@@ -2317,7 +2410,9 @@ class API:
                     "configPath": str(self._config_path),
                     "fileExists": False,
                     "effective": {
-                        "kv_cache_backend": os.environ.get("EXO_KV_CACHE_BACKEND", "default"),
+                        "kv_cache_backend": os.environ.get(
+                            "EXO_KV_CACHE_BACKEND", "default"
+                        ),
                     },
                 }
             )
@@ -2334,7 +2429,9 @@ class API:
                 "configPath": str(self._config_path),
                 "fileExists": True,
                 "effective": {
-                    "kv_cache_backend": os.environ.get("EXO_KV_CACHE_BACKEND", "default"),
+                    "kv_cache_backend": os.environ.get(
+                        "EXO_KV_CACHE_BACKEND", "default"
+                    ),
                     "has_hf_token": has_hf_token or "HF_TOKEN" in os.environ,
                 },
             }
@@ -2359,7 +2456,7 @@ class API:
         try:
             ExoConfig.model_validate(config_data)
         except Exception as exc:
-            raise HTTPException(status_code=422, detail=str(exc))
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         config_yaml = yaml.safe_dump(
             config_data, default_flow_style=False, sort_keys=False
         )
@@ -2373,9 +2470,12 @@ class API:
         # Apply inference config to env var immediately so next model launch uses it.
         # Don't overwrite if user provided the env var at launch.
         inference = config_data.get("inference")
-        if isinstance(inference, dict) and "kv_cache_backend" in inference:
-            if not os.environ.get("_EXO_KV_BACKEND_USER_SET"):
-                os.environ["EXO_KV_CACHE_BACKEND"] = str(inference["kv_cache_backend"])
+        if (
+            isinstance(inference, dict)
+            and "kv_cache_backend" in inference
+            and not os.environ.get("_EXO_KV_BACKEND_USER_SET")
+        ):
+            os.environ["EXO_KV_CACHE_BACKEND"] = str(inference["kv_cache_backend"])
         # Apply HF token immediately
         hf_token = config_data.get("hf_token")
         if hf_token and "HF_TOKEN" not in os.environ:
@@ -2386,8 +2486,16 @@ class API:
             {
                 "success": True,
                 "message": "Config saved and synced to cluster."
-                + (" KV cache backend takes effect on next model launch." if inference else "")
-                + (" Restart required for model store changes." if has_store_changes else ""),
+                + (
+                    " KV cache backend takes effect on next model launch."
+                    if inference
+                    else ""
+                )
+                + (
+                    " Restart required for model store changes."
+                    if has_store_changes
+                    else ""
+                ),
                 "requiresRestart": has_store_changes,
             }
         )
@@ -2432,8 +2540,8 @@ class API:
                 ],
                 key=lambda d: d["name"],
             )
-        except PermissionError:
-            raise HTTPException(status_code=403, detail="Permission denied")
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail="Permission denied") from exc
         return JSONResponse({"path": str(resolved), "directories": dirs})
 
     async def get_node_identity(self) -> JSONResponse:
@@ -2491,7 +2599,10 @@ class API:
     async def optimize_model(self, model_id: str, request: Request) -> JSONResponse:
         """Start an OptiQ mixed-precision optimization for a model."""
         if self._model_optimizer is None:
-            raise HTTPException(status_code=503, detail="Model optimizer not available (store not configured)")
+            raise HTTPException(
+                status_code=503,
+                detail="Model optimizer not available (store not configured)",
+            )
         try:
             body = await request.json()
         except Exception:
@@ -2505,12 +2616,14 @@ class API:
                 candidate_bits=candidate_bits,
             )
         except RuntimeError as exc:
-            raise HTTPException(status_code=409, detail=str(exc))
-        return JSONResponse({
-            "modelId": model_id,
-            "status": "started",
-            "targetBpw": target_bpw,
-        })
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return JSONResponse(
+            {
+                "modelId": model_id,
+                "status": "started",
+                "targetBpw": target_bpw,
+            }
+        )
 
     async def get_optimize_status(self, model_id: str) -> JSONResponse:
         """Get optimization status for a model."""
@@ -2519,13 +2632,95 @@ class API:
         job = self._model_optimizer.get_status(model_id)
         if job is None:
             raise HTTPException(status_code=404, detail="No optimization job found")
-        return JSONResponse({
-            "modelId": job.model_id,
-            "status": job.status,
-            "progress": job.progress,
-            "message": job.message,
-            "resultPath": job.result_path,
-            "achievedBpw": job.achieved_bpw,
-            "estimatedSizeMb": job.estimated_size_mb,
-            "error": job.error,
-        })
+        return JSONResponse(
+            {
+                "modelId": job.model_id,
+                "status": job.status,
+                "progress": job.progress,
+                "message": job.message,
+                "resultPath": job.result_path,
+                "achievedBpw": job.achieved_bpw,
+                "estimatedSizeMb": job.estimated_size_mb,
+                "error": job.error,
+            }
+        )
+
+    async def embeddings(self, request: EmbeddingRequest) -> JSONResponse:
+        """OpenAI-compatible embeddings endpoint — routes through cluster pipeline."""
+        from exo.shared.types.embedding import TextEmbeddingTaskParams
+
+        texts = [request.input] if isinstance(request.input, str) else request.input
+        if not texts:
+            raise HTTPException(status_code=400, detail="input must not be empty")
+
+        if request.dimensions is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="The `dimensions` parameter is not supported; embeddings are returned at the model's native dimensionality.",
+            )
+
+        model_id = await self._validate_embedding_model(ModelId(request.model))
+        command = TextEmbedding(
+            task_params=TextEmbeddingTaskParams(
+                model=model_id,
+                input_texts=texts,
+                encoding_format=request.encoding_format,
+            )
+        )
+        command_id = command.command_id
+
+        try:
+            self._embedding_queues[command_id], recv = channel[
+                EmbeddingChunk | ErrorChunk
+            ]()
+
+            await self._send(command)
+
+            with recv as chunks:
+                async for chunk in chunks:
+                    if isinstance(chunk, ErrorChunk):
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Embedding failed: {chunk.error_message}",
+                        )
+                    import base64
+                    import struct
+
+                    embeddings_data: list[list[float] | str] = []
+                    for emb in chunk.embeddings:
+                        if request.encoding_format == "base64":
+                            b64 = base64.b64encode(
+                                struct.pack(f"<{len(emb)}f", *emb)
+                            ).decode("ascii")
+                            embeddings_data.append(b64)
+                        else:
+                            embeddings_data.append(emb)
+
+                    response = EmbeddingResponse(
+                        data=[
+                            EmbeddingObject(index=idx, embedding=emb_data)
+                            for idx, emb_data in enumerate(embeddings_data)
+                        ],
+                        model=model_id,
+                        usage=EmbeddingUsage(
+                            prompt_tokens=chunk.token_count,
+                            total_tokens=chunk.token_count,
+                        ),
+                    )
+                    return JSONResponse(response.model_dump())
+
+            raise HTTPException(
+                status_code=500, detail="No embedding response received"
+            )
+
+        except anyio.get_cancelled_exc_class():
+            cancel_command = TaskCancelled(cancelled_command_id=command_id)
+            with anyio.CancelScope(shield=True):
+                await self.command_sender.send(
+                    ForwarderCommand(origin=self._system_id, command=cancel_command)
+                )
+            raise
+        finally:
+            await self._send(TaskFinished(finished_command_id=command_id))
+            if command_id in self._embedding_queues:
+                del self._embedding_queues[command_id]

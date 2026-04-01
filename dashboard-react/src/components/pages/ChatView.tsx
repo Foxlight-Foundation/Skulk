@@ -159,7 +159,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
 
   // Ready models
   const readyModels = useMemo(
-    () => readyInstances.filter((i) => i.status === 'ready' || i.status === 'running'),
+    () => readyInstances.filter((i) => (i.status === 'ready' || i.status === 'running') && !i.isEmbedding),
     [readyInstances],
   );
 

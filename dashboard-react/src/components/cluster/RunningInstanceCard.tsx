@@ -24,6 +24,7 @@ export interface RunningInstanceCardProps {
   loadProgress?: number;
   onDelete?: () => void;
   onChat?: () => void;
+  isEmbedding?: boolean;
   className?: string;
 }
 
@@ -250,12 +251,16 @@ export function RunningInstanceCard({
   loadProgress,
   onDelete,
   onChat,
+  isEmbedding,
   className,
 }: RunningInstanceCardProps) {
-  const cfg = STATUS_CONFIG[status];
+  const baseCfg = STATUS_CONFIG[status];
+  const cfg = isEmbedding && status === 'ready'
+    ? { ...baseCfg, defaultMessage: 'Ready for embedding' }
+    : baseCfg;
   const link = hfUrl(modelId);
   const showProgress = (status === 'loading' || status === 'warming_up') && loadProgress != null;
-  const canChat = status === 'ready' || status === 'running';
+  const canChat = (status === 'ready' || status === 'running') && !isEmbedding;
 
   return (
     <Card $color={cfg.color} $glow={cfg.glow} className={className}>

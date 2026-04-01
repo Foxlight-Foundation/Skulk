@@ -17,6 +17,10 @@ from .api import DeleteDownloadResponse as DeleteDownloadResponse
 from .api import DeleteInstanceResponse as DeleteInstanceResponse
 from .api import DeleteTracesRequest as DeleteTracesRequest
 from .api import DeleteTracesResponse as DeleteTracesResponse
+from .api import EmbeddingObject as EmbeddingObject
+from .api import EmbeddingRequest as EmbeddingRequest
+from .api import EmbeddingResponse as EmbeddingResponse
+from .api import EmbeddingUsage as EmbeddingUsage
 from .api import ErrorInfo as ErrorInfo
 from .api import ErrorResponse as ErrorResponse
 from .api import FinishReason as FinishReason

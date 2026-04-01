@@ -1000,7 +1000,7 @@
               {getModelFitStatus}
               onToggleExpand={() => toggleGroupExpanded(group.id)}
               onSelectModel={handleSelect}
-                {mode}
+              {mode}
               {onToggleFavorite}
               onShowInfo={(g) => (infoGroup = g)}
               downloadStatusMap={getVariantDownloadMap(group)}
@@ -1030,7 +1030,7 @@
               {getModelFitStatus}
               onToggleExpand={() => toggleGroupExpanded(group.id)}
               onSelectModel={handleSelect}
-                {mode}
+              {mode}
               {onToggleFavorite}
               onShowInfo={(g) => (infoGroup = g)}
               downloadStatusMap={getVariantDownloadMap(group)}

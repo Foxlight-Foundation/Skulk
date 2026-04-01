@@ -7,6 +7,7 @@ from exo.api.types import (
 from exo.shared.models.model_cards import ModelCard, ModelId
 from exo.shared.types.chunks import InputImageChunk
 from exo.shared.types.common import CommandId, NodeId, SystemId
+from exo.shared.types.embedding import TextEmbeddingTaskParams
 from exo.shared.types.text_generation import TextGenerationTaskParams
 from exo.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from exo.shared.types.worker.shards import Sharding, ShardMetadata
@@ -31,6 +32,10 @@ class ImageGeneration(BaseCommand):
 
 class ImageEdits(BaseCommand):
     task_params: ImageEditsTaskParams
+
+
+class TextEmbedding(BaseCommand):
+    task_params: TextEmbeddingTaskParams
 
 
 class PlaceInstance(BaseCommand):
@@ -114,6 +119,7 @@ Command = (
     | TextGeneration
     | ImageGeneration
     | ImageEdits
+    | TextEmbedding
     | PlaceInstance
     | CreateInstance
     | DeleteInstance
