@@ -295,12 +295,29 @@ class DownloadCoordinator:
         # Check if already downloading, complete, or recently failed
         if model_id in self.download_status:
             status = self.download_status[model_id]
-            if isinstance(status, (DownloadOngoing, DownloadCompleted, DownloadFailed)):
+            # If marked completed but model directory no longer exists on disk,
+            # clear the stale status and re-download from scratch.
+            if isinstance(status, DownloadCompleted) and status.model_directory:
+                model_dir = Path(status.model_directory)
+                if not model_dir.is_dir() or not (model_dir / "config.json").exists():
+                    logger.info(
+                        f"DownloadCoordinator: {model_id} was DownloadCompleted but "
+                        f"model directory {status.model_directory} no longer exists, re-downloading"
+                    )
+                    del self.download_status[model_id]
+                    # Fall through to fresh download below
+                else:
+                    logger.info(
+                        f"DownloadCoordinator: {model_id} already DownloadCompleted, re-emitting"
+                    )
+                    await self.event_sender.send(
+                        NodeDownloadProgress(download_progress=status)
+                    )
+                    return
+            elif isinstance(status, (DownloadOngoing, DownloadFailed)):
                 logger.info(
                     f"DownloadCoordinator: {model_id} already {type(status).__name__}, re-emitting"
                 )
-                # Re-emit so the global state picks it up (the planner may
-                # not have seen the original event, e.g. after election).
                 await self.event_sender.send(
                     NodeDownloadProgress(download_progress=status)
                 )
