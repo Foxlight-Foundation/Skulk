@@ -486,16 +486,7 @@ def _patch_lossy_chat_template(template: str) -> str | None:
 
 
 def _needs_dsml_encoding(task_params: TextGenerationTaskParams) -> bool:
-    if "deepseek-v3.2" not in task_params.model.lower():
-        return False
-    # Use DSML encoding when tools are provided or tool results are in the conversation
-    if task_params.tools:
-        return True
-    if task_params.chat_template_messages:
-        return any(
-            msg.get("role") == "tool" for msg in task_params.chat_template_messages
-        )
-    return False
+    return "deepseek-v3.2" in task_params.model.lower()
 
 
 def apply_chat_template(
@@ -514,8 +505,6 @@ def apply_chat_template(
     if task_params.chat_template_messages is not None:
         # Use pre-formatted messages that preserve tool_calls, thinking, etc.
         formatted_messages = list(task_params.chat_template_messages)
-        for msg in formatted_messages:
-            _normalize_tool_calls(msg)
     else:
         # Add system message (instructions) if present
         if task_params.instructions:
@@ -541,13 +530,19 @@ def apply_chat_template(
 
         prompt = encode_messages(
             messages=formatted_messages,
-            thinking_mode="thinking" if task_params.enable_thinking else "chat",
+            # Only use chat mode if enable thinking is explicitly False.
+            thinking_mode="chat"
+            if task_params.enable_thinking is False
+            else "thinking",
             tools=task_params.tools,
         )
         if partial_assistant_content:
             prompt += partial_assistant_content
         logger.info(prompt)
         return prompt
+
+    for msg in formatted_messages:
+        _normalize_tool_calls(msg)
 
     extra_kwargs: dict[str, Any] = {}
     if task_params.enable_thinking is not None:
@@ -586,6 +581,29 @@ def apply_chat_template(
     logger.info(prompt)
 
     return prompt
+
+
+def system_prompt_token_count(
+    task_params: TextGenerationTaskParams,
+    tokenizer: TokenizerWrapper,
+) -> int:
+    """Approximate token count of the system prompt portion of the input."""
+    parts: list[str] = []
+    if task_params.chat_template_messages is not None:
+        for msg in task_params.chat_template_messages:
+            if msg.get("role") in ("system", "developer"):
+                content = msg.get("content", "")  # type: ignore
+                if isinstance(content, str):
+                    parts.append(content)
+    else:
+        if task_params.instructions:
+            parts.append(task_params.instructions)
+        for msg in task_params.input:
+            if msg.role in ("system", "developer"):
+                parts.append(msg.content)
+    if len(parts) == 0:
+        return 0
+    return len(tokenizer.encode(" ".join(parts), add_special_tokens=False))
 
 
 def detect_thinking_prompt_suffix(prompt: str, tokenizer: TokenizerWrapper) -> bool:
@@ -638,6 +656,7 @@ class NullKVCache(KVCache):
     @property
     def state(self) -> tuple[mx.array, mx.array]:
         # matches what mx.save_safetensors / mx.eval expect
+        assert self.keys is not None and self.values is not None
         return self.keys, self.values
 
     @state.setter
@@ -739,12 +758,9 @@ def _parse_kimi_tool_calls(text: str):
         if func_args_match is None:
             raise ValueError("No tool call arguments found.")
         func_args = func_args_match.group(1)
-        try:
-            arg_dct = json.loads(func_args)  # pyright: ignore[reportAny]
-        except Exception:
-            arg_dct = None
+        arg_dct = json.loads(func_args)  # pyright: ignore[reportAny]
 
-        return dict(id=tool_call_id, name=func_name, arguments=arg_dct)
+        return dict(id=tool_call_id, name=func_name, arguments=arg_dct)  # pyright: ignore[reportAny]
 
     tool_matches = _tool_call_split_regex.findall(text)
     if tool_matches:

@@ -482,7 +482,7 @@ dependencies = [
     { name = "loguru", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "mflux", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "mlx", version = "0.30.6", source = { registry = "https://pypi.org/simple" }, extra = ["cpu"], marker = "sys_platform == 'linux'" },
-    { name = "mlx", version = "0.30.7.dev20260330+257d5692", source = { git = "https://github.com/rltakashige/mlx-jaccl-fix-small-recv.git?branch=address-rdma-gpu-locks#257d5692fc7af6bba3b8afaeb63c549b7d1e43d5" }, marker = "sys_platform == 'darwin'" },
+    { name = "mlx", version = "0.30.7.dev20260321+257d5692", source = { git = "https://github.com/rltakashige/mlx-jaccl-fix-small-recv.git?branch=address-rdma-gpu-locks#257d5692fc7af6bba3b8afaeb63c549b7d1e43d5" }, marker = "sys_platform == 'darwin'" },
     { name = "mlx-lm", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "mlx-optiq", extra = ["convert"], marker = "sys_platform == 'darwin'" },
     { name = "msgspec", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -525,7 +525,7 @@ requires-dist = [
     { name = "mflux", specifier = "==0.16.9" },
     { name = "mlx", marker = "sys_platform == 'darwin'", git = "https://github.com/rltakashige/mlx-jaccl-fix-small-recv.git?branch=address-rdma-gpu-locks" },
     { name = "mlx", extras = ["cpu"], marker = "sys_platform == 'linux'", specifier = "==0.30.6" },
-    { name = "mlx-lm", git = "https://github.com/rltakashige/mlx-lm?branch=leo%2Feval-left-padding-in-batched-rotation" },
+    { name = "mlx-lm", git = "https://github.com/rltakashige/mlx-lm?branch=leo%2Ffix-arrayscache-leak" },
     { name = "mlx-optiq", extras = ["convert"], marker = "sys_platform == 'darwin'" },
     { name = "msgspec", specifier = ">=0.19.0" },
     { name = "openai-harmony", specifier = ">=0.0.8" },
@@ -1422,7 +1422,7 @@ dependencies = [
     { name = "huggingface-hub", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "matplotlib", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "mlx", version = "0.30.6", source = { registry = "https://pypi.org/simple" }, extra = ["cuda13"], marker = "sys_platform == 'linux'" },
-    { name = "mlx", version = "0.30.7.dev20260330+257d5692", source = { git = "https://github.com/rltakashige/mlx-jaccl-fix-small-recv.git?branch=address-rdma-gpu-locks#257d5692fc7af6bba3b8afaeb63c549b7d1e43d5" }, marker = "sys_platform == 'darwin'" },
+    { name = "mlx", version = "0.30.7.dev20260321+257d5692", source = { git = "https://github.com/rltakashige/mlx-jaccl-fix-small-recv.git?branch=address-rdma-gpu-locks#257d5692fc7af6bba3b8afaeb63c549b7d1e43d5" }, marker = "sys_platform == 'darwin'" },
     { name = "numpy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "opencv-python", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "piexif", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -1522,7 +1522,7 @@ cuda13 = [
 
 [[package]]
 name = "mlx"
-version = "0.30.7.dev20260330+257d5692"
+version = "0.30.7.dev20260321+257d5692"
 source = { git = "https://github.com/rltakashige/mlx-jaccl-fix-small-recv.git?branch=address-rdma-gpu-locks#257d5692fc7af6bba3b8afaeb63c549b7d1e43d5" }
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'darwin'",
@@ -1555,11 +1555,11 @@ wheels = [
 
 [[package]]
 name = "mlx-lm"
-version = "0.31.0"
-source = { git = "https://github.com/rltakashige/mlx-lm?branch=leo%2Feval-left-padding-in-batched-rotation#5e0c484cfb5c68d281a71409927ee1bb75adaae2" }
+version = "0.31.2"
+source = { git = "https://github.com/rltakashige/mlx-lm?branch=leo%2Ffix-arrayscache-leak#d36e9b661e55a5fc0f77fb6f17ea643aa2dc87aa" }
 dependencies = [
     { name = "jinja2", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "mlx", version = "0.30.7.dev20260330+257d5692", source = { git = "https://github.com/rltakashige/mlx-jaccl-fix-small-recv.git?branch=address-rdma-gpu-locks#257d5692fc7af6bba3b8afaeb63c549b7d1e43d5" }, marker = "sys_platform == 'darwin'" },
+    { name = "mlx", version = "0.30.7.dev20260321+257d5692", source = { git = "https://github.com/rltakashige/mlx-jaccl-fix-small-recv.git?branch=address-rdma-gpu-locks#257d5692fc7af6bba3b8afaeb63c549b7d1e43d5" }, marker = "sys_platform == 'darwin'" },
     { name = "numpy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "protobuf", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "pyyaml", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -1572,7 +1572,7 @@ name = "mlx-optiq"
 version = "0.0.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "mlx", version = "0.30.7.dev20260330+257d5692", source = { git = "https://github.com/rltakashige/mlx-jaccl-fix-small-recv.git?branch=address-rdma-gpu-locks#257d5692fc7af6bba3b8afaeb63c549b7d1e43d5" }, marker = "sys_platform == 'darwin'" },
+    { name = "mlx", version = "0.30.7.dev20260321+257d5692", source = { git = "https://github.com/rltakashige/mlx-jaccl-fix-small-recv.git?branch=address-rdma-gpu-locks#257d5692fc7af6bba3b8afaeb63c549b7d1e43d5" }, marker = "sys_platform == 'darwin'" },
     { name = "mlx-lm", marker = "sys_platform == 'darwin'" },
     { name = "numpy", marker = "sys_platform == 'darwin'" },
     { name = "scipy", marker = "sys_platform == 'darwin'" },
