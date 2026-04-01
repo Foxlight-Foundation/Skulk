@@ -19,4 +19,4 @@ nav:
   - Reference:
       - OpenAPI Schema: reference/openapi.md
       - API Reference (ReDoc): reference/api-reference.md
-      - TypeDoc: reference/typedoc.md
+      - TypeScript API: reference/typedoc/README.md

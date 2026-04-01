@@ -21,7 +21,7 @@ If you are getting oriented, start with these pages:
 
 - I want to browse the backend API: [API Reference (ReDoc)](reference/api-reference.md)
 - I want the raw machine-readable schema: [OpenAPI schema](reference/openapi.md)
-- I want frontend and TypeScript symbols: [TypeDoc](reference/typedoc.md)
+- I want frontend and TypeScript symbols: [TypeScript API](reference/typedoc/README.md)
 - I want implementation context before I integrate: [Architecture overview](architecture.md)
 
 ## What Lives Here

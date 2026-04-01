@@ -42,6 +42,7 @@ dashboard-react/storybook-static/
 
 # generated docs
 docs/generated/
+docs/reference/typedoc/
 site/
 
 # host config snapshots

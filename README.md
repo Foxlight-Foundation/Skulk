@@ -12,6 +12,8 @@ a more modern dashboard, richer API workflows, sophisticated cache quantization,
 
 > Skulk is maintained by [Foxlight Foundation](https://github.com/foxlight-foundation) and forked from [exo](https://github.com/exo-explore/exo).
 
+**[Documentation](https://foxlight-foundation.github.io/Skulk/)** · **[API Guide](https://foxlight-foundation.github.io/Skulk/api/)** · **[Architecture](https://foxlight-foundation.github.io/Skulk/architecture/)**
+
 ## What Skulk Is Good At
 
 - Run a model on a single machine through the dashboard or API.

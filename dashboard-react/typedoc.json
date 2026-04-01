@@ -2,7 +2,7 @@
   "entryPoints": ["src/docs-entry.ts"],
   "entryPointStrategy": "resolve",
   "tsconfig": "tsconfig.app.json",
-  "out": "../docs/generated/typedoc",
+  "out": "../docs/reference/typedoc",
   "exclude": [
     "**/*.stories.ts",
     "**/*.stories.tsx",
@@ -16,5 +16,10 @@
   "readme": "none",
   "categorizeByGroup": false,
   "sort": ["source-order"],
-  "plugin": []
+  "plugin": ["typedoc-plugin-markdown"],
+  "outputFileStrategy": "members",
+  "flattenOutputFiles": false,
+  "hidePageHeader": true,
+  "hideGroupHeadings": true,
+  "indexFormat": "table"
 }

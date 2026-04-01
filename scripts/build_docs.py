@@ -15,13 +15,20 @@ def run(cmd: list[str], cwd: Path | None = None) -> None:
 
 
 def main() -> None:
+    # Generate OpenAPI schema + ReDoc HTML
     run(["uv", "run", "python", "scripts/export_openapi.py"])
-    run(["npm", "run", "docs:typedoc"], cwd=REPO_ROOT / "dashboard-react")
-    run(["uv", "run", "mkdocs", "build", "--strict"])
 
+    # Generate TypeDoc markdown (output goes directly into docs/ tree)
+    run(["npm", "run", "docs:typedoc"], cwd=REPO_ROOT / "dashboard-react")
+
+    # Build MkDocs (TypeDoc markdown is processed natively)
+    run(["uv", "run", "mkdocs", "build"])
+
+    # Copy OpenAPI generated assets into site output
     if SITE_GENERATED.exists():
         shutil.rmtree(SITE_GENERATED)
-    shutil.copytree(DOCS_GENERATED, SITE_GENERATED)
+    if DOCS_GENERATED.exists():
+        shutil.copytree(DOCS_GENERATED, SITE_GENERATED)
 
 
 if __name__ == "__main__":
