@@ -1,22 +1,13 @@
 site_name: Skulk Developer Docs
 site_description: Developer documentation for Skulk
+site_url: https://foxlight-foundation.github.io/Skulk/
 repo_url: https://github.com/Foxlight-Foundation/Skulk
 theme:
-  name: material
-  palette:
-    scheme: slate
-    primary: custom
-    accent: amber
-  features:
-    - navigation.sections
-    - navigation.expand
-    - content.code.copy
+  name: shadcn
+  show_stargazers: true
 
 docs_dir: docs
 site_dir: site
-
-extra_css:
-  - css/custom.css
 
 nav:
   - Home: index.md
