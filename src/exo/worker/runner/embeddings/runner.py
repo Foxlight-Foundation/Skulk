@@ -149,9 +149,16 @@ class Runner:
                 model_id = self.shard_metadata.model_card.model_id
                 logger.info(f"loading embedding model: {model_id}")
 
-                self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+                from exo.download.download_utils import build_model_path
+                from exo.shared.types.common import ModelId
+
+                local_path = str(build_model_path(ModelId(model_id)))
+                logger.info(f"loading from local path: {local_path}")
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    local_path, local_files_only=True
+                )
                 self.model = AutoModel.from_pretrained(
-                    model_id, trust_remote_code=False
+                    local_path, trust_remote_code=False, local_files_only=True
                 )
                 self.model.eval()
 
@@ -208,10 +215,8 @@ class Runner:
                 self.current_status = RunnerShutdown()
 
             case _:
-                message = (
+                raise RuntimeError(
                     f"embedding runner received unsupported task "
                     f"{task.__class__.__name__} in status "
                     f"{self.current_status.__class__.__name__}"
                 )
-                logger.error(message)
-                self.acknowledge_task(task)

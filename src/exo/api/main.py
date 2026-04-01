@@ -1206,6 +1206,31 @@ class API:
             )
         return resolved_model
 
+    async def _validate_embedding_model(self, model_id: ModelId) -> ModelId:
+        """Validate an embedding model exists and is the right type.
+
+        Raises HTTPException 404 if no instance, 400 if not an embedding model.
+        """
+        from exo.shared.models.model_cards import ModelTask
+
+        model_card = await ModelCard.load(model_id)
+        resolved = model_card.model_id
+        if ModelTask.TextEmbedding not in model_card.tasks:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {resolved} is not an embedding model",
+            )
+        if not any(
+            instance.shard_assignments.model_id == resolved
+            for instance in self.state.instances.values()
+        ):
+            await self._trigger_notify_user_to_download_model(resolved)
+            raise HTTPException(
+                status_code=404,
+                detail=f"No instance found for model {resolved}",
+            )
+        return resolved
+
     def stream_events(self) -> StreamingResponse:
         def _generate_json_array(events: Iterable[Event]) -> Iterable[str]:
             yield "["
@@ -2628,7 +2653,13 @@ class API:
         if not texts:
             raise HTTPException(status_code=400, detail="input must not be empty")
 
-        model_id = await self._resolve_and_validate_text_model(ModelId(request.model))
+        if request.dimensions is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="The `dimensions` parameter is not supported; embeddings are returned at the model's native dimensionality.",
+            )
+
+        model_id = await self._validate_embedding_model(ModelId(request.model))
         command = TextEmbedding(
             task_params=TextEmbeddingTaskParams(
                 model=model_id,
@@ -2670,7 +2701,7 @@ class API:
                             EmbeddingObject(index=idx, embedding=emb_data)
                             for idx, emb_data in enumerate(embeddings_data)
                         ],
-                        model=request.model,
+                        model=model_id,
                         usage=EmbeddingUsage(
                             prompt_tokens=chunk.token_count,
                             total_tokens=chunk.token_count,
