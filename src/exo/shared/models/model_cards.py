@@ -216,7 +216,7 @@ class ModelCard(CamelCaseModel):
             num_key_value_heads=config_data.num_key_value_heads,
             context_length=config_data.max_position_embeddings or 0,
             tasks=[ModelTask.TextGeneration],
-            trust_remote_code=False,
+            trust_remote_code=True,
             is_custom=True,
             vision=config_data.vision,
         )
