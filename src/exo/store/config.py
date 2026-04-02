@@ -183,12 +183,18 @@ class ExoConfig(FrozenModel):
     """Root configuration model for ``exo.yaml``.
 
     This is the top-level object parsed from the config file.  The design
-    leaves room for future top-level sections (networking, inference, etc.)
-    without breaking existing deployments.
+    leaves room for future top-level sections without breaking existing
+    deployments.
 
     Attributes:
         model_store: Model store configuration.  ``None`` when the section is
             absent, which means the model store feature is disabled.
+        inference: Inference settings (KV cache backend).  ``None`` uses
+            defaults.
+        logging: Centralized logging configuration (ingest URL, Grafana
+            credentials).  ``None`` disables remote log shipping.
+        hf_token: HuggingFace API token.  Stripped from ``GET /config``
+            responses for security.
     """
 
     model_store: ModelStoreConfig | None = None

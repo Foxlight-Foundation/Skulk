@@ -214,13 +214,13 @@ class DownloadCoordinator:
                         "DownloadCoordinator: updated HF_TOKEN from config sync"
                     )
                 # Apply logging config — enable/disable structured stdout
-                logging_cfg = raw.get("logging")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+                logging_cfg = raw.get("logging")
                 if isinstance(logging_cfg, dict):
                     from exo.shared.logging import set_structured_stdout
 
                     log_enabled = bool(logging_cfg.get("enabled", False)) and bool(
                         logging_cfg.get("ingest_url")
-                    )  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                    )
                     set_structured_stdout(log_enabled)
         except Exception as exc:
             logger.warning(f"DownloadCoordinator: failed to sync exo.yaml: {exc}")

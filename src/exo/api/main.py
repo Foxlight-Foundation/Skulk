@@ -20,7 +20,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from hypercorn.asyncio import serve  # pyright: ignore[reportUnknownVariableType]
+from hypercorn.asyncio import serve
 from hypercorn.config import Config
 from hypercorn.typing import ASGIFramework
 from loguru import logger
@@ -328,7 +328,7 @@ class API:
         self.app = _create_fastapi_app()
 
         @self.app.middleware("http")
-        async def _log_requests(  # pyright: ignore[reportUnusedFunction]
+        async def _log_requests(
             request: Request,
             call_next: Callable[[Request], Awaitable[StreamingResponse]],
         ) -> StreamingResponse:
@@ -2515,14 +2515,14 @@ class API:
         safe_raw = dict(raw) if raw else {}
         has_hf_token = bool(safe_raw.pop("hf_token", None))
         # Strip grafana_password but preserve the rest of logging config
-        logging_cfg = safe_raw.get("logging")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        logging_cfg = safe_raw.get("logging")
         if isinstance(logging_cfg, dict):
             safe_raw["logging"] = {
                 k: v for k, v in logging_cfg.items() if k != "grafana_password"
-            }  # pyright: ignore[reportUnknownVariableType]
+            }
             safe_raw["logging"]["has_grafana_password"] = bool(
                 logging_cfg.get("grafana_password")
-            )  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+            )
         return JSONResponse(
             {
                 "config": safe_raw,
@@ -2548,23 +2548,25 @@ class API:
                     existing = yaml.safe_load(f) or {}
                 if "hf_token" not in config_data and "hf_token" in existing:
                     config_data["hf_token"] = existing["hf_token"]
-                # Preserve grafana_password if not in this update
-                existing_logging = existing.get("logging", {})  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-                update_logging = config_data.get("logging", {})  # pyright: ignore[reportAny]
-                if isinstance(update_logging, dict) and isinstance(
-                    existing_logging, dict
-                ):
-                    # Strip the has_grafana_password flag from dashboard
-                    update_logging.pop("has_grafana_password", None)  # pyright: ignore[reportUnknownMemberType]
-                    if (
-                        "grafana_password" not in update_logging
-                        and "grafana_password" in existing_logging
-                    ):
-                        update_logging["grafana_password"] = existing_logging[
-                            "grafana_password"
-                        ]
-                    if update_logging:
-                        config_data["logging"] = update_logging
+                # Preserve logging config: only merge when the request
+                # explicitly includes a logging section. If omitted, keep
+                # the entire existing logging config intact.
+                if "logging" in config_data:
+                    existing_logging = existing.get("logging", {})
+                    update_logging = config_data["logging"]
+                    if isinstance(update_logging, dict):
+                        # Strip the has_grafana_password flag from dashboard
+                        update_logging.pop("has_grafana_password", None)
+                        if (
+                            isinstance(existing_logging, dict)
+                            and "grafana_password" not in update_logging
+                            and "grafana_password" in existing_logging
+                        ):
+                            update_logging["grafana_password"] = existing_logging[
+                                "grafana_password"
+                            ]
+                elif "logging" in existing:
+                    config_data["logging"] = existing["logging"]
             except Exception:
                 pass
         # Validate by attempting to parse with Pydantic
@@ -2580,10 +2582,22 @@ class API:
         # Write locally
         with self._config_path.open("w") as f:
             f.write(config_yaml)
-        # Broadcast to all nodes via the download commands topic (gossipsub)
+        # Broadcast to all nodes via the download commands topic (gossipsub).
+        # Strip secrets from the broadcast — grafana_password and hf_token
+        # stay on disk but are not transmitted over the network.
+        import copy
+
         from exo.shared.types.commands import SyncConfig
 
-        await self._send_download(SyncConfig(config_yaml=config_yaml))
+        broadcast_data = copy.deepcopy(config_data)
+        broadcast_data.pop("hf_token", None)
+        broadcast_logging = broadcast_data.get("logging")
+        if isinstance(broadcast_logging, dict):
+            broadcast_logging.pop("grafana_password", None)
+        broadcast_yaml = yaml.safe_dump(
+            broadcast_data, default_flow_style=False, sort_keys=False
+        )
+        await self._send_download(SyncConfig(config_yaml=broadcast_yaml))
         # Apply inference config to env var immediately so next model launch uses it.
         # Don't overwrite if user provided the env var at launch.
         inference = config_data.get("inference")
@@ -2598,13 +2612,13 @@ class API:
         if hf_token and "HF_TOKEN" not in os.environ:
             os.environ["HF_TOKEN"] = str(hf_token)
         # Apply logging config immediately
-        logging_cfg_update = config_data.get("logging")  # pyright: ignore[reportAny]
+        logging_cfg_update = config_data.get("logging")
         if isinstance(logging_cfg_update, dict):
             from exo.shared.logging import set_structured_stdout
 
             log_on = bool(logging_cfg_update.get("enabled", False)) and bool(
                 logging_cfg_update.get("ingest_url")
-            )  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+            )
             set_structured_stdout(log_on)
         # model_store changes still require restart; inference-only changes don't
         has_store_changes = "model_store" in config_data
