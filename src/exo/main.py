@@ -516,8 +516,22 @@ def main():
     resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
 
     mp.set_start_method("spawn", force=True)
-    # TODO: Refactor the current verbosity system
-    logger_setup(EXO_LOG, args.verbosity)
+
+    # Load config early so the logging section is available before anything
+    # else runs.  The full config is loaded again inside Node.create() for
+    # the model store and inference sections.
+    _early_config = load_exo_config(Path("exo.yaml"))
+    _log_cfg = _early_config.logging if _early_config else None
+
+    logger_setup(
+        EXO_LOG,
+        args.verbosity,
+        victorialogs_url=_log_cfg.url if _log_cfg and _log_cfg.enabled else None,
+        victorialogs_flush_interval=_log_cfg.flush_interval_seconds
+        if _log_cfg
+        else 2.0,
+        victorialogs_batch_size=_log_cfg.batch_size if _log_cfg else 64,
+    )
     logger.info("Starting EXO")
     logger.info(f"EXO_LIBP2P_NAMESPACE: {os.getenv('EXO_LIBP2P_NAMESPACE')}")
 

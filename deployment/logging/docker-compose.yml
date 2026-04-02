@@ -1,0 +1,64 @@
+# EXO Cluster Logging Stack
+# Deploy as a Portainer stack on the R720 — single file, no external mounts.
+#
+# VictoriaLogs: log ingestion & storage (port 9428)
+#   - Push JSON logs to: http://<r720>:9428/insert/jsonline
+#   - Built-in VMUI at:  http://<r720>:9428/select/vmui/
+#
+# Grafana: dashboards & alerting (port 3000)
+#   - Default login: admin / admin (change on first login)
+#   - VictoriaLogs is pre-configured as a data source
+
+services:
+  victorialogs:
+    image: victoriametrics/victoria-logs:latest
+    container_name: victorialogs
+    restart: unless-stopped
+    ports:
+      - "9428:9428"
+    volumes:
+      - vlogs-data:/victoria-logs-data
+    command:
+      - -retentionPeriod=90d
+      - -storageDataPath=/victoria-logs-data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9428/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=https://github.com/VictoriaMetrics/victorialogs-datasource/releases/download/v0.14.0/victoriametrics-logs-datasource-v0.14.0.zip;victorialogs-datasource
+      - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=victorialogs-datasource
+    entrypoint:
+      - sh
+      - -c
+      - |
+        mkdir -p /etc/grafana/provisioning/datasources
+        cat > /etc/grafana/provisioning/datasources/victorialogs.yml <<'EOF'
+        apiVersion: 1
+        datasources:
+          - name: VictoriaLogs
+            type: victorialogs-datasource
+            access: proxy
+            url: http://victorialogs:9428
+            isDefault: true
+            editable: true
+        EOF
+        exec /run.sh
+    depends_on:
+      victorialogs:
+        condition: service_healthy
+
+volumes:
+  vlogs-data:
+  grafana-data:

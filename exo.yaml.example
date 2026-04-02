@@ -68,6 +68,18 @@ inference:
   # before launch.
   kv_cache_backend: default
 
+logging:
+  # Ship structured JSON logs to a central VictoriaLogs instance.
+  # Deploy the stack: deployment/logging/docker-compose.yml
+  enabled: true
+  url: http://192.168.0.118:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts
+
+  # Max seconds between HTTP flushes (lower = less log loss on hard crash).
+  flush_interval_seconds: 2.0
+
+  # Flush immediately when the buffer reaches this many entries.
+  batch_size: 64
+
 # Optional Hugging Face token.
 # The dashboard Settings UI can manage this too.
 # hf_token: hf_xxxxxxxxxxxxxxxxxxxx

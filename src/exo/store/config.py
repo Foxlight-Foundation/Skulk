@@ -193,7 +193,36 @@ class ExoConfig(FrozenModel):
 
     model_store: ModelStoreConfig | None = None
     inference: "InferenceConfig | None" = None
+    logging: "LoggingConfig | None" = None
     hf_token: str | None = None
+
+
+@final
+class LoggingConfig(FrozenModel):
+    """Central log aggregation configuration.
+
+    When ``url`` is set, exo pushes structured JSON logs to a VictoriaLogs
+    (or any newline-delimited JSON endpoint) over HTTP.  The sink batches
+    log entries and flushes periodically to minimise overhead on inference
+    nodes.
+
+    Attributes:
+        enabled: Master switch.  ``False`` disables remote shipping even if
+            ``url`` is set — useful for temporarily pausing without removing
+            the config.
+        url: Full ingest URL including query parameters, e.g.
+            ``http://192.168.0.118:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts``.
+        flush_interval_seconds: Maximum seconds between HTTP flushes.
+            Lower values reduce the window of log loss on hard crashes but
+            increase network chatter.
+        batch_size: Flush when the buffer reaches this many entries,
+            regardless of the timer.
+    """
+
+    enabled: bool = True
+    url: str
+    flush_interval_seconds: float = 2.0
+    batch_size: int = 64
 
 
 @final
