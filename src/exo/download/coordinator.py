@@ -22,6 +22,7 @@ from exo.shared.types.commands import (
     DeleteDownload,
     ForwarderDownloadCommand,
     PurgeStagingCache,
+    RestartNode,
     StartDownload,
     SyncConfig,
 )
@@ -150,6 +151,8 @@ class DownloadCoordinator:
                         await self._delete_download(model_id)
                     case CancelDownload(model_id=model_id):
                         await self._cancel_download(model_id)
+                    case RestartNode():
+                        await self._restart_node()
 
     async def _cancel_download(self, model_id: ModelId) -> None:
         if model_id in self.active_downloads and model_id in self.download_status:
@@ -165,6 +168,27 @@ class DownloadCoordinator:
             await self.event_sender.send(
                 NodeDownloadProgress(download_progress=pending)
             )
+
+    async def _restart_node(self) -> None:
+        """Restart this node by spawning a replacement process and exiting."""
+        import subprocess
+        import sys
+        import threading
+
+        logger.info("RestartNode command received — spawning replacement and exiting")
+
+        def _do_restart() -> None:
+            import time
+
+            time.sleep(1)  # Allow in-flight operations to settle
+            subprocess.Popen(
+                [sys.executable, *sys.argv],
+                start_new_session=True,
+            )
+            time.sleep(0.5)
+            os._exit(0)  # Hard exit — releases all GPU/Metal memory
+
+        threading.Thread(target=_do_restart, daemon=True).start()
 
     async def _sync_config(self, config_yaml: str) -> None:
         """Write received config YAML to the local exo.yaml file and

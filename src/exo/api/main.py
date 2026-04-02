@@ -763,9 +763,10 @@ class API:
         self.app.post(
             "/admin/restart",
             tags=["Admin"],
-            summary="Restart this node",
+            summary="Restart a node",
             description=(
-                "Gracefully restart the exo process on this node. "
+                "Gracefully restart the exo process on this or a remote node. "
+                "Pass node_id query param to target a specific node. "
                 "Active inference is interrupted, GPU memory is fully released, "
                 "and the node rejoins the cluster automatically on startup."
             ),
@@ -2811,31 +2812,40 @@ class API:
             if command_id in self._embedding_queues:
                 del self._embedding_queues[command_id]
 
-    async def restart_node(self) -> JSONResponse:
-        """Restart the exo process on this node.
+    async def restart_node(self, node_id: NodeId | None = None) -> JSONResponse:
+        """Restart the exo process on this or a remote node.
 
-        Spawns a new exo process and then exits the current one. The OS
-        reclaims all GPU memory when the old process exits, and the new
-        process takes over the port after a brief delay."""
-        import subprocess
-        import sys
-        import threading
+        If node_id is omitted or matches this node, restarts locally by
+        spawning a new process and exiting. Otherwise, sends a RestartNode
+        command via pub/sub to the target node."""
+        target = node_id or self.node_id
 
-        logger.info("Node restart requested via API — spawning replacement and exiting")
+        if target == self.node_id:
+            import subprocess
+            import sys
+            import threading
 
-        def _do_restart() -> None:
-            import time
+            logger.info("Node restart requested via API — spawning replacement and exiting")
 
-            time.sleep(1)  # Allow the JSON response to flush
-            # Spawn a new exo process that will take over once we exit
-            subprocess.Popen(
-                [sys.executable, *sys.argv],
-                start_new_session=True,
-            )
-            time.sleep(0.5)  # Brief pause to let the new process start binding
-            import os
+            def _do_restart() -> None:
+                import time
 
-            os._exit(0)  # Hard exit — releases all GPU/Metal memory
+                time.sleep(1)  # Allow the JSON response to flush
+                subprocess.Popen(
+                    [sys.executable, *sys.argv],
+                    start_new_session=True,
+                )
+                time.sleep(0.5)
+                import os
 
-        threading.Thread(target=_do_restart, daemon=True).start()
-        return JSONResponse({"status": "restarting", "node_id": str(self.node_id)})
+                os._exit(0)  # Hard exit — releases all GPU/Metal memory
+
+            threading.Thread(target=_do_restart, daemon=True).start()
+            return JSONResponse({"status": "restarting", "node_id": str(self.node_id)})
+
+        # Remote restart — send command via download commands channel
+        from exo.shared.types.commands import RestartNode
+
+        logger.info(f"Remote node restart requested for {target}")
+        await self._send_download(RestartNode(target_node_id=target))
+        return JSONResponse({"status": "restart_sent", "node_id": str(target)})
