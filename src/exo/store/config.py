@@ -211,7 +211,7 @@ class LoggingConfig(FrozenModel):
             by Vector or another log shipper.
     """
 
-    structured_stdout: bool = True
+    structured_stdout: bool = False
 
 
 @final

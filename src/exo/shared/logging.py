@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from loguru import Message
 
 _MAX_LOG_ARCHIVES = 5
+_json_sink_id: int | None = None
 
 _node_name: str = socket.gethostname()
 
@@ -90,12 +91,19 @@ def _json_sink(message: Message) -> None:
                 traceback.format_exception(exc_type, exc_value, exc_tb)
             )
 
-    # Write to the real stdout (not loguru's stderr sink).
-    # Use sys.__stdout__ to bypass any redirections.
+    # Write to the original stdout, bypassing Python-level sys.stdout reassignment.
     stdout = sys.__stdout__
     if stdout is not None:
-        stdout.write(json.dumps(entry, default=str) + "\n")
-        stdout.flush()
+        try:
+            stdout.write(json.dumps(entry, default=str) + "\n")
+            stdout.flush()
+        except (BrokenPipeError, OSError):
+            # Vector (or whatever reads stdout) has exited — disable the sink
+            # to avoid spamming errors. Local file and stderr sinks still work.
+            logger.remove(_json_sink_id)
+            logger.warning(
+                "Structured stdout consumer disconnected — JSON sink disabled"
+            )
 
 
 def logger_setup(
@@ -150,7 +158,8 @@ def logger_setup(
         )
 
     if structured_stdout:
-        logger.add(
+        global _json_sink_id  # noqa: PLW0603
+        _json_sink_id = logger.add(
             _json_sink,
             level="INFO",
             enqueue=False,
