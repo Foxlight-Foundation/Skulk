@@ -4,6 +4,7 @@ import json
 import logging
 import socket
 import sys
+import traceback
 from collections.abc import Iterator
 from datetime import UTC
 from pathlib import Path
@@ -70,7 +71,8 @@ def _json_sink(message: Message) -> None:
     record = message.record
     name = record["name"]
     entry = {
-        "ts": record["time"].astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        "ts": record["time"].astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+        + "Z",
         "level": record["level"].name,
         "node_id": _node_name,
         "component": (name.split(".")[1] if "." in name else name)
@@ -82,7 +84,11 @@ def _json_sink(message: Message) -> None:
         "msg": str(record["message"]),
     }
     if record["exception"] is not None:
-        entry["exception"] = str(record["exception"])
+        exc_type, exc_value, exc_tb = record["exception"]
+        if exc_type is not None:
+            entry["exception"] = "".join(
+                traceback.format_exception(exc_type, exc_value, exc_tb)
+            )
 
     # Write to the real stdout (not loguru's stderr sink).
     # Use sys.__stdout__ to bypass any redirections.
@@ -147,7 +153,7 @@ def logger_setup(
         logger.add(
             _json_sink,
             level="INFO",
-            enqueue=True,
+            enqueue=False,
         )
 
 
