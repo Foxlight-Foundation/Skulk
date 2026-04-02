@@ -2814,20 +2814,28 @@ class API:
     async def restart_node(self) -> JSONResponse:
         """Restart the exo process on this node.
 
-        Schedules a process restart via os.execv after a brief delay to allow
-        the HTTP response to be sent. The OS reclaims all GPU memory when the
-        process is replaced."""
-        import os
+        Spawns a new exo process and then exits the current one. The OS
+        reclaims all GPU memory when the old process exits, and the new
+        process takes over the port after a brief delay."""
+        import subprocess
         import sys
         import threading
 
-        logger.info("Node restart requested via API — restarting in 1 second")
+        logger.info("Node restart requested via API — spawning replacement and exiting")
 
         def _do_restart() -> None:
             import time
 
             time.sleep(1)  # Allow the JSON response to flush
-            os.execv(sys.executable, [sys.executable, *sys.argv])
+            # Spawn a new exo process that will take over once we exit
+            subprocess.Popen(
+                [sys.executable, *sys.argv],
+                start_new_session=True,
+            )
+            time.sleep(0.5)  # Brief pause to let the new process start binding
+            import os
+
+            os._exit(0)  # Hard exit — releases all GPU/Metal memory
 
         threading.Thread(target=_do_restart, daemon=True).start()
         return JSONResponse({"status": "restarting", "node_id": str(self.node_id)})
