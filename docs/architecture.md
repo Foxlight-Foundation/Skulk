@@ -167,6 +167,21 @@ It is the main operator interface for the same Skulk runtime:
 
 That is why the docs often describe dashboard and API flows as parallel ways of driving the same underlying system.
 
+## Where Logging Fits
+
+Skulk supports centralized log aggregation for the cluster.
+
+Each node can emit structured JSON on stdout alongside the human-readable stderr output. A local Vector agent reads stdout and ships logs to a central VictoriaLogs instance, where they can be queried via Grafana or VictoriaLogs' built-in VMUI.
+
+The key pieces:
+
+- `src/exo/shared/logging.py` — loguru setup with a JSON stdout sink
+- `deployment/logging/vector.yaml` — Vector config (stdin → VictoriaLogs)
+- `deployment/logging/docker-compose.yml` — VictoriaLogs + Grafana stack
+- `exo.yaml` `logging.structured_stdout` — enables the JSON sink
+
+This is opt-in. Without the logging config, exo behaves identically to before.
+
 ## When to Read More
 
 If you are:
@@ -174,3 +189,4 @@ If you are:
 - trying to get started, go back to the [README](https://github.com/Foxlight-Foundation/Skulk/blob/main/README.md)
 - integrating against the API, read the [API guide](api.md)
 - setting up shared storage, read the [model store guide](model-store.md)
+- setting up cluster logging, read `deployment/logging/` and the [CONTRIBUTING guide](https://github.com/Foxlight-Foundation/Skulk/blob/main/CONTRIBUTING.md#centralized-logging)
