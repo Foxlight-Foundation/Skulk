@@ -5,6 +5,7 @@ import logging
 import socket
 import sys
 from collections.abc import Iterator
+from datetime import UTC
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -69,7 +70,7 @@ def _json_sink(message: Message) -> None:
     record = message.record
     name = record["name"]
     entry = {
-        "ts": record["time"].strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        "ts": record["time"].astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         "level": record["level"].name,
         "node_id": _node_name,
         "component": (name.split(".")[1] if "." in name else name)
