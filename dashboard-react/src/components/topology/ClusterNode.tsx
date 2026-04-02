@@ -18,6 +18,8 @@ export interface ClusterNodeProps {
   edges?: TopologyEdge[];
   /** All nodes (needed for interface name resolution). */
   allNodes?: Record<string, NodeInfo>;
+  /** Called when the user confirms a node restart. */
+  onRestart?: () => void;
 }
 
 function buildDebugContent(
@@ -105,6 +107,7 @@ export function ClusterNode({
   scale = 1,
   edges = [],
   allNodes = {},
+  onRestart,
 }: ClusterNodeProps) {
   const model = detectDeviceModel(nodeInfo.system_info?.model_id);
 
@@ -156,6 +159,7 @@ export function ClusterNode({
         nameY={iconTop - nameOffset}
         memoryY={iconTop + iconH + memoryOffset}
         debugContent={debugContent}
+        onRestart={onRestart}
       />
 
       {/* Device icon — centered at origin */}

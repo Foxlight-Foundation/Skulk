@@ -233,6 +233,10 @@ API_TAGS_METADATA = [
         "name": "Images",
         "description": "Image generation, editing, retrieval, and benchmarking endpoints.",
     },
+    {
+        "name": "Admin",
+        "description": "Administrative operations such as node restart.",
+    },
 ]
 
 
@@ -760,6 +764,17 @@ class API:
                 "Use this for workflows such as OptiQ conversion or alternate artifact generation."
             ),
         )(self.optimize_model)
+        self.app.post(
+            "/admin/restart",
+            tags=["Admin"],
+            summary="Restart a node",
+            description=(
+                "Restart the exo process on this or a remote node. "
+                "Pass node_id query param to target a specific node. "
+                "Active inference is interrupted, and the process is replaced; "
+                "the node rejoins the cluster automatically on startup."
+            ),
+        )(self.restart_node)
         self.app.get(
             "/store/models/{model_id:path}/optimize/status",
             tags=["Store"],
@@ -2800,3 +2815,30 @@ class API:
             await self._send(TaskFinished(finished_command_id=command_id))
             if command_id in self._embedding_queues:
                 del self._embedding_queues[command_id]
+
+    async def restart_node(self, node_id: NodeId | None = None) -> JSONResponse:
+        """Restart the exo process on this or a remote node.
+
+        If node_id is omitted or matches this node, replaces the current
+        process image via os.execv (in-place restart, same PID). Otherwise,
+        sends a RestartNode command via pub/sub to the target node."""
+        target = node_id or self.node_id
+
+        if target == self.node_id:
+            from exo.utils.restart import schedule_restart
+
+            logger.info("Node restart requested via API — scheduling process replacement")
+            scheduled = schedule_restart()
+            if not scheduled:
+                return JSONResponse(
+                    {"status": "restart_already_pending", "node_id": str(self.node_id)},
+                    status_code=409,
+                )
+            return JSONResponse({"status": "restarting", "node_id": str(self.node_id)})
+
+        # Remote restart — send command via download commands channel
+        from exo.shared.types.commands import RestartNode
+
+        logger.info(f"Remote node restart requested for {target}")
+        await self._send_download(RestartNode(target_node_id=target))
+        return JSONResponse({"status": "restart_sent", "node_id": str(target)})

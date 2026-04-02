@@ -22,6 +22,7 @@ from exo.shared.types.commands import (
     DeleteDownload,
     ForwarderDownloadCommand,
     PurgeStagingCache,
+    RestartNode,
     StartDownload,
     SyncConfig,
 )
@@ -150,6 +151,8 @@ class DownloadCoordinator:
                         await self._delete_download(model_id)
                     case CancelDownload(model_id=model_id):
                         await self._cancel_download(model_id)
+                    case RestartNode():
+                        await self._restart_node()
 
     async def _cancel_download(self, model_id: ModelId) -> None:
         if model_id in self.active_downloads and model_id in self.download_status:
@@ -165,6 +168,13 @@ class DownloadCoordinator:
             await self.event_sender.send(
                 NodeDownloadProgress(download_progress=pending)
             )
+
+    async def _restart_node(self) -> None:
+        """Restart this node by replacing the current process image (in-place restart)."""
+        from exo.utils.restart import schedule_restart
+
+        logger.info("RestartNode command received — scheduling in-place process restart")
+        schedule_restart()
 
     async def _sync_config(self, config_yaml: str) -> None:
         """Write received config YAML to the local exo.yaml file and

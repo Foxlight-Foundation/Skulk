@@ -103,18 +103,52 @@ Rust code in `rust/` provides:
 - `system_custodian`: System-level operations
 
 ### Dashboard
-Svelte 5 + TypeScript frontend in `dashboard/`. Build output goes to `dashboard/build/` and is served by the API.
+React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API. The legacy Svelte dashboard in `dashboard/` is from upstream exo and is not actively used.
 
-## Code Style Requirements
+## Mandatory Workflow Rules
 
-From .cursorrules:
-- Strict, exhaustive typing - never bypass the type-checker
-- Use `Literal[...]` for enum-like sets, `typing.NewType` for primitives
-- Pydantic models with `frozen=True` and `strict=True`
-- Pure functions with injectable effect handlers for side-effects
-- Descriptive names - no abbreviations or 3-letter acronyms
-- Catch exceptions only where you can handle them meaningfully
-- Use `@final` and immutability wherever applicable
+These rules apply to every change. No exceptions.
+
+### Documentation
+
+- **Every API endpoint must be documented** in `docs/api.md` with method, path, parameters, and behavior. If you add or modify an endpoint, update the docs in the same commit or PR.
+- **Every API endpoint must appear in the OpenAPI spec.** FastAPI auto-generates this from route decorators — ensure every route has `tags`, `summary`, and `description` set. Verify with `uv run python scripts/export_openapi.py` (output is gitignored but CI regenerates it).
+- **All public Python functions, classes, and methods must have docstrings** that are clear enough for generative documentation tools (mkdocs, pdoc, sphinx) to produce useful output. Describe what it does, parameters, return value, and any side effects.
+- **All Pydantic models and their fields must have descriptions** via docstrings or `Field(description=...)` for anything non-obvious. These flow into the OpenAPI spec.
+- **TypeScript components and hooks must have JSDoc comments** on exported interfaces, props, and non-trivial functions.
+- **Update CLAUDE.md** if you change architecture, add new topics/channels, or modify the build/test workflow.
+- **Update CONTRIBUTING.md** if you change project structure, add new directories, or modify development setup.
+
+### Code Quality
+
+- **Strict, exhaustive typing** — never bypass the type-checker. Use `Literal[...]` for enum-like sets, `typing.NewType` for primitives.
+- **Pydantic models** with `frozen=True` and `strict=True`.
+- **Pure functions** with injectable effect handlers for side-effects.
+- **Descriptive names** — no abbreviations or 3-letter acronyms.
+- **Catch exceptions only where you can handle them meaningfully.**
+- **Use `@final` and immutability wherever applicable.**
+- **Comments explain why, not what.** Every non-obvious decision, workaround, or architectural choice gets a comment explaining the reasoning.
+
+### Handling Review Comments
+
+Evaluate each review comment on a 1–5 severity scale:
+
+- **1 — Nitpick**: Style preferences, minor wording, subjective suggestions. Ignore.
+- **2 — Low**: Nice-to-have improvements, minor refactors, cosmetic. Ignore.
+- **3 — Medium**: Valid point but not blocking. Note for future work, do not fix in this PR.
+- **4 — High**: Real bug, meaningful correctness issue, missing test coverage for critical path. **Fix.**
+- **5 — Critical**: Security vulnerability, data loss risk, will break production. **Fix immediately.**
+
+Only fix comments rated 4 or 5. Do not iterate on minor wording, style, or speculative improvements from automated reviewers (e.g., Copilot). Time spent on low-severity feedback is time not spent on real work.
+
+### Before Every Commit
+
+1. Run the pre-commit checks (type check, lint, format, test) as documented above.
+2. Verify that all new or modified API endpoints are documented in `docs/api.md`.
+3. Verify that all new or modified API endpoints have proper FastAPI decorators (`tags`, `summary`, `description`).
+4. Verify that all new or modified public functions have docstrings.
+5. If the dashboard was changed, run `npm run build` in `dashboard-react/` to confirm it builds.
+6. Stage any files changed by formatters before committing.
 
 ## Testing
 

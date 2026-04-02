@@ -98,6 +98,12 @@ class PurgeStagingCache(BaseCommand):
     model_id: ModelId | None = None
 
 
+class RestartNode(BaseCommand):
+    """Command to restart a specific node in the cluster."""
+
+    target_node_id: NodeId
+
+
 class AddCustomModelCard(BaseCommand):
     model_card: ModelCard
 
@@ -107,7 +113,7 @@ class DeleteCustomModelCard(BaseCommand):
 
 
 DownloadCommand = (
-    StartDownload | DeleteDownload | CancelDownload | SyncConfig | PurgeStagingCache
+    StartDownload | DeleteDownload | CancelDownload | SyncConfig | PurgeStagingCache | RestartNode
 )
 
 CustomModelCardCommand = AddCustomModelCard | DeleteCustomModelCard
