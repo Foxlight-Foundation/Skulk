@@ -241,7 +241,7 @@ def logger_setup(
         logger.add(
             _victorialogs_sink,
             level="DEBUG",
-            enqueue=False,
+            enqueue=True,
         )
         logger.info(f"Remote logging enabled: {victorialogs_url}")
 
