@@ -500,7 +500,7 @@ class InfoGatherer:
                     # On TB4 hardware, system_profiler reports rdma_* identifiers
                     # but the interfaces are never created — RDMA requires TB5.
                     if idents and not _rdma_interfaces_exist():
-                        logger.info(
+                        logger.debug(
                             "Thunderbolt: rdma_ctl reports RDMA but no rdma_* interfaces "
                             "exist (TB4 hardware?) — suppressing RDMA identifiers"
                         )
