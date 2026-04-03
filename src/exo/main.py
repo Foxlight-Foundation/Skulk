@@ -366,9 +366,6 @@ class Node:
 
         broadcast_dict = copy.deepcopy(config_dict)
         broadcast_dict.pop("hf_token", None)
-        logging_section = broadcast_dict.get("logging")
-        if isinstance(logging_section, dict):
-            logging_section.pop("grafana_password", None)
         broadcast_yaml = yaml.safe_dump(
             broadcast_dict, default_flow_style=False, sort_keys=False
         )

@@ -75,8 +75,6 @@ logging:
   enabled: true
   ingest_url: http://192.168.0.118:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts
   grafana_url: http://192.168.0.118:3000
-  grafana_user: admin
-  grafana_password: changeme
 
 # Optional Hugging Face token.
 # The dashboard Settings UI can manage this too.

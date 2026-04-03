@@ -212,7 +212,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const [kvBackend, setKvBackend] = useState('default');
   const [hfToken, setHfToken] = useState('');
   const [loggingDraft, setLoggingDraft] = useState<LoggingConfig>({
-    enabled: false, ingest_url: '', grafana_url: '', grafana_user: '',
+    enabled: false, ingest_url: '', grafana_url: '',
   });
 
   // Fetch config when panel opens
@@ -232,8 +232,6 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
       enabled: fullConfig?.logging?.enabled ?? false,
       ingest_url: fullConfig?.logging?.ingest_url ?? '',
       grafana_url: fullConfig?.logging?.grafana_url ?? '',
-      grafana_user: fullConfig?.logging?.grafana_user ?? '',
-      has_grafana_password: fullConfig?.logging?.has_grafana_password,
     });
   }, [fullConfig, effective]);
 
@@ -507,27 +505,8 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                     placeholder="http://host:3000"
                   />
                 </Row>
-                <Row>
-                  <FieldLabel>Grafana user</FieldLabel>
-                  <StyledField
-                    size="sm"
-                    value={loggingDraft.grafana_user}
-                    onChange={(e) => setLoggingDraft(prev => ({ ...prev, grafana_user: (e.target as HTMLInputElement).value }))}
-                    placeholder="admin"
-                  />
-                </Row>
-                <Row>
-                  <FieldLabel>Grafana password</FieldLabel>
-                  <StyledField
-                    size="sm"
-                    type="password"
-                    value={loggingDraft.grafana_password ?? ''}
-                    onChange={(e) => setLoggingDraft(prev => ({ ...prev, grafana_password: (e.target as HTMLInputElement).value }))}
-                    placeholder={loggingDraft.has_grafana_password ? "Password is set — enter new to replace" : "password"}
-                  />
-                </Row>
                 <HintText>
-                  Non-secret settings are synced to all nodes. Grafana password stays local. Nodes will start shipping logs when saved.
+                  Settings are synced to all nodes. Nodes will start shipping logs when saved.
                 </HintText>
               </>
             )}

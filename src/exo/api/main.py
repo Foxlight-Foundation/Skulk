@@ -2514,15 +2514,6 @@ class API:
         # Remove sensitive fields — tokens/passwords managed separately
         safe_raw = dict(raw) if raw else {}
         has_hf_token = bool(safe_raw.pop("hf_token", None))
-        # Strip grafana_password but preserve the rest of logging config
-        logging_cfg = safe_raw.get("logging")
-        if isinstance(logging_cfg, dict):
-            safe_raw["logging"] = {
-                k: v for k, v in logging_cfg.items() if k != "grafana_password"
-            }
-            safe_raw["logging"]["has_grafana_password"] = bool(
-                logging_cfg.get("grafana_password")
-            )
         return JSONResponse(
             {
                 "config": safe_raw,
@@ -2548,24 +2539,8 @@ class API:
                     existing = yaml.safe_load(f) or {}
                 if "hf_token" not in config_data and "hf_token" in existing:
                     config_data["hf_token"] = existing["hf_token"]
-                # Preserve logging config: only merge when the request
-                # explicitly includes a logging section. If omitted, keep
-                # the entire existing logging config intact.
-                if "logging" in config_data:
-                    existing_logging = existing.get("logging", {})
-                    update_logging = config_data["logging"]
-                    if isinstance(update_logging, dict):
-                        # Strip the has_grafana_password flag from dashboard
-                        update_logging.pop("has_grafana_password", None)
-                        if (
-                            isinstance(existing_logging, dict)
-                            and "grafana_password" not in update_logging
-                            and "grafana_password" in existing_logging
-                        ):
-                            update_logging["grafana_password"] = existing_logging[
-                                "grafana_password"
-                            ]
-                elif "logging" in existing:
+                # Preserve logging config when omitted from the request
+                if "logging" not in config_data and "logging" in existing:
                     config_data["logging"] = existing["logging"]
             except Exception:
                 pass
@@ -2582,18 +2557,13 @@ class API:
         # Write locally
         with self._config_path.open("w") as f:
             f.write(config_yaml)
-        # Broadcast to all nodes via the download commands topic (gossipsub).
-        # Strip secrets from the broadcast — grafana_password and hf_token
-        # stay on disk but are not transmitted over the network.
+        # Broadcast to all nodes via gossipsub — strip hf_token (secret).
         import copy
 
         from exo.shared.types.commands import SyncConfig
 
         broadcast_data = copy.deepcopy(config_data)
         broadcast_data.pop("hf_token", None)
-        broadcast_logging = broadcast_data.get("logging")
-        if isinstance(broadcast_logging, dict):
-            broadcast_logging.pop("grafana_password", None)
         broadcast_yaml = yaml.safe_dump(
             broadcast_data, default_flow_style=False, sort_keys=False
         )

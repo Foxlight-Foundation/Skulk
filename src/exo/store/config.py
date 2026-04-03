@@ -212,11 +212,7 @@ class LoggingConfig(FrozenModel):
     human-readable stderr output.  A local log shipper such as Vector
     reads stdout and forwards to the ingest endpoint.
 
-    Grafana credentials are stored locally so the dashboard can link
-    directly to log views.  Non-secret fields (``enabled``, ``ingest_url``,
-    ``grafana_url``, ``grafana_user``) are synced to all nodes via gossipsub.
-    ``grafana_password`` is never broadcast — it stays on the local node's
-    ``exo.yaml`` only.
+    All fields are synced to all nodes via gossipsub.
 
     Attributes:
         enabled: Master switch for centralized logging.  Nodes only emit
@@ -226,15 +222,11 @@ class LoggingConfig(FrozenModel):
             ``http://192.168.0.118:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts``.
         grafana_url: Grafana base URL for dashboard links, e.g.
             ``http://192.168.0.118:3000``.
-        grafana_user: Grafana admin username.
-        grafana_password: Grafana admin password.
     """
 
     enabled: bool = False
     ingest_url: str = ""
     grafana_url: str = ""
-    grafana_user: str = ""
-    grafana_password: str = ""
 
 
 @final
