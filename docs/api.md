@@ -532,7 +532,7 @@ Use this for workflows such as model optimization or alternate artifact generati
 
 **GET** `/config`
 
-Returns the current cluster config and config path. Sensitive values such as `hf_token` are stripped from the returned config.
+Returns the current cluster config and config path. Sensitive values (`hf_token`) are stripped from the response.
 
 ### Update config
 
@@ -541,6 +541,9 @@ Returns the current cluster config and config path. Sensitive values such as `hf
 Updates cluster-wide config. Important behavior:
 
 - if you omit `hf_token`, Skulk preserves the existing value
+- if you omit `logging`, Skulk preserves the existing logging config
+- `hf_token` is not broadcast over gossipsub — it stays on the local node's `exo.yaml`
+- logging changes (enable/disable) take effect immediately on all nodes
 - inference changes affect future launches
 - model-store location changes generally require restart
 

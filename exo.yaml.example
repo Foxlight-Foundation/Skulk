@@ -68,6 +68,13 @@ inference:
   # before launch.
   kv_cache_backend: default
 
+logging:
+  # Centralized log aggregation — configure via the dashboard Settings panel
+  # or directly here. Settings are synced to all nodes via gossipsub.
+  # See deployment/logging/ for the Vector + VictoriaLogs + Grafana stack.
+  enabled: true
+  ingest_url: http://192.168.0.118:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts
+
 # Optional Hugging Face token.
 # The dashboard Settings UI can manage this too.
 # hf_token: hf_xxxxxxxxxxxxxxxxxxxx

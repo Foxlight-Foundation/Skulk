@@ -134,6 +134,9 @@
                 # SVELTE
                 nodejs
 
+                # LOGGING
+                vector
+
                 # MISC
                 just
                 jq

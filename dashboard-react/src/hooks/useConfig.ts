@@ -22,10 +22,17 @@ export interface InferenceConfig {
   kv_cache_backend: string;
 }
 
+/** Logging / observability config synced across the cluster. */
+export interface LoggingConfig {
+  enabled: boolean;
+  ingest_url: string;
+}
+
 /** Full editable config document as read from or written to `/config`. */
 export interface FullConfig {
   model_store?: StoreConfig;
   inference?: InferenceConfig;
+  logging?: LoggingConfig;
   hf_token?: string;
 }
 

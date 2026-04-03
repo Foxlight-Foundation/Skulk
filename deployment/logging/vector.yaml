@@ -1,0 +1,36 @@
+# Vector configuration for exo log shipping.
+#
+# Vector reads structured JSON from exo's stdout and ships it to
+# VictoriaLogs.  Run exo piped through Vector:
+#
+#   uv run exo 2>/dev/tty | vector --config deployment/logging/vector.yaml
+#
+# Vector's disk buffer lives under data_dir (defaults to ~/.exo/vector/).
+
+data_dir: ${EXO_VECTOR_DATA_DIR:-~/.exo/vector}
+
+sources:
+  exo_stdout:
+    type: stdin
+    decoding:
+      codec: json
+
+sinks:
+  victorialogs:
+    type: http
+    inputs:
+      - exo_stdout
+    uri: ${EXO_LOGGING_INGEST_URL:-http://192.168.0.118:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts}
+    encoding:
+      codec: json
+    framing:
+      method: newline_delimited
+    request:
+      timeout_secs: 5
+    batch:
+      max_bytes: 1048576
+      timeout_secs: 2
+    buffer:
+      type: disk
+      max_size: 536870912  # 512 MB — survives VictoriaLogs downtime
+      when_full: drop_newest

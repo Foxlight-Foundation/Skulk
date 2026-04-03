@@ -20,7 +20,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from hypercorn.asyncio import serve  # pyright: ignore[reportUnknownVariableType]
+from hypercorn.asyncio import serve
 from hypercorn.config import Config
 from hypercorn.typing import ASGIFramework
 from loguru import logger
@@ -328,7 +328,7 @@ class API:
         self.app = _create_fastapi_app()
 
         @self.app.middleware("http")
-        async def _log_requests(  # pyright: ignore[reportUnusedFunction]
+        async def _log_requests(
             request: Request,
             call_next: Callable[[Request], Awaitable[StreamingResponse]],
         ) -> StreamingResponse:
@@ -2511,7 +2511,7 @@ class API:
             raw = yaml.safe_load(f)
         if raw is None:
             raw = {}
-        # Remove sensitive fields — token is managed separately
+        # Remove sensitive fields — tokens/passwords managed separately
         safe_raw = dict(raw) if raw else {}
         has_hf_token = bool(safe_raw.pop("hf_token", None))
         return JSONResponse(
@@ -2531,14 +2531,17 @@ class API:
     async def update_config(self, request: Request) -> JSONResponse:
         body = await request.json()
         config_data = body.get("config", body)
-        # Preserve existing hf_token if not provided in this update
-        # (GET /config strips it for security, so saves won't have it)
-        if "hf_token" not in config_data and self._config_path.exists():
+        # Preserve existing secrets if not provided in this update
+        # (GET /config strips them for security, so saves won't have them)
+        if self._config_path.exists():
             try:
                 with self._config_path.open() as f:
                     existing = yaml.safe_load(f) or {}
-                if "hf_token" in existing:
+                if "hf_token" not in config_data and "hf_token" in existing:
                     config_data["hf_token"] = existing["hf_token"]
+                # Preserve logging config when omitted from the request
+                if "logging" not in config_data and "logging" in existing:
+                    config_data["logging"] = existing["logging"]
             except Exception:
                 pass
         # Validate by attempting to parse with Pydantic
@@ -2554,10 +2557,17 @@ class API:
         # Write locally
         with self._config_path.open("w") as f:
             f.write(config_yaml)
-        # Broadcast to all nodes via the download commands topic (gossipsub)
+        # Broadcast to all nodes via gossipsub — strip hf_token (secret).
+        import copy
+
         from exo.shared.types.commands import SyncConfig
 
-        await self._send_download(SyncConfig(config_yaml=config_yaml))
+        broadcast_data = copy.deepcopy(config_data)
+        broadcast_data.pop("hf_token", None)
+        broadcast_yaml = yaml.safe_dump(
+            broadcast_data, default_flow_style=False, sort_keys=False
+        )
+        await self._send_download(SyncConfig(config_yaml=broadcast_yaml))
         # Apply inference config to env var immediately so next model launch uses it.
         # Don't overwrite if user provided the env var at launch.
         inference = config_data.get("inference")
@@ -2571,6 +2581,15 @@ class API:
         hf_token = config_data.get("hf_token")
         if hf_token and "HF_TOKEN" not in os.environ:
             os.environ["HF_TOKEN"] = str(hf_token)
+        # Apply logging config immediately
+        logging_cfg_update = config_data.get("logging")
+        if isinstance(logging_cfg_update, dict):
+            from exo.shared.logging import set_structured_stdout
+
+            log_on = bool(logging_cfg_update.get("enabled", False)) and bool(
+                logging_cfg_update.get("ingest_url")
+            )
+            set_structured_stdout(log_on)
         # model_store changes still require restart; inference-only changes don't
         has_store_changes = "model_store" in config_data
         return JSONResponse(
@@ -2827,7 +2846,9 @@ class API:
         if target == self.node_id:
             from exo.utils.restart import schedule_restart
 
-            logger.info("Node restart requested via API — scheduling process replacement")
+            logger.info(
+                "Node restart requested via API — scheduling process replacement"
+            )
             scheduled = schedule_restart()
             if not scheduled:
                 return JSONResponse(

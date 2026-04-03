@@ -183,17 +183,47 @@ class ExoConfig(FrozenModel):
     """Root configuration model for ``exo.yaml``.
 
     This is the top-level object parsed from the config file.  The design
-    leaves room for future top-level sections (networking, inference, etc.)
-    without breaking existing deployments.
+    leaves room for future top-level sections without breaking existing
+    deployments.
 
     Attributes:
         model_store: Model store configuration.  ``None`` when the section is
             absent, which means the model store feature is disabled.
+        inference: Inference settings (KV cache backend).  ``None`` uses
+            defaults.
+        logging: Centralized logging configuration (enabled toggle, ingest
+            URL).  ``None`` disables remote log shipping.
+        hf_token: HuggingFace API token.  Stripped from ``GET /config``
+            responses for security.
     """
 
     model_store: ModelStoreConfig | None = None
     inference: "InferenceConfig | None" = None
+    logging: "LoggingConfig | None" = None
     hf_token: str | None = None
+
+
+@final
+class LoggingConfig(FrozenModel):
+    """Central log aggregation configuration.
+
+    When ``enabled`` is ``True`` and ``ingest_url`` is set, exo emits
+    structured JSON on stdout (one object per line) alongside the
+    human-readable stderr output.  A local log shipper such as Vector
+    reads stdout and forwards to the ingest endpoint.
+
+    All fields are synced to all nodes via gossipsub.
+
+    Attributes:
+        enabled: Master switch for centralized logging.  Nodes only emit
+            structured stdout when this is ``True`` and ``ingest_url`` is
+            set.
+        ingest_url: Full VictoriaLogs (or compatible) ingest URL, e.g.
+            ``http://192.168.0.118:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts``.
+    """
+
+    enabled: bool = False
+    ingest_url: str = ""
 
 
 @final

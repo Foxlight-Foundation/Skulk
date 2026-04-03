@@ -173,7 +173,9 @@ class DownloadCoordinator:
         """Restart this node by replacing the current process image (in-place restart)."""
         from exo.utils.restart import schedule_restart
 
-        logger.info("RestartNode command received — scheduling in-place process restart")
+        logger.info(
+            "RestartNode command received — scheduling in-place process restart"
+        )
         schedule_restart()
 
     async def _sync_config(self, config_yaml: str) -> None:
@@ -211,6 +213,15 @@ class DownloadCoordinator:
                     logger.info(
                         "DownloadCoordinator: updated HF_TOKEN from config sync"
                     )
+                # Apply logging config — enable/disable structured stdout
+                logging_cfg = raw.get("logging")
+                if isinstance(logging_cfg, dict):
+                    from exo.shared.logging import set_structured_stdout
+
+                    log_enabled = bool(logging_cfg.get("enabled", False)) and bool(
+                        logging_cfg.get("ingest_url")
+                    )
+                    set_structured_stdout(log_enabled)
         except Exception as exc:
             logger.warning(f"DownloadCoordinator: failed to sync exo.yaml: {exc}")
 

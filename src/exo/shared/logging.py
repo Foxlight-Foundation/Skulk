@@ -1,14 +1,28 @@
+from __future__ import annotations
+
+import contextlib
+import json
 import logging
+import socket
 import sys
+import traceback
 from collections.abc import Iterator
+from datetime import UTC
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import zstandard
 from hypercorn import Config
 from hypercorn.logging import Logger as HypercornLogger
 from loguru import logger
 
+if TYPE_CHECKING:
+    from loguru import Message
+
 _MAX_LOG_ARCHIVES = 5
+_json_sink_id: int | None = None
+
+_node_name: str = socket.gethostname()
 
 
 def _zstd_compress(filepath: str) -> None:
@@ -43,9 +57,73 @@ class _InterceptHandler(logging.Handler):
         logger.opt(depth=3, exception=record.exc_info).log(level, record.getMessage())
 
 
-def logger_setup(log_file: Path | None, verbosity: int = 0):
-    """Set up logging for this process - formatting, file handles, verbosity and output"""
+# ---------------------------------------------------------------------------
+# Structured JSON sink — writes one JSON object per line to stdout.
+# Vector (or any log shipper) reads stdout and forwards to VictoriaLogs.
+# ---------------------------------------------------------------------------
 
+
+def _json_sink(message: Message) -> None:
+    """Loguru sink that writes newline-delimited JSON to stdout.
+
+    Each log entry is a single JSON object with fields that map directly
+    to VictoriaLogs stream fields (``node_id``, ``component``) and the
+    message field (``msg``).  Vector consumes this on stdin and ships it.
+    """
+    record = message.record
+    name = record["name"]
+    entry = {
+        "ts": record["time"].astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+        + "Z",
+        "level": record["level"].name,
+        "node_id": _node_name,
+        "component": (name.split(".")[1] if "." in name else name)
+        if name
+        else "unknown",
+        "module": name or "unknown",
+        "function": record["function"],
+        "line": record["line"],
+        "msg": str(record["message"]),
+    }
+    if record["exception"] is not None:
+        exc_type, exc_value, exc_tb = record["exception"]
+        if exc_type is not None:
+            entry["exception"] = "".join(
+                traceback.format_exception(exc_type, exc_value, exc_tb)
+            )
+
+    # Write to the original stdout, bypassing Python-level sys.stdout reassignment.
+    stdout = sys.__stdout__
+    if stdout is not None:
+        try:
+            stdout.write(json.dumps(entry, default=str) + "\n")
+            stdout.flush()
+        except (BrokenPipeError, OSError):
+            # Vector (or whatever reads stdout) has exited — disable the sink
+            # to avoid spamming errors. Local file and stderr sinks still work.
+            global _json_sink_id  # noqa: PLW0603
+            if _json_sink_id is not None:
+                with contextlib.suppress(ValueError):
+                    logger.remove(_json_sink_id)
+                _json_sink_id = None
+            logger.warning(
+                "Structured stdout consumer disconnected — JSON sink disabled"
+            )
+
+
+def logger_setup(
+    log_file: Path | None,
+    verbosity: int = 0,
+    structured_stdout: bool = False,
+):
+    """Set up logging for this process — formatting, file handles, verbosity, and structured output.
+
+    Args:
+        log_file: Path to the local log file. ``None`` disables file logging.
+        verbosity: 0 = INFO on console, >=1 = DEBUG with source locations.
+        structured_stdout: When ``True``, emit structured JSON on stdout for
+            consumption by Vector or another log shipper.
+    """
     logging.getLogger("exo_pyo3_bindings").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -83,6 +161,36 @@ def logger_setup(log_file: Path | None, verbosity: int = 0):
             retention=_MAX_LOG_ARCHIVES,
             compression=_zstd_compress,
         )
+
+    if structured_stdout:
+        global _json_sink_id  # noqa: PLW0603
+        _json_sink_id = logger.add(
+            _json_sink,
+            level="INFO",
+            enqueue=False,
+        )
+
+
+def set_structured_stdout(enabled: bool) -> None:
+    """Enable or disable the structured JSON stdout sink at runtime.
+
+    Called when logging config is synced across the cluster.  Safe to call
+    repeatedly — adding when already active or removing when already
+    inactive is a no-op.
+    """
+    global _json_sink_id  # noqa: PLW0603
+    if enabled and _json_sink_id is None:
+        _json_sink_id = logger.add(
+            _json_sink,
+            level="INFO",
+            enqueue=False,
+        )
+        logger.info("Structured JSON stdout sink enabled")
+    elif not enabled and _json_sink_id is not None:
+        with contextlib.suppress(ValueError):
+            logger.remove(_json_sink_id)
+        _json_sink_id = None
+        logger.info("Structured JSON stdout sink disabled")
 
 
 def logger_cleanup():

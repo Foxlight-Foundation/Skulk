@@ -44,6 +44,7 @@ Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard),
 - `dashboard/` — Legacy Svelte dashboard (upstream EXO)
 - `rust/` — Rust components (networking, libp2p, PyO3 bindings)
 - `resources/inference_model_cards/` — Model metadata TOML files
+- `deployment/logging/` — VictoriaLogs + Grafana stack and Vector config
 - `docs/` — Technical documentation
 
 ### Dashboard (React)
@@ -157,9 +158,49 @@ Skulk uses `exo.yaml` for cluster configuration. Key sections:
 
 - `model_store` — Store host, paths, staging, download settings
 - `inference` — KV cache backend selection (`default`, `optiq`, `turboquant_adaptive`, etc.)
+- `logging` — Centralized log aggregation (enabled toggle, ingest URL)
 - `hf_token` — HuggingFace API token
 
 Configuration can be edited directly in `exo.yaml` or through the dashboard Settings panel. Changes made via the dashboard are synced to all nodes automatically via gossipsub.
+
+## Centralized Logging
+
+Skulk supports shipping structured logs from all cluster nodes to a central [VictoriaLogs](https://docs.victoriametrics.com/victorialogs/) instance via [Vector](https://vector.dev/).
+
+### Setup
+
+1. **Deploy the logging stack** on a central server (e.g. via Portainer):
+   ```bash
+   docker compose -f deployment/logging/docker-compose.yml up -d
+   ```
+   This starts VictoriaLogs (port 9428) and Grafana (port 3000).
+
+2. **Configure logging** in the dashboard Settings panel, or in `exo.yaml`:
+   ```yaml
+   logging:
+     enabled: true
+     ingest_url: http://<logging-server>:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts
+   ```
+   Settings are synced to all nodes via gossipsub.
+
+3. **Install Vector** on each node:
+   ```bash
+   brew install vectordotdev/brew/vector
+   ```
+   (Vector is also available via `nix develop` if using the nix dev shell.)
+
+4. **Run exo piped through Vector**:
+   ```bash
+   uv run exo 2>/dev/tty | vector --config deployment/logging/vector.yaml
+   ```
+   stderr goes to the terminal (human-readable), stdout goes to Vector → VictoriaLogs.
+
+5. **Update the VictoriaLogs URL** in `deployment/logging/vector.yaml` if your logging server is not at `192.168.0.118:9428`.
+
+### Browsing Logs
+
+- **VictoriaLogs VMUI**: `http://<logging-server>:9428/select/vmui/`
+- **Grafana**: `http://<logging-server>:3000` (login with the credentials configured in your exo.yaml logging section or set during stack deployment)
 
 ## API Adapters
 
