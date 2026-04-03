@@ -562,6 +562,7 @@ def main():
         SKULK_LOG,
         args.verbosity,
         structured_stdout=bool(_log_cfg and _log_cfg.enabled and _log_cfg.ingest_url),
+        ingest_url=_log_cfg.ingest_url if _log_cfg else "",
     )
     logger.info("Starting Skulk")
     logger.info(f"LIBP2P_NAMESPACE: {os.getenv('EXO_LIBP2P_NAMESPACE')}")

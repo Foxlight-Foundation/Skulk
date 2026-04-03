@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import atexit
 import contextlib
 import json
 import logging
+import shutil
 import socket
+import subprocess
 import sys
 import traceback
 from collections.abc import Iterator
 from datetime import UTC
+from io import TextIOWrapper
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,6 +25,8 @@ if TYPE_CHECKING:
 
 _MAX_LOG_ARCHIVES = 5
 _json_sink_id: int | None = None
+_vector_process: subprocess.Popen[bytes] | None = None
+_vector_pipe: TextIOWrapper | None = None
 
 _node_name: str = socket.gethostname()
 
@@ -58,17 +64,16 @@ class _InterceptHandler(logging.Handler):
 
 
 # ---------------------------------------------------------------------------
-# Structured JSON sink — writes one JSON object per line to stdout.
-# Vector (or any log shipper) reads stdout and forwards to VictoriaLogs.
+# Structured JSON sink — writes to Vector subprocess pipe or stdout
 # ---------------------------------------------------------------------------
 
 
 def _json_sink(message: Message) -> None:
-    """Loguru sink that writes newline-delimited JSON to stdout.
+    """Loguru sink that writes newline-delimited JSON to the Vector pipe.
 
     Each log entry is a single JSON object with fields that map directly
     to VictoriaLogs stream fields (``node_id``, ``component``) and the
-    message field (``msg``).  Vector consumes this on stdin and ships it.
+    message field (``msg``).
     """
     record = message.record
     name = record["name"]
@@ -92,37 +97,117 @@ def _json_sink(message: Message) -> None:
                 traceback.format_exception(exc_type, exc_value, exc_tb)
             )
 
-    # Write to the original stdout, bypassing Python-level sys.stdout reassignment.
-    stdout = sys.__stdout__
-    if stdout is not None:
+    line = json.dumps(entry, default=str) + "\n"
+
+    # Write to Vector's stdin pipe if available, otherwise stdout
+    target = _vector_pipe or sys.__stdout__
+    if target is not None:
         try:
-            stdout.write(json.dumps(entry, default=str) + "\n")
-            stdout.flush()
+            target.write(line)
+            target.flush()
         except (BrokenPipeError, OSError):
-            # Vector (or whatever reads stdout) has exited — disable the sink
-            # to avoid spamming errors. Local file and stderr sinks still work.
+            # Vector has exited — disable the sink
             global _json_sink_id  # noqa: PLW0603
             if _json_sink_id is not None:
                 with contextlib.suppress(ValueError):
                     logger.remove(_json_sink_id)
                 _json_sink_id = None
-            logger.warning(
-                "Structured stdout consumer disconnected — JSON sink disabled"
-            )
+            logger.warning("Log shipper disconnected — JSON sink disabled")
+
+
+# ---------------------------------------------------------------------------
+# Vector subprocess management
+# ---------------------------------------------------------------------------
+
+_VECTOR_CONFIG_PATH = (
+    Path(__file__).resolve().parents[3] / "deployment" / "logging" / "vector.yaml"
+)
+
+
+def _start_vector(ingest_url: str) -> bool:
+    """Spawn Vector as a child process reading JSON from a pipe.
+
+    Returns True if Vector was started successfully, False otherwise.
+    """
+    global _vector_process, _vector_pipe  # noqa: PLW0603
+
+    vector_bin = shutil.which("vector")
+    if vector_bin is None:
+        logger.warning(
+            "Vector not found on PATH — structured logging disabled. Install: brew install vectordotdev/brew/vector"
+        )
+        return False
+
+    if not _VECTOR_CONFIG_PATH.exists():
+        logger.warning(
+            f"Vector config not found at {_VECTOR_CONFIG_PATH} — structured logging disabled"
+        )
+        return False
+
+    env = {
+        **dict(__import__("os").environ),
+        "SKULK_LOGGING_INGEST_URL": ingest_url,
+        "EXO_LOGGING_INGEST_URL": ingest_url,  # legacy compat for vector.yaml
+        "SKULK_VECTOR_DATA_DIR": str(Path.home() / ".skulk" / "vector"),
+        "EXO_VECTOR_DATA_DIR": str(Path.home() / ".skulk" / "vector"),  # legacy compat
+    }
+
+    # Ensure the data dir exists
+    Path(env["SKULK_VECTOR_DATA_DIR"]).mkdir(parents=True, exist_ok=True)
+
+    _vector_process = subprocess.Popen(
+        [vector_bin, "--config", str(_VECTOR_CONFIG_PATH)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    if _vector_process.stdin is not None:
+        _vector_pipe = TextIOWrapper(
+            _vector_process.stdin, encoding="utf-8", line_buffering=True
+        )
+
+    atexit.register(_stop_vector)
+    logger.info(
+        f"Vector started (pid={_vector_process.pid}), shipping logs to {ingest_url}"
+    )
+    return True
+
+
+def _stop_vector() -> None:
+    """Gracefully stop the Vector subprocess."""
+    global _vector_process, _vector_pipe  # noqa: PLW0603
+    if _vector_pipe is not None:
+        with contextlib.suppress(Exception):
+            _vector_pipe.close()
+        _vector_pipe = None
+    if _vector_process is not None:
+        with contextlib.suppress(Exception):
+            _vector_process.terminate()
+            _vector_process.wait(timeout=5)
+        _vector_process = None
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 def logger_setup(
     log_file: Path | None,
     verbosity: int = 0,
     structured_stdout: bool = False,
+    ingest_url: str = "",
 ):
     """Set up logging for this process — formatting, file handles, verbosity, and structured output.
 
     Args:
         log_file: Path to the local log file. ``None`` disables file logging.
         verbosity: 0 = INFO on console, >=1 = DEBUG with source locations.
-        structured_stdout: When ``True``, emit structured JSON on stdout for
-            consumption by Vector or another log shipper.
+        structured_stdout: When ``True`` and ``ingest_url`` is set, spawn
+            Vector and pipe structured JSON logs to it.
+        ingest_url: VictoriaLogs ingest URL. Required for Vector to know
+            where to ship logs.
     """
     logging.getLogger("exo_pyo3_bindings").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -162,25 +247,16 @@ def logger_setup(
             compression=_zstd_compress,
         )
 
-    if structured_stdout:
-        # Only activate if stdout is piped (e.g., to Vector). When stdout
-        # is a terminal there's no consumer, so skip the JSON noise.
-        stdout = sys.__stdout__
-        if stdout is not None and not stdout.isatty():
-            global _json_sink_id  # noqa: PLW0603
-            _json_sink_id = logger.add(
-                _json_sink,
-                level="INFO",
-                enqueue=False,
-            )
-            logger.info("Structured JSON stdout enabled (pipe detected)")
-        else:
-            logger.debug(
-                "Structured stdout configured but stdout is a terminal — skipping JSON sink"
-            )
+    if structured_stdout and ingest_url and _start_vector(ingest_url):
+        global _json_sink_id  # noqa: PLW0603
+        _json_sink_id = logger.add(
+            _json_sink,
+            level="INFO",
+            enqueue=False,
+        )
 
 
-def set_structured_stdout(enabled: bool) -> None:
+def set_structured_stdout(enabled: bool, ingest_url: str = "") -> None:
     """Enable or disable the structured JSON stdout sink at runtime.
 
     Called when logging config is synced across the cluster.  Safe to call
@@ -188,27 +264,26 @@ def set_structured_stdout(enabled: bool) -> None:
     inactive is a no-op.
     """
     global _json_sink_id  # noqa: PLW0603
-    if enabled and _json_sink_id is None:
-        # Only activate if stdout is piped to a consumer (e.g., Vector)
-        stdout = sys.__stdout__
-        if stdout is None or stdout.isatty():
-            return
-        _json_sink_id = logger.add(
-            _json_sink,
-            level="INFO",
-            enqueue=False,
-        )
-        logger.info("Structured JSON stdout sink enabled")
+    if enabled and ingest_url and _json_sink_id is None:
+        if _start_vector(ingest_url):
+            _json_sink_id = logger.add(
+                _json_sink,
+                level="INFO",
+                enqueue=False,
+            )
+            logger.info("Structured JSON log shipping enabled")
     elif not enabled and _json_sink_id is not None:
         with contextlib.suppress(ValueError):
             logger.remove(_json_sink_id)
         _json_sink_id = None
-        logger.info("Structured JSON stdout sink disabled")
+        _stop_vector()
+        logger.info("Structured JSON log shipping disabled")
 
 
 def logger_cleanup():
     """Flush all queues before shutting down so any in-flight logs are written to disk"""
     logger.complete()
+    _stop_vector()
 
 
 """ --- TODO: Capture MLX Log output:

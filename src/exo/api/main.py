@@ -2595,7 +2595,7 @@ class API:
             log_on = bool(logging_cfg_update.get("enabled", False)) and bool(
                 logging_cfg_update.get("ingest_url")
             )
-            set_structured_stdout(log_on)
+            set_structured_stdout(log_on, ingest_url=str(logging_cfg_update.get("ingest_url", "")))
         # model_store changes still require restart; inference-only changes don't
         has_store_changes = "model_store" in config_data
         return JSONResponse(

@@ -227,7 +227,7 @@ class DownloadCoordinator:
                     log_enabled = bool(logging_cfg.get("enabled", False)) and bool(
                         logging_cfg.get("ingest_url")
                     )
-                    set_structured_stdout(log_enabled)
+                    set_structured_stdout(log_enabled, ingest_url=str(logging_cfg.get("ingest_url", "")))
         except Exception as exc:
             logger.warning(f"DownloadCoordinator: failed to sync exo.yaml: {exc}")
 
