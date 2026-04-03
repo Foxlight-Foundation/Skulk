@@ -361,10 +361,22 @@ class Node:
         except Exception as exc:
             logger.warning(f"Failed to update local exo.yaml: {exc}")
 
+        # Strip secrets before broadcasting over gossipsub
+        import copy
+
+        broadcast_dict = copy.deepcopy(config_dict)
+        broadcast_dict.pop("hf_token", None)
+        logging_section = broadcast_dict.get("logging")
+        if isinstance(logging_section, dict):
+            logging_section.pop("grafana_password", None)
+        broadcast_yaml = yaml.safe_dump(
+            broadcast_dict, default_flow_style=False, sort_keys=False
+        )
+
         await self.router.sender(topics.DOWNLOAD_COMMANDS).send(
             ForwarderDownloadCommand(
                 origin=SystemId(),
-                command=SyncConfig(config_yaml=config_yaml),
+                command=SyncConfig(config_yaml=broadcast_yaml),
             )
         )
         logger.info(
@@ -519,9 +531,15 @@ def main():
 
     # Load config early so the logging section is available before anything
     # else runs.  The full config is loaded again inside Node.create() for
-    # the model store and inference sections.
-    _early_config = load_exo_config(Path("exo.yaml"))
-    _log_cfg = _early_config.logging if _early_config else None
+    # the model store and inference sections.  If the file is malformed we
+    # fall back gracefully — logging will start without the JSON sink and
+    # the validation error is logged once the logger is up.
+    _log_cfg = None
+    try:
+        _early_config = load_exo_config(Path("exo.yaml"))
+        _log_cfg = _early_config.logging if _early_config else None
+    except Exception:
+        pass  # Logged after logger_setup below
 
     logger_setup(
         EXO_LOG,

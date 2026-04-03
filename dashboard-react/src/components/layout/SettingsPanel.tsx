@@ -527,7 +527,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                   />
                 </Row>
                 <HintText>
-                  Settings are synced to all nodes. Nodes will start shipping logs when saved.
+                  Non-secret settings are synced to all nodes. Grafana password stays local. Nodes will start shipping logs when saved.
                 </HintText>
               </>
             )}

@@ -184,7 +184,7 @@ Skulk supports shipping structured logs from all cluster nodes to a central [Vic
      grafana_user: admin
      grafana_password: <your-password>
    ```
-   Settings are synced to all nodes automatically via gossipsub.
+   Non-secret settings are synced to all nodes via gossipsub. Passwords and tokens stay on the local node only.
 
 3. **Install Vector** on each node:
    ```bash
