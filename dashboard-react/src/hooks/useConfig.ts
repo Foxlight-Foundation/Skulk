@@ -26,7 +26,6 @@ export interface InferenceConfig {
 export interface LoggingConfig {
   enabled: boolean;
   ingest_url: string;
-  grafana_url: string;
 }
 
 /** Full editable config document as read from or written to `/config`. */

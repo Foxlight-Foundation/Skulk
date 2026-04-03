@@ -191,8 +191,8 @@ class ExoConfig(FrozenModel):
             absent, which means the model store feature is disabled.
         inference: Inference settings (KV cache backend).  ``None`` uses
             defaults.
-        logging: Centralized logging configuration (ingest URL, Grafana
-            credentials).  ``None`` disables remote log shipping.
+        logging: Centralized logging configuration (enabled toggle, ingest
+            URL).  ``None`` disables remote log shipping.
         hf_token: HuggingFace API token.  Stripped from ``GET /config``
             responses for security.
     """
@@ -220,13 +220,10 @@ class LoggingConfig(FrozenModel):
             set.
         ingest_url: Full VictoriaLogs (or compatible) ingest URL, e.g.
             ``http://192.168.0.118:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts``.
-        grafana_url: Grafana base URL for dashboard links, e.g.
-            ``http://192.168.0.118:3000``.
     """
 
     enabled: bool = False
     ingest_url: str = ""
-    grafana_url: str = ""
 
 
 @final

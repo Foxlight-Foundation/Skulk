@@ -212,7 +212,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const [kvBackend, setKvBackend] = useState('default');
   const [hfToken, setHfToken] = useState('');
   const [loggingDraft, setLoggingDraft] = useState<LoggingConfig>({
-    enabled: false, ingest_url: '', grafana_url: '',
+    enabled: false, ingest_url: '',
   });
 
   // Fetch config when panel opens
@@ -231,7 +231,6 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     setLoggingDraft({
       enabled: fullConfig?.logging?.enabled ?? false,
       ingest_url: fullConfig?.logging?.ingest_url ?? '',
-      grafana_url: fullConfig?.logging?.grafana_url ?? '',
     });
   }, [fullConfig, effective]);
 
@@ -494,15 +493,6 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                     value={loggingDraft.ingest_url}
                     onChange={(e) => setLoggingDraft(prev => ({ ...prev, ingest_url: (e.target as HTMLInputElement).value }))}
                     placeholder="http://host:9428/insert/jsonline?_stream_fields=..."
-                  />
-                </Row>
-                <Row>
-                  <FieldLabel>Grafana URL</FieldLabel>
-                  <StyledField
-                    size="sm"
-                    value={loggingDraft.grafana_url}
-                    onChange={(e) => setLoggingDraft(prev => ({ ...prev, grafana_url: (e.target as HTMLInputElement).value }))}
-                    placeholder="http://host:3000"
                   />
                 </Row>
                 <HintText>
