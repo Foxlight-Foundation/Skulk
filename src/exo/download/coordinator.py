@@ -180,13 +180,13 @@ class DownloadCoordinator:
         schedule_restart()
 
     async def _sync_config(self, config_yaml: str) -> None:
-        """Write received config YAML to the local exo.yaml file and
+        """Write received config YAML to the local config file and
         apply runtime-effective settings (e.g., KV cache backend)."""
         config_path = resolve_config_path()
         try:
             config_path.write_text(config_yaml)
             logger.info(
-                f"DownloadCoordinator: synced exo.yaml from cluster ({len(config_yaml)} bytes)"
+                f"DownloadCoordinator: synced {config_path.name} from cluster ({len(config_yaml)} bytes)"
             )
             # Apply inference config to env var so next runner spawn picks it up
             import yaml
@@ -229,7 +229,7 @@ class DownloadCoordinator:
                     )
                     set_structured_stdout(log_enabled, ingest_url=str(logging_cfg.get("ingest_url", "")))
         except Exception as exc:
-            logger.warning(f"DownloadCoordinator: failed to sync exo.yaml: {exc}")
+            logger.warning(f"DownloadCoordinator: failed to sync config: {exc}")
 
     async def _purge_dir(self, path: Path, label: str) -> int:
         """Remove all model subdirectories from *path*. Returns count purged."""
