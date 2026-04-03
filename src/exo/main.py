@@ -565,7 +565,7 @@ def main():
         ingest_url=_log_cfg.ingest_url if _log_cfg else "",
     )
     logger.info("Starting Skulk")
-    logger.info(f"LIBP2P_NAMESPACE: {os.getenv('SKULK_LIBP2P_NAMESPACE') or os.getenv('EXO_LIBP2P_NAMESPACE')}")
+    logger.info(f"LIBP2P_NAMESPACE: {os.environ.get('SKULK_LIBP2P_NAMESPACE', os.getenv('EXO_LIBP2P_NAMESPACE'))}")
 
     if args.offline:
         logger.info("Running in OFFLINE mode — no internet checks, local models only")
