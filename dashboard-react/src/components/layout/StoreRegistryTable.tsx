@@ -84,6 +84,8 @@ const Container = styled.div`
   display: flex;
   flex-direction: column;
   gap: 16px;
+  min-height: 0;
+  flex: 1;
 `;
 
 const HeaderRow = styled.div`
@@ -128,6 +130,11 @@ const Table = styled.div`
   border: 1px solid rgba(80, 80, 80, 0.3);
   border-radius: ${({ theme }) => theme.radii.md};
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  /* Fill available height in the parent so the body scrolls, not the page */
+  min-height: 0;
+  flex: 1;
 `;
 
 const THead = styled.div`
@@ -139,6 +146,13 @@ const THead = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.tableHead};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.textMuted};
+  flex-shrink: 0;
+`;
+
+const TBody = styled.div`
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
 `;
 
 const TRow = styled.div<{ $highlight?: boolean }>`
@@ -542,6 +556,7 @@ export function StoreRegistryTable({
             <div />
           </THead>
 
+          <TBody>
           {/* Pending downloads (not yet registered) */}
           {pendingDownloads.map((dl) => (
             <TRow key={dl.modelId} $highlight>
@@ -670,6 +685,7 @@ export function StoreRegistryTable({
               </TRow>
             );
           })}
+          </TBody>
         </Table>
       )}
     </Container>

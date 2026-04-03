@@ -620,7 +620,9 @@ function CheckIcon() {
 const Container = styled.div`
   padding: 32px;
   height: 100%;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 `;
 
 const TopBar = styled.div`
