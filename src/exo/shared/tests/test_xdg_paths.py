@@ -6,15 +6,29 @@ from pathlib import Path
 from unittest import mock
 
 
-def test_xdg_paths_on_linux():
-    """Test that XDG paths are used on Linux when XDG env vars are set."""
-    env = {
+def _safe_env_without(*prefixes: str) -> dict[str, str]:
+    """Build a clean env dict, stripping vars with the given prefixes.
+
+    Always preserves SKULK_DASHBOARD_DIR / EXO_DASHBOARD_DIR and
+    SKULK_RESOURCES_DIR / EXO_RESOURCES_DIR so that `importlib.reload`
+    on constants doesn't fail looking for dashboard assets in CI.
+    """
+    keep = {
+        "SKULK_DASHBOARD_DIR",
+        "EXO_DASHBOARD_DIR",
+        "SKULK_RESOURCES_DIR",
+        "EXO_RESOURCES_DIR",
+    }
+    return {
         k: v
         for k, v in os.environ.items()
-        if not k.startswith("SKULK_")
-        and not k.startswith("EXO_")
-        and not k.startswith("XDG_")
+        if k in keep or not any(k.startswith(p) for p in prefixes)
     }
+
+
+def test_xdg_paths_on_linux():
+    """Test that XDG paths are used on Linux when XDG env vars are set."""
+    env = _safe_env_without("SKULK_", "EXO_", "XDG_")
     env.update(
         {
             "XDG_CONFIG_HOME": "/tmp/test-config",
@@ -41,13 +55,7 @@ def test_xdg_paths_on_linux():
 
 def test_xdg_default_paths_on_linux():
     """Test that XDG default paths are used on Linux when env vars are not set."""
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if not k.startswith("XDG_")
-        and not k.startswith("SKULK_")
-        and not k.startswith("EXO_")
-    }
+    env = _safe_env_without("XDG_", "SKULK_", "EXO_")
     with (
         mock.patch.dict(os.environ, env, clear=True),
         mock.patch.object(sys, "platform", "linux"),
@@ -66,13 +74,11 @@ def test_xdg_default_paths_on_linux():
 
 def test_skulk_home_takes_precedence():
     """Test that SKULK_HOME environment variable takes precedence."""
-    with mock.patch.dict(
-        os.environ,
-        {
-            "SKULK_HOME": ".custom-skulk",
-            "XDG_CONFIG_HOME": "/tmp/test-config",
-        },
-        clear=False,
+    env = _safe_env_without("SKULK_", "EXO_")
+    env["SKULK_HOME"] = ".custom-skulk"
+    env["XDG_CONFIG_HOME"] = "/tmp/test-config"
+    with (
+        mock.patch.dict(os.environ, env, clear=True),
     ):
         import importlib
 
@@ -87,7 +93,7 @@ def test_skulk_home_takes_precedence():
 
 def test_legacy_exo_home_fallback():
     """Test that EXO_HOME still works as a fallback when SKULK_HOME is not set."""
-    env = {k: v for k, v in os.environ.items() if k != "SKULK_HOME"}
+    env = _safe_env_without("SKULK_", "EXO_")
     env["EXO_HOME"] = ".custom-exo"
     with mock.patch.dict(os.environ, env, clear=True):
         import importlib
@@ -102,11 +108,7 @@ def test_legacy_exo_home_fallback():
 
 def test_macos_uses_skulk_directory():
     """Test that macOS uses ~/.skulk directory by default."""
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if not k.startswith("SKULK_") and not k.startswith("EXO_")
-    }
+    env = _safe_env_without("SKULK_", "EXO_")
     with (
         mock.patch.dict(os.environ, env, clear=True),
         mock.patch.object(sys, "platform", "darwin"),
@@ -126,18 +128,21 @@ def test_macos_uses_skulk_directory():
 
 def test_node_id_in_config_dir():
     """Test that node ID keypair is in the config directory."""
-    import exo.shared.constants as constants
+    # Reload to get a clean state after previous tests may have changed env
+    env = _safe_env_without("SKULK_", "EXO_")
+    with mock.patch.dict(os.environ, env, clear=True):
+        import importlib
 
-    assert constants.SKULK_NODE_ID_KEYPAIR.parent == constants.SKULK_CONFIG_HOME
+        import exo.shared.constants as constants
+
+        importlib.reload(constants)
+
+        assert constants.SKULK_NODE_ID_KEYPAIR.parent == constants.SKULK_CONFIG_HOME
 
 
 def test_models_in_data_dir():
     """Test that models directory is in the data directory."""
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if not k.startswith("SKULK_MODELS") and not k.startswith("EXO_MODELS")
-    }
+    env = _safe_env_without("SKULK_MODELS", "EXO_MODELS", "SKULK_HOME", "EXO_HOME")
     with mock.patch.dict(os.environ, env, clear=True):
         import importlib
 

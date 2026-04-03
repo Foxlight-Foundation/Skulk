@@ -180,7 +180,7 @@ class DownloadCoordinator:
         schedule_restart()
 
     async def _sync_config(self, config_yaml: str) -> None:
-        """Write received config YAML to the local exo.yaml file and
+        """Write received config YAML to the local config file and
         apply runtime-effective settings (e.g., KV cache backend)."""
         config_path = resolve_config_path()
         try:

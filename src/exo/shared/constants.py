@@ -92,12 +92,13 @@ def add_model_search_path(path: Path) -> None:
     Used by the model store to make the staging directory searchable
     by ``build_model_path`` / ``resolve_model_in_path``.
     """
-    global SKULK_MODELS_PATH  # noqa: PLW0603
+    global SKULK_MODELS_PATH, EXO_MODELS_PATH  # noqa: PLW0603
     expanded = path.expanduser()
     if expanded not in _extra_model_paths:
         _extra_model_paths.append(expanded)
     existing = list(SKULK_MODELS_PATH) if SKULK_MODELS_PATH else []
     SKULK_MODELS_PATH = tuple(existing + _extra_model_paths)  # pyright: ignore[reportConstantRedefinition]
+    EXO_MODELS_PATH = SKULK_MODELS_PATH  # pyright: ignore[reportConstantRedefinition] — keep alias in sync
 
 
 _RESOURCES_DIR_ENV = _env("SKULK_RESOURCES_DIR", "EXO_RESOURCES_DIR")

@@ -1,4 +1,4 @@
-# exo.yaml - optional Skulk cluster configuration
+# skulk.yaml - optional Skulk cluster configuration
 #
 # You can manage much of this from the dashboard at:
 # http://localhost:52415
@@ -39,7 +39,7 @@ model_store:
   staging:
     # Staging is where a node prepares model files before MLX loads them.
     enabled: true
-    node_cache_path: ~/.exo/staging
+    node_cache_path: ~/.skulk/staging
     cleanup_on_deactivate: true
 
   node_overrides:
