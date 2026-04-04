@@ -1,6 +1,8 @@
 from collections.abc import Generator
 from typing import Any
 
+from exo.shared.types.common import ModelId
+from exo.shared.types.mlx import Model
 from exo.shared.types.worker.runner_response import (
     FinishReason,
     GenerationResponse,
@@ -14,7 +16,9 @@ from exo.worker.engines.mlx.dsml_encoding import (
     TOOL_CALLS_START,
 )
 from exo.worker.runner.llm_inference.model_output_parsers import (
+    apply_all_parsers,
     parse_deepseek_v32,
+    parse_gemma4_thinking_channels,
     parse_thinking_models,
     parse_tool_calls,
 )
@@ -242,6 +246,136 @@ class TestThinkingModelsFinishReason:
             )
         )
         assert _got_finish(results)
+
+
+class _NoThinkingTokenizer:
+    has_thinking = False
+    think_start = None
+    think_end = None
+
+
+class TestGemma4ThinkingChannels:
+    def test_closed_thinking_block_is_flagged_and_markers_are_stripped(self):
+        tokens = [
+            _make_response("<|channel>thought\n", 100),
+            _make_response("Reason about the image.", 101),
+            _make_response("<channel|>", 102),
+            _make_response("It is a starship.", 103, finish_reason="stop"),
+        ]
+
+        results = _step_until_finish(
+            parse_gemma4_thinking_channels(_queue_source(tokens))
+        )
+
+        thinking_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and r.is_thinking
+        )
+        visible_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and not r.is_thinking
+        )
+
+        assert "Reason about the image." in thinking_text
+        assert "<|channel>thought" not in thinking_text
+        assert "<channel|>" not in thinking_text
+        assert visible_text == "It is a starship."
+
+    def test_split_markers_are_buffered_until_complete(self):
+        tokens = [
+            _make_response("<|chan", 100),
+            _make_response("nel>thought\n", 101),
+            _make_response("Hidden reasoning.", 102),
+            _make_response("<chan", 103),
+            _make_response("nel|>", 104),
+            _make_response("Visible answer.", 105, finish_reason="stop"),
+        ]
+
+        results = _step_until_finish(
+            parse_gemma4_thinking_channels(_queue_source(tokens))
+        )
+
+        all_text = "".join(r.text for r in results if isinstance(r, GenerationResponse))
+        thinking_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and r.is_thinking
+        )
+        visible_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and not r.is_thinking
+        )
+
+        assert "<|channel>thought" not in all_text
+        assert "<channel|>" not in all_text
+        assert thinking_text == "Hidden reasoning."
+        assert visible_text == "Visible answer."
+
+    def test_unclosed_thinking_block_at_finish_stays_hidden(self):
+        tokens = [
+            _make_response("<|channel>thought\n", 100),
+            _make_response(
+                "Model stayed in the thought channel.", 101, finish_reason="stop"
+            ),
+        ]
+
+        results = _step_until_finish(
+            parse_gemma4_thinking_channels(_queue_source(tokens))
+        )
+
+        thinking_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and r.is_thinking
+        )
+        visible_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and not r.is_thinking
+        )
+
+        assert thinking_text == "Model stayed in the thought channel."
+        assert visible_text == ""
+        assert _got_finish(results)
+
+    def test_apply_all_parsers_uses_gemma4_channel_parser_without_tokenizer_metadata(
+        self,
+    ):
+        tokens = [
+            _make_response("<|channel>thought\n", 100),
+            _make_response("Reason silently.", 101),
+            _make_response("<channel|>", 102),
+            _make_response("Final answer.", 103, finish_reason="stop"),
+        ]
+
+        results = _step_until_finish(
+            apply_all_parsers(
+                _queue_source(tokens),
+                prompt="<bos><|turn>user\nDescribe this.<turn|>\n<|turn>model\n",
+                tool_parser=None,
+                tokenizer=_NoThinkingTokenizer(),
+                model_type=Model,
+                model_id=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"),
+                tools=None,
+            )
+        )
+
+        thinking_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and r.is_thinking
+        )
+        visible_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and not r.is_thinking
+        )
+
+        assert thinking_text == "Reason silently."
+        assert visible_text == "Final answer."
 
 
 # ── parse_tool_calls (generic) ──────────────────────────────────

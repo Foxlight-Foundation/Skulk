@@ -23,6 +23,9 @@ from exo.worker.engines.mlx.utils_mlx import (
 from exo.worker.runner.bootstrap import logger
 from exo.worker.runner.llm_inference.tool_parsers import ToolParser
 
+_GEMMA4_THINK_START = "<|channel>thought\n"
+_GEMMA4_THINK_END = "<channel|>"
+
 
 @cache
 def get_gpt_oss_encoding():
@@ -41,7 +44,9 @@ def apply_all_parsers(
 ) -> Generator[GenerationResponse | ToolCallResponse | None]:
     mlx_generator = receiver
 
-    if tokenizer.has_thinking:
+    if _uses_gemma4_thinking_channels(model_id):
+        mlx_generator = parse_gemma4_thinking_channels(mlx_generator)
+    elif tokenizer.has_thinking:
         mlx_generator = parse_thinking_models(
             mlx_generator,
             tokenizer.think_start,
@@ -60,6 +65,137 @@ def apply_all_parsers(
         mlx_generator = parse_tool_calls(mlx_generator, tool_parser, tools)
 
     return mlx_generator
+
+
+def _uses_gemma4_thinking_channels(model_id: ModelId) -> bool:
+    """Return whether the model emits Gemma 4 channel-delimited thinking."""
+    normalized_model_id = model_id.normalize().lower()
+    return "gemma-4" in normalized_model_id or "gemma4" in normalized_model_id
+
+
+def parse_gemma4_thinking_channels(
+    responses: Generator[GenerationResponse | None],
+) -> Generator[GenerationResponse | None]:
+    """Route Gemma 4 channel-delimited reasoning via ``is_thinking``.
+
+    Gemma 4 does not expose ``TokenizerWrapper.has_thinking`` metadata, but its
+    tokenizer config defines assistant reasoning as a ``<|channel>thought``
+    block terminated by ``<channel|>``. We strip those channel markers from the
+    visible stream and mark the enclosed text as thinking so API adapters can
+    route it to reasoning fields instead of assistant content.
+    """
+
+    buffer = ""
+    is_thinking = False
+
+    def _emit_text(
+        template: GenerationResponse,
+        text: str,
+        *,
+        thinking: bool,
+    ) -> GenerationResponse | None:
+        if not text:
+            return None
+        return template.model_copy(
+            update={"text": text, "is_thinking": thinking, "finish_reason": None}
+        )
+
+    for response in responses:
+        if response is None:
+            yield None
+            continue
+
+        buffer += response.text
+
+        if response.finish_reason is None:
+            while True:
+                if not is_thinking:
+                    start_index = buffer.find(_GEMMA4_THINK_START)
+                    if start_index != -1:
+                        emitted = _emit_text(
+                            response,
+                            buffer[:start_index],
+                            thinking=False,
+                        )
+                        if emitted is not None:
+                            yield emitted
+                        buffer = buffer[start_index + len(_GEMMA4_THINK_START) :]
+                        is_thinking = True
+                        continue
+
+                    safe_length = len(buffer) - (len(_GEMMA4_THINK_START) - 1)
+                    if safe_length > 0:
+                        emitted = _emit_text(
+                            response,
+                            buffer[:safe_length],
+                            thinking=False,
+                        )
+                        if emitted is not None:
+                            yield emitted
+                        buffer = buffer[safe_length:]
+                    break
+
+                end_index = buffer.find(_GEMMA4_THINK_END)
+                if end_index != -1:
+                    emitted = _emit_text(
+                        response,
+                        buffer[:end_index],
+                        thinking=True,
+                    )
+                    if emitted is not None:
+                        yield emitted
+                    buffer = buffer[end_index + len(_GEMMA4_THINK_END) :]
+                    is_thinking = False
+                    continue
+
+                safe_length = len(buffer) - (len(_GEMMA4_THINK_END) - 1)
+                if safe_length > 0:
+                    emitted = _emit_text(
+                        response,
+                        buffer[:safe_length],
+                        thinking=True,
+                    )
+                    if emitted is not None:
+                        yield emitted
+                    buffer = buffer[safe_length:]
+                break
+            continue
+
+        while buffer:
+            if not is_thinking:
+                start_index = buffer.find(_GEMMA4_THINK_START)
+                if start_index == -1:
+                    emitted = _emit_text(response, buffer, thinking=False)
+                    if emitted is not None:
+                        yield emitted
+                    buffer = ""
+                    break
+
+                emitted = _emit_text(response, buffer[:start_index], thinking=False)
+                if emitted is not None:
+                    yield emitted
+                buffer = buffer[start_index + len(_GEMMA4_THINK_START) :]
+                is_thinking = True
+                continue
+
+            end_index = buffer.find(_GEMMA4_THINK_END)
+            if end_index == -1:
+                emitted = _emit_text(response, buffer, thinking=True)
+                if emitted is not None:
+                    yield emitted
+                buffer = ""
+                break
+
+            emitted = _emit_text(response, buffer[:end_index], thinking=True)
+            if emitted is not None:
+                yield emitted
+            buffer = buffer[end_index + len(_GEMMA4_THINK_END) :]
+            is_thinking = False
+
+        # Always emit a terminal chunk with the finish reason so SSE clients close cleanly.
+        yield response.model_copy(
+            update={"text": "", "is_thinking": False, "finish_reason": response.finish_reason}
+        )
 
 
 def parse_gpt_oss(
