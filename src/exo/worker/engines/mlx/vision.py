@@ -159,6 +159,27 @@ class VisionResult:
     media_regions: list[MediaRegion]
 
 
+_QUANTIZATION_SUFFIXES = (".biases", ".scales")
+
+
+def _load_projector_weights(
+    projector: nn.Module, weights: dict[str, mx.array]
+) -> None:
+    """Load projector weights, filtering out quantization-only tensors.
+
+    Quantized checkpoints include auxiliary tensors (biases, scales) that
+    the projector module doesn't define. We drop only those known extras
+    and keep strict loading so genuine incompatibilities are not masked."""
+    dropped = [k for k in weights if k.endswith(_QUANTIZATION_SUFFIXES)]
+    if dropped:
+        logger.info(
+            "Dropping quantization-only projector tensors: "
+            + ", ".join(sorted(dropped))
+        )
+    filtered = {k: v for k, v in weights.items() if k not in dropped}
+    projector.load_weights(list(filtered.items()))
+
+
 def _instantiate_projector(
     cls: type,
     model_config: Any,  # pyright: ignore[reportAny]
@@ -358,9 +379,7 @@ class VisionEncoder:
         mx.eval(self._vision_tower.parameters())
 
         if self._projector is not None and projector_weights:
-            # strict=False: quantized models include extra params (biases,
-            # scales) that the projector module doesn't define.
-            self._projector.load_weights(list(projector_weights.items()), strict=False)
+            _load_projector_weights(self._projector, projector_weights)
             mx.eval(self._projector.parameters())
 
         n_vision = sum(v.size for _, v in vision_weights.items())
@@ -413,9 +432,7 @@ class VisionEncoder:
         mx.eval(self._vision_tower.parameters())
 
         if self._projector is not None and projector_weights:
-            # strict=False: quantized models include extra params (biases,
-            # scales) that the projector module doesn't define.
-            self._projector.load_weights(list(projector_weights.items()), strict=False)
+            _load_projector_weights(self._projector, projector_weights)
             mx.eval(self._projector.parameters())
 
         n_vision = sum(v.size for _, v in vision_weights.items())  # type: ignore
