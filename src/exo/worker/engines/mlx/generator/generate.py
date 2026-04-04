@@ -111,6 +111,35 @@ def patch_embed_tokens(
         inner.embed_tokens = original_embed
 
 
+@contextlib.contextmanager
+def patch_native_vision(
+    model: Model, pixel_values: mx.array | list[mx.array]
+) -> Generator[None]:
+    """Inject ``pixel_values`` into the model's forward pass during prefill.
+
+    For models with native vision support (e.g. Gemma 4), ``Model.__call__``
+    accepts ``pixel_values`` and handles vision encoding internally via its
+    own vision tower, projector, and ``masked_scatter``.
+
+    Since ``mlx_lm.generate_step._model_call`` doesn't pass extra kwargs,
+    we monkey-patch the inner model's ``__call__`` to inject ``pixel_values``
+    for the duration of prefill.  After the context manager exits, the
+    original ``__call__`` is restored so decode steps don't re-process images.
+    """
+    inner: object = getattr(model, "_inner", model)
+    original_call: object = type(inner).__call__
+
+    def _injected_call(*args: object, **kwargs: object) -> object:
+        kwargs["pixel_values"] = pixel_values
+        return original_call(*args, **kwargs)  # pyright: ignore[reportAny]
+
+    type(inner).__call__ = _injected_call
+    try:
+        yield
+    finally:
+        type(inner).__call__ = original_call
+
+
 class PrefillCancelled(BaseException):
     """Raised when prefill is cancelled via the progress callback."""
 
@@ -587,13 +616,18 @@ def mlx_generate(
     )
     max_stop_len = max((len(s) for s in stop_sequences), default=0)
 
-    maybe_vision_ctx = (
-        patch_embed_tokens(
+    if vision is not None and vision.pixel_values is not None:
+        # Native vision path: inject pixel_values into the model's forward
+        # pass. The model handles vision encoding internally (e.g. Gemma 4).
+        maybe_vision_ctx = patch_native_vision(model, vision.pixel_values)
+    elif vision is not None:
+        # Legacy path: splice pre-computed embeddings via monkey-patched
+        # embed_tokens (Qwen-VL, Kimi, etc.).
+        maybe_vision_ctx = patch_embed_tokens(
             model, vision.embeddings, prefix_hit_length, len(prompt_tokens) - 1
         )
-        if vision is not None
-        else contextlib.nullcontext()
-    )
+    else:
+        maybe_vision_ctx = contextlib.nullcontext()
     with maybe_vision_ctx:
         prefill_tps, prefill_tokens, ssm_snapshots_list = prefill(
             model,

@@ -38,6 +38,7 @@ from exo.worker.engines.mlx.generator.generate import (
     eos_ids_from_tokenizer,
     extract_top_logprobs,
     patch_embed_tokens,
+    patch_native_vision,
     prefill,
 )
 from exo.worker.engines.mlx.utils_mlx import (
@@ -179,13 +180,14 @@ class ExoBatchGenerator:
             top_k=task_params.top_k if task_params.top_k is not None else 0,
         )
 
-        vision_ctx = (
-            patch_embed_tokens(
+        if vision is not None and vision.pixel_values is not None:
+            vision_ctx = patch_native_vision(self.model, vision.pixel_values)
+        elif vision is not None:
+            vision_ctx = patch_embed_tokens(
                 self.model, vision.embeddings, prefix_hit_length, len(prompt_tokens) - 1
             )
-            if vision is not None
-            else contextlib.nullcontext()
-        )
+        else:
+            vision_ctx = contextlib.nullcontext()
         with vision_ctx:
             _prefill_tps, _prefill_tokens, cache_snapshots = prefill(
                 self.model,

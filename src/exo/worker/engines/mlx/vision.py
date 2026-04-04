@@ -157,6 +157,10 @@ class VisionResult:
     prompt_tokens: mx.array
     embeddings: mx.array
     media_regions: list[MediaRegion]
+    # For native-vision models (e.g. Gemma 4) that handle vision internally
+    # via their own vision tower + projector. When set, pixel_values are
+    # injected into the model's forward pass instead of using patch_embed_tokens.
+    pixel_values: mx.array | list[mx.array] | None = None
 
 
 _QUANTIZATION_SUFFIXES = (".biases", ".scales")
@@ -467,6 +471,13 @@ class VisionEncoder:
             + (f", projector: {n_proj / 1e6:.1f}M params" if n_proj else "")
         )
 
+    def preprocess_images(
+        self, pil_images: list[Image.Image]
+    ) -> tuple[mx.array | list[mx.array], mx.array | None, list[int]]:
+        """Public interface to image preprocessing (pixel_values + token counts)."""
+        self.ensure_loaded()
+        return self._preprocess_images(pil_images)
+
     def encode_images(self, images: list[str]) -> tuple[mx.array, list[int]]:
         """Encode base64 images into feature tensors and per-image token counts."""
         self.ensure_loaded()
@@ -617,6 +628,17 @@ class VisionEncoder:
         return out
 
 
+def has_native_vision(model: nn.Module) -> bool:
+    """Check if the model has built-in vision processing (e.g. Gemma 4).
+
+    Models with both a ``vision_tower`` and ``embed_vision`` (projector)
+    handle image encoding internally via their ``__call__`` accepting
+    ``pixel_values``.  For these models we pass preprocessed tensors
+    directly instead of running a separate VisionEncoder."""
+    inner: object = getattr(model, "_inner", model)
+    return hasattr(inner, "vision_tower") and hasattr(inner, "embed_vision")
+
+
 def get_inner_model(model: nn.Module) -> Any:  # type: ignore
     """Traverse the model tree to find the inner transformer with ``embed_tokens``."""
     for candidate in (
@@ -761,6 +783,10 @@ class VisionProcessor:
     ) -> VisionResult:
         logger.info(f"Vision pipeline: {len(images)} image(s)")
 
+        native = has_native_vision(model)
+        if native:
+            return self._process_native(images, chat_template_messages, tokenizer)
+
         cache_key = self._image_cache_key(images)
         cached = self._feature_cache.pop(cache_key, None)
         if cached is not None:
@@ -825,6 +851,76 @@ class VisionProcessor:
             prompt_tokens=prompt_tokens,
             embeddings=embeddings,
             media_regions=media_regions,
+        )
+
+    def _process_native(
+        self,
+        images: list[str],
+        chat_template_messages: list[dict[str, Any]],
+        tokenizer: TokenizerWrapper,
+    ) -> VisionResult:
+        """Process images for models with native vision support (e.g. Gemma 4).
+
+        Instead of running a separate vision tower and producing embeddings,
+        this preprocesses images into ``pixel_values`` tensors and returns them
+        in ``VisionResult``.  The model's own ``__call__`` will handle vision
+        encoding via its built-in vision tower and ``masked_scatter``."""
+        logger.info("Using native vision pipeline (model has built-in vision tower)")
+        self._encoder.ensure_loaded()
+
+        pil_images = [decode_base64_image(b64) for b64 in images]
+        for idx, img in enumerate(pil_images):
+            logger.info(f"Image {idx}: {img.width}x{img.height} mode={img.mode}")
+
+        pixel_values, _grid_thw, n_tokens_per_image = self._encoder.preprocess_images(
+            pil_images
+        )
+        logger.info(
+            f"Native vision: preprocessed {len(images)} image(s), "
+            f"tokens per image: {n_tokens_per_image}"
+        )
+
+        image_token = self.vision_config.image_token
+        if image_token is None:
+            image_token = tokenizer.decode([self.vision_config.image_token_id])
+
+        formatted_messages = _format_vlm_messages(
+            chat_template_messages, self.vision_config.model_type
+        )
+        prompt = build_vision_prompt(
+            tokenizer,
+            formatted_messages,
+            n_tokens_per_image,
+            image_token,
+        )
+
+        prompt_tokens: mx.array = encode_prompt(tokenizer, prompt)
+        prompt_tokens = fix_unmatched_think_end_tokens(prompt_tokens, tokenizer)
+        n_image_tokens = int(
+            mx.sum(mx.equal(prompt_tokens, self.vision_config.image_token_id)).item()
+        )
+        logger.info(
+            f"Encoded prompt: {len(prompt_tokens)} tokens, {n_image_tokens} image pad tokens"
+        )
+
+        media_regions = _find_media_regions(
+            prompt_tokens,
+            images,
+            self.vision_config.image_token_id,
+            boi_token_id=self.vision_config.boi_token_id,
+            eoi_token_id=self.vision_config.eoi_token_id,
+        )
+
+        # Return empty embeddings — native models handle vision in their
+        # forward pass via pixel_values, not via pre-computed embeddings.
+        empty_embeddings = mx.zeros((1, 0, 1))
+
+        return VisionResult(
+            prompt=prompt,
+            prompt_tokens=prompt_tokens,
+            embeddings=empty_embeddings,
+            media_regions=media_regions,
+            pixel_values=pixel_values,
         )
 
 

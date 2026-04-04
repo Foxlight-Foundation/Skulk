@@ -177,3 +177,77 @@ class TestLoadProjectorWeights:
         _load_projector_weights(target, flat, config)
         # After loading, the module should have quantized weight shape.
         assert target.weight.shape == ref.weight.shape
+
+
+class TestHasNativeVision:
+    """has_native_vision should detect models with built-in vision support."""
+
+    def test_model_with_vision_tower_and_embed_vision(self):
+        from exo.worker.engines.mlx.vision import has_native_vision
+
+        class _FakeInner(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.vision_tower = nn.Linear(4, 4)
+                self.embed_vision = nn.Linear(4, 4)
+
+        class _FakeWrapper(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self._inner = _FakeInner()
+
+        assert has_native_vision(_FakeWrapper()) is True
+
+    def test_model_without_vision_tower(self):
+        from exo.worker.engines.mlx.vision import has_native_vision
+
+        class _Plain(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.some_layer = nn.Linear(4, 4)
+
+        assert has_native_vision(_Plain()) is False
+
+    def test_model_with_only_vision_tower(self):
+        from exo.worker.engines.mlx.vision import has_native_vision
+
+        class _Partial(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.vision_tower = nn.Linear(4, 4)
+
+        assert has_native_vision(_Partial()) is False
+
+
+class TestPatchNativeVision:
+    """patch_native_vision should inject pixel_values during prefill and restore after."""
+
+    def test_injects_pixel_values_and_restores(self):
+        from exo.worker.engines.mlx.generator.generate import patch_native_vision
+
+        class _Inner(nn.Module):
+            def __call__(self, input_ids, **kwargs):
+                return kwargs
+
+        class _Wrapper(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self._inner = _Inner()
+
+        wrapper = _Wrapper()
+        inner = wrapper._inner
+        pv = mx.ones((1, 3, 4))
+
+        # Before patch: no pixel_values injected
+        result_before = inner(mx.array([1, 2, 3]))
+        assert "pixel_values" not in result_before
+
+        # During patch: pixel_values injected
+        with patch_native_vision(wrapper, pv):
+            result_during = inner(mx.array([1, 2, 3]))
+            assert "pixel_values" in result_during
+            assert result_during["pixel_values"] is pv
+
+        # After patch: restored, no pixel_values
+        result_after = inner(mx.array([1, 2, 3]))
+        assert "pixel_values" not in result_after
