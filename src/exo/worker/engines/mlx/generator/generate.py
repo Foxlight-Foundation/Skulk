@@ -588,7 +588,10 @@ def mlx_generate(
     max_stop_len = max((len(s) for s in stop_sequences), default=0)
 
     if vision is not None and vision.pixel_values is not None:
-        model._pixel_values = vision.pixel_values  # type: ignore[attr-defined]
+        if hasattr(model, "set_pixel_values"):
+            model.set_pixel_values(vision.pixel_values)  # type: ignore[attr-defined]
+        else:
+            model._pixel_values = vision.pixel_values  # type: ignore[attr-defined]
         maybe_vision_ctx = contextlib.nullcontext()
     elif vision is not None:
         maybe_vision_ctx = patch_embed_tokens(
@@ -609,7 +612,9 @@ def mlx_generate(
                 distributed_prompt_progress_callback,
             )
     finally:
-        if hasattr(model, "_pixel_values"):
+        if hasattr(model, "set_pixel_values"):
+            model.set_pixel_values(None)  # type: ignore[attr-defined]
+        elif hasattr(model, "_pixel_values"):
             model._pixel_values = None  # type: ignore[attr-defined]
     cache_snapshots: list[CacheSnapshot] | None = ssm_snapshots_list or None
 
