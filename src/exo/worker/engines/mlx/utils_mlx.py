@@ -71,23 +71,32 @@ from exo.worker.runner.bootstrap import logger
 Group = mx.distributed.Group
 
 
-def _patch_vlm_model_output(model: nn.Module) -> nn.Module:
-    """Patch an mlx-vlm model so __call__ returns a plain mx.array.
+class _VlmModelWrapper(nn.Module):
+    """Wrapper that unwraps LanguageModelOutput → mx.array for mlx-lm compat.
 
-    mlx-vlm models return LanguageModelOutput (a structured object with
-    .logits), but mlx-lm's generation pipeline expects a raw array.
-    This wraps __call__ to unwrap transparently.
+    mlx-vlm models return LanguageModelOutput from __call__, but mlx-lm's
+    generation pipeline (stream_generate, generate_step) expects a plain
+    mx.array.  Python resolves __call__ on the *class*, not the instance,
+    so a simple instance attribute patch doesn't work — we need a real
+    subclass override.
     """
-    original_call = model.__call__
 
-    def _unwrapping_call(*args: object, **kwargs: object) -> mx.array:
-        result = original_call(*args, **kwargs)
+    def __init__(self, inner: nn.Module) -> None:
+        super().__init__()
+        self._inner = inner
+
+    def __call__(self, *args: object, **kwargs: object) -> mx.array:
+        result = self._inner(*args, **kwargs)
         if hasattr(result, "logits"):
             return result.logits  # type: ignore
         return result  # type: ignore
 
-    model.__call__ = _unwrapping_call  # type: ignore
-    return model
+    def __getattr__(self, name: str) -> object:
+        # Delegate attribute access to the inner model so layer iteration,
+        # parameter access, etc. all work transparently.
+        if name == "_inner":
+            return super().__getattr__(name)
+        return getattr(self._inner, name)
 
 
 def load_model(model_path: Path, **kwargs: object) -> tuple[nn.Module, object]:
@@ -103,9 +112,8 @@ def load_model(model_path: Path, **kwargs: object) -> tuple[nn.Module, object]:
             from mlx_vlm.utils import load_model as _mlx_vlm_load_model
 
             model = _mlx_vlm_load_model(model_path, **kwargs)
-            # Patch so mlx-lm's generation pipeline sees plain arrays
-            model = _patch_vlm_model_output(model)
-            return model, None
+            # Wrap so mlx-lm's generation pipeline sees plain arrays
+            return _VlmModelWrapper(model), None
         except ImportError:
             raise ValueError(
                 f"{e}. Install mlx-vlm for vision model support: pip install -U mlx-vlm"
