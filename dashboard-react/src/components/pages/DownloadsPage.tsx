@@ -202,6 +202,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
           const tags: string[] = [];
           if (mid.toLowerCase().includes('optiq') || (raw.quantization as string ?? '').toLowerCase().includes('optiq')) tags.push('optiq');
           if ((raw.capabilities as string[] ?? []).includes('thinking')) tags.push('thinking');
+          if ((raw.capabilities as string[] ?? []).includes('vision')) tags.push('vision');
           if ((raw.supportsTensor ?? raw.supports_tensor) as boolean) tags.push('tensor');
           if ((raw.capabilities as string[] ?? []).includes('embedding')) tags.push('embedding');
           cards[mid] = {

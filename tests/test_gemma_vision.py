@@ -11,7 +11,7 @@ import mlx.nn as nn
 from PIL import Image
 
 from exo.shared.models.model_cards import VisionCardConfig
-from exo.worker.engines.mlx.vision import _find_media_regions
+from exo.worker.engines.mlx.vision import _find_media_regions, _format_vlm_messages
 
 
 def _fake_b64_image() -> str:
@@ -218,4 +218,34 @@ class TestHasNativeVision:
 
         assert has_native_vision(_Partial()) is False
 
+
+class TestFormatVlmMessages:
+    """Gemma prompts should preserve multimodal ordering instead of flattening."""
+
+    def test_gemma4_preserves_interleaving(self):
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "first"},
+                    {"type": "image"},
+                    {"type": "text", "text": "second"},
+                    {"type": "image_url"},
+                ],
+            }
+        ]
+
+        formatted = _format_vlm_messages(messages, "gemma4")
+
+        assert formatted == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "first"},
+                    {"type": "image"},
+                    {"type": "text", "text": "second"},
+                    {"type": "image"},
+                ],
+            }
+        ]
 

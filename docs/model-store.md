@@ -189,6 +189,11 @@ These are exposed through the main Skulk API:
 - `POST /store/purge-staging`
 - `POST /store/models/{model_id}/optimize`
 
+The dashboard's Store Registry view combines these registry entries with model
+metadata so it can show capability-derived tags for downloaded models. Today
+that includes `vision`, `thinking`, `embedding`, `tensor`, and `optiq` when the
+underlying model card exposes enough metadata for Skulk to derive them.
+
 Common meanings:
 
 - `503 Store not configured`: the cluster is not configured to use a model store
@@ -233,6 +238,18 @@ Check:
 - whether the model is already present in the store
 - whether `allow_hf_fallback` is still `true`
 - whether the store host is reachable from worker nodes
+
+### A multimodal model is in the store but the UI does not show vision support
+
+Check:
+
+- that the model card includes the `vision` capability
+- that the dashboard is running a current Skulk build
+- that `GET /v1/models` returns a `vision` tag for that model
+
+Remember that store registration only tracks artifacts and metadata. Actual
+image understanding still depends on launching the model and sending a
+multimodal request through the chat APIs.
 
 ### Staged files are not being cleaned up
 

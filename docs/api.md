@@ -145,7 +145,8 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 
 **POST** `/v1/chat/completions`
 
-This is the main text-generation endpoint.
+This is the main chat-generation endpoint for both text-only and multimodal
+models.
 
 ### OpenAI Python SDK Example
 
@@ -228,6 +229,28 @@ for chunk in stream:
 
 Assistant messages may include `tool_calls`.
 Tool response messages should include `tool_call_id`.
+
+User messages may also be sent as structured content parts. Skulk accepts
+OpenAI-style image inputs for vision-capable models:
+
+```json
+{
+  "role": "user",
+  "content": [
+    { "type": "text", "text": "What is in this image?" },
+    {
+      "type": "image_url",
+      "image_url": { "url": "data:image/png;base64,..." }
+    }
+  ]
+}
+```
+
+Notes:
+
+- inline `data:` URLs are supported for image inputs
+- Anthropic-compatible requests can also carry image content for multimodal models
+- image understanding depends on the selected model exposing the `vision` capability
 
 ### Finish Reasons
 
@@ -494,6 +517,10 @@ Use this to confirm whether the store is configured and reachable.
 
 Use this to inspect which models the shared store knows about.
 
+The dashboard combines registry results with `GET /v1/models` metadata so it can
+display derived tags such as `vision`, `thinking`, `embedding`, `tensor`, and
+`optiq` in the Store list.
+
 ### Store downloads
 
 **GET** `/store/downloads`
@@ -525,6 +552,28 @@ Use this to remove staged model artifacts from nodes without deleting the store 
 **POST** `/store/models/{model_id}/optimize`
 
 Use this for workflows such as model optimization or alternate artifact generation.
+
+## Models Endpoint
+
+### List models
+
+**GET** `/v1/models`
+
+Returns the known model catalog, including downloaded models and catalog-backed
+entries.
+
+Important fields:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `id` | string | Canonical model ID |
+| `capabilities` | array | Functional capabilities such as `text`, `vision`, `thinking`, `code`, or `embedding` |
+| `tags` | array | UI-friendly derived labels such as `vision`, `thinking`, `embedding`, `tensor`, and `optiq` |
+| `supports_tensor` | boolean | Whether tensor parallel launch is supported |
+| `base_model` | string | Base family or upstream source model when known |
+
+The dashboard uses `tags` for compact badges and `capabilities` for filtering
+and richer tooltips.
 
 ## Configuration Endpoints
 

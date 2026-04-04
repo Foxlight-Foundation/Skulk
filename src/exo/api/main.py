@@ -1836,7 +1836,7 @@ class API:
         self, payload: ClaudeMessagesRequest
     ) -> ClaudeMessagesResponse | StreamingResponse:
         """Claude Messages API - adapter."""
-        task_params = claude_request_to_text_generation(payload)
+        task_params = await claude_request_to_text_generation(payload)
         if task_params.images:
             resolved_images: list[str] = []
             for img in task_params.images:
@@ -2091,6 +2091,9 @@ class API:
         # Thinking capability
         if "thinking" in card.capabilities:
             tags.append("thinking")
+        # Vision-capable models
+        if "vision" in card.capabilities:
+            tags.append("vision")
         # Tensor parallel support
         if card.supports_tensor:
             tags.append("tensor")

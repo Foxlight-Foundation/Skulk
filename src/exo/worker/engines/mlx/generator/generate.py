@@ -587,24 +587,30 @@ def mlx_generate(
     )
     max_stop_len = max((len(s) for s in stop_sequences), default=0)
 
-    maybe_vision_ctx = (
-        patch_embed_tokens(
+    if vision is not None and vision.pixel_values is not None:
+        model._pixel_values = vision.pixel_values  # type: ignore[attr-defined]
+        maybe_vision_ctx = contextlib.nullcontext()
+    elif vision is not None:
+        maybe_vision_ctx = patch_embed_tokens(
             model, vision.embeddings, prefix_hit_length, len(prompt_tokens) - 1
         )
-        if vision is not None
-        else contextlib.nullcontext()
-    )
-    with maybe_vision_ctx:
-        prefill_tps, prefill_tokens, ssm_snapshots_list = prefill(
-            model,
-            tokenizer,
-            sampler,
-            prompt_tokens[:-1],
-            caches,
-            group,
-            on_prefill_progress,
-            distributed_prompt_progress_callback,
-        )
+    else:
+        maybe_vision_ctx = contextlib.nullcontext()
+    try:
+        with maybe_vision_ctx:
+            prefill_tps, prefill_tokens, ssm_snapshots_list = prefill(
+                model,
+                tokenizer,
+                sampler,
+                prompt_tokens[:-1],
+                caches,
+                group,
+                on_prefill_progress,
+                distributed_prompt_progress_callback,
+            )
+    finally:
+        if hasattr(model, "_pixel_values"):
+            model._pixel_values = None  # type: ignore[attr-defined]
     cache_snapshots: list[CacheSnapshot] | None = ssm_snapshots_list or None
 
     # stream_generate starts from the last token

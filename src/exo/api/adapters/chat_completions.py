@@ -121,12 +121,18 @@ async def chat_request_to_text_generation(
             # Normalize content for model_dump
             if has_images:
                 multimodal_content: list[dict[str, Any]] = []
-                assert isinstance(msg.content, list)
-                for part in msg.content:
-                    if isinstance(part, ChatCompletionMessageText):
-                        multimodal_content.append({"type": "text", "text": part.text})
-                    else:
-                        multimodal_content.append({"type": "image"})
+                if isinstance(msg.content, list):
+                    for part in msg.content:
+                        if isinstance(part, ChatCompletionMessageText):
+                            multimodal_content.append(
+                                {"type": "text", "text": part.text}
+                            )
+                        else:
+                            multimodal_content.append({"type": "image"})
+                else:
+                    if content:
+                        multimodal_content.append({"type": "text", "text": content})
+                    multimodal_content.append({"type": "image"})
                 chat_template_messages.append(
                     {"role": msg.role, "content": multimodal_content}
                 )
