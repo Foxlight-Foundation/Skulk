@@ -159,6 +159,45 @@ class VisionResult:
     media_regions: list[MediaRegion]
 
 
+def _instantiate_projector(
+    cls: type,
+    model_config: Any,  # pyright: ignore[reportAny]
+    vision_config: Any,  # pyright: ignore[reportAny]
+    text_config: Any,  # pyright: ignore[reportAny]
+) -> nn.Module:
+    """Try multiple calling conventions for projector/embedder classes.
+
+    Different model families use different constructor signatures:
+    - Qwen/Kimi: ``Projector(model_config)``
+    - Gemma 3n: ``Embedder(vision_config, text_config=text_config)``
+    - Gemma 4: ``Embedder(embedding_dim, text_hidden_size, eps)``
+    """
+    params = set(inspect.signature(cls.__init__).parameters.keys()) - {"self"}
+    # Try single ModelConfig arg first (Qwen/Kimi pattern)
+    if "config" in params or len(params) == 1:
+        try:
+            return cls(model_config)  # type: ignore
+        except TypeError:
+            pass
+    # Try (multimodal_config, text_config) pattern (Gemma 3n)
+    if "multimodal_config" in params or "text_config" in params:
+        try:
+            return cls(vision_config, text_config=text_config)  # type: ignore
+        except TypeError:
+            pass
+    # Try raw dims pattern (Gemma 4: embedding_dim, text_hidden_size, eps)
+    if "embedding_dim" in params:
+        kwargs: dict[str, Any] = {
+            "embedding_dim": getattr(vision_config, "hidden_size", 768),  # pyright: ignore[reportAny]
+            "text_hidden_size": getattr(text_config, "hidden_size", 2048),  # pyright: ignore[reportAny]
+        }
+        if "eps" in params:
+            kwargs["eps"] = getattr(vision_config, "rms_norm_eps", 1e-6)  # pyright: ignore[reportAny]
+        return cls(**kwargs)  # type: ignore
+    # Fallback: pass through _filter_config
+    return cls(**_filter_config(cls, vars(model_config)))  # type: ignore
+
+
 class VisionEncoder:
     """Lazy-loaded vision tower + projector that encodes PIL images into
     feature tensors. Supports both bundled weights (loaded from the main
@@ -221,13 +260,16 @@ class VisionEncoder:
             model_mod = self._import_mlx_vlm(self._config.model_type)  # type: ignore
 
         projector_cls = None
+        # Match common projector class naming conventions across model
+        # families: *Projector (Qwen, Kimi), *Embedder (Gemma 3n/4).
+        _projector_patterns = ("Projector", "Embedder")
         if model_mod is not None:
             for attr_name in dir(model_mod):  # type: ignore
                 obj = getattr(model_mod, attr_name)  # type: ignore
                 if (
                     isinstance(obj, type)
                     and issubclass(obj, nn.Module)
-                    and "Projector" in attr_name
+                    and any(p in attr_name for p in _projector_patterns)
                 ):
                     projector_cls = obj
                     break
@@ -247,7 +289,9 @@ class VisionEncoder:
                 vision_config=vision_config,
                 **_filter_config(config_mod.ModelConfig, extra),  # type: ignore
             )
-            self._projector = projector_cls(model_config)  # type: ignore
+            self._projector = _instantiate_projector(
+                projector_cls, model_config, vision_config, text_config
+            )
 
         processor_repo = self._config.processor_repo
         if processor_repo:
@@ -330,7 +374,11 @@ class VisionEncoder:
             raise FileNotFoundError(f"No safetensors files found in {self._model_path}")
 
         vision_prefixes = ["vision_tower.", "model.visual."]
+        # Gemma 3n/4 store their projector (MultimodalEmbedder) under
+        # "embed_vision." in the same safetensors files as vision weights.
+        projector_prefixes = ["embed_vision."]
         vision_weights: dict[str, mx.array] = {}
+        projector_weights: dict[str, mx.array] = {}
         found_raw_prefix = False
         for sf_path in safetensors_files:
             file_weights: dict[str, mx.array] = mx.load(str(sf_path))  # type: ignore
@@ -342,6 +390,12 @@ class VisionEncoder:
                         if prefix == "model.visual.":
                             found_raw_prefix = True
                         break
+                else:
+                    for prefix in projector_prefixes:
+                        if key.startswith(prefix):
+                            short_key = key[len(prefix) :]
+                            projector_weights[short_key] = val
+                            break
 
         if not vision_weights:
             raise ValueError(
@@ -356,8 +410,16 @@ class VisionEncoder:
         self._vision_tower.load_weights(list(vision_weights.items()))  # type: ignore
         mx.eval(self._vision_tower.parameters())
 
+        if self._projector is not None and projector_weights:
+            self._projector.load_weights(list(projector_weights.items()))
+            mx.eval(self._projector.parameters())
+
         n_vision = sum(v.size for _, v in vision_weights.items())  # type: ignore
-        logger.info(f"Vision encoder loaded: {n_vision / 1e6:.1f}M params")
+        n_proj = sum(v.size for _, v in projector_weights.items())
+        logger.info(
+            f"Vision encoder loaded: {n_vision / 1e6:.1f}M params"
+            + (f", projector: {n_proj / 1e6:.1f}M params" if n_proj else "")
+        )
 
     def encode_images(self, images: list[str]) -> tuple[mx.array, list[int]]:
         """Encode base64 images into feature tensors and per-image token counts."""
@@ -368,6 +430,24 @@ class VisionEncoder:
         pil_images = [decode_base64_image(b64) for b64 in images]
         for idx, img in enumerate(pil_images):
             logger.info(f"Image {idx}: {img.width}x{img.height} mode={img.mode}")
+
+        pixel_values, grid_thw, n_tokens_per_image = self._preprocess_images(
+            pil_images
+        )
+        hidden_states = self._run_vision_tower(pixel_values, grid_thw)
+
+        if self._projector is not None:
+            image_features: mx.array = self._projector(hidden_states)
+        else:
+            image_features = hidden_states
+
+        return image_features, n_tokens_per_image
+
+    def _preprocess_images(
+        self, pil_images: list[Image.Image]
+    ) -> tuple[mx.array | list[mx.array], mx.array | None, list[int]]:
+        """Run the image processor and return pixel values, optional grid, and token counts."""
+        assert self._processor is not None
 
         if self._config.processor_repo:
             processed = self._processor.preprocess(
@@ -382,13 +462,29 @@ class VisionEncoder:
                 int(mx.prod(grid_thw[i]).item()) // merge_length
                 for i in range(grid_thw.shape[0])
             ]
-        else:
-            processed = self._processor(
-                images=pil_images,
-                return_tensors="np",
-            )
-            pixel_values = mx.array(processed["pixel_values"])  # type: ignore
-            grid_thw = mx.array(processed["image_grid_thw"])  # type: ignore
+            return pixel_values, grid_thw, n_tokens_per_image
+
+        raw: Any = self._processor(images=pil_images, return_tensors="np")
+
+        # Gemma 4's processor returns (data_dict, num_soft_tokens_per_image).
+        if isinstance(raw, tuple):
+            data_dict = dict(raw[0])  # type: ignore
+            soft_tokens: list[int] = list(raw[1])  # type: ignore
+            pv_raw = data_dict["pixel_values"]  # pyright: ignore[reportUnknownVariableType]
+            if isinstance(pv_raw, list):
+                # Variable-sized images — keep as list for per-image encoding.
+                pixel_values_list: list[mx.array] = [mx.array(v) for v in pv_raw]  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+                return pixel_values_list, None, soft_tokens
+            return mx.array(pv_raw), None, soft_tokens  # pyright: ignore[reportUnknownArgumentType]
+
+        # Standard HuggingFace processor (Qwen, SiglipImageProcessor, etc.)
+        pv_key = "pixel_values"
+        pixel_values = mx.array(raw[pv_key])  # type: ignore
+
+        # Processors that return grid info (Qwen-VL family).
+        grid_key = "image_grid_thw"
+        if grid_key in raw:
+            grid_thw = mx.array(raw[grid_key])  # type: ignore
             merge_unit = self._spatial_merge_size**2
             n_tokens_per_image = [
                 int(
@@ -399,24 +495,75 @@ class VisionEncoder:
                 // merge_unit
                 for i in range(grid_thw.shape[0])
             ]
+            return pixel_values, grid_thw, n_tokens_per_image
+
+        # Gemma 3n / simple processors: no grid info, use config's
+        # vision_soft_tokens_per_image or the vision tower's default_output_length.
+        n_per_image = self._get_soft_tokens_per_image()
+        n_tokens_per_image = [n_per_image] * len(pil_images)
+        return pixel_values, None, n_tokens_per_image
+
+    def _get_soft_tokens_per_image(self) -> int:
+        """Determine the number of soft tokens per image from model config.
+
+        Caches the result to avoid re-reading config.json on every call."""
+        cached = getattr(self, "_soft_tokens_cache", None)
+        if cached is not None:
+            return int(cached)
+
+        result = 256  # sensible default for SiglipImageProcessor-based models
+        config = self._load_config_json()
+        if config:
+            # Top-level vision_soft_tokens_per_image (gemma3n, gemma4).
+            vst = config.get("vision_soft_tokens_per_image")
+            if vst is not None:
+                result = int(vst)  # pyright: ignore[reportAny]
+            else:
+                # VisionConfig.default_output_length (gemma4).
+                vc: dict[str, Any] = config.get("vision_config", {})  # pyright: ignore[reportAny]
+                dol = vc.get("default_output_length")
+                if dol is not None:
+                    result = int(dol)  # pyright: ignore[reportAny]
+
+        self._soft_tokens_cache = result
+        return result
+
+    def _run_vision_tower(
+        self, pixel_values: mx.array | list[mx.array], grid_thw: mx.array | None
+    ) -> mx.array:
+        """Run the vision tower, dispatching by input format."""
+        assert self._vision_tower is not None
 
         if self._needs_nhwc:
+            assert grid_thw is not None
             grid_hw = grid_thw[:, 1:] if grid_thw.shape[-1] == 3 else grid_thw
-            hidden_states = self._vision_tower(
-                pixel_values.transpose(0, 2, 3, 1),
+            return self._vision_tower(
+                pixel_values.transpose(0, 2, 3, 1),  # type: ignore
                 output_hidden_states=True,
                 grid_thw=grid_hw,
             )
-        else:
+
+        if isinstance(pixel_values, list):
+            # Variable-sized images (Gemma 4): encode each independently and
+            # concatenate features.
+            features: list[mx.array] = []
+            for pv in pixel_values:
+                if pv.ndim == 3:
+                    pv = pv[None]  # add batch dim
+                out: mx.array = self._vision_tower(pv)
+                out = out[0] if isinstance(out, tuple) else out
+                if out.ndim == 3:
+                    out = out.reshape(-1, out.shape[-1])  # flatten batch
+                features.append(out)
+            return mx.concatenate(features, axis=0)
+
+        if grid_thw is not None:
             result = self._vision_tower(pixel_values, grid_thw)
-            hidden_states = result[0] if isinstance(result, tuple) else result
-
-        if self._projector is not None:
-            image_features: mx.array = self._projector(hidden_states)
         else:
-            image_features = hidden_states
-
-        return image_features, n_tokens_per_image
+            # No grid info (Gemma 3n, SiglipImageProcessor) — vision tower
+            # takes just pixel_values.
+            result = self._vision_tower(pixel_values)
+        return result[0] if isinstance(result, tuple) else result
 
 
 def get_inner_model(model: nn.Module) -> Any:  # type: ignore
@@ -479,7 +626,10 @@ def _find_media_regions(
     prompt_tokens: mx.array,
     images: list[str],
     image_token_id: int,
+    boi_token_id: int | None = None,
+    eoi_token_id: int | None = None,
 ) -> list[MediaRegion]:
+    """Find contiguous image-token runs and expand to include BOI/EOI markers."""
     tokens_np = np.array(prompt_tokens)
     is_pad = tokens_np == image_token_id  # type: ignore
 
@@ -499,6 +649,22 @@ def _find_media_regions(
         regions.append(
             MediaRegion(content_hash="", start_pos=run_start, end_pos=len(tokens_np))
         )
+
+    # Expand region boundaries to include surrounding BOI/EOI tokens so
+    # the KV prefix cache invalidates the full image span.
+    for region in regions:
+        if (
+            boi_token_id is not None
+            and region.start_pos > 0
+            and tokens_np[region.start_pos - 1] == boi_token_id
+        ):
+            region.start_pos -= 1
+        if (
+            eoi_token_id is not None
+            and region.end_pos < len(tokens_np)
+            and tokens_np[region.end_pos] == eoi_token_id
+        ):
+            region.end_pos += 1
 
     for i, region in enumerate(regions):
         if i < len(images):
@@ -599,6 +765,8 @@ class VisionProcessor:
             prompt_tokens,
             images,
             self.vision_config.image_token_id,
+            boi_token_id=self.vision_config.boi_token_id,
+            eoi_token_id=self.vision_config.eoi_token_id,
         )
 
         return VisionResult(

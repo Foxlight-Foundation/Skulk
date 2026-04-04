@@ -130,6 +130,8 @@ class VisionCardConfig(CamelCaseModel):
     weights_repo: str = ""
     image_token: str | None = None
     processor_repo: str | None = None
+    boi_token_id: int | None = None
+    eoi_token_id: int | None = None
 
 
 class ModelCard(CamelCaseModel):
@@ -297,15 +299,22 @@ class ConfigData(BaseModel):
         vision_config = data.get("vision_config")
         image_token_id = data.get("image_token_id")
         if vision_config is not None and image_token_id is not None:
+            # Prefer top-level model_type (e.g. "gemma4") over
+            # vision_config.model_type (e.g. "gemma4_vision") — the top-level
+            # value matches the mlx_vlm.models.{model_type} import path.
             model_type = str(
-                vision_config.get("model_type", data.get("model_type", ""))  # pyright: ignore[reportAny]
+                data.get("model_type", vision_config.get("model_type", ""))  # pyright: ignore[reportAny]
             )
             assert info.context is not None
 
+            boi = data.get("boi_token_id")
+            eoi = data.get("eoi_token_id")
             data["vision"] = VisionCardConfig(
                 image_token_id=int(image_token_id),  # pyright: ignore[reportAny]
                 model_type=model_type,
                 weights_repo=info.context["model_id"],  # type: ignore
+                boi_token_id=int(boi) if boi is not None else None,  # pyright: ignore[reportAny]
+                eoi_token_id=int(eoi) if eoi is not None else None,  # pyright: ignore[reportAny]
             )
 
         return data

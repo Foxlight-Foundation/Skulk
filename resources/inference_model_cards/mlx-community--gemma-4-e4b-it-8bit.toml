@@ -1,0 +1,19 @@
+model_id = "mlx-community/gemma-4-e4b-it-8bit"
+n_layers = 42
+hidden_size = 2560
+num_key_value_heads = 2
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "gemma"
+quantization = "8bit"
+base_model = "Gemma 4 E4B"
+capabilities = ["text", "vision", "thinking"]
+
+[vision]
+image_token_id = 258880
+model_type = "gemma4"
+boi_token_id = 255999
+eoi_token_id = 258882
+
+[storage_size]
+in_bytes = 7200000000

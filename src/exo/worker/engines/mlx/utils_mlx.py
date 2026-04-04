@@ -467,16 +467,21 @@ def load_tokenizer_for_model_id(
         eos_token_ids=eos_token_ids,
     )
 
-    if "gemma-3" in model_id_lower:
-        gemma_3_eos_id = 1
-        gemma_3_end_of_turn_id = 106
+    if "gemma-3" in model_id_lower or "gemma-4" in model_id_lower:
+        gemma_eos_id = 1
+        gemma_end_of_turn_id = 106
         if tokenizer.eos_token_ids is not None:
-            if gemma_3_end_of_turn_id not in tokenizer.eos_token_ids:
+            if gemma_end_of_turn_id not in tokenizer.eos_token_ids:
                 tokenizer.eos_token_ids = list(tokenizer.eos_token_ids) + [
-                    gemma_3_end_of_turn_id
+                    gemma_end_of_turn_id
                 ]
         else:
-            tokenizer.eos_token_ids = [gemma_3_eos_id, gemma_3_end_of_turn_id]
+            tokenizer.eos_token_ids = [gemma_eos_id, gemma_end_of_turn_id]
+
+    if "gemma-4" in model_id_lower:
+        tokenizer.tool_call_start = "<|tool_call>"
+        tokenizer.tool_call_end = "<tool_call|>"
+        tokenizer.tool_parser = _parse_gemma4_tool_calls
 
     return tokenizer
 
@@ -800,6 +805,63 @@ def mx_barrier(group: Group | None):
             mx.array(1.0), group=group, stream=mx.default_stream(mx.Device(mx.cpu))
         )
     )
+
+
+def _parse_gemma4_tool_calls(text: str) -> list[dict[str, Any]]:
+    """Parse Gemma 4 tool calls from model output.
+
+    Gemma 4 emits ``call:FUNCTION{key1:value1,key2:<|"|>string<|"|>}``
+    where ``<|"|>`` delimits string values. Bare values keep their JSON
+    type (number, boolean, null); quoted values are always strings.
+
+    Uses the three-phase approach from ollama PR #15306:
+    1. Extract ``<|"|>``-delimited strings into placeholders
+    2. Quote bare keys
+    3. Restore strings via ``json.dumps()`` for correct escaping
+    """
+    import regex as re
+
+    _call_re = re.compile(r"call:(\w+)\{(.*?)\}", re.DOTALL)
+    _gemma_quote_re = re.compile(r'(?s)<\|"\|>(.*?)<\|"\|>')
+    _bare_key_re = re.compile(r"([,{])(\w+):")
+
+    def _args_to_json(raw_args: str) -> str:
+        # Phase 1: extract <|"|>-quoted strings into placeholders.
+        extracted: list[str] = []
+
+        def _replace_quoted(m: re.Match[str]) -> str:
+            extracted.append(m.group(1))
+            return f"\x00{len(extracted) - 1}\x00"
+
+        skeleton = _gemma_quote_re.sub(_replace_quoted, raw_args)
+
+        # Phase 2: quote bare keys — {key: or ,key: → {"key": or ,"key":
+        skeleton = "{" + skeleton  # ensure leading { for regex
+        skeleton = _bare_key_re.sub(r'\1"\2":', skeleton)
+        skeleton = skeleton[1:]  # remove added {
+
+        # Phase 3: restore extracted strings with proper JSON escaping.
+        for i, value in enumerate(extracted):
+            escaped = json.dumps(value)  # json.dumps handles all escaping
+            skeleton = skeleton.replace(f"\x00{i}\x00", escaped)
+
+        return skeleton
+
+    results: list[dict[str, Any]] = []
+    for match in _call_re.finditer(text):
+        func_name = match.group(1)
+        raw_args = match.group(2)
+        args_json = "{" + _args_to_json(raw_args) + "}"
+        try:
+            args_dict: dict[str, Any] = json.loads(args_json)  # pyright: ignore[reportAny]
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse Gemma 4 tool call args: {args_json}")
+            args_dict = {}
+        results.append(dict(name=func_name, arguments=args_dict))  # pyright: ignore[reportAny]
+
+    if not results:
+        raise ValueError(f"No Gemma 4 tool calls found in: {text}")
+    return results
 
 
 def _parse_kimi_tool_calls(text: str):
