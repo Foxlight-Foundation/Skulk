@@ -606,10 +606,15 @@ class VisionEncoder:
         if grid_thw is not None:
             result = self._vision_tower(pixel_values, grid_thw)
         else:
-            # No grid info (Gemma 3n, SiglipImageProcessor) — vision tower
+            # No grid info (Gemma 3n/4, SiglipImageProcessor) — vision tower
             # takes just pixel_values.
             result = self._vision_tower(pixel_values)
-        return result[0] if isinstance(result, tuple) else result
+        out = result[0] if isinstance(result, tuple) else result
+        # Some vision towers (Gemma 4) preserve the batch dimension.
+        # Flatten to (total_tokens, hidden_dim) for create_vision_embeddings.
+        if out.ndim == 3:
+            out = out.reshape(-1, out.shape[-1])
+        return out
 
 
 def get_inner_model(model: nn.Module) -> Any:  # type: ignore
