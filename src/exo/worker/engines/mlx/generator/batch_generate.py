@@ -180,7 +180,10 @@ class ExoBatchGenerator:
         )
 
         if vision is not None and vision.pixel_values is not None:
-            self.model._pixel_values = vision.pixel_values  # type: ignore[attr-defined]
+            if hasattr(self.model, "set_pixel_values"):
+                self.model.set_pixel_values(vision.pixel_values)  # type: ignore[attr-defined]
+            else:
+                self.model._pixel_values = vision.pixel_values  # type: ignore[attr-defined]
             vision_ctx = contextlib.nullcontext()
         elif vision is not None:
             vision_ctx = patch_embed_tokens(
@@ -201,7 +204,9 @@ class ExoBatchGenerator:
                     distributed_prompt_progress_callback,
                 )
         finally:
-            if hasattr(self.model, "_pixel_values"):
+            if hasattr(self.model, "set_pixel_values"):
+                self.model.set_pixel_values(None)  # type: ignore[attr-defined]
+            elif hasattr(self.model, "_pixel_values"):
                 self.model._pixel_values = None  # type: ignore[attr-defined]
 
         # We need to clamp rotating kv caches to max size so that mlx lm's _merge_caches behaves

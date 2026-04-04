@@ -86,11 +86,19 @@ class _VlmModelWrapper(nn.Module):
         self._inner = inner
         # Set by the vision pipeline before prefill for native-vision models
         # like Gemma 4, then cleared once prefill has populated the KV cache.
-        self._pixel_values: mx.array | list[mx.array] | None = None
+        object.__setattr__(self, "_pixel_values", None)
+
+    def set_pixel_values(self, pixel_values: mx.array | list[mx.array] | None) -> None:
+        """Cache native vision pixel values for the next prefill call only."""
+        object.__setattr__(self, "_pixel_values", pixel_values)
 
     def __call__(self, *args: object, **kwargs: object) -> mx.array:
-        if self._pixel_values is not None:
-            kwargs["pixel_values"] = self._pixel_values
+        pixel_values = cast(
+            mx.array | list[mx.array] | None,
+            object.__getattribute__(self, "__dict__").get("_pixel_values"),
+        )
+        if pixel_values is not None:
+            kwargs["pixel_values"] = pixel_values
         result = self._inner(*args, **kwargs)
         if hasattr(result, "logits"):
             return result.logits  # type: ignore
@@ -99,6 +107,8 @@ class _VlmModelWrapper(nn.Module):
     def __getattr__(self, name: str) -> object:
         # Delegate attribute access to the inner model so layer iteration,
         # parameter access, etc. all work transparently.
+        if name == "_pixel_values":
+            return object.__getattribute__(self, "__dict__").get("_pixel_values")
         if name == "_inner":
             return super().__getattr__(name)
         return getattr(self._inner, name)
