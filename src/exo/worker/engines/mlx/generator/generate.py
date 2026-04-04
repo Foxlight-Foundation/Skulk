@@ -587,13 +587,19 @@ def mlx_generate(
     )
     max_stop_len = max((len(s) for s in stop_sequences), default=0)
 
-    maybe_vision_ctx = (
-        patch_embed_tokens(
+    if vision is not None and vision.pixel_values is not None:
+        # Native vision: inject pixel_values into the wrapper so the model's
+        # own __call__ handles vision tower → projector → masked_scatter.
+        model._pixel_values = vision.pixel_values  # type: ignore
+        maybe_vision_ctx = contextlib.nullcontext()
+    elif vision is not None:
+        # Legacy path: splice pre-computed embeddings via monkey-patched
+        # embed_tokens (Qwen-VL, Kimi, etc.).
+        maybe_vision_ctx = patch_embed_tokens(
             model, vision.embeddings, prefix_hit_length, len(prompt_tokens) - 1
         )
-        if vision is not None
-        else contextlib.nullcontext()
-    )
+    else:
+        maybe_vision_ctx = contextlib.nullcontext()
     with maybe_vision_ctx:
         prefill_tps, prefill_tokens, ssm_snapshots_list = prefill(
             model,
@@ -605,6 +611,10 @@ def mlx_generate(
             on_prefill_progress,
             distributed_prompt_progress_callback,
         )
+    # Clear pixel_values after prefill — image features are now in the KV
+    # cache. Subsequent decode steps must not re-process the image.
+    if hasattr(model, "_pixel_values"):
+        model._pixel_values = None  # type: ignore
     cache_snapshots: list[CacheSnapshot] | None = ssm_snapshots_list or None
 
     # stream_generate starts from the last token

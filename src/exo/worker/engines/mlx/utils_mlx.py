@@ -84,8 +84,14 @@ class _VlmModelWrapper(nn.Module):
     def __init__(self, inner: nn.Module) -> None:
         super().__init__()
         self._inner = inner
+        # Set by the vision pipeline before prefill for models with native
+        # vision support (e.g. Gemma 4).  Cleared after prefill so decode
+        # steps don't re-process images.
+        self._pixel_values: mx.array | list[mx.array] | None = None
 
     def __call__(self, *args: object, **kwargs: object) -> mx.array:
+        if self._pixel_values is not None:
+            kwargs["pixel_values"] = self._pixel_values
         result = self._inner(*args, **kwargs)
         if hasattr(result, "logits"):
             return result.logits  # type: ignore

@@ -179,13 +179,15 @@ class ExoBatchGenerator:
             top_k=task_params.top_k if task_params.top_k is not None else 0,
         )
 
-        vision_ctx = (
-            patch_embed_tokens(
+        if vision is not None and vision.pixel_values is not None:
+            self.model._pixel_values = vision.pixel_values  # type: ignore
+            vision_ctx = contextlib.nullcontext()
+        elif vision is not None:
+            vision_ctx = patch_embed_tokens(
                 self.model, vision.embeddings, prefix_hit_length, len(prompt_tokens) - 1
             )
-            if vision is not None
-            else contextlib.nullcontext()
-        )
+        else:
+            vision_ctx = contextlib.nullcontext()
         with vision_ctx:
             _prefill_tps, _prefill_tokens, cache_snapshots = prefill(
                 self.model,
@@ -197,6 +199,8 @@ class ExoBatchGenerator:
                 on_prefill_progress,
                 distributed_prompt_progress_callback,
             )
+        if hasattr(self.model, "_pixel_values"):
+            self.model._pixel_values = None  # type: ignore
 
         # We need to clamp rotating kv caches to max size so that mlx lm's _merge_caches behaves
         for c in cache:

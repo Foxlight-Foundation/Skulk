@@ -169,6 +169,9 @@ class VisionResult:
     prompt_tokens: mx.array
     embeddings: mx.array
     media_regions: list[MediaRegion]
+    # For native-vision models (e.g. Gemma 4): raw pixel tensors passed
+    # directly to the model's __call__ during prefill.
+    pixel_values: mx.array | list[mx.array] | None = None
 
 
 _QUANTIZATION_SUFFIXES = (".biases", ".scales")
@@ -872,12 +875,11 @@ class VisionProcessor:
     ) -> VisionResult:
         """Process images for models with native vision support (e.g. Gemma 4).
 
-        Instead of running a separate vision tower and projector, this calls
-        the model's own ``get_input_embeddings`` which uses its built-in
-        vision tower, projector, and ``masked_scatter`` to produce fused
-        text+vision embeddings.  These pre-computed embeddings are then
-        injected during prefill via the existing ``patch_embed_tokens``
-        mechanism — matching how mlx-vlm's own generate flow works."""
+        Instead of running a separate vision tower and projector, this
+        preprocesses images into ``pixel_values`` tensors.  During prefill
+        the wrapper injects ``pixel_values`` into the model's ``__call__``
+        so its built-in vision tower, projector, and ``masked_scatter``
+        handle everything — exactly matching mlx-vlm's own generate flow."""
         logger.info("Using native vision pipeline (model has built-in vision tower)")
         self._encoder.ensure_loaded()
 
@@ -918,19 +920,6 @@ class VisionProcessor:
             f"Encoded prompt: {len(prompt_tokens)} tokens, {n_image_tokens} image pad tokens"
         )
 
-        # Call the model's native get_input_embeddings to fuse text + vision.
-        # This runs the built-in vision tower → projector → masked_scatter,
-        # producing embeddings where image-token positions contain real
-        # vision features instead of text-token embeddings.
-        inner: Any = getattr(model, "_inner", model)
-        embedding_output: Any = inner.get_input_embeddings(  # pyright: ignore[reportAny]
-            input_ids=prompt_tokens[None],
-            pixel_values=pixel_values,
-        )
-        embeddings: mx.array = embedding_output.inputs_embeds  # pyright: ignore[reportAny]
-        mx.eval(embeddings)
-        logger.info(f"Native vision: fused embeddings shape {embeddings.shape}")
-
         media_regions = _find_media_regions(
             prompt_tokens,
             images,
@@ -939,11 +928,16 @@ class VisionProcessor:
             eoi_token_id=self.vision_config.eoi_token_id,
         )
 
+        # Empty embeddings — the model handles vision internally via
+        # pixel_values injected by _VlmModelWrapper during prefill.
+        empty_embeddings = mx.zeros((1, 0, 1))
+
         return VisionResult(
             prompt=prompt,
             prompt_tokens=prompt_tokens,
-            embeddings=embeddings,
+            embeddings=empty_embeddings,
             media_regions=media_regions,
+            pixel_values=pixel_values,
         )
 
 
