@@ -92,10 +92,10 @@ def _gemma4_native_processor_kwargs(
 ) -> dict[str, Any]:
     """Select processor kwargs for Gemma 4 native vision preprocessing.
 
-    Gemma 4 benefits from a slightly higher visual token budget for prompts
-    that include images. This keeps screenshots and text-dense images from
-    being under-resolved while staying well below the most expensive OCR
-    setting.
+    By default we keep the processor's built-in token budget so Gemma 4
+    matches the reference Hugging Face and Ollama preprocessing path. A
+    higher budget remains available through explicit environment overrides
+    for debugging or local experiments.
     """
     has_image = False
     for message in chat_template_messages:
@@ -108,7 +108,7 @@ def _gemma4_native_processor_kwargs(
         if has_image:
             break
 
-    configured_budget = 560
+    configured_budget: int | None = None
     for env_var_name in (
         "EXO_GEMMA4_MAX_SOFT_TOKENS",
         "EXO_GEMMA4_IMAGE_ONLY_MAX_SOFT_TOKENS",
@@ -124,7 +124,8 @@ def _gemma4_native_processor_kwargs(
 
     current_budget = getattr(processor, "max_soft_tokens", None)
     if (
-        not has_image
+        configured_budget is None
+        or not has_image
         or not isinstance(current_budget, int)
         or current_budget >= configured_budget
     ):
