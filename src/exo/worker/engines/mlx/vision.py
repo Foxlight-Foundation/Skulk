@@ -329,9 +329,30 @@ class VisionEncoder:
         if image_proc is not None:
             self._processor = image_proc
         else:
-            self._processor = AutoImageProcessor.from_pretrained(  # type: ignore
-                repo, trust_remote_code=True
-            )
+            try:
+                self._processor = AutoImageProcessor.from_pretrained(  # type: ignore
+                    repo, trust_remote_code=True
+                )
+            except (ValueError, OSError):
+                # transformers may not recognize newer model types (e.g.
+                # gemma4). Fall back to the mlx_vlm processor class.
+                proc_mod = self._import_mlx_vlm(  # type: ignore
+                    f"processing_{self._config.model_type}"
+                )
+                # Find the *ImageProcessor class in the module.
+                proc_cls = None
+                for attr in dir(proc_mod):  # type: ignore
+                    obj = getattr(proc_mod, attr)  # type: ignore
+                    if isinstance(obj, type) and "ImageProcessor" in attr:
+                        proc_cls = obj
+                        break
+                if proc_cls is None:
+                    raise ValueError(
+                        f"No ImageProcessor found in mlx_vlm.models."
+                        f"{self._config.model_type}.processing_{self._config.model_type}"
+                    ) from None
+                self._processor = proc_cls()  # type: ignore
+                logger.info(f"Using mlx_vlm {proc_cls.__name__} as image processor")
         if processor_repo:
             self._merge_kernel_size = vision_cfg.get("merge_kernel_size", [2, 2])  # type: ignore
             self._needs_nhwc = True
