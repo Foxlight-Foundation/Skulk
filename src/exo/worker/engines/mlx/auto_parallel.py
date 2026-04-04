@@ -431,34 +431,47 @@ def pipeline_auto_parallel(
 
 
 def patch_pipeline_model[T](model: T, group: mx.distributed.Group) -> T:
-    # Patch __call__ on the model's class
-    cls = model.__class__
-    original_call = cls.__call__  # type :ignore
-    call_signature = signature(original_call)  # type :ignore
+    def _patch_one(target: object) -> None:
+        cls = target.__class__
+        if getattr(cls, "_exo_pipeline_patched", False):
+            return
 
-    def patched_call(
-        self: T,
-        *args: object,
-        **kwargs: object,
-    ) -> mx.array:
-        logits: mx.array = original_call(self, *args, **kwargs)  # type: ignore
-        cache = call_signature.bind_partial(self, *args, **kwargs).arguments.get(
-            "cache", None
-        )
+        original_call = cls.__call__  # type: ignore[attr-defined]
+        call_signature = signature(original_call)  # type: ignore[arg-type]
 
-        # Add dependency to last cache entry to ensure distributed ops are evaluated
-        if cache is not None:
-            # Extract the raw logits array — vision models (mlx-vlm) may return
-            # a structured output (e.g. LanguageModelOutput) instead of mx.array.
-            logits_array = logits.logits if hasattr(logits, "logits") else logits  # type: ignore
-            last = cache[-1]  # type: ignore
-            dep_cache = last[0] if hasattr(last, "caches") else last  # type: ignore
-            if hasattr(dep_cache, "keys") and dep_cache.keys is not None:  # type: ignore
-                dep_cache.keys = mx.depends(dep_cache.keys, logits_array)  # type: ignore
+        def patched_call(
+            self: object,
+            *args: object,
+            **kwargs: object,
+        ) -> mx.array:
+            logits: mx.array = original_call(self, *args, **kwargs)  # type: ignore[misc]
+            cache = call_signature.bind_partial(self, *args, **kwargs).arguments.get(
+                "cache", None
+            )
 
-        return logits
+            # Add dependency to the final cache entry so MLX evaluates any
+            # distributed send/recv work before callers observe the logits.
+            # mlx-vlm's multimodal generate_step invokes model.language_model
+            # directly, so pipeline-parallel Gemma 4 needs this patch on both
+            # the top-level model and the nested language model.
+            if cache is not None:
+                logits_array = logits.logits if hasattr(logits, "logits") else logits  # type: ignore[attr-defined]
+                last = cache[-1]  # type: ignore[index]
+                dep_cache = last[0] if hasattr(last, "caches") else last  # type: ignore[index]
+                if hasattr(dep_cache, "keys") and dep_cache.keys is not None:  # type: ignore[attr-defined]
+                    dep_cache.keys = mx.depends(dep_cache.keys, logits_array)  # type: ignore[attr-defined]
 
-    cls.__call__ = patched_call
+            return logits
+
+        cls.__call__ = patched_call  # type: ignore[method-assign]
+        cls._exo_pipeline_patched = True  # type: ignore[attr-defined]
+
+    _patch_one(model)
+
+    language_model = getattr(model, "language_model", None)
+    if isinstance(language_model, nn.Module) and language_model is not model:
+        _patch_one(language_model)
+
     return model
 
 

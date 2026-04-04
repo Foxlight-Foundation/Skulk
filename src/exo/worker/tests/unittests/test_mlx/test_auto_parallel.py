@@ -17,6 +17,11 @@ from exo.worker.engines.mlx.auto_parallel import (
 from exo.worker.tests.unittests.test_mlx.conftest import MockLayer
 
 
+class _FakeCacheEntry:
+    def __init__(self) -> None:
+        self.keys = mx.array([1.0])
+
+
 def run_pipeline_device(
     rank: int,
     world_size: int,
@@ -144,3 +149,33 @@ def test_composed_call_works() -> None:
             )
     finally:
         os.unlink(hostfile_path)
+
+
+def test_patch_pipeline_model_patches_nested_language_model(monkeypatch) -> None:
+    class FakeLanguageModel(mlx_nn.Module):
+        def __call__(self, x: mx.array, cache: list[object] | None = None) -> mx.array:
+            return x * 2
+
+    class FakeOuterModel(mlx_nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.language_model = FakeLanguageModel()
+
+        def __call__(self, x: mx.array, cache: list[object] | None = None) -> mx.array:
+            return self.language_model(x, cache=cache)
+
+    depends_calls: list[tuple[mx.array, mx.array]] = []
+
+    def _fake_depends(lhs: mx.array, rhs: mx.array) -> mx.array:
+        depends_calls.append((lhs, rhs))
+        return lhs
+
+    monkeypatch.setattr("exo.worker.engines.mlx.auto_parallel.mx.depends", _fake_depends)
+
+    model = FakeOuterModel()
+    patch_pipeline_model(model, mx.distributed.init())
+
+    cache_entry = _FakeCacheEntry()
+    _ = model.language_model(mx.ones((1, 1)), cache=[cache_entry])
+
+    assert depends_calls, "Expected nested language_model call to be pipeline-patched"
