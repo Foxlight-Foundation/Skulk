@@ -1,4 +1,6 @@
+import base64
 import hashlib
+import io
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -6,6 +8,7 @@ from pathlib import Path
 import anyio
 from anyio import fail_after
 from loguru import logger
+from PIL import Image
 
 from exo.api.types import ImageEditsTaskParams
 from exo.download.download_utils import resolve_model_in_path
@@ -56,6 +59,40 @@ from exo.utils.keyed_backoff import KeyedBackoff
 from exo.utils.task_group import TaskGroup
 from exo.worker.plan import plan
 from exo.worker.runner.runner_supervisor import RunnerSupervisor
+
+
+def _log_image_payload_debug(
+    source: str,
+    image_index: int,
+    image_b64: str,
+    *,
+    expected_b64_sha256: str | None = None,
+) -> None:
+    """Log stable fingerprints for an image payload crossing worker boundaries."""
+    b64_sha256 = hashlib.sha256(image_b64.encode("ascii")).hexdigest()
+    message = (
+        f"{source} image {image_index}: b64_chars={len(image_b64)} "
+        f"b64_sha256={b64_sha256[:12]}..."
+    )
+    if expected_b64_sha256 is not None:
+        message += (
+            f" expected_b64_sha256={expected_b64_sha256[:12]}..."
+            f" matches_expected={b64_sha256 == expected_b64_sha256}"
+        )
+
+    try:
+        raw_bytes = base64.b64decode(image_b64)
+        raw_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+        with Image.open(io.BytesIO(raw_bytes)) as pil_image:
+            message += (
+                f" raw_bytes={len(raw_bytes)} raw_sha256={raw_sha256[:12]}..."
+                f" decoded={pil_image.width}x{pil_image.height}"
+                f" mode={pil_image.mode}"
+            )
+    except Exception as exc:
+        message += f" decode_failed={type(exc).__name__}: {exc}"
+
+    logger.info(message)
 
 
 class Worker:
@@ -295,6 +332,7 @@ class Worker:
                         f"Assembled input image from {len(chunks)} chunks, "
                         f"total size: {len(assembled)} bytes"
                     )
+                    _log_image_payload_debug("Worker assembled image edit", 0, assembled)
                     # Create modified task with assembled image data
                     modified_task = ImageEdits(
                         task_id=task.task_id,
@@ -335,6 +373,12 @@ class Worker:
                     for idx, h in task.task_params.image_hashes.items():
                         assert h in self.image_cache
                         by_index[idx] = self.image_cache[h]
+                        _log_image_payload_debug(
+                            "Worker resolved cached VLM",
+                            idx,
+                            by_index[idx],
+                            expected_b64_sha256=h,
+                        )
 
                     if task.task_params.total_input_chunks > 0:
                         chunk_buffer = self.input_chunk_buffer.get(cmd_id, {})
@@ -348,10 +392,15 @@ class Worker:
                                 per_image[img_idx], key=lambda c: c.chunk_index
                             )
                             img = "".join(c.data for c in sorted_chunks)
-                            self.image_cache[
-                                hashlib.sha256(img.encode("ascii")).hexdigest()
-                            ] = img
+                            b64_sha256 = hashlib.sha256(img.encode("ascii")).hexdigest()
+                            self.image_cache[b64_sha256] = img
                             by_index[img_idx] = img
+                            _log_image_payload_debug(
+                                "Worker assembled VLM",
+                                img_idx,
+                                img,
+                                expected_b64_sha256=b64_sha256,
+                            )
                         logger.info(
                             f"Assembled {len(per_image)} VLM image(s) "
                             f"from {len(chunk_buffer)} chunks"

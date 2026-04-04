@@ -156,9 +156,37 @@ def _patch_video_processor() -> None:
 
 def decode_base64_image(b64_data: str) -> Image.Image:
     """Decode a raw base64 string into an RGB PIL Image."""
+    return _decode_base64_image_with_debug(b64_data)[0]
+
+
+@dataclass(frozen=True)
+class _DecodedImageDebug:
+    b64_sha256: str
+    raw_sha256: str
+    rgb_sha256: str
+    raw_bytes: int
+    width: int
+    height: int
+    original_mode: str
+
+
+def _decode_base64_image_with_debug(
+    b64_data: str,
+) -> tuple[Image.Image, _DecodedImageDebug]:
     raw = base64.b64decode(b64_data)
-    img = Image.open(io.BytesIO(raw))
-    return img.convert("RGB")
+    with Image.open(io.BytesIO(raw)) as img:
+        original_mode = img.mode
+        rgb_img = img.convert("RGB")
+    debug = _DecodedImageDebug(
+        b64_sha256=hashlib.sha256(b64_data.encode("ascii")).hexdigest(),
+        raw_sha256=hashlib.sha256(raw).hexdigest(),
+        rgb_sha256=hashlib.sha256(rgb_img.tobytes()).hexdigest(),
+        raw_bytes=len(raw),
+        width=rgb_img.width,
+        height=rgb_img.height,
+        original_mode=original_mode,
+    )
+    return rgb_img, debug
 
 
 def _format_vlm_messages(
@@ -901,6 +929,18 @@ def _find_media_regions(
         else:
             logger.warning(f"Media region {i} has no corresponding image")
 
+    region_summaries = [
+        {
+            "index": i,
+            "start": region.start_pos,
+            "end": region.end_pos,
+            "length": region.end_pos - region.start_pos,
+            "content_hash": region.content_hash[:12],
+        }
+        for i, region in enumerate(regions)
+    ]
+    logger.info(f"Vision media regions: {region_summaries}")
+
     return regions
 
 
@@ -1028,15 +1068,23 @@ class VisionProcessor:
         processor = self._encoder._processor
         assert processor is not None
 
-        pil_images = [decode_base64_image(b64) for b64 in images]
-        for idx, img in enumerate(pil_images):
-            logger.info(f"Image {idx}: {img.width}x{img.height} mode={img.mode}")
+        decoded_images = [_decode_base64_image_with_debug(b64) for b64 in images]
+        pil_images = [image for image, _debug in decoded_images]
+        for idx, (img, debug) in enumerate(decoded_images):
+            logger.info(
+                f"Image {idx}: {img.width}x{img.height} mode={img.mode} "
+                f"original_mode={debug.original_mode} raw_bytes={debug.raw_bytes} "
+                f"b64_sha256={debug.b64_sha256[:12]}... "
+                f"raw_sha256={debug.raw_sha256[:12]}... "
+                f"rgb_sha256={debug.rgb_sha256[:12]}..."
+            )
 
         processor_kwargs = (
             _gemma4_native_processor_kwargs(chat_template_messages, processor)
             if self.vision_config.model_type == "gemma4"
             else {}
         )
+        logger.info(f"Native vision processor kwargs: {processor_kwargs}")
         pixel_values, _grid_thw, n_tokens_per_image = self._encoder.preprocess_images(
             pil_images,
             processor_kwargs=processor_kwargs,

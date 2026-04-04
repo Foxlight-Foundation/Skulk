@@ -163,6 +163,10 @@ class ExoBatchGenerator:
                 )
                 prompt_tokens = remaining_tokens
             else:
+                logger.info(
+                    f"KV cache miss: 0/{len(all_prompt_tokens)} tokens cached "
+                    f"(media_regions={len(media_regions)})"
+                )
                 cache = make_kv_cache(self.model)
         else:
             cache = make_kv_cache(self.model)

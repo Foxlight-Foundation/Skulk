@@ -560,6 +560,11 @@ def mlx_generate(
             logger.info(
                 f"KV cache hit: {prefix_hit_length}/{len(all_prompt_tokens)} tokens cached ({100 * prefix_hit_length / len(all_prompt_tokens):.1f}%)"
             )
+        else:
+            logger.info(
+                f"KV cache miss: 0/{len(all_prompt_tokens)} tokens cached "
+                f"(media_regions={len(media_regions)})"
+            )
 
     logits_processors: list[Callable[[mx.array, mx.array], mx.array]] = (
         make_logits_processors(

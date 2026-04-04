@@ -1166,6 +1166,21 @@ class API:
                 self._sent_image_hashes.add(h)
                 new_images.append((idx, img))
 
+        logger.info(
+            f"TextGeneration image transport: total={len(images)} "
+            f"new={len(new_images)} cached={len(cached_hashes)}"
+        )
+        for idx, img in new_images:
+            logger.info(
+                f"TextGeneration new image {idx}: b64_chars={len(img)} "
+                f"b64_sha256={hashlib.sha256(img.encode('ascii')).hexdigest()[:12]}..."
+            )
+        for idx, h in cached_hashes.items():
+            logger.info(
+                f"TextGeneration cached image {idx}: "
+                f"b64_sha256={h[:12]}..."
+            )
+
         if not new_images:
             task_params = task_params.model_copy(
                 update={"images": [], "image_hashes": cached_hashes}

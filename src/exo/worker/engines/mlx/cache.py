@@ -218,6 +218,10 @@ class KVPrefixCache:
                 best_index, best_length = i, length
 
         if best_index is None:
+            logger.info(
+                f"KV cache miss: cache_entries={len(self.prompts)} "
+                f"query_tokens={max_length} query_media_regions={len(query_regions)}"
+            )
             return make_kv_cache(model), prompt_tokens, None
 
         # For exact match: trim to max_length-1 so remaining has the last token
@@ -244,6 +248,14 @@ class KVPrefixCache:
         self._access_counter += 1
         self._last_used[best_index] = self._access_counter
         remaining = prompt_tokens[restore_pos:]
+        logger.info(
+            f"KV cache lookup: matched_index={best_index} "
+            f"matched_tokens={best_length}/{max_length} "
+            f"restore_pos={restore_pos} remaining_tokens={len(remaining)} "
+            f"exact_match={is_exact} "
+            f"query_media_regions={len(query_regions)} "
+            f"cached_media_regions={len(self._media_regions[best_index])}"
+        )
 
         return prompt_cache, remaining, best_index
 
