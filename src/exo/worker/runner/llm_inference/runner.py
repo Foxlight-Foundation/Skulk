@@ -118,6 +118,26 @@ class Runner:
         logger.info("runner created")
         self.update_status(RunnerIdle())
 
+    @staticmethod
+    def _summarize_text_generation_task(task: TextGeneration) -> str:
+        """Return a compact log summary for text generation tasks."""
+        params = task.task_params
+        return (
+            "TextGeneration("
+            f"task_id={task.task_id!r}, "
+            f"command_id={task.command_id!r}, "
+            f"model={params.model!r}, "
+            f"input_messages={len(params.input)}, "
+            f"chat_template_messages={len(params.chat_template_messages or [])}, "
+            f"images={len(params.images)}, "
+            f"image_hashes={sorted(params.image_hashes.keys())}, "
+            f"total_input_chunks={params.total_input_chunks}, "
+            f"image_count={params.image_count}, "
+            f"stream={params.stream}, "
+            f"reasoning_effort={params.reasoning_effort!r}, "
+            f"enable_thinking={params.enable_thinking!r})"
+        )
+
     def update_status(self, status: RunnerStatus):
         self.current_status = status
         self.event_sender.send(
@@ -268,7 +288,10 @@ class Runner:
         assert isinstance(self.current_status, RunnerReady)
         assert isinstance(self.generator, InferenceGenerator)
 
-        logger.info(f"received chat request: {starting_task}")
+        logger.info(
+            "received chat request: "
+            f"{self._summarize_text_generation_task(starting_task)}"
+        )
         self.update_status(RunnerRunning())
         logger.info("runner running")
         self.acknowledge_task(starting_task)

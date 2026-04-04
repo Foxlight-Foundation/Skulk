@@ -246,7 +246,7 @@ class TestMlxVlmProcessorFallback:
 
 
 class TestGemma4NativeProcessorBudget:
-    """Image-only Gemma 4 requests should use a higher visual token budget."""
+    """Gemma 4 requests with images should use a higher visual token budget."""
 
     def test_image_only_prompt_raises_budget(self):
         from exo.worker.engines.mlx.vision import _gemma4_native_processor_kwargs
@@ -269,7 +269,7 @@ class TestGemma4NativeProcessorBudget:
 
         assert result == {"max_soft_tokens": 320}
 
-    def test_text_prompt_keeps_existing_budget(self):
+    def test_text_and_image_prompt_raises_budget(self):
         from exo.worker.engines.mlx.vision import _gemma4_native_processor_kwargs
 
         messages = [
@@ -281,6 +281,16 @@ class TestGemma4NativeProcessorBudget:
                 ],
             }
         ]
+        processor = SimpleNamespace(max_soft_tokens=280)
+
+        result = _gemma4_native_processor_kwargs(messages, processor)
+
+        assert result == {"max_soft_tokens": 560}
+
+    def test_text_only_prompt_keeps_existing_budget(self):
+        from exo.worker.engines.mlx.vision import _gemma4_native_processor_kwargs
+
+        messages = [{"role": "user", "content": "Describe this text prompt"}]
         processor = SimpleNamespace(max_soft_tokens=280)
 
         result = _gemma4_native_processor_kwargs(messages, processor)

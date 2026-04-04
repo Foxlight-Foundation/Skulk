@@ -90,46 +90,46 @@ def _gemma4_native_processor_kwargs(
 ) -> dict[str, Any]:
     """Select processor kwargs for Gemma 4 native vision preprocessing.
 
-    Image-only requests rely entirely on the visual stream. A slightly higher
-    visual token budget keeps screenshots and text-dense images from being
-    under-resolved while staying well below the most expensive OCR setting.
+    Gemma 4 benefits from a slightly higher visual token budget for prompts
+    that include images. This keeps screenshots and text-dense images from
+    being under-resolved while staying well below the most expensive OCR
+    setting.
     """
-    has_text = False
+    has_image = False
     for message in chat_template_messages:
         content = message.get("content")
-        if isinstance(content, str) and content.strip():
-            has_text = True
-            break
         if isinstance(content, list):
             for part in content:
-                if (
-                    isinstance(part, dict)
-                    and str(part.get("type", "")) == "text"
-                    and str(part.get("text", "")).strip()
-                ):
-                    has_text = True
+                if isinstance(part, dict) and str(part.get("type", "")) == "image":
+                    has_image = True
                     break
-        if has_text:
+        if has_image:
             break
 
     configured_budget = 560
-    override_value = os.environ.get("EXO_GEMMA4_IMAGE_ONLY_MAX_SOFT_TOKENS")
-    if override_value is not None:
+    for env_var_name in (
+        "EXO_GEMMA4_MAX_SOFT_TOKENS",
+        "EXO_GEMMA4_IMAGE_ONLY_MAX_SOFT_TOKENS",
+    ):
+        override_value = os.environ.get(env_var_name)
+        if override_value is None:
+            continue
         with contextlib.suppress(ValueError):
             parsed_override = int(override_value)
             if parsed_override > 0:
                 configured_budget = parsed_override
+                break
 
     current_budget = getattr(processor, "max_soft_tokens", None)
     if (
-        has_text
+        not has_image
         or not isinstance(current_budget, int)
         or current_budget >= configured_budget
     ):
         return {}
 
     logger.info(
-        "Gemma 4 image-only prompt detected; raising max_soft_tokens "
+        "Gemma 4 prompt with images detected; raising max_soft_tokens "
         f"from {current_budget} to {configured_budget} for better visual detail"
     )
     return {"max_soft_tokens": configured_budget}
