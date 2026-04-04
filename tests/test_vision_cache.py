@@ -79,7 +79,11 @@ class TestValidateMediaMatch:
 
     def test_no_cached_regions(self):
         query = [MediaRegion("hashA", 100, 200)]
-        assert validate(500, [], query) == 500
+        assert validate(500, [], query) == 100
+
+    def test_no_cached_regions_but_match_ends_before_query_image(self):
+        query = [MediaRegion("hashA", 100, 200)]
+        assert validate(50, [], query) == 50
 
     def test_cached_region_beyond_match(self):
         cached = [MediaRegion("hashA", 10000, 12000)]

@@ -253,12 +253,28 @@ class KVPrefixCache:
         cached_regions: list["MediaRegion"],
         query_regions: list["MediaRegion"],
     ) -> int:
-        if not cached_regions:
-            return match_length
-
+        cached_by_start: dict[int, "MediaRegion"] = {
+            r.start_pos: r for r in cached_regions
+        }
         query_by_start: dict[int, "MediaRegion"] = {
             r.start_pos: r for r in query_regions
         }
+
+        for query_r in query_regions:
+            if query_r.start_pos >= match_length:
+                break
+            cached_r = cached_by_start.get(query_r.start_pos)
+            if cached_r is None:
+                # The query expects an image span here, but the cached entry has
+                # no media metadata for this region. Reusing cache past this point
+                # would risk carrying over stale hidden states from a text-only or
+                # pre-media-aware entry into a new multimodal request.
+                logger.info(
+                    f"Query media region at pos {query_r.start_pos} absent in cache — "
+                    f"truncating match from {match_length} to {query_r.start_pos}"
+                )
+                match_length = query_r.start_pos
+                break
 
         for cached_r in cached_regions:
             if cached_r.start_pos >= match_length:
