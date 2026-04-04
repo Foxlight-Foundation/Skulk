@@ -1,5 +1,7 @@
 """Tests for Claude Messages API conversion functions and types."""
 
+from unittest.mock import AsyncMock, patch
+
 import pydantic
 import pytest
 
@@ -8,6 +10,8 @@ from exo.api.adapters.claude import (
     finish_reason_to_claude_stop_reason,
 )
 from exo.api.types.claude_api import (
+    ClaudeImageBlock,
+    ClaudeImageSource,
     ClaudeMessage,
     ClaudeMessagesRequest,
     ClaudeTextBlock,
@@ -40,7 +44,8 @@ class TestFinishReasonToClaudeStopReason:
 class TestClaudeRequestToInternal:
     """Tests for converting Claude Messages API requests to TextGenerationTaskParams."""
 
-    def test_basic_request_conversion(self):
+    @pytest.mark.anyio
+    async def test_basic_request_conversion(self):
         request = ClaudeMessagesRequest(
             model=ModelId("claude-3-opus"),
             max_tokens=100,
@@ -48,7 +53,7 @@ class TestClaudeRequestToInternal:
                 ClaudeMessage(role="user", content="Hello"),
             ],
         )
-        params = claude_request_to_text_generation(request)
+        params = await claude_request_to_text_generation(request)
 
         assert params.model == "claude-3-opus"
         assert params.max_output_tokens == 100
@@ -58,7 +63,8 @@ class TestClaudeRequestToInternal:
         assert params.input[0].content == "Hello"
         assert params.instructions is None
 
-    def test_request_with_system_string(self):
+    @pytest.mark.anyio
+    async def test_request_with_system_string(self):
         request = ClaudeMessagesRequest(
             model=ModelId("claude-3-opus"),
             max_tokens=100,
@@ -67,7 +73,7 @@ class TestClaudeRequestToInternal:
                 ClaudeMessage(role="user", content="Hello"),
             ],
         )
-        params = claude_request_to_text_generation(request)
+        params = await claude_request_to_text_generation(request)
 
         assert params.instructions == "You are a helpful assistant."
         assert isinstance(params.input, list)
@@ -75,7 +81,8 @@ class TestClaudeRequestToInternal:
         assert params.input[0].role == "user"
         assert params.input[0].content == "Hello"
 
-    def test_request_with_system_text_blocks(self):
+    @pytest.mark.anyio
+    async def test_request_with_system_text_blocks(self):
         request = ClaudeMessagesRequest(
             model=ModelId("claude-3-opus"),
             max_tokens=100,
@@ -87,13 +94,14 @@ class TestClaudeRequestToInternal:
                 ClaudeMessage(role="user", content="Hello"),
             ],
         )
-        params = claude_request_to_text_generation(request)
+        params = await claude_request_to_text_generation(request)
 
         assert params.instructions == "You are helpful. Be concise."
         assert isinstance(params.input, list)
         assert len(params.input) == 1
 
-    def test_request_with_content_blocks(self):
+    @pytest.mark.anyio
+    async def test_request_with_content_blocks(self):
         request = ClaudeMessagesRequest(
             model=ModelId("claude-3-opus"),
             max_tokens=100,
@@ -107,13 +115,14 @@ class TestClaudeRequestToInternal:
                 ),
             ],
         )
-        params = claude_request_to_text_generation(request)
+        params = await claude_request_to_text_generation(request)
 
         assert isinstance(params.input, list)
         assert len(params.input) == 1
         assert params.input[0].content == "First part. Second part."
 
-    def test_request_with_multi_turn_conversation(self):
+    @pytest.mark.anyio
+    async def test_request_with_multi_turn_conversation(self):
         request = ClaudeMessagesRequest(
             model=ModelId("claude-3-opus"),
             max_tokens=100,
@@ -123,7 +132,7 @@ class TestClaudeRequestToInternal:
                 ClaudeMessage(role="user", content="How are you?"),
             ],
         )
-        params = claude_request_to_text_generation(request)
+        params = await claude_request_to_text_generation(request)
 
         assert isinstance(params.input, list)
         assert len(params.input) == 3
@@ -131,7 +140,8 @@ class TestClaudeRequestToInternal:
         assert params.input[1].role == "assistant"
         assert params.input[2].role == "user"
 
-    def test_request_with_optional_parameters(self):
+    @pytest.mark.anyio
+    async def test_request_with_optional_parameters(self):
         request = ClaudeMessagesRequest(
             model=ModelId("claude-3-opus"),
             max_tokens=100,
@@ -142,13 +152,52 @@ class TestClaudeRequestToInternal:
             stop_sequences=["STOP", "END"],
             stream=True,
         )
-        params = claude_request_to_text_generation(request)
+        params = await claude_request_to_text_generation(request)
 
         assert params.temperature == 0.7
         assert params.top_p == 0.9
         assert params.top_k == 40
         assert params.stop == ["STOP", "END"]
         assert params.stream is True
+
+    @pytest.mark.anyio
+    async def test_request_with_image_url_fetches_bytes(self):
+        request = ClaudeMessagesRequest(
+            model=ModelId("claude-3-opus"),
+            max_tokens=100,
+            messages=[
+                ClaudeMessage(
+                    role="user",
+                    content=[
+                        ClaudeImageBlock(
+                            source=ClaudeImageSource(
+                                type="url",
+                                url="https://example.com/cat.png",
+                            )
+                        ),
+                        ClaudeTextBlock(text="describe"),
+                    ],
+                )
+            ],
+        )
+
+        with patch(
+            "exo.api.adapters.claude.fetch_image_url",
+            new=AsyncMock(return_value="BASE64DATA"),
+        ) as mock_fetch:
+            params = await claude_request_to_text_generation(request)
+
+        mock_fetch.assert_awaited_once_with("https://example.com/cat.png")
+        assert params.images == ["BASE64DATA"]
+        assert params.chat_template_messages == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "describe"},
+                ],
+            }
+        ]
 
 
 class TestClaudeMessagesRequestValidation:

@@ -89,6 +89,22 @@ def _format_vlm_messages(
             formatted.append(msg)
             continue
         parts: list[dict[str, Any]] = content  # type: ignore
+
+        # Preserve the original multimodal ordering for Gemma family prompts.
+        # Rebuilding the message from "all text + image count" destroys
+        # interleaving such as text -> image -> text, which Gemma 4 explicitly
+        # supports and which its chat template can represent directly.
+        if model_type in {"gemma3n", "gemma4"}:
+            normalized_parts: list[dict[str, Any]] = []
+            for part in parts:
+                part_type = str(part.get("type", ""))
+                if part_type == "text":
+                    normalized_parts.append({"type": "text", "text": str(part["text"])})  # type: ignore[index]
+                elif part_type in {"image", "image_url"}:
+                    normalized_parts.append({"type": "image"})
+            formatted.append({"role": role, "content": normalized_parts})
+            continue
+
         text_parts = [str(p["text"]) for p in parts if p.get("type") == "text"]  # type: ignore
         n_images = sum(1 for p in parts if p.get("type") in ("image", "image_url"))
         result: dict[str, Any] = get_message_json(
@@ -250,6 +266,7 @@ class VisionEncoder:
         self._spatial_merge_size: int = 2
         self._merge_kernel_size: list[int] | None = None
         self._needs_nhwc: bool = False
+        self._processor_loaded = False
         self._loaded = False
 
     def _load_config_json(self) -> dict[str, Any]:
@@ -273,6 +290,18 @@ class VisionEncoder:
             return
         self._load_weights()
         self._loaded = True
+
+    def ensure_processor_loaded(self) -> None:
+        """Load only the image processor needed for preprocessing images.
+
+        Native multimodal models like Gemma 4 already carry their vision tower and
+        projector inside the main loaded model. In that case we only need the
+        processor contract from mlx-vlm/HF, not a second copy of the vision weights.
+        """
+        if self._processor_loaded:
+            return
+        self._load_processor()
+        self._processor_loaded = True
 
     def _load_weights(self) -> None:
         _patch_video_processor()
@@ -336,6 +365,22 @@ class VisionEncoder:
         else:
             self._load_weights_from_model_repo(config)
 
+        self._load_processor(config=config, vision_cfg=vision_cfg)
+
+    def _load_processor(
+        self,
+        *,
+        config: dict[str, Any] | None = None,
+        vision_cfg: dict[str, Any] | None = None,
+    ) -> None:
+        """Load the image processor without forcing vision-weight initialization."""
+        _patch_video_processor()
+        config = config or self._load_config_json()
+        if not config:
+            raise FileNotFoundError(f"config.json not found in {self._model_path}")
+        vision_cfg = vision_cfg or config.get("vision_config", {})  # type: ignore
+
+        processor_repo = self._config.processor_repo
         repo = processor_repo or str(self._model_path)
         image_proc = load_image_processor(repo)
         if image_proc is not None:
@@ -351,7 +396,6 @@ class VisionEncoder:
                 proc_mod = self._import_mlx_vlm(  # type: ignore
                     f"processing_{self._config.model_type}"
                 )
-                # Find the *ImageProcessor class in the module.
                 proc_cls = None
                 for attr in dir(proc_mod):  # type: ignore
                     obj = getattr(proc_mod, attr)  # type: ignore
@@ -369,6 +413,7 @@ class VisionEncoder:
             self._merge_kernel_size = vision_cfg.get("merge_kernel_size", [2, 2])  # type: ignore
             self._needs_nhwc = True
         logger.info(f"HF image processor loaded from {repo}")
+        self._processor_loaded = True
 
     def _load_weights_from_separate_repo(self, config: dict[str, Any]) -> None:
         safetensors_files = list(self._model_path.glob("*.safetensors"))
@@ -483,7 +528,7 @@ class VisionEncoder:
         self, pil_images: list[Image.Image]
     ) -> tuple[mx.array | list[mx.array], mx.array | None, list[int]]:
         """Public interface to image preprocessing (pixel_values + token counts)."""
-        self.ensure_loaded()
+        self.ensure_processor_loaded()
         return self._preprocess_images(pil_images)
 
     def encode_images(self, images: list[str]) -> tuple[mx.array, list[int]]:
