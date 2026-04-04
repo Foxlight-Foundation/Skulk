@@ -87,10 +87,17 @@ def patch_embed_tokens(
             return original_embed(input_ids)  # type: ignore
         chunk_len = input_ids.shape[-1]
         end = min(start + chunk_len, end_offset)
-        offset[0] = end
-        if end - start < chunk_len:
-            return original_embed(input_ids)  # type: ignore
-        return embeddings[:, start:end, :]
+        offset[0] = start + chunk_len
+        vision_len = end - start
+        if vision_len == chunk_len:
+            return embeddings[:, start:end, :]
+        # Partial overlap: splice vision embeddings for the covered portion
+        # and fall back to text embeddings for the remainder, so image tokens
+        # at chunk boundaries still get correct vision features.
+        text_embeds: mx.array = original_embed(input_ids)  # type: ignore
+        vision_slice = embeddings[:, start:end, :]
+        text_embeds[:, :vision_len, :] = vision_slice
+        return text_embeds
 
     for attr in dir(original_embed):  # type: ignore
         if not attr.startswith("_") and not hasattr(_inject, attr):

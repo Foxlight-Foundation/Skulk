@@ -33,8 +33,27 @@ class TestValidateMediaMatch:
         assert validate(4000, cached, query) == 4000
 
     def test_text_followup_no_images_in_query(self):
+        # When the cached entry has an image but the query does not, the match
+        # must truncate before the image region to avoid reusing stale vision
+        # KV states.
         cached = [MediaRegion("hashA", 5000, 8600)]
-        assert validate(9000, cached, []) == 9000
+        assert validate(9000, cached, []) == 5000
+
+    def test_text_followup_match_before_cached_image(self):
+        # If the token-level match already ends before the cached image region,
+        # no truncation is needed — the KV cache doesn't cover the image.
+        cached = [MediaRegion("hashA", 5000, 8600)]
+        assert validate(4000, cached, []) == 4000
+
+    def test_multi_image_second_absent_truncates(self):
+        # Turn 1 had two images; turn 2 only has the first — truncate at the
+        # second image's position.
+        cached = [
+            MediaRegion("hashA", 2000, 4000),
+            MediaRegion("hashB", 6000, 8000),
+        ]
+        query = [MediaRegion("hashA", 2000, 4000)]
+        assert validate(9000, cached, query) == 6000
 
     def test_multiple_images_first_mismatch_truncates(self):
         cached = [

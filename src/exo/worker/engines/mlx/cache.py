@@ -265,7 +265,15 @@ class KVPrefixCache:
                 break
             query_r = query_by_start.get(cached_r.start_pos)
             if query_r is None:
-                continue
+                # Cached entry has an image here but query does not — the KV
+                # cache at these positions encodes stale vision embeddings
+                # that must not be reused.
+                logger.info(
+                    f"Media region at pos {cached_r.start_pos} absent in query — "
+                    f"truncating match from {match_length} to {cached_r.start_pos}"
+                )
+                match_length = cached_r.start_pos
+                break
             if query_r.content_hash != cached_r.content_hash:
                 logger.info(
                     f"Media region mismatch at pos {cached_r.start_pos}: "
