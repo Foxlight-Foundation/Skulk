@@ -24,6 +24,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -187,6 +188,31 @@ def _decode_base64_image_with_debug(
         original_mode=original_mode,
     )
     return rgb_img, debug
+
+
+def _maybe_dump_debug_image(
+    image: Image.Image,
+    debug: _DecodedImageDebug,
+    image_index: int,
+) -> None:
+    """Persist the decoded image when explicit vision debugging is enabled.
+
+    This makes it easy to distinguish "the model saw the wrong image" from
+    "the model misread the right image" without reintroducing giant base64
+    blobs into the logs.
+    """
+    configured_dir = os.environ.get("EXO_VISION_DEBUG_SAVE_DIR")
+    if not configured_dir:
+        return
+
+    output_dir = Path(configured_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{debug.raw_sha256[:16]}-image{image_index}.png"
+    image.save(output_path, format="PNG")
+    logger.info(
+        f"Saved decoded vision image {image_index} to {output_path} "
+        f"(raw_sha256={debug.raw_sha256[:12]}... rgb_sha256={debug.rgb_sha256[:12]}...)"
+    )
 
 
 def _format_vlm_messages(
@@ -1078,6 +1104,7 @@ class VisionProcessor:
                 f"raw_sha256={debug.raw_sha256[:12]}... "
                 f"rgb_sha256={debug.rgb_sha256[:12]}..."
             )
+            _maybe_dump_debug_image(img, debug, idx)
 
         processor_kwargs = (
             _gemma4_native_processor_kwargs(chat_template_messages, processor)

@@ -49,6 +49,25 @@ PREFILL_TIMEOUT_SECONDS = 60
 DECODE_TIMEOUT_SECONDS = 5
 
 
+def _summarize_task(task: Task) -> str:
+    """Return a compact task summary for logs."""
+    if isinstance(task, TextGeneration):
+        params = task.task_params
+        return (
+            "TextGeneration("
+            f"task_id={task.task_id!r}, "
+            f"command_id={task.command_id!r}, "
+            f"model={params.model!r}, "
+            f"input_messages={len(params.input)}, "
+            f"chat_template_messages={len(params.chat_template_messages or [])}, "
+            f"images={len(params.images)}, "
+            f"image_hashes={sorted(params.image_hashes.keys())}, "
+            f"total_input_chunks={params.total_input_chunks}, "
+            f"image_count={params.image_count})"
+        )
+    return repr(task)
+
+
 @dataclass(eq=False)
 class RunnerSupervisor:
     shard_metadata: ShardMetadata
@@ -161,7 +180,7 @@ class RunnerSupervisor:
                 f"Skipping invalid task {task} as it has already been completed"
             )
             return
-        logger.info(f"Starting task {task}")
+        logger.info(f"Starting task {_summarize_task(task)}")
         event = anyio.Event()
         self.pending[task.task_id] = event
         self.in_progress[task.task_id] = task
