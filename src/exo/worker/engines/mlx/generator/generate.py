@@ -596,19 +596,21 @@ def mlx_generate(
         )
     else:
         maybe_vision_ctx = contextlib.nullcontext()
-    with maybe_vision_ctx:
-        prefill_tps, prefill_tokens, ssm_snapshots_list = prefill(
-            model,
-            tokenizer,
-            sampler,
-            prompt_tokens[:-1],
-            caches,
-            group,
-            on_prefill_progress,
-            distributed_prompt_progress_callback,
-        )
-    if hasattr(model, "_pixel_values"):
-        model._pixel_values = None  # type: ignore[attr-defined]
+    try:
+        with maybe_vision_ctx:
+            prefill_tps, prefill_tokens, ssm_snapshots_list = prefill(
+                model,
+                tokenizer,
+                sampler,
+                prompt_tokens[:-1],
+                caches,
+                group,
+                on_prefill_progress,
+                distributed_prompt_progress_callback,
+            )
+    finally:
+        if hasattr(model, "_pixel_values"):
+            model._pixel_values = None  # type: ignore[attr-defined]
     cache_snapshots: list[CacheSnapshot] | None = ssm_snapshots_list or None
 
     # stream_generate starts from the last token
