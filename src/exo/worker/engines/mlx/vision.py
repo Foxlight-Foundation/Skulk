@@ -103,9 +103,15 @@ def build_vision_prompt(
     chat_template_messages: list[dict[str, Any]],
     n_tokens_per_image: list[int],
     image_token: str,
+    boi_token_id: int | None = None,
+    eoi_token_id: int | None = None,
 ) -> str:
     """Build the full prompt string, expanding each image placeholder to the
-    correct number of image tokens based on the encoder's output size."""
+    correct number of image tokens based on the encoder's output size.
+
+    For models that use BOI/EOI framing (Gemma 3n/4), each expanded image
+    sequence is wrapped as ``BOI + (IMAGE × N) + EOI`` matching the format
+    the model was trained on."""
     logger.info(
         f"Vision prompt messages: {[{k: (v[:50] if isinstance(v, str) else v) for k, v in m.items()} for m in chat_template_messages]}"  # type: ignore
     )
@@ -115,8 +121,14 @@ def build_vision_prompt(
         add_generation_prompt=True,
     )
 
+    # Decode BOI/EOI token IDs to their string form so we can insert them
+    # into the prompt text before tokenization.
+    boi_str = tokenizer.decode([boi_token_id]) if boi_token_id is not None else ""
+    eoi_str = tokenizer.decode([eoi_token_id]) if eoi_token_id is not None else ""
+
     # Walk the prompt and expand each single image_token placeholder into
-    # N copies where N = the number of vision features for that image.
+    # N copies where N = the number of vision features for that image,
+    # wrapped in BOI/EOI markers when configured.
     image_idx = 0
     result: list[str] = []
     i = 0
@@ -128,7 +140,7 @@ def build_vision_prompt(
                 if image_idx < len(n_tokens_per_image)
                 else 1
             )
-            result.append(image_token * n)
+            result.append(f"{boi_str}{image_token * n}{eoi_str}")
             image_idx += 1
             i += pad_len
         else:
@@ -811,6 +823,8 @@ class VisionProcessor:
             formatted_messages,
             n_tokens_per_image,
             image_token,
+            boi_token_id=self.vision_config.boi_token_id,
+            eoi_token_id=self.vision_config.eoi_token_id,
         )
 
         logger.info(
@@ -891,6 +905,8 @@ class VisionProcessor:
             formatted_messages,
             n_tokens_per_image,
             image_token,
+            boi_token_id=self.vision_config.boi_token_id,
+            eoi_token_id=self.vision_config.eoi_token_id,
         )
 
         prompt_tokens: mx.array = encode_prompt(tokenizer, prompt)
