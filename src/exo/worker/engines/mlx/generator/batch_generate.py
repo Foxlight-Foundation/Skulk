@@ -34,6 +34,7 @@ from exo.worker.engines.mlx.cache import (
 )
 from exo.worker.engines.mlx.constants import DEFAULT_TOP_LOGPROBS, MAX_TOKENS
 from exo.worker.engines.mlx.generator.generate import (
+    _slice_native_pixel_values_for_uncached_suffix,
     ban_token_ids,
     eos_ids_from_tokenizer,
     extract_top_logprobs,
@@ -183,13 +184,23 @@ class ExoBatchGenerator:
             top_k=task_params.top_k if task_params.top_k is not None else 0,
         )
 
-        if vision is not None and vision.pixel_values is not None:
+        is_native_vision = vision is not None and vision.pixel_values is not None
+        native_pixel_values: mx.array | list[mx.array] | None = None
+        if is_native_vision:
+            assert vision is not None
+            native_pixel_values = _slice_native_pixel_values_for_uncached_suffix(
+                vision.pixel_values,
+                media_regions,
+                prefix_hit_length,
+            )
+
+        if native_pixel_values is not None:
             if hasattr(self.model, "set_pixel_values"):
-                self.model.set_pixel_values(vision.pixel_values)  # type: ignore[attr-defined]
+                self.model.set_pixel_values(native_pixel_values)  # type: ignore[attr-defined]
             else:
-                self.model._pixel_values = vision.pixel_values  # type: ignore[attr-defined]
+                self.model._pixel_values = native_pixel_values  # type: ignore[attr-defined]
             vision_ctx = contextlib.nullcontext()
-        elif vision is not None:
+        elif vision is not None and not is_native_vision:
             vision_ctx = patch_embed_tokens(
                 self.model, vision.embeddings, prefix_hit_length, len(prompt_tokens) - 1
             )

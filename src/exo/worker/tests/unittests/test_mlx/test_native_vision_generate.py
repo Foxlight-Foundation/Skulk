@@ -10,9 +10,10 @@ from exo.shared.types.worker.runner_response import GenerationResponse
 from exo.worker.engines.mlx.generator.generate import (
     _mlx_generate_native_vision,
     _should_use_native_vision_reference_path,
+    _slice_native_pixel_values_for_uncached_suffix,
     mlx_generate,
 )
-from exo.worker.engines.mlx.vision import VisionResult
+from exo.worker.engines.mlx.vision import MediaRegion, VisionResult
 
 
 class _FakeDetokenizer:
@@ -296,3 +297,260 @@ def test_native_vision_reference_path_keeps_prereleases_on_safe_path(
     )
 
     assert _should_use_native_vision_reference_path() is True
+def test_slice_native_pixel_values_for_uncached_suffix_drops_cached_images() -> None:
+    """Prefix hits should remove already-cached native images from pixel_values."""
+
+    pixel_values = [mx.array([10.0]), mx.array([20.0])]
+    media_regions = [
+        MediaRegion("first", 1, 4),
+        MediaRegion("second", 5, 8),
+    ]
+
+    result = _slice_native_pixel_values_for_uncached_suffix(
+        pixel_values,
+        media_regions,
+        prefix_hit_length=5,
+    )
+
+    assert isinstance(result, list)
+    assert len(result) == 1
+    assert result[0].tolist() == [20.0]
+
+
+def test_slice_native_pixel_values_for_uncached_suffix_returns_none_when_fully_cached() -> (
+    None
+):
+    """Fully cached follow-up turns should not inject any native pixel values."""
+
+    pixel_values = [mx.array([10.0]), mx.array([20.0])]
+    media_regions = [
+        MediaRegion("first", 1, 4),
+        MediaRegion("second", 5, 8),
+    ]
+
+    result = _slice_native_pixel_values_for_uncached_suffix(
+        pixel_values,
+        media_regions,
+        prefix_hit_length=8,
+    )
+
+    assert result is None
+
+
+def test_mlx_generate_slices_native_pixel_values_after_prefix_hit(
+    monkeypatch,
+) -> None:
+    """Follow-up turns should not reuse stale pixel values from cached images."""
+
+    class _FakePrefixCache:
+        def get_kv_cache(self, _model, _prompt_tokens, media_regions=None):
+            assert media_regions is not None
+            return [], mx.array([6, 7, 8]), 0
+
+        def add_kv_cache(self, *args, **kwargs) -> None:
+            return None
+
+        def update_kv_cache(self, *args, **kwargs) -> None:
+            return None
+
+    class _FakeModel:
+        def __init__(self) -> None:
+            self.pixel_values = None
+            self.seen_pixel_values = None
+
+        def set_pixel_values(self, pixel_values) -> None:
+            self.pixel_values = pixel_values
+
+    vision = VisionResult(
+        prompt="ignored",
+        prompt_tokens=mx.array([1, 2, 3, 4, 5, 6, 7, 8]),
+        embeddings=mx.zeros((1, 0, 1)),
+        media_regions=[
+            MediaRegion("first", 1, 4),
+            MediaRegion("second", 5, 8),
+        ],
+        pixel_values=[mx.array([10.0]), mx.array([20.0])],
+    )
+
+    def _fake_prepare_vision(**_kwargs: object) -> VisionResult:
+        return vision
+
+    def _fake_prefill(model, *_args, **_kwargs):
+        assert isinstance(model.pixel_values, list)
+        assert len(model.pixel_values) == 1
+        assert model.pixel_values[0].tolist() == [20.0]
+        model.seen_pixel_values = model.pixel_values
+        return 0.0, 2, []
+
+    def _fake_stream_generate(*_args: object, **_kwargs: object):
+        yield GenerationResponse(text="ok", token=101, usage=None)
+
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.generator.generate.prepare_vision",
+        _fake_prepare_vision,
+    )
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.generator.generate._should_use_native_vision_reference_path",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.generator.generate.prefill",
+        _fake_prefill,
+    )
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.generator.generate.stream_generate",
+        _fake_stream_generate,
+    )
+
+    task = TextGenerationTaskParams(
+        model=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"),
+        input=[InputMessage(role="user", content="what is this?")],
+        chat_template_messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "first"},
+                ],
+            },
+            {"role": "assistant", "content": "ok"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "second"},
+                ],
+            },
+        ],
+        images=["ignored-a", "ignored-b"],
+        max_output_tokens=8,
+        temperature=0.0,
+    )
+
+    model = _FakeModel()
+    responses = list(
+        mlx_generate(
+            model=model,  # type: ignore[arg-type]
+            tokenizer=_FakeTokenizer(),  # type: ignore[arg-type]
+            task=task,
+            prompt="<bos>",
+            kv_prefix_cache=_FakePrefixCache(),  # type: ignore[arg-type]
+            group=None,
+            vision_processor=object(),  # type: ignore[arg-type]
+        )
+    )
+
+    assert [response.text for response in responses] == ["ok"]
+    assert model.seen_pixel_values is not None
+    assert model.pixel_values is None
+
+
+def test_mlx_generate_skips_embedding_patch_when_native_images_are_fully_cached(
+    monkeypatch,
+) -> None:
+    """Fully cached native images should fall back to plain text prefill only."""
+
+    class _FakePrefixCache:
+        def get_kv_cache(self, _model, _prompt_tokens, media_regions=None):
+            assert media_regions is not None
+            return [], mx.array([7, 8]), 0
+
+        def add_kv_cache(self, *args, **kwargs) -> None:
+            return None
+
+        def update_kv_cache(self, *args, **kwargs) -> None:
+            return None
+
+    class _FakeModel:
+        def __init__(self) -> None:
+            self.pixel_values = None
+            self.seen_pixel_values = "unset"
+
+        def set_pixel_values(self, pixel_values) -> None:
+            self.pixel_values = pixel_values
+            self.seen_pixel_values = pixel_values
+
+    vision = VisionResult(
+        prompt="ignored",
+        prompt_tokens=mx.array([1, 2, 3, 4, 5, 6, 7, 8]),
+        embeddings=mx.zeros((1, 0, 1)),
+        media_regions=[
+            MediaRegion("first", 1, 4),
+            MediaRegion("second", 5, 6),
+        ],
+        pixel_values=[mx.array([10.0]), mx.array([20.0])],
+    )
+
+    def _fake_prepare_vision(**_kwargs: object) -> VisionResult:
+        return vision
+
+    def _fake_prefill(model, *_args, **_kwargs):
+        assert model.pixel_values is None
+        return 0.0, 2, []
+
+    def _fake_stream_generate(*_args: object, **_kwargs: object):
+        yield GenerationResponse(text="ok", token=101, usage=None)
+
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.generator.generate.prepare_vision",
+        _fake_prepare_vision,
+    )
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.generator.generate._should_use_native_vision_reference_path",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.generator.generate.prefill",
+        _fake_prefill,
+    )
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.generator.generate.stream_generate",
+        _fake_stream_generate,
+    )
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.generator.generate.patch_embed_tokens",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("native fully-cached requests should not patch embeddings")
+        ),
+    )
+
+    task = TextGenerationTaskParams(
+        model=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"),
+        input=[InputMessage(role="user", content="what is this?")],
+        chat_template_messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "first"},
+                ],
+            },
+            {"role": "assistant", "content": "ok"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "second"},
+                ],
+            },
+        ],
+        images=["ignored-a", "ignored-b"],
+        max_output_tokens=8,
+        temperature=0.0,
+    )
+
+    model = _FakeModel()
+    responses = list(
+        mlx_generate(
+            model=model,  # type: ignore[arg-type]
+            tokenizer=_FakeTokenizer(),  # type: ignore[arg-type]
+            task=task,
+            prompt="<bos>",
+            kv_prefix_cache=_FakePrefixCache(),  # type: ignore[arg-type]
+            group=None,
+            vision_processor=object(),  # type: ignore[arg-type]
+        )
+    )
+
+    assert [response.text for response in responses] == ["ok"]
+    assert model.seen_pixel_values is None
