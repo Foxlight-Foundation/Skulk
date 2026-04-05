@@ -184,8 +184,10 @@ class ExoBatchGenerator:
             top_k=task_params.top_k if task_params.top_k is not None else 0,
         )
 
+        is_native_vision = vision is not None and vision.pixel_values is not None
         native_pixel_values: mx.array | list[mx.array] | None = None
-        if vision is not None and vision.pixel_values is not None:
+        if is_native_vision:
+            assert vision is not None
             native_pixel_values = _slice_native_pixel_values_for_uncached_suffix(
                 vision.pixel_values,
                 media_regions,
@@ -198,7 +200,7 @@ class ExoBatchGenerator:
             else:
                 self.model._pixel_values = native_pixel_values  # type: ignore[attr-defined]
             vision_ctx = contextlib.nullcontext()
-        elif vision is not None:
+        elif vision is not None and not is_native_vision:
             vision_ctx = patch_embed_tokens(
                 self.model, vision.embeddings, prefix_hit_length, len(prompt_tokens) - 1
             )

@@ -115,10 +115,13 @@ def _slice_native_pixel_values_for_uncached_suffix(
     if prefix_hit_length <= 0 or not media_regions:
         return pixel_values
 
+    available_images = (
+        len(pixel_values) if isinstance(pixel_values, list) else int(pixel_values.shape[0])
+    )
     remaining_indices = [
         idx
         for idx, region in enumerate(media_regions)
-        if region.end_pos > prefix_hit_length
+        if idx < available_images and region.end_pos > prefix_hit_length
     ]
     if not remaining_indices:
         logger.info(
@@ -127,12 +130,18 @@ def _slice_native_pixel_values_for_uncached_suffix(
         )
         return None
 
-    if remaining_indices == list(range(len(media_regions))):
+    if available_images != len(media_regions):
+        logger.warning(
+            "Native vision pixel_values/media_regions length mismatch: "
+            f"{available_images} image tensor(s) for {len(media_regions)} media region(s)"
+        )
+
+    if remaining_indices == list(range(available_images)):
         return pixel_values
 
     logger.info(
         "Native vision prefix cache hit trimmed pixel_values from "
-        f"{len(media_regions)} to {len(remaining_indices)} image(s) "
+        f"{available_images} to {len(remaining_indices)} image(s) "
         f"(restore_pos={prefix_hit_length})"
     )
 
@@ -140,7 +149,7 @@ def _slice_native_pixel_values_for_uncached_suffix(
         return [pixel_values[idx] for idx in remaining_indices]
 
     first_idx = remaining_indices[0]
-    expected_suffix = list(range(first_idx, len(media_regions)))
+    expected_suffix = list(range(first_idx, available_images))
     if remaining_indices == expected_suffix:
         return pixel_values[first_idx:]
 
@@ -867,8 +876,10 @@ def mlx_generate(
             "mlx/mlx-vlm stack"
         )
 
+    is_native_vision = vision is not None and vision.pixel_values is not None
     native_pixel_values: mx.array | list[mx.array] | None = None
-    if vision is not None and vision.pixel_values is not None:
+    if is_native_vision:
+        assert vision is not None
         native_pixel_values = _slice_native_pixel_values_for_uncached_suffix(
             vision.pixel_values,
             media_regions,
@@ -881,7 +892,7 @@ def mlx_generate(
         else:
             model._pixel_values = native_pixel_values  # type: ignore[attr-defined]
         maybe_vision_ctx = contextlib.nullcontext()
-    elif vision is not None:
+    elif vision is not None and not is_native_vision:
         maybe_vision_ctx = patch_embed_tokens(
             model, vision.embeddings, prefix_hit_length, len(prompt_tokens) - 1
         )
