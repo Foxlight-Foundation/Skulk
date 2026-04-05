@@ -9,7 +9,6 @@ from exo.shared.types.text_generation import InputMessage, TextGenerationTaskPar
 from exo.shared.types.worker.runner_response import GenerationResponse
 from exo.worker.engines.mlx.generator.generate import (
     _mlx_generate_native_vision,
-    _parse_version_triplet,
     _should_use_native_vision_reference_path,
     mlx_generate,
 )
@@ -285,8 +284,15 @@ def test_native_vision_reference_path_version_gate(monkeypatch) -> None:
     assert _should_use_native_vision_reference_path() is False
 
 
-def test_parse_version_triplet_ignores_suffix_digits() -> None:
-    """Prerelease suffix digits should not inflate release comparisons."""
+def test_native_vision_reference_path_keeps_prereleases_on_safe_path(
+    monkeypatch,
+) -> None:
+    """Prerelease builds should keep the safer reference path enabled."""
 
-    assert _parse_version_triplet("0.31.1rc2") == (0, 31, 1)
-    assert _parse_version_triplet("0.31.1.dev4") == (0, 31, 1)
+    monkeypatch.delenv("EXO_NATIVE_VISION_REFERENCE_PATH", raising=False)
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.generator.generate.metadata.version",
+        lambda package: {"mlx": "0.31.1rc1", "mlx-vlm": "0.4.4.dev1"}[package],
+    )
+
+    assert _should_use_native_vision_reference_path() is True

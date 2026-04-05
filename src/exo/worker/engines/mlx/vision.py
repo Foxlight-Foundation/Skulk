@@ -40,6 +40,7 @@ from safetensors import safe_open
 from transformers import AutoImageProcessor
 
 from exo.download.download_utils import build_model_path
+from exo.shared.constants import EXO_IMAGE_TRANSPORT_DEBUG
 from exo.shared.models.model_cards import VisionCardConfig
 from exo.shared.types.common import ModelId
 from exo.shared.types.mlx import Model
@@ -159,7 +160,9 @@ def _patch_video_processor() -> None:
 
 def decode_base64_image(b64_data: str) -> Image.Image:
     """Decode a raw base64 string into an RGB PIL Image."""
-    return _decode_base64_image_with_debug(b64_data)[0]
+    raw = base64.b64decode(b64_data)
+    with Image.open(io.BytesIO(raw)) as img:
+        return img.convert("RGB")
 
 
 @dataclass(frozen=True)
@@ -190,6 +193,11 @@ def _decode_base64_image_with_debug(
         original_mode=original_mode,
     )
     return rgb_img, debug
+
+
+def _vision_transport_debug_enabled() -> bool:
+    """Return whether expensive per-image debug hashing/logging is enabled."""
+    return EXO_IMAGE_TRANSPORT_DEBUG or bool(os.environ.get("EXO_VISION_DEBUG_SAVE_DIR"))
 
 
 def _maybe_dump_debug_image(
@@ -1058,7 +1066,7 @@ class VisionProcessor:
         prompt_tokens: mx.array = encode_prompt(tokenizer, prompt)
         prompt_tokens = fix_unmatched_think_end_tokens(prompt_tokens, tokenizer)
         n_image_tokens = int(
-            np.count_nonzero(np.asarray(prompt_tokens) == self.vision_config.image_token_id)
+            mx.sum(mx.equal(prompt_tokens, self.vision_config.image_token_id)).item()
         )
         logger.info(
             f"Encoded prompt: {len(prompt_tokens)} tokens, {n_image_tokens} image pad tokens"
@@ -1105,17 +1113,23 @@ class VisionProcessor:
         processor = self._encoder._processor
         assert processor is not None
 
-        decoded_images = [_decode_base64_image_with_debug(b64) for b64 in images]
-        pil_images = [image for image, _debug in decoded_images]
-        for idx, (img, debug) in enumerate(decoded_images):
-            logger.info(
-                f"Image {idx}: {img.width}x{img.height} mode={img.mode} "
-                f"original_mode={debug.original_mode} raw_bytes={debug.raw_bytes} "
-                f"b64_sha256={debug.b64_sha256[:12]}... "
-                f"raw_sha256={debug.raw_sha256[:12]}... "
-                f"rgb_sha256={debug.rgb_sha256[:12]}..."
-            )
-            _maybe_dump_debug_image(img, debug, idx)
+        debug_enabled = _vision_transport_debug_enabled()
+        if debug_enabled:
+            decoded_images = [_decode_base64_image_with_debug(b64) for b64 in images]
+            pil_images = [image for image, _debug in decoded_images]
+            for idx, (img, debug) in enumerate(decoded_images):
+                logger.info(
+                    f"Image {idx}: {img.width}x{img.height} mode={img.mode} "
+                    f"original_mode={debug.original_mode} raw_bytes={debug.raw_bytes} "
+                    f"b64_sha256={debug.b64_sha256[:12]}... "
+                    f"raw_sha256={debug.raw_sha256[:12]}... "
+                    f"rgb_sha256={debug.rgb_sha256[:12]}..."
+                )
+                _maybe_dump_debug_image(img, debug, idx)
+        else:
+            pil_images = [decode_base64_image(b64) for b64 in images]
+            for idx, img in enumerate(pil_images):
+                logger.debug(f"Image {idx}: {img.width}x{img.height} mode={img.mode}")
 
         processor_kwargs = (
             _gemma4_native_processor_kwargs(chat_template_messages, processor)
@@ -1152,7 +1166,7 @@ class VisionProcessor:
         prompt_tokens: mx.array = encode_prompt(tokenizer, prompt)
         prompt_tokens = fix_unmatched_think_end_tokens(prompt_tokens, tokenizer)
         n_image_tokens = int(
-            np.count_nonzero(np.asarray(prompt_tokens) == self.vision_config.image_token_id)
+            mx.sum(mx.equal(prompt_tokens, self.vision_config.image_token_id)).item()
         )
         logger.info(
             f"Encoded prompt: {len(prompt_tokens)} tokens, {n_image_tokens} image pad tokens"

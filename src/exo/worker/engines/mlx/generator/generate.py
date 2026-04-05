@@ -2,7 +2,6 @@ import contextlib
 import functools
 import math
 import os
-import re
 import time
 from copy import deepcopy
 from importlib import metadata
@@ -16,6 +15,7 @@ from mlx_lm.generate import (
 from mlx_lm.models.cache import ArraysCache, RotatingKVCache
 from mlx_lm.sample_utils import make_logits_processors, make_sampler
 from mlx_lm.tokenizer_utils import TokenizerWrapper
+from packaging.version import InvalidVersion, Version
 
 from exo.api.types import (
     CompletionTokensDetails,
@@ -75,21 +75,6 @@ generation_stream = mx.new_stream(mx.default_device())
 _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
 
 
-def _parse_version_triplet(version_str: str) -> tuple[int, int, int]:
-    """Parse a package version into a coarse comparable triplet."""
-    parts: list[int] = []
-    for piece in version_str.split("."):
-        match = re.match(r"(\d+)", piece)
-        if match is None:
-            break
-        parts.append(int(match.group(1)))
-        if len(parts) == 3:
-            break
-    while len(parts) < 3:
-        parts.append(0)
-    return parts[0], parts[1], parts[2]
-
-
 def _should_use_native_vision_reference_path() -> bool:
     """Return whether native vision should force MLX-VLM's reference decode path.
 
@@ -104,14 +89,14 @@ def _should_use_native_vision_reference_path() -> bool:
         return normalized not in {"0", "false", "no", "off"}
 
     try:
-        mlx_version = _parse_version_triplet(metadata.version("mlx"))
-        mlx_vlm_version = _parse_version_triplet(metadata.version("mlx-vlm"))
-    except metadata.PackageNotFoundError:
+        mlx_version = Version(metadata.version("mlx"))
+        mlx_vlm_version = Version(metadata.version("mlx-vlm"))
+    except (metadata.PackageNotFoundError, InvalidVersion):
         # Be conservative if metadata is unavailable.
         return True
 
     return not (
-        mlx_version >= (0, 31, 1) and mlx_vlm_version >= (0, 4, 4)
+        mlx_version >= Version("0.31.1") and mlx_vlm_version >= Version("0.4.4")
     )
 
 

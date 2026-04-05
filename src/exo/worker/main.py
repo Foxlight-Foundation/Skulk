@@ -67,7 +67,7 @@ def _log_image_transport(message: str) -> None:
 
     Multimodal traffic can be large and frequent, so the default path keeps
     these diagnostics at DEBUG. Operators can opt in with
-    ``SKULK_IMAGE_TRANSPORT_DEBUG=1`` (or the legacy ``EXO_*`` alias) when
+    ``SKULK_IMAGE_TRANSPORT_DEBUG=true`` (or the legacy ``EXO_*`` alias) when
     they need end-to-end payload fingerprints.
     """
     if EXO_IMAGE_TRANSPORT_DEBUG:
