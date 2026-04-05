@@ -27,7 +27,7 @@ If you are getting oriented, start with these pages:
 ## Common Jobs
 
 - I want to browse the backend API: [API Reference](/docs/api/skulk-api)
-- I want frontend and TypeScript symbols: [TypeScript API](/typedoc/)
+- I want frontend and TypeScript symbols: [TypeScript API](https://foxlight-foundation.github.io/Skulk/typedoc/)
 - I want implementation context before I integrate: [Architecture overview](architecture)
 
 ## What Lives Here

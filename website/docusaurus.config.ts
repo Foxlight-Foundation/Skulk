@@ -44,6 +44,23 @@ const config: Config = {
   ],
 
   plugins: [
+    // postman-code-generators (transitive dep of the OpenAPI theme) uses
+    // Node's `path` module.  Webpack 5 no longer auto-polyfills Node core
+    // modules, so we supply the browser shim explicitly.
+    function nodePolyfillPlugin() {
+      return {
+        name: "node-polyfill-plugin",
+        configureWebpack() {
+          return {
+            resolve: {
+              fallback: {
+                path: require.resolve("path-browserify"),
+              },
+            },
+          };
+        },
+      };
+    },
     [
       "docusaurus-plugin-openapi-docs",
       {
@@ -93,7 +110,10 @@ const config: Config = {
         },
         {
           // TypeDoc HTML is served from website/static/typedoc/ at /typedoc/.
-          href: "/Skulk/typedoc/",
+          // Uses the full URL so Docusaurus doesn't treat it as an internal
+          // link and fail the broken-link check (static files are invisible
+          // to the link checker).
+          href: "https://foxlight-foundation.github.io/Skulk/typedoc/",
           label: "TypeScript API",
           position: "left",
         },
@@ -120,7 +140,10 @@ const config: Config = {
           title: "Reference",
           items: [
             { label: "API Reference", to: "/docs/api/skulk-api" },
-            { label: "TypeScript API", href: "/Skulk/typedoc/" },
+            {
+              label: "TypeScript API",
+              href: "https://foxlight-foundation.github.io/Skulk/typedoc/",
+            },
           ],
         },
         {
