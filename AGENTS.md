@@ -174,7 +174,7 @@ Only fix comments rated 4 or 5. Do not iterate on minor wording, style, or specu
 ### Before Every Commit
 
 1. Run the pre-commit checks (type check, lint, format, test) as documented above.
-2. Verify that all new or modified API endpoints are documented in `docs/api.md`.
+2. Verify that all new or modified API endpoints are documented in `website/docs/api-guide.md`.
 3. Verify that all new or modified API endpoints have proper FastAPI decorators (`tags`, `summary`, `description`).
 4. Verify that all new or modified public functions have docstrings.
 5. If the dashboard was changed, run `npm run build` in `dashboard-react/` to confirm it builds.
