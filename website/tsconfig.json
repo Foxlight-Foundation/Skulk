@@ -1,0 +1,8 @@
+{
+  // Extends the shared Docusaurus TypeScript config which handles all the
+  // module resolution and JSX settings Docusaurus needs.
+  "extends": "@docusaurus/tsconfig",
+  "compilerOptions": {
+    "baseUrl": "."
+  }
+}
