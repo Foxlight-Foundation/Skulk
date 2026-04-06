@@ -70,6 +70,7 @@ const ModelSelect = styled.select`
 `;
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
+const STREAM_STALL_TIMEOUT_MS = 60_000;
 
 /* ── Component ────────────────────────────────────────── */
 
@@ -235,6 +236,18 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    let stallTimer: number | null = null;
+    let requestTimedOut = false;
+
+    const resetStallTimer = () => {
+      if (stallTimer !== null) {
+        window.clearTimeout(stallTimer);
+      }
+      stallTimer = window.setTimeout(() => {
+        requestTimedOut = true;
+        controller.abort();
+      }, STREAM_STALL_TIMEOUT_MS);
+    };
 
     const startTime = performance.now();
     let firstTokenTime: number | null = null;
@@ -244,6 +257,8 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     let lastTps: number | undefined;
 
     try {
+      resetStallTimer();
+
       // Build messages array — use multimodal content format when images are attached
       const apiMessages = allMessages.map((m) => {
         if (m.attachments?.some((a) => a.type.startsWith('image/') && a.preview)) {
@@ -288,6 +303,8 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+
+        resetStallTimer();
 
         buffer += decoder.decode(value, { stream: true });
 
@@ -373,23 +390,37 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     } catch (err) {
       if ((err as Error).name === 'AbortError') {
         // User cancelled
+        if (requestTimedOut) {
+          rawContent = `Error: generation stalled for more than ${Math.round(STREAM_STALL_TIMEOUT_MS / 1000)} seconds.`;
+        }
       } else {
         rawContent = rawContent || `Error: ${(err as Error).message}`;
+      }
+    } finally {
+      if (stallTimer !== null) {
+        window.clearTimeout(stallTimer);
       }
     }
 
     // Finalize assistant message
-    const assistantMsg: ChatMessage = {
-      id: crypto.randomUUID(),
-      role: 'assistant',
-      content: rawContent.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<think>[\s\S]*/i, '').trim(),
-      timestamp: Date.now(),
-      ttftMs: firstTokenTime ? firstTokenTime - startTime : undefined,
-      tps: lastTps,
-      thinkingContent: fullThinking || undefined,
-    };
+    const finalAssistantContent = rawContent
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/<think>[\s\S]*/i, '')
+      .trim();
 
-    addMessage(assistantMsg);
+    if (finalAssistantContent || fullThinking) {
+      const assistantMsg: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: finalAssistantContent,
+        timestamp: Date.now(),
+        ttftMs: firstTokenTime ? firstTokenTime - startTime : undefined,
+        tps: lastTps,
+        thinkingContent: fullThinking || undefined,
+      };
+
+      addMessage(assistantMsg);
+    }
     setStreamingContent(null);
     setStreamingThinking(null);
     setIsLoading(false);
