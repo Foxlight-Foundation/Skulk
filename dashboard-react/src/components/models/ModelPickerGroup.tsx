@@ -205,6 +205,7 @@ const InfoIconWrapper = styled.span`
 
 function ModelGroupInfo({ group }: { group: ModelGroup }) {
   const v = group.smallestVariant;
+  const resolved = v.resolved_capabilities;
   return (
     <div style={{ minWidth: 220 }}>
       <div style={{ color: '#FFD700', fontWeight: 600, marginBottom: 6 }}>
@@ -229,6 +230,18 @@ function ModelGroupInfo({ group }: { group: ModelGroup }) {
           <>
             <span style={{ color: 'rgba(255,255,255,0.45)' }}>Capabilities</span>
             <span>{group.capabilities.join(', ')}</span>
+          </>
+        )}
+        {resolved && (
+          <>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Thinking toggle</span>
+            <span>{resolved.supports_thinking_toggle ? 'Supported' : 'Not supported'}</span>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Tool calling</span>
+            <span>{resolved.supports_tool_calling ? 'Supported' : 'Not supported'}</span>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Image input</span>
+            <span>{resolved.supports_image_input ? 'Supported' : 'Not supported'}</span>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Audio input</span>
+            <span>{resolved.supports_audio_input ? 'Supported' : 'Not supported'}</span>
           </>
         )}
       </div>

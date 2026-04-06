@@ -119,6 +119,9 @@ The system uses event sourcing for state management:
   - `commands.py`: Command types
   - `tasks.py`: Task types for worker execution
   - `state.py`: Cluster state model
+- `src/exo/shared/models/`: persisted model metadata and capability resolution
+  - `model_cards.py`: declarative model cards, including optional advanced capability sections
+  - `capabilities.py`: normalized runtime capability profiles derived from model cards plus conservative family defaults
 
 ### Rust Components
 Rust code in `rust/` provides:
@@ -128,6 +131,13 @@ Rust code in `rust/` provides:
 
 ### Dashboard
 React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API. The legacy Svelte dashboard in `dashboard/` is from upstream exo and is not actively used.
+
+### Model Capability System
+Skulk now treats model capability handling as two layers:
+- **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `tooling`, and `runtime` sections for refined model support
+- **Resolved capability profiles**: normalized runtime behavior contracts derived from the card plus conservative family defaults
+
+This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, and additive `/v1/models` metadata consumed by the dashboard.
 
 ### Logging & Observability
 Centralized logging uses a three-layer stack:

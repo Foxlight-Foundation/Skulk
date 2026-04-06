@@ -7,7 +7,7 @@ import mlx.core as mx
 from anyio import WouldBlock
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
-from exo.shared.models.model_cards import ModelTask
+from exo.shared.models.model_cards import ModelCard, ModelTask
 from exo.shared.types.chunks import (
     ErrorChunk,
     TokenChunk,
@@ -105,6 +105,7 @@ class Runner:
 
         self.generator: Builder | InferenceGenerator = Builder(
             self.model_id,
+            self.shard_metadata.model_card,
             self.event_sender,
             self.cancel_receiver,
         )
@@ -404,6 +405,7 @@ class Runner:
 @dataclass
 class Builder:
     model_id: ModelId
+    model_card: ModelCard
     event_sender: MpSender[Event]
     cancel_receiver: MpReceiver[TaskId]
     inference_model: Model | None = None
@@ -463,6 +465,7 @@ class Builder:
                 group=self.group,
                 tool_parser=tool_parser,
                 kv_prefix_cache=kv_prefix_cache,
+                model_card=self.model_card,
                 model_id=self.model_id,
                 device_rank=device_rank,
                 cancel_receiver=self.cancel_receiver,
@@ -476,6 +479,7 @@ class Builder:
             group=self.group,
             tool_parser=tool_parser,
             kv_prefix_cache=kv_prefix_cache,
+            model_card=self.model_card,
             model_id=self.model_id,
             device_rank=device_rank,
             cancel_receiver=self.cancel_receiver,

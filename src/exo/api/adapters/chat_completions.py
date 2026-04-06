@@ -23,6 +23,8 @@ from exo.api.types import (
     Usage,
 )
 from exo.download.download_utils import create_http_session
+from exo.shared.models.capabilities import resolve_model_capability_profile
+from exo.shared.models.model_cards import ModelCard
 from exo.shared.types.chunks import (
     ErrorChunk,
     PrefillProgressChunk,
@@ -142,8 +144,15 @@ async def chat_request_to_text_generation(
             dumped: dict[str, Any] = msg_copy.model_dump(exclude_none=True)
             chat_template_messages.append(dumped)
 
+    model_card = await ModelCard.load(request.model)
+    capability_profile = resolve_model_capability_profile(
+        request.model,
+        model_card=model_card,
+    )
     resolved_effort, resolved_thinking = resolve_reasoning_params(
-        request.reasoning_effort, request.enable_thinking
+        request.reasoning_effort,
+        request.enable_thinking,
+        capability_profile,
     )
 
     return TextGenerationTaskParams(

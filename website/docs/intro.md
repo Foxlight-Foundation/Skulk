@@ -22,6 +22,8 @@ If you are getting oriented, start with these pages:
 - [API guide](api-guide) for the happy path: place a model, then call the API
 - [Model store guide](model-store) for shared model storage and download workflows
 - [KV cache backends](kv-cache-backends) for backend and runtime tuning
+- [Model cards](model-cards) for the metadata and capability declarations Skulk uses to describe models
+- [Model capabilities](model-capabilities) for how declarative card fields become runtime behavior
 - [Architecture overview](architecture) for how the node, cluster, and event model fit together
 
 ## Common Jobs

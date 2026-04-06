@@ -11,3 +11,10 @@ capabilities = ["text", "thinking"]
 
 [storage_size]
 in_bytes = 70652212224
+
+[tooling]
+supports_tool_calling = true
+tool_call_format = "gpt_oss"
+
+[runtime]
+output_parser = "gpt_oss"

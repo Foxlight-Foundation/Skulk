@@ -2,8 +2,6 @@ from collections.abc import Generator
 from functools import cache
 from typing import Any
 
-from mlx_lm.models.deepseek_v32 import Model as DeepseekV32Model
-from mlx_lm.models.gpt_oss import Model as GptOssModel
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 from openai_harmony import (  # pyright: ignore[reportMissingTypeStubs]
     HarmonyEncodingName,
@@ -14,6 +12,12 @@ from openai_harmony import (  # pyright: ignore[reportMissingTypeStubs]
 )
 
 from exo.api.types import ToolCallItem
+from exo.shared.models.capabilities import resolve_model_capability_profile
+from exo.shared.models.model_cards import (
+    ModelCard,
+    OutputParserType,
+    ReasoningFormat,
+)
 from exo.shared.types.common import ModelId
 from exo.shared.types.mlx import Model
 from exo.shared.types.worker.runner_response import GenerationResponse, ToolCallResponse
@@ -41,12 +45,22 @@ def apply_all_parsers(
     model_type: type[Model],
     model_id: ModelId,
     tools: list[dict[str, Any]] | None,
+    model_card: ModelCard | None = None,
 ) -> Generator[GenerationResponse | ToolCallResponse | None]:
     mlx_generator = receiver
+    capability_profile = resolve_model_capability_profile(
+        model_id,
+        model_card=model_card,
+        tokenizer=tokenizer,
+    )
 
-    if _uses_gemma4_thinking_channels(model_id):
+    if capability_profile.thinking_format == ReasoningFormat.ChannelDelimited:
         mlx_generator = parse_gemma4_thinking_channels(mlx_generator)
-    elif tokenizer.has_thinking:
+    elif (
+        capability_profile.thinking_format == ReasoningFormat.TokenDelimited
+        and tokenizer.think_start is not None
+        and tokenizer.think_end is not None
+    ):
         mlx_generator = parse_thinking_models(
             mlx_generator,
             tokenizer.think_start,
@@ -54,23 +68,14 @@ def apply_all_parsers(
             starts_in_thinking=detect_thinking_prompt_suffix(prompt, tokenizer),
         )
 
-    if issubclass(model_type, GptOssModel):
+    if capability_profile.output_parser == OutputParserType.GptOss:
         mlx_generator = parse_gpt_oss(mlx_generator)
-    elif (
-        issubclass(model_type, DeepseekV32Model)
-        and "deepseek" in model_id.normalize().lower()
-    ):
+    elif capability_profile.output_parser == OutputParserType.DeepseekV32:
         mlx_generator = parse_deepseek_v32(mlx_generator)
     elif tool_parser:
         mlx_generator = parse_tool_calls(mlx_generator, tool_parser, tools)
 
     return mlx_generator
-
-
-def _uses_gemma4_thinking_channels(model_id: ModelId) -> bool:
-    """Return whether the model emits Gemma 4 channel-delimited thinking."""
-    normalized_model_id = model_id.normalize().lower()
-    return "gemma-4" in normalized_model_id or "gemma4" in normalized_model_id
 
 
 def parse_gemma4_thinking_channels(

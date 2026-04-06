@@ -1,7 +1,9 @@
 from collections.abc import Generator
 from typing import Any
 
+from exo.shared.models.model_cards import ModelCard, ModelTask
 from exo.shared.types.common import ModelId
+from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import Model
 from exo.shared.types.worker.runner_response import (
     FinishReason,
@@ -376,6 +378,47 @@ class TestGemma4ThinkingChannels:
 
         assert thinking_text == "Reason silently."
         assert visible_text == "Final answer."
+
+    def test_apply_all_parsers_uses_deepseek_parser_from_family_without_model_class(
+        self,
+    ):
+        tokens = [
+            _make_response(TOOL_CALLS_START, 0),
+            _make_response("\n", 1),
+            _make_response(f'<{DSML_TOKEN}invoke name="get_weather">\n', 2),
+            _make_response(
+                f'<{DSML_TOKEN}parameter name="city" string="true">Tokyo</{DSML_TOKEN}parameter>\n',
+                3,
+            ),
+            _make_response(f"</{DSML_TOKEN}invoke>\n", 4),
+            _make_response(TOOL_CALLS_END, 5, finish_reason="stop"),
+        ]
+
+        results = _step_until_finish(
+            apply_all_parsers(
+                _queue_source(tokens),
+                prompt="",
+                tool_parser=None,
+                tokenizer=_NoThinkingTokenizer(),
+                model_type=Model,
+                model_id=ModelId("custom/deepseek-compatible"),
+                tools=None,
+                model_card=ModelCard(
+                    model_id=ModelId("custom/deepseek-compatible"),
+                    storage_size=Memory.from_bytes(1024),
+                    n_layers=1,
+                    hidden_size=1,
+                    supports_tensor=False,
+                    tasks=[ModelTask.TextGeneration],
+                    family="deepseek-v3.2",
+                    capabilities=["text", "thinking"],
+                ),
+            )
+        )
+
+        tool_results = [r for r in results if isinstance(r, ToolCallResponse)]
+        assert len(tool_results) == 1
+        assert tool_results[0].tool_calls[0].name == "get_weather"
 
 
 # ── parse_tool_calls (generic) ──────────────────────────────────

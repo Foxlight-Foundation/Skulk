@@ -70,6 +70,12 @@ This is where Skulk selects inference behavior such as:
 - MLX execution path
 - KV cache backend choice
 
+The runtime behavior for a specific model family is increasingly driven by
+model-card-backed capability resolution rather than scattered family checks. See
+[Model Cards](model-cards), [Model Capabilities](model-capabilities), and
+[Gemma 4 behavior notes](model-behaviors/gemma4) for the current shape of that
+system.
+
 ### API
 
 The API server exposes:

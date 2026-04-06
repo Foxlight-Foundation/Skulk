@@ -92,6 +92,7 @@ from exo.api.types import (
     PlacementPreviewResponse,
     PurgeStagingRequest,
     PurgeStagingResponse,
+    ResolvedModelCapabilities,
     StartDownloadParams,
     StartDownloadResponse,
     ToolCall,
@@ -139,6 +140,7 @@ from exo.shared.constants import (
 )
 from exo.shared.election import ElectionMessage
 from exo.shared.logging import InterceptLogger
+from exo.shared.models.capabilities import resolve_model_capability_profile
 from exo.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -2126,6 +2128,37 @@ class API:
             tags.append("embedding")
         return tags
 
+    @staticmethod
+    def _model_list_entry(card: "ModelCard") -> ModelListModel:
+        """Build the public model-list representation for one model card."""
+        resolved_profile = resolve_model_capability_profile(
+            card.model_id,
+            model_card=card,
+        )
+        return ModelListModel(
+            id=card.model_id,
+            hugging_face_id=card.model_id,
+            name=card.model_id.short(),
+            description="",
+            tags=API._model_tags(card),
+            storage_size_megabytes=card.storage_size.in_mb,
+            supports_tensor=card.supports_tensor,
+            tasks=[task.value for task in card.tasks],
+            is_custom=card.is_custom,
+            family=card.family,
+            quantization=card.quantization,
+            base_model=card.base_model,
+            capabilities=card.capabilities,
+            context_length=card.context_length,
+            reasoning=card.reasoning,
+            modalities=card.modalities,
+            tooling=card.tooling,
+            runtime=card.runtime,
+            resolved_capabilities=ResolvedModelCapabilities.from_profile(
+                resolved_profile
+            ),
+        )
+
     async def get_models(self, status: str | None = Query(default=None)) -> ModelList:
         """Returns list of available models, optionally filtered by being downloaded."""
         cards = await get_model_cards()
@@ -2139,25 +2172,7 @@ class API:
             cards = [c for c in cards if c.model_id in downloaded_model_ids]
 
         return ModelList(
-            data=[
-                ModelListModel(
-                    id=card.model_id,
-                    hugging_face_id=card.model_id,
-                    name=card.model_id.short(),
-                    description="",
-                    tags=self._model_tags(card),
-                    storage_size_megabytes=card.storage_size.in_mb,
-                    supports_tensor=card.supports_tensor,
-                    tasks=[task.value for task in card.tasks],
-                    is_custom=card.is_custom,
-                    family=card.family,
-                    quantization=card.quantization,
-                    base_model=card.base_model,
-                    capabilities=card.capabilities,
-                    context_length=card.context_length,
-                )
-                for card in cards
-            ]
+            data=[self._model_list_entry(card) for card in cards]
         )
 
     async def add_custom_model(self, payload: AddCustomModelParams) -> ModelListModel:
@@ -2176,18 +2191,7 @@ class API:
             )
         )
 
-        return ModelListModel(
-            id=card.model_id,
-            hugging_face_id=card.model_id,
-            name=card.model_id.short(),
-            description="",
-            tags=[],
-            storage_size_megabytes=int(card.storage_size.in_mb),
-            supports_tensor=card.supports_tensor,
-            tasks=[task.value for task in card.tasks],
-            is_custom=True,
-            context_length=card.context_length,
-        )
+        return self._model_list_entry(card.model_copy(update={"is_custom": True}))
 
     async def delete_custom_model(self, model_id: ModelId) -> JSONResponse:
         """Delete a user-added custom model card and sync deletion across the cluster."""

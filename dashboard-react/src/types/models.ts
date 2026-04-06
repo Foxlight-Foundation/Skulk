@@ -1,4 +1,49 @@
 /** Dashboard-friendly model metadata derived from the Skulk model catalog. */
+export interface ReasoningCapabilityInfo {
+  supports_toggle?: boolean;
+  supports_budget?: boolean;
+  format?: string;
+  default_effort?: string;
+  disabled_effort?: string;
+}
+
+/** Optional declarative modality metadata copied from a model card. */
+export interface ModalitiesCapabilityInfo {
+  supports_audio_input?: boolean;
+  supports_native_multimodal?: boolean;
+}
+
+/** Optional declarative tool-calling metadata copied from a model card. */
+export interface ToolingCapabilityInfo {
+  supports_tool_calling?: boolean;
+  tool_call_format?: string;
+}
+
+/** Optional declarative runtime hints copied from a model card. */
+export interface RuntimeCapabilityInfo {
+  prompt_renderer?: string;
+  output_parser?: string;
+}
+
+/** Normalized runtime capability contract returned by `/v1/models`. */
+export interface ResolvedModelCapabilities {
+  family: string;
+  supports_thinking: boolean;
+  supports_thinking_toggle: boolean;
+  supports_thinking_budget: boolean;
+  default_reasoning_effort: string;
+  disabled_reasoning_effort: string;
+  thinking_format: string;
+  supports_image_input: boolean;
+  supports_audio_input: boolean;
+  supports_tool_calling: boolean;
+  tool_call_format: string;
+  prompt_renderer: string;
+  output_parser: string;
+  supports_native_multimodal: boolean;
+}
+
+/** Complete dashboard-facing model metadata entry returned by the model catalog. */
 export interface ModelInfo {
   id: string;
   name?: string;
@@ -11,6 +56,11 @@ export interface ModelInfo {
   is_custom?: boolean;
   tasks?: string[];
   hugging_face_id?: string;
+  reasoning?: ReasoningCapabilityInfo;
+  modalities?: ModalitiesCapabilityInfo;
+  tooling?: ToolingCapabilityInfo;
+  runtime?: RuntimeCapabilityInfo;
+  resolved_capabilities?: ResolvedModelCapabilities;
 }
 
 /** Group of related model variants shown as one family in the picker UI. */

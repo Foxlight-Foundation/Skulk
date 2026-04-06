@@ -40,6 +40,8 @@ from exo.api.types.openai_responses import (
     ResponseTextDoneEvent,
     ResponseUsage,
 )
+from exo.shared.models.capabilities import resolve_model_capability_profile
+from exo.shared.models.model_cards import ModelCard
 from exo.shared.types.chunks import (
     ErrorChunk,
     PrefillProgressChunk,
@@ -154,8 +156,15 @@ async def responses_request_to_text_generation(
         built_chat_template = chat_template_messages if chat_template_messages else None
 
     effort_from_reasoning = request.reasoning.effort if request.reasoning else None
+    model_card = await ModelCard.load(request.model)
+    capability_profile = resolve_model_capability_profile(
+        request.model,
+        model_card=model_card,
+    )
     resolved_effort, resolved_thinking = resolve_reasoning_params(
-        effort_from_reasoning, request.enable_thinking
+        effort_from_reasoning,
+        request.enable_thinking,
+        capability_profile,
     )
 
     # The responses API often does not provide tool args nested under a "function" field.

@@ -23,6 +23,17 @@ const sidebars: SidebarsConfig = {
         "api-guide",
         "model-store",
         "kv-cache-backends",
+        "model-cards",
+        "model-capabilities",
+        {
+          type: "category",
+          label: "Model Behaviors",
+          items: [
+            "model-behaviors/gemma4",
+            "model-behaviors/gpt-oss",
+            "model-behaviors/deepseek-v32",
+          ],
+        },
         "architecture",
       ],
     },

@@ -32,6 +32,18 @@ export interface ModelCardInfo {
   supportsTensor?: boolean;
   capabilities?: string[];
   tags?: string[];
+  resolvedCapabilities?: {
+    supportsThinking?: boolean;
+    supportsThinkingToggle?: boolean;
+    supportsThinkingBudget?: boolean;
+    supportsImageInput?: boolean;
+    supportsAudioInput?: boolean;
+    supportsToolCalling?: boolean;
+    thinkingFormat?: string;
+    promptRenderer?: string;
+    outputParser?: string;
+    supportsNativeMultimodal?: boolean;
+  };
 }
 
 export interface StoreRegistryTableProps {
@@ -420,6 +432,7 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
   const hfUrl = entry.model_id.includes('/')
     ? `https://huggingface.co/${entry.model_id}`
     : null;
+  const resolved = card?.resolvedCapabilities;
 
   return (
     <div style={{ minWidth: 240 }}>
@@ -470,6 +483,22 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
           <>
             <span style={{ color: 'rgba(255,255,255,0.45)' }}>Capabilities</span>
             <span>{card.capabilities.join(', ')}</span>
+          </>
+        )}
+        {resolved && (
+          <>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Thinking toggle</span>
+            <span>{resolved.supportsThinkingToggle ? 'Supported' : 'Not supported'}</span>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Thinking budget</span>
+            <span>{resolved.supportsThinkingBudget ? 'Supported' : 'Not supported'}</span>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Tool calling</span>
+            <span>{resolved.supportsToolCalling ? 'Supported' : 'Not supported'}</span>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Image input</span>
+            <span>{resolved.supportsImageInput ? 'Supported' : 'Not supported'}</span>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Audio input</span>
+            <span>{resolved.supportsAudioInput ? 'Supported' : 'Not supported'}</span>
+            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Reasoning format</span>
+            <span>{resolved.thinkingFormat ?? 'none'}</span>
           </>
         )}
         <span style={{ color: 'rgba(255,255,255,0.45)' }}>Files</span>

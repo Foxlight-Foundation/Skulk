@@ -319,7 +319,7 @@ Notes:
 
 - `enable_thinking` is a Skulk extension.
 - Reasoning support depends on model capabilities.
-- Models with `thinking` or `thinking_toggle` metadata are the likeliest candidates.
+- Use `/v1/models[].resolved_capabilities` to decide whether a model supports thinking and whether clients should render a thinking toggle.
 
 ## Structured Output
 
@@ -417,6 +417,11 @@ curl http://localhost:52415/v1/models
 ```
 
 This returns known model cards, not just running instances.
+
+The response now includes both:
+
+- the declarative advanced capability sections from the model card when present
+- a normalized `resolved_capabilities` block that the dashboard and API clients can use for model-aware behavior without guessing
 
 ### Search Hugging Face
 
@@ -571,9 +576,29 @@ Important fields:
 | `tags` | array | UI-friendly derived labels such as `vision`, `thinking`, `embedding`, `tensor`, and `optiq` |
 | `supports_tensor` | boolean | Whether tensor parallel launch is supported |
 | `base_model` | string | Base family or upstream source model when known |
+| `reasoning` | object/null | Optional declarative reasoning metadata from the model card |
+| `modalities` | object/null | Optional declarative modality metadata from the model card |
+| `tooling` | object/null | Optional declarative tool-calling metadata from the model card |
+| `runtime` | object/null | Optional declarative runtime integration hints from the model card |
+| `resolved_capabilities` | object/null | Normalized runtime capability view resolved from the model card and model-family defaults |
 
 The dashboard uses `tags` for compact badges and `capabilities` for filtering
 and richer tooltips.
+
+Important `resolved_capabilities` fields include:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `supports_thinking` | boolean | Whether the model family is expected to expose a reasoning or thinking mode |
+| `supports_thinking_toggle` | boolean | Whether clients can safely offer a thinking on/off control |
+| `supports_thinking_budget` | boolean | Whether the runtime expects a thinking-budget style control to exist |
+| `supports_image_input` | boolean | Whether image input is supported |
+| `supports_audio_input` | boolean | Whether audio input is supported |
+| `supports_tool_calling` | boolean | Whether structured tool calling is expected |
+| `thinking_format` | string | The normalized reasoning marker format, such as `none`, `token_delimited`, or `channel_delimited` |
+| `prompt_renderer` | string | The resolved prompt rendering strategy, such as `tokenizer`, `gemma4`, or `dsml` |
+| `output_parser` | string | The resolved output parsing strategy, such as `generic`, `gemma4`, `gpt_oss`, or `deepseek_v32` |
+| `supports_native_multimodal` | boolean | Whether Skulk can use a native multimodal execution path for the model |
 
 ## Configuration Endpoints
 

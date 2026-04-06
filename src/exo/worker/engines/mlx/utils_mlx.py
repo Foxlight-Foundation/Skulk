@@ -27,7 +27,14 @@ from mlx_lm.models.cache import KVCache
 from mlx_lm.models.deepseek_v3 import DeepseekV3Model
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
-from exo.shared.models.model_cards import ModelId
+from exo.shared.models.capabilities import resolve_model_capability_profile
+from exo.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    PromptRendererType,
+    ToolCallFormat,
+    get_card,
+)
 from exo.worker.engines.mlx.constants import TRUST_REMOTE_CODE
 
 try:
@@ -70,22 +77,6 @@ from exo.worker.engines.mlx.gemma4_prompt import render_gemma4_prompt
 from exo.worker.runner.bootstrap import logger
 
 Group = mx.distributed.Group
-
-
-def _uses_gemma4_reference_prompt(task_params: TextGenerationTaskParams) -> bool:
-    """Return whether this request should use the dedicated Gemma 4 renderer."""
-    model_name = str(task_params.model).lower()
-    if "gemma-4" not in model_name and "gemma4" not in model_name:
-        return False
-
-    if task_params.tools:
-        # Tool-enabled Gemma 4 requests still use the tokenizer template until
-        # we port the full declaration/call grammar from the reference
-        # renderer. The current bug report is for plain multimodal prompting.
-        return False
-
-    return task_params.chat_template_messages is not None
-
 
 def _gemma4_output_length_for_pixel_values(
     pixel_values: mx.array,
@@ -643,6 +634,11 @@ def load_tokenizer_for_model_id(
     """
     model_id_lower = model_id.lower()
     eos_token_ids = get_eos_token_ids_for_model(model_id)
+    model_card = get_card(model_id)
+    capability_profile = resolve_model_capability_profile(
+        model_id,
+        model_card=model_card,
+    )
 
     # Kimi uses a custom TikTokenTokenizer that transformers 5.x can't load via AutoTokenizer
     if "kimi-k2" in model_id_lower:
@@ -710,7 +706,7 @@ def load_tokenizer_for_model_id(
         else:
             tokenizer.eos_token_ids = [gemma_eos_id, gemma_end_of_turn_id]
 
-    if "gemma-4" in model_id_lower:
+    if capability_profile.tool_call_format == ToolCallFormat.Gemma4:
         tokenizer.tool_call_start = "<|tool_call>"
         tokenizer.tool_call_end = "<tool_call|>"
         tokenizer.tool_parser = _parse_gemma4_tool_calls
@@ -790,13 +786,10 @@ def _patch_lossy_chat_template(template: str) -> str | None:
     return patched if n > 0 else None
 
 
-def _needs_dsml_encoding(task_params: TextGenerationTaskParams) -> bool:
-    return "deepseek-v3.2" in task_params.model.lower()
-
-
 def apply_chat_template(
     tokenizer: TokenizerWrapper,
     task_params: TextGenerationTaskParams,
+    model_card: ModelCard | None = None,
 ) -> str:
     """Convert TextGenerationTaskParams to a chat template prompt.
 
@@ -830,7 +823,14 @@ def apply_chat_template(
         partial_assistant_content = cast(str, formatted_messages[-1].get("content", ""))
         formatted_messages = formatted_messages[:-1]
 
-    if _needs_dsml_encoding(task_params):
+    capability_profile = resolve_model_capability_profile(
+        task_params.model,
+        model_card=model_card,
+        tokenizer=tokenizer,
+        task_params=task_params,
+    )
+
+    if capability_profile.prompt_renderer == PromptRendererType.Dsml:
         from exo.worker.engines.mlx.dsml_encoding import encode_messages
 
         prompt = encode_messages(
@@ -846,7 +846,7 @@ def apply_chat_template(
         logger.info(prompt)
         return prompt
 
-    if _uses_gemma4_reference_prompt(task_params):
+    if capability_profile.prompt_renderer == PromptRendererType.Gemma4:
         prompt = render_gemma4_prompt(
             formatted_messages,
             add_generation_prompt=True,
