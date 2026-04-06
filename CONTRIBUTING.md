@@ -83,6 +83,21 @@ Before starting work:
 
 This makes reviews faster and helps us maintain code quality as the project evolves.
 
+## Pull Request Review Loop
+
+When working an active PR, use this review loop:
+
+1. Inspect the PR for new review comments, unresolved threads, and failing checks.
+2. Rank each comment on the repository's 1–5 severity scale.
+3. Ignore severity 1–2 comments.
+4. Defer severity 3 comments unless maintainers explicitly ask for them in the current PR.
+5. Fix severity 4–5 comments with the smallest correct change.
+6. Add or update focused tests for every correctness fix.
+7. Run focused validation before replying.
+8. Reply on each addressed thread with the concrete fix.
+9. Resolve only threads that are actually addressed.
+10. Repeat until there are no unresolved severity 4–5 comments, or stop and escalate if the change becomes ambiguous, broad, or blocked.
+
 ## Code Style
 
 Write pure functions where possible. Leverage the type systems available to you — Rust's type system, Python type hints, and TypeScript types. Comments should explain why you're doing something, not what the code does — especially for non-obvious decisions.
