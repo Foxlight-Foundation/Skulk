@@ -47,17 +47,21 @@ const config: Config = {
   ],
 
   plugins: [
-    // postman-code-generators (transitive dep of the OpenAPI theme) uses
-    // Node's `path` module.  Webpack 5 no longer auto-polyfills Node core
-    // modules, so we supply the browser shim explicitly.
-    function nodePolyfillPlugin() {
+    // postman-code-generators (transitive dep of the OpenAPI theme) imports
+    // Node core modules.  They're only used during SSG, not at runtime in
+    // the browser, so we stub them with empty modules on the client side.
+    function stubNodeModulesPlugin() {
       return {
-        name: "node-polyfill-plugin",
-        configureWebpack() {
+        name: "stub-node-modules-plugin",
+        configureWebpack(_config: unknown, isServer: boolean) {
+          if (isServer) return {};
           return {
             resolve: {
               fallback: {
-                path: require.resolve("path-browserify"),
+                path: false,
+                fs: false,
+                os: false,
+                module: false,
               },
             },
           };
