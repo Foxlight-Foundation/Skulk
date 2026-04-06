@@ -2,7 +2,7 @@
 id: intro
 title: Skulk Developer Docs
 sidebar_position: 1
-slug: /intro
+slug: /
 ---
 
 <!-- Copyright 2025 Foxlight Foundation -->
