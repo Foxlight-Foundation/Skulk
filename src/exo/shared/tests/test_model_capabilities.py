@@ -126,6 +126,7 @@ def test_resolve_reasoning_params_treats_none_as_disabled_even_for_custom_profil
     )
 
     assert resolve_reasoning_params("none", None, profile) == ("minimal", False)
+    assert resolve_reasoning_params("none", True, profile) == ("minimal", False)
 
 
 def test_resolve_model_capability_profile_uses_safe_generic_fallback() -> None:

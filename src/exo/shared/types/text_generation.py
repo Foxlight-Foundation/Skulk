@@ -41,15 +41,13 @@ def resolve_reasoning_params(
         else "none"
     )
 
-    if reasoning_effort is None and enable_thinking is not None:
+    if reasoning_effort == "none":
+        resolved_effort = disabled_effort
+        resolved_thinking = False
+    elif reasoning_effort is None and enable_thinking is not None:
         resolved_effort = enabled_effort if enable_thinking else disabled_effort
-
-    if enable_thinking is None and reasoning_effort is not None:
-        if reasoning_effort == "none":
-            resolved_effort = disabled_effort
-            resolved_thinking = False
-        else:
-            resolved_thinking = reasoning_effort != disabled_effort
+    elif enable_thinking is None and reasoning_effort is not None:
+        resolved_thinking = reasoning_effort != disabled_effort
 
     return resolved_effort, resolved_thinking
 
