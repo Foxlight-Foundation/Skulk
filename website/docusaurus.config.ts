@@ -23,6 +23,17 @@ const config: Config = {
     locales: ["en"],
   },
 
+  // Use Rspack instead of webpack.  The OpenAPI theme's CJS modules have
+  // bare `exports.default = ...` that webpack mishandles (placing them
+  // outside module wrappers where `exports` is undefined).  Rspack handles
+  // CJS/ESM interop correctly and doesn't need any polyfill workarounds.
+  future: {
+    experimental_faster: true,
+    v4: {
+      removeLegacyPostBuildHeadAttribute: true,
+    },
+  },
+
   presets: [
     [
       "classic",
@@ -47,27 +58,6 @@ const config: Config = {
   ],
 
   plugins: [
-    // postman-code-generators (transitive dep of the OpenAPI theme) imports
-    // Node core modules.  They're only used during SSG, not at runtime in
-    // the browser, so we stub them with empty modules on the client side.
-    function stubNodeModulesPlugin() {
-      return {
-        name: "stub-node-modules-plugin",
-        configureWebpack(_config: unknown, isServer: boolean) {
-          if (isServer) return {};
-          return {
-            resolve: {
-              fallback: {
-                path: false,
-                fs: false,
-                os: false,
-                module: false,
-              },
-            },
-          };
-        },
-      };
-    },
     [
       "docusaurus-plugin-openapi-docs",
       {
