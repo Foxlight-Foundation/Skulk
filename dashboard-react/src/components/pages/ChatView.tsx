@@ -70,7 +70,8 @@ const ModelSelect = styled.select`
 `;
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
-const STREAM_STALL_TIMEOUT_MS = 60_000;
+const INITIAL_STREAM_STALL_TIMEOUT_MS = 10 * 60_000;
+const ACTIVE_STREAM_STALL_TIMEOUT_MS = 60_000;
 
 /* ── Component ────────────────────────────────────────── */
 
@@ -238,15 +239,19 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     abortRef.current = controller;
     let stallTimer: number | null = null;
     let requestTimedOut = false;
+    let lastStallTimeoutMs = INITIAL_STREAM_STALL_TIMEOUT_MS;
 
     const resetStallTimer = () => {
       if (stallTimer !== null) {
         window.clearTimeout(stallTimer);
       }
+      lastStallTimeoutMs = firstTokenTime === null
+        ? INITIAL_STREAM_STALL_TIMEOUT_MS
+        : ACTIVE_STREAM_STALL_TIMEOUT_MS;
       stallTimer = window.setTimeout(() => {
         requestTimedOut = true;
         controller.abort();
-      }, STREAM_STALL_TIMEOUT_MS);
+      }, lastStallTimeoutMs);
     };
 
     const startTime = performance.now();
@@ -391,7 +396,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
       if ((err as Error).name === 'AbortError') {
         // User cancelled
         if (requestTimedOut) {
-          rawContent = `Error: generation stalled for more than ${Math.round(STREAM_STALL_TIMEOUT_MS / 1000)} seconds.`;
+          rawContent = `Error: generation stalled for more than ${Math.round(lastStallTimeoutMs / 1000)} seconds.`;
         }
       } else {
         rawContent = rawContent || `Error: ${(err as Error).message}`;
