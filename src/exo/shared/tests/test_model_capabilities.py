@@ -104,6 +104,7 @@ def test_resolve_model_capability_profile_keeps_gemma4_tool_fallback() -> None:
         task_params=task_params,
     )
 
+    assert profile.supports_tool_calling is True
     assert profile.prompt_renderer == PromptRendererType.Tokenizer
     assert profile.output_parser == OutputParserType.Gemma4
 
@@ -241,6 +242,7 @@ def test_resolve_model_capability_profile_uses_deepseek_v32_family_defaults() ->
 
     assert profile.supports_thinking is True
     assert profile.supports_thinking_toggle is True
+    assert profile.supports_tool_calling is True
     assert profile.prompt_renderer == PromptRendererType.Dsml
     assert profile.output_parser == OutputParserType.DeepseekV32
     assert profile.tool_call_format == ToolCallFormat.Dsml

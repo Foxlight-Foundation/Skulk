@@ -150,6 +150,7 @@ def resolve_model_capability_profile(
             update={
                 "supports_thinking": True,
                 "supports_thinking_toggle": True,
+                "supports_tool_calling": True,
                 "thinking_format": ReasoningFormat.ChannelDelimited,
                 "prompt_renderer": prompt_renderer,
                 "output_parser": OutputParserType.Gemma4,
@@ -162,6 +163,7 @@ def resolve_model_capability_profile(
             update={
                 "supports_thinking": True,
                 "supports_thinking_toggle": True,
+                "supports_tool_calling": True,
                 "prompt_renderer": PromptRendererType.Dsml,
                 "output_parser": OutputParserType.DeepseekV32,
                 "tool_call_format": ToolCallFormat.Dsml,

@@ -137,8 +137,10 @@ def test_model_list_entry_exposes_deepseek_family_defaults_without_card_extensio
     assert entry.runtime is None
     assert entry.resolved_capabilities is not None
     assert entry.resolved_capabilities.supports_thinking_toggle is True
+    assert entry.resolved_capabilities.supports_tool_calling is True
     assert entry.resolved_capabilities.prompt_renderer == "dsml"
     assert entry.resolved_capabilities.output_parser == "deepseek_v32"
+    assert entry.resolved_capabilities.tool_call_format == "dsml"
 
 
 def test_model_list_entry_honors_coarse_thinking_toggle_capability() -> None:
