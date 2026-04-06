@@ -581,6 +581,7 @@ def get_tokenizer(model_path: Path, shard_metadata: ShardMetadata) -> TokenizerW
     return load_tokenizer_for_model_id(
         shard_metadata.model_card.model_id,
         model_path,
+        model_card=shard_metadata.model_card,
         trust_remote_code=shard_metadata.model_card.trust_remote_code,
     )
 
@@ -617,7 +618,11 @@ def get_eos_token_ids_for_model(model_id: ModelId) -> list[int] | None:
 
 
 def load_tokenizer_for_model_id(
-    model_id: ModelId, model_path: Path, *, trust_remote_code: bool = TRUST_REMOTE_CODE
+    model_id: ModelId,
+    model_path: Path,
+    *,
+    model_card: ModelCard | None = None,
+    trust_remote_code: bool = TRUST_REMOTE_CODE,
 ) -> TokenizerWrapper:
     """
     Load tokenizer for a model given its ID and local path.
@@ -634,7 +639,7 @@ def load_tokenizer_for_model_id(
     """
     model_id_lower = model_id.lower()
     eos_token_ids = get_eos_token_ids_for_model(model_id)
-    model_card = get_card(model_id)
+    model_card = model_card or get_card(model_id)
     capability_profile = resolve_model_capability_profile(
         model_id,
         model_card=model_card,
