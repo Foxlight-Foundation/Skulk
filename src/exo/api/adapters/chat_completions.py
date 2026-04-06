@@ -59,6 +59,8 @@ async def fetch_image_url(url: str) -> str:
 
 async def chat_request_to_text_generation(
     request: ChatCompletionRequest,
+    *,
+    model_card: ModelCard | None = None,
 ) -> TextGenerationTaskParams:
     instructions: str | None = None
     input_messages: list[InputMessage] = []
@@ -144,7 +146,6 @@ async def chat_request_to_text_generation(
             dumped: dict[str, Any] = msg_copy.model_dump(exclude_none=True)
             chat_template_messages.append(dumped)
 
-    model_card = await ModelCard.load(request.model)
     capability_profile = resolve_model_capability_profile(
         request.model,
         model_card=model_card,

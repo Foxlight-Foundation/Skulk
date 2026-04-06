@@ -105,9 +105,9 @@ class Runner:
 
         self.generator: Builder | InferenceGenerator = Builder(
             self.model_id,
-            self.shard_metadata.model_card,
             self.event_sender,
             self.cancel_receiver,
+            self.shard_metadata.model_card,
         )
 
         self.seen: set[TaskId] = set()
@@ -405,9 +405,9 @@ class Runner:
 @dataclass
 class Builder:
     model_id: ModelId
-    model_card: ModelCard
     event_sender: MpSender[Event]
     cancel_receiver: MpReceiver[TaskId]
+    model_card: ModelCard | None = None
     inference_model: Model | None = None
     tokenizer: TokenizerWrapper | None = None
     group: mx.distributed.Group | None = None

@@ -6,14 +6,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from exo.shared.models.capabilities import ResolvedCapabilityProfile
-from exo.shared.models.model_cards import (
-    ModalitiesCardConfig,
-    ModelCard,
-    ModelId,
-    ReasoningCardConfig,
-    RuntimeCapabilityCardConfig,
-    ToolingCardConfig,
-)
+from exo.shared.models.model_cards import ModelCard, ModelId
 from exo.shared.types.common import CommandId, NodeId
 from exo.shared.types.memory import Memory
 from exo.shared.types.text_generation import ReasoningEffort
@@ -61,19 +54,19 @@ class ModelListModel(BaseModel):
         default_factory=list,
         description="Coarse catalog capability labels such as text, vision, thinking, or embedding.",
     )
-    reasoning: ReasoningCardConfig | None = Field(
+    reasoning: "ReasoningCapabilitySection | None" = Field(
         default=None,
         description="Optional declarative reasoning controls from the model card.",
     )
-    modalities: ModalitiesCardConfig | None = Field(
+    modalities: "ModalitiesCapabilitySection | None" = Field(
         default=None,
         description="Optional declarative modality support details from the model card.",
     )
-    tooling: ToolingCardConfig | None = Field(
+    tooling: "ToolingCapabilitySection | None" = Field(
         default=None,
         description="Optional declarative tool-calling metadata from the model card.",
     )
-    runtime: RuntimeCapabilityCardConfig | None = Field(
+    runtime: "RuntimeCapabilitySection | None" = Field(
         default=None,
         description="Optional declarative runtime integration hints from the model card.",
     )
@@ -159,6 +152,90 @@ class ResolvedModelCapabilities(BaseModel):
             prompt_renderer=profile.prompt_renderer.value,
             output_parser=profile.output_parser.value,
             supports_native_multimodal=profile.supports_native_multimodal,
+        )
+
+
+class ReasoningCapabilitySection(BaseModel):
+    """Snake-case reasoning metadata exposed by the models API."""
+
+    supports_toggle: bool | None = None
+    supports_budget: bool | None = None
+    format: str | None = None
+    default_effort: ReasoningEffort | None = None
+    disabled_effort: ReasoningEffort | None = None
+
+    @classmethod
+    def from_model_card(cls, model_card: ModelCard) -> "ReasoningCapabilitySection | None":
+        config = model_card.reasoning
+        if config is None:
+            return None
+        return cls(
+            supports_toggle=config.supports_toggle,
+            supports_budget=config.supports_budget,
+            format=config.format.value if config.format is not None else None,
+            default_effort=config.default_effort,
+            disabled_effort=config.disabled_effort,
+        )
+
+
+class ModalitiesCapabilitySection(BaseModel):
+    """Snake-case modality metadata exposed by the models API."""
+
+    supports_audio_input: bool | None = None
+    supports_native_multimodal: bool | None = None
+
+    @classmethod
+    def from_model_card(cls, model_card: ModelCard) -> "ModalitiesCapabilitySection | None":
+        config = model_card.modalities
+        if config is None:
+            return None
+        return cls(
+            supports_audio_input=config.supports_audio_input,
+            supports_native_multimodal=config.supports_native_multimodal,
+        )
+
+
+class ToolingCapabilitySection(BaseModel):
+    """Snake-case tool-calling metadata exposed by the models API."""
+
+    supports_tool_calling: bool | None = None
+    tool_call_format: str | None = None
+
+    @classmethod
+    def from_model_card(cls, model_card: ModelCard) -> "ToolingCapabilitySection | None":
+        config = model_card.tooling
+        if config is None:
+            return None
+        return cls(
+            supports_tool_calling=config.supports_tool_calling,
+            tool_call_format=(
+                config.tool_call_format.value
+                if config.tool_call_format is not None
+                else None
+            ),
+        )
+
+
+class RuntimeCapabilitySection(BaseModel):
+    """Snake-case runtime metadata exposed by the models API."""
+
+    prompt_renderer: str | None = None
+    output_parser: str | None = None
+
+    @classmethod
+    def from_model_card(cls, model_card: ModelCard) -> "RuntimeCapabilitySection | None":
+        config = model_card.runtime
+        if config is None:
+            return None
+        return cls(
+            prompt_renderer=(
+                config.prompt_renderer.value
+                if config.prompt_renderer is not None
+                else None
+            ),
+            output_parser=(
+                config.output_parser.value if config.output_parser is not None else None
+            ),
         )
 
 

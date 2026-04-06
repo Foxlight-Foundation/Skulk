@@ -59,7 +59,7 @@ def test_model_list_entry_exposes_declared_and_resolved_capabilities() -> None:
     assert entry.reasoning is not None
     assert entry.reasoning.supports_toggle is True
     assert entry.runtime is not None
-    assert entry.runtime.prompt_renderer == PromptRendererType.Gemma4
+    assert entry.runtime.prompt_renderer == "gemma4"
     assert entry.resolved_capabilities is not None
     assert entry.resolved_capabilities.supports_thinking_toggle is True
     assert entry.resolved_capabilities.prompt_renderer == "gemma4"
@@ -160,3 +160,38 @@ def test_model_list_entry_honors_coarse_thinking_toggle_capability() -> None:
     assert entry.resolved_capabilities is not None
     assert entry.resolved_capabilities.supports_thinking is True
     assert entry.resolved_capabilities.supports_thinking_toggle is True
+
+
+def test_model_list_entry_serializes_declared_capabilities_in_snake_case() -> None:
+    """API JSON should keep declared capability sections in snake_case."""
+    card = ModelCard(
+        model_id=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"),
+        storage_size=Memory.from_bytes(1024),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        capabilities=["text", "vision", "thinking"],
+        family="gemma",
+        reasoning=ReasoningCardConfig(
+            supports_toggle=True,
+            supports_budget=True,
+            format=ReasoningFormat.ChannelDelimited,
+        ),
+        tooling=ToolingCardConfig(
+            supports_tool_calling=True,
+            tool_call_format=ToolCallFormat.Gemma4,
+        ),
+        runtime=RuntimeCapabilityCardConfig(
+            prompt_renderer=PromptRendererType.Gemma4,
+            output_parser=OutputParserType.Gemma4,
+        ),
+    )
+
+    payload = API._model_list_entry(card).model_dump(by_alias=True)
+
+    assert payload["reasoning"]["supports_toggle"] is True
+    assert payload["reasoning"]["supports_budget"] is True
+    assert payload["tooling"]["supports_tool_calling"] is True
+    assert payload["tooling"]["tool_call_format"] == "gemma4"
+    assert payload["runtime"]["prompt_renderer"] == "gemma4"

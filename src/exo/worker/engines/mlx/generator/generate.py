@@ -28,6 +28,7 @@ from exo.api.types import (
     TopLogprobItem,
     Usage,
 )
+from exo.shared.models.model_cards import ModelCard
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import KVCacheType, Model
@@ -545,6 +546,7 @@ def warmup_inference(
     tokenizer: TokenizerWrapper,
     group: mx.distributed.Group | None,
     model_id: ModelId,
+    model_card: ModelCard | None = None,
 ) -> int:
     logger.info(f"warming up inference for instance: {model_id}")
 
@@ -561,6 +563,7 @@ def warmup_inference(
         warmup_prompt = apply_chat_template(
             tokenizer=tokenizer,
             task_params=warmup_task_params,
+            model_card=model_card,
         )
     logger.info(
         "Warmup prompt prepared "

@@ -85,6 +85,7 @@ from exo.api.types import (
     ImageListItem,
     ImageListResponse,
     ImageSize,
+    ModalitiesCapabilitySection,
     ModelList,
     ModelListModel,
     PlaceInstanceParams,
@@ -92,10 +93,13 @@ from exo.api.types import (
     PlacementPreviewResponse,
     PurgeStagingRequest,
     PurgeStagingResponse,
+    ReasoningCapabilitySection,
     ResolvedModelCapabilities,
+    RuntimeCapabilitySection,
     StartDownloadParams,
     StartDownloadResponse,
     ToolCall,
+    ToolingCapabilitySection,
     TraceCategoryStats,
     TraceEventResponse,
     TraceListItem,
@@ -1236,11 +1240,12 @@ class API:
         self, payload: ChatCompletionRequest
     ) -> ChatCompletionResponse | StreamingResponse:
         """OpenAI Chat Completions API - adapter."""
-        task_params = await chat_request_to_text_generation(payload)
-        resolved_model = await self._resolve_and_validate_text_model(
-            ModelId(task_params.model)
+        resolved_model = await self._resolve_and_validate_text_model(payload.model)
+        model_card = await ModelCard.load(resolved_model)
+        task_params = await chat_request_to_text_generation(
+            payload.model_copy(update={"model": resolved_model}),
+            model_card=model_card,
         )
-        task_params = task_params.model_copy(update={"model": resolved_model})
 
         command = await self._send_text_generation_with_images(task_params)
 
@@ -1908,9 +1913,12 @@ class API:
         self, payload: ResponsesRequest
     ) -> ResponsesResponse | StreamingResponse:
         """OpenAI Responses API."""
-        task_params = await responses_request_to_text_generation(payload)
-        resolved_model = await self._resolve_and_validate_text_model(task_params.model)
-        task_params = task_params.model_copy(update={"model": resolved_model})
+        resolved_model = await self._resolve_and_validate_text_model(payload.model)
+        model_card = await ModelCard.load(resolved_model)
+        task_params = await responses_request_to_text_generation(
+            payload.model_copy(update={"model": resolved_model}),
+            model_card=model_card,
+        )
 
         command = await self._send_text_generation_with_images(task_params)
 
@@ -2150,10 +2158,10 @@ class API:
             base_model=card.base_model,
             capabilities=card.capabilities,
             context_length=card.context_length,
-            reasoning=card.reasoning,
-            modalities=card.modalities,
-            tooling=card.tooling,
-            runtime=card.runtime,
+            reasoning=ReasoningCapabilitySection.from_model_card(card),
+            modalities=ModalitiesCapabilitySection.from_model_card(card),
+            tooling=ToolingCapabilitySection.from_model_card(card),
+            runtime=RuntimeCapabilitySection.from_model_card(card),
             resolved_capabilities=ResolvedModelCapabilities.from_profile(
                 resolved_profile
             ),

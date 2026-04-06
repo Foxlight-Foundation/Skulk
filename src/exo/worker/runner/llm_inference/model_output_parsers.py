@@ -2,6 +2,8 @@ from collections.abc import Generator
 from functools import cache
 from typing import Any
 
+from mlx_lm.models.deepseek_v32 import Model as DeepseekV32Model
+from mlx_lm.models.gpt_oss import Model as GptOssModel
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 from openai_harmony import (  # pyright: ignore[reportMissingTypeStubs]
     HarmonyEncodingName,
@@ -68,9 +70,13 @@ def apply_all_parsers(
             starts_in_thinking=detect_thinking_prompt_suffix(prompt, tokenizer),
         )
 
-    if capability_profile.output_parser == OutputParserType.GptOss:
+    if capability_profile.output_parser == OutputParserType.GptOss or issubclass(
+        model_type, GptOssModel
+    ):
         mlx_generator = parse_gpt_oss(mlx_generator)
-    elif capability_profile.output_parser == OutputParserType.DeepseekV32:
+    elif capability_profile.output_parser == OutputParserType.DeepseekV32 or issubclass(
+        model_type, DeepseekV32Model
+    ):
         mlx_generator = parse_deepseek_v32(mlx_generator)
     elif tool_parser:
         mlx_generator = parse_tool_calls(mlx_generator, tool_parser, tools)

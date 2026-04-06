@@ -47,6 +47,8 @@ export interface ResolvedModelCapabilities {
 export interface ModelInfo {
   id: string;
   name?: string;
+  context_length?: number;
+  tags?: string[];
   storage_size_megabytes?: number;
   base_model?: string;
   quantization?: string;

@@ -118,6 +118,15 @@ def test_resolve_reasoning_params_uses_profile_defaults() -> None:
     assert resolve_reasoning_params(None, False, profile) == ("none", False)
 
 
+def test_resolve_reasoning_params_treats_none_as_disabled_even_for_custom_profiles() -> None:
+    profile = ResolvedCapabilityProfile(
+        default_reasoning_effort="high",
+        disabled_reasoning_effort="minimal",
+    )
+
+    assert resolve_reasoning_params("none", None, profile) == ("minimal", False)
+
+
 def test_resolve_model_capability_profile_uses_safe_generic_fallback() -> None:
     card = ModelCard(
         model_id=ModelId("example/plain-text-model"),
@@ -139,6 +148,15 @@ def test_resolve_model_capability_profile_uses_safe_generic_fallback() -> None:
     assert profile.supports_tool_calling is False
     assert profile.prompt_renderer == PromptRendererType.Tokenizer
     assert profile.output_parser == OutputParserType.Generic
+
+
+def test_resolve_model_capability_profile_infers_family_from_short_model_id() -> None:
+    profile = resolve_model_capability_profile(
+        ModelId("mlx-community/gemma-4-custom"),
+        model_card=None,
+    )
+
+    assert profile.family == "gemma"
 
 
 def test_resolve_model_capability_profile_honors_coarse_thinking_toggle_capability() -> None:
@@ -226,3 +244,21 @@ def test_resolve_model_capability_profile_uses_deepseek_v32_family_defaults() ->
     assert profile.prompt_renderer == PromptRendererType.Dsml
     assert profile.output_parser == OutputParserType.DeepseekV32
     assert profile.tool_call_format == ToolCallFormat.Dsml
+
+
+def test_resolve_model_capability_profile_keeps_native_multimodal_conservative_by_default() -> None:
+    card = ModelCard(
+        model_id=ModelId("mlx-community/vision-model"),
+        storage_size=Memory.from_mb(100),
+        n_layers=10,
+        hidden_size=1024,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        family="vision",
+        capabilities=["text", "vision"],
+    )
+
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+
+    assert profile.supports_image_input is True
+    assert profile.supports_native_multimodal is False

@@ -72,6 +72,8 @@ def _extract_content(content: str | list[ResponseContentPart]) -> str:
 
 async def responses_request_to_text_generation(
     request: ResponsesRequest,
+    *,
+    model_card: ModelCard | None = None,
 ) -> TextGenerationTaskParams:
     input_value: list[InputMessage]
     built_chat_template: list[dict[str, Any]] | None = None
@@ -156,7 +158,6 @@ async def responses_request_to_text_generation(
         built_chat_template = chat_template_messages if chat_template_messages else None
 
     effort_from_reasoning = request.reasoning.effort if request.reasoning else None
-    model_card = await ModelCard.load(request.model)
     capability_profile = resolve_model_capability_profile(
         request.model,
         model_card=model_card,

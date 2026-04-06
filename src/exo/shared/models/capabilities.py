@@ -45,7 +45,9 @@ class ResolvedCapabilityProfile(FrozenModel):
 def _infer_family(model_id: ModelId, model_card: ModelCard | None) -> str:
     if model_card is not None and model_card.family:
         return model_card.family
-    return model_id.normalize().split("-", 1)[0]
+    short_model_id = model_id.short()
+    family = short_model_id.split("-", 1)[0]
+    return family or "generic"
 
 
 def _is_gemma4_family(profile_family: str, normalized_model_id: str) -> bool:
@@ -132,7 +134,7 @@ def resolve_model_capability_profile(
         supports_image_input=supports_image_input,
         supports_tool_calling=supports_tool_calling,
         thinking_format=thinking_format,
-        supports_native_multimodal=supports_image_input,
+        supports_native_multimodal=False,
     )
 
     # Family-specific defaults preserve current behavior until cards opt in to

@@ -23,10 +23,10 @@ def resolve_reasoning_params(
     capability_profile: "ResolvedCapabilityProfile | None" = None,
 ) -> tuple[ReasoningEffort | None, bool | None]:
     """
-    enable_thinking=True  -> reasoning_effort="medium"
-    enable_thinking=False -> reasoning_effort="none"
-    reasoning_effort="none" -> enable_thinking=False
-    reasoning_effort=<anything else> -> enable_thinking=True
+    enable_thinking=True -> use the profile's default enabled effort
+    enable_thinking=False -> use the profile's disabled effort
+    reasoning_effort="none" -> normalize to the profile's disabled effort and disable thinking
+    reasoning_effort=<anything else> -> enable thinking unless it already matches the disabled effort
     """
     resolved_effort: ReasoningEffort | None = reasoning_effort
     resolved_thinking: bool | None = enable_thinking
@@ -45,7 +45,11 @@ def resolve_reasoning_params(
         resolved_effort = enabled_effort if enable_thinking else disabled_effort
 
     if enable_thinking is None and reasoning_effort is not None:
-        resolved_thinking = reasoning_effort != disabled_effort
+        if reasoning_effort == "none":
+            resolved_effort = disabled_effort
+            resolved_thinking = False
+        else:
+            resolved_thinking = reasoning_effort != disabled_effort
 
     return resolved_effort, resolved_thinking
 

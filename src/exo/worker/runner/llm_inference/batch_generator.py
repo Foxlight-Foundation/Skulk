@@ -118,7 +118,7 @@ class SequentialGenerator(InferenceGenerator):
     group: mx.distributed.Group | None
     kv_prefix_cache: KVPrefixCache | None
     tool_parser: ToolParser | None
-    model_card: ModelCard
+    model_card: ModelCard | None
     model_id: ModelId
     device_rank: int
     cancel_receiver: MpReceiver[TaskId]
@@ -150,6 +150,7 @@ class SequentialGenerator(InferenceGenerator):
             tokenizer=self.tokenizer,
             group=self.group,
             model_id=self.model_id,
+            model_card=self.model_card,
         )
 
     def submit(
@@ -237,18 +238,18 @@ class SequentialGenerator(InferenceGenerator):
         if task.task_params.bench:
             output_generator = queue.gen()
         else:
-                output_generator = apply_all_parsers(
-                    queue.gen(),
-                    apply_chat_template(
-                        self.tokenizer, task.task_params, model_card=self.model_card
-                    ),
-                    self.tool_parser,
-                    self.tokenizer,
-                    type(self.model),
-                    self.model_id,
-                    task.task_params.tools,
-                    self.model_card,
-                )
+            output_generator = apply_all_parsers(
+                queue.gen(),
+                apply_chat_template(
+                    self.tokenizer, task.task_params, model_card=self.model_card
+                ),
+                self.tool_parser,
+                self.tokenizer,
+                type(self.model),
+                self.model_id,
+                task.task_params.tools,
+                self.model_card,
+            )
         self._active = (task, mlx_gen, queue, output_generator)
 
     def _send_error(self, task: TextGeneration, e: Exception) -> None:
@@ -327,7 +328,7 @@ class BatchGenerator(InferenceGenerator):
     group: mx.distributed.Group | None
     kv_prefix_cache: KVPrefixCache | None
     tool_parser: ToolParser | None
-    model_card: ModelCard
+    model_card: ModelCard | None
     model_id: ModelId
     device_rank: int
     cancel_receiver: MpReceiver[TaskId]
@@ -365,6 +366,7 @@ class BatchGenerator(InferenceGenerator):
             tokenizer=self.tokenizer,
             group=self.group,
             model_id=self.model_id,
+            model_card=self.model_card,
         )
 
     def submit(
@@ -505,7 +507,9 @@ class BatchGenerator(InferenceGenerator):
 
     def _start_task(self, task: TextGeneration) -> int:
         _check_for_debug_prompts(task.task_params)
-        prompt = apply_chat_template(self.tokenizer, task.task_params)
+        prompt = apply_chat_template(
+            self.tokenizer, task.task_params, model_card=self.model_card
+        )
 
         def on_prefill_progress(processed: int, total: int) -> None:
             if self.device_rank == 0:
