@@ -102,6 +102,9 @@ def resolve_model_capability_profile(
         card is not None
         and ("thinking" in card.capabilities or card.reasoning is not None)
     )
+    supports_thinking_toggle = bool(
+        card is not None and "thinking_toggle" in card.capabilities
+    )
     supports_tool_calling = bool(
         (tokenizer is not None and getattr(tokenizer, "has_tool_calling", False))
         or (
@@ -125,6 +128,7 @@ def resolve_model_capability_profile(
     profile = ResolvedCapabilityProfile(
         family=profile_family,
         supports_thinking=supports_thinking,
+        supports_thinking_toggle=supports_thinking_toggle,
         supports_image_input=supports_image_input,
         supports_tool_calling=supports_tool_calling,
         thinking_format=thinking_format,

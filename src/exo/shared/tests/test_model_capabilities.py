@@ -141,6 +141,26 @@ def test_resolve_model_capability_profile_uses_safe_generic_fallback() -> None:
     assert profile.output_parser == OutputParserType.Generic
 
 
+def test_resolve_model_capability_profile_honors_coarse_thinking_toggle_capability() -> None:
+    card = ModelCard(
+        model_id=ModelId("mlx-community/Qwen3.5-122B-A10B-4bit"),
+        storage_size=Memory.from_mb(100),
+        n_layers=10,
+        hidden_size=1024,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        family="qwen",
+        capabilities=["text", "thinking", "thinking_toggle"],
+    )
+
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+
+    assert profile.supports_thinking is True
+    assert profile.supports_thinking_toggle is True
+    assert profile.prompt_renderer == PromptRendererType.Tokenizer
+    assert profile.output_parser == OutputParserType.Generic
+
+
 def test_resolve_model_capability_profile_uses_declared_tooling_without_model_id_match() -> None:
     card = ModelCard(
         model_id=ModelId("custom/open-model"),

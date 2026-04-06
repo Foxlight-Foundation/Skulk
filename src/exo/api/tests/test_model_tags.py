@@ -139,3 +139,24 @@ def test_model_list_entry_exposes_deepseek_family_defaults_without_card_extensio
     assert entry.resolved_capabilities.supports_thinking_toggle is True
     assert entry.resolved_capabilities.prompt_renderer == "dsml"
     assert entry.resolved_capabilities.output_parser == "deepseek_v32"
+
+
+def test_model_list_entry_honors_coarse_thinking_toggle_capability() -> None:
+    """Legacy coarse capability tags should still drive toggle support in the API contract."""
+    card = ModelCard(
+        model_id=ModelId("mlx-community/Qwen3.5-122B-A10B-4bit"),
+        storage_size=Memory.from_bytes(1024),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        capabilities=["text", "thinking", "thinking_toggle"],
+        family="qwen",
+    )
+
+    entry = API._model_list_entry(card)
+
+    assert entry.reasoning is None
+    assert entry.resolved_capabilities is not None
+    assert entry.resolved_capabilities.supports_thinking is True
+    assert entry.resolved_capabilities.supports_thinking_toggle is True
