@@ -1276,12 +1276,12 @@ class API:
     async def bench_chat_completions(
         self, payload: BenchChatCompletionRequest
     ) -> BenchChatCompletionResponse:
-        task_params = await chat_request_to_text_generation(payload)
-        resolved_model = await self._resolve_and_validate_text_model(
-            ModelId(task_params.model)
+        resolved_model = await self._resolve_and_validate_text_model(payload.model)
+        model_card = await self._get_running_model_card(resolved_model)
+        task_params = await chat_request_to_text_generation(
+            payload.model_copy(update={"model": resolved_model}),
+            model_card=model_card,
         )
-        task_params = task_params.model_copy(update={"model": resolved_model})
-
         task_params = task_params.model_copy(update={"stream": False, "bench": True})
 
         command = await self._send_text_generation_with_images(task_params)
