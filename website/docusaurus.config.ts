@@ -58,6 +58,27 @@ const config: Config = {
   ],
 
   plugins: [
+    // postman-code-generators (transitive dep of the OpenAPI theme) imports
+    // Node core modules that don't exist in the browser.  Stub them on the
+    // client since they're only exercised during SSG.
+    function stubNodeModulesPlugin() {
+      return {
+        name: "stub-node-modules-plugin",
+        configureWebpack(_config: unknown, isServer: boolean) {
+          if (isServer) return {};
+          return {
+            resolve: {
+              fallback: {
+                path: false,
+                fs: false,
+                os: false,
+                module: false,
+              },
+            },
+          };
+        },
+      };
+    },
     [
       "docusaurus-plugin-openapi-docs",
       {
