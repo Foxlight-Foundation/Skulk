@@ -1241,7 +1241,7 @@ class API:
     ) -> ChatCompletionResponse | StreamingResponse:
         """OpenAI Chat Completions API - adapter."""
         resolved_model = await self._resolve_and_validate_text_model(payload.model)
-        model_card = await ModelCard.load(resolved_model)
+        model_card = await self._get_running_model_card(resolved_model)
         task_params = await chat_request_to_text_generation(
             payload.model_copy(update={"model": resolved_model}),
             model_card=model_card,
@@ -1303,6 +1303,18 @@ class API:
                 detail=f"No instance found for model {model_id}",
             )
         return model_id
+
+    async def _get_running_model_card(self, model_id: ModelId) -> ModelCard:
+        """Return a model card for a running instance without requiring remote lookup.
+
+        Text requests should prefer the in-memory shard metadata once a model is
+        already running so request availability does not depend on model-card
+        cache misses or Hugging Face fetches during normal inference.
+        """
+        for instance in self.state.instances.values():
+            if instance.shard_assignments.model_id == model_id:
+                return instance.shard_assignments.model_card
+        return await ModelCard.load(model_id)
 
     async def _validate_image_model(self, model: ModelId) -> ModelId:
         """Validate model exists and return resolved model ID.
@@ -1914,7 +1926,7 @@ class API:
     ) -> ResponsesResponse | StreamingResponse:
         """OpenAI Responses API."""
         resolved_model = await self._resolve_and_validate_text_model(payload.model)
-        model_card = await ModelCard.load(resolved_model)
+        model_card = await self._get_running_model_card(resolved_model)
         task_params = await responses_request_to_text_generation(
             payload.model_copy(update={"model": resolved_model}),
             model_card=model_card,
