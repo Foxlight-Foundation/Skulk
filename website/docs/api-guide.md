@@ -145,7 +145,7 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `GET /v1/traces/{task_id}/stats`
 - `GET /v1/traces/{task_id}/raw`
 
-For the full interactive reference with request/response schemas, see the [API Reference](/docs/api/skulk-api).
+For the full interactive reference with request/response schemas, see the [API Reference](/api/skulk-api).
 
 ## OpenAI Chat Completions
 
@@ -656,4 +656,4 @@ Use these endpoints when you are debugging generation behavior, cluster executio
 - [README](https://github.com/Foxlight-Foundation/Skulk/blob/main/README.md)
 - [Model store guide](model-store)
 - [Architecture overview](architecture)
-- [API Reference](/docs/api/skulk-api)
+- [API Reference](/api/skulk-api)
