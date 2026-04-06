@@ -80,8 +80,8 @@ _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
 
 def _mlx_hang_debug_enabled() -> bool:
     """Return whether verbose warmup/prefill hang diagnostics are enabled."""
-    value = os.environ.get("EXO_MLX_HANG_DEBUG") or os.environ.get(
-        "SKULK_MLX_HANG_DEBUG"
+    value = os.environ.get("SKULK_MLX_HANG_DEBUG") or os.environ.get(
+        "EXO_MLX_HANG_DEBUG"
     )
     if value is None:
         return False
@@ -90,8 +90,8 @@ def _mlx_hang_debug_enabled() -> bool:
 
 def _mlx_hang_debug_interval_seconds() -> float:
     """Return the periodic interval for hang-debug watchdog logs."""
-    raw = os.environ.get("EXO_MLX_HANG_DEBUG_INTERVAL_SECONDS") or os.environ.get(
-        "SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS"
+    raw = os.environ.get("SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS") or os.environ.get(
+        "EXO_MLX_HANG_DEBUG_INTERVAL_SECONDS"
     )
     if raw is None:
         return 30.0

@@ -79,6 +79,27 @@ Some follow-up work is intentionally tracked separately, including:
 - audio input support for variants that expose it upstream
 - fuller Gemma 4 tool grammar support
 
+## Debugging Gemma 4 Stalls
+
+If Gemma 4 appears to hang during warmup or prefill, enable the MLX
+hang-debug instrumentation before starting Skulk:
+
+```bash
+export SKULK_MLX_HANG_DEBUG=1
+export SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS=10
+uv run skulk
+```
+
+This causes the runner to log:
+
+- warmup and prefill phase boundaries
+- the selected prefill path
+- whether the first prefill token was ever produced
+- repeated Python stack traces while the stuck phase is still active
+
+The older `EXO_MLX_HANG_DEBUG` names still work as compatibility fallbacks, but
+new scripts and docs should prefer the `SKULK_` prefix.
+
 ## Why This Matters
 
 Gemma 4 is the proof point for the model capability system.
