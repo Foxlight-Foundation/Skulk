@@ -1,0 +1,12 @@
+# Docusaurus build output
+build/
+.docusaurus/
+
+# Generated API reference MDX (produced by `npm run gen-api-docs`)
+docs/api/
+
+# Generated TypeDoc HTML (produced by `npm run docs:typedoc` in dashboard-react)
+static/typedoc/
+
+# Node modules
+node_modules/

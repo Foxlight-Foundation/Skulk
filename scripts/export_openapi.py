@@ -40,9 +40,51 @@ def build_docs_api() -> API:
     )
 
 
+def _hoist_defs(schema: dict) -> dict:
+    """Move inline ``$defs`` up to ``components/schemas`` and rewrite ``$ref`` pointers.
+
+    Pydantic v2 emits ``$defs`` inside individual request/response schemas,
+    but docusaurus-plugin-openapi-docs resolves ``$ref`` against the whole
+    document root, causing "Missing $ref pointer" errors.  Hoisting the
+    definitions to ``components/schemas`` and rewriting ``#/$defs/Foo`` to
+    ``#/components/schemas/Foo`` makes the spec compatible.
+    """
+    components = schema.setdefault("components", {})
+    schemas = components.setdefault("schemas", {})
+
+    def _collect(node: object) -> None:
+        if isinstance(node, dict):
+            if "$defs" in node:
+                for name, defn in node.pop("$defs").items():
+                    schemas.setdefault(name, defn)
+                    _collect(defn)
+            for value in node.values():
+                _collect(value)
+        elif isinstance(node, list):
+            for item in node:
+                _collect(item)
+
+    _collect(schema)
+
+    def _rewrite_refs(node: object) -> None:
+        if isinstance(node, dict):
+            if "$ref" in node and isinstance(node["$ref"], str):
+                ref = node["$ref"]
+                if ref.startswith("#/$defs/"):
+                    node["$ref"] = ref.replace("#/$defs/", "#/components/schemas/")
+            for value in node.values():
+                _rewrite_refs(value)
+        elif isinstance(node, list):
+            for item in node:
+                _rewrite_refs(item)
+
+    _rewrite_refs(schema)
+    return schema
+
+
 def write_openapi(output_path: Path) -> None:
     api = build_docs_api()
-    schema = api.app.openapi()
+    schema = _hoist_defs(api.app.openapi())
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(schema, indent=2) + "\n")
 

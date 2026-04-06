@@ -1,0 +1,33 @@
+/* Copyright 2025 Foxlight Foundation */
+
+/**
+ * Custom CSS overrides for the Skulk docs site.
+ *
+ * Docusaurus exposes its full design token set as CSS variables — override
+ * them here rather than in component styles so the values propagate cleanly
+ * through the theme.
+ */
+
+/* --ifm-color-primary is used for links, active sidebar items, buttons, etc. */
+:root {
+  --ifm-color-primary: #6366f1;
+  --ifm-color-primary-dark: #4f52e8;
+  --ifm-color-primary-darker: #4346e4;
+  --ifm-color-primary-darkest: #2d30d5;
+  --ifm-color-primary-light: #7779f4;
+  --ifm-color-primary-lighter: #8385f5;
+  --ifm-color-primary-lightest: #a5a6f9;
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+}
+
+[data-theme="dark"] {
+  --ifm-color-primary: #818cf8;
+  --ifm-color-primary-dark: #6c77f6;
+  --ifm-color-primary-darker: #616cf5;
+  --ifm-color-primary-darkest: #3d4af1;
+  --ifm-color-primary-light: #96a0fa;
+  --ifm-color-primary-lighter: #a1abfb;
+  --ifm-color-primary-lightest: #c1c8fd;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+}

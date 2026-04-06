@@ -27,13 +27,20 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: dashboard-react/package-lock.json
+          # Cache both the dashboard and the Docusaurus site together.
+          cache-dependency-path: |
+            dashboard-react/package-lock.json
+            website/package-lock.json
 
       - name: Install Python dependencies
         run: uv sync --group dev
 
       - name: Install dashboard dependencies
         working-directory: dashboard-react
+        run: npm ci
+
+      - name: Install website dependencies
+        working-directory: website
         run: npm ci
 
       - name: Build dashboard
@@ -48,13 +55,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: docs-site
-          path: site
+          path: website/build
 
       - name: Upload Pages artifact
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: website/build
 
   deploy-docs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
