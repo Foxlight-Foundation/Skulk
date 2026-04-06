@@ -23,6 +23,17 @@ const config: Config = {
     locales: ["en"],
   },
 
+  // Use Rspack instead of webpack.  The OpenAPI theme's CJS modules have
+  // bare `exports.default = ...` that webpack mishandles (placing them
+  // outside module wrappers where `exports` is undefined).  Rspack handles
+  // CJS/ESM interop correctly and doesn't need any polyfill workarounds.
+  future: {
+    experimental_faster: true,
+    v4: {
+      removeLegacyPostBuildHeadAttribute: true,
+    },
+  },
+
   presets: [
     [
       "classic",
@@ -47,17 +58,21 @@ const config: Config = {
   ],
 
   plugins: [
-    // postman-code-generators (transitive dep of the OpenAPI theme) uses
-    // Node's `path` module.  Webpack 5 no longer auto-polyfills Node core
-    // modules, so we supply the browser shim explicitly.
-    function nodePolyfillPlugin() {
+    // postman-code-generators (transitive dep of the OpenAPI theme) imports
+    // Node core modules that don't exist in the browser.  Stub them on the
+    // client since they're only exercised during SSG.
+    function stubNodeModulesPlugin() {
       return {
-        name: "node-polyfill-plugin",
-        configureWebpack() {
+        name: "stub-node-modules-plugin",
+        configureWebpack(_config: unknown, isServer: boolean) {
+          if (isServer) return {};
           return {
             resolve: {
               fallback: {
-                path: require.resolve("path-browserify"),
+                path: false,
+                fs: false,
+                os: false,
+                module: false,
               },
             },
           };
