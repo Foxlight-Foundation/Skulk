@@ -29,6 +29,9 @@ const config: Config = {
       {
         docs: {
           sidebarPath: "./sidebars.ts",
+          // Serve docs at the site root (/Skulk/) instead of /Skulk/docs/
+          // so URLs match the README links (e.g. /Skulk/architecture/).
+          routeBasePath: "/",
           // Required by docusaurus-plugin-openapi-docs so API pages render
           // with the interactive request/response UI rather than plain MDX.
           docItemComponent: "@theme/ApiItem",
@@ -130,16 +133,16 @@ const config: Config = {
         {
           title: "Guides",
           items: [
-            { label: "API Guide", to: "/docs/api-guide" },
-            { label: "Architecture", to: "/docs/architecture" },
-            { label: "Model Store", to: "/docs/model-store" },
-            { label: "KV Cache Backends", to: "/docs/kv-cache-backends" },
+            { label: "API Guide", to: "/api-guide" },
+            { label: "Architecture", to: "/architecture" },
+            { label: "Model Store", to: "/model-store" },
+            { label: "KV Cache Backends", to: "/kv-cache-backends" },
           ],
         },
         {
           title: "Reference",
           items: [
-            { label: "API Reference", to: "/docs/api/skulk-api" },
+            { label: "API Reference", to: "/api/skulk-api" },
             {
               label: "TypeScript API",
               href: "https://foxlight-foundation.github.io/Skulk/typedoc/",

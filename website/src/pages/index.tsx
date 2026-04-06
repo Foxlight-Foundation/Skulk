@@ -7,5 +7,5 @@ import { Redirect } from "@docusaurus/router";
  * immediately useful rather than a separate marketing landing page.
  */
 export default function Home(): JSX.Element {
-  return <Redirect to="/docs/intro" />;
+  return <Redirect to="/intro" />;
 }
