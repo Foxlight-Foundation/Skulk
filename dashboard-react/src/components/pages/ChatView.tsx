@@ -158,6 +158,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [modelThinkingToggleSupport, setModelThinkingToggleSupport] = useState<Record<string, boolean>>({});
+  const [modelImageInputSupport, setModelImageInputSupport] = useState<Record<string, boolean>>({});
   const [modelContextLengths, setModelContextLengths] = useState<Record<string, number>>({});
 
   // Restore scroll position after store hydration + DOM render
@@ -203,14 +204,17 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
         if (!res.ok) return;
         const data = await res.json() as { data?: ModelInfo[] };
         const toggleSupport: Record<string, boolean> = {};
+        const imageSupport: Record<string, boolean> = {};
         const ctxLens: Record<string, number> = {};
         for (const m of data.data ?? []) {
           if (m.id) {
             toggleSupport[m.id] = m.resolved_capabilities?.supports_thinking_toggle ?? false;
+            imageSupport[m.id] = m.resolved_capabilities?.supports_image_input ?? false;
           }
           if (m.id && m.context_length) ctxLens[m.id] = m.context_length;
         }
         setModelThinkingToggleSupport(toggleSupport);
+        setModelImageInputSupport(imageSupport);
         setModelContextLengths(ctxLens);
       } catch { /* ignore */ }
     })();
@@ -220,6 +224,9 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
 
   const supportsThinking = selectedModelId
     ? (modelThinkingToggleSupport[selectedModelId] ?? false)
+    : false;
+  const supportsImageAttachments = selectedModelId
+    ? (modelImageInputSupport[selectedModelId] ?? false)
     : false;
 
   useEffect(() => {
@@ -566,6 +573,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
           showThinkingToggle={supportsThinking}
           thinkingEnabled={thinkingEnabled}
           onToggleThinking={() => setThinkingEnabled((v) => !v)}
+          supportsImageAttachments={supportsImageAttachments}
           placeholder={selectedModelId ? `Message ${selectedLabel}…` : 'Select a model to chat'}
         />
       </InputArea>
