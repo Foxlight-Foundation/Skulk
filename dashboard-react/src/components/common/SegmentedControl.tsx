@@ -42,6 +42,11 @@ const Segment = styled.button<{
   transition: all 0.15s;
   white-space: nowrap;
 
+  &:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 2px ${({ theme }) => theme.colors.gold};
+  }
+
   ${({ $active }) =>
     $active
       ? css`

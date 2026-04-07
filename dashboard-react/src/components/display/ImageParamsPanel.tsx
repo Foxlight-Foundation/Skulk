@@ -80,9 +80,10 @@ const Select = styled.select`
   color: ${({ theme }) => theme.colors.text};
   cursor: pointer;
 
-  &:focus {
-    border-color: ${({ theme }) => theme.colors.goldDim};
+  &:focus-visible {
+    border-color: ${({ theme }) => theme.colors.gold};
     outline: none;
+    box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim};
   }
 `;
 
@@ -156,7 +157,7 @@ const NumberInput = styled.input`
     -webkit-appearance: none;
     margin: 0;
   }
-  &:focus { border-color: ${({ theme }) => theme.colors.goldDim}; outline: none; }
+  &:focus-visible { border-color: ${({ theme }) => theme.colors.gold}; outline: none; box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim}; }
 `;
 
 const Divider = styled.div`
@@ -234,7 +235,7 @@ const TextArea = styled.textarea`
   resize: none;
   box-sizing: border-box;
   &::placeholder { color: ${({ theme }) => theme.colors.textMuted}; }
-  &:focus { border-color: ${({ theme }) => theme.colors.goldDim}; outline: none; }
+  &:focus-visible { border-color: ${({ theme }) => theme.colors.gold}; outline: none; box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim}; }
 `;
 
 const ResetBtn = styled(Button)`

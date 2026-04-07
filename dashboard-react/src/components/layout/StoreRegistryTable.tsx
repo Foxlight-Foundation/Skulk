@@ -410,7 +410,8 @@ const StopBtn = styled.button`
   transition: background 0.15s, transform 0.1s;
 
   &:hover {
-    background: ${({ theme }) => theme.colors.errorBg};
+    background: ${({ theme }) => theme.colors.error};
+    color: ${({ theme }) => theme.colors.textOnAccent};
     transform: scale(1.1);
   }
 `;
