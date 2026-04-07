@@ -72,23 +72,24 @@ const Label = styled.span`
 
 const Select = styled.select`
   all: unset;
-  background: rgba(80, 80, 80, 0.5);
-  border: 1px solid rgba(255, 215, 0, 0.3);
+  background: ${({ theme }) => theme.colors.surfaceSunken};
+  border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 4px 8px;
   font: inherit;
   color: ${({ theme }) => theme.colors.text};
   cursor: pointer;
 
-  &:focus {
-    border-color: rgba(255, 215, 0, 0.7);
+  &:focus-visible {
+    border-color: ${({ theme }) => theme.colors.gold};
     outline: none;
+    box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim};
   }
 `;
 
 const ToggleGroup = styled.div`
   display: flex;
-  border: 1px solid rgba(255, 215, 0, 0.3);
+  border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.sm};
   overflow: hidden;
 `;
@@ -103,14 +104,14 @@ const ToggleBtn = styled.button<{ $active: boolean }>`
   ${({ $active }) =>
     $active
       ? css`
-          background: #FFD700;
-          color: #000;
+          background: ${({ theme }) => theme.colors.gold};
+          color: ${({ theme }) => theme.colors.textOnAccent};
           font-weight: 600;
         `
       : css`
-          background: rgba(80, 80, 80, 0.3);
-          color: rgba(179, 179, 179, 0.8);
-          &:hover { color: #fff; }
+          background: ${({ theme }) => theme.colors.surfaceSunken};
+          color: ${({ theme }) => theme.colors.textMuted};
+          &:hover { color: ${({ theme }) => theme.colors.text}; }
         `}
 `;
 
@@ -125,8 +126,8 @@ const Switch = styled.button<{ $on: boolean }>`
 
   ${({ $on }) =>
     $on
-      ? css`background: #FFD700;`
-      : css`background: rgba(80,80,80,0.5); border: 1px solid rgba(80,80,80,0.5);`}
+      ? css`background: ${({ theme }) => theme.colors.gold};`
+      : css`background: ${({ theme }) => theme.colors.surfaceSunken}; border: 1px solid ${({ theme }) => theme.colors.border};`}
 
   &::after {
     content: '';
@@ -136,7 +137,7 @@ const Switch = styled.button<{ $on: boolean }>`
     width: 12px;
     height: 12px;
     border-radius: 50%;
-    background: ${({ $on }) => ($on ? '#000' : '#999')};
+    background: ${({ $on, theme }) => ($on ? theme.colors.textOnAccent : theme.colors.textMuted)};
     transition: left 0.2s;
   }
 `;
@@ -145,8 +146,8 @@ const NumberInput = styled.input`
   all: unset;
   width: 48px;
   text-align: center;
-  background: rgba(80, 80, 80, 0.5);
-  border: 1px solid rgba(255, 215, 0, 0.3);
+  background: ${({ theme }) => theme.colors.surfaceSunken};
+  border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 4px 6px;
   font: inherit;
@@ -156,7 +157,7 @@ const NumberInput = styled.input`
     -webkit-appearance: none;
     margin: 0;
   }
-  &:focus { border-color: rgba(255, 215, 0, 0.7); outline: none; }
+  &:focus-visible { border-color: ${({ theme }) => theme.colors.gold}; outline: none; box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim}; }
 `;
 
 const Divider = styled.div`
@@ -175,7 +176,7 @@ const AdvancedToggle = styled(Button)<{ $hasParams: boolean }>`
         width: 6px;
         height: 6px;
         border-radius: 50%;
-        background: #FFD700;
+        background: ${({ theme }) => theme.colors.gold};
       }
     `}
 `;
@@ -198,7 +199,7 @@ const RangeInput = styled.input`
   flex: 1;
   -webkit-appearance: none;
   height: 4px;
-  background: rgba(80, 80, 80, 0.5);
+  background: ${({ theme }) => theme.colors.surfaceSunken};
   border-radius: 2px;
   outline: none;
 
@@ -207,7 +208,7 @@ const RangeInput = styled.input`
     width: 12px;
     height: 12px;
     border-radius: 50%;
-    background: #FFD700;
+    background: ${({ theme }) => theme.colors.gold};
     cursor: pointer;
   }
 
@@ -215,7 +216,7 @@ const RangeInput = styled.input`
     width: 12px;
     height: 12px;
     border-radius: 50%;
-    background: #FFD700;
+    background: ${({ theme }) => theme.colors.gold};
     cursor: pointer;
     border: none;
   }
@@ -227,14 +228,14 @@ const TextArea = styled.textarea`
   width: 100%;
   font: inherit;
   color: ${({ theme }) => theme.colors.text};
-  background: rgba(80, 80, 80, 0.5);
-  border: 1px solid rgba(255, 215, 0, 0.3);
+  background: ${({ theme }) => theme.colors.surfaceSunken};
+  border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 6px 8px;
   resize: none;
   box-sizing: border-box;
   &::placeholder { color: ${({ theme }) => theme.colors.textMuted}; }
-  &:focus { border-color: rgba(255, 215, 0, 0.7); outline: none; }
+  &:focus-visible { border-color: ${({ theme }) => theme.colors.gold}; outline: none; box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim}; }
 `;
 
 const ResetBtn = styled(Button)`

@@ -56,7 +56,7 @@ const ModelSelect = styled.select`
   appearance: none;
   background: transparent;
   border: none;
-  color: #FFD700;
+  color: ${({ theme }) => theme.colors.gold};
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.xs};
   cursor: pointer;

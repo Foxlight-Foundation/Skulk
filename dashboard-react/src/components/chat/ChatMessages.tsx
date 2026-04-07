@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import styled, { css, keyframes } from 'styled-components';
+import styled, { css, keyframes, useTheme } from 'styled-components';
+import type { Theme } from '../../theme';
 import type { ChatMessage } from '../../types/chat';
 import { getFileIcon } from '../../types/chat';
 import { MarkdownContent } from '../display/MarkdownContent';
@@ -67,8 +68,9 @@ const Circle = styled.div<{ $size: number; $opacity: number }>`
   width: ${({ $size }) => $size}px;
   height: ${({ $size }) => $size}px;
   border-radius: 50%;
-  border: 1.5px solid rgba(255, 215, 0, ${({ $opacity }) => $opacity});
-  box-shadow: 0 0 8px rgba(255, 215, 0, ${({ $opacity }) => $opacity * 0.5});
+  border: 1.5px solid ${({ theme }) => theme.colors.gold};
+  box-shadow: 0 0 8px ${({ theme }) => theme.colors.gold};
+  opacity: ${({ $opacity }) => $opacity};
 `;
 
 const MessageCard = styled.div<{ $role: 'user' | 'assistant' }>`
@@ -86,7 +88,7 @@ const MessageCard = styled.div<{ $role: 'user' | 'assistant' }>`
           border-color: ${({ theme }) => theme.colors.border};
         `
       : css`
-          border-left: 2px solid rgba(255, 215, 0, 0.3);
+          border-left: 2px solid ${({ theme }) => theme.colors.goldDim};
         `}
 `;
 
@@ -100,7 +102,7 @@ const MsgHeader = styled.div`
 `;
 
 const RoleLabel = styled.span<{ $role: 'user' | 'assistant' }>`
-  color: ${({ $role }) => ($role === 'assistant' ? '#FFD700' : '#999')};
+  color: ${({ $role, theme }) => ($role === 'assistant' ? theme.colors.gold : theme.colors.textSecondary)};
   font-weight: 600;
 `;
 
@@ -111,7 +113,7 @@ const Timestamp = styled.span`
 const StatLabel = styled.span`
   color: ${({ theme }) => theme.colors.textMuted};
   font-variant-numeric: tabular-nums;
-  & > span { color: rgba(255, 215, 0, 0.7); }
+  & > span { color: ${({ theme }) => theme.colors.goldDim}; }
 `;
 
 const Dot = styled.span<{ $color: string }>`
@@ -135,7 +137,7 @@ const Cursor = styled.span`
   display: inline-block;
   width: 8px;
   height: 16px;
-  background: #FFD700;
+  background: ${({ theme }) => theme.colors.gold};
   margin-left: 2px;
   vertical-align: text-bottom;
   animation: ${blink} 0.8s step-end infinite;
@@ -154,8 +156,8 @@ const ActiveGhostBtn = styled(Button)<{ $active?: boolean }>`
   ${({ $active }) =>
     $active &&
     css`
-      color: #FFD700;
-      background: rgba(255, 215, 0, 0.1);
+      color: ${({ theme }) => theme.colors.gold};
+      background: ${({ theme }) => theme.colors.goldBg};
     `}
 `;
 
@@ -166,7 +168,7 @@ const EditArea = styled.textarea`
   font-size: ${({ theme }) => theme.fontSizes.md};
   color: ${({ theme }) => theme.colors.text};
   background: ${({ theme }) => theme.colors.bg};
-  border: 1px solid rgba(255, 215, 0, 0.4);
+  border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 8px;
   resize: none;
@@ -185,17 +187,17 @@ const BtnRow = styled.div`
 const ConfirmBox = styled.div`
   padding: 8px;
   margin-top: 8px;
-  border: 1px solid rgba(239, 68, 68, 0.3);
+  border: 1px solid ${({ theme }) => theme.colors.errorBg};
   border-radius: ${({ theme }) => theme.radii.sm};
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: #fca5a5;
+  color: ${({ theme }) => theme.colors.errorText};
 `;
 
 
 const ThinkingBlock = styled.div<{ $open: boolean }>`
   margin: 8px 0;
-  border: 1px solid rgba(255, 215, 0, 0.15);
+  border: 1px solid ${({ theme }) => theme.colors.goldBg};
   border-radius: ${({ theme }) => theme.radii.md};
   overflow: hidden;
 `;
@@ -210,10 +212,10 @@ const ThinkingHeader = styled.button`
   padding: 6px 10px;
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: rgba(255, 215, 0, 0.6);
+  color: ${({ theme }) => theme.colors.goldDim};
   transition: background 0.15s;
   box-sizing: border-box;
-  &:hover { background: rgba(255, 215, 0, 0.05); }
+  &:hover { background: ${({ theme }) => theme.colors.goldBg}; }
 `;
 
 const ThinkingChevron = styled.span<{ $open: boolean }>`
@@ -225,7 +227,7 @@ const ThinkingContent = styled.div`
   padding: 8px 10px;
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
   color: ${({ theme }) => theme.colors.textMuted};
-  border-top: 1px solid rgba(255, 215, 0, 0.1);
+  border-top: 1px solid ${({ theme }) => theme.colors.goldBg};
 
   & * {
     color: inherit;
@@ -262,7 +264,7 @@ const GenImage = styled.img`
   cursor: pointer;
   border: 1px solid ${({ theme }) => theme.colors.border};
   transition: border-color 0.15s;
-  &:hover { border-color: rgba(255, 215, 0, 0.4); }
+  &:hover { border-color: ${({ theme }) => theme.colors.goldDim}; }
 `;
 
 const AttachmentRow = styled.div`
@@ -278,7 +280,7 @@ const AttachThumb = styled.img`
   object-fit: cover;
   border-radius: ${({ theme }) => theme.radii.sm};
   cursor: pointer;
-  border: 1px solid rgba(255, 215, 0, 0.2);
+  border: 1px solid ${({ theme }) => theme.colors.goldDim};
 `;
 
 const AttachFile = styled.span`
@@ -300,14 +302,14 @@ const ScrollBtn = styled.button`
   height: 36px;
   border-radius: 50%;
   background: ${({ theme }) => theme.colors.surface};
-  border: 1px solid rgba(255, 215, 0, 0.3);
-  color: #FFD700;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  border: 1px solid ${({ theme }) => theme.colors.goldDim};
+  color: ${({ theme }) => theme.colors.gold};
+  box-shadow: 0 4px 12px ${({ theme }) => theme.colors.shadow};
   transition: all 0.15s;
 
   &:hover {
-    background: rgba(255, 215, 0, 0.1);
-    border-color: rgba(255, 215, 0, 0.5);
+    background: ${({ theme }) => theme.colors.goldBg};
+    border-color: ${({ theme }) => theme.colors.goldDim};
   }
 `;
 
@@ -339,6 +341,7 @@ export function ChatMessages({
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const [streamThinkingOpen, setStreamThinkingOpen] = useState(false);
   const lastCountRef = useRef(messages.length);
+  const theme = useTheme() as Theme;
 
   // Reset streaming thinking toggle when new stream starts
   const prevStreamingThinking = useRef(streamingThinking);
@@ -432,7 +435,7 @@ export function ChatMessages({
           <MsgHeader>
             {msg.role === 'assistant' ? (
               <>
-                <Dot $color="#FFD700" />
+                <Dot $color={theme.colors.gold} />
                 <RoleLabel $role="assistant">Skulk</RoleLabel>
                 <Timestamp>{formatTime(msg.timestamp)}</Timestamp>
                 {msg.ttftMs != null && <StatLabel>TTFT <span>{Math.round(msg.ttftMs)}ms</span></StatLabel>}
@@ -443,7 +446,7 @@ export function ChatMessages({
                 <Timestamp>{formatTime(msg.timestamp)}</Timestamp>
                 <Spacer />
                 <RoleLabel $role="user">Query</RoleLabel>
-                <Dot $color="#999" />
+                <Dot $color={theme.colors.textSecondary} />
               </>
             )}
           </MsgHeader>
@@ -571,7 +574,7 @@ export function ChatMessages({
       {(streamingContent != null || streamingThinking) && (
         <MessageCard $role="assistant">
           <MsgHeader>
-            <Dot $color="#FFD700" />
+            <Dot $color={theme.colors.gold} />
             <RoleLabel $role="assistant">Skulk</RoleLabel>
           </MsgHeader>
           {streamingThinking && (

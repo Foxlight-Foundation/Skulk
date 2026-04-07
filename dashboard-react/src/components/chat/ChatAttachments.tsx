@@ -23,13 +23,13 @@ const FileCard = styled.div`
   gap: 8px;
   padding: 6px 10px;
   background: ${({ theme }) => theme.colors.surface};
-  border: 1px solid rgba(255, 215, 0, 0.2);
+  border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.md};
   transition: all 0.15s;
 
   &:hover {
-    border-color: rgba(255, 215, 0, 0.4);
-    box-shadow: 0 0 8px rgba(255, 215, 0, 0.1);
+    border-color: ${({ theme }) => theme.colors.goldDim};
+    box-shadow: 0 0 8px ${({ theme }) => theme.colors.goldBg};
   }
 `;
 
@@ -38,7 +38,7 @@ const Thumbnail = styled.img`
   height: 32px;
   object-fit: cover;
   border-radius: ${({ theme }) => theme.radii.sm};
-  border: 1px solid rgba(255, 215, 0, 0.3);
+  border: 1px solid ${({ theme }) => theme.colors.goldDim};
 `;
 
 const IconEmoji = styled.span`
@@ -55,7 +55,7 @@ const FileInfo = styled.div`
 const FileName = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: #FFD700;
+  color: ${({ theme }) => theme.colors.gold};
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -69,7 +69,7 @@ const FileSize = styled.span`
 
 const RemoveBtn = styled(Button)`
   &:hover:not(:disabled) {
-    color: #ef4444;
+    color: ${({ theme }) => theme.colors.error};
     background: transparent;
   }
 `;

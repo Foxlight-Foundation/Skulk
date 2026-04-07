@@ -43,9 +43,9 @@ const Chip = styled(Button)<{ $active: boolean }>`
   ${({ $active }) =>
     $active &&
     css`
-      background: rgba(255, 215, 0, 0.15);
-      border-color: #ffd700;
-      color: #ffd700;
+      background: ${({ theme }) => theme.colors.goldBg};
+      border-color: ${({ theme }) => theme.colors.gold};
+      color: ${({ theme }) => theme.colors.gold};
     `}
 `;
 

@@ -1,6 +1,7 @@
-import styled, { keyframes, css } from 'styled-components';
+import styled, { keyframes, css, useTheme } from 'styled-components';
 import { FiExternalLink } from 'react-icons/fi';
 import { BsChatDotsFill } from 'react-icons/bs';
+import type { Theme } from '../../theme';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -30,14 +31,20 @@ export interface RunningInstanceCardProps {
 
 /* ── Status helpers ───────────────────────────────────── */
 
-const STATUS_CONFIG: Record<InstanceStatus, { label: string; color: string; glow: string; defaultMessage: string }> = {
-  loading:       { label: 'Loading',       color: '#FFD700', glow: 'rgba(255, 215, 0, 0.25)',  defaultMessage: 'Downloading model...' },
-  warming_up:    { label: 'Warming Up',    color: '#FFD700', glow: 'rgba(255, 215, 0, 0.25)',  defaultMessage: 'Preparing for inference...' },
-  ready:         { label: 'Ready',         color: '#4ade80', glow: 'rgba(74, 222, 128, 0.25)', defaultMessage: 'Ready to chat!' },
-  running:       { label: 'Running',       color: '#4ade80', glow: 'rgba(74, 222, 128, 0.25)', defaultMessage: 'Processing inference...' },
-  failed:        { label: 'Failed',        color: '#ef4444', glow: 'rgba(239, 68, 68, 0.25)',  defaultMessage: 'Instance failed' },
-  shutting_down: { label: 'Shutting Down', color: '#f59e0b', glow: 'rgba(245, 158, 11, 0.25)', defaultMessage: 'Shutting down...' },
-};
+/** Build status display config from the active theme. Called per render so the
+ *  status colors track theme switches. */
+function buildStatusConfig(
+  theme: Theme,
+): Record<InstanceStatus, { label: string; color: string; glow: string; defaultMessage: string }> {
+  return {
+    loading:       { label: 'Loading',       color: theme.colors.gold,    glow: theme.colors.goldDim,    defaultMessage: 'Downloading model...' },
+    warming_up:    { label: 'Warming Up',    color: theme.colors.gold,    glow: theme.colors.goldDim,    defaultMessage: 'Preparing for inference...' },
+    ready:         { label: 'Ready',         color: theme.colors.healthy, glow: theme.colors.accentBg,   defaultMessage: 'Ready to chat!' },
+    running:       { label: 'Running',       color: theme.colors.healthy, glow: theme.colors.accentBg,   defaultMessage: 'Processing inference...' },
+    failed:        { label: 'Failed',        color: theme.colors.error,   glow: theme.colors.errorBg,    defaultMessage: 'Instance failed' },
+    shutting_down: { label: 'Shutting Down', color: theme.colors.warning, glow: theme.colors.warningBg,  defaultMessage: 'Shutting down...' },
+  };
+}
 
 function formatInstanceId(id: string): string {
   return id.slice(0, 8).toUpperCase();
@@ -69,7 +76,7 @@ const Card = styled.div<{ $color: string; $glow: string }>`
   background: ${({ theme }) => theme.colors.surface};
   border: 1px solid ${({ $color }) => $color};
   border-radius: ${({ theme }) => theme.radii.md};
-  box-shadow: 0 0 12px ${({ $glow }) => $glow}, inset 0 0 12px ${({ $glow }) => $glow};
+  box-shadow: 0 0 6px ${({ $glow }) => $glow};
   padding: 12px 14px;
   display: flex;
   flex-direction: column;
@@ -119,7 +126,7 @@ const DeleteBtn = styled.button`
   transition: all 0.15s;
 
   &:hover {
-    background: rgba(239, 68, 68, 0.15);
+    background: ${({ theme }) => theme.colors.errorBg};
   }
 `;
 
@@ -195,7 +202,7 @@ const ChatBtn = styled.button`
   gap: 5px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: #4ade80;
+  color: ${({ theme }) => theme.colors.healthy};
   border: 1px solid rgba(74, 222, 128, 0.3);
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 3px 10px;
@@ -210,7 +217,7 @@ const ChatBtn = styled.button`
 const ProgressTrack = styled.div`
   width: 100%;
   height: 4px;
-  background: rgba(255, 255, 255, 0.08);
+  background: ${({ theme }) => theme.colors.borderLight};
   border-radius: 2px;
   overflow: hidden;
 `;
@@ -226,11 +233,11 @@ const ProgressFill = styled.div<{ $pct: number; $color: string }>`
     css`
       background-image: linear-gradient(
         45deg,
-        rgba(255, 255, 255, 0.15) 25%,
+        ${({ theme }) => theme.colors.border} 25%,
         transparent 25%,
         transparent 50%,
-        rgba(255, 255, 255, 0.15) 50%,
-        rgba(255, 255, 255, 0.15) 75%,
+        ${({ theme }) => theme.colors.border} 50%,
+        ${({ theme }) => theme.colors.border} 75%,
         transparent 75%
       );
       background-size: 20px 20px;
@@ -254,7 +261,8 @@ export function RunningInstanceCard({
   isEmbedding,
   className,
 }: RunningInstanceCardProps) {
-  const baseCfg = STATUS_CONFIG[status];
+  const theme = useTheme() as Theme;
+  const baseCfg = buildStatusConfig(theme)[status];
   const cfg = isEmbedding && status === 'ready'
     ? { ...baseCfg, defaultMessage: 'Ready for embedding' }
     : baseCfg;

@@ -37,7 +37,7 @@ const Sidebar = styled.aside`
   flex-direction: column;
   height: 100%;
   background: ${({ theme }) => theme.colors.surface};
-  border-right: 1px solid rgba(255, 215, 0, 0.1);
+  border-right: 1px solid ${({ theme }) => theme.colors.goldBg};
   width: 280px;
   overflow: hidden;
 `;
@@ -64,7 +64,7 @@ const SearchInput = styled.input`
   box-sizing: border-box;
 
   &::placeholder { color: ${({ theme }) => theme.colors.textMuted}; }
-  &:focus { border-color: rgba(255, 215, 0, 0.4); }
+  &:focus { border-color: ${({ theme }) => theme.colors.goldDim}; }
 `;
 
 const SectionLabel = styled.div`
@@ -90,15 +90,15 @@ const ConvItem = styled.div<{ $active: boolean }>`
   ${({ $active }) =>
     $active &&
     css`
-      background: rgba(255, 215, 0, 0.05);
-      border-left: 2px solid #FFD700;
+      background: ${({ theme }) => theme.colors.goldBg};
+      border-left: 2px solid ${({ theme }) => theme.colors.gold};
     `}
 `;
 
 const ConvName = styled.div<{ $active: boolean }>`
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ $active }) => ($active ? '#FFD700' : '#e5e5e5')};
+  color: ${({ $active, theme }) => ($active ? theme.colors.gold : theme.colors.text)};
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -128,7 +128,7 @@ const EditInput = styled.input`
   width: 100%;
   padding: 4px 8px;
   background: ${({ theme }) => theme.colors.bg};
-  border: 1px solid rgba(255, 215, 0, 0.4);
+  border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.sm};
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
@@ -139,11 +139,11 @@ const EditInput = styled.input`
 const ConfirmBox = styled.div<{ $danger?: boolean }>`
   padding: 8px;
   margin-top: 4px;
-  border: 1px solid ${({ $danger }) => ($danger ? 'rgba(239,68,68,0.3)' : 'rgba(255,215,0,0.2)')};
+  border: 1px solid ${({ $danger, theme}) => ($danger ? 'rgba(239,68,68,0.3)' : theme.colors.goldDim)};
   border-radius: ${({ theme }) => theme.radii.sm};
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ $danger, theme }) => ($danger ? '#fca5a5' : theme.colors.textSecondary)};
+  color: ${({ $danger, theme }) => ($danger ? theme.colors.errorText : theme.colors.textSecondary)};
 `;
 
 const BtnRow = styled.div`

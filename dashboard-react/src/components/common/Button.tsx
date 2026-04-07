@@ -33,31 +33,31 @@ const sizeFontMap: Record<ButtonSize, string> = {
 
 const variantStyles: Record<ButtonVariant, ReturnType<typeof css>> = {
   primary: css`
-    color: #FFD700;
-    border: 1px solid rgba(255, 215, 0, 0.4);
+    color: ${({ theme }) => theme.colors.gold};
+    border: 1px solid ${({ theme }) => theme.colors.goldDim};
     background: transparent;
 
     &:hover:not(:disabled) {
-      background: rgba(255, 215, 0, 0.1);
-      border-color: rgba(255, 215, 0, 0.6);
+      background: ${({ theme }) => theme.colors.goldBg};
+      border-color: ${({ theme }) => theme.colors.goldDim};
     }
 
     &:active:not(:disabled) {
-      background: rgba(255, 215, 0, 0.15);
+      background: ${({ theme }) => theme.colors.goldBg};
     }
   `,
   outline: css`
-    color: rgba(179, 179, 179, 0.9);
-    border: 1px solid rgba(80, 80, 80, 0.4);
+    color: ${({ theme }) => theme.colors.textSecondary};
+    border: 1px solid ${({ theme }) => theme.colors.border};
     background: transparent;
 
     &:hover:not(:disabled) {
-      color: #FFD700;
-      border-color: rgba(255, 215, 0, 0.4);
+      color: ${({ theme }) => theme.colors.gold};
+      border-color: ${({ theme }) => theme.colors.goldDim};
     }
 
     &:active:not(:disabled) {
-      background: rgba(255, 215, 0, 0.05);
+      background: ${({ theme }) => theme.colors.goldBg};
     }
   `,
   ghost: css`
@@ -66,27 +66,27 @@ const variantStyles: Record<ButtonVariant, ReturnType<typeof css>> = {
     background: transparent;
 
     &:hover:not(:disabled) {
-      color: #FFD700;
-      background: rgba(255, 215, 0, 0.08);
+      color: ${({ theme }) => theme.colors.gold};
+      background: ${({ theme }) => theme.colors.goldBg};
     }
 
     &:active:not(:disabled) {
-      background: rgba(255, 215, 0, 0.12);
+      background: ${({ theme }) => theme.colors.goldBg};
     }
   `,
   danger: css`
-    color: rgba(179, 179, 179, 0.8);
-    border: 1px solid rgba(80, 80, 80, 0.4);
+    color: ${({ theme }) => theme.colors.textSecondary};
+    border: 1px solid ${({ theme }) => theme.colors.border};
     background: transparent;
 
     &:hover:not(:disabled) {
-      color: #ef4444;
-      border-color: rgba(239, 68, 68, 0.4);
-      background: rgba(239, 68, 68, 0.08);
+      color: ${({ theme }) => theme.colors.error};
+      border-color: ${({ theme }) => theme.colors.errorBg};
+      background: ${({ theme }) => theme.colors.errorBg};
     }
 
     &:active:not(:disabled) {
-      background: rgba(239, 68, 68, 0.12);
+      background: ${({ theme }) => theme.colors.errorBg};
     }
   `,
 };
@@ -151,6 +151,12 @@ const StyledButton = styled.button<{
   &:disabled {
     opacity: 0.88;
     cursor: not-allowed;
+  }
+
+  /* Keyboard focus — all: unset removes the browser outline. */
+  &:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim};
   }
 `;
 

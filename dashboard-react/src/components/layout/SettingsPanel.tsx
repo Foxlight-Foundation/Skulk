@@ -5,6 +5,7 @@ import { Button } from '../common/Button';
 import { Field } from '../common/Field';
 import { InfoTooltip } from '../common/InfoTooltip';
 import { addToast } from '../../hooks/useToast';
+import { useUIStore } from '../../stores/uiStore';
 
 export interface SettingsPanelProps {
   open: boolean;
@@ -29,7 +30,7 @@ const Backdrop = styled.div`
   position: fixed;
   inset: 0;
   z-index: 40;
-  background: rgba(0, 0, 0, 0.5);
+  background: ${({ theme }) => theme.colors.shadowStrong};
   backdrop-filter: blur(2px);
   animation: ${fadeIn} 0.2s ease-out;
 `;
@@ -61,7 +62,7 @@ const Title = styled.h2`
   font-size: ${({ theme }) => theme.fontSizes.md};
   font-family: ${({ theme }) => theme.fonts.body};
   font-weight: 600;
-  color: #FFD700;
+  color: ${({ theme }) => theme.colors.gold};
 `;
 
 const Body = styled.div`
@@ -125,10 +126,14 @@ const Toggle = styled.button<{ $on: boolean }>`
   flex-shrink: 0;
   transition: background 0.2s;
 
-  ${({ $on }) =>
-    $on
-      ? css`background: #FFD700;`
-      : css`background: rgba(80, 80, 80, 0.5);`}
+  background: ${({ $on, theme }) =>
+    $on ? theme.colors.gold : theme.colors.surfaceSunken};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+
+  &:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim};
+  }
 
   &::after {
     content: '';
@@ -138,7 +143,8 @@ const Toggle = styled.button<{ $on: boolean }>`
     width: 16px;
     height: 16px;
     border-radius: 50%;
-    background: ${({ $on }) => ($on ? '#000' : '#999')};
+    background: ${({ theme }) => theme.colors.surface};
+    box-shadow: 0 1px 2px ${({ theme }) => theme.colors.shadow};
     transition: left 0.2s;
   }
 `;
@@ -187,7 +193,7 @@ const ConfigPath = styled.div`
 const ErrorText = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: #ef4444;
+  color: ${({ theme }) => theme.colors.error};
 `;
 
 const LoadingText = styled.div`
@@ -208,6 +214,8 @@ const Spacer = styled.span`
 
 export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const { fullConfig, effective, configPath, loading, saving, error, fetchConfig, saveFullConfig } = useConfig();
+  const themeName = useUIStore((s) => s.theme);
+  const setTheme = useUIStore((s) => s.setTheme);
   const [draft, setDraft] = useState<StoreConfig | null>(null);
   const [kvBackend, setKvBackend] = useState('default');
   const [hfToken, setHfToken] = useState('');
@@ -290,6 +298,23 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
         <Body>
           {loading && <LoadingText>Loading config…</LoadingText>}
           {error && <ErrorText>{error}</ErrorText>}
+
+          {/* Appearance */}
+          <Fieldset>
+            <Legend>Appearance</Legend>
+            <Row>
+              <FieldLabel>Color theme</FieldLabel>
+              <Toggle
+                $on={themeName === 'light'}
+                onClick={() => setTheme(themeName === 'dark' ? 'light' : 'dark')}
+                role="switch"
+                aria-checked={themeName === 'light'}
+                aria-label={themeName === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
+              />
+              <Spacer />
+              <span style={{ fontSize: 13, opacity: 0.7 }}>{themeName === 'light' ? 'Light' : 'Dark'}</span>
+            </Row>
+          </Fieldset>
 
           {draft && (
             <>

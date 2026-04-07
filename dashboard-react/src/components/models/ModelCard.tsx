@@ -1,8 +1,9 @@
-import styled, { css, keyframes } from 'styled-components';
+import styled, { css, keyframes, useTheme } from 'styled-components';
 import type { NodeInfo } from '../../types/topology';
 import type { DownloadProgress, PlacementPreview } from '../../types/models';
 import { formatBytes } from '../../utils/format';
 import { Button } from '../common/Button';
+import type { Theme } from '../../theme';
 
 /* ================================================================
    Types
@@ -165,7 +166,7 @@ const Header = styled.div`
 const ModelName = styled.div<{ $canFit: boolean }>`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ $canFit }) => ($canFit ? '#FFD700' : '#f87171')};
+  color: ${({ $canFit, theme }) => ($canFit ? theme.colors.gold : theme.colors.error)};
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -174,7 +175,7 @@ const ModelName = styled.div<{ $canFit: boolean }>`
 const ModelId = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: rgba(179, 179, 179, 0.8);
+  color: ${({ theme }) => theme.colors.textMuted};
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -184,15 +185,15 @@ const ModelId = styled.div`
 const MemorySize = styled.div<{ $canFit: boolean }>`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ $canFit }) => ($canFit ? '#FFD700' : '#f87171')};
+  color: ${({ $canFit, theme }) => ($canFit ? theme.colors.gold : theme.colors.error)};
   flex-shrink: 0;
 `;
 
 const HfLink = styled.a`
-  color: rgba(255, 255, 255, 0.6);
+  color: ${({ theme }) => theme.colors.textSecondary};
   flex-shrink: 0;
   transition: color 0.15s;
-  &:hover { color: #FFD700; }
+  &:hover { color: ${({ theme }) => theme.colors.gold}; }
 `;
 
 const BadgeRow = styled.div`
@@ -206,9 +207,10 @@ const Badge = styled.span<{ $color?: string }>`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
   padding: 2px 6px;
-  background: rgba(80, 80, 80, 0.3);
-  border: 1px solid rgba(80, 80, 80, 0.4);
-  color: ${({ $color }) => $color ?? 'rgba(179,179,179,0.8)'};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  background: ${({ theme }) => theme.colors.surfaceHover};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  color: ${({ $color, theme }) => $color ?? theme.colors.textSecondary};
 `;
 
 const TagBadge = styled.span<{ $variant: 'green' | 'purple' }>`
@@ -218,14 +220,14 @@ const TagBadge = styled.span<{ $variant: 'green' | 'purple' }>`
   border-radius: ${({ theme }) => theme.radii.sm};
   ${({ $variant }) =>
     $variant === 'green'
-      ? css`background: rgba(34,197,94,0.2); color: #4ade80; border: 1px solid rgba(34,197,94,0.3);`
+      ? css`background: rgba(34,197,94,0.2); color: ${({ theme }) => theme.colors.healthy}; border: 1px solid rgba(34,197,94,0.3);`
       : css`background: rgba(168,85,247,0.2); color: #c084fc; border: 1px solid rgba(168,85,247,0.3);`}
 `;
 
 const SectionTitle = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: rgba(255, 255, 255, 0.2);
+  color: ${({ theme }) => theme.colors.border};
   margin-bottom: 4px;
 `;
 
@@ -240,7 +242,7 @@ const DownloadRow = styled.div`
 const ProgressTrack = styled.div`
   flex: 1;
   height: 4px;
-  background: rgba(80, 80, 80, 0.3);
+  background: ${({ theme }) => theme.colors.surfaceSunken};
   border-radius: 2px;
   overflow: hidden;
 `;
@@ -249,16 +251,16 @@ const ProgressFill = styled.div<{ $status: string }>`
   height: 100%;
   transition: width 0.3s;
   ${({ $status }) => {
-    if ($status === 'downloading') return css`background: rgba(59,130,246,0.7);`;
-    if ($status === 'completed') return css`background: rgba(255,215,0,0.4);`;
-    return css`background: rgba(255,255,255,0.2);`;
+    if ($status === 'downloading') return css`background: ${({ theme }) => theme.colors.info};`;
+    if ($status === 'completed') return css`background: ${({ theme }) => theme.colors.goldDim};`;
+    return css`background: ${({ theme }) => theme.colors.border};`;
   }}
 `;
 
 const PreviewBox = styled.div`
   margin-bottom: 12px;
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(80, 80, 80, 0.2);
+  background: ${({ theme }) => theme.colors.surfaceSunken};
+  border: 1px solid ${({ theme }) => theme.colors.borderLight};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 8px;
   position: relative;
@@ -280,8 +282,8 @@ const LaunchBtn = styled(Button)<{ $canFit: boolean; $launching: boolean }>`
   ${({ $launching }) =>
     $launching &&
     css`
-      color: #FFD700;
-      border-color: rgba(255, 215, 0, 0.5);
+      color: ${({ theme }) => theme.colors.gold};
+      border-color: ${({ theme }) => theme.colors.goldDim};
       cursor: wait;
     `}
 
@@ -289,9 +291,9 @@ const LaunchBtn = styled(Button)<{ $canFit: boolean; $launching: boolean }>`
     !$canFit &&
     !$launching &&
     css`
-      background: rgba(239, 68, 68, 0.1);
-      color: rgba(248, 113, 113, 1);
-      border-color: rgba(239, 68, 68, 0.3);
+      background: ${({ theme }) => theme.colors.errorBg};
+      color: ${({ theme }) => theme.colors.error};
+      border-color: ${({ theme }) => theme.colors.errorBg};
       cursor: not-allowed;
       opacity: 1;
     `}
@@ -301,7 +303,7 @@ const LaunchSpinner = styled.span`
   display: inline-block;
   width: 8px;
   height: 8px;
-  border: 1px solid #FFD700;
+  border: 1px solid ${({ theme }) => theme.colors.gold};
   border-top-color: transparent;
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
@@ -333,6 +335,10 @@ export function ModelCard({
     ? Math.round(model.storage_size_megabytes / 1024)
     : estimateMemoryGB(model.id, model.name);
 
+  const theme = useTheme() as Theme;
+  // Drop the SVG glow filter in light mode — looks like a hard drop-shadow against
+  // the soft blue background.
+  const useGlow = theme.colors.bg === '#000000';
   const placement = computePlacement(nodes, apiPreview);
   const canFit = apiPreview ? apiPreview.error === null : placement.canFit;
   const perNode = downloadStatus?.perNode ?? [];
@@ -395,7 +401,7 @@ export function ModelCard({
           <SectionTitle>Download progress</SectionTitle>
           {perNode.map((nd) => (
             <DownloadRow key={nd.nodeId}>
-              <span style={{ color: 'rgba(255,255,255,0.4)', width: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={nd.nodeId}>
+              <span style={{ color: theme.colors.textMuted, width: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={nd.nodeId}>
                 {nd.nodeName}
               </span>
               <ProgressTrack>
@@ -403,7 +409,7 @@ export function ModelCard({
               </ProgressTrack>
               <span style={{
                 textAlign: 'right',
-                color: nd.status === 'completed' ? 'rgba(255,215,0,0.6)' : nd.status === 'downloading' ? 'rgba(96,165,250,0.6)' : 'rgba(255,255,255,0.3)',
+                color: nd.status === 'completed' ? theme.colors.goldDim : nd.status === 'downloading' ? theme.colors.info : theme.colors.textMuted,
               }}>
                 {nd.status === 'downloading' && nd.progress
                   ? `${Math.round(nd.percentage)}% ${formatSpeed(nd.progress.speed)}`
@@ -440,7 +446,7 @@ export function ModelCard({
                 <line
                   key={`${n.id}-${n2.id}`}
                   x1={n.x} y1={n.y} x2={n2.x} y2={n2.y}
-                  stroke={n.isUsed && n2.isUsed ? '#FFD700' : '#374151'}
+                  stroke={n.isUsed && n2.isUsed ? theme.colors.gold : theme.colors.border}
                   strokeWidth={1}
                   strokeDasharray={n.isUsed && n2.isUsed ? '4,2' : '2,4'}
                   opacity={n.isUsed && n2.isUsed ? 0.5 : 0.25}
@@ -453,8 +459,8 @@ export function ModelCard({
               <g
                 key={node.id}
                 transform={`translate(${node.x}, ${node.y})`}
-                opacity={node.isUsed ? 1 : 0.7}
-                filter={node.isUsed ? `url(#nodeGlow-${filterId})` : undefined}
+                opacity={node.isUsed ? 1 : (theme.colors.bg === '#000000' ? 0.7 : 0.9)}
+                filter={node.isUsed && useGlow ? `url(#nodeGlow-${filterId})` : undefined}
               >
                 <PlacementDeviceIcon node={node} filterId={filterId} />
                 <text
@@ -462,7 +468,7 @@ export function ModelCard({
                   textAnchor="middle"
                   fontSize={8}
                   fontFamily="SF Mono, Monaco, monospace"
-                  fill={node.isUsed ? (node.newPercent > 90 ? '#f87171' : '#FFD700') : '#9CA3AF'}
+                  fill={node.isUsed ? (node.newPercent > 90 ? theme.colors.error : theme.colors.gold) : theme.colors.textMuted}
                 >
                   {node.newPercent.toFixed(0)}%
                 </text>
@@ -501,9 +507,16 @@ export function ModelCard({
    ================================================================ */
 
 function PlacementDeviceIcon({ node, filterId }: { node: PlacementNode; filterId: string }) {
+  const theme = useTheme() as Theme;
+  const useGlow = theme.colors.bg === '#000000';
   const s = node.iconSize;
   const half = s / 2;
-  const stroke = node.isUsed ? '#FFD700' : '#6B7280';
+  const stroke = node.isUsed ? theme.colors.gold : theme.colors.border;
+  // Idle device case (was hardcoded #1a1a1a) and existing-RAM-usage shade (was #4B5563).
+  const bodyFill = theme.colors.deviceBody;
+  const usedFill = theme.colors.gpuBarBg;
+  const memGlow = useGlow ? `url(#memGlow-${filterId})` : undefined;
+  // Macbook screen-area RAM-fill geometry (only used in the macbook branch).
   const screenH = s * 0.58;
   const currentFillH = screenH * (node.currentPercent / 100);
   const modelFillH = screenH * ((node.newPercent - node.currentPercent) / 100);
@@ -513,10 +526,10 @@ function PlacementDeviceIcon({ node, filterId }: { node: PlacementNode; filterId
       return (
         <g transform={`translate(${-half}, ${-half})`}>
           <rect x={2} y={0} width={s - 4} height={s * 0.65} rx={2} fill="none" stroke={stroke} strokeWidth={1.5} />
-          <rect x={4} y={2} width={s - 8} height={screenH} fill="#1a1a1a" />
-          <rect x={4} y={2 + screenH - currentFillH} width={s - 8} height={currentFillH} fill="#4B5563" />
+          <rect x={4} y={2} width={s - 8} height={screenH} fill={bodyFill} />
+          <rect x={4} y={2 + screenH - currentFillH} width={s - 8} height={currentFillH} fill={usedFill} />
           {node.modelUsageGB > 0 && node.isUsed && (
-            <ModelFill x={4} y={2 + screenH - currentFillH - modelFillH} width={s - 8} height={modelFillH} fill="#FFD700" filter={`url(#memGlow-${filterId})`} />
+            <ModelFill x={4} y={2 + screenH - currentFillH - modelFillH} width={s - 8} height={modelFillH} fill={theme.colors.gold} filter={memGlow} />
           )}
           <path d={`M 0 ${s * 0.68} L ${s} ${s * 0.68} L ${s - 2} ${s * 0.78} L 2 ${s * 0.78} Z`} fill="none" stroke={stroke} strokeWidth={1.5} />
         </g>
@@ -525,10 +538,10 @@ function PlacementDeviceIcon({ node, filterId }: { node: PlacementNode; filterId
       return (
         <g transform={`translate(${-half}, ${-half})`}>
           <rect x={2} y={2} width={s - 4} height={s - 4} rx={4} fill="none" stroke={stroke} strokeWidth={1.5} />
-          <rect x={4} y={4} width={s - 8} height={s - 8} fill="#1a1a1a" />
-          <rect x={4} y={4 + (s - 8) * (1 - node.currentPercent / 100)} width={s - 8} height={(s - 8) * (node.currentPercent / 100)} fill="#4B5563" />
+          <rect x={4} y={4} width={s - 8} height={s - 8} fill={bodyFill} />
+          <rect x={4} y={4 + (s - 8) * (1 - node.currentPercent / 100)} width={s - 8} height={(s - 8) * (node.currentPercent / 100)} fill={usedFill} />
           {node.modelUsageGB > 0 && node.isUsed && (
-            <ModelFill x={4} y={4 + (s - 8) * (1 - node.newPercent / 100)} width={s - 8} height={(s - 8) * ((node.newPercent - node.currentPercent) / 100)} fill="#FFD700" filter={`url(#memGlow-${filterId})`} />
+            <ModelFill x={4} y={4 + (s - 8) * (1 - node.newPercent / 100)} width={s - 8} height={(s - 8) * ((node.newPercent - node.currentPercent) / 100)} fill={theme.colors.gold} filter={memGlow} />
           )}
         </g>
       );
@@ -536,10 +549,10 @@ function PlacementDeviceIcon({ node, filterId }: { node: PlacementNode; filterId
       return (
         <g transform={`translate(${-half}, ${-half})`}>
           <rect x={2} y={s * 0.3} width={s - 4} height={s * 0.4} rx={3} fill="none" stroke={stroke} strokeWidth={1.5} />
-          <rect x={4} y={s * 0.32} width={s - 8} height={s * 0.36} fill="#1a1a1a" />
-          <rect x={4} y={s * 0.32 + s * 0.36 * (1 - node.currentPercent / 100)} width={s - 8} height={s * 0.36 * (node.currentPercent / 100)} fill="#4B5563" />
+          <rect x={4} y={s * 0.32} width={s - 8} height={s * 0.36} fill={bodyFill} />
+          <rect x={4} y={s * 0.32 + s * 0.36 * (1 - node.currentPercent / 100)} width={s - 8} height={s * 0.36 * (node.currentPercent / 100)} fill={usedFill} />
           {node.modelUsageGB > 0 && node.isUsed && (
-            <ModelFill x={4} y={s * 0.32 + s * 0.36 * (1 - node.newPercent / 100)} width={s - 8} height={s * 0.36 * ((node.newPercent - node.currentPercent) / 100)} fill="#FFD700" filter={`url(#memGlow-${filterId})`} />
+            <ModelFill x={4} y={s * 0.32 + s * 0.36 * (1 - node.newPercent / 100)} width={s - 8} height={s * 0.36 * ((node.newPercent - node.currentPercent) / 100)} fill={theme.colors.gold} filter={memGlow} />
           )}
         </g>
       );
@@ -548,7 +561,7 @@ function PlacementDeviceIcon({ node, filterId }: { node: PlacementNode; filterId
         <g transform={`translate(${-half}, ${-half})`}>
           <polygon
             points={`${half},0 ${s},${s * 0.25} ${s},${s * 0.75} ${half},${s} 0,${s * 0.75} 0,${s * 0.25}`}
-            fill={node.isUsed ? 'rgba(255,215,0,0.1)' : '#0a0a0a'}
+            fill={node.isUsed ? theme.colors.goldBg : bodyFill}
             stroke={stroke}
             strokeWidth={1.5}
           />

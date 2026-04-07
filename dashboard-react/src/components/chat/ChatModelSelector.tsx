@@ -108,7 +108,7 @@ const Header = styled.div`
 const ClusterName = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.lg};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: #FFD700;
+  color: ${({ theme }) => theme.colors.gold};
   margin-top: 4px;
 `;
 
@@ -133,7 +133,7 @@ const Card = styled.button<{ $disabled: boolean }>`
   text-align: left;
 
   &:hover {
-    border-color: rgba(255, 215, 0, 0.4);
+    border-color: ${({ theme }) => theme.colors.goldDim};
     background: ${({ theme }) => theme.colors.surfaceHover};
   }
 
@@ -190,7 +190,7 @@ const Tooltip = styled.div<{ $x: number; $y: number }>`
   top: ${({ $y }) => $y}px;
   transform: translate(-50%, -100%);
   z-index: 9999;
-  background: #000;
+  background: ${({ theme }) => theme.colors.bg};
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 4px 8px;

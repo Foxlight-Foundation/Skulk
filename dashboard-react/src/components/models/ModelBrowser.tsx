@@ -72,11 +72,11 @@ const Toolbar = styled.div`
 `;
 
 const FilterBtn = styled(Button)<{ $active: boolean }>`
-  ${({ $active }) =>
+  ${({ $active, theme }) =>
     $active &&
     `
-      color: #ffd700;
-      border-color: rgba(255, 215, 0, 0.4);
+      color: ${theme.colors.gold};
+      border-color: ${theme.colors.goldDim};
     `}
 `;
 
