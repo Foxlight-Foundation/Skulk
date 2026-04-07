@@ -223,18 +223,35 @@ export function ChatForm({
     }
   }, [supportsImageAttachments, files.length]);
 
+  useEffect(() => {
+    return () => {
+      files.forEach((file) => {
+        if (file.preview) URL.revokeObjectURL(file.preview);
+      });
+    };
+  }, [files]);
+
+  const clearFiles = useCallback(() => {
+    setFiles((prev) => {
+      prev.forEach((file) => {
+        if (file.preview) URL.revokeObjectURL(file.preview);
+      });
+      return [];
+    });
+  }, []);
+
   const handleSubmit = useCallback(
     (e?: React.FormEvent) => {
       e?.preventDefault();
       if (isLoading || !canSend) return;
       onSend(message.trim(), files);
       setMessage('');
-      setFiles([]);
+      clearFiles();
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto';
       }
     },
-    [isLoading, canSend, message, files, onSend],
+    [isLoading, canSend, message, files, onSend, clearFiles],
   );
 
   const handleKeyDown = useCallback(
