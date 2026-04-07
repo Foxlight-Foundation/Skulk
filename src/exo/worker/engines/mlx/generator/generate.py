@@ -465,12 +465,12 @@ def prefill(
     prefill_step_size = 4096
     logger.info(
         "Prefill path selected: "
-        f"{'pipeline_parallel_prefill' if is_pipeline and num_tokens >= prefill_step_size else 'stream_generate'} "
+        f"{'pipeline_parallel_prefill' if is_pipeline else 'stream_generate'} "
         f"(rank={rank}, prompt_tokens={num_tokens}, prefill_step_size={prefill_step_size})"
     )
 
     try:
-        if is_pipeline and num_tokens >= prefill_step_size:
+        if is_pipeline:
             set_pipeline_queue_sends(model, queue_sends=True)
             assert group is not None, "Pipeline prefill requires a distributed group"
             with _hang_debug_watch(
