@@ -74,19 +74,19 @@ const Dot = styled.span<{ $active: boolean; $size: number; $inactiveSize: number
     return `${pad}px 0`;
   }};
   border-radius: 50%;
-  background: ${({ $active, theme}) => ($active ? theme.colors.gold : '#787878')};
+  background: ${({ $active, theme }) => ($active ? theme.colors.gold : theme.colors.borderStrong)};
   transition: all 0.15s ease-out;
-  box-shadow: ${({ $active }) => ($active ? '0 0 8px rgba(255, 215, 0, 0.4)' : 'none')};
+  box-shadow: ${({ $active, theme }) => ($active ? `0 0 8px ${theme.colors.goldDim}` : 'none')};
 
   ${StepCol}:hover & {
-    background: ${({ $active, theme}) => ($active ? theme.colors.gold : '#a0a0a0')};
+    background: ${({ $active, theme }) => ($active ? theme.colors.gold : theme.colors.textMuted)};
   }
 `;
 
 const Label = styled.span<{ $active: boolean }>`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ $active, theme}) => ($active ? theme.colors.gold : 'rgba(179, 179, 179, 0.6)')};
+  color: ${({ $active, theme }) => ($active ? theme.colors.gold : theme.colors.textMuted)};
   font-weight: ${({ $active }) => ($active ? 600 : 400)};
   transition: color 0.15s;
 `;

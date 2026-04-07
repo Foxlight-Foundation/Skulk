@@ -71,7 +71,7 @@ const ToastCard = styled.div<{ $borderColor: string }>`
   pointer-events: auto;
   max-width: 360px;
   width: 320px;
-  background: ${({ theme }) => theme.colors.surface};
+  background: ${({ theme }) => theme.colors.surfaceElevated};
   backdrop-filter: blur(4px);
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-left: 3px solid ${({ $borderColor }) => $borderColor};
