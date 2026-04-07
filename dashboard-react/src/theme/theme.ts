@@ -100,6 +100,7 @@ interface ColorTokens {
   deviceIconFill: string;
   deviceBody: string; // background fill of the device "case" in the topology icon
   ramFill: string;    // RAM-fullness fill drawn on top of deviceBody
+  gpuBarBg: string;   // empty/background fill of the GPU stats bar
   meshLine: string;
   meshNode: string;
 
@@ -164,6 +165,7 @@ const darkColors: ColorTokens = {
   deviceIconFill: 'rgba(255, 255, 255, 0.08)',
   deviceBody: '#1a1a1a',
   ramFill: 'rgba(255, 215, 0, 0.75)',
+  gpuBarBg: 'rgba(80, 80, 90, 0.7)',
   meshLine: 'rgba(255, 215, 0, 0.35)',
   meshNode: 'rgba(255, 215, 0, 0.6)',
 
@@ -230,6 +232,7 @@ const lightColors: ColorTokens = {
   deviceIconFill: 'rgba(29, 78, 216, 0.08)',
   deviceBody: '#dbeafe',          // light-blue "empty RAM" case background
   ramFill: 'rgba(29, 78, 216, 0.75)', // darker blue RAM fullness
+  gpuBarBg: '#bccfe8',             // a touch darker than the device case so the bar reads as a separate element
   meshLine: 'rgba(29, 78, 216, 0.30)',
   meshNode: 'rgba(29, 78, 216, 0.55)',
 

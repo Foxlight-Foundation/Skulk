@@ -33,9 +33,9 @@ export function GpuStatsBar({ gpuPercent, gpuTemp, sysPower, width, height }: Gp
 
   return (
     <g>
-      {/* Background — softer than the device body so the fullness fill stands out. */}
+      {/* Background — dedicated token so light/dark can tune contrast independently. */}
       <rect x={0} y={0} width={width} height={height}
-        fill={theme.colors.surfaceHover} rx={2} />
+        fill={theme.colors.gpuBarBg} rx={2} />
       {/* Fill from bottom */}
       {gpuPercent > 0 && (
         <rect x={0} y={height - fillHeight} width={width} height={fillHeight}
