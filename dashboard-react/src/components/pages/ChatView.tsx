@@ -121,6 +121,18 @@ function splitReasoningDecoratedContent(raw: string): { content: string; thinkin
   return { content, thinking };
 }
 
+function mergeThinkingContent(existing: string, incoming: string): string {
+  if (!incoming) return existing;
+  if (!existing) return incoming;
+  if (incoming.startsWith(existing)) {
+    return existing + incoming.slice(existing.length);
+  }
+  if (existing.includes(incoming)) {
+    return existing;
+  }
+  return existing + incoming;
+}
+
 /* ── Component ────────────────────────────────────────── */
 
 export function ChatView({ readyInstances, className }: ChatViewProps) {
@@ -400,7 +412,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
               rawContent += delta.content;
               const separated = splitReasoningDecoratedContent(rawContent);
               if (separated.thinking) {
-                fullThinking = separated.thinking;
+                fullThinking = mergeThinkingContent(fullThinking, separated.thinking);
                 setStreamingThinking(fullThinking);
               }
               setStreamingContent(separated.content || null);
@@ -440,7 +452,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     // Finalize assistant message
     const separatedContent = splitReasoningDecoratedContent(rawContent);
     if (separatedContent.thinking) {
-      fullThinking = fullThinking || separatedContent.thinking;
+      fullThinking = mergeThinkingContent(fullThinking, separatedContent.thinking);
     }
     const finalAssistantContent = separatedContent.content.trim();
 
@@ -462,7 +474,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     setIsLoading(false);
     abortRef.current = null;
 
-  }, [selectedModelId, isLoading, thinkingEnabled, addMessage]);
+  }, [selectedModelId, isLoading, thinkingEnabled, supportsThinking, addMessage]);
 
   const handleCancel = useCallback(() => {
     abortRef.current?.abort();
