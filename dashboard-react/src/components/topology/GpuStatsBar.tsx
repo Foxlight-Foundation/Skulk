@@ -1,4 +1,6 @@
+import { useTheme } from 'styled-components';
 import { getTemperatureColor } from '../../utils/format';
+import type { Theme } from '../../theme';
 
 export interface GpuStatsBarProps {
   /** 0-100 */
@@ -12,8 +14,13 @@ export interface GpuStatsBarProps {
 }
 
 export function GpuStatsBar({ gpuPercent, gpuTemp, sysPower, width, height }: GpuStatsBarProps) {
+  const theme = useTheme() as Theme;
   const fillHeight = (gpuPercent / 100) * height;
-  const fillColor = getTemperatureColor(gpuTemp);
+  // In dark mode use the temperature gradient (blue→red); in light mode use the
+  // same darker-blue ramFill the device-icon RAM bar uses, so the GPU bar reads
+  // as the same "fullness on light blue" treatment.
+  const isLight = theme.colors.bg !== '#000000';
+  const fillColor = isLight ? theme.colors.ramFill : getTemperatureColor(gpuTemp);
 
   const fontSize = Math.min(16, Math.max(10, width * 0.55));
   const lineSpacing = fontSize * 1.25;
@@ -28,7 +35,7 @@ export function GpuStatsBar({ gpuPercent, gpuTemp, sysPower, width, height }: Gp
     <g>
       {/* Background */}
       <rect x={0} y={0} width={width} height={height}
-        fill="rgba(80, 80, 90, 0.7)" rx={2} />
+        fill={theme.colors.deviceBody} rx={2} />
       {/* Fill from bottom */}
       {gpuPercent > 0 && (
         <rect x={0} y={height - fillHeight} width={width} height={fillHeight}
@@ -36,17 +43,17 @@ export function GpuStatsBar({ gpuPercent, gpuTemp, sysPower, width, height }: Gp
       )}
       {/* GPU % */}
       <text x={textX} y={textY - lineSpacing} textAnchor="middle" dominantBaseline="middle"
-        fill="#FFFFFF" fontSize={fontSize} fontWeight={700} fontFamily="SF Mono, Monaco, monospace">
+        fill={theme.colors.text} fontSize={fontSize} fontWeight={700} fontFamily="SF Mono, Monaco, monospace">
         {gpuText}
       </text>
       {/* Temperature */}
       <text x={textX} y={textY} textAnchor="middle" dominantBaseline="middle"
-        fill="#FFFFFF" fontSize={fontSize} fontWeight={700} fontFamily="SF Mono, Monaco, monospace">
+        fill={theme.colors.text} fontSize={fontSize} fontWeight={700} fontFamily="SF Mono, Monaco, monospace">
         {tempText}
       </text>
       {/* Power */}
       <text x={textX} y={textY + lineSpacing} textAnchor="middle" dominantBaseline="middle"
-        fill="#FFFFFF" fontSize={fontSize} fontWeight={700} fontFamily="SF Mono, Monaco, monospace">
+        fill={theme.colors.text} fontSize={fontSize} fontWeight={700} fontFamily="SF Mono, Monaco, monospace">
         {powerText}
       </text>
     </g>
