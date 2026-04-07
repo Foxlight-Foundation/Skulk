@@ -33,27 +33,25 @@ export function DeviceIcon({
   const theme = useTheme() as Theme;
   const wireColor = wireColorProp ?? theme.colors.deviceIconStroke;
   const fillColor = fillColorProp ?? theme.colors.deviceIconFill;
+  const bodyColor = theme.colors.deviceBody;
+  const ramColor = theme.colors.ramFill;
   const cx = width / 2;
   const cy = height / 2;
+  const common = { cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId, bodyColor, ramColor };
 
-  if (model === 'mac-studio') {
-    return <MacStudio cx={cx} cy={cy} width={width} height={height} ramPercent={ramPercent} wireColor={wireColor} strokeWidth={strokeWidth} clipId={clipId} />;
-  }
-  if (model === 'mac-mini') {
-    return <MacMini cx={cx} cy={cy} width={width} height={height} ramPercent={ramPercent} wireColor={wireColor} strokeWidth={strokeWidth} clipId={clipId} />;
-  }
-  if (model === 'macbook-pro') {
-    return <MacBookPro cx={cx} cy={cy} width={width} height={height} ramPercent={ramPercent} wireColor={wireColor} strokeWidth={strokeWidth} clipId={clipId} />;
-  }
-  return <HexagonDefault cx={cx} cy={cy} width={width} height={height} wireColor={wireColor} strokeWidth={strokeWidth} fillColor={fillColor} ramPercent={ramPercent} clipId={clipId} />;
+  if (model === 'mac-studio') return <MacStudio {...common} />;
+  if (model === 'mac-mini') return <MacMini {...common} />;
+  if (model === 'macbook-pro') return <MacBookPro {...common} />;
+  return <HexagonDefault {...common} fillColor={fillColor} />;
 }
 
 interface MacStudioProps {
   cx: number; cy: number; width: number; height: number;
   ramPercent: number; wireColor: string; strokeWidth: number; clipId: string;
+  bodyColor: string; ramColor: string;
 }
 
-function MacStudio({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId }: MacStudioProps) {
+function MacStudio({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId, bodyColor, ramColor }: MacStudioProps) {
   const boxW = width * 0.82;
   const boxH = height * 0.7;
   const x = cx - boxW / 2;
@@ -75,11 +73,11 @@ function MacStudio({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, 
       </defs>
       {/* Body */}
       <rect x={x} y={y} width={boxW} height={boxH} rx={cornerRadius}
-        fill="#1a1a1a" stroke={wireColor} strokeWidth={strokeWidth} />
+        fill={bodyColor} stroke={wireColor} strokeWidth={strokeWidth} />
       {/* RAM fill */}
       {ramPercent > 0 && (
         <rect x={x} y={y + topSurfaceH + (bodyH - memFillH)} width={boxW} height={memFillH}
-          fill="rgba(255,215,0,0.75)" clipPath={`url(#${clipId}-studio)`} />
+          fill={ramColor} clipPath={`url(#${clipId}-studio)`} />
       )}
       {/* USB-C slots */}
       {[cx - boxW * 0.28, cx - boxW * 0.18].map((vx, i) => (
@@ -96,9 +94,10 @@ function MacStudio({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, 
 interface MacMiniProps {
   cx: number; cy: number; width: number; height: number;
   ramPercent: number; wireColor: string; strokeWidth: number; clipId: string;
+  bodyColor: string; ramColor: string;
 }
 
-function MacMini({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId }: MacMiniProps) {
+function MacMini({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId, bodyColor, ramColor }: MacMiniProps) {
   const boxW = width * 0.85;
   const boxH = height * 0.58;
   const x = cx - boxW / 2;
@@ -119,10 +118,10 @@ function MacMini({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, cl
         </clipPath>
       </defs>
       <rect x={x} y={y} width={boxW} height={boxH} rx={cornerRadius}
-        fill="#1a1a1a" stroke={wireColor} strokeWidth={strokeWidth} />
+        fill={bodyColor} stroke={wireColor} strokeWidth={strokeWidth} />
       {ramPercent > 0 && (
         <rect x={x} y={y + topSurfaceH + (bodyH - memFillH)} width={boxW} height={memFillH}
-          fill="rgba(255,215,0,0.75)" clipPath={`url(#${clipId}-mini)`} />
+          fill={ramColor} clipPath={`url(#${clipId}-mini)`} />
       )}
       {[cx - boxW * 0.24, cx - boxW * 0.14].map((vx, i) => (
         <rect key={i} x={vx - vSlotW / 2} y={vSlotY} width={vSlotW} height={slotH}
@@ -135,9 +134,10 @@ function MacMini({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, cl
 interface MacBookProProps {
   cx: number; cy: number; width: number; height: number;
   ramPercent: number; wireColor: string; strokeWidth: number; clipId: string;
+  bodyColor: string; ramColor: string;
 }
 
-function MacBookPro({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId }: MacBookProProps) {
+function MacBookPro({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId, bodyColor, ramColor }: MacBookProProps) {
   const screenW = width * 0.72;
   const screenH = height * 0.62;
   const baseH = height * 0.26;
@@ -180,14 +180,14 @@ function MacBookPro({ cx, cy, width, height, ramPercent, wireColor, strokeWidth,
       </defs>
       {/* Screen frame */}
       <rect x={screenX} y={screenY} width={screenW} height={screenH} rx={3}
-        fill="#1a1a1a" stroke={wireColor} strokeWidth={strokeWidth} />
+        fill={bodyColor} stroke={wireColor} strokeWidth={strokeWidth} />
       {/* Screen inner */}
       <rect x={screenX + bezel} y={screenY + bezel} width={innerW} height={innerH} rx={2}
-        fill="#0a0a12" />
+        fill={bodyColor} />
       {/* RAM fill on screen */}
       {ramPercent > 0 && (
         <rect x={screenX + bezel} y={screenY + bezel + (innerH - memFillH)} width={innerW} height={memFillH}
-          fill="rgba(255,215,0,0.85)" clipPath={`url(#${clipId}-mbp-screen)`} />
+          fill={ramColor} clipPath={`url(#${clipId}-mbp-screen)`} />
       )}
       {/* Apple logo */}
       <path d={APPLE_LOGO_PATH}
@@ -211,9 +211,10 @@ interface HexagonDefaultProps {
   cx: number; cy: number; width: number; height: number;
   wireColor: string; strokeWidth: number; fillColor: string;
   ramPercent: number; clipId: string;
+  bodyColor: string; ramColor: string;
 }
 
-function HexagonDefault({ cx, cy, width, height, wireColor, strokeWidth, fillColor, ramPercent, clipId }: HexagonDefaultProps) {
+function HexagonDefault({ cx, cy, width, height, wireColor, strokeWidth, fillColor, ramPercent, clipId, ramColor }: HexagonDefaultProps) {
   const hexRadius = Math.min(width, height) * 0.42;
   const points = Array.from({ length: 6 }, (_, i) => {
     const angle = ((i * 60 - 30) * Math.PI) / 180;
@@ -237,7 +238,7 @@ function HexagonDefault({ cx, cy, width, height, wireColor, strokeWidth, fillCol
       <polygon points={points} fill={fillColor} stroke={wireColor} strokeWidth={strokeWidth} />
       {ramPercent > 0 && (
         <rect x={hexLeft} y={hexTop + (hexH - memFillH)} width={hexW} height={memFillH}
-          fill="rgba(255,215,0,0.75)" clipPath={`url(#${clipId}-hex)`} />
+          fill={ramColor} clipPath={`url(#${clipId}-hex)`} />
       )}
     </g>
   );

@@ -36,7 +36,7 @@ const Nav = styled.header`
   z-index: 20;
   background: ${({ theme }) => theme.colors.header};
   border-bottom: none;
-  background-image: linear-gradient(to right, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.03));
+  background-image: ${({ theme }) => theme.colors.headerBorder};
   background-size: 100% 1px;
   background-position: bottom;
   background-repeat: no-repeat;
@@ -93,7 +93,7 @@ const VersionTag = styled.sup`
   font-size: 10px;
   font-weight: 400;
   font-family: ${({ theme }) => theme.fonts.body};
-  color: rgba(255, 255, 255, 0.88);
+  color: ${({ theme }) => theme.colors.textSecondary};
   margin-left: 2px;
   position: relative;
   top: -4px;
@@ -302,7 +302,7 @@ export function HeaderNav({
           </IconToggle>
         )}
         <LogoBtn $disabled={!showHome} onClick={showHome ? () => navigate('cluster') : undefined}>
-          <SkulkIcon size={32} color="#ffffff" />
+          <SkulkIcon size={32} color={theme.colors.text} />
           <LogoText>Skulk<VersionTag>{__APP_VERSION__}</VersionTag></LogoText>
         </LogoBtn>
         {warnings && warnings.items.length > 0 && (

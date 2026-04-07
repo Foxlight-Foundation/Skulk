@@ -98,6 +98,8 @@ interface ColorTokens {
   // Topology / SVG
   deviceIconStroke: string;
   deviceIconFill: string;
+  deviceBody: string; // background fill of the device "case" in the topology icon
+  ramFill: string;    // RAM-fullness fill drawn on top of deviceBody
   meshLine: string;
   meshNode: string;
 
@@ -160,6 +162,8 @@ const darkColors: ColorTokens = {
 
   deviceIconStroke: '#ffffff',
   deviceIconFill: 'rgba(255, 255, 255, 0.08)',
+  deviceBody: '#1a1a1a',
+  ramFill: 'rgba(255, 215, 0, 0.75)',
   meshLine: 'rgba(255, 215, 0, 0.35)',
   meshNode: 'rgba(255, 215, 0, 0.6)',
 
@@ -224,6 +228,8 @@ const lightColors: ColorTokens = {
 
   deviceIconStroke: '#1e3a8a',
   deviceIconFill: 'rgba(29, 78, 216, 0.08)',
+  deviceBody: '#dbeafe',          // light-blue "empty RAM" case background
+  ramFill: 'rgba(29, 78, 216, 0.75)', // darker blue RAM fullness
   meshLine: 'rgba(29, 78, 216, 0.30)',
   meshNode: 'rgba(29, 78, 216, 0.55)',
 
