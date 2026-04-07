@@ -241,7 +241,7 @@ function ProgressCircle({ count, percentage }: { count: number; percentage: numb
   return (
     <DownloadBadge>
       <svg width="28" height="28" viewBox="0 0 28 28">
-        <circle cx="14" cy="14" r={r} fill="none" stroke="rgba(179,179,179,0.2)" strokeWidth="2" />
+        <circle cx="14" cy="14" r={r} fill="none" stroke={theme.colors.borderStrong} strokeWidth="2" />
         <circle
           cx="14" cy="14" r={r}
           fill="none" stroke={theme.colors.gold} strokeWidth="2"
@@ -372,6 +372,7 @@ export function HeaderNav({
           icon
           onClick={toggleTheme}
           aria-label={themeName === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          aria-pressed={themeName === 'light'}
           title={themeName === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
         >
           {themeName === 'dark' ? <FiSun size={16} /> : <FiMoon size={16} />}

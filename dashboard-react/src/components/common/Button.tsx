@@ -47,8 +47,8 @@ const variantStyles: Record<ButtonVariant, ReturnType<typeof css>> = {
     }
   `,
   outline: css`
-    color: rgba(179, 179, 179, 0.9);
-    border: 1px solid rgba(80, 80, 80, 0.4);
+    color: ${({ theme }) => theme.colors.textSecondary};
+    border: 1px solid ${({ theme }) => theme.colors.border};
     background: transparent;
 
     &:hover:not(:disabled) {
@@ -75,8 +75,8 @@ const variantStyles: Record<ButtonVariant, ReturnType<typeof css>> = {
     }
   `,
   danger: css`
-    color: rgba(179, 179, 179, 0.8);
-    border: 1px solid rgba(80, 80, 80, 0.4);
+    color: ${({ theme }) => theme.colors.textSecondary};
+    border: 1px solid ${({ theme }) => theme.colors.border};
     background: transparent;
 
     &:hover:not(:disabled) {
@@ -151,6 +151,12 @@ const StyledButton = styled.button<{
   &:disabled {
     opacity: 0.88;
     cursor: not-allowed;
+  }
+
+  /* Keyboard focus — all: unset removes the browser outline. */
+  &:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim};
   }
 `;
 

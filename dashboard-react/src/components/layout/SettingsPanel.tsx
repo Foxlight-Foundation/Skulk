@@ -302,7 +302,9 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               <Toggle
                 $on={themeName === 'light'}
                 onClick={() => setTheme(themeName === 'dark' ? 'light' : 'dark')}
-                aria-label="Toggle light theme"
+                role="switch"
+                aria-checked={themeName === 'light'}
+                aria-label={themeName === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
               />
               <Spacer />
               <span style={{ fontSize: 13, opacity: 0.7 }}>{themeName === 'light' ? 'Light' : 'Dark'}</span>

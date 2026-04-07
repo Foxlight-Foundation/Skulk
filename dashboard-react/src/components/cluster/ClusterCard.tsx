@@ -79,7 +79,7 @@ function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
           <line
             key={`e${i}`}
             x1={p.x} y1={p.y} x2={next.x} y2={next.y}
-            stroke="rgba(255,215,0,0.15)"
+            stroke={theme.colors.meshLine}
             strokeWidth={1}
             strokeDasharray="4 3"
           />
@@ -104,7 +104,7 @@ function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
             <text
               x={p.x} y={p.y + iconH / 2 + 14}
               textAnchor="middle"
-              fill="rgba(255,255,255,0.6)"
+              fill={theme.colors.textSecondary}
               fontSize={11}
               fontFamily="'Outfit', sans-serif"
             >

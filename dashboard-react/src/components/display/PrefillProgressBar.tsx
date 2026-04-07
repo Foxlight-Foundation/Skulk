@@ -74,7 +74,7 @@ const FooterRow = styled.div`
   justify-content: space-between;
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: rgba(179, 179, 179, 0.7);
+  color: ${({ theme }) => theme.colors.textMuted};
   margin-top: 4px;
 `;
 

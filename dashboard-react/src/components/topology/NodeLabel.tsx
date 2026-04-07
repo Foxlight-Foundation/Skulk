@@ -91,7 +91,7 @@ export function NodeLabel({
             >
               <path
                 d="M13.65 2.35A7.96 7.96 0 0 0 8 0a8 8 0 1 0 8 8h-2a6 6 0 1 1-1.76-4.24L9 7h7V0l-2.35 2.35z"
-                fill={confirming ? theme.colors.warning : '#999'}
+                fill={confirming ? theme.colors.warning : theme.colors.textMuted}
               />
             </svg>
           </InfoTooltip>
@@ -122,9 +122,9 @@ export function NodeLabel({
       {/* Memory below: "15.4GB" in grey, "/24GB (64%)" in yellow */}
       <text x={cx} y={memoryY} textAnchor="middle" dominantBaseline="middle"
         fontFamily="SF Mono, Monaco, monospace" fontSize={13}>
-        <tspan fill="#999999">{usedStr}</tspan>
+        <tspan fill={theme.colors.textSecondary}>{usedStr}</tspan>
         <tspan fill={theme.colors.gold}>/{totalStr}</tspan>
-        <tspan fill="#999999">{' '}({ramPercent}%)</tspan>
+        <tspan fill={theme.colors.textSecondary}>{' '}({ramPercent}%)</tspan>
       </text>
     </g>
   );

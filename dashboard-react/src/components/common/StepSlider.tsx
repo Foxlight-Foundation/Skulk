@@ -32,7 +32,7 @@ const TrackLine = styled.div<{ $inset: number; $height: number; $dotCenter: numb
   right: ${({ $inset }) => $inset}px;
   height: ${({ $height }) => $height}px;
   margin-top: ${({ $height }) => -$height / 2}px;
-  background: rgba(80, 80, 80, 0.6);
+  background: ${({ theme }) => theme.colors.borderStrong};
   border-radius: ${({ $height }) => $height / 2}px;
 `;
 

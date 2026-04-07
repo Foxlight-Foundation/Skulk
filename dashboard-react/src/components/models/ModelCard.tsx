@@ -166,7 +166,7 @@ const Header = styled.div`
 const ModelName = styled.div<{ $canFit: boolean }>`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ $canFit, theme}) => ($canFit ? theme.colors.gold : '#f87171')};
+  color: ${({ $canFit, theme }) => ($canFit ? theme.colors.gold : theme.colors.error)};
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -175,7 +175,7 @@ const ModelName = styled.div<{ $canFit: boolean }>`
 const ModelId = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: rgba(179, 179, 179, 0.8);
+  color: ${({ theme }) => theme.colors.textMuted};
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -185,7 +185,7 @@ const ModelId = styled.div`
 const MemorySize = styled.div<{ $canFit: boolean }>`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ $canFit, theme}) => ($canFit ? theme.colors.gold : '#f87171')};
+  color: ${({ $canFit, theme }) => ($canFit ? theme.colors.gold : theme.colors.error)};
   flex-shrink: 0;
 `;
 
@@ -242,7 +242,7 @@ const DownloadRow = styled.div`
 const ProgressTrack = styled.div`
   flex: 1;
   height: 4px;
-  background: rgba(80, 80, 80, 0.3);
+  background: ${({ theme }) => theme.colors.surfaceSunken};
   border-radius: 2px;
   overflow: hidden;
 `;
@@ -251,7 +251,7 @@ const ProgressFill = styled.div<{ $status: string }>`
   height: 100%;
   transition: width 0.3s;
   ${({ $status }) => {
-    if ($status === 'downloading') return css`background: rgba(59,130,246,0.7);`;
+    if ($status === 'downloading') return css`background: ${({ theme }) => theme.colors.info};`;
     if ($status === 'completed') return css`background: ${({ theme }) => theme.colors.goldDim};`;
     return css`background: ${({ theme }) => theme.colors.border};`;
   }}
@@ -260,7 +260,7 @@ const ProgressFill = styled.div<{ $status: string }>`
 const PreviewBox = styled.div`
   margin-bottom: 12px;
   background: ${({ theme }) => theme.colors.shadow};
-  border: 1px solid rgba(80, 80, 80, 0.2);
+  border: 1px solid ${({ theme }) => theme.colors.borderLight};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 8px;
   position: relative;
@@ -292,7 +292,7 @@ const LaunchBtn = styled(Button)<{ $canFit: boolean; $launching: boolean }>`
     !$launching &&
     css`
       background: ${({ theme }) => theme.colors.errorBg};
-      color: rgba(248, 113, 113, 1);
+      color: ${({ theme }) => theme.colors.error};
       border-color: ${({ theme }) => theme.colors.errorBg};
       cursor: not-allowed;
       opacity: 1;

@@ -216,7 +216,7 @@ const Container = styled.div`
   .hljs-comment { color: #6b7280; font-style: italic; }
   .hljs-title { color: #f472b6; }
   .hljs-type { color: #2dd4bf; }
-  .hljs-params { color: #e5e5e5; }
+  .hljs-params { color: ${({ theme }) => theme.colors.text}; }
 
   /* Math */
   .mc-math-display {
@@ -232,7 +232,7 @@ const Container = styled.div`
   }
 
   .mc-math-error {
-    color: #f87171;
+    color: ${({ theme }) => theme.colors.error};
     font-family: ${({ theme }) => theme.fonts.mono};
     font-size: ${({ theme }) => theme.fontSizes.sm};
     background: ${({ theme }) => theme.colors.errorBg};
@@ -241,8 +241,8 @@ const Container = styled.div`
   }
 
   /* KaTeX color overrides */
-  .katex { color: rgba(229, 229, 229, 0.9); }
-  .katex .delimsizing, .katex .mord { color: rgba(191, 191, 191, 0.75); }
+  .katex { color: ${({ theme }) => theme.colors.text}; }
+  .katex .delimsizing, .katex .mord { color: ${({ theme }) => theme.colors.textSecondary}; }
 `;
 
 /* ================================================================

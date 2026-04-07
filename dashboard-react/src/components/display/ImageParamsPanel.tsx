@@ -137,7 +137,7 @@ const Switch = styled.button<{ $on: boolean }>`
     width: 12px;
     height: 12px;
     border-radius: 50%;
-    background: ${({ $on }) => ($on ? '#000' : '#999')};
+    background: ${({ $on, theme }) => ($on ? theme.colors.textOnAccent : theme.colors.textMuted)};
     transition: left 0.2s;
   }
 `;

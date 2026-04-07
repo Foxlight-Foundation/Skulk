@@ -123,13 +123,14 @@ const HeaderText = styled.span`
 const ShimmerRow = styled.div`
   height: 48px;
   border-radius: ${({ theme }) => theme.radii.md};
-  background: linear-gradient(90deg, rgba(80,80,80,0.1) 25%, rgba(80,80,80,0.2) 50%, rgba(80,80,80,0.1) 75%);
+  background: ${({ theme }) =>
+    `linear-gradient(90deg, ${theme.colors.surfaceSunken} 25%, ${theme.colors.surfaceHover} 50%, ${theme.colors.surfaceSunken} 75%)`};
   background-size: 200% 100%;
   animation: ${shimmer} 1.5s ease-in-out infinite;
 `;
 
 const EmptyBox = styled.div`
-  border: 1px solid rgba(80, 80, 80, 0.3);
+  border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.md};
   background: ${({ theme }) => theme.colors.shadow};
   padding: 24px;
@@ -140,7 +141,7 @@ const EmptyBox = styled.div`
 `;
 
 const Table = styled.div`
-  border: 1px solid rgba(80, 80, 80, 0.3);
+  border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.md};
   overflow: hidden;
   display: flex;
@@ -174,10 +175,10 @@ const TRow = styled.div<{ $highlight?: boolean }>`
   gap: 8px;
   padding: 10px 12px;
   align-items: center;
-  border-top: 1px solid rgba(80, 80, 80, 0.2);
+  border-top: 1px solid ${({ theme }) => theme.colors.borderLight};
   transition: background 0.15s;
 
-  &:hover { background: rgba(80, 80, 80, 0.1); }
+  &:hover { background: ${({ theme }) => theme.colors.surfaceHover}; }
 
   ${({ $highlight }) =>
     $highlight &&
@@ -295,7 +296,7 @@ const Cell = styled.div<{ $align?: string }>`
 const ProgressTrack = styled.div`
   width: 96px;
   height: 6px;
-  background: rgba(80, 80, 80, 0.3);
+  background: ${({ theme }) => theme.colors.surfaceSunken};
   border-radius: 3px;
   overflow: hidden;
 `;

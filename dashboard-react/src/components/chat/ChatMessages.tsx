@@ -68,8 +68,9 @@ const Circle = styled.div<{ $size: number; $opacity: number }>`
   width: ${({ $size }) => $size}px;
   height: ${({ $size }) => $size}px;
   border-radius: 50%;
-  border: 1.5px solid rgba(255, 215, 0, ${({ $opacity }) => $opacity});
-  box-shadow: 0 0 8px rgba(255, 215, 0, ${({ $opacity }) => $opacity * 0.5});
+  border: 1.5px solid ${({ theme }) => theme.colors.gold};
+  box-shadow: 0 0 8px ${({ theme }) => theme.colors.gold};
+  opacity: ${({ $opacity }) => $opacity};
 `;
 
 const MessageCard = styled.div<{ $role: 'user' | 'assistant' }>`
@@ -445,7 +446,7 @@ export function ChatMessages({
                 <Timestamp>{formatTime(msg.timestamp)}</Timestamp>
                 <Spacer />
                 <RoleLabel $role="user">Query</RoleLabel>
-                <Dot $color="#999" />
+                <Dot $color={theme.colors.textSecondary} />
               </>
             )}
           </MsgHeader>

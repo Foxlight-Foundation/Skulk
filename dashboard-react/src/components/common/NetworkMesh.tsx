@@ -1,14 +1,15 @@
 import { useEffect, useRef } from 'react';
-import styled from 'styled-components';
+import styled, { useTheme } from 'styled-components';
+import type { Theme } from '../../theme';
 
 export interface NetworkMeshProps {
   /** Number of particles. Default 60. */
   count?: number;
   /** Max distance for drawing connections. Default 150. */
   linkDistance?: number;
-  /** Particle color. Default 'rgba(255,215,0,0.15)'. */
+  /** Particle color. Defaults to `theme.colors.meshNode`. */
   color?: string;
-  /** Connection color. Default 'rgba(255,215,0,0.04)'. */
+  /** Connection color. Defaults to `theme.colors.meshLine`. */
   lineColor?: string;
   /** Particle radius. Default 1.5. */
   radius?: number;
@@ -34,12 +35,15 @@ interface Particle {
 export function NetworkMesh({
   count = 60,
   linkDistance = 150,
-  color = 'rgba(255,215,0,0.15)',
-  lineColor = 'rgba(255,215,0,0.04)',
+  color: colorProp,
+  lineColor: lineColorProp,
   radius = 1.5,
   speed = 0.3,
   className,
 }: NetworkMeshProps) {
+  const theme = useTheme() as Theme;
+  const color = colorProp ?? theme.colors.meshNode;
+  const lineColor = lineColorProp ?? theme.colors.meshLine;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const particlesRef = useRef<Particle[]>([]);
   const rafRef = useRef<number>(0);

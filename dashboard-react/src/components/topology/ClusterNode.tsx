@@ -68,7 +68,7 @@ function buildDebugContent(
     : 'Disabled';
   const rdmaColor = nodeInfo.rdma_enabled
     ? (nodeInfo.rdma_interfaces_present === false ? theme.colors.warning : theme.colors.healthy)
-    : '#888';
+    : theme.colors.textMuted;
   const version = nodeInfo.exo_version && nodeInfo.exo_version !== 'Unknown'
     ? `v${nodeInfo.exo_version}${nodeInfo.exo_commit && nodeInfo.exo_commit !== 'Unknown' ? ` (${nodeInfo.exo_commit})` : ''}`
     : '';
