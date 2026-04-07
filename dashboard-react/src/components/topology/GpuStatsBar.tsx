@@ -16,11 +16,10 @@ export interface GpuStatsBarProps {
 export function GpuStatsBar({ gpuPercent, gpuTemp, sysPower, width, height }: GpuStatsBarProps) {
   const theme = useTheme() as Theme;
   const fillHeight = (gpuPercent / 100) * height;
-  // In dark mode use the temperature gradient (blue→red); in light mode use the
-  // same darker-blue ramFill the device-icon RAM bar uses, so the GPU bar reads
-  // as the same "fullness on light blue" treatment.
-  const isLight = theme.colors.bg !== '#000000';
-  const fillColor = isLight ? theme.colors.ramFill : getTemperatureColor(gpuTemp);
+  // Always encode thermal state via the temperature gradient (cool-blue → amber → red).
+  // The gradient reads correctly on both dark and light backgrounds, so we keep the
+  // overheat signal in every theme rather than collapsing it to a flat fill.
+  const fillColor = getTemperatureColor(gpuTemp);
 
   const fontSize = Math.min(16, Math.max(10, width * 0.55));
   const lineSpacing = fontSize * 1.25;

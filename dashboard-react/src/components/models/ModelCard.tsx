@@ -516,6 +516,10 @@ function PlacementDeviceIcon({ node, filterId }: { node: PlacementNode; filterId
   const bodyFill = theme.colors.deviceBody;
   const usedFill = theme.colors.gpuBarBg;
   const memGlow = useGlow ? `url(#memGlow-${filterId})` : undefined;
+  // Macbook screen-area RAM-fill geometry (only used in the macbook branch).
+  const screenH = s * 0.58;
+  const currentFillH = screenH * (node.currentPercent / 100);
+  const modelFillH = screenH * ((node.newPercent - node.currentPercent) / 100);
 
   switch (node.deviceType) {
     case 'macbook':
