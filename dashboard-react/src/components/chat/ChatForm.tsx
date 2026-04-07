@@ -86,7 +86,7 @@ const ThinkingBtn = styled.button<{ $active: boolean }>`
   ${({ $active }) =>
     $active
       ? css`border-color: ${({ theme }) => theme.colors.gold}; color: ${({ theme }) => theme.colors.gold}; background: ${({ theme }) => theme.colors.goldBg};`
-      : css`border-color: rgba(80,80,80,0.4); color: rgba(179,179,179,0.6); &:hover { border-color: ${({ theme }) => theme.colors.goldDim}; color: ${({ theme }) => theme.colors.gold}; }`}
+      : css`border-color: ${({ theme }) => theme.colors.border}; color: ${({ theme }) => theme.colors.textMuted}; &:hover { border-color: ${({ theme }) => theme.colors.goldDim}; color: ${({ theme }) => theme.colors.gold}; }`}
 `;
 
 const Stat = styled.span`

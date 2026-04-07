@@ -98,7 +98,7 @@ const ConvItem = styled.div<{ $active: boolean }>`
 const ConvName = styled.div<{ $active: boolean }>`
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ $active, theme}) => ($active ? theme.colors.gold : '#e5e5e5')};
+  color: ${({ $active, theme }) => ($active ? theme.colors.gold : theme.colors.text)};
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

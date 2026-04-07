@@ -62,9 +62,9 @@ const Tooltip = styled.div<{ $x: number; $y: number }>`
   transform: translate(-50%, -100%);
   z-index: 50;
   min-width: 192px;
-  background: rgba(17, 24, 39, 0.95);
+  background: ${({ theme }) => theme.colors.surfaceElevated};
   backdrop-filter: blur(4px);
-  border: 1px solid rgba(75, 85, 99, 0.5);
+  border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: 12px;
   box-shadow: 0 20px 40px ${({ theme }) => theme.colors.shadow};
   padding: 10px 12px;
@@ -78,7 +78,7 @@ const Tooltip = styled.div<{ $x: number; $y: number }>`
     transform: translateX(-50%);
     border-left: 6px solid transparent;
     border-right: 6px solid transparent;
-    border-top: 6px solid rgba(17, 24, 39, 0.95);
+    border-top: 6px solid ${({ theme }) => theme.colors.surfaceElevated};
   }
 `;
 

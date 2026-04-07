@@ -401,7 +401,7 @@ export function ModelCard({
           <SectionTitle>Download progress</SectionTitle>
           {perNode.map((nd) => (
             <DownloadRow key={nd.nodeId}>
-              <span style={{ color: 'rgba(255,255,255,0.4)', width: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={nd.nodeId}>
+              <span style={{ color: theme.colors.textMuted, width: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={nd.nodeId}>
                 {nd.nodeName}
               </span>
               <ProgressTrack>
@@ -409,7 +409,7 @@ export function ModelCard({
               </ProgressTrack>
               <span style={{
                 textAlign: 'right',
-                color: nd.status === 'completed' ? theme.colors.goldDim : nd.status === 'downloading' ? 'rgba(96,165,250,0.6)' : 'rgba(255,255,255,0.3)',
+                color: nd.status === 'completed' ? theme.colors.goldDim : nd.status === 'downloading' ? theme.colors.info : theme.colors.textMuted,
               }}>
                 {nd.status === 'downloading' && nd.progress
                   ? `${Math.round(nd.percentage)}% ${formatSpeed(nd.progress.speed)}`

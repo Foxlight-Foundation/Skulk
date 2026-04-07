@@ -32,7 +32,9 @@ const Dot = styled.div`
 const Text = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.errorText};
+  /* The banner sits on a saturated dark-red background regardless of theme,
+     so the text must always be light for contrast — bypass the palette text token. */
+  color: #fecaca;
 `;
 
 export function ConnectionBanner({ connected }: ConnectionBannerProps) {

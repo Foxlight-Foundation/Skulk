@@ -104,12 +104,12 @@ const ToggleBtn = styled.button<{ $active: boolean }>`
     $active
       ? css`
           background: ${({ theme }) => theme.colors.gold};
-          color: ${({ theme }) => theme.colors.bg};
+          color: ${({ theme }) => theme.colors.textOnAccent};
           font-weight: 600;
         `
       : css`
-          background: rgba(80, 80, 80, 0.3);
-          color: rgba(179, 179, 179, 0.8);
+          background: ${({ theme }) => theme.colors.surfaceSunken};
+          color: ${({ theme }) => theme.colors.textMuted};
           &:hover { color: ${({ theme }) => theme.colors.text}; }
         `}
 `;

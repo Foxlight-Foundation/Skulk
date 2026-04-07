@@ -202,7 +202,7 @@ const TooltipInner = styled.div<{ $color: ColorKey }>`
   padding: 12px;
   border-radius: 8px;
   border: 1px solid ${({ $color }) => colorMap[$color].border};
-  background: rgba(17, 17, 17, 0.95);
+  background: ${({ theme }) => theme.colors.surfaceElevated};
   backdrop-filter: blur(8px);
   box-shadow: 0 8px 32px ${({ theme }) => theme.colors.shadow};
 
