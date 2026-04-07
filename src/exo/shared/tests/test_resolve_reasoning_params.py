@@ -1,5 +1,6 @@
 import pytest
 
+from exo.shared.models.capabilities import ResolvedCapabilityProfile
 from exo.shared.types.text_generation import resolve_reasoning_params
 
 
@@ -9,12 +10,35 @@ def test_both_none_returns_none_none() -> None:
 
 def test_both_set_passes_through_unchanged_except_explicit_none() -> None:
     assert resolve_reasoning_params("high", True) == ("high", True)
-    assert resolve_reasoning_params("low", False) == ("low", False)
+    assert resolve_reasoning_params("low", False) == ("none", False)
 
 
 def test_explicit_none_disables_thinking_even_with_explicit_flag() -> None:
     assert resolve_reasoning_params("none", True) == ("none", False)
     assert resolve_reasoning_params("none", False) == ("none", False)
+
+
+def test_non_toggleable_thinking_models_ignore_explicit_controls() -> None:
+    profile = ResolvedCapabilityProfile(
+        supports_thinking=True,
+        supports_thinking_toggle=False,
+        default_reasoning_effort="high",
+        disabled_reasoning_effort="none",
+    )
+
+    assert resolve_reasoning_params(None, True, profile) == (None, None)
+    assert resolve_reasoning_params("none", None, profile) == (None, None)
+    assert resolve_reasoning_params("high", True, profile) == (None, None)
+
+
+def test_models_without_thinking_support_drop_reasoning_controls() -> None:
+    profile = ResolvedCapabilityProfile(
+        supports_thinking=False,
+        supports_thinking_toggle=False,
+    )
+
+    assert resolve_reasoning_params(None, True, profile) == (None, None)
+    assert resolve_reasoning_params("high", None, profile) == (None, None)
 
 
 def test_enable_thinking_true_derives_medium() -> None:

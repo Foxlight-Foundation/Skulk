@@ -72,6 +72,54 @@ const ModelSelect = styled.select`
 const EMPTY_MESSAGES: ChatMessage[] = [];
 const INITIAL_STREAM_STALL_TIMEOUT_MS = 10 * 60_000;
 const ACTIVE_STREAM_STALL_TIMEOUT_MS = 60_000;
+const THINK_TAG_START = '<think>';
+const THINK_TAG_END = '</think>';
+const GEMMA_THINK_START = '<|channel>thought\n';
+const GEMMA_THINK_END = '<channel|>';
+
+function splitReasoningDecoratedContent(raw: string): { content: string; thinking: string } {
+  let content = '';
+  let thinking = '';
+  let i = 0;
+  let activeEndTag: string | null = null;
+
+  while (i < raw.length) {
+    if (activeEndTag === null) {
+      if (raw.startsWith(THINK_TAG_START, i)) {
+        activeEndTag = THINK_TAG_END;
+        i += THINK_TAG_START.length;
+        continue;
+      }
+      if (raw.startsWith(GEMMA_THINK_START, i)) {
+        activeEndTag = GEMMA_THINK_END;
+        i += GEMMA_THINK_START.length;
+        continue;
+      }
+      if (raw.startsWith(THINK_TAG_END, i)) {
+        i += THINK_TAG_END.length;
+        continue;
+      }
+      if (raw.startsWith(GEMMA_THINK_END, i)) {
+        i += GEMMA_THINK_END.length;
+        continue;
+      }
+      content += raw[i];
+      i++;
+      continue;
+    }
+
+    if (raw.startsWith(activeEndTag, i)) {
+      i += activeEndTag.length;
+      activeEndTag = null;
+      continue;
+    }
+
+    thinking += raw[i];
+    i++;
+  }
+
+  return { content, thinking };
+}
 
 /* ── Component ────────────────────────────────────────── */
 
@@ -161,6 +209,12 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   const supportsThinking = selectedModelId
     ? (modelThinkingToggleSupport[selectedModelId] ?? false)
     : false;
+
+  useEffect(() => {
+    if (!supportsThinking && thinkingEnabled) {
+      setThinkingEnabled(false);
+    }
+  }, [supportsThinking, thinkingEnabled]);
 
   // Ready models
   const readyModels = useMemo(
@@ -288,7 +342,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
           model: selectedModelId,
           messages: apiMessages,
           stream: true,
-          ...(thinkingEnabled ? { enable_thinking: true } : {}),
+          ...(supportsThinking ? { enable_thinking: thinkingEnabled } : {}),
         }),
         signal: controller.signal,
       });
@@ -344,36 +398,12 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
             // Content — parse out inline <think> tags
             if (delta?.content) {
               rawContent += delta.content;
-
-              // Process <think> tags incrementally
-              let displayContent = '';
-              let thinkContent = '';
-              let i = 0;
-              let inTag = false;
-              const raw = rawContent;
-
-              while (i < raw.length) {
-                if (!inTag && raw.startsWith('<think>', i)) {
-                  inTag = true;
-                  i += 7;
-                } else if (inTag && raw.startsWith('</think>', i)) {
-                  inTag = false;
-                  i += 8;
-                } else if (inTag) {
-                  thinkContent += raw[i];
-                  i++;
-                } else {
-                  displayContent += raw[i];
-                  i++;
-                }
-              }
-
-              // If we found think tags, route to thinking
-              if (thinkContent) {
-                fullThinking = thinkContent;
+              const separated = splitReasoningDecoratedContent(rawContent);
+              if (separated.thinking) {
+                fullThinking = separated.thinking;
                 setStreamingThinking(fullThinking);
               }
-              setStreamingContent(displayContent || null);
+              setStreamingContent(separated.content || null);
             }
 
             // Update TPS on every token (thinking or content)
@@ -408,10 +438,11 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     }
 
     // Finalize assistant message
-    const finalAssistantContent = rawContent
-      .replace(/<think>[\s\S]*?<\/think>/gi, '')
-      .replace(/<think>[\s\S]*/i, '')
-      .trim();
+    const separatedContent = splitReasoningDecoratedContent(rawContent);
+    if (separatedContent.thinking) {
+      fullThinking = fullThinking || separatedContent.thinking;
+    }
+    const finalAssistantContent = separatedContent.content.trim();
 
     if (finalAssistantContent || fullThinking) {
       const assistantMsg: ChatMessage = {

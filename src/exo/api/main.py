@@ -1879,7 +1879,12 @@ class API:
         self, payload: ClaudeMessagesRequest
     ) -> ClaudeMessagesResponse | StreamingResponse:
         """Claude Messages API - adapter."""
-        task_params = await claude_request_to_text_generation(payload)
+        resolved_model = await self._resolve_and_validate_text_model(payload.model)
+        model_card = await self._get_running_model_card(resolved_model)
+        task_params = await claude_request_to_text_generation(
+            payload.model_copy(update={"model": resolved_model}),
+            model_card=model_card,
+        )
         if task_params.images:
             resolved_images: list[str] = []
             for img in task_params.images:
@@ -1888,10 +1893,6 @@ class API:
                 else:
                     resolved_images.append(img)
             task_params = task_params.model_copy(update={"images": resolved_images})
-        resolved_model = await self._resolve_and_validate_text_model(
-            ModelId(task_params.model)
-        )
-        task_params = task_params.model_copy(update={"model": resolved_model})
 
         command = await self._send_text_generation_with_images(task_params)
 
@@ -1971,11 +1972,12 @@ class API:
         """Ollama Chat API — accepts JSON regardless of Content-Type."""
         body = await request.body()
         payload = OllamaChatRequest.model_validate_json(body)
-        task_params = ollama_request_to_text_generation(payload)
-        resolved_model = await self._resolve_and_validate_text_model(
-            ModelId(task_params.model)
+        resolved_model = await self._resolve_and_validate_text_model(payload.model)
+        model_card = await self._get_running_model_card(resolved_model)
+        task_params = ollama_request_to_text_generation(
+            payload.model_copy(update={"model": resolved_model}),
+            model_card=model_card,
         )
-        task_params = task_params.model_copy(update={"model": resolved_model})
 
         command = await self._send_text_generation_with_images(task_params)
 
@@ -2007,11 +2009,12 @@ class API:
         """Ollama Generate API — accepts JSON regardless of Content-Type."""
         body = await request.body()
         payload = OllamaGenerateRequest.model_validate_json(body)
-        task_params = ollama_generate_request_to_text_generation(payload)
-        resolved_model = await self._resolve_and_validate_text_model(
-            ModelId(task_params.model)
+        resolved_model = await self._resolve_and_validate_text_model(payload.model)
+        model_card = await self._get_running_model_card(resolved_model)
+        task_params = ollama_generate_request_to_text_generation(
+            payload.model_copy(update={"model": resolved_model}),
+            model_card=model_card,
         )
-        task_params = task_params.model_copy(update={"model": resolved_model})
 
         command = await self._send_text_generation_with_images(task_params)
 

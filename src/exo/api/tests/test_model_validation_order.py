@@ -5,12 +5,19 @@ from typing import Any
 
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 
 from exo.api.main import API
 from exo.api.types import (
     BenchChatCompletionRequest,
     ChatCompletionMessage,
     ChatCompletionRequest,
+)
+from exo.api.types.claude_api import ClaudeMessage, ClaudeMessagesRequest
+from exo.api.types.ollama_api import (
+    OllamaChatRequest,
+    OllamaGenerateRequest,
+    OllamaMessage,
 )
 from exo.api.types.openai_responses import ResponsesRequest
 from exo.shared.models.model_cards import ModelCard, ModelTask
@@ -71,6 +78,32 @@ async def test_openai_responses_validates_model_before_adapter(monkeypatch: pyte
 
 
 @pytest.mark.anyio
+async def test_claude_messages_validates_model_before_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Invalid Claude models should fail before adapter conversion runs."""
+
+    async def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("claude_request_to_text_generation should not run before validation")
+
+    async def _raise_not_found(self: API, model_id: ModelId) -> ModelId:
+        raise HTTPException(status_code=404, detail=f"No instance found for model {model_id}")
+
+    monkeypatch.setattr("exo.api.main.claude_request_to_text_generation", _fail_if_called)
+    monkeypatch.setattr(API, "_resolve_and_validate_text_model", _raise_not_found)
+
+    api = object.__new__(API)
+    payload = ClaudeMessagesRequest(
+        model=ModelId("missing/model"),
+        max_tokens=100,
+        messages=[ClaudeMessage(role="user", content="hello")],
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.claude_messages(payload)
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.anyio
 async def test_running_text_requests_use_in_memory_model_card(monkeypatch: pytest.MonkeyPatch) -> None:
     """Running text requests should not depend on ModelCard.load cache/fetch behavior."""
 
@@ -105,6 +138,76 @@ async def test_running_text_requests_use_in_memory_model_card(monkeypatch: pytes
     resolved = await api._get_running_model_card(running_card.model_id)
 
     assert resolved == running_card
+
+
+@pytest.mark.anyio
+async def test_ollama_chat_validates_model_before_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Invalid Ollama chat models should fail locally before adapter conversion."""
+
+    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("ollama_request_to_text_generation should not run before validation")
+
+    async def _raise_not_found(self: API, model_id: ModelId) -> ModelId:
+        raise HTTPException(status_code=404, detail=f"No instance found for model {model_id}")
+
+    monkeypatch.setattr("exo.api.main.ollama_request_to_text_generation", _fail_if_called)
+    monkeypatch.setattr(API, "_resolve_and_validate_text_model", _raise_not_found)
+
+    api = object.__new__(API)
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "headers": [(b"content-type", b"application/json")],
+    }
+    body = OllamaChatRequest(
+        model=ModelId("missing/model"),
+        messages=[OllamaMessage(role="user", content="hello")],
+    ).model_dump_json().encode()
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    request = Request(scope, receive=receive)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.ollama_chat(request)
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_ollama_generate_validates_model_before_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Invalid Ollama generate models should fail locally before adapter conversion."""
+
+    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("ollama_generate_request_to_text_generation should not run before validation")
+
+    async def _raise_not_found(self: API, model_id: ModelId) -> ModelId:
+        raise HTTPException(status_code=404, detail=f"No instance found for model {model_id}")
+
+    monkeypatch.setattr("exo.api.main.ollama_generate_request_to_text_generation", _fail_if_called)
+    monkeypatch.setattr(API, "_resolve_and_validate_text_model", _raise_not_found)
+
+    api = object.__new__(API)
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "headers": [(b"content-type", b"application/json")],
+    }
+    body = OllamaGenerateRequest(
+        model=ModelId("missing/model"),
+        prompt="hello",
+    ).model_dump_json().encode()
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    request = Request(scope, receive=receive)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.ollama_generate(request)
+
+    assert exc_info.value.status_code == 404
 
 
 @pytest.mark.anyio
