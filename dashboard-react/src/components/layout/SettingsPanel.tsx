@@ -126,10 +126,9 @@ const Toggle = styled.button<{ $on: boolean }>`
   flex-shrink: 0;
   transition: background 0.2s;
 
-  ${({ $on }) =>
-    $on
-      ? css`background: ${({ theme }) => theme.colors.gold};`
-      : css`background: rgba(80, 80, 80, 0.5);`}
+  background: ${({ $on, theme }) =>
+    $on ? theme.colors.gold : theme.colors.surfaceSunken};
+  border: 1px solid ${({ theme }) => theme.colors.border};
 
   &::after {
     content: '';
@@ -139,7 +138,8 @@ const Toggle = styled.button<{ $on: boolean }>`
     width: 16px;
     height: 16px;
     border-radius: 50%;
-    background: ${({ $on }) => ($on ? '#000' : '#999')};
+    background: ${({ theme }) => theme.colors.surface};
+    box-shadow: 0 1px 2px ${({ theme }) => theme.colors.shadow};
     transition: left 0.2s;
   }
 `;
