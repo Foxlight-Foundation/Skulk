@@ -247,6 +247,21 @@ export function ChatForm({
     [handleSubmit],
   );
 
+  const addFiles = useCallback((fileList: File[]) => {
+    const imageFiles = fileList.filter((file) => file.type.startsWith('image/'));
+    if (imageFiles.length === 0) {
+      return;
+    }
+    const newFiles: ChatUploadedFile[] = imageFiles.map((f) => ({
+      id: `file-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: f.name,
+      type: f.type,
+      size: f.size,
+      preview: f.type.startsWith('image/') ? URL.createObjectURL(f) : undefined,
+    }));
+    setFiles((prev) => [...prev, ...newFiles]);
+  }, []);
+
   // Drag and drop
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -263,21 +278,6 @@ export function ChatForm({
     const dropped = Array.from(e.dataTransfer.files);
     addFiles(dropped);
   }, [addFiles, supportsImageAttachments]);
-
-  const addFiles = useCallback((fileList: File[]) => {
-    const imageFiles = fileList.filter((file) => file.type.startsWith('image/'));
-    if (imageFiles.length === 0) {
-      return;
-    }
-    const newFiles: ChatUploadedFile[] = imageFiles.map((f) => ({
-      id: `file-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      name: f.name,
-      type: f.type,
-      size: f.size,
-      preview: f.type.startsWith('image/') ? URL.createObjectURL(f) : undefined,
-    }));
-    setFiles((prev) => [...prev, ...newFiles]);
-  }, []);
 
   const removeFile = useCallback((id: string) => {
     setFiles((prev) => {
