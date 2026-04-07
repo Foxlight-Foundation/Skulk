@@ -259,7 +259,7 @@ const ProgressFill = styled.div<{ $status: string }>`
 
 const PreviewBox = styled.div`
   margin-bottom: 12px;
-  background: ${({ theme }) => theme.colors.shadow};
+  background: ${({ theme }) => theme.colors.surfaceSunken};
   border: 1px solid ${({ theme }) => theme.colors.borderLight};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 8px;

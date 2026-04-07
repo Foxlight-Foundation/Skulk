@@ -7,9 +7,9 @@ export interface NetworkMeshProps {
   count?: number;
   /** Max distance for drawing connections. Default 150. */
   linkDistance?: number;
-  /** Particle color. Defaults to `theme.colors.meshNode`. */
+  /** Particle color. Defaults to `theme.colors.bgMeshNode`. */
   color?: string;
-  /** Connection color. Defaults to `theme.colors.meshLine`. */
+  /** Connection color. Defaults to `theme.colors.bgMeshLine`. */
   lineColor?: string;
   /** Particle radius. Default 1.5. */
   radius?: number;
