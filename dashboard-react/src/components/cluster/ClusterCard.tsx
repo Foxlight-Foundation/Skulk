@@ -1,8 +1,9 @@
 import { useMemo } from 'react';
-import styled, { keyframes } from 'styled-components';
+import styled, { keyframes, useTheme } from 'styled-components';
 import { FiExternalLink } from 'react-icons/fi';
 import { MdPlayArrow } from 'react-icons/md';
 import { DeviceIcon } from '../topology/DeviceIcon';
+import type { Theme } from '../../theme';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -47,6 +48,7 @@ function hfUrl(modelId: string): string | null {
 /* ── Mini Topology ────────────────────────────────────── */
 
 function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
+  const theme = useTheme() as Theme;
   const count = nodes.length;
   const iconW = 48;
   const iconH = 40;
@@ -94,7 +96,7 @@ function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
                 ramPercent={node.memoryUsedPercent}
                 width={iconW}
                 height={iconH}
-                wireColor="rgba(255,215,0,0.5)"
+                wireColor={theme.colors.goldDim}
                 clipId={`cc-${node.nodeId}`}
               />
             </g>
@@ -268,7 +270,7 @@ const TypeBadge = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-weight: 600;
   color: ${({ theme }) => theme.colors.textSecondary};
-  background: rgba(255, 255, 255, 0.06);
+  background: ${({ theme }) => theme.colors.surfaceSunken};
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 3px 10px;
@@ -280,7 +282,7 @@ const ReadyBadge = styled.span`
   gap: 5px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-weight: 500;
-  color: #4ade80;
+  color: ${({ theme }) => theme.colors.healthy};
   background: rgba(34, 197, 94, 0.1);
   border: 1px solid rgba(34, 197, 94, 0.2);
   border-radius: ${({ theme }) => theme.radii.sm};
@@ -291,7 +293,7 @@ const PulseDot = styled.span`
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #4ade80;
+  background: ${({ theme }) => theme.colors.healthy};
   animation: ${pulse} 1.5s ease-in-out infinite;
 `;
 
@@ -323,7 +325,7 @@ const DownloadNode = styled.span`
 const DownloadBar = styled.div`
   flex: 1;
   height: 4px;
-  background: rgba(255, 255, 255, 0.08);
+  background: ${({ theme }) => theme.colors.borderLight};
   border-radius: 2px;
   overflow: hidden;
 `;

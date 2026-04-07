@@ -1,8 +1,9 @@
-import styled from 'styled-components';
+import styled, { useTheme } from 'styled-components';
 import { FiCheck, FiDownload, FiExternalLink } from 'react-icons/fi';
 import type { HuggingFaceModel } from '../../types/models';
 import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
+import type { Theme } from '../../theme';
 
 export interface HuggingFaceResultItemProps {
   model: HuggingFaceModel;
@@ -68,16 +69,15 @@ const AddedBadge = styled.span`
   padding: 2px 8px;
   border-radius: ${({ theme }) => theme.radii.sm};
   background: rgba(34, 197, 94, 0.15);
-  color: #22c55e;
+  color: ${({ theme }) => theme.colors.accent};
 `;
 
 const SelectBtn = styled(Button)`
-  background: rgba(255, 215, 0, 0.15);
-  color: #ffd700;
+  background: ${({ theme }) => theme.colors.goldBg};
+  color: ${({ theme }) => theme.colors.gold};
   &:hover:not(:disabled) { background: rgba(255, 215, 0, 0.25); }
 `;
 
-const CheckIcon = () => <FiCheck size={16} color="#22c55e" strokeWidth={2.5} />;
 const StoreDownloadIcon = () => <FiDownload size={14} />;
 
 export function HuggingFaceResultItem({
@@ -88,6 +88,8 @@ export function HuggingFaceResultItem({
   onAdd,
   onSelect,
 }: HuggingFaceResultItemProps) {
+  const theme = useTheme() as Theme;
+  const CheckIcon = () => <FiCheck size={16} color={theme.colors.accent} strokeWidth={2.5} />;
   const shortName = model.id.startsWith('mlx-community/')
     ? model.id.replace('mlx-community/', '')
     : model.id;
@@ -100,13 +102,13 @@ export function HuggingFaceResultItem({
   const tooltipContent = (
     <div style={{ minWidth: 220 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-        <span style={{ color: '#FFD700', fontWeight: 600 }}>{model.id}</span>
+        <span style={{ color: theme.colors.gold, fontWeight: 600 }}>{model.id}</span>
         <a
           href={hfUrl}
           target="_blank"
           rel="noopener noreferrer"
           style={{ color: 'rgba(255,255,255,0.5)', display: 'flex', transition: 'color 0.15s' }}
-          onMouseEnter={(e) => { e.currentTarget.style.color = '#FFD700'; }}
+          onMouseEnter={(e) => { e.currentTarget.style.color = theme.colors.gold; }}
           onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.5)'; }}
           title="Open on HuggingFace"
         >

@@ -56,7 +56,7 @@ const Image = styled.img`
   max-height: 90vh;
   object-fit: contain;
   border-radius: ${({ theme }) => theme.radii.lg};
-  box-shadow: 0 25px 50px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 25px 50px ${({ theme }) => theme.colors.shadowStrong};
   animation: ${slideUp} 0.3s cubic-bezier(0.33, 1, 0.68, 1);
 `;
 

@@ -43,7 +43,7 @@ const ActiveLine = styled.div<{ $inset: number; $pct: number; $height: number; $
   height: ${({ $height }) => $height}px;
   margin-top: ${({ $height }) => -$height / 2}px;
   width: calc((100% - ${({ $inset }) => $inset * 2}px) * ${({ $pct }) => $pct / 100});
-  background: #FFD700;
+  background: ${({ theme }) => theme.colors.gold};
   border-radius: ${({ $height }) => $height / 2}px;
   transition: width 0.15s ease-out;
 `;
@@ -74,19 +74,19 @@ const Dot = styled.span<{ $active: boolean; $size: number; $inactiveSize: number
     return `${pad}px 0`;
   }};
   border-radius: 50%;
-  background: ${({ $active }) => ($active ? '#FFD700' : '#787878')};
+  background: ${({ $active, theme}) => ($active ? theme.colors.gold : '#787878')};
   transition: all 0.15s ease-out;
   box-shadow: ${({ $active }) => ($active ? '0 0 8px rgba(255, 215, 0, 0.4)' : 'none')};
 
   ${StepCol}:hover & {
-    background: ${({ $active }) => ($active ? '#FFD700' : '#a0a0a0')};
+    background: ${({ $active, theme}) => ($active ? theme.colors.gold : '#a0a0a0')};
   }
 `;
 
 const Label = styled.span<{ $active: boolean }>`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ $active }) => ($active ? '#FFD700' : 'rgba(179, 179, 179, 0.6)')};
+  color: ${({ $active, theme}) => ($active ? theme.colors.gold : 'rgba(179, 179, 179, 0.6)')};
   font-weight: ${({ $active }) => ($active ? 600 : 400)};
   transition: color 0.15s;
 `;

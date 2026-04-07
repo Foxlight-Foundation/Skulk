@@ -1,5 +1,6 @@
-import styled, { css, keyframes } from 'styled-components';
+import styled, { css, keyframes, useTheme } from 'styled-components';
 import { FiDownload, FiCheck } from 'react-icons/fi';
+import type { Theme } from '../../theme';
 import type {
   ModelGroup,
   ModelInfo,
@@ -153,9 +154,9 @@ const StatusDot = styled.span<{ $class: string }>`
   border-radius: 50%;
   flex-shrink: 0;
   ${({ $class }) => {
-    if ($class === 'ready') return css`background: #22c55e;`;
+    if ($class === 'ready') return css`background: ${({ theme }) => theme.colors.accent};`;
     if ($class === 'loading') return css`background: #eab308;`;
-    if ($class === 'downloading') return css`background: #3b82f6;`;
+    if ($class === 'downloading') return css`background: ${({ theme }) => theme.colors.info};`;
     return css`background: #666;`;
   }}
 `;
@@ -171,8 +172,6 @@ const FavStar = styled.button<{ $active: boolean }>`
   }
 `;
 
-const DownloadIcon = () => <FiDownload size={14} color="#22c55e" />;
-const CheckMark = () => <FiCheck size={16} color="#22c55e" strokeWidth={2.5} />;
 
 const VariantList = styled.div`
   padding: 4px 0 4px 32px;
@@ -204,11 +203,12 @@ const InfoIconWrapper = styled.span`
 /* ---------- component ---------- */
 
 function ModelGroupInfo({ group }: { group: ModelGroup }) {
+  const theme = useTheme() as Theme;
   const v = group.smallestVariant;
   const resolved = v.resolved_capabilities;
   return (
     <div style={{ minWidth: 220 }}>
-      <div style={{ color: '#FFD700', fontWeight: 600, marginBottom: 6 }}>
+      <div style={{ color: theme.colors.gold, fontWeight: 600, marginBottom: 6 }}>
         {group.name}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
@@ -223,7 +223,7 @@ function ModelGroupInfo({ group }: { group: ModelGroup }) {
         <span style={{ color: 'rgba(255,255,255,0.45)' }}>Smallest</span>
         <span>{v.storage_size_megabytes ? formatBytes(v.storage_size_megabytes * 1024 * 1024) : '—'}</span>
         <span style={{ color: 'rgba(255,255,255,0.45)' }}>Tensor parallel</span>
-        <span style={{ color: v.supports_tensor ? '#4ade80' : 'rgba(255,255,255,0.7)' }}>
+        <span style={{ color: v.supports_tensor ? theme.colors.healthy : 'rgba(255,255,255,0.7)' }}>
           {v.supports_tensor ? 'Yes' : 'No'}
         </span>
         {group.capabilities.length > 0 && (
@@ -278,6 +278,9 @@ export function ModelPickerGroup({
   instanceStatuses,
   mode: _mode = 'launch',
 }: ModelPickerGroupProps) {
+  const theme = useTheme() as Theme;
+  const DownloadIcon = () => <FiDownload size={14} color={theme.colors.accent} />;
+  const CheckMark = () => <FiCheck size={16} color={theme.colors.accent} strokeWidth={2.5} />;
   const { variants, hasMultipleVariants } = group;
   const singleVariant = !hasMultipleVariants ? variants[0] : null;
 

@@ -55,7 +55,7 @@ const TokenCount = styled.span`
 
 const Track = styled.div`
   height: 6px;
-  background: rgba(0, 0, 0, 0.6);
+  background: ${({ theme }) => theme.colors.overlay};
   border-radius: 3px;
   overflow: hidden;
 `;
@@ -63,7 +63,7 @@ const Track = styled.div`
 const Fill = styled.div<{ $pct: number }>`
   height: 100%;
   width: ${({ $pct }) => $pct}%;
-  background: #FFD700;
+  background: ${({ theme }) => theme.colors.gold};
   border-radius: 3px;
   transition: width 150ms ease-out;
 `;

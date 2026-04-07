@@ -1,8 +1,10 @@
+import { useTheme } from 'styled-components';
 import type { NodeInfo, TopologyEdge } from '../../types/topology';
 import { detectDeviceModel } from '../../types/topology';
 import { DeviceIcon } from './DeviceIcon';
 import { GpuStatsBar } from './GpuStatsBar';
 import { NodeLabel } from './NodeLabel';
+import type { Theme } from '../../theme';
 
 
 export interface ClusterNodeProps {
@@ -27,6 +29,7 @@ function buildDebugContent(
   nodeInfo: NodeInfo,
   edges: TopologyEdge[],
   allNodes: Record<string, NodeInfo>,
+  theme: Theme,
 ): React.ReactNode {
   const chip = nodeInfo.system_info?.chip ?? '';
   const modelId = nodeInfo.system_info?.model_id ?? 'Unknown';
@@ -64,7 +67,7 @@ function buildDebugContent(
     ? (nodeInfo.rdma_interfaces_present === false ? 'Enabled (no HW support)' : 'Enabled')
     : 'Disabled';
   const rdmaColor = nodeInfo.rdma_enabled
-    ? (nodeInfo.rdma_interfaces_present === false ? '#f59e0b' : '#4ade80')
+    ? (nodeInfo.rdma_interfaces_present === false ? theme.colors.warning : theme.colors.healthy)
     : '#888';
   const version = nodeInfo.exo_version && nodeInfo.exo_version !== 'Unknown'
     ? `v${nodeInfo.exo_version}${nodeInfo.exo_commit && nodeInfo.exo_commit !== 'Unknown' ? ` (${nodeInfo.exo_commit})` : ''}`
@@ -72,7 +75,7 @@ function buildDebugContent(
 
   return (
     <div style={{ lineHeight: 1.6 }}>
-      <div style={{ color: '#FFD700', fontWeight: 600, marginBottom: 4 }}>
+      <div style={{ color: theme.colors.gold, fontWeight: 600, marginBottom: 4 }}>
         {modelId}{chip ? ` · ${chip}` : ''}
       </div>
       {os && <div style={{ color: 'rgba(255,255,255,0.6)' }}>{os}</div>}
@@ -109,6 +112,7 @@ export function ClusterNode({
   allNodes = {},
   onRestart,
 }: ClusterNodeProps) {
+  const theme = useTheme() as Theme;
   const model = detectDeviceModel(nodeInfo.system_info?.model_id);
 
   // Icon dimensions (unscaled)
@@ -145,7 +149,7 @@ export function ClusterNode({
   const iconLeft = -iconW / 2;
   const iconTop = -iconH / 2;
 
-  const debugContent = buildDebugContent(nodeId, nodeInfo, edges, allNodes);
+  const debugContent = buildDebugContent(nodeId, nodeInfo, edges, allNodes, theme);
 
   return (
     <g transform={`translate(${x}, ${y}) scale(${scale})`}>

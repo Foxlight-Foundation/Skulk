@@ -64,7 +64,7 @@ const Overlay = styled.div`
   position: fixed;
   inset: 0;
   z-index: 100;
-  background: rgba(0, 0, 0, 0.6);
+  background: ${({ theme }) => theme.colors.overlay};
   display: flex;
   align-items: center;
   justify-content: center;
@@ -162,15 +162,14 @@ const OptionBtn = styled.button<{ $selected: boolean; $disabled: boolean }>`
   border-radius: ${({ theme }) => theme.radii.md};
   border: 1px solid ${({ $selected, $disabled, theme }) =>
     $disabled ? 'rgba(255,255,255,0.08)' : $selected ? theme.colors.goldDim : theme.colors.border};
-  background: ${({ $selected, $disabled }) =>
-    $disabled ? 'rgba(255,255,255,0.02)' : $selected ? 'rgba(255, 215, 0, 0.08)' : 'transparent'};
+  background: ${({ $selected, $disabled, theme}) => $disabled ? 'rgba(255,255,255,0.02)' : $selected ? theme.colors.goldBg : 'transparent'};
   opacity: ${({ $disabled }) => $disabled ? 0.5 : 1};
   transition: all 0.15s;
   text-align: center;
 
   ${({ $disabled }) => !$disabled && css`
     &:hover {
-      border-color: rgba(255, 215, 0, 0.4);
+      border-color: ${({ theme }) => theme.colors.goldDim};
     }
   `}
 `;
@@ -179,7 +178,7 @@ const OptionLabel = styled.div<{ $selected: boolean }>`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
   font-weight: 500;
-  color: ${({ $selected }) => $selected ? '#FFD700' : 'rgba(255,255,255,0.7)'};
+  color: ${({ $selected, theme}) => $selected ? theme.colors.gold : 'rgba(255,255,255,0.7)'};
 `;
 
 const OptionSub = styled.div`
@@ -208,7 +207,7 @@ const ErrorCallout = styled.div`
   gap: 8px;
   padding: 10px 12px;
   border-radius: ${({ theme }) => theme.radii.md};
-  background: rgba(239, 68, 68, 0.08);
+  background: ${({ theme }) => theme.colors.errorBg};
   border: 1px solid rgba(239, 68, 68, 0.25);
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};

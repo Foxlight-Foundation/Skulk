@@ -102,7 +102,7 @@ export function NetworkMesh({
 
       // Draw connections
       const linkDist2 = linkDistance * linkDistance;
-      // Extract base alpha from lineColor (e.g. "rgba(255,215,0,0.08)" → 0.08)
+      // Extract base alpha from lineColor (e.g. theme.colors.goldBg → 0.08)
       const baseAlphaMatch = lineColor.match(/([\d.]+)\)$/);
       const baseAlpha = baseAlphaMatch ? parseFloat(baseAlphaMatch[1]) : 0.08;
       const lineBase = lineColor.replace(/[\d.]+\)$/, '');

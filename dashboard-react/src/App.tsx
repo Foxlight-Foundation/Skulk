@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { ThemeProvider } from 'styled-components';
-import { theme, GlobalStyle } from './theme';
+import { darkTheme, lightTheme, GlobalStyle } from './theme';
 import { useClusterState } from './hooks/useClusterState';
 import { HeaderNav, type NavRoute } from './components/layout/HeaderNav';
 import { TopologyGraph } from './components/topology/TopologyGraph';
@@ -110,6 +110,15 @@ export function App() {
   const activeRoute = useUIStore((s) => s.activeRoute);
   const panelOpen = useUIStore((s) => s.panelOpen);
   const historyPanelOpen = useUIStore((s) => s.historyPanelOpen);
+  const themeName = useUIStore((s) => s.theme);
+  const activeTheme = themeName === 'light' ? lightTheme : darkTheme;
+
+  // Reflect theme on the html root so non-styled-components surfaces (highlight.js,
+  // scrollbars, etc.) can react via `html[data-theme='light'] …` selectors.
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    document.documentElement.setAttribute('data-theme', themeName);
+  }, [themeName]);
   const setActiveRoute = useUIStore((s) => s.setActiveRoute);
   const togglePanel = useUIStore((s) => s.togglePanel);
   const toggleHistoryPanel = useUIStore((s) => s.toggleHistoryPanel);
@@ -255,9 +264,9 @@ export function App() {
   }, []);
 
   return (
-    <ThemeProvider theme={theme}>
+    <ThemeProvider theme={activeTheme}>
       <GlobalStyle />
-      <NetworkMesh radius={2.5} lineColor="rgba(255,215,0,0.35)" />
+      <NetworkMesh radius={2.5} lineColor={activeTheme.colors.meshLine} />
       <Shell>
         <ConnectionBanner connected={connected} />
         <HeaderNav

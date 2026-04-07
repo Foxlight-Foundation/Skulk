@@ -5,7 +5,7 @@ import type { RawDownloads, NodeDiskInfo, RawInstances, RawRunners } from '../..
 import { StoreRegistryTable, type StoreRegistryEntry, type StoreDownloadProgress, type ModelCardInfo } from '../layout/StoreRegistryTable';
 import type { ClusterCardProps, ClusterCardNode } from '../cluster/ClusterCard';
 import { ModelSearchModal } from './ModelSearchModal';
-import { FiTrash2, FiSearch, FiCheck } from 'react-icons/fi';
+import { FiTrash2, FiSearch } from 'react-icons/fi';
 import { Button } from '../common/Button';
 import { addToast } from '../../hooks/useToast';
 import { PlacementManager } from '../cluster/PlacementManager';
@@ -135,24 +135,9 @@ function buildGrid(
   return { rows: Array.from(rowMap.values()), columns };
 }
 
-function formatBytes(bytes: number): string {
-  if (!bytes || bytes <= 0) return '0B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const val = bytes / Math.pow(1024, i);
-  return `${val.toFixed(val >= 10 ? 0 : 1)}${units[i]}`;
-}
-
 const TrashIcon = () => <FiTrash2 size={14} />;
 const SearchIcon = () => <FiSearch size={14} />;
-
-function formatSpeed(bps: number): string {
-  if (!bps || bps <= 0) return '--';
-  const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
-  const i = Math.min(Math.floor(Math.log(bps) / Math.log(1024)), units.length - 1);
-  const val = bps / Math.pow(1024, i);
-  return `${val.toFixed(val >= 10 ? 0 : 1)} ${units[i]}`;
-}
+// formatBytes / formatSpeed deleted along with dead CellContent.
 
 /* ── Component ────────────────────────────────────────── */
 
@@ -595,45 +580,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
   );
 }
 
-function CellContent({ cell }: { cell: CellStatus }) {
-  switch (cell.kind) {
-    case 'completed':
-      return (
-        <CellInner>
-          <CheckIcon />
-          <CellSize>{formatBytes(cell.totalBytes)}</CellSize>
-        </CellInner>
-      );
-    case 'downloading':
-      return (
-        <CellInner>
-          <ProgressText $color="#FFD700">
-            {(cell.percentage ?? 0).toFixed(1)}%
-          </ProgressText>
-          <CellSize>{formatSpeed(cell.speed ?? 0)}</CellSize>
-        </CellInner>
-      );
-    case 'pending':
-      return (
-        <CellInner>
-          <ProgressText $color="#FFD700">
-            {cell.downloadedBytes && cell.totalBytes
-              ? `${((cell.downloadedBytes / cell.totalBytes) * 100).toFixed(1)}%`
-              : '0.0%'}
-          </ProgressText>
-          <CellSize>--</CellSize>
-        </CellInner>
-      );
-    case 'failed':
-      return <FailedText>Failed</FailedText>;
-    default:
-      return <NotPresent>--</NotPresent>;
-  }
-}
-
-function CheckIcon() {
-  return <FiCheck size={20} color="#4ade80" strokeWidth={2.5} />;
-}
+// CellContent / CheckIcon were unused dead code — removed during light-theme migration.
 
 /* ── Styles ───────────────────────────────────────────── */
 
@@ -663,7 +610,7 @@ const PurgeModal = styled.div`
 const ModalBackdrop = styled.div`
   position: absolute;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: ${({ theme }) => theme.colors.overlay};
 `;
 
 const ModalBox = styled.div`
@@ -726,7 +673,7 @@ const SegmentBtn = styled.button<{ $active: boolean }>`
           font-weight: 600;
         `
       : css`
-          background: rgba(0, 0, 0, 0.3);
+          background: ${({ theme }) => theme.colors.shadow};
           color: ${theme.colors.textSecondary};
           &:hover {
             color: ${theme.colors.text};
@@ -746,7 +693,7 @@ const EmptyState = styled.div`
   padding: 48px 24px;
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.md};
-  background: rgba(0, 0, 0, 0.2);
+  background: ${({ theme }) => theme.colors.shadow};
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
   color: ${({ theme }) => theme.colors.textMuted};
@@ -755,7 +702,7 @@ const EmptyState = styled.div`
 const TableWrap = styled.div`
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.md};
-  background: rgba(0, 0, 0, 0.2);
+  background: ${({ theme }) => theme.colors.shadow};
   overflow-x: auto;
 `;
 
@@ -797,40 +744,14 @@ const ModelCell = styled.td`
   padding: 16px 20px;
   color: ${({ theme }) => theme.colors.text};
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid ${({ theme }) => theme.colors.surfaceSunken};
   white-space: nowrap;
 `;
 
 const StatusCell = styled.td`
   text-align: center;
   padding: 12px 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid ${({ theme }) => theme.colors.surfaceSunken};
 `;
 
-const CellInner = styled.div`
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-`;
-
-const CellSize = styled.div`
-  font-size: ${({ theme }) => theme.fontSizes.sm};
-  color: ${({ theme }) => theme.colors.textSecondary};
-`;
-
-const ProgressText = styled.div<{ $color: string }>`
-  font-size: ${({ theme }) => theme.fontSizes.md};
-  font-weight: 600;
-  color: ${({ $color }) => $color};
-`;
-
-const FailedText = styled.div`
-  font-size: ${({ theme }) => theme.fontSizes.sm};
-  font-weight: 600;
-  color: ${({ theme }) => theme.colors.error};
-`;
-
-const NotPresent = styled.div`
-  color: ${({ theme }) => theme.colors.textMuted};
-`;
+// Cell-status display styled-components removed alongside dead CellContent.

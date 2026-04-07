@@ -18,13 +18,13 @@ const Banner = styled.div`
   gap: 8px;
   padding: 8px 16px;
   background: rgba(69, 10, 10, 0.8);
-  border-bottom: 1px solid rgba(239, 68, 68, 0.3);
+  border-bottom: 1px solid ${({ theme }) => theme.colors.errorBg};
 `;
 
 const Dot = styled.div`
   width: 8px;
   height: 8px;
-  background: #ef4444;
+  background: ${({ theme }) => theme.colors.error};
   border-radius: 50%;
   animation: ${pulse} 1.5s ease-in-out infinite;
 `;
@@ -32,7 +32,7 @@ const Dot = styled.div`
 const Text = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: #fca5a5;
+  color: ${({ theme }) => theme.colors.errorText};
 `;
 
 export function ConnectionBanner({ connected }: ConnectionBannerProps) {

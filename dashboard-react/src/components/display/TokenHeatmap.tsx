@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
-import styled, { css } from 'styled-components';
+import styled, { useTheme } from 'styled-components';
 import { Button } from '../common/Button';
+import type { Theme } from '../../theme';
 
 export interface TokenData {
   token: string;
@@ -25,11 +26,11 @@ function getConfidenceStyle(prob: number): { bg: string; color: string; border: 
   return { bg: 'rgba(239,68,68,0.2)', color: 'rgba(254,202,202,0.9)', border: 'rgba(239,68,68,0.4)' };
 }
 
-function probColor(prob: number): string {
-  if (prob > 0.8) return '#4ade80';
-  if (prob > 0.5) return '#d1d5db';
-  if (prob > 0.2) return '#fbbf24';
-  return '#f87171';
+function probColor(prob: number, theme: Theme): string {
+  if (prob > 0.8) return theme.colors.healthy;
+  if (prob > 0.5) return theme.colors.textSecondary;
+  if (prob > 0.2) return theme.colors.warning;
+  return theme.colors.error;
 }
 
 /* ---- styles ---- */
@@ -65,7 +66,7 @@ const Tooltip = styled.div<{ $x: number; $y: number }>`
   backdrop-filter: blur(4px);
   border: 1px solid rgba(75, 85, 99, 0.5);
   border-radius: 12px;
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 20px 40px ${({ theme }) => theme.colors.shadow};
   padding: 10px 12px;
   font-size: ${({ theme }) => theme.fontSizes.sm};
 
@@ -90,7 +91,7 @@ const TooltipHeader = styled.div`
 
 const TooltipToken = styled.span`
   font-family: ${({ theme }) => theme.fonts.body};
-  color: #fff;
+  color: ${({ theme }) => theme.colors.text};
 `;
 
 const LogprobText = styled.div`
@@ -114,7 +115,7 @@ const RegenButton = styled(Button)`
   margin-top: 8px;
   color: rgba(156, 163, 175, 0.8);
   &:hover:not(:disabled) {
-    color: #FFD700;
+    color: ${({ theme }) => theme.colors.gold};
   }
 `;
 
@@ -132,7 +133,8 @@ export function TokenHeatmap({
     y: number;
   } | null>(null);
   const [tooltipHovered, setTooltipHovered] = useState(false);
-  const hideTimer = useRef<ReturnType<typeof setTimeout>>();
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const theme = useTheme() as Theme;
 
   const handleMouseEnter = useCallback(
     (e: React.MouseEvent, index: number) => {
@@ -191,7 +193,7 @@ export function TokenHeatmap({
         >
           <TooltipHeader>
             <TooltipToken>"{hoveredToken.token}"</TooltipToken>
-            <span style={{ color: probColor(hoveredToken.probability), fontWeight: 600 }}>
+            <span style={{ color: probColor(hoveredToken.probability, theme), fontWeight: 600 }}>
               {(hoveredToken.probability * 100).toFixed(1)}%
             </span>
           </TooltipHeader>

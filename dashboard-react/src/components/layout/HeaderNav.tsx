@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
-import styled, { css, keyframes } from 'styled-components';
-import { FiSettings, FiMenu, FiX, FiSidebar, FiDatabase, FiMessageSquare } from 'react-icons/fi';
+import styled, { css, useTheme } from 'styled-components';
+import { FiSettings, FiMenu, FiX, FiSidebar, FiDatabase, FiMessageSquare, FiSun, FiMoon } from 'react-icons/fi';
 import { MdHub } from 'react-icons/md';
-import { MdOutlineViewSidebar } from 'react-icons/md';
 import { Button } from '../common/Button';
 import SkulkIcon from '../icons/SkulkIcon';
+import type { Theme } from '../../theme';
+import { useUIStore } from '../../stores/uiStore';
 
 export type NavRoute = 'cluster' | 'model-store' | 'chat';
 
@@ -63,8 +63,8 @@ const ToggleBtn = styled(Button)<{ $active: boolean }>`
   ${({ $active }) =>
     $active &&
     css`
-      color: #FFD700;
-      border-color: rgba(255, 215, 0, 0.4);
+      color: ${({ theme }) => theme.colors.gold};
+      border-color: ${({ theme }) => theme.colors.goldDim};
     `}
 `;
 
@@ -85,8 +85,8 @@ const LogoText = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.xxl};
   font-weight: 700;
   font-family: ${({ theme }) => theme.fonts.body};
-  color: #ffffff;
-  filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.2));
+  color: ${({ theme }) => theme.colors.text};
+  filter: drop-shadow(0 0 4px ${({ theme }) => theme.colors.border});
 `;
 
 const VersionTag = styled.sup`
@@ -155,14 +155,14 @@ const WarningCircle = styled.div<{ $level: 'error' | 'warning' }>`
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  background: ${({ $level }) => $level === 'error' ? '#ef4444' : '#f59e0b'};
+  background: ${({ $level, theme}) => $level === 'error' ? theme.colors.error : theme.colors.warning};
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 14px;
   font-weight: 700;
   font-family: ${({ theme }) => theme.fonts.body};
-  color: #ffffff;
+  color: ${({ theme }) => theme.colors.text};
 `;
 
 const WarningTooltip = styled.div`
@@ -184,7 +184,7 @@ const WarningTooltipInner = styled.div`
   border-radius: ${({ theme }) => theme.radii.md};
   padding: 10px 12px;
   backdrop-filter: blur(8px);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 8px 32px ${({ theme }) => theme.colors.shadow};
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -193,7 +193,7 @@ const WarningTooltipInner = styled.div`
 const WarningItem = styled.div<{ $level: 'error' | 'warning' }>`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ $level }) => $level === 'error' ? '#fca5a5' : '#fcd34d'};
+  color: ${({ $level, theme}) => $level === 'error' ? theme.colors.errorText : theme.colors.warningText};
   line-height: 1.4;
   display: flex;
   align-items: flex-start;
@@ -201,7 +201,7 @@ const WarningItem = styled.div<{ $level: 'error' | 'warning' }>`
 
   &::before {
     content: '${({ $level }) => $level === 'error' ? '●' : '●'}';
-    color: ${({ $level }) => $level === 'error' ? '#ef4444' : '#f59e0b'};
+    color: ${({ $level, theme}) => $level === 'error' ? theme.colors.error : theme.colors.warning};
     flex-shrink: 0;
   }
 `;
@@ -226,13 +226,13 @@ const InstanceToggle = styled.button<{ $healthy: boolean; $active: boolean }>`
 const MenuIcon = () => <FiMenu size={18} />;
 const CloseIcon = () => <FiX size={18} />;
 const SidebarIcon = () => <FiSidebar size={18} />;
-const PanelIcon = () => <MdOutlineViewSidebar size={18} />;
 const ClusterIcon = () => <MdHub size={16} />;
 const StoreIcon = () => <FiDatabase size={16} />;
 const ChatIcon = () => <FiMessageSquare size={16} />;
 const SettingsIcon = () => <FiSettings size={16} />;
 
 function ProgressCircle({ count, percentage }: { count: number; percentage: number }) {
+  const theme = useTheme() as Theme;
   const r = 10;
   const circ = 2 * Math.PI * r;
   const offset = circ * (1 - percentage / 100);
@@ -243,13 +243,13 @@ function ProgressCircle({ count, percentage }: { count: number; percentage: numb
         <circle cx="14" cy="14" r={r} fill="none" stroke="rgba(179,179,179,0.2)" strokeWidth="2" />
         <circle
           cx="14" cy="14" r={r}
-          fill="none" stroke="#FFD700" strokeWidth="2"
+          fill="none" stroke={theme.colors.gold} strokeWidth="2"
           strokeDasharray={circ} strokeDashoffset={offset}
           strokeLinecap="round"
           transform="rotate(-90 14 14)"
           style={{ transition: 'stroke-dashoffset 0.3s ease-out' }}
         />
-        <text x="14" y="14" textAnchor="middle" dominantBaseline="central" fill="#FFD700" fontSize="8" fontFamily="monospace">
+        <text x="14" y="14" textAnchor="middle" dominantBaseline="central" fill={theme.colors.gold} fontSize="8" fontFamily="monospace">
           {count}
         </text>
       </svg>
@@ -280,6 +280,9 @@ export function HeaderNav({
   onOpenSettings,
   className,
 }: HeaderNavProps) {
+  const theme = useTheme() as Theme;
+  const themeName = useUIStore((s) => s.theme);
+  const toggleTheme = useUIStore((s) => s.toggleTheme);
   const navigate = (route: NavRoute) => {
     onNavigate?.(route);
     if (route === 'cluster') onHome?.();
@@ -343,7 +346,7 @@ export function HeaderNav({
               <circle
                 cx="14" cy="14" r="11"
                 fill="none"
-                stroke={instancesHealthy ? '#4ade80' : '#ef4444'}
+                stroke={instancesHealthy ? theme.colors.healthy : theme.colors.error}
                 strokeWidth="2"
                 opacity={mobileRightOpen ? 1 : 0.7}
               />
@@ -351,7 +354,7 @@ export function HeaderNav({
                 x="14" y="14"
                 textAnchor="middle"
                 dominantBaseline="central"
-                fill={instancesHealthy ? '#4ade80' : '#ef4444'}
+                fill={instancesHealthy ? theme.colors.healthy : theme.colors.error}
                 fontSize="13"
                 fontFamily="'Outfit', sans-serif"
                 fontWeight="700"
@@ -361,6 +364,17 @@ export function HeaderNav({
             </svg>
           </InstanceToggle>
         )}
+
+        <Button
+          variant="ghost"
+          size="lg"
+          icon
+          onClick={toggleTheme}
+          aria-label={themeName === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          title={themeName === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+        >
+          {themeName === 'dark' ? <FiSun size={16} /> : <FiMoon size={16} />}
+        </Button>
 
         <Button variant="ghost" size="lg" icon onClick={() => onOpenSettings?.()} aria-label="Settings">
           <SettingsIcon />

@@ -1,6 +1,7 @@
-import styled, { keyframes } from 'styled-components';
+import styled, { keyframes, useTheme } from 'styled-components';
 import { useToast, type Toast } from '../../hooks/useToast';
 import { Button } from '../common/Button';
+import type { Theme } from '../../theme';
 
 /* ---- type config ---- */
 
@@ -11,32 +12,35 @@ interface TypeStyle {
   progressColor: string;
 }
 
-const TYPE_STYLES: Record<Toast['type'], TypeStyle> = {
-  success: {
-    borderColor: '#22c55e',
-    iconColor: '#4ade80',
-    iconPath: 'M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z',
-    progressColor: 'rgba(34,197,94,0.6)',
-  },
-  error: {
-    borderColor: '#ef4444',
-    iconColor: '#f87171',
-    iconPath: 'M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z',
-    progressColor: 'rgba(239,68,68,0.6)',
-  },
-  warning: {
-    borderColor: '#eab308',
-    iconColor: '#facc15',
-    iconPath: 'M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z',
-    progressColor: 'rgba(234,179,8,0.6)',
-  },
-  info: {
-    borderColor: '#3b82f6',
-    iconColor: '#60a5fa',
-    iconPath: 'M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z',
-    progressColor: 'rgba(59,130,246,0.6)',
-  },
-};
+/** Per-toast-type display config. Built from the active theme so colors track theme switches. */
+function buildTypeStyles(theme: Theme): Record<Toast['type'], TypeStyle> {
+  return {
+    success: {
+      borderColor: theme.colors.accent,
+      iconColor: theme.colors.healthy,
+      iconPath: 'M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z',
+      progressColor: theme.colors.accentBg,
+    },
+    error: {
+      borderColor: theme.colors.error,
+      iconColor: theme.colors.error,
+      iconPath: 'M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z',
+      progressColor: theme.colors.errorBg,
+    },
+    warning: {
+      borderColor: theme.colors.warning,
+      iconColor: theme.colors.warning,
+      iconPath: 'M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z',
+      progressColor: theme.colors.warningBg,
+    },
+    info: {
+      borderColor: theme.colors.info,
+      iconColor: theme.colors.info,
+      iconPath: 'M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z',
+      progressColor: theme.colors.infoBg,
+    },
+  };
+}
 
 /* ---- animations ---- */
 
@@ -72,7 +76,7 @@ const ToastCard = styled.div<{ $borderColor: string }>`
   border: 1px solid rgba(80, 80, 80, 0.6);
   border-left: 3px solid ${({ $borderColor }) => $borderColor};
   border-radius: ${({ theme }) => theme.radii.md};
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 4px 12px ${({ theme }) => theme.colors.shadow};
   animation: ${slideIn} 0.25s ease-out;
 `;
 
@@ -87,20 +91,20 @@ const Message = styled.p`
   flex: 1;
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: rgba(255, 255, 255, 0.9);
+  color: ${({ theme }) => theme.colors.text};
   line-height: 1.4;
   margin: 0;
 `;
 
 const DismissBtn = styled(Button)`
   flex-shrink: 0;
-  color: rgba(255, 255, 255, 0.4);
-  &:hover:not(:disabled) { color: rgba(255, 255, 255, 0.8); background: transparent; }
+  color: ${({ theme }) => theme.colors.textMuted};
+  &:hover:not(:disabled) { color: ${({ theme }) => theme.colors.textSecondary}; background: transparent; }
 `;
 
 const ProgressTrack = styled.div`
   height: 2px;
-  background: rgba(255, 255, 255, 0.05);
+  background: ${({ theme }) => theme.colors.surfaceSunken};
   border-radius: 0 0 ${({ theme }) => theme.radii.md} ${({ theme }) => theme.radii.md};
   overflow: hidden;
 `;
@@ -115,6 +119,8 @@ const ProgressBar = styled.div<{ $color: string; $duration: number }>`
 
 export function ToastContainer() {
   const { toasts, dismissToast } = useToast();
+  const theme = useTheme() as Theme;
+  const TYPE_STYLES = buildTypeStyles(theme);
 
   if (toasts.length === 0) return null;
 

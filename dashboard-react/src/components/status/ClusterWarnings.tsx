@@ -204,11 +204,11 @@ const TooltipInner = styled.div<{ $color: ColorKey }>`
   border: 1px solid ${({ $color }) => colorMap[$color].border};
   background: rgba(17, 17, 17, 0.95);
   backdrop-filter: blur(8px);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 8px 32px ${({ theme }) => theme.colors.shadow};
 
   p {
     font-size: ${({ theme }) => theme.fontSizes.sm};
-    color: rgba(255, 255, 255, 0.8);
+    color: ${({ theme }) => theme.colors.textSecondary};
     margin: 0 0 8px;
     line-height: 1.5;
   }
@@ -223,7 +223,7 @@ const NodeList = styled.ul`
   padding: 0;
   margin: 0 0 8px;
   font-size: ${({ theme }) => theme.fontSizes.label};
-  color: rgba(255, 255, 255, 0.6);
+  color: ${({ theme }) => theme.colors.textSecondary};
 
   li {
     padding-left: 8px;

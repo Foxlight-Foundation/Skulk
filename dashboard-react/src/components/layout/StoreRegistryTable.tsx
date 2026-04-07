@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
-import styled, { css, keyframes } from 'styled-components';
+import styled, { css, keyframes, useTheme } from 'styled-components';
+import type { Theme } from '../../theme';
 import { FiTrash2, FiExternalLink, FiRefreshCw } from 'react-icons/fi';
 import { MdPlayArrow, MdClose, MdTune, MdAutoFixHigh } from 'react-icons/md';
 import { BsChatDotsFill } from 'react-icons/bs';
@@ -130,7 +131,7 @@ const ShimmerRow = styled.div`
 const EmptyBox = styled.div`
   border: 1px solid rgba(80, 80, 80, 0.3);
   border-radius: ${({ theme }) => theme.radii.md};
-  background: rgba(0, 0, 0, 0.3);
+  background: ${({ theme }) => theme.colors.shadow};
   padding: 24px;
   text-align: center;
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
@@ -154,7 +155,7 @@ const THead = styled.div`
   grid-template-columns: 36px 32px 1fr 80px 60px 100px 100px;
   gap: 8px;
   padding: 8px 12px;
-  background: rgba(0, 0, 0, 0.4);
+  background: ${({ theme }) => theme.colors.shadow};
   font-size: ${({ theme }) => theme.fontSizes.tableHead};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.textMuted};
@@ -180,7 +181,7 @@ const TRow = styled.div<{ $highlight?: boolean }>`
 
   ${({ $highlight }) =>
     $highlight &&
-    css`background: rgba(255, 215, 0, 0.05);`}
+    css`background: ${({ theme }) => theme.colors.goldBg};`}
 `;
 
 const ModelCell = styled.div`
@@ -207,7 +208,7 @@ const ReadyBadge = styled.span`
   flex-shrink: 0;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: #4ade80;
+  color: ${({ theme }) => theme.colors.healthy};
   background: rgba(34, 197, 94, 0.1);
   border: 1px solid rgba(34, 197, 94, 0.2);
   border-radius: ${({ theme }) => theme.radii.sm};
@@ -232,7 +233,7 @@ const PulseDot = styled.span`
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #4ade80;
+  background: ${({ theme }) => theme.colors.healthy};
   animation: ${pulse} 1.5s ease-in-out infinite;
 `;
 
@@ -244,13 +245,15 @@ const ActiveDot = styled.span`
   animation: ${pulse} 1.5s ease-in-out infinite;
 `;
 
-const TAG_COLORS: Record<string, { color: string; bg: string; border: string }> = {
-  optiq: { color: '#a78bfa', bg: 'rgba(167, 139, 250, 0.1)', border: 'rgba(167, 139, 250, 0.3)' },
-  thinking: { color: '#60a5fa', bg: 'rgba(96, 165, 250, 0.1)', border: 'rgba(96, 165, 250, 0.3)' },
-  vision: { color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.12)', border: 'rgba(245, 158, 11, 0.32)' },
-  tensor: { color: '#34d399', bg: 'rgba(52, 211, 153, 0.1)', border: 'rgba(52, 211, 153, 0.3)' },
-  embedding: { color: '#f472b6', bg: 'rgba(244, 114, 182, 0.1)', border: 'rgba(244, 114, 182, 0.3)' },
-};
+function buildTagColors(theme: Theme): Record<string, { color: string; bg: string; border: string }> {
+  return {
+    optiq: { color: '#a78bfa', bg: 'rgba(167, 139, 250, 0.1)', border: 'rgba(167, 139, 250, 0.3)' },
+    thinking: { color: theme.colors.info, bg: theme.colors.infoBg, border: theme.colors.infoBg },
+    vision: { color: theme.colors.warning, bg: theme.colors.warningBg, border: theme.colors.warningBg },
+    tensor: { color: theme.colors.healthy, bg: theme.colors.accentBg, border: theme.colors.accentBg },
+    embedding: { color: '#f472b6', bg: 'rgba(244, 114, 182, 0.1)', border: 'rgba(244, 114, 182, 0.3)' },
+  };
+}
 
 const TagBadge = styled.span<{ $color: string; $bg: string; $border: string }>`
   flex-shrink: 0;
@@ -271,7 +274,7 @@ const ChatBubble = styled.button`
   cursor: pointer;
   display: flex;
   align-items: center;
-  color: #4ade80;
+  color: ${({ theme }) => theme.colors.healthy};
   padding: 2px;
   border-radius: ${({ theme }) => theme.radii.sm};
   transition: all 0.15s;
@@ -300,7 +303,7 @@ const ProgressTrack = styled.div`
 const ProgressFill = styled.div<{ $pct: number }>`
   width: ${({ $pct }) => $pct}%;
   height: 100%;
-  background: #FFD700;
+  background: ${({ theme }) => theme.colors.gold};
   border-radius: 3px;
   transition: width 0.3s ease-out;
 `;
@@ -308,7 +311,7 @@ const ProgressFill = styled.div<{ $pct: number }>`
 const ProgressText = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: #FFD700;
+  color: ${({ theme }) => theme.colors.gold};
 `;
 
 const spin = keyframes`
@@ -354,11 +357,11 @@ const PlayBtn = styled.button`
   height: 28px;
   border-radius: 50%;
   color: ${({ theme }) => theme.colors.gold};
-  background: rgba(255, 215, 0, 0.15);
+  background: ${({ theme }) => theme.colors.goldBg};
   transition: background 0.15s, transform 0.1s;
 
   &:hover {
-    background: rgba(255, 215, 0, 0.3);
+    background: ${({ theme }) => theme.colors.goldDim};
     transform: scale(1.1);
   }
 `;
@@ -389,7 +392,7 @@ const PlacementBtn = styled.button`
 
   &:hover {
     color: ${({ theme }) => theme.colors.gold};
-    background: rgba(255, 215, 0, 0.1);
+    background: ${({ theme }) => theme.colors.goldBg};
   }
 `;
 
@@ -403,11 +406,11 @@ const StopBtn = styled.button`
   height: 28px;
   border-radius: 50%;
   color: ${({ theme }) => theme.colors.error};
-  background: rgba(239, 68, 68, 0.15);
+  background: ${({ theme }) => theme.colors.errorBg};
   transition: background 0.15s, transform 0.1s;
 
   &:hover {
-    background: rgba(239, 68, 68, 0.3);
+    background: ${({ theme }) => theme.colors.errorBg};
     transform: scale(1.1);
   }
 `;
@@ -429,6 +432,7 @@ const ActionsCell = styled.div`
 const LinkIcon = () => <FiExternalLink size={14} style={{ flexShrink: 0 }} />;
 
 function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: ModelCardInfo }) {
+  const theme = useTheme() as Theme;
   const hfUrl = entry.model_id.includes('/')
     ? `https://huggingface.co/${entry.model_id}`
     : null;
@@ -437,7 +441,7 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
   return (
     <div style={{ minWidth: 240 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-        <span style={{ color: '#FFD700', fontWeight: 600 }}>
+        <span style={{ color: theme.colors.gold, fontWeight: 600 }}>
           {entry.model_id}
         </span>
         {hfUrl && (
@@ -446,7 +450,7 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
             target="_blank"
             rel="noopener noreferrer"
             style={{ color: 'rgba(255,255,255,0.5)', display: 'flex', transition: 'color 0.15s' }}
-            onMouseEnter={(e) => { e.currentTarget.style.color = '#FFD700'; }}
+            onMouseEnter={(e) => { e.currentTarget.style.color = theme.colors.gold; }}
             onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.5)'; }}
             title="Open on HuggingFace"
           >
@@ -476,7 +480,7 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
           </>
         )}
         <span style={{ color: 'rgba(255,255,255,0.45)' }}>Tensor parallel</span>
-        <span style={{ color: card?.supportsTensor ? '#4ade80' : 'rgba(255,255,255,0.7)' }}>
+        <span style={{ color: card?.supportsTensor ? theme.colors.healthy : 'rgba(255,255,255,0.7)' }}>
           {card?.supportsTensor ? 'Yes' : 'No'}
         </span>
         {card?.capabilities && card.capabilities.length > 0 && (
@@ -539,6 +543,8 @@ export function StoreRegistryTable({
   totalClusterMemoryBytes = 0,
   onOptimize,
 }: StoreRegistryTableProps) {
+  const theme = useTheme() as Theme;
+  const TAG_COLORS = useMemo(() => buildTagColors(theme), [theme]);
   const registeredIds = useMemo(() => new Set(entries.map((e) => e.model_id)), [entries]);
   const pendingDownloads = useMemo(
     () => activeDownloads.filter((d) => !registeredIds.has(d.modelId)),

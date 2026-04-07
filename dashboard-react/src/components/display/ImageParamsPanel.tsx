@@ -73,7 +73,7 @@ const Label = styled.span`
 const Select = styled.select`
   all: unset;
   background: rgba(80, 80, 80, 0.5);
-  border: 1px solid rgba(255, 215, 0, 0.3);
+  border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 4px 8px;
   font: inherit;
@@ -81,14 +81,14 @@ const Select = styled.select`
   cursor: pointer;
 
   &:focus {
-    border-color: rgba(255, 215, 0, 0.7);
+    border-color: ${({ theme }) => theme.colors.goldDim};
     outline: none;
   }
 `;
 
 const ToggleGroup = styled.div`
   display: flex;
-  border: 1px solid rgba(255, 215, 0, 0.3);
+  border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.sm};
   overflow: hidden;
 `;
@@ -103,14 +103,14 @@ const ToggleBtn = styled.button<{ $active: boolean }>`
   ${({ $active }) =>
     $active
       ? css`
-          background: #FFD700;
-          color: #000;
+          background: ${({ theme }) => theme.colors.gold};
+          color: ${({ theme }) => theme.colors.bg};
           font-weight: 600;
         `
       : css`
           background: rgba(80, 80, 80, 0.3);
           color: rgba(179, 179, 179, 0.8);
-          &:hover { color: #fff; }
+          &:hover { color: ${({ theme }) => theme.colors.text}; }
         `}
 `;
 
@@ -125,7 +125,7 @@ const Switch = styled.button<{ $on: boolean }>`
 
   ${({ $on }) =>
     $on
-      ? css`background: #FFD700;`
+      ? css`background: ${({ theme }) => theme.colors.gold};`
       : css`background: rgba(80,80,80,0.5); border: 1px solid rgba(80,80,80,0.5);`}
 
   &::after {
@@ -146,7 +146,7 @@ const NumberInput = styled.input`
   width: 48px;
   text-align: center;
   background: rgba(80, 80, 80, 0.5);
-  border: 1px solid rgba(255, 215, 0, 0.3);
+  border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 4px 6px;
   font: inherit;
@@ -156,7 +156,7 @@ const NumberInput = styled.input`
     -webkit-appearance: none;
     margin: 0;
   }
-  &:focus { border-color: rgba(255, 215, 0, 0.7); outline: none; }
+  &:focus { border-color: ${({ theme }) => theme.colors.goldDim}; outline: none; }
 `;
 
 const Divider = styled.div`
@@ -175,7 +175,7 @@ const AdvancedToggle = styled(Button)<{ $hasParams: boolean }>`
         width: 6px;
         height: 6px;
         border-radius: 50%;
-        background: #FFD700;
+        background: ${({ theme }) => theme.colors.gold};
       }
     `}
 `;
@@ -207,7 +207,7 @@ const RangeInput = styled.input`
     width: 12px;
     height: 12px;
     border-radius: 50%;
-    background: #FFD700;
+    background: ${({ theme }) => theme.colors.gold};
     cursor: pointer;
   }
 
@@ -215,7 +215,7 @@ const RangeInput = styled.input`
     width: 12px;
     height: 12px;
     border-radius: 50%;
-    background: #FFD700;
+    background: ${({ theme }) => theme.colors.gold};
     cursor: pointer;
     border: none;
   }
@@ -228,13 +228,13 @@ const TextArea = styled.textarea`
   font: inherit;
   color: ${({ theme }) => theme.colors.text};
   background: rgba(80, 80, 80, 0.5);
-  border: 1px solid rgba(255, 215, 0, 0.3);
+  border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 6px 8px;
   resize: none;
   box-sizing: border-box;
   &::placeholder { color: ${({ theme }) => theme.colors.textMuted}; }
-  &:focus { border-color: rgba(255, 215, 0, 0.7); outline: none; }
+  &:focus { border-color: ${({ theme }) => theme.colors.goldDim}; outline: none; }
 `;
 
 const ResetBtn = styled(Button)`

@@ -46,9 +46,9 @@ const NavButton = styled.button<{ $active: boolean }>`
   ${({ $active }) =>
     $active &&
     css`
-      background: rgba(255, 215, 0, 0.1);
-      color: #ffd700;
-      border-left-color: #ffd700;
+      background: ${({ theme }) => theme.colors.goldBg};
+      color: ${({ theme }) => theme.colors.gold};
+      border-left-color: ${({ theme }) => theme.colors.gold};
     `}
 `;
 

@@ -39,20 +39,20 @@ const Form = styled.form<{ $dragOver: boolean }>`
   transition: border-color 0.15s;
 
   &:focus-within {
-    border-color: rgba(255, 215, 0, 0.3);
+    border-color: ${({ theme }) => theme.colors.goldDim};
   }
 
   ${({ $dragOver }) =>
     $dragOver &&
     css`
-      border-color: #FFD700;
-      box-shadow: 0 0 12px rgba(255, 215, 0, 0.2);
+      border-color: ${({ theme }) => theme.colors.gold};
+      box-shadow: 0 0 12px ${({ theme }) => theme.colors.goldDim};
     `}
 `;
 
 const AccentLine = styled.div`
   height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(255, 215, 0, 0.3), transparent);
+  background: linear-gradient(90deg, transparent, ${({ theme }) => theme.colors.goldDim}, transparent);
 `;
 
 const HeaderRow = styled.div`
@@ -68,7 +68,7 @@ const HeaderRow = styled.div`
 const ModelBtn = styled.button`
   all: unset;
   cursor: pointer;
-  color: #FFD700;
+  color: ${({ theme }) => theme.colors.gold};
   font: inherit;
   transition: opacity 0.15s;
   &:hover { opacity: 0.8; }
@@ -85,8 +85,8 @@ const ThinkingBtn = styled.button<{ $active: boolean }>`
 
   ${({ $active }) =>
     $active
-      ? css`border-color: #FFD700; color: #FFD700; background: rgba(255,215,0,0.1);`
-      : css`border-color: rgba(80,80,80,0.4); color: rgba(179,179,179,0.6); &:hover { border-color: rgba(255,215,0,0.3); color: #FFD700; }`}
+      ? css`border-color: ${({ theme }) => theme.colors.gold}; color: ${({ theme }) => theme.colors.gold}; background: ${({ theme }) => theme.colors.goldBg};`
+      : css`border-color: rgba(80,80,80,0.4); color: rgba(179,179,179,0.6); &:hover { border-color: ${({ theme }) => theme.colors.goldDim}; color: ${({ theme }) => theme.colors.gold}; }`}
 `;
 
 const Stat = styled.span`
@@ -95,7 +95,7 @@ const Stat = styled.span`
 `;
 
 const StatValue = styled.span`
-  color: rgba(255, 215, 0, 0.7);
+  color: ${({ theme }) => theme.colors.goldDim};
 `;
 
 const Spacer = styled.span`
@@ -114,7 +114,7 @@ const AttachBtn = styled(Button)`
 `;
 
 const Prompt = styled.span`
-  color: #FFD700;
+  color: ${({ theme }) => theme.colors.gold};
   font-size: ${({ theme }) => theme.fontSizes.lg};
   font-family: ${({ theme }) => theme.fonts.body};
   flex-shrink: 0;
@@ -146,12 +146,12 @@ const DragOverlay = styled.div`
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.8);
-  border: 2px dashed #FFD700;
+  background: ${({ theme }) => theme.colors.overlay};
+  border: 2px dashed ${({ theme }) => theme.colors.gold};
   border-radius: ${({ theme }) => theme.radii.lg};
   font-size: ${({ theme }) => theme.fontSizes.md};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: #FFD700;
+  color: ${({ theme }) => theme.colors.gold};
 `;
 
 const HelperText = styled.div`

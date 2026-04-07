@@ -5,6 +5,7 @@ import { Button } from '../common/Button';
 import { Field } from '../common/Field';
 import { InfoTooltip } from '../common/InfoTooltip';
 import { addToast } from '../../hooks/useToast';
+import { useUIStore } from '../../stores/uiStore';
 
 export interface SettingsPanelProps {
   open: boolean;
@@ -29,7 +30,7 @@ const Backdrop = styled.div`
   position: fixed;
   inset: 0;
   z-index: 40;
-  background: rgba(0, 0, 0, 0.5);
+  background: ${({ theme }) => theme.colors.shadowStrong};
   backdrop-filter: blur(2px);
   animation: ${fadeIn} 0.2s ease-out;
 `;
@@ -61,7 +62,7 @@ const Title = styled.h2`
   font-size: ${({ theme }) => theme.fontSizes.md};
   font-family: ${({ theme }) => theme.fonts.body};
   font-weight: 600;
-  color: #FFD700;
+  color: ${({ theme }) => theme.colors.gold};
 `;
 
 const Body = styled.div`
@@ -127,7 +128,7 @@ const Toggle = styled.button<{ $on: boolean }>`
 
   ${({ $on }) =>
     $on
-      ? css`background: #FFD700;`
+      ? css`background: ${({ theme }) => theme.colors.gold};`
       : css`background: rgba(80, 80, 80, 0.5);`}
 
   &::after {
@@ -187,7 +188,7 @@ const ConfigPath = styled.div`
 const ErrorText = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: #ef4444;
+  color: ${({ theme }) => theme.colors.error};
 `;
 
 const LoadingText = styled.div`
@@ -208,6 +209,8 @@ const Spacer = styled.span`
 
 export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const { fullConfig, effective, configPath, loading, saving, error, fetchConfig, saveFullConfig } = useConfig();
+  const themeName = useUIStore((s) => s.theme);
+  const setTheme = useUIStore((s) => s.setTheme);
   const [draft, setDraft] = useState<StoreConfig | null>(null);
   const [kvBackend, setKvBackend] = useState('default');
   const [hfToken, setHfToken] = useState('');
@@ -290,6 +293,21 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
         <Body>
           {loading && <LoadingText>Loading config…</LoadingText>}
           {error && <ErrorText>{error}</ErrorText>}
+
+          {/* Appearance */}
+          <Fieldset>
+            <Legend>Appearance</Legend>
+            <Row>
+              <FieldLabel>Color theme</FieldLabel>
+              <Toggle
+                $on={themeName === 'light'}
+                onClick={() => setTheme(themeName === 'dark' ? 'light' : 'dark')}
+                aria-label="Toggle light theme"
+              />
+              <Spacer />
+              <span style={{ fontSize: 13, opacity: 0.7 }}>{themeName === 'light' ? 'Light' : 'Dark'}</span>
+            </Row>
+          </Fieldset>
 
           {draft && (
             <>
