@@ -133,6 +133,45 @@ function mergeThinkingContent(existing: string, incoming: string): string {
   return existing + incoming;
 }
 
+async function readUploadedImageAsDataUrl(file: ChatUploadedFile): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error(`Failed to read attachment ${file.name} as a data URL.`));
+    };
+    reader.onerror = () => {
+      reject(new Error(`Failed to read attachment ${file.name}.`));
+    };
+
+    if (file.file) {
+      reader.readAsDataURL(file.file);
+      return;
+    }
+
+    if (!file.preview) {
+      reject(new Error(`Attachment ${file.name} has no file contents.`));
+      return;
+    }
+
+    // Fallback for any older in-memory attachment shape that only has an object URL.
+    fetch(file.preview)
+      .then((resp) => {
+        if (!resp.ok) {
+          throw new Error(`Failed to read attachment preview for ${file.name} (HTTP ${resp.status}).`);
+        }
+        return resp.blob();
+      })
+      .then((blob) => reader.readAsDataURL(blob))
+      .catch((error: unknown) => {
+        reject(error instanceof Error ? error : new Error(`Failed to read attachment ${file.name}.`));
+      });
+  });
+}
+
 /* ── Component ────────────────────────────────────────── */
 
 export function ChatView({ readyInstances, className }: ChatViewProps) {
@@ -260,20 +299,8 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     // Convert image files to base64 data URLs for the API and message history
     const imageAttachments: { dataUrl: string; file: ChatUploadedFile }[] = [];
     for (const f of files) {
-      if (f.type.startsWith('image/') && f.preview) {
-        const dataUrl = await new Promise<string>((resolve) => {
-          const reader = new FileReader();
-          reader.onloadend = () => resolve(reader.result as string);
-          if (f.file) {
-            reader.readAsDataURL(f.file);
-            return;
-          }
-
-          // Fallback for any older in-memory attachment shape that only has an object URL.
-          fetch(f.preview)
-            .then((resp) => resp.blob())
-            .then((blob) => reader.readAsDataURL(blob));
-        });
+      if (f.type.startsWith('image/') && (f.file || f.preview)) {
+        const dataUrl = await readUploadedImageAsDataUrl(f);
         imageAttachments.push({ dataUrl, file: f });
       }
     }
