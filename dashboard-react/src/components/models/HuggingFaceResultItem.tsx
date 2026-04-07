@@ -75,7 +75,7 @@ const AddedBadge = styled.span`
 const SelectBtn = styled(Button)`
   background: ${({ theme }) => theme.colors.goldBg};
   color: ${({ theme }) => theme.colors.gold};
-  &:hover:not(:disabled) { background: rgba(255, 215, 0, 0.25); }
+  &:hover:not(:disabled) { background: ${({ theme }) => theme.colors.goldDim}; }
 `;
 
 const StoreDownloadIcon = () => <FiDownload size={14} />;

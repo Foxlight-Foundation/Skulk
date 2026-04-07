@@ -201,7 +201,7 @@ const WarningItem = styled.div<{ $level: 'error' | 'warning' }>`
   gap: 6px;
 
   &::before {
-    content: '${({ $level }) => $level === 'error' ? '●' : '●'}';
+    content: '●';
     color: ${({ $level, theme}) => $level === 'error' ? theme.colors.error : theme.colors.warning};
     flex-shrink: 0;
   }

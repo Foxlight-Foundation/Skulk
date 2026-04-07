@@ -72,7 +72,7 @@ const Label = styled.span`
 
 const Select = styled.select`
   all: unset;
-  background: rgba(80, 80, 80, 0.5);
+  background: ${({ theme }) => theme.colors.surfaceSunken};
   border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 4px 8px;
@@ -126,7 +126,7 @@ const Switch = styled.button<{ $on: boolean }>`
   ${({ $on }) =>
     $on
       ? css`background: ${({ theme }) => theme.colors.gold};`
-      : css`background: rgba(80,80,80,0.5); border: 1px solid rgba(80,80,80,0.5);`}
+      : css`background: ${({ theme }) => theme.colors.surfaceSunken}; border: 1px solid ${({ theme }) => theme.colors.border};`}
 
   &::after {
     content: '';
@@ -145,7 +145,7 @@ const NumberInput = styled.input`
   all: unset;
   width: 48px;
   text-align: center;
-  background: rgba(80, 80, 80, 0.5);
+  background: ${({ theme }) => theme.colors.surfaceSunken};
   border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 4px 6px;
@@ -198,7 +198,7 @@ const RangeInput = styled.input`
   flex: 1;
   -webkit-appearance: none;
   height: 4px;
-  background: rgba(80, 80, 80, 0.5);
+  background: ${({ theme }) => theme.colors.surfaceSunken};
   border-radius: 2px;
   outline: none;
 
@@ -227,7 +227,7 @@ const TextArea = styled.textarea`
   width: 100%;
   font: inherit;
   color: ${({ theme }) => theme.colors.text};
-  background: rgba(80, 80, 80, 0.5);
+  background: ${({ theme }) => theme.colors.surfaceSunken};
   border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 6px 8px;
