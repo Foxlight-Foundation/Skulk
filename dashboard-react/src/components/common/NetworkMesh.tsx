@@ -42,8 +42,8 @@ export function NetworkMesh({
   className,
 }: NetworkMeshProps) {
   const theme = useTheme() as Theme;
-  const color = colorProp ?? theme.colors.meshNode;
-  const lineColor = lineColorProp ?? theme.colors.meshLine;
+  const color = colorProp ?? theme.colors.bgMeshNode;
+  const lineColor = lineColorProp ?? theme.colors.bgMeshLine;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const particlesRef = useRef<Particle[]>([]);
   const rafRef = useRef<number>(0);
