@@ -72,7 +72,11 @@ class ModelListModel(BaseModel):
     )
     resolved_capabilities: "ResolvedModelCapabilities | None" = Field(
         default=None,
-        description="Normalized runtime capabilities resolved from the model card and model-family defaults.",
+        description=(
+            "Normalized runtime capabilities resolved from the model card and "
+            "model-family defaults for the default tool-free request path. "
+            "Request-specific options such as tools may change some resolved values."
+        ),
     )
 
 

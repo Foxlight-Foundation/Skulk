@@ -2155,11 +2155,16 @@ class API:
             card.model_id,
             model_card=card,
         )
+        description = (
+            "resolved_capabilities reflects the default tool-free request path; "
+            "request-specific options such as tools may change prompt rendering "
+            "and related resolved capability values."
+        )
         return ModelListModel(
             id=card.model_id,
             hugging_face_id=card.model_id,
             name=card.model_id.short(),
-            description="",
+            description=description,
             tags=API._model_tags(card),
             storage_size_megabytes=card.storage_size.in_mb,
             supports_tensor=card.supports_tensor,

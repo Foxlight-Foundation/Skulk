@@ -320,6 +320,7 @@ Notes:
 - `enable_thinking` is a Skulk extension.
 - Reasoning support depends on model capabilities.
 - Use `/v1/models` response `data[].resolved_capabilities` to decide whether a model supports thinking and whether clients should render a thinking toggle.
+- Treat `resolved_capabilities` as the default tool-free request path; request-specific options such as tools can change prompt rendering and related resolved values for mixed-mode model families.
 
 ## Structured Output
 
@@ -580,7 +581,7 @@ Important fields:
 | `modalities` | object/null | Optional declarative modality metadata from the model card |
 | `tooling` | object/null | Optional declarative tool-calling metadata from the model card |
 | `runtime` | object/null | Optional declarative runtime integration hints from the model card |
-| `resolved_capabilities` | object/null | Normalized runtime capability view resolved from the model card and model-family defaults |
+| `resolved_capabilities` | object/null | Normalized runtime capability view resolved from the model card and model-family defaults for the default tool-free request path |
 
 The dashboard uses `tags` for compact badges and `capabilities` for filtering
 and richer tooltips.
