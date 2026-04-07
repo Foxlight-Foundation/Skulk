@@ -4,11 +4,14 @@ All external API formats (Chat Completions, Claude Messages, OpenAI Responses)
 are converted to TextGenerationTaskParams at the API boundary via adapters.
 """
 
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
 from exo.shared.types.common import ModelId
+
+if TYPE_CHECKING:
+    from exo.shared.models.capabilities import ResolvedCapabilityProfile
 
 MessageRole = Literal["user", "assistant", "system", "developer"]
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
@@ -17,21 +20,34 @@ ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
 def resolve_reasoning_params(
     reasoning_effort: ReasoningEffort | None,
     enable_thinking: bool | None,
+    capability_profile: "ResolvedCapabilityProfile | None" = None,
 ) -> tuple[ReasoningEffort | None, bool | None]:
     """
-    enable_thinking=True  -> reasoning_effort="medium"
-    enable_thinking=False -> reasoning_effort="none"
-    reasoning_effort="none" -> enable_thinking=False
-    reasoning_effort=<anything else> -> enable_thinking=True
+    enable_thinking=True -> use the profile's default enabled effort
+    enable_thinking=False -> use the profile's disabled effort
+    reasoning_effort="none" -> normalize to the profile's disabled effort and disable thinking
+    reasoning_effort=<anything else> -> enable thinking unless it already matches the disabled effort
     """
     resolved_effort: ReasoningEffort | None = reasoning_effort
     resolved_thinking: bool | None = enable_thinking
+    enabled_effort = (
+        capability_profile.default_reasoning_effort
+        if capability_profile is not None
+        else "medium"
+    )
+    disabled_effort = (
+        capability_profile.disabled_reasoning_effort
+        if capability_profile is not None
+        else "none"
+    )
 
-    if reasoning_effort is None and enable_thinking is not None:
-        resolved_effort = "medium" if enable_thinking else "none"
-
-    if enable_thinking is None and reasoning_effort is not None:
-        resolved_thinking = reasoning_effort != "none"
+    if reasoning_effort == "none":
+        resolved_effort = disabled_effort
+        resolved_thinking = False
+    elif reasoning_effort is None and enable_thinking is not None:
+        resolved_effort = enabled_effort if enable_thinking else disabled_effort
+    elif enable_thinking is None and reasoning_effort is not None:
+        resolved_thinking = reasoning_effort != disabled_effort
 
     return resolved_effort, resolved_thinking
 

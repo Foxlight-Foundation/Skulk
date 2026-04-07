@@ -182,6 +182,18 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
             supportsTensor: m.supports_tensor ?? undefined,
             capabilities: m.capabilities ?? undefined,
             tags: m.tags ?? [],
+            resolvedCapabilities: m.resolved_capabilities ? {
+              supportsThinking: m.resolved_capabilities.supports_thinking ?? false,
+              supportsThinkingToggle: m.resolved_capabilities.supports_thinking_toggle ?? false,
+              supportsThinkingBudget: m.resolved_capabilities.supports_thinking_budget ?? false,
+              supportsImageInput: m.resolved_capabilities.supports_image_input ?? false,
+              supportsAudioInput: m.resolved_capabilities.supports_audio_input ?? false,
+              supportsToolCalling: m.resolved_capabilities.supports_tool_calling ?? false,
+              thinkingFormat: m.resolved_capabilities.thinking_format ?? 'none',
+              promptRenderer: m.resolved_capabilities.prompt_renderer ?? 'tokenizer',
+              outputParser: m.resolved_capabilities.output_parser ?? 'generic',
+              supportsNativeMultimodal: m.resolved_capabilities.supports_native_multimodal ?? false,
+            } : undefined,
           };
         }
         setApiModelCards(cards);

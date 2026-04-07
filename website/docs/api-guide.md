@@ -325,7 +325,8 @@ Notes:
 
 - `enable_thinking` is a Skulk extension.
 - Reasoning support depends on model capabilities.
-- Models with `thinking` or `thinking_toggle` metadata are the likeliest candidates.
+- Use `GET /v1/models` response `data[].resolved_capabilities` to decide whether a model supports thinking and whether clients should render a thinking toggle.
+- Treat `resolved_capabilities` as the default tool-free request path; request-specific options such as tools can change prompt rendering and related resolved values for mixed-mode model families.
 
 ## Structured Output
 

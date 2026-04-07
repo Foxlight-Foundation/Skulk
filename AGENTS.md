@@ -119,6 +119,9 @@ The system uses event sourcing for state management:
   - `commands.py`: Command types
   - `tasks.py`: Task types for worker execution
   - `state.py`: Cluster state model
+- `src/exo/shared/models/`: persisted model metadata and capability resolution
+  - `model_cards.py`: declarative model cards, including optional advanced capability sections
+  - `capabilities.py`: normalized runtime capability profiles derived from model cards plus conservative family defaults
 
 ### Rust Components
 Rust code in `rust/` provides:
@@ -128,6 +131,13 @@ Rust code in `rust/` provides:
 
 ### Dashboard
 React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API. The legacy Svelte dashboard in `dashboard/` is from upstream exo and is not actively used.
+
+### Model Capability System
+Skulk now treats model capability handling as two layers:
+- **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `tooling`, and `runtime` sections for refined model support
+- **Resolved capability profiles**: normalized runtime behavior contracts derived from the card plus conservative family defaults
+
+This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, and additive `/v1/models` metadata consumed by the dashboard.
 
 ### Logging & Observability
 Centralized logging uses a three-layer stack:
@@ -170,6 +180,22 @@ Evaluate each review comment on a 1–5 severity scale:
 - **5 — Critical**: Security vulnerability, data loss risk, will break production. **Fix immediately.**
 
 Only fix comments rated 4 or 5. Do not iterate on minor wording, style, or speculative improvements from automated reviewers (e.g., Copilot). Time spent on low-severity feedback is time not spent on real work.
+
+### PR Review Loop
+
+When working an open pull request, use this review loop until no unresolved
+severity 4 or 5 comments remain:
+
+1. Inspect the PR for new review comments, unresolved threads, and failing checks.
+2. Evaluate each comment using the severity rubric above.
+3. Ignore severity 1–2 comments.
+4. Note severity 3 comments for future work, but do not fix them in the current PR.
+5. Fix severity 4–5 comments with the smallest correct change.
+6. Add or update focused tests for every correctness fix on a critical path.
+7. Run focused validation before replying on the PR.
+8. Reply on each addressed thread with the concrete fix or rationale.
+9. Resolve only threads that are actually addressed by code and validation.
+10. Repeat until there are no unresolved severity 4–5 comments, or stop and escalate if the fix becomes ambiguous, validation fails, or the required change would sprawl beyond the PR scope.
 
 ### Before Every Commit
 

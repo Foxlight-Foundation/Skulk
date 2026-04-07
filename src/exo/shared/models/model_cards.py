@@ -28,6 +28,7 @@ from exo.shared.constants import (
 )
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
+from exo.shared.types.text_generation import ReasoningEffort
 from exo.utils.pydantic_ext import CamelCaseModel
 
 # kinda ugly...
@@ -134,6 +135,107 @@ class VisionCardConfig(CamelCaseModel):
     eoi_token_id: int | None = None
 
 
+class ReasoningFormat(str, Enum):
+    """Reasoning marker formats used by model families."""
+
+    None_ = "none"
+    TokenDelimited = "token_delimited"
+    ChannelDelimited = "channel_delimited"
+
+
+class PromptRendererType(str, Enum):
+    """Prompt renderer strategies supported by the runtime."""
+
+    Tokenizer = "tokenizer"
+    Gemma4 = "gemma4"
+    Dsml = "dsml"
+
+
+class OutputParserType(str, Enum):
+    """Output parser strategies supported by the runtime."""
+
+    Generic = "generic"
+    Gemma4 = "gemma4"
+    GptOss = "gpt_oss"
+    DeepseekV32 = "deepseek_v32"
+
+
+class ToolCallFormat(str, Enum):
+    """Tool-call output formats emitted by model families."""
+
+    Generic = "generic"
+    Gemma4 = "gemma4"
+    GptOss = "gpt_oss"
+    Dsml = "dsml"
+
+
+class ReasoningCardConfig(CamelCaseModel):
+    """Optional advanced reasoning capability declarations for a model card."""
+
+    supports_toggle: bool | None = None
+    supports_budget: bool | None = None
+    format: ReasoningFormat | None = None
+    default_effort: ReasoningEffort | None = None
+    disabled_effort: ReasoningEffort | None = None
+
+    @field_validator("format", mode="before")
+    @classmethod
+    def _validate_format(
+        cls, value: str | ReasoningFormat | None
+    ) -> ReasoningFormat | None:
+        if value is None or isinstance(value, ReasoningFormat):
+            return value
+        return ReasoningFormat(value)
+
+
+class ModalitiesCardConfig(CamelCaseModel):
+    """Optional advanced modality declarations for a model card."""
+
+    supports_audio_input: bool | None = None
+    supports_native_multimodal: bool | None = None
+
+
+class ToolingCardConfig(CamelCaseModel):
+    """Optional tool-calling behavior declarations for a model card."""
+
+    supports_tool_calling: bool | None = None
+    tool_call_format: ToolCallFormat | None = None
+
+    @field_validator("tool_call_format", mode="before")
+    @classmethod
+    def _validate_tool_call_format(
+        cls, value: str | ToolCallFormat | None
+    ) -> ToolCallFormat | None:
+        if value is None or isinstance(value, ToolCallFormat):
+            return value
+        return ToolCallFormat(value)
+
+
+class RuntimeCapabilityCardConfig(CamelCaseModel):
+    """Optional runtime behavior hints for a model card."""
+
+    prompt_renderer: PromptRendererType | None = None
+    output_parser: OutputParserType | None = None
+
+    @field_validator("prompt_renderer", mode="before")
+    @classmethod
+    def _validate_prompt_renderer(
+        cls, value: str | PromptRendererType | None
+    ) -> PromptRendererType | None:
+        if value is None or isinstance(value, PromptRendererType):
+            return value
+        return PromptRendererType(value)
+
+    @field_validator("output_parser", mode="before")
+    @classmethod
+    def _validate_output_parser(
+        cls, value: str | OutputParserType | None
+    ) -> OutputParserType | None:
+        if value is None or isinstance(value, OutputParserType):
+            return value
+        return OutputParserType(value)
+
+
 class ModelCard(CamelCaseModel):
     model_id: ModelId
     storage_size: Memory
@@ -152,6 +254,10 @@ class ModelCard(CamelCaseModel):
     trust_remote_code: bool = True
     is_custom: bool = False
     vision: VisionCardConfig | None = None
+    reasoning: ReasoningCardConfig | None = None
+    modalities: ModalitiesCardConfig | None = None
+    tooling: ToolingCardConfig | None = None
+    runtime: RuntimeCapabilityCardConfig | None = None
 
     @model_validator(mode="after")
     def _fill_vision_weights_repo(self) -> "ModelCard":

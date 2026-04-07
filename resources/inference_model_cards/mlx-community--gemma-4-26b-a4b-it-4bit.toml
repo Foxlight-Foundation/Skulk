@@ -9,6 +9,22 @@ quantization = "4bit"
 base_model = "Gemma 4 26B A4B"
 capabilities = ["text", "vision", "thinking"]
 
+[reasoning]
+supports_toggle = true
+format = "channel_delimited"
+default_effort = "medium"
+disabled_effort = "none"
+
+[modalities]
+supports_native_multimodal = true
+
+[tooling]
+tool_call_format = "gemma4"
+
+[runtime]
+prompt_renderer = "gemma4"
+output_parser = "gemma4"
+
 [vision]
 image_token_id = 258880
 model_type = "gemma4"

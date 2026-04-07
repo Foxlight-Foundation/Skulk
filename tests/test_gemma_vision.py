@@ -5,14 +5,26 @@ model_type auto-detection priority, and VisionCardConfig BOI/EOI fields."""
 
 import base64
 import io
+from pathlib import Path
 from types import SimpleNamespace
 
 import mlx.core as mx
 import mlx.nn as nn
 from PIL import Image
 
-from exo.shared.models.model_cards import VisionCardConfig
+from exo.shared.constants import RESOURCES_DIR
+from exo.shared.models.model_cards import (
+    ModelCard,
+    ModelTask,
+    OutputParserType,
+    PromptRendererType,
+    ReasoningFormat,
+    RuntimeCapabilityCardConfig,
+    ToolCallFormat,
+    VisionCardConfig,
+)
 from exo.shared.types.common import ModelId
+from exo.shared.types.memory import Memory
 from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from exo.worker.engines.mlx.gemma4_prompt import render_gemma4_prompt
 from exo.worker.engines.mlx.utils_mlx import apply_chat_template
@@ -115,6 +127,36 @@ class TestVisionCardConfigBoiEoi:
         assert config.boi_token_id == 255999
         assert config.eoi_token_id == 262144
 
+
+class TestGemma4ExtendedModelCard:
+    """Gemma 4 built-in cards should expose advanced runtime declarations."""
+
+    async def test_builtin_card_includes_reasoning_and_runtime_sections(self):
+        card = await ModelCard.load_from_path(
+            Path(RESOURCES_DIR)
+            / "inference_model_cards"
+            / "mlx-community--gemma-4-26b-a4b-it-4bit.toml"
+        )
+
+        assert card.reasoning is not None
+        assert card.reasoning.supports_toggle is True
+        assert card.reasoning.format == ReasoningFormat.ChannelDelimited
+        assert card.runtime is not None
+        assert card.runtime.prompt_renderer == PromptRendererType.Gemma4
+        assert card.runtime.output_parser == OutputParserType.Gemma4
+
+    async def test_gpt_oss_builtin_card_includes_tooling_and_runtime_sections(self):
+        card = await ModelCard.load_from_path(
+            Path(RESOURCES_DIR)
+            / "inference_model_cards"
+            / "mlx-community--gpt-oss-20b-MXFP4-Q8.toml"
+        )
+
+        assert card.tooling is not None
+        assert card.tooling.supports_tool_calling is True
+        assert card.tooling.tool_call_format == ToolCallFormat.GptOss
+        assert card.runtime is not None
+        assert card.runtime.output_parser == OutputParserType.GptOss
 
 class TestModelTypePriority:
     """Auto-detection should prefer top-level model_type over vision_config.model_type."""
@@ -223,6 +265,43 @@ class TestGemma4ReferencePromptRenderer:
         prompt = apply_chat_template(_Tokenizer(), task)  # type: ignore[arg-type]
 
         assert prompt.endswith("<|channel>thought\n<channel|>Draft answer:")
+
+    def test_apply_chat_template_uses_dsml_renderer_from_model_card(self):
+        class _Tokenizer:
+            def apply_chat_template(self, *args, **kwargs):
+                raise AssertionError(
+                    "Card-declared DSML rendering should not fall back to generic chat templating"
+                )
+
+        model_id = ModelId("custom/deepseek-compatible")
+        task = TextGenerationTaskParams(
+            model=model_id,
+            input=[InputMessage(role="user", content="hello there")],
+            chat_template_messages=[{"role": "user", "content": "hello there"}],
+            enable_thinking=False,
+        )
+        model_card = ModelCard(
+            model_id=model_id,
+            storage_size=Memory.from_bytes(1024),
+            n_layers=1,
+            hidden_size=1,
+            supports_tensor=False,
+            tasks=[ModelTask.TextGeneration],
+            family="custom",
+            capabilities=["text", "thinking"],
+            runtime=RuntimeCapabilityCardConfig(
+                prompt_renderer=PromptRendererType.Dsml,
+                output_parser=OutputParserType.DeepseekV32,
+            ),
+        )
+
+        prompt = apply_chat_template(  # type: ignore[arg-type]
+            _Tokenizer(),
+            task,
+            model_card=model_card,
+        )
+
+        assert "hello there" in prompt
 
     def test_build_vision_prompt_uses_reference_renderer_for_gemma4(self):
         from exo.worker.engines.mlx.vision import build_vision_prompt

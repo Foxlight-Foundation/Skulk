@@ -9,6 +9,7 @@ import mlx.core as mx
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 from exo.shared.constants import EXO_MAX_CONCURRENT_REQUESTS
+from exo.shared.models.model_cards import ModelCard
 from exo.shared.types.chunks import ErrorChunk, PrefillProgressChunk
 from exo.shared.types.common import ModelId
 from exo.shared.types.events import ChunkGenerated, Event
@@ -117,6 +118,7 @@ class SequentialGenerator(InferenceGenerator):
     group: mx.distributed.Group | None
     kv_prefix_cache: KVPrefixCache | None
     tool_parser: ToolParser | None
+    model_card: ModelCard | None
     model_id: ModelId
     device_rank: int
     cancel_receiver: MpReceiver[TaskId]
@@ -148,6 +150,7 @@ class SequentialGenerator(InferenceGenerator):
             tokenizer=self.tokenizer,
             group=self.group,
             model_id=self.model_id,
+            model_card=self.model_card,
         )
 
     def submit(
@@ -237,12 +240,15 @@ class SequentialGenerator(InferenceGenerator):
         else:
             output_generator = apply_all_parsers(
                 queue.gen(),
-                apply_chat_template(self.tokenizer, task.task_params),
+                apply_chat_template(
+                    self.tokenizer, task.task_params, model_card=self.model_card
+                ),
                 self.tool_parser,
                 self.tokenizer,
                 type(self.model),
                 self.model_id,
                 task.task_params.tools,
+                self.model_card,
             )
         self._active = (task, mlx_gen, queue, output_generator)
 
@@ -261,7 +267,9 @@ class SequentialGenerator(InferenceGenerator):
 
     def _build_generator(self, task: TextGeneration) -> Generator[GenerationResponse]:
         _check_for_debug_prompts(task.task_params)
-        prompt = apply_chat_template(self.tokenizer, task.task_params)
+        prompt = apply_chat_template(
+            self.tokenizer, task.task_params, model_card=self.model_card
+        )
 
         def on_prefill_progress(processed: int, total: int) -> None:
             if self.device_rank == 0:
@@ -320,6 +328,7 @@ class BatchGenerator(InferenceGenerator):
     group: mx.distributed.Group | None
     kv_prefix_cache: KVPrefixCache | None
     tool_parser: ToolParser | None
+    model_card: ModelCard | None
     model_id: ModelId
     device_rank: int
     cancel_receiver: MpReceiver[TaskId]
@@ -357,6 +366,7 @@ class BatchGenerator(InferenceGenerator):
             tokenizer=self.tokenizer,
             group=self.group,
             model_id=self.model_id,
+            model_card=self.model_card,
         )
 
     def submit(
@@ -415,12 +425,15 @@ class BatchGenerator(InferenceGenerator):
             else:
                 output_generator = apply_all_parsers(
                     queue.gen(),
-                    apply_chat_template(self.tokenizer, task.task_params),
+                    apply_chat_template(
+                        self.tokenizer, task.task_params, model_card=self.model_card
+                    ),
                     self.tool_parser,
                     self.tokenizer,
                     type(self.model),
                     self.model_id,
                     task.task_params.tools,
+                    self.model_card,
                 )
             self._active_tasks[uid] = (task, queue, output_generator)
 
@@ -494,7 +507,9 @@ class BatchGenerator(InferenceGenerator):
 
     def _start_task(self, task: TextGeneration) -> int:
         _check_for_debug_prompts(task.task_params)
-        prompt = apply_chat_template(self.tokenizer, task.task_params)
+        prompt = apply_chat_template(
+            self.tokenizer, task.task_params, model_card=self.model_card
+        )
 
         def on_prefill_progress(processed: int, total: int) -> None:
             if self.device_rank == 0:

@@ -2,7 +2,10 @@ import contextlib
 import functools
 import math
 import os
+import sys
+import threading
 import time
+import traceback
 from copy import deepcopy
 from importlib import metadata
 from typing import Callable, Generator, cast, get_args
@@ -25,6 +28,7 @@ from exo.api.types import (
     TopLogprobItem,
     Usage,
 )
+from exo.shared.models.model_cards import ModelCard
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import KVCacheType, Model
@@ -73,6 +77,71 @@ from exo.worker.runner.bootstrap import logger
 generation_stream = mx.new_stream(mx.default_device())
 
 _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
+
+
+def _mlx_hang_debug_enabled() -> bool:
+    """Return whether verbose warmup/prefill hang diagnostics are enabled."""
+    value = os.environ.get("SKULK_MLX_HANG_DEBUG") or os.environ.get(
+        "EXO_MLX_HANG_DEBUG"
+    )
+    if value is None:
+        return False
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _mlx_hang_debug_interval_seconds() -> float:
+    """Return the periodic interval for hang-debug watchdog logs."""
+    raw = os.environ.get("SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS") or os.environ.get(
+        "EXO_MLX_HANG_DEBUG_INTERVAL_SECONDS"
+    )
+    if raw is None:
+        return 30.0
+    with contextlib.suppress(ValueError):
+        return max(float(raw), 1.0)
+    return 30.0
+
+
+@contextlib.contextmanager
+def _hang_debug_watch(label: str) -> Generator[None]:
+    """Emit periodic stack-rich logs while the current thread is stuck in one phase."""
+    if not _mlx_hang_debug_enabled():
+        yield
+        return
+
+    interval_seconds = _mlx_hang_debug_interval_seconds()
+    started_at = time.monotonic()
+    monitored_thread_id = threading.get_ident()
+    finished = threading.Event()
+
+    logger.info(
+        f"[hang-debug] Entering {label} (watchdog interval={interval_seconds:.0f}s)"
+    )
+
+    def watchdog() -> None:
+        while not finished.wait(timeout=interval_seconds):
+            elapsed = time.monotonic() - started_at
+            frame = sys._current_frames().get(monitored_thread_id)
+            if frame is None:
+                stack_text = "<no Python frame available>"
+            else:
+                stack_text = "".join(traceback.format_stack(frame))
+            logger.warning(
+                f"[hang-debug] Still in {label} after {elapsed:.1f}s\n{stack_text}"
+            )
+
+    watchdog_thread = threading.Thread(
+        target=watchdog,
+        name=f"hang-debug:{label}",
+        daemon=True,
+    )
+    watchdog_thread.start()
+
+    try:
+        yield
+    finally:
+        finished.set()
+        elapsed = time.monotonic() - started_at
+        logger.info(f"[hang-debug] Leaving {label} after {elapsed:.1f}s")
 
 
 def _should_use_native_vision_reference_path() -> bool:
@@ -357,6 +426,9 @@ def prefill(
     if num_tokens == 0:
         return 0.0, 0, []
 
+    rank = group.rank() if group is not None else 0
+    group_size = group.size() if group is not None else 1
+
     logger.debug(f"Prefilling {num_tokens} tokens...")
     start_time = time.perf_counter()
     has_ssm = has_non_kv_caches(cache)
@@ -382,44 +454,61 @@ def prefill(
 
     set_pipeline_prefill(model, is_prefill=True)
 
-    mx_barrier(group)
-    logger.info("Starting prefill")
+    with _hang_debug_watch(f"prefill barrier rank={rank} group_size={group_size}"):
+        mx_barrier(group)
+    logger.info(
+        f"Starting prefill (rank={rank}, group_size={group_size}, prompt_tokens={num_tokens})"
+    )
 
     is_pipeline = _has_pipeline_communication_layer(model)
 
     prefill_step_size = 4096
+    logger.info(
+        "Prefill path selected: "
+        f"{'pipeline_parallel_prefill' if is_pipeline and num_tokens >= prefill_step_size else 'stream_generate'} "
+        f"(rank={rank}, prompt_tokens={num_tokens}, prefill_step_size={prefill_step_size})"
+    )
 
     try:
         if is_pipeline and num_tokens >= prefill_step_size:
             set_pipeline_queue_sends(model, queue_sends=True)
             assert group is not None, "Pipeline prefill requires a distributed group"
-            pipeline_parallel_prefill(
-                model=model,
-                prompt=prompt_tokens,
-                prompt_cache=cache,
-                prefill_step_size=prefill_step_size,
-                kv_group_size=KV_GROUP_SIZE,
-                kv_bits=KV_BITS,
-                prompt_progress_callback=progress_callback,
-                distributed_prompt_progress_callback=distributed_prompt_progress_callback,
-                group=group,
-            )
+            with _hang_debug_watch(
+                f"pipeline_parallel_prefill rank={rank} group_size={group_size}"
+            ):
+                pipeline_parallel_prefill(
+                    model=model,
+                    prompt=prompt_tokens,
+                    prompt_cache=cache,
+                    prefill_step_size=prefill_step_size,
+                    kv_group_size=KV_GROUP_SIZE,
+                    kv_bits=KV_BITS,
+                    prompt_progress_callback=progress_callback,
+                    distributed_prompt_progress_callback=distributed_prompt_progress_callback,
+                    group=group,
+                )
         else:
             # Use max_tokens=1 because max_tokens=0 does not work.
             # We just throw away the generated token - we only care about filling the cache
-            for _ in stream_generate(
-                model=model,
-                tokenizer=tokenizer,
-                prompt=prompt_tokens,
-                max_tokens=1,
-                sampler=sampler,
-                prompt_cache=cache,
-                prefill_step_size=prefill_step_size,
-                kv_group_size=KV_GROUP_SIZE,
-                kv_bits=KV_BITS,
-                prompt_progress_callback=combined_progress_callback,
+            with _hang_debug_watch(
+                f"stream_generate prefill rank={rank} group_size={group_size}"
             ):
-                break  # Stop after first iteration - cache is now filled
+                for _ in stream_generate(
+                    model=model,
+                    tokenizer=tokenizer,
+                    prompt=prompt_tokens,
+                    max_tokens=1,
+                    sampler=sampler,
+                    prompt_cache=cache,
+                    prefill_step_size=prefill_step_size,
+                    kv_group_size=KV_GROUP_SIZE,
+                    kv_bits=KV_BITS,
+                    prompt_progress_callback=combined_progress_callback,
+                ):
+                    logger.info(
+                        f"Prefill stream_generate yielded first token (rank={rank})"
+                    )
+                    break  # Stop after first iteration - cache is now filled
     except PrefillCancelled:
         set_pipeline_queue_sends(model, queue_sends=False)
         set_pipeline_prefill(model, is_prefill=False)
@@ -457,6 +546,7 @@ def warmup_inference(
     tokenizer: TokenizerWrapper,
     group: mx.distributed.Group | None,
     model_id: ModelId,
+    model_card: ModelCard | None = None,
 ) -> int:
     logger.info(f"warming up inference for instance: {model_id}")
 
@@ -469,34 +559,45 @@ def warmup_inference(
         temperature=0.0,
     )
 
-    warmup_prompt = apply_chat_template(
-        tokenizer=tokenizer,
-        task_params=warmup_task_params,
+    with _hang_debug_watch(f"warmup apply_chat_template model={model_id}"):
+        warmup_prompt = apply_chat_template(
+            tokenizer=tokenizer,
+            task_params=warmup_task_params,
+            model_card=model_card,
+        )
+    logger.info(
+        "Warmup prompt prepared "
+        f"(model={model_id}, prompt_chars={len(warmup_prompt)}, group_size={group.size() if group is not None else 1})"
     )
 
     tokens_generated = 0
 
-    mx_barrier(group)
+    with _hang_debug_watch(f"warmup pre-generation barrier model={model_id}"):
+        mx_barrier(group)
 
     logger.info("Generating warmup tokens")
 
     t = time.monotonic()
 
-    for _r in mlx_generate(
-        model=model,
-        tokenizer=tokenizer,
-        task=warmup_task_params,
-        prompt=warmup_prompt,
-        kv_prefix_cache=None,
-        group=group,
-    ):
-        tokens_generated += 1
+    with _hang_debug_watch(f"warmup mlx_generate model={model_id}"):
+        for _r in mlx_generate(
+            model=model,
+            tokenizer=tokenizer,
+            task=warmup_task_params,
+            prompt=warmup_prompt,
+            kv_prefix_cache=None,
+            group=group,
+        ):
+            tokens_generated += 1
 
     check_for_cancel_every = min(
         math.ceil(tokens_generated / max(time.monotonic() - t, 0.001)), 100
     )
 
-    mx_barrier(group)
+    with _hang_debug_watch(
+        f"warmup final barrier model={model_id} tokens_generated={tokens_generated}"
+    ):
+        mx_barrier(group)
 
     logger.info(f"warmed up by generating {tokens_generated} tokens")
     if group is not None:

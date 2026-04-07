@@ -38,6 +38,7 @@ from .api import ImageListResponse as ImageListResponse
 from .api import ImageSize as ImageSize
 from .api import Logprobs as Logprobs
 from .api import LogprobsContentItem as LogprobsContentItem
+from .api import ModalitiesCapabilitySection as ModalitiesCapabilitySection
 from .api import ModelList as ModelList
 from .api import ModelListModel as ModelListModel
 from .api import NodePowerStats as NodePowerStats
@@ -48,11 +49,15 @@ from .api import PowerUsage as PowerUsage
 from .api import PromptTokensDetails as PromptTokensDetails
 from .api import PurgeStagingRequest as PurgeStagingRequest
 from .api import PurgeStagingResponse as PurgeStagingResponse
+from .api import ReasoningCapabilitySection as ReasoningCapabilitySection
+from .api import ResolvedModelCapabilities as ResolvedModelCapabilities
+from .api import RuntimeCapabilitySection as RuntimeCapabilitySection
 from .api import StartDownloadParams as StartDownloadParams
 from .api import StartDownloadResponse as StartDownloadResponse
 from .api import StreamingChoiceResponse as StreamingChoiceResponse
 from .api import ToolCall as ToolCall
 from .api import ToolCallItem as ToolCallItem
+from .api import ToolingCapabilitySection as ToolingCapabilitySection
 from .api import TopLogprobItem as TopLogprobItem
 from .api import TraceCategoryStats as TraceCategoryStats
 from .api import TraceEventResponse as TraceEventResponse

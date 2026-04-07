@@ -7,10 +7,14 @@ def test_both_none_returns_none_none() -> None:
     assert resolve_reasoning_params(None, None) == (None, None)
 
 
-def test_both_set_passes_through_unchanged() -> None:
+def test_both_set_passes_through_unchanged_except_explicit_none() -> None:
     assert resolve_reasoning_params("high", True) == ("high", True)
-    assert resolve_reasoning_params("none", True) == ("none", True)
     assert resolve_reasoning_params("low", False) == ("low", False)
+
+
+def test_explicit_none_disables_thinking_even_with_explicit_flag() -> None:
+    assert resolve_reasoning_params("none", True) == ("none", False)
+    assert resolve_reasoning_params("none", False) == ("none", False)
 
 
 def test_enable_thinking_true_derives_medium() -> None:

@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from exo.shared.models.capabilities import ResolvedCapabilityProfile
 from exo.shared.models.model_cards import ModelCard, ModelId
 from exo.shared.types.common import CommandId, NodeId
 from exo.shared.types.memory import Memory
@@ -30,6 +31,8 @@ class ErrorResponse(BaseModel):
 
 
 class ModelListModel(BaseModel):
+    """Public model-catalog entry returned by the models endpoints."""
+
     id: str
     object: str = "model"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -47,7 +50,197 @@ class ModelListModel(BaseModel):
     family: str = Field(default="")
     quantization: str = Field(default="")
     base_model: str = Field(default="")
-    capabilities: list[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(
+        default_factory=list,
+        description="Coarse catalog capability labels such as text, vision, thinking, or embedding.",
+    )
+    reasoning: "ReasoningCapabilitySection | None" = Field(
+        default=None,
+        description="Optional declarative reasoning controls from the model card.",
+    )
+    modalities: "ModalitiesCapabilitySection | None" = Field(
+        default=None,
+        description="Optional declarative modality support details from the model card.",
+    )
+    tooling: "ToolingCapabilitySection | None" = Field(
+        default=None,
+        description="Optional declarative tool-calling metadata from the model card.",
+    )
+    runtime: "RuntimeCapabilitySection | None" = Field(
+        default=None,
+        description="Optional declarative runtime integration hints from the model card.",
+    )
+    resolved_capabilities: "ResolvedModelCapabilities | None" = Field(
+        default=None,
+        description=(
+            "Normalized runtime capabilities resolved from the model card and "
+            "model-family defaults for the default tool-free request path. "
+            "Request-specific options such as tools may change some resolved values."
+        ),
+    )
+
+
+class ResolvedModelCapabilities(BaseModel):
+    """Normalized runtime behavior that UI and API consumers can safely inspect."""
+
+    family: str = Field(default="", description="Resolved model family used for runtime behavior decisions.")
+    supports_thinking: bool = Field(
+        default=False,
+        description="Whether the runtime expects the model to expose a reasoning or thinking mode.",
+    )
+    supports_thinking_toggle: bool = Field(
+        default=False,
+        description="Whether thinking can be explicitly enabled or disabled for requests.",
+    )
+    supports_thinking_budget: bool = Field(
+        default=False,
+        description="Whether the runtime expects the model to accept a thinking or reasoning budget control.",
+    )
+    default_reasoning_effort: ReasoningEffort = Field(
+        default="medium",
+        description="Reasoning effort used when thinking is enabled without an explicit effort override.",
+    )
+    disabled_reasoning_effort: ReasoningEffort = Field(
+        default="none",
+        description="Reasoning effort used when thinking is explicitly disabled.",
+    )
+    thinking_format: str = Field(
+        default="none",
+        description="Resolved reasoning marker format expected from this model family.",
+    )
+    supports_image_input: bool = Field(
+        default=False,
+        description="Whether the runtime should treat the model as accepting image inputs.",
+    )
+    supports_audio_input: bool = Field(
+        default=False,
+        description="Whether the runtime should treat the model as accepting audio inputs.",
+    )
+    supports_tool_calling: bool = Field(
+        default=False,
+        description="Whether the runtime expects the model to support structured tool calling.",
+    )
+    tool_call_format: str = Field(
+        default="generic",
+        description="Resolved tool-call output format family used for parsing.",
+    )
+    prompt_renderer: str = Field(
+        default="tokenizer",
+        description="Resolved prompt renderer strategy used to prepare requests for this model.",
+    )
+    output_parser: str = Field(
+        default="generic",
+        description="Resolved output parser strategy used to interpret model responses.",
+    )
+    supports_native_multimodal: bool = Field(
+        default=False,
+        description="Whether the runtime can use a native multimodal execution path for the model.",
+    )
+
+    @classmethod
+    def from_profile(
+        cls, profile: ResolvedCapabilityProfile
+    ) -> "ResolvedModelCapabilities":
+        return cls(
+            family=profile.family,
+            supports_thinking=profile.supports_thinking,
+            supports_thinking_toggle=profile.supports_thinking_toggle,
+            supports_thinking_budget=profile.supports_thinking_budget,
+            default_reasoning_effort=profile.default_reasoning_effort,
+            disabled_reasoning_effort=profile.disabled_reasoning_effort,
+            thinking_format=profile.thinking_format.value,
+            supports_image_input=profile.supports_image_input,
+            supports_audio_input=profile.supports_audio_input,
+            supports_tool_calling=profile.supports_tool_calling,
+            tool_call_format=profile.tool_call_format.value,
+            prompt_renderer=profile.prompt_renderer.value,
+            output_parser=profile.output_parser.value,
+            supports_native_multimodal=profile.supports_native_multimodal,
+        )
+
+
+class ReasoningCapabilitySection(BaseModel):
+    """Snake-case reasoning metadata exposed by the models API."""
+
+    supports_toggle: bool | None = None
+    supports_budget: bool | None = None
+    format: str | None = None
+    default_effort: ReasoningEffort | None = None
+    disabled_effort: ReasoningEffort | None = None
+
+    @classmethod
+    def from_model_card(cls, model_card: ModelCard) -> "ReasoningCapabilitySection | None":
+        config = model_card.reasoning
+        if config is None:
+            return None
+        return cls(
+            supports_toggle=config.supports_toggle,
+            supports_budget=config.supports_budget,
+            format=config.format.value if config.format is not None else None,
+            default_effort=config.default_effort,
+            disabled_effort=config.disabled_effort,
+        )
+
+
+class ModalitiesCapabilitySection(BaseModel):
+    """Snake-case modality metadata exposed by the models API."""
+
+    supports_audio_input: bool | None = None
+    supports_native_multimodal: bool | None = None
+
+    @classmethod
+    def from_model_card(cls, model_card: ModelCard) -> "ModalitiesCapabilitySection | None":
+        config = model_card.modalities
+        if config is None:
+            return None
+        return cls(
+            supports_audio_input=config.supports_audio_input,
+            supports_native_multimodal=config.supports_native_multimodal,
+        )
+
+
+class ToolingCapabilitySection(BaseModel):
+    """Snake-case tool-calling metadata exposed by the models API."""
+
+    supports_tool_calling: bool | None = None
+    tool_call_format: str | None = None
+
+    @classmethod
+    def from_model_card(cls, model_card: ModelCard) -> "ToolingCapabilitySection | None":
+        config = model_card.tooling
+        if config is None:
+            return None
+        return cls(
+            supports_tool_calling=config.supports_tool_calling,
+            tool_call_format=(
+                config.tool_call_format.value
+                if config.tool_call_format is not None
+                else None
+            ),
+        )
+
+
+class RuntimeCapabilitySection(BaseModel):
+    """Snake-case runtime metadata exposed by the models API."""
+
+    prompt_renderer: str | None = None
+    output_parser: str | None = None
+
+    @classmethod
+    def from_model_card(cls, model_card: ModelCard) -> "RuntimeCapabilitySection | None":
+        config = model_card.runtime
+        if config is None:
+            return None
+        return cls(
+            prompt_renderer=(
+                config.prompt_renderer.value
+                if config.prompt_renderer is not None
+                else None
+            ),
+            output_parser=(
+                config.output_parser.value if config.output_parser is not None else None
+            ),
+        )
 
 
 class ModelList(BaseModel):

@@ -85,6 +85,7 @@ from exo.api.types import (
     ImageListItem,
     ImageListResponse,
     ImageSize,
+    ModalitiesCapabilitySection,
     ModelList,
     ModelListModel,
     PlaceInstanceParams,
@@ -92,9 +93,13 @@ from exo.api.types import (
     PlacementPreviewResponse,
     PurgeStagingRequest,
     PurgeStagingResponse,
+    ReasoningCapabilitySection,
+    ResolvedModelCapabilities,
+    RuntimeCapabilitySection,
     StartDownloadParams,
     StartDownloadResponse,
     ToolCall,
+    ToolingCapabilitySection,
     TraceCategoryStats,
     TraceEventResponse,
     TraceListItem,
@@ -139,6 +144,7 @@ from exo.shared.constants import (
 )
 from exo.shared.election import ElectionMessage
 from exo.shared.logging import InterceptLogger
+from exo.shared.models.capabilities import resolve_model_capability_profile
 from exo.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -1234,11 +1240,12 @@ class API:
         self, payload: ChatCompletionRequest
     ) -> ChatCompletionResponse | StreamingResponse:
         """OpenAI Chat Completions API - adapter."""
-        task_params = await chat_request_to_text_generation(payload)
-        resolved_model = await self._resolve_and_validate_text_model(
-            ModelId(task_params.model)
+        resolved_model = await self._resolve_and_validate_text_model(payload.model)
+        model_card = await self._get_running_model_card(resolved_model)
+        task_params = await chat_request_to_text_generation(
+            payload.model_copy(update={"model": resolved_model}),
+            model_card=model_card,
         )
-        task_params = task_params.model_copy(update={"model": resolved_model})
 
         command = await self._send_text_generation_with_images(task_params)
 
@@ -1269,12 +1276,12 @@ class API:
     async def bench_chat_completions(
         self, payload: BenchChatCompletionRequest
     ) -> BenchChatCompletionResponse:
-        task_params = await chat_request_to_text_generation(payload)
-        resolved_model = await self._resolve_and_validate_text_model(
-            ModelId(task_params.model)
+        resolved_model = await self._resolve_and_validate_text_model(payload.model)
+        model_card = await self._get_running_model_card(resolved_model)
+        task_params = await chat_request_to_text_generation(
+            payload.model_copy(update={"model": resolved_model}),
+            model_card=model_card,
         )
-        task_params = task_params.model_copy(update={"model": resolved_model})
-
         task_params = task_params.model_copy(update={"stream": False, "bench": True})
 
         command = await self._send_text_generation_with_images(task_params)
@@ -1296,6 +1303,18 @@ class API:
                 detail=f"No instance found for model {model_id}",
             )
         return model_id
+
+    async def _get_running_model_card(self, model_id: ModelId) -> ModelCard:
+        """Return a model card for a running instance without requiring remote lookup.
+
+        Text requests should prefer the in-memory shard metadata once a model is
+        already running so request availability does not depend on model-card
+        cache misses or Hugging Face fetches during normal inference.
+        """
+        for instance in self.state.instances.values():
+            if instance.shard_assignments.model_id == model_id:
+                return instance.shard_assignments.model_card
+        return await ModelCard.load(model_id)
 
     async def _validate_image_model(self, model: ModelId) -> ModelId:
         """Validate model exists and return resolved model ID.
@@ -1906,9 +1925,12 @@ class API:
         self, payload: ResponsesRequest
     ) -> ResponsesResponse | StreamingResponse:
         """OpenAI Responses API."""
-        task_params = await responses_request_to_text_generation(payload)
-        resolved_model = await self._resolve_and_validate_text_model(task_params.model)
-        task_params = task_params.model_copy(update={"model": resolved_model})
+        resolved_model = await self._resolve_and_validate_text_model(payload.model)
+        model_card = await self._get_running_model_card(resolved_model)
+        task_params = await responses_request_to_text_generation(
+            payload.model_copy(update={"model": resolved_model}),
+            model_card=model_card,
+        )
 
         command = await self._send_text_generation_with_images(task_params)
 
@@ -2126,6 +2148,42 @@ class API:
             tags.append("embedding")
         return tags
 
+    @staticmethod
+    def _model_list_entry(card: "ModelCard") -> ModelListModel:
+        """Build the public model-list representation for one model card."""
+        resolved_profile = resolve_model_capability_profile(
+            card.model_id,
+            model_card=card,
+        )
+        description = (
+            "resolved_capabilities reflects the default tool-free request path; "
+            "request-specific options such as tools may change prompt rendering "
+            "and related resolved capability values."
+        )
+        return ModelListModel(
+            id=card.model_id,
+            hugging_face_id=card.model_id,
+            name=card.model_id.short(),
+            description=description,
+            tags=API._model_tags(card),
+            storage_size_megabytes=card.storage_size.in_mb,
+            supports_tensor=card.supports_tensor,
+            tasks=[task.value for task in card.tasks],
+            is_custom=card.is_custom,
+            family=card.family,
+            quantization=card.quantization,
+            base_model=card.base_model,
+            capabilities=card.capabilities,
+            context_length=card.context_length,
+            reasoning=ReasoningCapabilitySection.from_model_card(card),
+            modalities=ModalitiesCapabilitySection.from_model_card(card),
+            tooling=ToolingCapabilitySection.from_model_card(card),
+            runtime=RuntimeCapabilitySection.from_model_card(card),
+            resolved_capabilities=ResolvedModelCapabilities.from_profile(
+                resolved_profile
+            ),
+        )
+
     async def get_models(self, status: str | None = Query(default=None)) -> ModelList:
         """Returns list of available models, optionally filtered by being downloaded."""
         cards = await get_model_cards()
@@ -2139,25 +2197,7 @@ class API:
             cards = [c for c in cards if c.model_id in downloaded_model_ids]
 
         return ModelList(
-            data=[
-                ModelListModel(
-                    id=card.model_id,
-                    hugging_face_id=card.model_id,
-                    name=card.model_id.short(),
-                    description="",
-                    tags=self._model_tags(card),
-                    storage_size_megabytes=card.storage_size.in_mb,
-                    supports_tensor=card.supports_tensor,
-                    tasks=[task.value for task in card.tasks],
-                    is_custom=card.is_custom,
-                    family=card.family,
-                    quantization=card.quantization,
-                    base_model=card.base_model,
-                    capabilities=card.capabilities,
-                    context_length=card.context_length,
-                )
-                for card in cards
-            ]
+            data=[self._model_list_entry(card) for card in cards]
         )
 
     async def add_custom_model(self, payload: AddCustomModelParams) -> ModelListModel:
@@ -2176,18 +2216,7 @@ class API:
             )
         )
 
-        return ModelListModel(
-            id=card.model_id,
-            hugging_face_id=card.model_id,
-            name=card.model_id.short(),
-            description="",
-            tags=[],
-            storage_size_megabytes=int(card.storage_size.in_mb),
-            supports_tensor=card.supports_tensor,
-            tasks=[task.value for task in card.tasks],
-            is_custom=True,
-            context_length=card.context_length,
-        )
+        return self._model_list_entry(card.model_copy(update={"is_custom": True}))
 
     async def delete_custom_model(self, model_id: ModelId) -> JSONResponse:
         """Delete a user-added custom model card and sync deletion across the cluster."""

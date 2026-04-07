@@ -4,6 +4,7 @@ import { ChatMessages } from '../chat/ChatMessages';
 import { ChatForm } from '../chat/ChatForm';
 import type { ChatMessage } from '../../types/chat';
 import type { ChatUploadedFile } from '../../types/chat';
+import type { ModelInfo } from '../../types/models';
 import type { InstanceCardData } from '../layout/InstancePanel';
 import { useChatStore } from '../../stores/chatStore';
 import { useUIStore } from '../../stores/uiStore';
@@ -69,6 +70,8 @@ const ModelSelect = styled.select`
 `;
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
+const INITIAL_STREAM_STALL_TIMEOUT_MS = 10 * 60_000;
+const ACTIVE_STREAM_STALL_TIMEOUT_MS = 60_000;
 
 /* ── Component ────────────────────────────────────────── */
 
@@ -94,7 +97,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   const [tps, setTps] = useState<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [modelCapabilities, setModelCapabilities] = useState<Record<string, string[]>>({});
+  const [modelThinkingToggleSupport, setModelThinkingToggleSupport] = useState<Record<string, boolean>>({});
   const [modelContextLengths, setModelContextLengths] = useState<Record<string, number>>({});
 
   // Restore scroll position after store hydration + DOM render
@@ -138,14 +141,16 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
       try {
         const res = await fetch('/models');
         if (!res.ok) return;
-        const data = await res.json();
-        const caps: Record<string, string[]> = {};
+        const data = await res.json() as { data?: ModelInfo[] };
+        const toggleSupport: Record<string, boolean> = {};
         const ctxLens: Record<string, number> = {};
         for (const m of data.data ?? []) {
-          if (m.id && m.capabilities) caps[m.id] = m.capabilities;
+          if (m.id) {
+            toggleSupport[m.id] = m.resolved_capabilities?.supports_thinking_toggle ?? false;
+          }
           if (m.id && m.context_length) ctxLens[m.id] = m.context_length;
         }
-        setModelCapabilities(caps);
+        setModelThinkingToggleSupport(toggleSupport);
         setModelContextLengths(ctxLens);
       } catch { /* ignore */ }
     })();
@@ -154,7 +159,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   const contextLength = selectedModelId ? modelContextLengths[selectedModelId] ?? 0 : 0;
 
   const supportsThinking = selectedModelId
-    ? (modelCapabilities[selectedModelId]?.includes('thinking_toggle') ?? false)
+    ? (modelThinkingToggleSupport[selectedModelId] ?? false)
     : false;
 
   // Ready models
@@ -232,6 +237,22 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    let stallTimer: number | null = null;
+    let requestTimedOut = false;
+    let lastStallTimeoutMs = INITIAL_STREAM_STALL_TIMEOUT_MS;
+
+    const resetStallTimer = () => {
+      if (stallTimer !== null) {
+        window.clearTimeout(stallTimer);
+      }
+      lastStallTimeoutMs = firstTokenTime === null
+        ? INITIAL_STREAM_STALL_TIMEOUT_MS
+        : ACTIVE_STREAM_STALL_TIMEOUT_MS;
+      stallTimer = window.setTimeout(() => {
+        requestTimedOut = true;
+        controller.abort();
+      }, lastStallTimeoutMs);
+    };
 
     const startTime = performance.now();
     let firstTokenTime: number | null = null;
@@ -241,6 +262,8 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     let lastTps: number | undefined;
 
     try {
+      resetStallTimer();
+
       // Build messages array — use multimodal content format when images are attached
       const apiMessages = allMessages.map((m) => {
         if (m.attachments?.some((a) => a.type.startsWith('image/') && a.preview)) {
@@ -285,6 +308,8 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+
+        resetStallTimer();
 
         buffer += decoder.decode(value, { stream: true });
 
@@ -370,23 +395,37 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     } catch (err) {
       if ((err as Error).name === 'AbortError') {
         // User cancelled
+        if (requestTimedOut) {
+          rawContent = `Error: generation stalled for more than ${Math.round(lastStallTimeoutMs / 1000)} seconds.`;
+        }
       } else {
         rawContent = rawContent || `Error: ${(err as Error).message}`;
+      }
+    } finally {
+      if (stallTimer !== null) {
+        window.clearTimeout(stallTimer);
       }
     }
 
     // Finalize assistant message
-    const assistantMsg: ChatMessage = {
-      id: crypto.randomUUID(),
-      role: 'assistant',
-      content: rawContent.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<think>[\s\S]*/i, '').trim(),
-      timestamp: Date.now(),
-      ttftMs: firstTokenTime ? firstTokenTime - startTime : undefined,
-      tps: lastTps,
-      thinkingContent: fullThinking || undefined,
-    };
+    const finalAssistantContent = rawContent
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/<think>[\s\S]*/i, '')
+      .trim();
 
-    addMessage(assistantMsg);
+    if (finalAssistantContent || fullThinking) {
+      const assistantMsg: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: finalAssistantContent,
+        timestamp: Date.now(),
+        ttftMs: firstTokenTime ? firstTokenTime - startTime : undefined,
+        tps: lastTps,
+        thinkingContent: fullThinking || undefined,
+      };
+
+      addMessage(assistantMsg);
+    }
     setStreamingContent(null);
     setStreamingThinking(null);
     setIsLoading(false);

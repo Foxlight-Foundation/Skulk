@@ -71,6 +71,7 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
 - `src/exo/worker/` — Worker node (inference, runner management, download coordination)
 - `src/exo/store/` — Model store (registry, downloads, config, model optimizer)
 - `src/exo/shared/` — Shared types, constants, topology
+- `website/docs/` — Docusaurus documentation source, including API guide and model-capability docs
 
 ## Development Guidelines
 
@@ -81,6 +82,21 @@ Before starting work:
 - Avoid combining unrelated changes, even if they seem small
 
 This makes reviews faster and helps us maintain code quality as the project evolves.
+
+## Pull Request Review Loop
+
+When working an active PR, use this review loop:
+
+1. Inspect the PR for new review comments, unresolved threads, and failing checks.
+2. Rank each comment on the repository's 1–5 severity scale.
+3. Ignore severity 1–2 comments.
+4. Defer severity 3 comments unless maintainers explicitly ask for them in the current PR.
+5. Fix severity 4–5 comments with the smallest correct change.
+6. Add or update focused tests for every correctness fix.
+7. Run focused validation before replying.
+8. Reply on each addressed thread with the concrete fix.
+9. Resolve only threads that are actually addressed.
+10. Repeat until there are no unresolved severity 4–5 comments, or stop and escalate if the change becomes ambiguous, broad, or blocked.
 
 ## Code Style
 
@@ -145,8 +161,42 @@ in_bytes = 729808896
 The `capabilities` field defines what the model can do:
 - `text`: Standard text generation
 - `thinking`: Model supports chain-of-thought reasoning
-- `thinking_toggle`: Thinking can be enabled/disabled via `enable_thinking` parameter
 - `image_edit`: Model supports image-to-image editing (FLUX.1-Kontext)
+
+These coarse capability tags are intentionally broad. They help with catalog
+badges and filtering, but they are not the full runtime behavior contract.
+
+### Extended Capability Sections
+
+Model cards can now optionally declare refined model behavior through structured
+sections:
+
+- `[reasoning]`
+  - `supports_toggle`
+  - `supports_budget`
+  - `format`
+  - `default_effort`
+  - `disabled_effort`
+- `[modalities]`
+  - `supports_audio_input`
+  - `supports_native_multimodal`
+- `[tooling]`
+  - `supports_tool_calling`
+  - `tool_call_format`
+- `[runtime]`
+  - `prompt_renderer`
+  - `output_parser`
+
+These sections are optional. Existing cards still work without them.
+
+At runtime, Skulk resolves the model card plus conservative model-family
+defaults into a normalized capability profile. That resolved profile drives
+model-aware reasoning defaults, prompt rendering, output parsing, and the
+additive `resolved_capabilities` metadata returned by `/v1/models`.
+
+For the full field reference and examples, see:
+- [website/docs/model-cards.md](website/docs/model-cards.md)
+- [website/docs/model-capabilities.md](website/docs/model-capabilities.md)
 
 ### Security Note
 

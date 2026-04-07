@@ -12,3 +12,10 @@ context_length = 131072
 
 [storage_size]
 in_bytes = 12025908224
+
+[tooling]
+supports_tool_calling = true
+tool_call_format = "gpt_oss"
+
+[runtime]
+output_parser = "gpt_oss"

@@ -70,6 +70,12 @@ This is where Skulk selects inference behavior such as:
 - MLX execution path
 - KV cache backend choice
 
+The runtime behavior for a specific model family is increasingly driven by
+model-card-backed capability resolution rather than scattered family checks. See
+[Model Cards](model-cards), [Model Capabilities](model-capabilities), and
+[Gemma 4 behavior notes](model-behaviors/gemma4) for the current shape of that
+system.
+
 ### API
 
 The API server exposes:
@@ -185,6 +191,27 @@ The key pieces:
 - `skulk.yaml` `logging.enabled` + `logging.ingest_url` — enables the JSON sink (configurable via dashboard Settings, synced to all nodes)
 
 This is opt-in. Without the logging config, skulk behaves identically to before.
+
+## Debugging MLX Hangs
+
+When a model appears to stall during warmup, prefill, or distributed generation,
+Skulk can emit phase-specific hang diagnostics from the runner process.
+
+Set these environment variables before starting `skulk`:
+
+- `SKULK_MLX_HANG_DEBUG=1`
+- `SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS=10`
+
+When enabled, the runner logs:
+
+- entry and exit for warmup and prefill phases
+- which prefill path was selected (`stream_generate` or `pipeline_parallel_prefill`)
+- whether prefill yielded its first token
+- periodic Python stack traces while the active phase remains stuck
+
+`SKULK_...` is the preferred prefix. `EXO_MLX_HANG_DEBUG` and
+`EXO_MLX_HANG_DEBUG_INTERVAL_SECONDS` remain accepted as compatibility
+fallbacks while older scripts are updated.
 
 ## When to Read More
 
