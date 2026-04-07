@@ -1,8 +1,10 @@
+import { useTheme } from 'styled-components';
 import type { NodeInfo, TopologyEdge } from '../../types/topology';
 import { detectDeviceModel } from '../../types/topology';
 import { DeviceIcon } from './DeviceIcon';
 import { GpuStatsBar } from './GpuStatsBar';
 import { NodeLabel } from './NodeLabel';
+import type { Theme } from '../../theme';
 
 
 export interface ClusterNodeProps {
@@ -27,6 +29,7 @@ function buildDebugContent(
   nodeInfo: NodeInfo,
   edges: TopologyEdge[],
   allNodes: Record<string, NodeInfo>,
+  theme: Theme,
 ): React.ReactNode {
   const chip = nodeInfo.system_info?.chip ?? '';
   const modelId = nodeInfo.system_info?.model_id ?? 'Unknown';
@@ -64,30 +67,30 @@ function buildDebugContent(
     ? (nodeInfo.rdma_interfaces_present === false ? 'Enabled (no HW support)' : 'Enabled')
     : 'Disabled';
   const rdmaColor = nodeInfo.rdma_enabled
-    ? (nodeInfo.rdma_interfaces_present === false ? '#f59e0b' : '#4ade80')
-    : '#888';
+    ? (nodeInfo.rdma_interfaces_present === false ? theme.colors.warning : theme.colors.healthy)
+    : theme.colors.textMuted;
   const version = nodeInfo.exo_version && nodeInfo.exo_version !== 'Unknown'
     ? `v${nodeInfo.exo_version}${nodeInfo.exo_commit && nodeInfo.exo_commit !== 'Unknown' ? ` (${nodeInfo.exo_commit})` : ''}`
     : '';
 
   return (
     <div style={{ lineHeight: 1.6 }}>
-      <div style={{ color: '#FFD700', fontWeight: 600, marginBottom: 4 }}>
+      <div style={{ color: theme.colors.gold, fontWeight: 600, marginBottom: 4 }}>
         {modelId}{chip ? ` · ${chip}` : ''}
       </div>
-      {os && <div style={{ color: 'rgba(255,255,255,0.6)' }}>{os}</div>}
-      {version && <div style={{ color: 'rgba(255,255,255,0.6)' }}>{version}</div>}
+      {os && <div style={{ color: theme.colors.textSecondary }}>{os}</div>}
+      {version && <div style={{ color: theme.colors.textSecondary }}>{version}</div>}
       <div style={{ color: rdmaColor, marginBottom: 6 }}>RDMA: {rdmaStatus}</div>
       {byTarget.size > 0 && (
         <>
-          <div style={{ color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
+          <div style={{ color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
             Connections
           </div>
           {Array.from(byTarget.entries()).map(([target, conns]) => (
             <div key={target} style={{ marginBottom: 4 }}>
-              <div style={{ color: 'rgba(255,255,255,0.8)', fontWeight: 500 }}>→ {target}</div>
+              <div style={{ color: theme.colors.textSecondary, fontWeight: 500 }}>→ {target}</div>
               {conns.map((c, i) => (
-                <div key={i} style={{ paddingLeft: 12, color: c.startsWith('RDMA') ? 'rgba(255,215,0,0.9)' : c.startsWith('TB ') ? 'rgba(96,165,250,0.9)' : 'rgba(255,255,255,0.6)' }}>
+                <div key={i} style={{ paddingLeft: 12, color: c.startsWith('RDMA') ? theme.colors.gold : c.startsWith('TB ') ? theme.colors.info : theme.colors.textSecondary }}>
                   {c}
                 </div>
               ))}
@@ -109,6 +112,7 @@ export function ClusterNode({
   allNodes = {},
   onRestart,
 }: ClusterNodeProps) {
+  const theme = useTheme() as Theme;
   const model = detectDeviceModel(nodeInfo.system_info?.model_id);
 
   // Icon dimensions (unscaled)
@@ -145,7 +149,7 @@ export function ClusterNode({
   const iconLeft = -iconW / 2;
   const iconTop = -iconH / 2;
 
-  const debugContent = buildDebugContent(nodeId, nodeInfo, edges, allNodes);
+  const debugContent = buildDebugContent(nodeId, nodeInfo, edges, allNodes, theme);
 
   return (
     <g transform={`translate(${x}, ${y}) scale(${scale})`}>

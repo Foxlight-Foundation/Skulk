@@ -1,8 +1,9 @@
-import styled from 'styled-components';
+import styled, { useTheme } from 'styled-components';
 import { FiCheck, FiDownload, FiExternalLink } from 'react-icons/fi';
 import type { HuggingFaceModel } from '../../types/models';
 import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
+import type { Theme } from '../../theme';
 
 export interface HuggingFaceResultItemProps {
   model: HuggingFaceModel;
@@ -68,16 +69,15 @@ const AddedBadge = styled.span`
   padding: 2px 8px;
   border-radius: ${({ theme }) => theme.radii.sm};
   background: rgba(34, 197, 94, 0.15);
-  color: #22c55e;
+  color: ${({ theme }) => theme.colors.accent};
 `;
 
 const SelectBtn = styled(Button)`
-  background: rgba(255, 215, 0, 0.15);
-  color: #ffd700;
-  &:hover:not(:disabled) { background: rgba(255, 215, 0, 0.25); }
+  background: ${({ theme }) => theme.colors.goldBg};
+  color: ${({ theme }) => theme.colors.gold};
+  &:hover:not(:disabled) { background: ${({ theme }) => theme.colors.goldDim}; }
 `;
 
-const CheckIcon = () => <FiCheck size={16} color="#22c55e" strokeWidth={2.5} />;
 const StoreDownloadIcon = () => <FiDownload size={14} />;
 
 export function HuggingFaceResultItem({
@@ -88,6 +88,8 @@ export function HuggingFaceResultItem({
   onAdd,
   onSelect,
 }: HuggingFaceResultItemProps) {
+  const theme = useTheme() as Theme;
+  const CheckIcon = () => <FiCheck size={16} color={theme.colors.accent} strokeWidth={2.5} />;
   const shortName = model.id.startsWith('mlx-community/')
     ? model.id.replace('mlx-community/', '')
     : model.id;
@@ -100,37 +102,37 @@ export function HuggingFaceResultItem({
   const tooltipContent = (
     <div style={{ minWidth: 220 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-        <span style={{ color: '#FFD700', fontWeight: 600 }}>{model.id}</span>
+        <span style={{ color: theme.colors.gold, fontWeight: 600 }}>{model.id}</span>
         <a
           href={hfUrl}
           target="_blank"
           rel="noopener noreferrer"
-          style={{ color: 'rgba(255,255,255,0.5)', display: 'flex', transition: 'color 0.15s' }}
-          onMouseEnter={(e) => { e.currentTarget.style.color = '#FFD700'; }}
-          onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.5)'; }}
+          style={{ color: theme.colors.textMuted, display: 'flex', transition: 'color 0.15s' }}
+          onMouseEnter={(e) => { e.currentTarget.style.color = theme.colors.gold; }}
+          onMouseLeave={(e) => { e.currentTarget.style.color = theme.colors.textMuted; }}
           title="Open on HuggingFace"
         >
           <FiExternalLink size={14} />
         </a>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Author</span>
+        <span style={{ color: theme.colors.textMuted }}>Author</span>
         <span>{model.author}</span>
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Downloads</span>
+        <span style={{ color: theme.colors.textMuted }}>Downloads</span>
         <span>{formatCount(model.downloads)}</span>
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Likes</span>
+        <span style={{ color: theme.colors.textMuted }}>Likes</span>
         <span>{formatCount(model.likes)}</span>
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Updated</span>
+        <span style={{ color: theme.colors.textMuted }}>Updated</span>
         <span>{new Date(model.last_modified).toLocaleDateString()}</span>
       </div>
       {sizeTags.length > 0 && (
-        <div style={{ marginTop: 8, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 6 }}>
-          <div style={{ color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
+        <div style={{ marginTop: 8, borderTop: `1px solid ${theme.colors.borderLight}`, paddingTop: 6 }}>
+          <div style={{ color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
             Tags
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
             {sizeTags.map((t) => (
-              <span key={t} style={{ padding: '1px 6px', borderRadius: 3, background: 'rgba(255,255,255,0.08)', color: 'rgba(255,255,255,0.7)' }}>{t}</span>
+              <span key={t} style={{ padding: '1px 6px', borderRadius: 3, background: theme.colors.borderLight, color: theme.colors.textSecondary }}>{t}</span>
             ))}
           </div>
         </div>

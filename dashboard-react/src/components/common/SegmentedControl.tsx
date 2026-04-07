@@ -24,7 +24,7 @@ const sizeConfig = {
 
 const Group = styled.div<{ $size: SegmentedControlSize }>`
   display: inline-flex;
-  border: 1px solid rgba(255, 215, 0, 0.3);
+  border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.sm};
   overflow: hidden;
 `;
@@ -42,18 +42,23 @@ const Segment = styled.button<{
   transition: all 0.15s;
   white-space: nowrap;
 
+  &:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 2px ${({ theme }) => theme.colors.gold};
+  }
+
   ${({ $active }) =>
     $active
       ? css`
-          background: #FFD700;
-          color: #000;
+          background: ${({ theme }) => theme.colors.gold};
+          color: ${({ theme }) => theme.colors.textOnAccent};
           font-weight: 600;
         `
       : css`
-          background: rgba(80, 80, 80, 0.3);
-          color: rgba(179, 179, 179, 0.8);
+          background: ${({ theme }) => theme.colors.surfaceSunken};
+          color: ${({ theme }) => theme.colors.textMuted};
           &:hover {
-            color: #fff;
+            color: ${({ theme }) => theme.colors.text};
           }
         `}
 
@@ -67,7 +72,7 @@ const Segment = styled.button<{
 
   /* Subtle divider between inactive segments */
   &:not(:first-child) {
-    border-left: 1px solid rgba(255, 215, 0, 0.15);
+    border-left: 1px solid ${({ theme }) => theme.colors.goldBg};
   }
 `;
 

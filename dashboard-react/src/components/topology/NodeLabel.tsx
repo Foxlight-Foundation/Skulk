@@ -1,6 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { useTheme } from 'styled-components';
 import { formatBytes } from '../../utils/format';
 import { InfoTooltip } from '../common/InfoTooltip';
+import type { Theme } from '../../theme';
 
 export interface NodeLabelProps {
   name: string;
@@ -31,6 +33,7 @@ export function NodeLabel({
   debugContent,
   onRestart,
 }: NodeLabelProps) {
+  const theme = useTheme() as Theme;
   const ramPercent = ramTotal > 0 ? ((ramUsed / ramTotal) * 100).toFixed(0) : '0';
   const usedStr = formatBytes(ramUsed);
   const totalStr = formatBytes(ramTotal);
@@ -88,7 +91,7 @@ export function NodeLabel({
             >
               <path
                 d="M13.65 2.35A7.96 7.96 0 0 0 8 0a8 8 0 1 0 8 8h-2a6 6 0 1 1-1.76-4.24L9 7h7V0l-2.35 2.35z"
-                fill={confirming ? '#f59e0b' : '#999'}
+                fill={confirming ? theme.colors.warning : theme.colors.textMuted}
               />
             </svg>
           </InfoTooltip>
@@ -96,7 +99,7 @@ export function NodeLabel({
       )}
       {/* Name above */}
       <text x={cx} y={nameY} textAnchor="middle" dominantBaseline="middle"
-        fill="#FFD700" fontSize={fontSize} fontWeight={700}
+        fill={theme.colors.gold} fontSize={fontSize} fontWeight={700}
         fontFamily="SF Mono, Monaco, monospace">
         {name}
       </text>
@@ -119,9 +122,9 @@ export function NodeLabel({
       {/* Memory below: "15.4GB" in grey, "/24GB (64%)" in yellow */}
       <text x={cx} y={memoryY} textAnchor="middle" dominantBaseline="middle"
         fontFamily="SF Mono, Monaco, monospace" fontSize={13}>
-        <tspan fill="#999999">{usedStr}</tspan>
-        <tspan fill="#FFD700">/{totalStr}</tspan>
-        <tspan fill="#999999">{' '}({ramPercent}%)</tspan>
+        <tspan fill={theme.colors.textSecondary}>{usedStr}</tspan>
+        <tspan fill={theme.colors.gold}>/{totalStr}</tspan>
+        <tspan fill={theme.colors.textSecondary}>{' '}({ramPercent}%)</tspan>
       </text>
     </g>
   );

@@ -159,7 +159,7 @@ const Backdrop = styled.div`
   position: fixed;
   inset: 0;
   z-index: 50;
-  background: rgba(0, 0, 0, 0.7);
+  background: ${({ theme }) => theme.colors.overlay};
 `;
 
 const ModalContainer = styled.div`
@@ -176,7 +176,7 @@ const ModalContainer = styled.div`
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.lg};
   overflow: hidden;
-  box-shadow: 0 0 43px rgba(0, 0, 0, 0.70), 0 0 88px rgba(0, 0, 0, 0.70);
+  box-shadow: 0 0 43px ${({ theme }) => theme.colors.shadowStrong}, 0 0 88px ${({ theme }) => theme.colors.shadow};
 `;
 
 const ModalHeader = styled.div`

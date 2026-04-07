@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
-import styled, { css, keyframes } from 'styled-components';
+import styled, { css, keyframes, useTheme } from 'styled-components';
+import type { Theme } from '../../theme';
 import { FiTrash2, FiExternalLink, FiRefreshCw } from 'react-icons/fi';
 import { MdPlayArrow, MdClose, MdTune, MdAutoFixHigh } from 'react-icons/md';
 import { BsChatDotsFill } from 'react-icons/bs';
@@ -122,15 +123,16 @@ const HeaderText = styled.span`
 const ShimmerRow = styled.div`
   height: 48px;
   border-radius: ${({ theme }) => theme.radii.md};
-  background: linear-gradient(90deg, rgba(80,80,80,0.1) 25%, rgba(80,80,80,0.2) 50%, rgba(80,80,80,0.1) 75%);
+  background: ${({ theme }) =>
+    `linear-gradient(90deg, ${theme.colors.surfaceSunken} 25%, ${theme.colors.surfaceHover} 50%, ${theme.colors.surfaceSunken} 75%)`};
   background-size: 200% 100%;
   animation: ${shimmer} 1.5s ease-in-out infinite;
 `;
 
 const EmptyBox = styled.div`
-  border: 1px solid rgba(80, 80, 80, 0.3);
+  border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.md};
-  background: rgba(0, 0, 0, 0.3);
+  background: ${({ theme }) => theme.colors.surfaceSunken};
   padding: 24px;
   text-align: center;
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
@@ -139,7 +141,7 @@ const EmptyBox = styled.div`
 `;
 
 const Table = styled.div`
-  border: 1px solid rgba(80, 80, 80, 0.3);
+  border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.md};
   overflow: hidden;
   display: flex;
@@ -154,7 +156,7 @@ const THead = styled.div`
   grid-template-columns: 36px 32px 1fr 80px 60px 100px 100px;
   gap: 8px;
   padding: 8px 12px;
-  background: rgba(0, 0, 0, 0.4);
+  background: ${({ theme }) => theme.colors.surfaceSunken};
   font-size: ${({ theme }) => theme.fontSizes.tableHead};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.textMuted};
@@ -173,14 +175,14 @@ const TRow = styled.div<{ $highlight?: boolean }>`
   gap: 8px;
   padding: 10px 12px;
   align-items: center;
-  border-top: 1px solid rgba(80, 80, 80, 0.2);
+  border-top: 1px solid ${({ theme }) => theme.colors.borderLight};
   transition: background 0.15s;
 
-  &:hover { background: rgba(80, 80, 80, 0.1); }
+  &:hover { background: ${({ theme }) => theme.colors.surfaceHover}; }
 
   ${({ $highlight }) =>
     $highlight &&
-    css`background: rgba(255, 215, 0, 0.05);`}
+    css`background: ${({ theme }) => theme.colors.goldBg};`}
 `;
 
 const ModelCell = styled.div`
@@ -207,7 +209,7 @@ const ReadyBadge = styled.span`
   flex-shrink: 0;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: #4ade80;
+  color: ${({ theme }) => theme.colors.healthy};
   background: rgba(34, 197, 94, 0.1);
   border: 1px solid rgba(34, 197, 94, 0.2);
   border-radius: ${({ theme }) => theme.radii.sm};
@@ -232,7 +234,7 @@ const PulseDot = styled.span`
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #4ade80;
+  background: ${({ theme }) => theme.colors.healthy};
   animation: ${pulse} 1.5s ease-in-out infinite;
 `;
 
@@ -244,13 +246,15 @@ const ActiveDot = styled.span`
   animation: ${pulse} 1.5s ease-in-out infinite;
 `;
 
-const TAG_COLORS: Record<string, { color: string; bg: string; border: string }> = {
-  optiq: { color: '#a78bfa', bg: 'rgba(167, 139, 250, 0.1)', border: 'rgba(167, 139, 250, 0.3)' },
-  thinking: { color: '#60a5fa', bg: 'rgba(96, 165, 250, 0.1)', border: 'rgba(96, 165, 250, 0.3)' },
-  vision: { color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.12)', border: 'rgba(245, 158, 11, 0.32)' },
-  tensor: { color: '#34d399', bg: 'rgba(52, 211, 153, 0.1)', border: 'rgba(52, 211, 153, 0.3)' },
-  embedding: { color: '#f472b6', bg: 'rgba(244, 114, 182, 0.1)', border: 'rgba(244, 114, 182, 0.3)' },
-};
+function buildTagColors(theme: Theme): Record<string, { color: string; bg: string; border: string }> {
+  return {
+    optiq: { color: '#a78bfa', bg: 'rgba(167, 139, 250, 0.1)', border: 'rgba(167, 139, 250, 0.3)' },
+    thinking: { color: theme.colors.info, bg: theme.colors.infoBg, border: theme.colors.infoBg },
+    vision: { color: theme.colors.warning, bg: theme.colors.warningBg, border: theme.colors.warningBg },
+    tensor: { color: theme.colors.healthy, bg: theme.colors.accentBg, border: theme.colors.accentBg },
+    embedding: { color: '#f472b6', bg: 'rgba(244, 114, 182, 0.1)', border: 'rgba(244, 114, 182, 0.3)' },
+  };
+}
 
 const TagBadge = styled.span<{ $color: string; $bg: string; $border: string }>`
   flex-shrink: 0;
@@ -271,7 +275,7 @@ const ChatBubble = styled.button`
   cursor: pointer;
   display: flex;
   align-items: center;
-  color: #4ade80;
+  color: ${({ theme }) => theme.colors.healthy};
   padding: 2px;
   border-radius: ${({ theme }) => theme.radii.sm};
   transition: all 0.15s;
@@ -292,7 +296,7 @@ const Cell = styled.div<{ $align?: string }>`
 const ProgressTrack = styled.div`
   width: 96px;
   height: 6px;
-  background: rgba(80, 80, 80, 0.3);
+  background: ${({ theme }) => theme.colors.surfaceSunken};
   border-radius: 3px;
   overflow: hidden;
 `;
@@ -300,7 +304,7 @@ const ProgressTrack = styled.div`
 const ProgressFill = styled.div<{ $pct: number }>`
   width: ${({ $pct }) => $pct}%;
   height: 100%;
-  background: #FFD700;
+  background: ${({ theme }) => theme.colors.gold};
   border-radius: 3px;
   transition: width 0.3s ease-out;
 `;
@@ -308,7 +312,7 @@ const ProgressFill = styled.div<{ $pct: number }>`
 const ProgressText = styled.span`
   font-size: ${({ theme }) => theme.fontSizes.label};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: #FFD700;
+  color: ${({ theme }) => theme.colors.gold};
 `;
 
 const spin = keyframes`
@@ -354,11 +358,11 @@ const PlayBtn = styled.button`
   height: 28px;
   border-radius: 50%;
   color: ${({ theme }) => theme.colors.gold};
-  background: rgba(255, 215, 0, 0.15);
+  background: ${({ theme }) => theme.colors.goldBg};
   transition: background 0.15s, transform 0.1s;
 
   &:hover {
-    background: rgba(255, 215, 0, 0.3);
+    background: ${({ theme }) => theme.colors.goldDim};
     transform: scale(1.1);
   }
 `;
@@ -389,7 +393,7 @@ const PlacementBtn = styled.button`
 
   &:hover {
     color: ${({ theme }) => theme.colors.gold};
-    background: rgba(255, 215, 0, 0.1);
+    background: ${({ theme }) => theme.colors.goldBg};
   }
 `;
 
@@ -403,11 +407,12 @@ const StopBtn = styled.button`
   height: 28px;
   border-radius: 50%;
   color: ${({ theme }) => theme.colors.error};
-  background: rgba(239, 68, 68, 0.15);
+  background: ${({ theme }) => theme.colors.errorBg};
   transition: background 0.15s, transform 0.1s;
 
   &:hover {
-    background: rgba(239, 68, 68, 0.3);
+    background: ${({ theme }) => theme.colors.error};
+    color: ${({ theme }) => theme.colors.textOnAccent};
     transform: scale(1.1);
   }
 `;
@@ -429,6 +434,7 @@ const ActionsCell = styled.div`
 const LinkIcon = () => <FiExternalLink size={14} style={{ flexShrink: 0 }} />;
 
 function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: ModelCardInfo }) {
+  const theme = useTheme() as Theme;
   const hfUrl = entry.model_id.includes('/')
     ? `https://huggingface.co/${entry.model_id}`
     : null;
@@ -437,7 +443,7 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
   return (
     <div style={{ minWidth: 240 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-        <span style={{ color: '#FFD700', fontWeight: 600 }}>
+        <span style={{ color: theme.colors.gold, fontWeight: 600 }}>
           {entry.model_id}
         </span>
         {hfUrl && (
@@ -445,9 +451,9 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
             href={hfUrl}
             target="_blank"
             rel="noopener noreferrer"
-            style={{ color: 'rgba(255,255,255,0.5)', display: 'flex', transition: 'color 0.15s' }}
-            onMouseEnter={(e) => { e.currentTarget.style.color = '#FFD700'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.5)'; }}
+            style={{ color: theme.colors.textMuted, display: 'flex', transition: 'color 0.15s' }}
+            onMouseEnter={(e) => { e.currentTarget.style.color = theme.colors.gold; }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = theme.colors.textMuted; }}
             title="Open on HuggingFace"
           >
             <LinkIcon />
@@ -455,63 +461,63 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
         )}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Size</span>
+        <span style={{ color: theme.colors.textMuted }}>Size</span>
         <span>{formatBytes(entry.total_bytes)}</span>
         {card?.baseModel && (
           <>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Base model</span>
+            <span style={{ color: theme.colors.textMuted }}>Base model</span>
             <span>{card.baseModel}</span>
           </>
         )}
         {card?.family && (
           <>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Family</span>
+            <span style={{ color: theme.colors.textMuted }}>Family</span>
             <span>{card.family}</span>
           </>
         )}
         {card?.quantization && (
           <>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Quantization</span>
+            <span style={{ color: theme.colors.textMuted }}>Quantization</span>
             <span>{card.quantization}</span>
           </>
         )}
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Tensor parallel</span>
-        <span style={{ color: card?.supportsTensor ? '#4ade80' : 'rgba(255,255,255,0.7)' }}>
+        <span style={{ color: theme.colors.textMuted }}>Tensor parallel</span>
+        <span style={{ color: card?.supportsTensor ? theme.colors.healthy : theme.colors.textSecondary }}>
           {card?.supportsTensor ? 'Yes' : 'No'}
         </span>
         {card?.capabilities && card.capabilities.length > 0 && (
           <>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Capabilities</span>
+            <span style={{ color: theme.colors.textMuted }}>Capabilities</span>
             <span>{card.capabilities.join(', ')}</span>
           </>
         )}
         {resolved && (
           <>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Thinking toggle</span>
+            <span style={{ color: theme.colors.textMuted }}>Thinking toggle</span>
             <span>{resolved.supportsThinkingToggle ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Thinking budget</span>
+            <span style={{ color: theme.colors.textMuted }}>Thinking budget</span>
             <span>{resolved.supportsThinkingBudget ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Tool calling</span>
+            <span style={{ color: theme.colors.textMuted }}>Tool calling</span>
             <span>{resolved.supportsToolCalling ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Image input</span>
+            <span style={{ color: theme.colors.textMuted }}>Image input</span>
             <span>{resolved.supportsImageInput ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Audio input</span>
+            <span style={{ color: theme.colors.textMuted }}>Audio input</span>
             <span>{resolved.supportsAudioInput ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Reasoning format</span>
+            <span style={{ color: theme.colors.textMuted }}>Reasoning format</span>
             <span>{resolved.thinkingFormat ?? 'none'}</span>
           </>
         )}
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Files</span>
+        <span style={{ color: theme.colors.textMuted }}>Files</span>
         <span>{entry.files.length}</span>
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Downloaded</span>
+        <span style={{ color: theme.colors.textMuted }}>Downloaded</span>
         <span>{new Date(entry.downloaded_at).toLocaleString()}</span>
       </div>
       {entry.files.length > 0 && (
-        <div style={{ marginTop: 8, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 6 }}>
-          <div style={{ color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
+        <div style={{ marginTop: 8, borderTop: `1px solid ${theme.colors.borderLight}`, paddingTop: 6 }}>
+          <div style={{ color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
             Files
           </div>
-          <div style={{ color: 'rgba(255,255,255,0.6)', maxHeight: 120, overflowY: 'auto' }}>
+          <div style={{ color: theme.colors.textSecondary, maxHeight: 120, overflowY: 'auto' }}>
             {entry.files.map((f) => (
               <div key={f}>{f}</div>
             ))}
@@ -539,6 +545,8 @@ export function StoreRegistryTable({
   totalClusterMemoryBytes = 0,
   onOptimize,
 }: StoreRegistryTableProps) {
+  const theme = useTheme() as Theme;
+  const TAG_COLORS = useMemo(() => buildTagColors(theme), [theme]);
   const registeredIds = useMemo(() => new Set(entries.map((e) => e.model_id)), [entries]);
   const pendingDownloads = useMemo(
     () => activeDownloads.filter((d) => !registeredIds.has(d.modelId)),

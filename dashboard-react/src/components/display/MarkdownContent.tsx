@@ -123,7 +123,7 @@ const Container = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.md};
 
   /* Headings */
-  h1, h2 { color: #FFD700; }
+  h1, h2 { color: ${({ theme }) => theme.colors.gold}; }
   h1 { font-size: 1.5em; margin: 16px 0 8px; }
   h2 { font-size: 1.3em; margin: 14px 0 6px; }
   h3, h4, h5, h6 { margin: 12px 0 4px; }
@@ -140,33 +140,33 @@ const Container = styled.div`
 
   /* Blockquotes */
   blockquote {
-    border-left: 3px solid rgba(255, 215, 0, 0.5);
-    background: rgba(255, 215, 0, 0.05);
+    border-left: 3px solid ${({ theme }) => theme.colors.goldDim};
+    background: ${({ theme }) => theme.colors.goldBg};
     padding: 8px 12px;
     margin: 8px 0;
-    color: rgba(255, 255, 255, 0.8);
+    color: ${({ theme }) => theme.colors.textSecondary};
   }
 
   /* Tables */
   table { width: 100%; border-collapse: collapse; margin: 8px 0; }
-  th { background: rgba(255, 215, 0, 0.1); text-align: left; }
+  th { background: ${({ theme }) => theme.colors.goldBg}; text-align: left; }
   th, td { border: 1px solid ${({ theme }) => theme.colors.border}; padding: 6px 10px; font-size: ${({ theme }) => theme.fontSizes.tableBody}; }
 
   /* Inline code */
   .mc-inline-code {
-    background: rgba(255, 215, 0, 0.1);
-    border: 1px solid rgba(255, 215, 0, 0.15);
+    background: ${({ theme }) => theme.colors.goldBg};
+    border: 1px solid ${({ theme }) => theme.colors.goldBg};
     border-radius: 3px;
     padding: 1px 5px;
     font-family: ${({ theme }) => theme.fonts.mono};
     font-size: 0.9em;
-    color: #FFD700;
+    color: ${({ theme }) => theme.colors.gold};
   }
 
   /* Code blocks */
   .mc-code-block {
-    background: rgba(0, 0, 0, 0.4);
-    border: 1px solid rgba(255, 215, 0, 0.2);
+    background: ${({ theme }) => theme.colors.shadow};
+    border: 1px solid ${({ theme }) => theme.colors.goldDim};
     border-radius: ${({ theme }) => theme.radii.md};
     margin: 12px 0;
     overflow: hidden;
@@ -177,14 +177,14 @@ const Container = styled.div`
     align-items: center;
     justify-content: space-between;
     padding: 6px 12px;
-    background: rgba(255, 215, 0, 0.05);
-    border-bottom: 1px solid rgba(255, 215, 0, 0.1);
+    background: ${({ theme }) => theme.colors.goldBg};
+    border-bottom: 1px solid ${({ theme }) => theme.colors.goldBg};
   }
 
   .mc-code-lang {
     font-size: ${({ theme }) => theme.fontSizes.label};
     font-family: ${({ theme }) => theme.fonts.mono};
-    color: rgba(255, 215, 0, 0.6);
+    color: ${({ theme }) => theme.colors.goldDim};
   }
 
   .mc-copy-btn {
@@ -192,9 +192,9 @@ const Container = styled.div`
     cursor: pointer;
     font-size: ${({ theme }) => theme.fontSizes.label};
     font-family: ${({ theme }) => theme.fonts.mono};
-    color: rgba(255, 255, 255, 0.4);
+    color: ${({ theme }) => theme.colors.textMuted};
     transition: color 0.15s;
-    &:hover { color: #FFD700; }
+    &:hover { color: ${({ theme }) => theme.colors.gold}; }
   }
 
   pre {
@@ -211,18 +211,18 @@ const Container = styled.div`
   /* Highlight.js dark theme overrides */
   .hljs-keyword, .hljs-selector-tag { color: #c084fc; }
   .hljs-string, .hljs-attr { color: #fbbf24; }
-  .hljs-number, .hljs-literal { color: #4ade80; }
+  .hljs-number, .hljs-literal { color: ${({ theme }) => theme.colors.healthy}; }
   .hljs-built_in, .hljs-function { color: #60a5fa; }
   .hljs-comment { color: #6b7280; font-style: italic; }
   .hljs-title { color: #f472b6; }
   .hljs-type { color: #2dd4bf; }
-  .hljs-params { color: #e5e5e5; }
+  .hljs-params { color: ${({ theme }) => theme.colors.text}; }
 
   /* Math */
   .mc-math-display {
     margin: 12px 0;
     padding: 12px;
-    border: 1px solid rgba(255, 215, 0, 0.15);
+    border: 1px solid ${({ theme }) => theme.colors.goldBg};
     border-radius: ${({ theme }) => theme.radii.md};
     overflow-x: auto;
   }
@@ -232,17 +232,17 @@ const Container = styled.div`
   }
 
   .mc-math-error {
-    color: #f87171;
+    color: ${({ theme }) => theme.colors.error};
     font-family: ${({ theme }) => theme.fonts.mono};
     font-size: ${({ theme }) => theme.fontSizes.sm};
-    background: rgba(239, 68, 68, 0.1);
+    background: ${({ theme }) => theme.colors.errorBg};
     padding: 2px 6px;
     border-radius: 3px;
   }
 
   /* KaTeX color overrides */
-  .katex { color: rgba(229, 229, 229, 0.9); }
-  .katex .delimsizing, .katex .mord { color: rgba(191, 191, 191, 0.75); }
+  .katex { color: ${({ theme }) => theme.colors.text}; }
+  .katex .delimsizing, .katex .mord { color: ${({ theme }) => theme.colors.textSecondary}; }
 `;
 
 /* ================================================================

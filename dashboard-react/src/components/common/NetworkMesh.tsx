@@ -1,14 +1,15 @@
 import { useEffect, useRef } from 'react';
-import styled from 'styled-components';
+import styled, { useTheme } from 'styled-components';
+import type { Theme } from '../../theme';
 
 export interface NetworkMeshProps {
   /** Number of particles. Default 60. */
   count?: number;
   /** Max distance for drawing connections. Default 150. */
   linkDistance?: number;
-  /** Particle color. Default 'rgba(255,215,0,0.15)'. */
+  /** Particle color. Defaults to `theme.colors.bgMeshNode`. */
   color?: string;
-  /** Connection color. Default 'rgba(255,215,0,0.04)'. */
+  /** Connection color. Defaults to `theme.colors.bgMeshLine`. */
   lineColor?: string;
   /** Particle radius. Default 1.5. */
   radius?: number;
@@ -34,12 +35,15 @@ interface Particle {
 export function NetworkMesh({
   count = 60,
   linkDistance = 150,
-  color = 'rgba(255,215,0,0.15)',
-  lineColor = 'rgba(255,215,0,0.04)',
+  color: colorProp,
+  lineColor: lineColorProp,
   radius = 1.5,
   speed = 0.3,
   className,
 }: NetworkMeshProps) {
+  const theme = useTheme() as Theme;
+  const color = colorProp ?? theme.colors.bgMeshNode;
+  const lineColor = lineColorProp ?? theme.colors.bgMeshLine;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const particlesRef = useRef<Particle[]>([]);
   const rafRef = useRef<number>(0);
@@ -100,12 +104,10 @@ export function NetworkMesh({
         p.y = Math.max(0, Math.min(h, p.y));
       }
 
-      // Draw connections
+      // Draw connections. Use globalAlpha for the distance-fade so we don't need
+      // to parse lineColor — any valid CSS color (hex, rgb, rgba, named) works.
       const linkDist2 = linkDistance * linkDistance;
-      // Extract base alpha from lineColor (e.g. "rgba(255,215,0,0.08)" → 0.08)
-      const baseAlphaMatch = lineColor.match(/([\d.]+)\)$/);
-      const baseAlpha = baseAlphaMatch ? parseFloat(baseAlphaMatch[1]) : 0.08;
-      const lineBase = lineColor.replace(/[\d.]+\)$/, '');
+      ctx!.strokeStyle = lineColor;
 
       for (let i = 0; i < particles.length; i++) {
         for (let j = i + 1; j < particles.length; j++) {
@@ -114,7 +116,7 @@ export function NetworkMesh({
           const d2 = dx * dx + dy * dy;
           if (d2 < linkDist2) {
             const fade = 1 - Math.sqrt(d2) / linkDistance;
-            ctx!.strokeStyle = `${lineBase}${(fade * baseAlpha).toFixed(4)})`;
+            ctx!.globalAlpha = fade;
             ctx!.beginPath();
             ctx!.moveTo(particles[i].x, particles[i].y);
             ctx!.lineTo(particles[j].x, particles[j].y);
@@ -122,6 +124,7 @@ export function NetworkMesh({
           }
         }
       }
+      ctx!.globalAlpha = 1;
 
       // Draw particles
       ctx!.fillStyle = color;
