@@ -132,7 +132,7 @@ const ShimmerRow = styled.div`
 const EmptyBox = styled.div`
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.md};
-  background: ${({ theme }) => theme.colors.shadow};
+  background: ${({ theme }) => theme.colors.surfaceSunken};
   padding: 24px;
   text-align: center;
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
@@ -156,7 +156,7 @@ const THead = styled.div`
   grid-template-columns: 36px 32px 1fr 80px 60px 100px 100px;
   gap: 8px;
   padding: 8px 12px;
-  background: ${({ theme }) => theme.colors.shadow};
+  background: ${({ theme }) => theme.colors.surfaceSunken};
   font-size: ${({ theme }) => theme.fontSizes.tableHead};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.textMuted};

@@ -155,9 +155,9 @@ const StatusDot = styled.span<{ $class: string }>`
   flex-shrink: 0;
   ${({ $class }) => {
     if ($class === 'ready') return css`background: ${({ theme }) => theme.colors.accent};`;
-    if ($class === 'loading') return css`background: #eab308;`;
+    if ($class === 'loading') return css`background: ${({ theme }) => theme.colors.warning};`;
     if ($class === 'downloading') return css`background: ${({ theme }) => theme.colors.info};`;
-    return css`background: #666;`;
+    return css`background: ${({ theme }) => theme.colors.textMuted};`;
   }}
 `;
 

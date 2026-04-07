@@ -130,6 +130,11 @@ const Toggle = styled.button<{ $on: boolean }>`
     $on ? theme.colors.gold : theme.colors.surfaceSunken};
   border: 1px solid ${({ theme }) => theme.colors.border};
 
+  &:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim};
+  }
+
   &::after {
     content: '';
     position: absolute;

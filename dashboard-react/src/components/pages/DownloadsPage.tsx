@@ -673,7 +673,7 @@ const SegmentBtn = styled.button<{ $active: boolean }>`
           font-weight: 600;
         `
       : css`
-          background: ${({ theme }) => theme.colors.shadow};
+          background: ${({ theme }) => theme.colors.surfaceSunken};
           color: ${theme.colors.textSecondary};
           &:hover {
             color: ${theme.colors.text};
@@ -693,7 +693,7 @@ const EmptyState = styled.div`
   padding: 48px 24px;
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.md};
-  background: ${({ theme }) => theme.colors.shadow};
+  background: ${({ theme }) => theme.colors.surfaceSunken};
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
   color: ${({ theme }) => theme.colors.textMuted};
@@ -702,7 +702,7 @@ const EmptyState = styled.div`
 const TableWrap = styled.div`
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radii.md};
-  background: ${({ theme }) => theme.colors.shadow};
+  background: ${({ theme }) => theme.colors.surfaceSunken};
   overflow-x: auto;
 `;
 
