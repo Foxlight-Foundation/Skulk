@@ -261,13 +261,18 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     const imageAttachments: { dataUrl: string; file: ChatUploadedFile }[] = [];
     for (const f of files) {
       if (f.type.startsWith('image/') && f.preview) {
-        // f.preview is an object URL — read the file to get a data URL
-        const resp = await fetch(f.preview);
-        const blob = await resp.blob();
         const dataUrl = await new Promise<string>((resolve) => {
           const reader = new FileReader();
           reader.onloadend = () => resolve(reader.result as string);
-          reader.readAsDataURL(blob);
+          if (f.file) {
+            reader.readAsDataURL(f.file);
+            return;
+          }
+
+          // Fallback for any older in-memory attachment shape that only has an object URL.
+          fetch(f.preview)
+            .then((resp) => resp.blob())
+            .then((blob) => reader.readAsDataURL(blob));
         });
         imageAttachments.push({ dataUrl, file: f });
       }

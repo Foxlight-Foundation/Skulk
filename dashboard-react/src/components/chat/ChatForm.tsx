@@ -189,6 +189,7 @@ export function ChatForm({
   const [isDragOver, setIsDragOver] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const filesRef = useRef<ChatUploadedFile[]>([]);
 
   const canSend = message.trim().length > 0 || files.length > 0;
 
@@ -210,25 +211,7 @@ export function ChatForm({
   }, [isLoading]);
 
   useEffect(() => {
-    if (!supportsImageAttachments) {
-      setIsDragOver(false);
-    }
-    if (!supportsImageAttachments && files.length > 0) {
-      setFiles((prev) => {
-        prev.forEach((file) => {
-          if (file.preview) URL.revokeObjectURL(file.preview);
-        });
-        return [];
-      });
-    }
-  }, [supportsImageAttachments, files.length]);
-
-  useEffect(() => {
-    return () => {
-      files.forEach((file) => {
-        if (file.preview) URL.revokeObjectURL(file.preview);
-      });
-    };
+    filesRef.current = files;
   }, [files]);
 
   const clearFiles = useCallback(() => {
@@ -238,6 +221,23 @@ export function ChatForm({
       });
       return [];
     });
+  }, []);
+
+  useEffect(() => {
+    if (!supportsImageAttachments) {
+      setIsDragOver(false);
+    }
+    if (!supportsImageAttachments && files.length > 0) {
+      clearFiles();
+    }
+  }, [supportsImageAttachments, files.length, clearFiles]);
+
+  useEffect(() => {
+    return () => {
+      filesRef.current.forEach((file) => {
+        if (file.preview) URL.revokeObjectURL(file.preview);
+      });
+    };
   }, []);
 
   const handleSubmit = useCallback(
@@ -274,6 +274,7 @@ export function ChatForm({
       name: f.name,
       type: f.type,
       size: f.size,
+      file: f,
       preview: f.type.startsWith('image/') ? URL.createObjectURL(f) : undefined,
     }));
     setFiles((prev) => [...prev, ...newFiles]);
