@@ -37,11 +37,11 @@ export function DeviceIcon({
   const ramColor = theme.colors.ramFill;
   const cx = width / 2;
   const cy = height / 2;
-  const common = { cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId, bodyColor, ramColor };
+  const common = { cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId, ramColor };
 
-  if (model === 'mac-studio') return <MacStudio {...common} />;
-  if (model === 'mac-mini') return <MacMini {...common} />;
-  if (model === 'macbook-pro') return <MacBookPro {...common} />;
+  if (model === 'mac-studio') return <MacStudio {...common} bodyColor={bodyColor} />;
+  if (model === 'mac-mini') return <MacMini {...common} bodyColor={bodyColor} />;
+  if (model === 'macbook-pro') return <MacBookPro {...common} bodyColor={bodyColor} />;
   return <HexagonDefault {...common} fillColor={fillColor} />;
 }
 
@@ -211,7 +211,7 @@ interface HexagonDefaultProps {
   cx: number; cy: number; width: number; height: number;
   wireColor: string; strokeWidth: number; fillColor: string;
   ramPercent: number; clipId: string;
-  bodyColor: string; ramColor: string;
+  ramColor: string;
 }
 
 function HexagonDefault({ cx, cy, width, height, wireColor, strokeWidth, fillColor, ramPercent, clipId, ramColor }: HexagonDefaultProps) {

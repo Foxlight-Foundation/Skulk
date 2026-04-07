@@ -50,8 +50,8 @@ const preview: Preview = {
     backgrounds: {
       default: 'dark',
       values: [
-        { name: 'dark', value: '#000000' },
-        { name: 'light', value: '#f5f4ef' },
+        { name: 'dark', value: darkTheme.colors.bg },
+        { name: 'light', value: lightTheme.colors.bg },
       ],
     },
     controls: {
