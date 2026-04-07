@@ -449,9 +449,9 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
             href={hfUrl}
             target="_blank"
             rel="noopener noreferrer"
-            style={{ color: 'rgba(255,255,255,0.5)', display: 'flex', transition: 'color 0.15s' }}
+            style={{ color: theme.colors.textMuted, display: 'flex', transition: 'color 0.15s' }}
             onMouseEnter={(e) => { e.currentTarget.style.color = theme.colors.gold; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.5)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = theme.colors.textMuted; }}
             title="Open on HuggingFace"
           >
             <LinkIcon />
@@ -459,63 +459,63 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
         )}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Size</span>
+        <span style={{ color: theme.colors.textMuted }}>Size</span>
         <span>{formatBytes(entry.total_bytes)}</span>
         {card?.baseModel && (
           <>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Base model</span>
+            <span style={{ color: theme.colors.textMuted }}>Base model</span>
             <span>{card.baseModel}</span>
           </>
         )}
         {card?.family && (
           <>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Family</span>
+            <span style={{ color: theme.colors.textMuted }}>Family</span>
             <span>{card.family}</span>
           </>
         )}
         {card?.quantization && (
           <>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Quantization</span>
+            <span style={{ color: theme.colors.textMuted }}>Quantization</span>
             <span>{card.quantization}</span>
           </>
         )}
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Tensor parallel</span>
-        <span style={{ color: card?.supportsTensor ? theme.colors.healthy : 'rgba(255,255,255,0.7)' }}>
+        <span style={{ color: theme.colors.textMuted }}>Tensor parallel</span>
+        <span style={{ color: card?.supportsTensor ? theme.colors.healthy : theme.colors.textSecondary }}>
           {card?.supportsTensor ? 'Yes' : 'No'}
         </span>
         {card?.capabilities && card.capabilities.length > 0 && (
           <>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Capabilities</span>
+            <span style={{ color: theme.colors.textMuted }}>Capabilities</span>
             <span>{card.capabilities.join(', ')}</span>
           </>
         )}
         {resolved && (
           <>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Thinking toggle</span>
+            <span style={{ color: theme.colors.textMuted }}>Thinking toggle</span>
             <span>{resolved.supportsThinkingToggle ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Thinking budget</span>
+            <span style={{ color: theme.colors.textMuted }}>Thinking budget</span>
             <span>{resolved.supportsThinkingBudget ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Tool calling</span>
+            <span style={{ color: theme.colors.textMuted }}>Tool calling</span>
             <span>{resolved.supportsToolCalling ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Image input</span>
+            <span style={{ color: theme.colors.textMuted }}>Image input</span>
             <span>{resolved.supportsImageInput ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Audio input</span>
+            <span style={{ color: theme.colors.textMuted }}>Audio input</span>
             <span>{resolved.supportsAudioInput ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Reasoning format</span>
+            <span style={{ color: theme.colors.textMuted }}>Reasoning format</span>
             <span>{resolved.thinkingFormat ?? 'none'}</span>
           </>
         )}
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Files</span>
+        <span style={{ color: theme.colors.textMuted }}>Files</span>
         <span>{entry.files.length}</span>
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Downloaded</span>
+        <span style={{ color: theme.colors.textMuted }}>Downloaded</span>
         <span>{new Date(entry.downloaded_at).toLocaleString()}</span>
       </div>
       {entry.files.length > 0 && (
-        <div style={{ marginTop: 8, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 6 }}>
-          <div style={{ color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
+        <div style={{ marginTop: 8, borderTop: `1px solid ${theme.colors.borderLight}`, paddingTop: 6 }}>
+          <div style={{ color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
             Files
           </div>
-          <div style={{ color: 'rgba(255,255,255,0.6)', maxHeight: 120, overflowY: 'auto' }}>
+          <div style={{ color: theme.colors.textSecondary, maxHeight: 120, overflowY: 'auto' }}>
             {entry.files.map((f) => (
               <div key={f}>{f}</div>
             ))}

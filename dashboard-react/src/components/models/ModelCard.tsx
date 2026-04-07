@@ -207,9 +207,10 @@ const Badge = styled.span<{ $color?: string }>`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
   padding: 2px 6px;
-  background: rgba(80, 80, 80, 0.3);
-  border: 1px solid rgba(80, 80, 80, 0.4);
-  color: ${({ $color }) => $color ?? 'rgba(179,179,179,0.8)'};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  background: ${({ theme }) => theme.colors.surfaceHover};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  color: ${({ $color, theme }) => $color ?? theme.colors.textSecondary};
 `;
 
 const TagBadge = styled.span<{ $variant: 'green' | 'purple' }>`
@@ -335,6 +336,9 @@ export function ModelCard({
     : estimateMemoryGB(model.id, model.name);
 
   const theme = useTheme() as Theme;
+  // Drop the SVG glow filter in light mode — looks like a hard drop-shadow against
+  // the soft blue background.
+  const useGlow = theme.colors.bg === '#000000';
   const placement = computePlacement(nodes, apiPreview);
   const canFit = apiPreview ? apiPreview.error === null : placement.canFit;
   const perNode = downloadStatus?.perNode ?? [];
@@ -442,7 +446,7 @@ export function ModelCard({
                 <line
                   key={`${n.id}-${n2.id}`}
                   x1={n.x} y1={n.y} x2={n2.x} y2={n2.y}
-                  stroke={n.isUsed && n2.isUsed ? theme.colors.gold : '#374151'}
+                  stroke={n.isUsed && n2.isUsed ? theme.colors.gold : theme.colors.border}
                   strokeWidth={1}
                   strokeDasharray={n.isUsed && n2.isUsed ? '4,2' : '2,4'}
                   opacity={n.isUsed && n2.isUsed ? 0.5 : 0.25}
@@ -455,8 +459,8 @@ export function ModelCard({
               <g
                 key={node.id}
                 transform={`translate(${node.x}, ${node.y})`}
-                opacity={node.isUsed ? 1 : 0.7}
-                filter={node.isUsed ? `url(#nodeGlow-${filterId})` : undefined}
+                opacity={node.isUsed ? 1 : (theme.colors.bg === '#000000' ? 0.7 : 0.9)}
+                filter={node.isUsed && useGlow ? `url(#nodeGlow-${filterId})` : undefined}
               >
                 <PlacementDeviceIcon node={node} filterId={filterId} />
                 <text
@@ -464,7 +468,7 @@ export function ModelCard({
                   textAnchor="middle"
                   fontSize={8}
                   fontFamily="SF Mono, Monaco, monospace"
-                  fill={node.isUsed ? (node.newPercent > 90 ? '#f87171' : theme.colors.gold) : '#9CA3AF'}
+                  fill={node.isUsed ? (node.newPercent > 90 ? theme.colors.error : theme.colors.gold) : theme.colors.textMuted}
                 >
                   {node.newPercent.toFixed(0)}%
                 </text>
@@ -504,22 +508,24 @@ export function ModelCard({
 
 function PlacementDeviceIcon({ node, filterId }: { node: PlacementNode; filterId: string }) {
   const theme = useTheme() as Theme;
+  const useGlow = theme.colors.bg === '#000000';
   const s = node.iconSize;
   const half = s / 2;
-  const stroke = node.isUsed ? theme.colors.gold : theme.colors.textMuted;
-  const screenH = s * 0.58;
-  const currentFillH = screenH * (node.currentPercent / 100);
-  const modelFillH = screenH * ((node.newPercent - node.currentPercent) / 100);
+  const stroke = node.isUsed ? theme.colors.gold : theme.colors.border;
+  // Idle device case (was hardcoded #1a1a1a) and existing-RAM-usage shade (was #4B5563).
+  const bodyFill = theme.colors.deviceBody;
+  const usedFill = theme.colors.gpuBarBg;
+  const memGlow = useGlow ? `url(#memGlow-${filterId})` : undefined;
 
   switch (node.deviceType) {
     case 'macbook':
       return (
         <g transform={`translate(${-half}, ${-half})`}>
           <rect x={2} y={0} width={s - 4} height={s * 0.65} rx={2} fill="none" stroke={stroke} strokeWidth={1.5} />
-          <rect x={4} y={2} width={s - 8} height={screenH} fill="#1a1a1a" />
-          <rect x={4} y={2 + screenH - currentFillH} width={s - 8} height={currentFillH} fill="#4B5563" />
+          <rect x={4} y={2} width={s - 8} height={screenH} fill={bodyFill} />
+          <rect x={4} y={2 + screenH - currentFillH} width={s - 8} height={currentFillH} fill={usedFill} />
           {node.modelUsageGB > 0 && node.isUsed && (
-            <ModelFill x={4} y={2 + screenH - currentFillH - modelFillH} width={s - 8} height={modelFillH} fill={theme.colors.gold} filter={`url(#memGlow-${filterId})`} />
+            <ModelFill x={4} y={2 + screenH - currentFillH - modelFillH} width={s - 8} height={modelFillH} fill={theme.colors.gold} filter={memGlow} />
           )}
           <path d={`M 0 ${s * 0.68} L ${s} ${s * 0.68} L ${s - 2} ${s * 0.78} L 2 ${s * 0.78} Z`} fill="none" stroke={stroke} strokeWidth={1.5} />
         </g>
@@ -528,10 +534,10 @@ function PlacementDeviceIcon({ node, filterId }: { node: PlacementNode; filterId
       return (
         <g transform={`translate(${-half}, ${-half})`}>
           <rect x={2} y={2} width={s - 4} height={s - 4} rx={4} fill="none" stroke={stroke} strokeWidth={1.5} />
-          <rect x={4} y={4} width={s - 8} height={s - 8} fill="#1a1a1a" />
-          <rect x={4} y={4 + (s - 8) * (1 - node.currentPercent / 100)} width={s - 8} height={(s - 8) * (node.currentPercent / 100)} fill="#4B5563" />
+          <rect x={4} y={4} width={s - 8} height={s - 8} fill={bodyFill} />
+          <rect x={4} y={4 + (s - 8) * (1 - node.currentPercent / 100)} width={s - 8} height={(s - 8) * (node.currentPercent / 100)} fill={usedFill} />
           {node.modelUsageGB > 0 && node.isUsed && (
-            <ModelFill x={4} y={4 + (s - 8) * (1 - node.newPercent / 100)} width={s - 8} height={(s - 8) * ((node.newPercent - node.currentPercent) / 100)} fill={theme.colors.gold} filter={`url(#memGlow-${filterId})`} />
+            <ModelFill x={4} y={4 + (s - 8) * (1 - node.newPercent / 100)} width={s - 8} height={(s - 8) * ((node.newPercent - node.currentPercent) / 100)} fill={theme.colors.gold} filter={memGlow} />
           )}
         </g>
       );
@@ -539,10 +545,10 @@ function PlacementDeviceIcon({ node, filterId }: { node: PlacementNode; filterId
       return (
         <g transform={`translate(${-half}, ${-half})`}>
           <rect x={2} y={s * 0.3} width={s - 4} height={s * 0.4} rx={3} fill="none" stroke={stroke} strokeWidth={1.5} />
-          <rect x={4} y={s * 0.32} width={s - 8} height={s * 0.36} fill="#1a1a1a" />
-          <rect x={4} y={s * 0.32 + s * 0.36 * (1 - node.currentPercent / 100)} width={s - 8} height={s * 0.36 * (node.currentPercent / 100)} fill="#4B5563" />
+          <rect x={4} y={s * 0.32} width={s - 8} height={s * 0.36} fill={bodyFill} />
+          <rect x={4} y={s * 0.32 + s * 0.36 * (1 - node.currentPercent / 100)} width={s - 8} height={s * 0.36 * (node.currentPercent / 100)} fill={usedFill} />
           {node.modelUsageGB > 0 && node.isUsed && (
-            <ModelFill x={4} y={s * 0.32 + s * 0.36 * (1 - node.newPercent / 100)} width={s - 8} height={s * 0.36 * ((node.newPercent - node.currentPercent) / 100)} fill={theme.colors.gold} filter={`url(#memGlow-${filterId})`} />
+            <ModelFill x={4} y={s * 0.32 + s * 0.36 * (1 - node.newPercent / 100)} width={s - 8} height={s * 0.36 * ((node.newPercent - node.currentPercent) / 100)} fill={theme.colors.gold} filter={memGlow} />
           )}
         </g>
       );
@@ -551,7 +557,7 @@ function PlacementDeviceIcon({ node, filterId }: { node: PlacementNode; filterId
         <g transform={`translate(${-half}, ${-half})`}>
           <polygon
             points={`${half},0 ${s},${s * 0.25} ${s},${s * 0.75} ${half},${s} 0,${s * 0.75} 0,${s * 0.25}`}
-            fill={node.isUsed ? theme.colors.goldBg : '#0a0a0a'}
+            fill={node.isUsed ? theme.colors.goldBg : bodyFill}
             stroke={stroke}
             strokeWidth={1.5}
           />

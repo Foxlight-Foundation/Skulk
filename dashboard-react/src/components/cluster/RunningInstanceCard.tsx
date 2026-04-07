@@ -76,7 +76,7 @@ const Card = styled.div<{ $color: string; $glow: string }>`
   background: ${({ theme }) => theme.colors.surface};
   border: 1px solid ${({ $color }) => $color};
   border-radius: ${({ theme }) => theme.radii.md};
-  box-shadow: 0 0 12px ${({ $glow }) => $glow}, inset 0 0 12px ${({ $glow }) => $glow};
+  box-shadow: 0 0 6px ${({ $glow }) => $glow};
   padding: 12px 14px;
   display: flex;
   flex-direction: column;

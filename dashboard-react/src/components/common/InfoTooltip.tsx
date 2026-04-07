@@ -16,7 +16,8 @@ import {
   FloatingArrow,
   type Placement,
 } from '@floating-ui/react';
-import styled from 'styled-components';
+import styled, { useTheme } from 'styled-components';
+import type { Theme } from '../../theme';
 
 export interface InfoTooltipProps {
   /** Tooltip content — string or JSX. */
@@ -39,24 +40,22 @@ const Trigger = styled.span`
   align-items: center;
   justify-content: center;
   cursor: help;
-  color: ${({ theme }) => theme.colors.textSecondary};
-  transition: color 0.15s;
+  color: ${({ theme }) => theme.colors.gold};
+  transition: color 0.15s, opacity 0.15s;
 
-  &:hover {
-    color: ${({ theme }) => theme.colors.text};
-  }
+  &:hover { opacity: 0.8; }
 `;
 
 const TooltipBox = styled.div`
   max-width: 360px;
   padding: 10px 14px;
-  background: #1a1a1a;
-  border: 1px solid ${({ theme }) => theme.colors.borderLight};
+  background: ${({ theme }) => theme.colors.surface};
+  border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.md};
   box-shadow: 0 8px 24px ${({ theme }) => theme.colors.shadowStrong};
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ theme }) => theme.colors.textSecondary};
+  color: ${({ theme }) => theme.colors.text};
   line-height: 1.5;
   white-space: pre-line;
   z-index: 9999;
@@ -64,13 +63,18 @@ const TooltipBox = styled.div`
 
 const ARROW_SIZE = 8;
 
-const InfoIcon = ({ filled = false, size = 20 }: { filled?: boolean; size?: number }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill={filled ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="12" cy="12" r="10" />
-    <path d="M12 16v-4" stroke={filled ? '#000' : 'currentColor'} />
-    <path d="M12 8h.01" stroke={filled ? '#000' : 'currentColor'} />
-  </svg>
-);
+/** Info icon styled to match the header nav buttons (outlined circle with a soft
+ *  branded fill). The `filled` prop is now a no-op kept for back-compat. */
+const InfoIcon = ({ size = 20 }: { filled?: boolean; size?: number }) => {
+  const theme = useTheme() as Theme;
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" fill={theme.colors.goldBg} stroke="currentColor" />
+      <path d="M12 16v-4" />
+      <path d="M12 8h.01" />
+    </svg>
+  );
+};
 
 export function InfoTooltip({
   content,
@@ -83,6 +87,7 @@ export function InfoTooltip({
 }: InfoTooltipProps) {
   const [isOpen, setIsOpen] = useState(false);
   const arrowRef = useRef(null);
+  const theme = useTheme() as Theme;
 
   const { refs, floatingStyles, context } = useFloating({
     open: isOpen,
@@ -135,8 +140,8 @@ export function InfoTooltip({
               context={context}
               width={ARROW_SIZE * 2}
               height={ARROW_SIZE}
-              fill="#1a1a1a"
-              stroke="rgba(255, 255, 255, 0.1)"
+              fill={theme.colors.surface}
+              stroke={theme.colors.goldDim}
               strokeWidth={1}
             />
             {content}

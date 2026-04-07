@@ -37,10 +37,10 @@ function sizeText(mb?: number): string {
   return formatBytes(mb * 1024 * 1024);
 }
 
-function fitColor(status: ModelFitStatus): string {
-  if (status === 'fits_now') return 'rgba(255,255,255,0.9)';
-  if (status === 'fits_cluster_capacity') return '#fb923c';
-  return '#f87171';
+function fitColor(status: ModelFitStatus, theme: Theme): string {
+  if (status === 'fits_now') return theme.colors.text;
+  if (status === 'fits_cluster_capacity') return theme.colors.warning;
+  return theme.colors.error;
 }
 
 function timeAgo(ts: number): string {
@@ -214,44 +214,44 @@ function ModelGroupInfo({ group }: { group: ModelGroup }) {
       <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
         {v.family && (
           <>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Family</span>
+            <span style={{ color: theme.colors.textMuted }}>Family</span>
             <span>{v.family}</span>
           </>
         )}
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Variants</span>
+        <span style={{ color: theme.colors.textMuted }}>Variants</span>
         <span>{group.variants.length}</span>
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Smallest</span>
+        <span style={{ color: theme.colors.textMuted }}>Smallest</span>
         <span>{v.storage_size_megabytes ? formatBytes(v.storage_size_megabytes * 1024 * 1024) : '—'}</span>
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Tensor parallel</span>
-        <span style={{ color: v.supports_tensor ? theme.colors.healthy : 'rgba(255,255,255,0.7)' }}>
+        <span style={{ color: theme.colors.textMuted }}>Tensor parallel</span>
+        <span style={{ color: v.supports_tensor ? theme.colors.healthy : theme.colors.textSecondary }}>
           {v.supports_tensor ? 'Yes' : 'No'}
         </span>
         {group.capabilities.length > 0 && (
           <>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Capabilities</span>
+            <span style={{ color: theme.colors.textMuted }}>Capabilities</span>
             <span>{group.capabilities.join(', ')}</span>
           </>
         )}
         {resolved && (
           <>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Thinking toggle</span>
+            <span style={{ color: theme.colors.textMuted }}>Thinking toggle</span>
             <span>{resolved.supports_thinking_toggle ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Tool calling</span>
+            <span style={{ color: theme.colors.textMuted }}>Tool calling</span>
             <span>{resolved.supports_tool_calling ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Image input</span>
+            <span style={{ color: theme.colors.textMuted }}>Image input</span>
             <span>{resolved.supports_image_input ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: 'rgba(255,255,255,0.45)' }}>Audio input</span>
+            <span style={{ color: theme.colors.textMuted }}>Audio input</span>
             <span>{resolved.supports_audio_input ? 'Supported' : 'Not supported'}</span>
           </>
         )}
       </div>
       {group.hasMultipleVariants && (
-        <div style={{ marginTop: 8, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 6 }}>
-          <div style={{ color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
+        <div style={{ marginTop: 8, borderTop: `1px solid ${theme.colors.borderLight}`, paddingTop: 6 }}>
+          <div style={{ color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
             Quantizations
           </div>
           {group.variants.map((variant) => (
-            <div key={variant.id} style={{ color: 'rgba(255,255,255,0.6)' }}>
+            <div key={variant.id} style={{ color: theme.colors.textSecondary }}>
               {variant.quantization || '—'} · {variant.storage_size_megabytes ? formatBytes(variant.storage_size_megabytes * 1024 * 1024) : '—'}
             </div>
           ))}
@@ -322,7 +322,7 @@ export function ModelPickerGroup({
     );
   } else if (singleVariant?.storage_size_megabytes) {
     sizeDisplay = (
-      <Badge $color={fitColor(groupFit)}>
+      <Badge $color={fitColor(groupFit, theme)}>
         {sizeText(singleVariant.storage_size_megabytes)}
       </Badge>
     );
@@ -397,7 +397,7 @@ export function ModelPickerGroup({
             return (
               <VariantRow key={v.id} onClick={() => onSelectModel(v.id)}>
                 {v.quantization && <Badge>{v.quantization}</Badge>}
-                <span style={{ color: fitColor(vFit), flex: 1 }}>
+                <span style={{ color: fitColor(vFit, theme), flex: 1 }}>
                   {sizeText(v.storage_size_megabytes)}
                 </span>
                 {vDownload?.available ? <CheckMark /> : <DownloadIcon />}

@@ -161,8 +161,8 @@ const OptionBtn = styled.button<{ $selected: boolean; $disabled: boolean }>`
   padding: 10px 14px;
   border-radius: ${({ theme }) => theme.radii.md};
   border: 1px solid ${({ $selected, $disabled, theme }) =>
-    $disabled ? 'rgba(255,255,255,0.08)' : $selected ? theme.colors.goldDim : theme.colors.border};
-  background: ${({ $selected, $disabled, theme}) => $disabled ? 'rgba(255,255,255,0.02)' : $selected ? theme.colors.goldBg : 'transparent'};
+    $disabled ? theme.colors.borderLight : $selected ? theme.colors.goldDim : theme.colors.border};
+  background: ${({ $selected, $disabled, theme}) => $disabled ? theme.colors.surfaceSunken : $selected ? theme.colors.goldBg : theme.colors.surface};
   opacity: ${({ $disabled }) => $disabled ? 0.5 : 1};
   transition: all 0.15s;
   text-align: center;
@@ -178,7 +178,7 @@ const OptionLabel = styled.div<{ $selected: boolean }>`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
   font-weight: 500;
-  color: ${({ $selected, theme}) => $selected ? theme.colors.gold : 'rgba(255,255,255,0.7)'};
+  color: ${({ $selected, theme }) => $selected ? theme.colors.gold : theme.colors.text};
 `;
 
 const OptionSub = styled.div`

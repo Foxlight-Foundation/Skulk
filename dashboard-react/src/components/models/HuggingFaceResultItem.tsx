@@ -107,32 +107,32 @@ export function HuggingFaceResultItem({
           href={hfUrl}
           target="_blank"
           rel="noopener noreferrer"
-          style={{ color: 'rgba(255,255,255,0.5)', display: 'flex', transition: 'color 0.15s' }}
+          style={{ color: theme.colors.textMuted, display: 'flex', transition: 'color 0.15s' }}
           onMouseEnter={(e) => { e.currentTarget.style.color = theme.colors.gold; }}
-          onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.5)'; }}
+          onMouseLeave={(e) => { e.currentTarget.style.color = theme.colors.textMuted; }}
           title="Open on HuggingFace"
         >
           <FiExternalLink size={14} />
         </a>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Author</span>
+        <span style={{ color: theme.colors.textMuted }}>Author</span>
         <span>{model.author}</span>
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Downloads</span>
+        <span style={{ color: theme.colors.textMuted }}>Downloads</span>
         <span>{formatCount(model.downloads)}</span>
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Likes</span>
+        <span style={{ color: theme.colors.textMuted }}>Likes</span>
         <span>{formatCount(model.likes)}</span>
-        <span style={{ color: 'rgba(255,255,255,0.45)' }}>Updated</span>
+        <span style={{ color: theme.colors.textMuted }}>Updated</span>
         <span>{new Date(model.last_modified).toLocaleDateString()}</span>
       </div>
       {sizeTags.length > 0 && (
-        <div style={{ marginTop: 8, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 6 }}>
-          <div style={{ color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
+        <div style={{ marginTop: 8, borderTop: `1px solid ${theme.colors.borderLight}`, paddingTop: 6 }}>
+          <div style={{ color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
             Tags
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
             {sizeTags.map((t) => (
-              <span key={t} style={{ padding: '1px 6px', borderRadius: 3, background: 'rgba(255,255,255,0.08)', color: 'rgba(255,255,255,0.7)' }}>{t}</span>
+              <span key={t} style={{ padding: '1px 6px', borderRadius: 3, background: theme.colors.borderLight, color: theme.colors.textSecondary }}>{t}</span>
             ))}
           </div>
         </div>

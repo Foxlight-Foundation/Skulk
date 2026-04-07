@@ -180,12 +180,12 @@ const WarningTooltip = styled.div`
 `;
 
 const WarningTooltipInner = styled.div`
-  background: rgba(17, 17, 17, 0.95);
-  border: 1px solid ${({ theme }) => theme.colors.border};
+  background: ${({ theme }) => theme.colors.surface};
+  border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.md};
   padding: 10px 12px;
   backdrop-filter: blur(8px);
-  box-shadow: 0 8px 32px ${({ theme }) => theme.colors.shadow};
+  box-shadow: 0 8px 32px ${({ theme }) => theme.colors.shadowStrong};
   display: flex;
   flex-direction: column;
   gap: 6px;

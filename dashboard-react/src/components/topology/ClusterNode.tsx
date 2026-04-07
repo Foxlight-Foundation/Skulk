@@ -78,19 +78,19 @@ function buildDebugContent(
       <div style={{ color: theme.colors.gold, fontWeight: 600, marginBottom: 4 }}>
         {modelId}{chip ? ` · ${chip}` : ''}
       </div>
-      {os && <div style={{ color: 'rgba(255,255,255,0.6)' }}>{os}</div>}
-      {version && <div style={{ color: 'rgba(255,255,255,0.6)' }}>{version}</div>}
+      {os && <div style={{ color: theme.colors.textSecondary }}>{os}</div>}
+      {version && <div style={{ color: theme.colors.textSecondary }}>{version}</div>}
       <div style={{ color: rdmaColor, marginBottom: 6 }}>RDMA: {rdmaStatus}</div>
       {byTarget.size > 0 && (
         <>
-          <div style={{ color: 'rgba(255,255,255,0.45)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
+          <div style={{ color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
             Connections
           </div>
           {Array.from(byTarget.entries()).map(([target, conns]) => (
             <div key={target} style={{ marginBottom: 4 }}>
-              <div style={{ color: 'rgba(255,255,255,0.8)', fontWeight: 500 }}>→ {target}</div>
+              <div style={{ color: theme.colors.textSecondary, fontWeight: 500 }}>→ {target}</div>
               {conns.map((c, i) => (
-                <div key={i} style={{ paddingLeft: 12, color: c.startsWith('RDMA') ? 'rgba(255,215,0,0.9)' : c.startsWith('TB ') ? 'rgba(96,165,250,0.9)' : 'rgba(255,255,255,0.6)' }}>
+                <div key={i} style={{ paddingLeft: 12, color: c.startsWith('RDMA') ? theme.colors.gold : c.startsWith('TB ') ? theme.colors.info : theme.colors.textSecondary }}>
                   {c}
                 </div>
               ))}
