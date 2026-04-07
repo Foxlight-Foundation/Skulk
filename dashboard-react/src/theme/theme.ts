@@ -240,7 +240,7 @@ const lightColors: ColorTokens = {
   gpuBarBg: '#bccfe8',             // a touch darker than the device case so the bar reads as a separate element
   meshLine: 'rgba(29, 78, 216, 0.30)',
   meshNode: 'rgba(29, 78, 216, 0.55)',
-  bgMeshLine: 'rgba(29, 78, 216, 0.35)',
+  bgMeshLine: 'rgba(29, 78, 216, 0.21)',
   bgMeshNode: 'rgba(29, 78, 216, 0.18)',
 
   healthy: '#0ea5e9',
