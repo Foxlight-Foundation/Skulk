@@ -23,6 +23,8 @@ from exo.api.types.openai_responses import ResponsesRequest
 from exo.shared.models.model_cards import ModelCard, ModelTask
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
+from exo.shared.types.worker.runners import RunnerId
+from exo.shared.types.worker.shards import PipelineShardMetadata
 
 
 @pytest.mark.anyio
@@ -129,7 +131,16 @@ async def test_running_text_requests_use_in_memory_model_card(monkeypatch: pytes
             "running": SimpleNamespace(
                 shard_assignments=SimpleNamespace(
                     model_id=running_card.model_id,
-                    model_card=running_card,
+                    runner_to_shard={
+                        RunnerId("runner-1"): PipelineShardMetadata(
+                            model_card=running_card,
+                            device_rank=0,
+                            world_size=1,
+                            start_layer=0,
+                            end_layer=1,
+                            n_layers=1,
+                        )
+                    },
                 )
             )
         }

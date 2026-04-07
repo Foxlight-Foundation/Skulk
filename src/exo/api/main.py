@@ -1313,7 +1313,17 @@ class API:
         """
         for instance in self.state.instances.values():
             if instance.shard_assignments.model_id == model_id:
-                return instance.shard_assignments.model_card
+                runner_to_shard = getattr(
+                    instance.shard_assignments, "runner_to_shard", None
+                )
+                if runner_to_shard is not None:
+                    for shard in runner_to_shard.values():
+                        return shard.model_card
+                fallback_card = getattr(instance.shard_assignments, "model_card", None)
+                if fallback_card is not None:
+                    # Older tests and any simplified in-memory stubs may attach the
+                    # card directly to shard_assignments instead of runner_to_shard.
+                    return fallback_card
         return await ModelCard.load(model_id)
 
     async def _validate_image_model(self, model: ModelId) -> ModelId:
