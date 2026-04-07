@@ -266,7 +266,7 @@ export function App() {
   return (
     <ThemeProvider theme={activeTheme}>
       <GlobalStyle />
-      <NetworkMesh radius={2.5} />
+      <NetworkMesh radius={2.5} count={80} linkDistance={220} />
       <Shell>
         <ConnectionBanner connected={connected} />
         <HeaderNav
