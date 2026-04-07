@@ -100,12 +100,10 @@ export function NetworkMesh({
         p.y = Math.max(0, Math.min(h, p.y));
       }
 
-      // Draw connections
+      // Draw connections. Use globalAlpha for the distance-fade so we don't need
+      // to parse lineColor — any valid CSS color (hex, rgb, rgba, named) works.
       const linkDist2 = linkDistance * linkDistance;
-      // Extract base alpha from lineColor (e.g. theme.colors.goldBg → 0.08)
-      const baseAlphaMatch = lineColor.match(/([\d.]+)\)$/);
-      const baseAlpha = baseAlphaMatch ? parseFloat(baseAlphaMatch[1]) : 0.08;
-      const lineBase = lineColor.replace(/[\d.]+\)$/, '');
+      ctx!.strokeStyle = lineColor;
 
       for (let i = 0; i < particles.length; i++) {
         for (let j = i + 1; j < particles.length; j++) {
@@ -114,7 +112,7 @@ export function NetworkMesh({
           const d2 = dx * dx + dy * dy;
           if (d2 < linkDist2) {
             const fade = 1 - Math.sqrt(d2) / linkDistance;
-            ctx!.strokeStyle = `${lineBase}${(fade * baseAlpha).toFixed(4)})`;
+            ctx!.globalAlpha = fade;
             ctx!.beginPath();
             ctx!.moveTo(particles[i].x, particles[i].y);
             ctx!.lineTo(particles[j].x, particles[j].y);
@@ -122,6 +120,7 @@ export function NetworkMesh({
           }
         }
       }
+      ctx!.globalAlpha = 1;
 
       // Draw particles
       ctx!.fillStyle = color;

@@ -180,7 +180,7 @@ const WarningTooltip = styled.div`
 `;
 
 const WarningTooltipInner = styled.div`
-  background: ${({ theme }) => theme.colors.surface};
+  background: ${({ theme }) => theme.colors.surfaceElevated};
   border: 1px solid ${({ theme }) => theme.colors.goldDim};
   border-radius: ${({ theme }) => theme.radii.md};
   padding: 10px 12px;

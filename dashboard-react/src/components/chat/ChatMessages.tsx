@@ -101,7 +101,7 @@ const MsgHeader = styled.div`
 `;
 
 const RoleLabel = styled.span<{ $role: 'user' | 'assistant' }>`
-  color: ${({ $role, theme}) => ($role === 'assistant' ? theme.colors.gold : '#999')};
+  color: ${({ $role, theme }) => ($role === 'assistant' ? theme.colors.gold : theme.colors.textSecondary)};
   font-weight: 600;
 `;
 
