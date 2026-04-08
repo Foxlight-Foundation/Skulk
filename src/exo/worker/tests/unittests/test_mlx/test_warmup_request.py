@@ -12,7 +12,7 @@ class _FakeGroup:
         return 3
 
 
-def test_warmup_inference_uses_hello_request_with_instructions_and_sampler_settings(
+def test_warmup_inference_uses_neutral_padded_user_content_with_instructions_and_sampler_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -72,7 +72,10 @@ def test_warmup_inference_uses_hello_request_with_instructions_and_sampler_setti
     assert task_params.top_k == 64
     assert task_params.max_output_tokens == 8
     first_message = task_params.input[0]
-    assert first_message.content == "hello"
+    assert (
+        first_message.content
+        == "hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello"
+    )
     assert captured["label"] == "warmup"
     assert captured["logged_task_params"] == task_params
     assert captured["logged_prompt"] == "warmup prompt"
