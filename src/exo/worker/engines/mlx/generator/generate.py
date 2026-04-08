@@ -114,18 +114,27 @@ def _warmup_repeat_count() -> int:
     return 1
 
 
-def _warmup_user_content() -> str:
+def _is_distributed_pipeline_warmup(group: mx.distributed.Group | None) -> bool:
+    """Return whether warmup is running for a multi-node pipeline model."""
+    return group is not None and group.size() > 1
+
+
+def _warmup_user_content(group: mx.distributed.Group | None) -> str:
     """Return the synthetic warmup user content.
 
-    A short prompt is the safest default for pipeline models. When we need to
-    debug prompt-length hangs, an environment override lets us scale the same
-    neutral content without another code push.
+    Distributed pipeline warmup intentionally stays minimal because richer
+    synthetic prompts have been observed to wedge stream_generate prefill.
+    Single-node debugging may still scale the neutral content via environment.
     """
+    if _is_distributed_pipeline_warmup(group):
+        return "hello"
     return " ".join(["hello"] * _warmup_repeat_count())
 
 
-def _warmup_instructions() -> str | None:
+def _warmup_instructions(group: mx.distributed.Group | None) -> str | None:
     """Return optional warmup instructions for prompt-shape debugging."""
+    if _is_distributed_pipeline_warmup(group):
+        return None
     raw = os.environ.get("SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS") or os.environ.get(
         "EXO_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS"
     )
@@ -614,19 +623,33 @@ def warmup_inference(
     model_id: ModelId,
     model_card: ModelCard | None = None,
 ) -> int:
+    """Run a conservative synthetic warmup request to validate the MLX path.
+
+    Distributed pipeline warmup intentionally uses a minimal prompt because
+    richer synthetic prompts have been observed to wedge short-prompt
+    ``stream_generate`` prefill. Debug shaping overrides remain available for
+    single-node investigation, but pipeline warmup always stays on the minimal
+    sanity-check path.
+    """
     logger.info(f"warming up inference for instance: {model_id}")
+
+    if _is_distributed_pipeline_warmup(group) and (
+        _warmup_repeat_count() != 1 or _warmup_instructions(None) is not None
+    ):
+        logger.info(
+            "Distributed pipeline warmup is forcing the minimal sanity-check "
+            "prompt and ignoring warmup shaping overrides"
+        )
 
     warmup_task_params = TextGenerationTaskParams(
         model=model_id,
-        # Keep the default pipeline warmup prompt tiny so clusters boot
-        # reliably; use SKULK_DEBUG_WARMUP_REPEAT_COUNT and
-        # SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS when bisecting prompt-shape
-        # hangs without another code push.
-        instructions=_warmup_instructions(),
+        # Distributed pipeline warmup always uses the minimal sanity-check
+        # shape; single-node debugging can still opt into prompt shaping.
+        instructions=_warmup_instructions(group),
         input=[
             InputMessage(
                 role="user",
-                content=_warmup_user_content(),
+                content=_warmup_user_content(group),
             )
         ],
         max_output_tokens=1024,
