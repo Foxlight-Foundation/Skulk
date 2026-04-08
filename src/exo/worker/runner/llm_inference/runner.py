@@ -146,6 +146,17 @@ class Runner:
             f"enable_thinking={params.enable_thinking!r})"
         )
 
+    def _lifecycle_context(self) -> str:
+        """Return stable runner identity fields for lifecycle logs."""
+        return (
+            f"instance_id={self.instance.instance_id}, "
+            f"runner_id={self.runner_id}, "
+            f"node_id={self.bound_instance.bound_node_id}, "
+            f"device_rank={self.shard_metadata.device_rank}, "
+            f"world_size={self.shard_metadata.world_size}, "
+            f"layers={self.shard_metadata.start_layer}:{self.shard_metadata.end_layer}"
+        )
+
     def update_status(self, status: RunnerStatus):
         self.current_status = status
         self.event_sender.send(
@@ -181,7 +192,7 @@ class Runner:
                 self.current_status, (RunnerIdle, RunnerFailed)
             ):
                 assert isinstance(self.generator, Builder)
-                logger.info("runner connecting")
+                logger.info(f"runner connecting ({self._lifecycle_context()})")
                 self.update_status(RunnerConnecting())
                 self.acknowledge_task(task)
 
@@ -205,7 +216,7 @@ class Runner:
                 total_layers = (
                     self.shard_metadata.end_layer - self.shard_metadata.start_layer
                 )
-                logger.info("runner loading")
+                logger.info(f"runner loading ({self._lifecycle_context()})")
 
                 self.update_status(
                     RunnerLoading(layers_loaded=0, total_layers=total_layers)
@@ -241,11 +252,11 @@ class Runner:
 
                 self.send_task_status(task.task_id, TaskStatus.Complete)
                 self.update_status(RunnerLoaded())
-                logger.info("runner loaded")
+                logger.info(f"runner loaded ({self._lifecycle_context()})")
 
             case StartWarmup() if isinstance(self.current_status, RunnerLoaded):
                 assert isinstance(self.generator, InferenceGenerator)
-                logger.info("runner warming up")
+                logger.info(f"runner warming up ({self._lifecycle_context()})")
 
                 self.update_status(RunnerWarmingUp())
                 self.acknowledge_task(task)
@@ -265,7 +276,7 @@ class Runner:
 
                 self.send_task_status(task.task_id, TaskStatus.Complete)
                 self.update_status(RunnerReady())
-                logger.info("runner ready")
+                logger.info(f"runner ready ({self._lifecycle_context()})")
 
             case TextGeneration() if isinstance(self.current_status, RunnerReady):
                 return_code = self.handle_generation_tasks(starting_task=task)
