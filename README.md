@@ -462,10 +462,10 @@ uv run exo --bootstrap-peers /ip4/192.168.1.20/tcp/5678/p2p/12D3KooW...
 Examples:
 
 ```bash
-EXO_OFFLINE=true uv run exo
-EXO_ENABLE_IMAGE_MODELS=true uv run exo
-EXO_KV_CACHE_BACKEND=optiq EXO_OPTIQ_BITS=4 EXO_OPTIQ_FP16_LAYERS=4 uv run exo
-SKULK_KV_CACHE_BACKEND=rotorquant_adaptive SKULK_ROTORQUANT_FP16_LAYERS=4 uv run exo
+EXO_OFFLINE=true uv run skulk
+EXO_ENABLE_IMAGE_MODELS=true uv run skulk
+EXO_KV_CACHE_BACKEND=optiq EXO_OPTIQ_BITS=4 EXO_OPTIQ_FP16_LAYERS=4 uv run skulk
+SKULK_KV_CACHE_BACKEND=rotorquant_adaptive SKULK_ROTORQUANT_FP16_LAYERS=4 uv run skulk
 ```
 
 ## RDMA on macOS

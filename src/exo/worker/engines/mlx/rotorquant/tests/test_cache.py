@@ -1,5 +1,7 @@
 """Tests for ``RotorQuantKVCache`` including the deferred-prefill path."""
 
+from typing import cast
+
 import mlx.core as mx
 import pytest
 
@@ -110,6 +112,62 @@ def test_trim_works_in_both_phases() -> None:
     assert flushed_cache.size() == 11
     flushed_cache.trim(3)
     assert flushed_cache.size() == 8
+
+
+def test_first_call_decode_shaped_does_not_crash() -> None:
+    """A 1-token first call should flush an empty pending buffer cleanly.
+
+    Regression for the case where stream_generate or pipeline_parallel_prefill
+    delivers a 1-token prompt: ``update_and_fetch`` is called with
+    ``num_steps == 1`` before any deferred prefill has been appended. The
+    flush path must treat the empty-pending case as a no-op and let the
+    normal quantize-on-insert path handle the new token.
+    """
+    cache = RotorQuantKVCache(defer_prefill=True)
+    keys, values = _kv_chunk(1, seed=80)
+    out_k, out_v = cache.update_and_fetch(keys, values)
+
+    assert cache.is_deferred is False
+    assert cache.has_pending_storage is False
+    assert cache.has_live_storage is True
+    assert cache.offset == 1
+    assert out_k.shape == (1, 4, 1, ISO3_BLOCK_SIZE)
+    assert out_v.shape == (1, 4, 1, ISO3_BLOCK_SIZE)
+
+
+def test_state_round_trips_in_both_phases() -> None:
+    """``state`` must be a pytree of mx.array leaves only (no str tags).
+
+    MLX serializers and ``mx.eval`` walk the cache state expecting array
+    leaves; a Python ``str`` tag would raise at runtime.
+    """
+    pending = RotorQuantKVCache(defer_prefill=True)
+    pending.update_and_fetch(*_kv_chunk(8, seed=90))
+    pending_state_obj = pending.state
+    assert isinstance(pending_state_obj, tuple)
+    pending_state = cast(tuple[mx.array, ...], pending_state_obj)
+    assert len(pending_state) == 2
+    for leaf in pending_state:
+        assert isinstance(leaf, mx.array)
+
+    flushed = RotorQuantKVCache(defer_prefill=True)
+    flushed.update_and_fetch(*_kv_chunk(8, seed=91))
+    flushed.update_and_fetch(*_kv_chunk(1, seed=92))  # triggers flush
+    live_state_obj = flushed.state
+    assert isinstance(live_state_obj, tuple)
+    live_state = cast(tuple[mx.array, ...], live_state_obj)
+    assert len(live_state) == 4
+    for leaf in live_state:
+        assert isinstance(leaf, mx.array)
+
+    # Round-trip via the setter into a fresh cache and confirm the offset
+    # and observable size match.
+    restored = RotorQuantKVCache(defer_prefill=False)
+    restored._quantizer = flushed._quantizer  # type: ignore[reportPrivateUsage]
+    restored.head_dim = flushed.head_dim
+    restored.state = live_state
+    assert restored.offset == flushed.offset
+    assert restored.size() == flushed.size()
 
 
 def test_head_dim_must_be_block_aligned() -> None:

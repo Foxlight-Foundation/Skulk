@@ -193,11 +193,22 @@ class RotorQuantKVCache:
         )
 
     def _flush_deferred(self, dtype: mx.Dtype) -> None:
-        """Quantize the deferred prefill buffer and free the fp16 scratch."""
+        """Quantize the deferred prefill buffer and free the fp16 scratch.
+
+        If the first call into ``update_and_fetch`` is already decode-shaped
+        (e.g., a 1-token prompt) the deferred buffers will be empty. In that
+        case there is nothing to flush — we just exit the deferred phase and
+        let the caller's normal quantize-on-insert path handle the new
+        token.
+        """
         del dtype  # the live cache stores indices regardless of caller dtype
-        assert self._pending_keys is not None
-        assert self._pending_values is not None
         assert self._quantizer is not None
+
+        if self._pending_keys is None or self._pending_values is None:
+            self._pending_keys = None
+            self._pending_values = None
+            self._pending_active = False
+            return
 
         pending_keys = self._pending_keys
         pending_values = self._pending_values
@@ -279,21 +290,30 @@ class RotorQuantKVCache:
 
     @property
     def state(self) -> object:
+        """Pytree of array leaves for snapshot/restore and ``mx.eval``.
+
+        The shape of the tuple disambiguates phases for the setter:
+          - 2 elements → deferred-prefill scratch ``(pending_keys, pending_values)``
+          - 4 elements → live quantized cache ``(key_indices, key_norms, value_indices, value_norms)``
+          - empty list → uninitialized cache
+
+        We deliberately do **not** include a Python ``str`` tag here:
+        ``mx.eval`` and ``mx.save_safetensors`` expect every leaf in the
+        cache pytree to be an ``mx.array``, and a ``str`` leaf raises at
+        runtime. The phase is also tracked in ``meta_state`` via
+        ``_pending_active`` for human inspection.
+        """
         if self._pending_active:
-            # While deferred, expose only the fp16 scratch so that any
-            # external snapshot/restore round-trips correctly without
-            # corrupting the offset of the not-yet-allocated live cache.
             if self._pending_keys is None:
                 return []
             assert self._pending_values is not None
-            return ("pending", self._pending_keys, self._pending_values)
+            return (self._pending_keys, self._pending_values)
         if self._key_indices is None:
             return []
         assert self._key_norms is not None
         assert self._value_indices is not None
         assert self._value_norms is not None
         return (
-            "live",
             self._key_indices[..., : self.offset, :],
             self._key_norms[..., : self.offset, :],
             self._value_indices[..., : self.offset, :],
@@ -302,22 +322,25 @@ class RotorQuantKVCache:
 
     @state.setter
     def state(self, value: object) -> None:
-        seq = cast(Sequence[object], value)
+        seq = cast(Sequence[mx.array], value)
         if len(seq) == 0:
             return
-        tag = seq[0]
-        if tag == "pending":
-            self._pending_keys = cast(mx.array, seq[1])
-            self._pending_values = cast(mx.array, seq[2])
+        if len(seq) == 2:
+            self._pending_keys = seq[0]
+            self._pending_values = seq[1]
             self._pending_active = True
             return
-        if tag == "live":
-            self._key_indices = cast(mx.array, seq[1])
-            self._key_norms = cast(mx.array, seq[2])
-            self._value_indices = cast(mx.array, seq[3])
-            self._value_norms = cast(mx.array, seq[4])
+        if len(seq) == 4:
+            self._key_indices = seq[0]
+            self._key_norms = seq[1]
+            self._value_indices = seq[2]
+            self._value_norms = seq[3]
             self.offset = int(self._key_indices.shape[2])
             self._pending_active = False
+            return
+        raise ValueError(
+            f"RotorQuantKVCache.state expects 0, 2, or 4 array leaves, got {len(seq)}"
+        )
 
     @property
     def meta_state(self) -> object:
