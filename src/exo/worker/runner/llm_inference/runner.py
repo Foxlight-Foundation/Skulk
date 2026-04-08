@@ -69,6 +69,13 @@ from .batch_generator import Cancelled, Finished
 from .tool_parsers import make_mlx_parser
 
 
+def _should_skip_llm_warmup() -> bool:
+    # Temporary experiment for Gemma 4 pipeline bring-up: let runners report
+    # ready without synthetic warmup so we can probe the first real prompt path.
+    # Set SKULK_FORCE_LLM_WARMUP=1 to restore the normal behavior.
+    return os.environ.get("SKULK_FORCE_LLM_WARMUP") != "1"
+
+
 class ExitCode(str, Enum):
     AllTasksComplete = "AllTasksComplete"
     Shutdown = "Shutdown"
@@ -243,7 +250,14 @@ class Runner:
                 self.update_status(RunnerWarmingUp())
                 self.acknowledge_task(task)
 
-                self.generator.warmup()
+                if _should_skip_llm_warmup():
+                    logger.warning(
+                        "Skipping LLM warmup and marking runner ready "
+                        "(temporary debug bypass; set SKULK_FORCE_LLM_WARMUP=1 "
+                        "to restore synthetic warmup)"
+                    )
+                else:
+                    self.generator.warmup()
 
                 logger.info(
                     f"runner initialized in {time.time() - self.setup_start_time} seconds"

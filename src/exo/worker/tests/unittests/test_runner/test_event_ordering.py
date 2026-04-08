@@ -344,3 +344,30 @@ def test_events_processed_in_correct_order(patch_out_mlx: pytest.MonkeyPatch):
             RunnerStatusUpdated(runner_id=RUNNER_1_ID, runner_status=RunnerShutdown()),
         ],
     )
+
+
+def test_warmup_task_can_be_bypassed_while_runner_still_becomes_ready(
+    patch_out_mlx: pytest.MonkeyPatch, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("SKULK_FORCE_LLM_WARMUP", raising=False)
+
+    def fail_if_called(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("warmup() should be bypassed in this debug branch")
+
+    monkeypatch.setattr(mlx_batch_generator.BatchGenerator, "warmup", fail_if_called)
+    monkeypatch.setattr(
+        mlx_batch_generator.SequentialGenerator, "warmup", fail_if_called
+    )
+
+    events = _run([INIT_TASK, LOAD_TASK, WARMUP_TASK, SHUTDOWN_TASK])
+
+    assert any(
+        isinstance(event, RunnerStatusUpdated)
+        and isinstance(event.runner_status, RunnerWarmingUp)
+        for event in events
+    )
+    assert any(
+        isinstance(event, RunnerStatusUpdated)
+        and isinstance(event.runner_status, RunnerReady)
+        for event in events
+    )
