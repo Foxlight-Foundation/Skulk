@@ -579,11 +579,14 @@ def warmup_inference(
 
     warmup_task_params = TextGenerationTaskParams(
         model=model_id,
-        # Keep warmup as close as possible to the smallest known-good live
-        # request while still exercising the full prompt-render/generation path.
+        # Reintroduce warmup dimensions one at a time so we can isolate which
+        # request characteristic destabilizes the MLX/GPU path.
         input=[InputMessage(role="user", content="hello")],
         max_output_tokens=8,
         enable_thinking=False,
+        temperature=1.0,
+        top_p=0.95,
+        top_k=64,
     )
 
     with _hang_debug_watch(f"warmup apply_chat_template model={model_id}"):

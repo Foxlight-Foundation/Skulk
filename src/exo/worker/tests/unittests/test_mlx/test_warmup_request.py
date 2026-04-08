@@ -12,7 +12,7 @@ class _FakeGroup:
         return 3
 
 
-def test_warmup_inference_uses_minimal_hello_request(
+def test_warmup_inference_uses_hello_request_with_explicit_sampler_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -64,9 +64,9 @@ def test_warmup_inference_uses_minimal_hello_request(
     assert check_every == 0
     assert task_params.instructions is None
     assert task_params.enable_thinking is False
-    assert task_params.temperature is None
-    assert task_params.top_p is None
-    assert task_params.top_k is None
+    assert task_params.temperature == 1.0
+    assert task_params.top_p == 0.95
+    assert task_params.top_k == 64
     assert task_params.max_output_tokens == 8
     first_message = task_params.input[0]
     assert first_message.content == "hello"
