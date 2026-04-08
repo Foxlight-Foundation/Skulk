@@ -12,7 +12,7 @@ class _FakeGroup:
         return 3
 
 
-def test_warmup_inference_uses_neutral_padded_user_content_with_instructions_and_sampler_settings(
+def test_warmup_inference_uses_safe_default_user_content_with_instructions_and_sampler_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -72,10 +72,7 @@ def test_warmup_inference_uses_neutral_padded_user_content_with_instructions_and
     assert task_params.top_k == 64
     assert task_params.max_output_tokens == 1024
     first_message = task_params.input[0]
-    assert (
-        first_message.content
-        == "hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello hello"
-    )
+    assert first_message.content == "hello"
     assert captured["label"] == "warmup"
     assert captured["logged_task_params"] == task_params
     assert captured["logged_prompt"] == "warmup prompt"
@@ -83,3 +80,43 @@ def test_warmup_inference_uses_neutral_padded_user_content_with_instructions_and
         "group_size": 3,
         "model_id": "mlx-community/gemma-4-26b-a4b-it-4bit",
     }
+
+
+def test_warmup_inference_honors_repeat_count_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_apply_chat_template(*, tokenizer: object, task_params: object, model_card: object):
+        del tokenizer, model_card
+        captured["task_params"] = task_params
+        return "warmup prompt"
+
+    def fake_mx_barrier(_group: object) -> None:
+        return None
+
+    def fake_mlx_generate(**_kwargs: object):
+        if False:
+            yield None
+        return
+
+    def fake_all_gather(array: object, *, group: object):
+        del group
+        return array
+
+    monkeypatch.setenv("SKULK_DEBUG_WARMUP_REPEAT_COUNT", "4")
+    monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
+    monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
+    monkeypatch.setattr(generate_mod, "mlx_generate", fake_mlx_generate)
+    monkeypatch.setattr(generate_mod.mx.distributed, "all_gather", fake_all_gather)
+
+    generate_mod.warmup_inference(
+        model=object(),  # type: ignore[arg-type]
+        tokenizer=object(),  # type: ignore[arg-type]
+        group=cast(object, _FakeGroup()),  # type: ignore[arg-type]
+        model_id=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"),
+        model_card=None,
+    )
+
+    task_params = cast(TextGenerationTaskParams, captured["task_params"])
+    assert task_params.input[0].content == "hello hello hello hello"

@@ -102,6 +102,28 @@ def _mlx_hang_debug_interval_seconds() -> float:
     return 30.0
 
 
+def _warmup_repeat_count() -> int:
+    """Return the neutral warmup token repeat count used for debugging."""
+    raw = os.environ.get("SKULK_DEBUG_WARMUP_REPEAT_COUNT") or os.environ.get(
+        "EXO_DEBUG_WARMUP_REPEAT_COUNT"
+    )
+    if raw is None:
+        return 1
+    with contextlib.suppress(ValueError):
+        return max(int(raw), 1)
+    return 1
+
+
+def _warmup_user_content() -> str:
+    """Return the synthetic warmup user content.
+
+    A short prompt is the safest default for pipeline models. When we need to
+    debug prompt-length hangs, an environment override lets us scale the same
+    neutral content without another code push.
+    """
+    return " ".join(["hello"] * _warmup_repeat_count())
+
+
 @contextlib.contextmanager
 def _hang_debug_watch(label: str) -> Generator[None]:
     """Emit periodic stack-rich logs while the current thread is stuck in one phase."""
@@ -583,16 +605,14 @@ def warmup_inference(
 
     warmup_task_params = TextGenerationTaskParams(
         model=model_id,
-        # Reintroduce warmup dimensions one at a time so we can isolate which
-        # request characteristic destabilizes the MLX/GPU path.
+        # Keep the default pipeline warmup prompt tiny so clusters boot
+        # reliably; use SKULK_DEBUG_WARMUP_REPEAT_COUNT to stretch the same
+        # neutral content when bisecting prompt-length hangs.
         instructions="You are a helpful assistant. Answer the user in one short sentence.",
         input=[
             InputMessage(
                 role="user",
-                content=(
-                    "hello hello hello hello hello hello hello hello "
-                    "hello hello hello hello hello hello hello hello"
-                ),
+                content=_warmup_user_content(),
             )
         ],
         max_output_tokens=1024,
