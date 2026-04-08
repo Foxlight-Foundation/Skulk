@@ -86,7 +86,7 @@ def _request_shape_debug_enabled() -> bool:
     )
     if value is None:
         return False
-    return value.strip().lower() not in {"0", "false", "no", "off"}
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def log_request_shape(

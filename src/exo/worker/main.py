@@ -104,8 +104,38 @@ def _summarize_worker_task(task: Task) -> str:
             f"runner_id={task.runner_id!r}, "
             f"cancelled_task_id={task.cancelled_task_id!r})"
         )
-    if isinstance(task, (TextGeneration, ImageEdits)):
-        return repr(task)
+    if isinstance(task, TextGeneration):
+        params = task.task_params
+        return (
+            "TextGeneration("
+            f"task_id={task.task_id!r}, "
+            f"command_id={task.command_id!r}, "
+            f"instance_id={task.instance_id!r}, "
+            f"model={params.model!r}, "
+            f"input_messages={len(params.input)}, "
+            f"chat_template_messages={len(params.chat_template_messages or [])}, "
+            f"images={len(params.images)}, "
+            f"cached_image_indices={sorted(params.image_hashes.keys())}, "
+            f"total_input_chunks={params.total_input_chunks}, "
+            f"image_count={params.image_count}, "
+            f"stream={params.stream}, "
+            f"reasoning_effort={params.reasoning_effort!r}, "
+            f"enable_thinking={params.enable_thinking!r})"
+        )
+    if isinstance(task, ImageEdits):
+        params = task.task_params
+        return (
+            "ImageEdits("
+            f"task_id={task.task_id!r}, "
+            f"command_id={task.command_id!r}, "
+            f"instance_id={task.instance_id!r}, "
+            f"model={params.model!r}, "
+            f"total_input_chunks={params.total_input_chunks}, "
+            f"has_inline_image_data={bool(params.image_data)}, "
+            f"n={params.n!r}, "
+            f"size={params.size!r}, "
+            f"stream={params.stream!r})"
+        )
     return task.__class__.__name__
 
 

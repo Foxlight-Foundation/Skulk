@@ -5,6 +5,7 @@ from exo.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from exo.shared.types.common import NodeId
 from exo.shared.types.events import NodeTimedOut
 from exo.shared.types.memory import Memory
+from exo.shared.types.profiling import NodeIdentity
 from exo.shared.types.state import State
 from exo.shared.types.tasks import StartWarmup, TaskId, TaskStatus
 from exo.shared.types.worker.instances import InstanceId, MlxRingInstance
@@ -109,6 +110,11 @@ def test_apply_node_timed_out_removes_affected_instances_runners_and_tasks() -> 
             node_b: datetime.now(),
             node_c: datetime.now(),
         },
+        node_identities={
+            node_a: NodeIdentity(friendly_name="kite1"),
+            node_b: NodeIdentity(friendly_name="kite2"),
+            node_c: NodeIdentity(friendly_name="kite3"),
+        },
     )
 
     new_state = apply_node_timed_out(NodeTimedOut(node_id=node_a), state)
@@ -126,3 +132,7 @@ def test_apply_node_timed_out_removes_affected_instances_runners_and_tasks() -> 
     assert node_a not in new_state.last_seen
     assert node_b in new_state.last_seen
     assert node_c in new_state.last_seen
+
+    assert node_a not in new_state.node_identities
+    assert node_b in new_state.node_identities
+    assert node_c in new_state.node_identities

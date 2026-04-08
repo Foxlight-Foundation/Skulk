@@ -107,8 +107,9 @@ minimal synthetic prompt by design:
 - a single user message with content `hello`
 
 This is intentional. During debugging, richer synthetic warmup prompts were
-observed to wedge short-prompt `stream_generate` prefill on multi-node pipeline
-setups.
+observed to trigger the distributed warmup hang path on multi-node pipeline
+setups. Short single-chunk prompts are therefore routed through
+`stream_generate`, while richer synthetic warmup shapes are avoided entirely.
 
 Two debug-only warmup shaping env vars exist:
 

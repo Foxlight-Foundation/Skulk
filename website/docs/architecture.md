@@ -218,9 +218,10 @@ fallbacks while older scripts are updated.
 Distributed pipeline models now use an intentionally minimal warmup request.
 
 The goal of warmup is only to validate that MLX prefill and first-token
-generation are functional without risking richer synthetic prompt shapes that
-have been observed to wedge `stream_generate` prefill on multi-node pipeline
-models.
+generation are functional while matching the current `generate.prefill()`
+routing behavior: short single-chunk prompts are sent through
+`stream_generate` because `pipeline_parallel_prefill` has been observed to
+wedge for that case on multi-node pipeline models.
 
 For distributed pipeline warmup, Skulk always uses:
 
