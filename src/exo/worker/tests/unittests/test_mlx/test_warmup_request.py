@@ -34,9 +34,22 @@ def test_warmup_inference_uses_realistic_gemma_style_request(
         del group
         return array
 
+    def fake_log_request_shape(
+        label: str,
+        task_params: object,
+        prompt: str,
+        *,
+        extra: object = None,
+    ) -> None:
+        captured["label"] = label
+        captured["logged_task_params"] = task_params
+        captured["logged_prompt"] = prompt
+        captured["logged_extra"] = extra
+
     monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
     monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
     monkeypatch.setattr(generate_mod, "mlx_generate", fake_mlx_generate)
+    monkeypatch.setattr(generate_mod, "log_request_shape", fake_log_request_shape)
     monkeypatch.setattr(generate_mod.mx.distributed, "all_gather", fake_all_gather)
 
     check_every = generate_mod.warmup_inference(
@@ -59,3 +72,10 @@ def test_warmup_inference_uses_realistic_gemma_style_request(
     assert task_params.max_output_tokens == 32
     first_message = task_params.input[0]
     assert "Summarize this status update in one sentence" in first_message.content
+    assert captured["label"] == "warmup"
+    assert captured["logged_task_params"] == task_params
+    assert captured["logged_prompt"] == "warmup prompt"
+    assert captured["logged_extra"] == {
+        "group_size": 3,
+        "model_id": "mlx-community/gemma-4-26b-a4b-it-4bit",
+    }

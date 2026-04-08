@@ -78,6 +78,49 @@ from exo.worker.runner.bootstrap import logger
 
 Group = mx.distributed.Group
 
+
+def _request_shape_debug_enabled() -> bool:
+    """Return whether request-shape tracing is enabled for prompt debugging."""
+    value = os.environ.get("SKULK_TRACE_REQUEST_SHAPES") or os.environ.get(
+        "EXO_TRACE_REQUEST_SHAPES"
+    )
+    if value is None:
+        return False
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def log_request_shape(
+    label: str,
+    task_params: TextGenerationTaskParams,
+    prompt: str,
+    *,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Emit an exact request-shape trace for prompt/rendering comparisons.
+
+    This is intentionally opt-in because it logs full rendered prompts and the
+    complete internal request payload. We use it to compare synthetic warmup
+    requests against real traffic when a model wedges only during startup.
+    """
+    if not _request_shape_debug_enabled():
+        return
+
+    payload: dict[str, Any] = {
+        "label": label,
+        "task_params": task_params.model_dump(mode="json"),
+        "prompt_chars": len(prompt),
+        "prompt_lines": prompt.count("\n") + 1,
+    }
+    if extra:
+        payload.update(extra)
+
+    logger.info(
+        "[request-shape] "
+        f"{json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
+    )
+    logger.info(f"[request-shape] prompt label={label}\n{prompt}")
+
+
 def _gemma4_output_length_for_pixel_values(
     pixel_values: mx.array,
     patch_size: int,

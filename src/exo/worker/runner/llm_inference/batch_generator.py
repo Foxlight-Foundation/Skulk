@@ -27,6 +27,7 @@ from exo.worker.engines.mlx.generator.generate import (
 )
 from exo.worker.engines.mlx.utils_mlx import (
     apply_chat_template,
+    log_request_shape,
     mx_all_gather_tasks,
     mx_any,
 )
@@ -143,6 +144,7 @@ class SequentialGenerator(InferenceGenerator):
         ]
         | None
     ) = field(default=None, init=False)
+    _logged_first_request_shape: bool = field(default=False, init=False)
 
     def warmup(self):
         self.check_for_cancel_every = warmup_inference(
@@ -270,6 +272,19 @@ class SequentialGenerator(InferenceGenerator):
         prompt = apply_chat_template(
             self.tokenizer, task.task_params, model_card=self.model_card
         )
+        if not self._logged_first_request_shape:
+            log_request_shape(
+                "first-live-request",
+                task.task_params,
+                prompt,
+                extra={
+                    "command_id": str(task.command_id),
+                    "device_rank": self.device_rank,
+                    "generator": "sequential",
+                    "task_id": str(task.task_id),
+                },
+            )
+            self._logged_first_request_shape = True
 
         def on_prefill_progress(processed: int, total: int) -> None:
             if self.device_rank == 0:
@@ -350,6 +365,7 @@ class BatchGenerator(InferenceGenerator):
             Generator[GenerationResponse | ToolCallResponse | None],
         ],
     ] = field(default_factory=dict, init=False)
+    _logged_first_request_shape: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         self._mlx_gen = ExoBatchGenerator(
@@ -510,6 +526,19 @@ class BatchGenerator(InferenceGenerator):
         prompt = apply_chat_template(
             self.tokenizer, task.task_params, model_card=self.model_card
         )
+        if not self._logged_first_request_shape:
+            log_request_shape(
+                "first-live-request",
+                task.task_params,
+                prompt,
+                extra={
+                    "command_id": str(task.command_id),
+                    "device_rank": self.device_rank,
+                    "generator": "batch",
+                    "task_id": str(task.task_id),
+                },
+            )
+            self._logged_first_request_shape = True
 
         def on_prefill_progress(processed: int, total: int) -> None:
             if self.device_rank == 0:

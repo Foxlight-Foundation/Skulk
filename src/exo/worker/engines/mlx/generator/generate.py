@@ -62,6 +62,7 @@ from exo.worker.engines.mlx.constants import (
 from exo.worker.engines.mlx.utils_mlx import (
     apply_chat_template,
     fix_unmatched_think_end_tokens,
+    log_request_shape,
     mx_barrier,
     system_prompt_token_count,
 )
@@ -605,6 +606,15 @@ def warmup_inference(
     logger.info(
         "Warmup prompt prepared "
         f"(model={model_id}, prompt_chars={len(warmup_prompt)}, group_size={group.size() if group is not None else 1})"
+    )
+    log_request_shape(
+        "warmup",
+        warmup_task_params,
+        warmup_prompt,
+        extra={
+            "group_size": group.size() if group is not None else 1,
+            "model_id": str(model_id),
+        },
     )
 
     tokens_generated = 0

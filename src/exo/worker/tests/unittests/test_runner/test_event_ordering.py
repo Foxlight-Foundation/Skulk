@@ -371,3 +371,36 @@ def test_warmup_task_can_be_bypassed_while_runner_still_becomes_ready(
         and isinstance(event.runner_status, RunnerReady)
         for event in events
     )
+
+
+def test_first_live_request_shape_is_logged_once(
+    patch_out_mlx: pytest.MonkeyPatch, monkeypatch: pytest.MonkeyPatch
+):
+    logged: list[tuple[str, TextGenerationTaskParams, str, object]] = []
+
+    def fake_log_request_shape(
+        label: str,
+        task_params: TextGenerationTaskParams,
+        prompt: str,
+        *,
+        extra: object = None,
+    ) -> None:
+        logged.append((label, task_params, prompt, extra))
+
+    monkeypatch.setattr(mlx_batch_generator, "log_request_shape", fake_log_request_shape)
+
+    _run([INIT_TASK, LOAD_TASK, WARMUP_TASK, CHAT_TASK], send_after_ready=[SHUTDOWN_TASK])
+
+    assert logged == [
+        (
+            "first-live-request",
+            CHAT_PARAMS,
+            "test prompt",
+            {
+                "command_id": str(COMMAND_1_ID),
+                "device_rank": 0,
+                "generator": "batch",
+                "task_id": str(CHAT_COMPLETION_TASK_ID),
+            },
+        )
+    ]
