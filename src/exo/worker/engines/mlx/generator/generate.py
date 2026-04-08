@@ -577,23 +577,12 @@ def warmup_inference(
 ) -> int:
     logger.info(f"warming up inference for instance: {model_id}")
 
-    instructions = (
-        "You are a helpful assistant. Answer the user in one short sentence."
-    )
-    content = (
-        "Summarize this status update in one sentence: "
-        "Skulk is starting a distributed Gemma 4 model runner, verifying "
-        "pipeline communication between nodes, and preparing to serve chat requests."
-    )
-
     warmup_task_params = TextGenerationTaskParams(
         model=model_id,
-        instructions=instructions,
-        input=[InputMessage(role="user", content=content)],
-        max_output_tokens=32,
-        temperature=1.0,
-        top_p=0.95,
-        top_k=64,
+        # Keep warmup as close as possible to the smallest known-good live
+        # request while still exercising the full prompt-render/generation path.
+        input=[InputMessage(role="user", content="hello")],
+        max_output_tokens=8,
         enable_thinking=False,
     )
 

@@ -12,7 +12,7 @@ class _FakeGroup:
         return 3
 
 
-def test_warmup_inference_uses_realistic_gemma_style_request(
+def test_warmup_inference_uses_minimal_hello_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -62,16 +62,14 @@ def test_warmup_inference_uses_realistic_gemma_style_request(
 
     task_params = cast(TextGenerationTaskParams, captured["task_params"])
     assert check_every == 0
-    assert task_params.instructions == (
-        "You are a helpful assistant. Answer the user in one short sentence."
-    )
+    assert task_params.instructions is None
     assert task_params.enable_thinking is False
-    assert task_params.temperature == 1.0
-    assert task_params.top_p == 0.95
-    assert task_params.top_k == 64
-    assert task_params.max_output_tokens == 32
+    assert task_params.temperature is None
+    assert task_params.top_p is None
+    assert task_params.top_k is None
+    assert task_params.max_output_tokens == 8
     first_message = task_params.input[0]
-    assert "Summarize this status update in one sentence" in first_message.content
+    assert first_message.content == "hello"
     assert captured["label"] == "warmup"
     assert captured["logged_task_params"] == task_params
     assert captured["logged_prompt"] == "warmup prompt"
