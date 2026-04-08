@@ -5,6 +5,7 @@ from exo.shared.types.worker.runners import (
     RunnerIdle,
     RunnerLoaded,
     RunnerLoading,
+    RunnerReady,
     RunnerWarmingUp,
 )
 from exo.worker.tests.constants import (
@@ -67,6 +68,50 @@ def test_plan_starts_warmup_for_accepting_rank_when_all_loaded_or_warming():
     assert result.instance_id == INSTANCE_1_ID
 
 
+def test_plan_starts_warmup_for_accepting_rank_when_peer_is_already_ready():
+    """
+    Non-zero ranks should still start warmup when a peer races through the
+    temporary debug warmup bypass and reaches Ready before they observe
+    WarmingUp.
+    """
+    shard0 = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=3)
+    shard1 = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=1, world_size=3)
+    shard2 = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=2, world_size=3)
+    instance = get_mlx_ring_instance(
+        instance_id=INSTANCE_1_ID,
+        model_id=MODEL_A_ID,
+        node_to_runner={NODE_A: RUNNER_1_ID, NODE_B: RUNNER_2_ID, NODE_C: RUNNER_3_ID},
+        runner_to_shard={RUNNER_1_ID: shard0, RUNNER_2_ID: shard1, RUNNER_3_ID: shard2},
+    )
+
+    bound_instance = BoundInstance(
+        instance=instance, bound_runner_id=RUNNER_2_ID, bound_node_id=NODE_B
+    )
+    local_runner = FakeRunnerSupervisor(
+        bound_instance=bound_instance, status=RunnerLoaded()
+    )
+
+    runners = {RUNNER_2_ID: local_runner}
+    instances = {INSTANCE_1_ID: instance}
+    all_runners = {
+        RUNNER_1_ID: RunnerReady(),
+        RUNNER_2_ID: RunnerLoaded(),
+        RUNNER_3_ID: RunnerLoaded(),
+    }
+
+    result = plan_mod.plan(
+        node_id=NODE_B,
+        runners=runners,  # type: ignore
+        global_download_status={NODE_A: []},
+        instances=instances,
+        all_runners=all_runners,
+        tasks={},
+    )
+
+    assert isinstance(result, StartWarmup)
+    assert result.instance_id == INSTANCE_1_ID
+
+
 def test_plan_starts_warmup_for_rank_zero_after_others_warming():
     """
     For device_rank == 0, StartWarmup should only be emitted once all the
@@ -93,6 +138,47 @@ def test_plan_starts_warmup_for_rank_zero_after_others_warming():
     all_runners = {
         RUNNER_1_ID: RunnerLoaded(),
         RUNNER_2_ID: RunnerWarmingUp(),
+    }
+
+    result = plan_mod.plan(
+        node_id=NODE_A,
+        runners=runners,  # type: ignore
+        global_download_status={NODE_A: []},
+        instances=instances,
+        all_runners=all_runners,
+        tasks={},
+    )
+
+    assert isinstance(result, StartWarmup)
+    assert result.instance_id == INSTANCE_1_ID
+
+
+def test_plan_starts_warmup_for_rank_zero_after_other_rank_is_already_ready():
+    """
+    Rank zero should still start warmup when another rank races from WarmingUp
+    to Ready before the planner observes the intermediate state.
+    """
+    shard0 = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=2)
+    shard1 = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=1, world_size=2)
+    instance = get_mlx_ring_instance(
+        instance_id=INSTANCE_1_ID,
+        model_id=MODEL_A_ID,
+        node_to_runner={NODE_A: RUNNER_1_ID, NODE_B: RUNNER_2_ID},
+        runner_to_shard={RUNNER_1_ID: shard0, RUNNER_2_ID: shard1},
+    )
+
+    bound_instance = BoundInstance(
+        instance=instance, bound_runner_id=RUNNER_1_ID, bound_node_id=NODE_A
+    )
+    local_runner = FakeRunnerSupervisor(
+        bound_instance=bound_instance, status=RunnerLoaded()
+    )
+
+    runners = {RUNNER_1_ID: local_runner}
+    instances = {INSTANCE_1_ID: instance}
+    all_runners = {
+        RUNNER_1_ID: RunnerLoaded(),
+        RUNNER_2_ID: RunnerReady(),
     }
 
     result = plan_mod.plan(
