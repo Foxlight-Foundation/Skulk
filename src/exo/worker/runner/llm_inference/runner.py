@@ -70,10 +70,10 @@ from .tool_parsers import make_mlx_parser
 
 
 def _should_skip_llm_warmup() -> bool:
-    # Temporary experiment for Gemma 4 pipeline bring-up: let runners report
-    # ready without synthetic warmup so we can probe the first real prompt path.
-    # Set SKULK_FORCE_LLM_WARMUP=1 to restore the normal behavior.
-    return os.environ.get("SKULK_FORCE_LLM_WARMUP") != "1"
+    # Temporary escape hatch for debug sessions where we want runners to reach
+    # Ready without issuing the synthetic warmup request. Normal behavior keeps
+    # warmup enabled unless SKULK_SKIP_LLM_WARMUP=1 is set explicitly.
+    return os.environ.get("SKULK_SKIP_LLM_WARMUP") == "1"
 
 
 class ExitCode(str, Enum):
@@ -253,8 +253,8 @@ class Runner:
                 if _should_skip_llm_warmup():
                     logger.warning(
                         "Skipping LLM warmup and marking runner ready "
-                        "(temporary debug bypass; set SKULK_FORCE_LLM_WARMUP=1 "
-                        "to restore synthetic warmup)"
+                        "(temporary debug bypass; unset SKULK_SKIP_LLM_WARMUP "
+                        "or set it to 0 to restore synthetic warmup)"
                     )
                 else:
                     self.generator.warmup()

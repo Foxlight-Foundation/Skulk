@@ -349,7 +349,7 @@ def test_events_processed_in_correct_order(patch_out_mlx: pytest.MonkeyPatch):
 def test_warmup_task_can_be_bypassed_while_runner_still_becomes_ready(
     patch_out_mlx: pytest.MonkeyPatch, monkeypatch: pytest.MonkeyPatch
 ):
-    monkeypatch.delenv("SKULK_FORCE_LLM_WARMUP", raising=False)
+    monkeypatch.setenv("SKULK_SKIP_LLM_WARMUP", "1")
 
     def fail_if_called(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("warmup() should be bypassed in this debug branch")
