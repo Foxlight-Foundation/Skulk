@@ -1,9 +1,14 @@
+import contextlib
 import os
+import sys
 import threading
+import time
+import traceback
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from functools import partial
 from inspect import signature
+from types import FrameType
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 import mlx.core as mx
@@ -70,10 +75,83 @@ LayerLoadedCallback = Callable[[int, int], None]  # (layers_loaded, total_layers
 _pending_prefill_sends: list[tuple[mx.array, int, mx.distributed.Group]] = []
 
 
+def _mlx_hang_debug_enabled() -> bool:
+    value = os.environ.get("SKULK_MLX_HANG_DEBUG") or os.environ.get(
+        "EXO_MLX_HANG_DEBUG"
+    )
+    if value is None:
+        return False
+    return value.lower() not in {"", "0", "false", "no", "off"}
+
+
+def _mlx_hang_debug_interval_seconds() -> float:
+    raw = os.environ.get("SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS") or os.environ.get(
+        "EXO_MLX_HANG_DEBUG_INTERVAL_SECONDS"
+    )
+    if raw is None:
+        return 30.0
+    with contextlib.suppress(ValueError):
+        return max(float(raw), 1.0)
+    return 30.0
+
+
+@contextlib.contextmanager
+def _hang_debug_watch(label: str) -> Generator[None]:
+    """Emit periodic stack-rich logs while a pipeline wrapper stage is stuck."""
+    if not _mlx_hang_debug_enabled():
+        yield
+        return
+
+    interval_seconds = _mlx_hang_debug_interval_seconds()
+    started_at = time.monotonic()
+    monitored_thread_id = threading.get_ident()
+    finished = threading.Event()
+
+    logger.info(
+        f"[hang-debug] Entering {label} (watchdog interval={interval_seconds:.0f}s)"
+    )
+
+    def watchdog() -> None:
+        while not finished.wait(timeout=interval_seconds):
+            elapsed = time.monotonic() - started_at
+            current_frames = cast(
+                Callable[[], dict[int, FrameType]] | None,
+                getattr(sys, "_current_frames", None),
+            )
+            frame = (
+                None
+                if current_frames is None
+                else current_frames().get(monitored_thread_id)
+            )
+            if frame is None:
+                stack_text = "<no Python frame available>"
+            else:
+                stack_text = "".join(traceback.format_stack(frame))
+            logger.warning(
+                f"[hang-debug] Still in {label} after {elapsed:.1f}s\n{stack_text}"
+            )
+
+    watchdog_thread = threading.Thread(
+        target=watchdog,
+        name=f"hang-debug:{label}",
+        daemon=True,
+    )
+    watchdog_thread.start()
+
+    try:
+        yield
+    finally:
+        finished.set()
+        elapsed = time.monotonic() - started_at
+        logger.info(f"[hang-debug] Leaving {label} after {elapsed:.1f}s")
+
+
 def flush_prefill_sends() -> None:
     for output, dst, group in _pending_prefill_sends:
-        sent = mx.distributed.send(output, dst, group=group)
-        mx.async_eval(sent)
+        with _hang_debug_watch(f"flush_prefill_sends send dst={dst}"):
+            sent = mx.distributed.send(output, dst, group=group)
+        with _hang_debug_watch(f"flush_prefill_sends async_eval dst={dst}"):
+            mx.async_eval(sent)
     _pending_prefill_sends.clear()
 
 
@@ -163,10 +241,20 @@ class PipelineFirstLayer(CustomMlxLayer):
         if self.r != 0:
             # We want to avoid GPU timeout errors by evalling the distributed operation
             # so that it stays on CPU, which does not have a timeout.
-            mx.eval(x)
-            x = mx.distributed.recv_like(x, (self.r - 1), group=self.group)
-            mx.eval(x)
-        return self.original_layer(x, *args, **kwargs)
+            with _hang_debug_watch(
+                f"pipeline_first eval_input rank={self.r} src={self.r - 1}"
+            ):
+                mx.eval(x)
+            with _hang_debug_watch(
+                f"pipeline_first recv_like rank={self.r} src={self.r - 1}"
+            ):
+                x = mx.distributed.recv_like(x, (self.r - 1), group=self.group)
+            with _hang_debug_watch(
+                f"pipeline_first eval_recv rank={self.r} src={self.r - 1}"
+            ):
+                mx.eval(x)
+        with _hang_debug_watch(f"pipeline_first original_layer rank={self.r}"):
+            return self.original_layer(x, *args, **kwargs)
 
 
 class PipelineLastLayer(CustomMlxLayer):
@@ -190,11 +278,17 @@ class PipelineLastLayer(CustomMlxLayer):
             x, *args, **kwargs
         ).arguments.get("cache", None)
 
-        output: mx.array = self.original_layer(x, *args, **kwargs)
+        with _hang_debug_watch(
+            f"pipeline_last original_layer rank={self.r} world={self.s} prefill={self.is_prefill}"
+        ):
+            output: mx.array = self.original_layer(x, *args, **kwargs)
 
         # Eval layer output to materialize it before send — this splits the graph
         # so the send is isolated and the receiving rank's recv can complete.
-        mx.eval(output)
+        with _hang_debug_watch(
+            f"pipeline_last eval_output rank={self.r} world={self.s} prefill={self.is_prefill}"
+        ):
+            mx.eval(output)
 
         if self.r != self.s - 1:
             if self.queue_sends:
@@ -202,24 +296,39 @@ class PipelineLastLayer(CustomMlxLayer):
                     (output, (self.r + 1) % self.s, self.group)
                 )
             else:
-                output = mx.distributed.send(
-                    output, (self.r + 1) % self.s, group=self.group
-                )
+                with _hang_debug_watch(
+                    f"pipeline_last send rank={self.r} dst={(self.r + 1) % self.s} prefill={self.is_prefill}"
+                ):
+                    output = mx.distributed.send(
+                        output, (self.r + 1) % self.s, group=self.group
+                    )
             if cache is not None:
                 # CacheList (used by MLA models like DeepSeekV32, GLM MoE DSA)
                 # doesn't have .keys directly; access via first sub-cache.
                 _cache = cache[0] if hasattr(cache, "caches") else cache  # type: ignore
                 if hasattr(_cache, "keys"):  # pyright: ignore[reportAny]
                     _cache.keys = mx.depends(_cache.keys, output)  # type: ignore
-            mx.eval(output)
+            with _hang_debug_watch(
+                f"pipeline_last eval_send rank={self.r} dst={(self.r + 1) % self.s} prefill={self.is_prefill}"
+            ):
+                mx.eval(output)
             if cache is not None and hasattr(_cache, "keys"):  # type: ignore
-                mx.eval(_cache.keys)  # type: ignore
+                with _hang_debug_watch(
+                    f"pipeline_last eval_cache_dep rank={self.r} dst={(self.r + 1) % self.s} prefill={self.is_prefill}"
+                ):
+                    mx.eval(_cache.keys)  # type: ignore
 
         if not self.is_prefill:
-            output = mx.distributed.all_gather(output, group=self.group)[
-                -output.shape[0] :
-            ]
-            mx.eval(output)
+            with _hang_debug_watch(
+                f"pipeline_last all_gather rank={self.r} world={self.s}"
+            ):
+                output = mx.distributed.all_gather(output, group=self.group)[
+                    -output.shape[0] :
+                ]
+            with _hang_debug_watch(
+                f"pipeline_last eval_all_gather rank={self.r} world={self.s}"
+            ):
+                mx.eval(output)
 
         return output
 
@@ -436,8 +545,8 @@ def patch_pipeline_model[T](model: T, group: mx.distributed.Group) -> T:
         if getattr(cls, "_exo_pipeline_patched", False):
             return
 
-        original_call = cls.__call__  # type: ignore[attr-defined]
-        call_signature = signature(original_call)  # type: ignore[arg-type]
+        original_call = cls.__call__
+        call_signature = signature(original_call)
 
         def patched_call(
             self: object,
@@ -463,7 +572,7 @@ def patch_pipeline_model[T](model: T, group: mx.distributed.Group) -> T:
 
             return logits
 
-        cls.__call__ = patched_call  # type: ignore[method-assign]
+        cls.__call__ = patched_call
         cls._exo_pipeline_patched = True  # type: ignore[attr-defined]
 
     _patch_one(model)
