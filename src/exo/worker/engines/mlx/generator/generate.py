@@ -586,15 +586,7 @@ def warmup_inference(
         # Reintroduce warmup dimensions one at a time so we can isolate which
         # request characteristic destabilizes the MLX/GPU path.
         instructions="You are a helpful assistant. Answer the user in one short sentence.",
-        input=[
-            InputMessage(
-                role="user",
-                content=(
-                    "Summarize this status update in one sentence: "
-                    "the pipeline prefill change improved startup stability."
-                ),
-            )
-        ],
+        input=[InputMessage(role="user", content="hello")],
         max_output_tokens=8,
         enable_thinking=False,
         temperature=1.0,
