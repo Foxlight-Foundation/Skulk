@@ -466,16 +466,37 @@ def prefill(
     effective_prefill_step_size = (
         prefill_step_size // min(4, group_size) if is_pipeline else prefill_step_size
     )
+
+    # Pipeline-parallel prefill currently wedges when the prompt fits inside a
+    # single per-rank chunk (i.e. ``n_real == 1`` in the prefill loop). This
+    # was observed during Gemma 4 warmup with a 23-token prompt and reproduced
+    # in the issue tracker for any short prompt under pipeline parallelism.
+    # PR #101's pipeline-prefill widening (cb2dc68e) removed the prior
+    # ``num_tokens >= prefill_step_size`` gate to fix a different Gemma warmup
+    # hang in stream_generate; the result was that *every* short prompt now
+    # routed through pipeline_parallel_prefill and hit the new wedge. The
+    # narrower gate below preserves PR #101's fix for non-trivial prompts
+    # (where pipeline_parallel_prefill is the right path) while routing
+    # short / warmup prompts back through stream_generate, which is known to
+    # work for that shape. See PR review thread on PR #103 for the full
+    # diagnosis.
+    pipeline_chunks = (
+        (num_tokens + effective_prefill_step_size - 1) // effective_prefill_step_size
+        if effective_prefill_step_size > 0
+        else 0
+    )
+    use_pipeline_prefill = is_pipeline and pipeline_chunks >= 2
     logger.info(
         "Prefill path selected: "
-        f"{'pipeline_parallel_prefill' if is_pipeline else 'stream_generate'} "
-        f"(rank={rank}, prompt_tokens={num_tokens}, "
+        f"{'pipeline_parallel_prefill' if use_pipeline_prefill else 'stream_generate'} "
+        f"(rank={rank}, prompt_tokens={num_tokens}, is_pipeline={is_pipeline}, "
         f"prefill_step_size_input={prefill_step_size}, "
-        f"prefill_step_size_effective={effective_prefill_step_size})"
+        f"prefill_step_size_effective={effective_prefill_step_size}, "
+        f"pipeline_chunks={pipeline_chunks})"
     )
 
     try:
-        if is_pipeline:
+        if use_pipeline_prefill:
             set_pipeline_queue_sends(model, queue_sends=True)
             assert group is not None, "Pipeline prefill requires a distributed group"
             with _hang_debug_watch(

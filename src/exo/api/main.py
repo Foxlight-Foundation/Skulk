@@ -2592,7 +2592,8 @@ class API:
                 "fileExists": True,
                 "effective": {
                     "kv_cache_backend": os.environ.get(
-                        "EXO_KV_CACHE_BACKEND", "default"
+                        "SKULK_KV_CACHE_BACKEND",
+                        os.environ.get("EXO_KV_CACHE_BACKEND", "default"),
                     ),
                     "has_hf_token": has_hf_token or "HF_TOKEN" in os.environ,
                 },
