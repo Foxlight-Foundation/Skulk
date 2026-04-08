@@ -581,7 +581,6 @@ def warmup_inference(
         model=model_id,
         # Reintroduce warmup dimensions one at a time so we can isolate which
         # request characteristic destabilizes the MLX/GPU path.
-        instructions="You are a helpful assistant. Answer the user in one short sentence.",
         input=[InputMessage(role="user", content="hello")],
         max_output_tokens=8,
         enable_thinking=False,

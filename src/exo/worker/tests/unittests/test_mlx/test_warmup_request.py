@@ -12,7 +12,7 @@ class _FakeGroup:
         return 3
 
 
-def test_warmup_inference_uses_hello_request_with_instructions_and_sampler_settings(
+def test_warmup_inference_uses_hello_request_with_explicit_sampler_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -62,10 +62,7 @@ def test_warmup_inference_uses_hello_request_with_instructions_and_sampler_setti
 
     task_params = cast(TextGenerationTaskParams, captured["task_params"])
     assert check_every == 0
-    assert (
-        task_params.instructions
-        == "You are a helpful assistant. Answer the user in one short sentence."
-    )
+    assert task_params.instructions is None
     assert task_params.enable_thinking is False
     assert task_params.temperature == 1.0
     assert task_params.top_p == 0.95
