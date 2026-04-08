@@ -14,6 +14,8 @@ from exo.api.types.ollama_api import (
     OllamaToolCall,
     OllamaToolFunction,
 )
+from exo.shared.models.capabilities import resolve_model_capability_profile
+from exo.shared.models.model_cards import ModelCard
 from exo.shared.types.chunks import (
     ErrorChunk,
     PrefillProgressChunk,
@@ -21,7 +23,11 @@ from exo.shared.types.chunks import (
     ToolCallChunk,
 )
 from exo.shared.types.common import CommandId
-from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
+from exo.shared.types.text_generation import (
+    InputMessage,
+    TextGenerationTaskParams,
+    resolve_reasoning_params,
+)
 
 
 def _map_done_reason(
@@ -77,6 +83,7 @@ def _get_usage(
 
 def ollama_request_to_text_generation(
     request: OllamaChatRequest,
+    model_card: ModelCard | None = None,
 ) -> TextGenerationTaskParams:
     """Convert Ollama chat request to exo's internal text generation format."""
     instructions: str | None = None
@@ -149,6 +156,15 @@ def ollama_request_to_text_generation(
         chat_template_messages.append(dumped)
 
     options = request.options
+    capability_profile = resolve_model_capability_profile(
+        request.model,
+        model_card=model_card,
+    )
+    resolved_effort, resolved_thinking = resolve_reasoning_params(
+        None,
+        request.think,
+        capability_profile,
+    )
     return TextGenerationTaskParams(
         model=request.model,
         input=input_messages
@@ -163,7 +179,8 @@ def ollama_request_to_text_generation(
         seed=options.seed if options else None,
         stream=request.stream,
         tools=request.tools,
-        enable_thinking=request.think,
+        reasoning_effort=resolved_effort,
+        enable_thinking=resolved_thinking,
         chat_template_messages=chat_template_messages
         if chat_template_messages
         else None,
@@ -324,6 +341,7 @@ async def collect_ollama_chat_response(
 
 def ollama_generate_request_to_text_generation(
     request: OllamaGenerateRequest,
+    model_card: ModelCard | None = None,
 ) -> TextGenerationTaskParams:
     """Convert Ollama generate request to exo's internal text generation format."""
     chat_template_messages: list[dict[str, Any]] = []
@@ -340,6 +358,15 @@ def ollama_generate_request_to_text_generation(
         chat_template_messages.append({"role": "user", "content": request.prompt})
 
     options = request.options
+    capability_profile = resolve_model_capability_profile(
+        request.model,
+        model_card=model_card,
+    )
+    resolved_effort, resolved_thinking = resolve_reasoning_params(
+        None,
+        request.think,
+        capability_profile,
+    )
     return TextGenerationTaskParams(
         model=request.model,
         input=[InputMessage(role="user", content=request.prompt)],
@@ -351,7 +378,8 @@ def ollama_generate_request_to_text_generation(
         stop=options.stop if options else None,
         seed=options.seed if options else None,
         stream=request.stream,
-        enable_thinking=request.think,
+        reasoning_effort=resolved_effort,
+        enable_thinking=resolved_thinking,
         chat_template_messages=chat_template_messages
         if chat_template_messages
         else None,

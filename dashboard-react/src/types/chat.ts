@@ -4,6 +4,8 @@ export interface ChatUploadedFile {
   name: string;
   type: string;
   size: number;
+  /** Browser `File` preserved for local preprocessing before the message is sent. */
+  file?: File;
   textContent?: string;
   preview?: string;
 }

@@ -25,6 +25,8 @@ export interface ChatFormProps {
   showThinkingToggle?: boolean;
   thinkingEnabled?: boolean;
   onToggleThinking?: () => void;
+  /** Whether the selected model accepts image attachments. */
+  supportsImageAttachments?: boolean;
   className?: string;
 }
 
@@ -179,6 +181,7 @@ export function ChatForm({
   showThinkingToggle = false,
   thinkingEnabled = false,
   onToggleThinking,
+  supportsImageAttachments = false,
   className,
 }: ChatFormProps) {
   const [message, setMessage] = useState('');
@@ -186,6 +189,7 @@ export function ChatForm({
   const [isDragOver, setIsDragOver] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const filesRef = useRef<ChatUploadedFile[]>([]);
 
   const canSend = message.trim().length > 0 || files.length > 0;
 
@@ -206,18 +210,48 @@ export function ChatForm({
     prevLoading.current = isLoading;
   }, [isLoading]);
 
+  useEffect(() => {
+    filesRef.current = files;
+  }, [files]);
+
+  const clearFiles = useCallback(() => {
+    setFiles((prev) => {
+      prev.forEach((file) => {
+        if (file.preview) URL.revokeObjectURL(file.preview);
+      });
+      return [];
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!supportsImageAttachments) {
+      setIsDragOver(false);
+    }
+    if (!supportsImageAttachments && files.length > 0) {
+      clearFiles();
+    }
+  }, [supportsImageAttachments, files.length, clearFiles]);
+
+  useEffect(() => {
+    return () => {
+      filesRef.current.forEach((file) => {
+        if (file.preview) URL.revokeObjectURL(file.preview);
+      });
+    };
+  }, []);
+
   const handleSubmit = useCallback(
     (e?: React.FormEvent) => {
       e?.preventDefault();
       if (isLoading || !canSend) return;
       onSend(message.trim(), files);
       setMessage('');
-      setFiles([]);
+      clearFiles();
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto';
       }
     },
-    [isLoading, canSend, message, files, onSend],
+    [isLoading, canSend, message, files, onSend, clearFiles],
   );
 
   const handleKeyDown = useCallback(
@@ -230,31 +264,38 @@ export function ChatForm({
     [handleSubmit],
   );
 
+  const addFiles = useCallback((fileList: File[]) => {
+    const imageFiles = fileList.filter((file) => file.type.startsWith('image/'));
+    if (imageFiles.length === 0) {
+      return;
+    }
+    const newFiles: ChatUploadedFile[] = imageFiles.map((f) => ({
+      id: `file-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: f.name,
+      type: f.type,
+      size: f.size,
+      file: f,
+      preview: f.type.startsWith('image/') ? URL.createObjectURL(f) : undefined,
+    }));
+    setFiles((prev) => [...prev, ...newFiles]);
+  }, []);
+
   // Drag and drop
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
+    if (!supportsImageAttachments) return;
     setIsDragOver(true);
-  }, []);
+  }, [supportsImageAttachments]);
 
   const handleDragLeave = useCallback(() => setIsDragOver(false), []);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragOver(false);
+    if (!supportsImageAttachments) return;
     const dropped = Array.from(e.dataTransfer.files);
     addFiles(dropped);
-  }, []);
-
-  const addFiles = useCallback((fileList: File[]) => {
-    const newFiles: ChatUploadedFile[] = fileList.map((f) => ({
-      id: `file-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      name: f.name,
-      type: f.type,
-      size: f.size,
-      preview: f.type.startsWith('image/') ? URL.createObjectURL(f) : undefined,
-    }));
-    setFiles((prev) => [...prev, ...newFiles]);
-  }, []);
+  }, [addFiles, supportsImageAttachments]);
 
   const removeFile = useCallback((id: string) => {
     setFiles((prev) => {
@@ -321,6 +362,7 @@ export function ChatForm({
           icon
           type="button"
           onClick={() => fileInputRef.current?.click()}
+          disabled={!supportsImageAttachments}
           aria-label="Attach file"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -357,13 +399,18 @@ export function ChatForm({
       </InputRow>
 
       <AccentLine />
-      <HelperText>Enter to send · Shift+Enter for new line · Drag & drop files</HelperText>
+      <HelperText>
+        {supportsImageAttachments
+          ? 'Enter to send · Shift+Enter for new line · Drag & drop images'
+          : 'Enter to send · Shift+Enter for new line'}
+      </HelperText>
 
       {/* Hidden file input */}
       <input
         ref={fileInputRef}
         type="file"
         multiple
+        accept="image/*"
         style={{ display: 'none' }}
         onChange={(e) => {
           if (e.target.files) addFiles(Array.from(e.target.files));

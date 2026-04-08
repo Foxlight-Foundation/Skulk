@@ -321,6 +321,10 @@ Notes:
 - Reasoning support depends on model capabilities.
 - Use `/v1/models` response `data[].resolved_capabilities` to decide whether a model supports thinking and whether clients should render a thinking toggle.
 - Treat `resolved_capabilities` as the default tool-free request path; request-specific options such as tools can change prompt rendering and related resolved values for mixed-mode model families.
+- Phase 2 semantics are model-aware:
+  - if `supports_thinking_toggle` is `true`, send `enable_thinking=true` or `false` explicitly
+  - `reasoning_effort="none"` disables thinking for toggleable models
+  - if a model does not support toggleable thinking, Skulk ignores explicit toggle overrides and falls back to the model's default supported behavior
 
 ## Structured Output
 
@@ -600,6 +604,12 @@ Important `resolved_capabilities` fields include:
 | `prompt_renderer` | string | The resolved prompt rendering strategy, such as `tokenizer`, `gemma4`, or `dsml` |
 | `output_parser` | string | The resolved output parsing strategy, such as `generic`, `gemma4`, `gpt_oss`, or `deepseek_v32` |
 | `supports_native_multimodal` | boolean | Whether Skulk can use a native multimodal execution path for the model |
+
+Thinking-control behavior in Phase 2:
+
+- `supports_thinking_toggle` is the contract for whether clients should send explicit on/off thinking controls.
+- Toggleable models honor `enable_thinking` and `reasoning_effort` together using the model profile's default and disabled effort values.
+- Non-toggleable models expose reasoning support, but explicit toggle overrides are normalized away so requests fall back to the model's supported default behavior.
 
 ## Configuration Endpoints
 

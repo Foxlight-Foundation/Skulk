@@ -31,6 +31,8 @@ from exo.api.types.claude_api import (
     ClaudeToolUseBlock,
     ClaudeUsage,
 )
+from exo.shared.models.capabilities import resolve_model_capability_profile
+from exo.shared.models.model_cards import ModelCard
 from exo.shared.types.chunks import (
     ErrorChunk,
     PrefillProgressChunk,
@@ -38,7 +40,11 @@ from exo.shared.types.chunks import (
     ToolCallChunk,
 )
 from exo.shared.types.common import CommandId
-from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
+from exo.shared.types.text_generation import (
+    InputMessage,
+    TextGenerationTaskParams,
+    resolve_reasoning_params,
+)
 
 
 def finish_reason_to_claude_stop_reason(
@@ -86,6 +92,7 @@ def _strip_volatile_headers(text: str) -> str:
 
 async def claude_request_to_text_generation(
     request: ClaudeMessagesRequest,
+    model_card: ModelCard | None = None,
 ) -> TextGenerationTaskParams:
     # Handle system message
     instructions: str | None = None
@@ -203,6 +210,15 @@ async def claude_request_to_text_generation(
     enable_thinking: bool | None = None
     if request.thinking is not None:
         enable_thinking = request.thinking.type in ("enabled", "adaptive")
+    capability_profile = resolve_model_capability_profile(
+        request.model,
+        model_card=model_card,
+    )
+    resolved_effort, resolved_thinking = resolve_reasoning_params(
+        None,
+        enable_thinking,
+        capability_profile,
+    )
 
     return TextGenerationTaskParams(
         model=request.model,
@@ -217,7 +233,8 @@ async def claude_request_to_text_generation(
         stop=request.stop_sequences,
         stream=request.stream,
         tools=tools,
-        enable_thinking=enable_thinking,
+        reasoning_effort=resolved_effort,
+        enable_thinking=resolved_thinking,
         chat_template_messages=chat_template_messages
         if chat_template_messages
         else None,

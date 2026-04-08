@@ -75,6 +75,33 @@ Phase 1 specifically focuses on:
 - prompt renderer selection
 - output parser selection
 
+## Phase 2 Thinking Contract
+
+Phase 2 keeps the existing public controls:
+
+- `enable_thinking`
+- `reasoning_effort`
+
+But their behavior is now explicitly model-aware through `resolved_capabilities`.
+
+### Toggleable reasoning models
+
+If `resolved_capabilities.supports_thinking_toggle` is `true`:
+
+- `enable_thinking=true` enables thinking using the model profile's default effort unless an explicit non-disabled effort is provided
+- `enable_thinking=false` disables thinking using the profile's disabled effort
+- `reasoning_effort="none"` also disables thinking
+
+### Non-toggleable reasoning models
+
+If a model supports reasoning but does not support thinking toggle:
+
+- clients should not offer a toggle
+- explicit toggle overrides are normalized away
+- requests fall back to the model's supported default behavior
+
+This keeps the public API stable without pretending every reasoning-capable model can switch on and off cleanly.
+
 ## Fallback Behavior
 
 If a model card does not define advanced sections, Skulk should still work.

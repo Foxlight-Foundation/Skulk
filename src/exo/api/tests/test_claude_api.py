@@ -17,7 +17,9 @@ from exo.api.types.claude_api import (
     ClaudeTextBlock,
     ClaudeToolResultBlock,
 )
+from exo.shared.models.model_cards import ModelCard, ModelTask, ReasoningCardConfig
 from exo.shared.types.common import ModelId
+from exo.shared.types.memory import Memory
 
 
 class TestFinishReasonToClaudeStopReason:
@@ -160,6 +162,65 @@ class TestClaudeRequestToInternal:
         assert params.top_k == 40
         assert params.stop == ["STOP", "END"]
         assert params.stream is True
+
+    @pytest.mark.anyio
+    async def test_thinking_toggle_uses_model_capability_profile(self):
+        model_id = ModelId("custom/toggleable-claude-compatible")
+        card = ModelCard(
+            model_id=model_id,
+            storage_size=Memory.from_mb(100),
+            n_layers=10,
+            hidden_size=1024,
+            supports_tensor=False,
+            tasks=[ModelTask.TextGeneration],
+            family="custom",
+            capabilities=["text", "thinking"],
+            reasoning=ReasoningCardConfig(
+                supports_toggle=True,
+                default_effort="high",
+                disabled_effort="minimal",
+            ),
+        )
+        request = ClaudeMessagesRequest(
+            model=model_id,
+            max_tokens=100,
+            thinking={"type": "enabled"},
+            messages=[ClaudeMessage(role="user", content="Hello")],
+        )
+
+        params = await claude_request_to_text_generation(request, model_card=card)
+
+        assert params.enable_thinking is True
+        assert params.reasoning_effort == "high"
+
+    @pytest.mark.anyio
+    async def test_non_toggleable_thinking_request_is_normalized_away(self):
+        model_id = ModelId("custom/non-toggle-claude-compatible")
+        card = ModelCard(
+            model_id=model_id,
+            storage_size=Memory.from_mb(100),
+            n_layers=10,
+            hidden_size=1024,
+            supports_tensor=False,
+            tasks=[ModelTask.TextGeneration],
+            family="custom",
+            capabilities=["text", "thinking"],
+            reasoning=ReasoningCardConfig(
+                supports_toggle=False,
+                default_effort="high",
+                disabled_effort="minimal",
+            ),
+        )
+        request = ClaudeMessagesRequest(
+            model=model_id,
+            max_tokens=100,
+            thinking={"type": "disabled"},
+            messages=[ClaudeMessage(role="user", content="Hello")],
+        )
+
+        params = await claude_request_to_text_generation(request, model_card=card)
+
+        assert params.enable_thinking is None
 
     @pytest.mark.anyio
     async def test_request_with_image_url_fetches_bytes(self):

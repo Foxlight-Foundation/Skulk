@@ -111,6 +111,8 @@ def test_resolve_model_capability_profile_keeps_gemma4_tool_fallback() -> None:
 
 def test_resolve_reasoning_params_uses_profile_defaults() -> None:
     profile = ResolvedCapabilityProfile(
+        supports_thinking=True,
+        supports_thinking_toggle=True,
         default_reasoning_effort="high",
         disabled_reasoning_effort="none",
     )
@@ -121,12 +123,26 @@ def test_resolve_reasoning_params_uses_profile_defaults() -> None:
 
 def test_resolve_reasoning_params_treats_none_as_disabled_even_for_custom_profiles() -> None:
     profile = ResolvedCapabilityProfile(
+        supports_thinking=True,
+        supports_thinking_toggle=True,
         default_reasoning_effort="high",
         disabled_reasoning_effort="minimal",
     )
 
     assert resolve_reasoning_params("none", None, profile) == ("minimal", False)
     assert resolve_reasoning_params("none", True, profile) == ("minimal", False)
+
+
+def test_resolve_reasoning_params_ignores_toggle_inputs_for_non_toggleable_profiles() -> None:
+    profile = ResolvedCapabilityProfile(
+        supports_thinking=True,
+        supports_thinking_toggle=False,
+        default_reasoning_effort="high",
+        disabled_reasoning_effort="minimal",
+    )
+
+    assert resolve_reasoning_params(None, False, profile) == (None, None)
+    assert resolve_reasoning_params("minimal", None, profile) == (None, None)
 
 
 def test_resolve_model_capability_profile_uses_safe_generic_fallback() -> None:

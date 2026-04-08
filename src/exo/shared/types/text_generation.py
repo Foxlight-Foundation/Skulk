@@ -23,13 +23,20 @@ def resolve_reasoning_params(
     capability_profile: "ResolvedCapabilityProfile | None" = None,
 ) -> tuple[ReasoningEffort | None, bool | None]:
     """
-    enable_thinking=True -> use the profile's default enabled effort
-    enable_thinking=False -> use the profile's disabled effort
-    reasoning_effort="none" -> normalize to the profile's disabled effort and disable thinking
-    reasoning_effort=<anything else> -> enable thinking unless it already matches the disabled effort
+    Resolve public thinking controls into the canonical internal request form.
+
+    The Phase 2 contract is:
+    - models without thinking support ignore reasoning controls entirely
+    - models without toggle support ignore explicit thinking/toggle overrides
+    - ``reasoning_effort="none"`` always normalizes to the profile's disabled effort
+      and disables thinking for toggleable models
+    - ``enable_thinking=False`` disables thinking for toggleable models
+    - ``enable_thinking=True`` enables thinking using either the explicit
+      non-disabled effort or the profile default effort
+    - when only ``reasoning_effort`` is provided, it determines thinking on/off
+      relative to the profile's disabled effort
+    - when neither value is provided, the runtime uses the model's default behavior
     """
-    resolved_effort: ReasoningEffort | None = reasoning_effort
-    resolved_thinking: bool | None = enable_thinking
     enabled_effort = (
         capability_profile.default_reasoning_effort
         if capability_profile is not None
@@ -40,16 +47,35 @@ def resolve_reasoning_params(
         if capability_profile is not None
         else "none"
     )
+    supports_thinking = (
+        capability_profile.supports_thinking
+        if capability_profile is not None
+        else True
+    )
+    supports_toggle = (
+        capability_profile.supports_thinking_toggle
+        if capability_profile is not None
+        else True
+    )
 
-    if reasoning_effort == "none":
-        resolved_effort = disabled_effort
-        resolved_thinking = False
-    elif reasoning_effort is None and enable_thinking is not None:
-        resolved_effort = enabled_effort if enable_thinking else disabled_effort
-    elif enable_thinking is None and reasoning_effort is not None:
-        resolved_thinking = reasoning_effort != disabled_effort
+    if not supports_thinking:
+        return None, None
 
-    return resolved_effort, resolved_thinking
+    if not supports_toggle:
+        return None, None
+
+    if reasoning_effort == "none" or enable_thinking is False:
+        return disabled_effort, False
+
+    if enable_thinking is True:
+        if reasoning_effort is not None and reasoning_effort != disabled_effort:
+            return reasoning_effort, True
+        return enabled_effort, True
+
+    if reasoning_effort is not None:
+        return reasoning_effort, reasoning_effort != disabled_effort
+
+    return None, None
 
 
 class InputMessage(BaseModel, frozen=True):

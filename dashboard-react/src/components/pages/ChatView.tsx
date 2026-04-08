@@ -72,6 +72,105 @@ const ModelSelect = styled.select`
 const EMPTY_MESSAGES: ChatMessage[] = [];
 const INITIAL_STREAM_STALL_TIMEOUT_MS = 10 * 60_000;
 const ACTIVE_STREAM_STALL_TIMEOUT_MS = 60_000;
+const THINK_TAG_START = '<think>';
+const THINK_TAG_END = '</think>';
+const GEMMA_THINK_START = '<|channel>thought\n';
+const GEMMA_THINK_END = '<channel|>';
+
+function splitReasoningDecoratedContent(raw: string): { content: string; thinking: string } {
+  let content = '';
+  let thinking = '';
+  let i = 0;
+  let activeEndTag: string | null = null;
+
+  while (i < raw.length) {
+    if (activeEndTag === null) {
+      if (raw.startsWith(THINK_TAG_START, i)) {
+        activeEndTag = THINK_TAG_END;
+        i += THINK_TAG_START.length;
+        continue;
+      }
+      if (raw.startsWith(GEMMA_THINK_START, i)) {
+        activeEndTag = GEMMA_THINK_END;
+        i += GEMMA_THINK_START.length;
+        continue;
+      }
+      if (raw.startsWith(THINK_TAG_END, i)) {
+        i += THINK_TAG_END.length;
+        continue;
+      }
+      if (raw.startsWith(GEMMA_THINK_END, i)) {
+        i += GEMMA_THINK_END.length;
+        continue;
+      }
+      content += raw[i];
+      i++;
+      continue;
+    }
+
+    if (raw.startsWith(activeEndTag, i)) {
+      i += activeEndTag.length;
+      activeEndTag = null;
+      continue;
+    }
+
+    thinking += raw[i];
+    i++;
+  }
+
+  return { content, thinking };
+}
+
+function mergeThinkingContent(existing: string, incoming: string): string {
+  if (!incoming) return existing;
+  if (!existing) return incoming;
+  if (incoming.startsWith(existing)) {
+    return existing + incoming.slice(existing.length);
+  }
+  if (existing.includes(incoming)) {
+    return existing;
+  }
+  return existing + incoming;
+}
+
+async function readUploadedImageAsDataUrl(file: ChatUploadedFile): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error(`Failed to read attachment ${file.name} as a data URL.`));
+    };
+    reader.onerror = () => {
+      reject(new Error(`Failed to read attachment ${file.name}.`));
+    };
+
+    if (file.file) {
+      reader.readAsDataURL(file.file);
+      return;
+    }
+
+    if (!file.preview) {
+      reject(new Error(`Attachment ${file.name} has no file contents.`));
+      return;
+    }
+
+    // Fallback for any older in-memory attachment shape that only has an object URL.
+    fetch(file.preview)
+      .then((resp) => {
+        if (!resp.ok) {
+          throw new Error(`Failed to read attachment preview for ${file.name} (HTTP ${resp.status}).`);
+        }
+        return resp.blob();
+      })
+      .then((blob) => reader.readAsDataURL(blob))
+      .catch((error: unknown) => {
+        reject(error instanceof Error ? error : new Error(`Failed to read attachment ${file.name}.`));
+      });
+  });
+}
 
 /* ── Component ────────────────────────────────────────── */
 
@@ -98,6 +197,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [modelThinkingToggleSupport, setModelThinkingToggleSupport] = useState<Record<string, boolean>>({});
+  const [modelImageInputSupport, setModelImageInputSupport] = useState<Record<string, boolean>>({});
   const [modelContextLengths, setModelContextLengths] = useState<Record<string, number>>({});
 
   // Restore scroll position after store hydration + DOM render
@@ -143,14 +243,17 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
         if (!res.ok) return;
         const data = await res.json() as { data?: ModelInfo[] };
         const toggleSupport: Record<string, boolean> = {};
+        const imageSupport: Record<string, boolean> = {};
         const ctxLens: Record<string, number> = {};
         for (const m of data.data ?? []) {
           if (m.id) {
             toggleSupport[m.id] = m.resolved_capabilities?.supports_thinking_toggle ?? false;
+            imageSupport[m.id] = m.resolved_capabilities?.supports_image_input ?? false;
           }
           if (m.id && m.context_length) ctxLens[m.id] = m.context_length;
         }
         setModelThinkingToggleSupport(toggleSupport);
+        setModelImageInputSupport(imageSupport);
         setModelContextLengths(ctxLens);
       } catch { /* ignore */ }
     })();
@@ -161,6 +264,15 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   const supportsThinking = selectedModelId
     ? (modelThinkingToggleSupport[selectedModelId] ?? false)
     : false;
+  const supportsImageAttachments = selectedModelId
+    ? (modelImageInputSupport[selectedModelId] ?? false)
+    : false;
+
+  useEffect(() => {
+    if (!supportsThinking && thinkingEnabled) {
+      setThinkingEnabled(false);
+    }
+  }, [supportsThinking, thinkingEnabled]);
 
   // Ready models
   const readyModels = useMemo(
@@ -187,15 +299,8 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     // Convert image files to base64 data URLs for the API and message history
     const imageAttachments: { dataUrl: string; file: ChatUploadedFile }[] = [];
     for (const f of files) {
-      if (f.type.startsWith('image/') && f.preview) {
-        // f.preview is an object URL — read the file to get a data URL
-        const resp = await fetch(f.preview);
-        const blob = await resp.blob();
-        const dataUrl = await new Promise<string>((resolve) => {
-          const reader = new FileReader();
-          reader.onloadend = () => resolve(reader.result as string);
-          reader.readAsDataURL(blob);
-        });
+      if (f.type.startsWith('image/') && (f.file || f.preview)) {
+        const dataUrl = await readUploadedImageAsDataUrl(f);
         imageAttachments.push({ dataUrl, file: f });
       }
     }
@@ -288,7 +393,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
           model: selectedModelId,
           messages: apiMessages,
           stream: true,
-          ...(thinkingEnabled ? { enable_thinking: true } : {}),
+          ...(supportsThinking ? { enable_thinking: thinkingEnabled } : {}),
         }),
         signal: controller.signal,
       });
@@ -344,36 +449,12 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
             // Content — parse out inline <think> tags
             if (delta?.content) {
               rawContent += delta.content;
-
-              // Process <think> tags incrementally
-              let displayContent = '';
-              let thinkContent = '';
-              let i = 0;
-              let inTag = false;
-              const raw = rawContent;
-
-              while (i < raw.length) {
-                if (!inTag && raw.startsWith('<think>', i)) {
-                  inTag = true;
-                  i += 7;
-                } else if (inTag && raw.startsWith('</think>', i)) {
-                  inTag = false;
-                  i += 8;
-                } else if (inTag) {
-                  thinkContent += raw[i];
-                  i++;
-                } else {
-                  displayContent += raw[i];
-                  i++;
-                }
-              }
-
-              // If we found think tags, route to thinking
-              if (thinkContent) {
-                fullThinking = thinkContent;
+              const separated = splitReasoningDecoratedContent(rawContent);
+              if (separated.thinking) {
+                fullThinking = mergeThinkingContent(fullThinking, separated.thinking);
                 setStreamingThinking(fullThinking);
               }
-              setStreamingContent(displayContent || null);
+              setStreamingContent(separated.content || null);
             }
 
             // Update TPS on every token (thinking or content)
@@ -408,10 +489,11 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     }
 
     // Finalize assistant message
-    const finalAssistantContent = rawContent
-      .replace(/<think>[\s\S]*?<\/think>/gi, '')
-      .replace(/<think>[\s\S]*/i, '')
-      .trim();
+    const separatedContent = splitReasoningDecoratedContent(rawContent);
+    if (separatedContent.thinking) {
+      fullThinking = mergeThinkingContent(fullThinking, separatedContent.thinking);
+    }
+    const finalAssistantContent = separatedContent.content.trim();
 
     if (finalAssistantContent || fullThinking) {
       const assistantMsg: ChatMessage = {
@@ -431,7 +513,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     setIsLoading(false);
     abortRef.current = null;
 
-  }, [selectedModelId, isLoading, thinkingEnabled, addMessage]);
+  }, [selectedModelId, isLoading, thinkingEnabled, supportsThinking, addMessage]);
 
   const handleCancel = useCallback(() => {
     abortRef.current?.abort();
@@ -523,6 +605,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
           showThinkingToggle={supportsThinking}
           thinkingEnabled={thinkingEnabled}
           onToggleThinking={() => setThinkingEnabled((v) => !v)}
+          supportsImageAttachments={supportsImageAttachments}
           placeholder={selectedModelId ? `Message ${selectedLabel}…` : 'Select a model to chat'}
         />
       </InputArea>
