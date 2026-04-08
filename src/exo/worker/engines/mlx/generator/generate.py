@@ -124,6 +124,19 @@ def _warmup_user_content() -> str:
     return " ".join(["hello"] * _warmup_repeat_count())
 
 
+def _warmup_instructions() -> str | None:
+    """Return optional warmup instructions for prompt-shape debugging."""
+    raw = os.environ.get("SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS") or os.environ.get(
+        "EXO_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS"
+    )
+    if raw is None:
+        return None
+    include = raw.strip().lower() not in {"0", "false", "no", "off"}
+    if not include:
+        return None
+    return "You are a helpful assistant. Answer the user in one short sentence."
+
+
 @contextlib.contextmanager
 def _hang_debug_watch(label: str) -> Generator[None]:
     """Emit periodic stack-rich logs while the current thread is stuck in one phase."""
@@ -606,9 +619,10 @@ def warmup_inference(
     warmup_task_params = TextGenerationTaskParams(
         model=model_id,
         # Keep the default pipeline warmup prompt tiny so clusters boot
-        # reliably; use SKULK_DEBUG_WARMUP_REPEAT_COUNT to stretch the same
-        # neutral content when bisecting prompt-length hangs.
-        instructions="You are a helpful assistant. Answer the user in one short sentence.",
+        # reliably; use SKULK_DEBUG_WARMUP_REPEAT_COUNT and
+        # SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS when bisecting prompt-shape
+        # hangs without another code push.
+        instructions=_warmup_instructions(),
         input=[
             InputMessage(
                 role="user",
