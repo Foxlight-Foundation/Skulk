@@ -100,6 +100,32 @@ This causes the runner to log:
 The older `EXO_MLX_HANG_DEBUG` names still work as compatibility fallbacks, but
 new scripts and docs should prefer the `SKULK_` prefix.
 
+For distributed Gemma 4 pipeline warmup specifically, Skulk now forces a
+minimal synthetic prompt by design:
+
+- no synthetic instructions
+- a single user message with content `hello`
+
+This is intentional. During debugging, richer synthetic warmup prompts were
+observed to wedge short-prompt `stream_generate` prefill on multi-node pipeline
+setups.
+
+Two debug-only warmup shaping env vars exist:
+
+- `SKULK_DEBUG_WARMUP_REPEAT_COUNT`
+- `SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS`
+
+However, distributed pipeline warmup intentionally ignores them and stays on the
+minimal sanity-check prompt. They remain useful for single-node investigation.
+
+If you need to bypass synthetic warmup entirely during diagnosis, you can use:
+
+```bash
+export SKULK_SKIP_LLM_WARMUP=1
+```
+
+That bypass should be treated as a temporary debugging escape hatch only.
+
 ## Why This Matters
 
 Gemma 4 is the proof point for the model capability system.
