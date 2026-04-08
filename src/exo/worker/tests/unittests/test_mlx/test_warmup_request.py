@@ -207,3 +207,42 @@ def test_warmup_inference_honors_repeat_and_instruction_overrides_for_single_nod
         task_params.instructions
         == "You are a helpful assistant. Answer the user in one short sentence."
     )
+
+
+def test_warmup_inference_stops_after_first_generated_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generated_tokens = 0
+
+    def fake_apply_chat_template(*, tokenizer: object, task_params: object, model_card: object):
+        del tokenizer, task_params, model_card
+        return "warmup prompt"
+
+    def fake_mx_barrier(_group: object) -> None:
+        return None
+
+    def fake_mlx_generate(**_kwargs: object):
+        nonlocal generated_tokens
+        for token in ("first", "second", "third"):
+            generated_tokens += 1
+            yield token
+
+    def fake_all_gather(array: object, *, group: object):
+        del group
+        return array
+
+    monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
+    monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
+    monkeypatch.setattr(generate_mod, "mlx_generate", fake_mlx_generate)
+    monkeypatch.setattr(generate_mod.mx.distributed, "all_gather", fake_all_gather)
+
+    check_every = generate_mod.warmup_inference(
+        model=object(),  # type: ignore[arg-type]
+        tokenizer=object(),  # type: ignore[arg-type]
+        group=cast(object, _SingleNodeGroup()),  # type: ignore[arg-type]
+        model_id=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"),
+        model_card=None,
+    )
+
+    assert generated_tokens == 1
+    assert check_every == 100

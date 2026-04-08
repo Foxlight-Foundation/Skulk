@@ -690,6 +690,10 @@ def warmup_inference(
             group=group,
         ):
             tokens_generated += 1
+            # Warmup is only meant to validate prefill plus the first decode
+            # step. Stopping after the first token keeps runner readiness
+            # bounded even if the model would otherwise continue sampling.
+            break
 
     check_for_cancel_every = min(
         math.ceil(tokens_generated / max(time.monotonic() - t, 0.001)), 100
