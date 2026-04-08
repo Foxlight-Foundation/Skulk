@@ -23,10 +23,16 @@ from exo.worker.engines.mlx.constants import (
     KV_CACHE_BITS,
     OPTIQ_BITS,
     OPTIQ_FP16_LAYERS,
+    ROTORQUANT_DEFER_PREFILL,
+    ROTORQUANT_FP16_LAYERS,
     TURBOQUANT_FP16_LAYERS,
     TURBOQUANT_K_BITS,
     TURBOQUANT_V_BITS,
     KVCacheBackend,
+)
+from exo.worker.engines.mlx.rotorquant import (
+    make_rotorquant_adaptive_cache,
+    make_rotorquant_cache_from_template,
 )
 from exo.worker.engines.mlx.turboquant import (
     make_turboquant_adaptive_cache,
@@ -578,6 +584,27 @@ def make_kv_cache(
             for i, _ in enumerate(model.layers)
         ]
 
+    if backend == "rotorquant":
+        logger.info(
+            f"Using rotorquant KV cache (defer_prefill={ROTORQUANT_DEFER_PREFILL})"
+        )
+        return make_rotorquant_cache_from_template(
+            model,
+            defer_prefill=ROTORQUANT_DEFER_PREFILL,
+        )
+
+    if backend == "rotorquant_adaptive":
+        logger.info(
+            f"Using rotorquant adaptive KV cache "
+            f"(fp16_layers={ROTORQUANT_FP16_LAYERS}, "
+            f"defer_prefill={ROTORQUANT_DEFER_PREFILL})"
+        )
+        return make_rotorquant_adaptive_cache(
+            model,
+            fp16_layers=ROTORQUANT_FP16_LAYERS,
+            defer_prefill=ROTORQUANT_DEFER_PREFILL,
+        )
+
     if hasattr(model, "make_cache"):
         logger.info("Using MLX LM's make cache")
         return model.make_cache()  # type: ignore
@@ -594,6 +621,8 @@ def get_kv_cache_backend() -> KVCacheBackend:
         "turboquant",
         "turboquant_adaptive",
         "optiq",
+        "rotorquant",
+        "rotorquant_adaptive",
     )
     if backend not in valid_backends:
         logger.warning(

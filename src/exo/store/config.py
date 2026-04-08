@@ -235,7 +235,13 @@ class InferenceConfig(FrozenModel):
     """
 
     kv_cache_backend: Literal[
-        "default", "mlx_quantized", "turboquant", "turboquant_adaptive", "optiq"
+        "default",
+        "mlx_quantized",
+        "turboquant",
+        "turboquant_adaptive",
+        "optiq",
+        "rotorquant",
+        "rotorquant_adaptive",
     ] = "default"
 
 

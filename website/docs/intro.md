@@ -19,6 +19,7 @@ Skulk is a distributed inference platform, so these docs try to serve both of th
 If you are getting oriented, start with these pages:
 
 - [README](https://github.com/Foxlight-Foundation/Skulk/blob/main/README.md) for installation, first run, and quick-start paths
+- [Everything Different About Skulk](everything-different) for a single-page view of how this fork diverges from upstream exo
 - [API guide](api-guide) for the happy path: place a model, then call the API
 - [Model store guide](model-store) for shared model storage and download workflows
 - [KV cache backends](kv-cache-backends) for backend and runtime tuning
