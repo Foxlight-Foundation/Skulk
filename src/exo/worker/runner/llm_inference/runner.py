@@ -69,11 +69,26 @@ from .batch_generator import Cancelled, Finished
 from .tool_parsers import make_mlx_parser
 
 
-def _should_skip_llm_warmup() -> bool:
+def _should_skip_llm_warmup(group_size: int) -> bool:
+    """Return whether the synthetic warmup request should be bypassed.
+
+    Distributed warmup uses barriers and collectives, so skipping it on only
+    one rank can strand peers inside warmup coordination. The debug bypass is
+    therefore limited to single-node groups.
+    """
     # Temporary escape hatch for debug sessions where we want runners to reach
     # Ready without issuing the synthetic warmup request. Normal behavior keeps
     # warmup enabled unless SKULK_SKIP_LLM_WARMUP=1 is set explicitly.
-    return os.environ.get("SKULK_SKIP_LLM_WARMUP") == "1"
+    if os.environ.get("SKULK_SKIP_LLM_WARMUP") != "1":
+        return False
+    if group_size > 1:
+        logger.warning(
+            "Ignoring SKULK_SKIP_LLM_WARMUP=1 for distributed warmup "
+            f"(group_size={group_size}); synthetic warmup must stay consistent "
+            "across all ranks"
+        )
+        return False
+    return True
 
 
 class ExitCode(str, Enum):
@@ -261,7 +276,8 @@ class Runner:
                 self.update_status(RunnerWarmingUp())
                 self.acknowledge_task(task)
 
-                if _should_skip_llm_warmup():
+                group_size = self.generator.group.size() if self.generator.group else 1
+                if _should_skip_llm_warmup(group_size):
                     logger.warning(
                         "Skipping LLM warmup and marking runner ready "
                         "(temporary debug bypass; unset SKULK_SKIP_LLM_WARMUP "

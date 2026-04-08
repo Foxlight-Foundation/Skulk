@@ -81,7 +81,7 @@ def _mlx_hang_debug_enabled() -> bool:
     )
     if value is None:
         return False
-    return value.lower() not in {"", "0", "false", "no", "off"}
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def _mlx_hang_debug_interval_seconds() -> float:

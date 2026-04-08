@@ -249,7 +249,8 @@ There is also an emergency bypass for debugging:
 - `SKULK_SKIP_LLM_WARMUP=1`
 
 That bypass marks the runner ready without issuing the synthetic warmup request
-and should only be used for diagnosis, not normal operation.
+and should only be used for diagnosis, not normal operation. Distributed
+groups ignore it so warmup coordination cannot diverge across ranks.
 
 ## When to Read More
 

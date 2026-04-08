@@ -126,6 +126,8 @@ export SKULK_SKIP_LLM_WARMUP=1
 ```
 
 That bypass should be treated as a temporary debugging escape hatch only.
+Distributed pipeline groups ignore it so one rank cannot skip warmup while
+peers are still participating in warmup coordination.
 
 ## Why This Matters
 

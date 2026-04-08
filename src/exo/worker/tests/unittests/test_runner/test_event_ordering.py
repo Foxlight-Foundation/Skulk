@@ -224,6 +224,14 @@ class MockGroup:
         return 1
 
 
+class MockDistributedGroup:
+    def rank(self) -> int:
+        return 0
+
+    def size(self) -> int:
+        return 2
+
+
 def _run(tasks: Iterable[Task], send_after_ready: list[Task] | None = None):
     bound_instance = get_bound_mlx_ring_instance(
         instance_id=INSTANCE_1_ID,
@@ -366,6 +374,32 @@ def test_warmup_task_can_be_bypassed_while_runner_still_becomes_ready(
         and isinstance(event.runner_status, RunnerWarmingUp)
         for event in events
     )
+    assert any(
+        isinstance(event, RunnerStatusUpdated)
+        and isinstance(event.runner_status, RunnerReady)
+        for event in events
+    )
+
+
+def test_distributed_warmup_skip_env_is_ignored(
+    patch_out_mlx: pytest.MonkeyPatch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SKULK_SKIP_LLM_WARMUP", "1")
+    monkeypatch.setattr(mlx_runner, "initialize_mlx", make_nothin(MockDistributedGroup()))
+
+    warmup_calls = 0
+
+    def fake_warmup(self: object) -> None:
+        del self
+        nonlocal warmup_calls
+        warmup_calls += 1
+
+    monkeypatch.setattr(mlx_batch_generator.BatchGenerator, "warmup", fake_warmup)
+    monkeypatch.setattr(mlx_batch_generator.SequentialGenerator, "warmup", fake_warmup)
+
+    events = _run([INIT_TASK, LOAD_TASK, WARMUP_TASK, SHUTDOWN_TASK])
+
+    assert warmup_calls == 1
     assert any(
         isinstance(event, RunnerStatusUpdated)
         and isinstance(event.runner_status, RunnerReady)
