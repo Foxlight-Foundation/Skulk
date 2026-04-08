@@ -453,14 +453,6 @@ def prefill(
             distributed_prompt_progress_callback()
         progress_callback(processed, total)
 
-    set_pipeline_prefill(model, is_prefill=True)
-
-    with _hang_debug_watch(f"prefill barrier rank={rank} group_size={group_size}"):
-        mx_barrier(group)
-    logger.info(
-        f"Starting prefill (rank={rank}, group_size={group_size}, prompt_tokens={num_tokens})"
-    )
-
     is_pipeline = _has_pipeline_communication_layer(model)
 
     prefill_step_size = 4096
@@ -494,6 +486,18 @@ def prefill(
         f"prefill_step_size_input={prefill_step_size}, "
         f"prefill_step_size_effective={effective_prefill_step_size}, "
         f"pipeline_chunks={pipeline_chunks})"
+    )
+    # Only enable pipeline-prefill mode for the true pipeline prefill path.
+    # Short prompts routed through stream_generate must behave like normal
+    # generation; leaving pipeline wrappers in prefill mode there can strand
+    # non-zero ranks in the pipeline send/recv path without the coordinated
+    # queue/flush behavior used by pipeline_parallel_prefill.
+    set_pipeline_prefill(model, is_prefill=use_pipeline_prefill)
+
+    with _hang_debug_watch(f"prefill barrier rank={rank} group_size={group_size}"):
+        mx_barrier(group)
+    logger.info(
+        f"Starting prefill (rank={rank}, group_size={group_size}, prompt_tokens={num_tokens})"
     )
 
     try:

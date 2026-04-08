@@ -45,8 +45,14 @@ def test_prefill_uses_pipeline_parallel_path_for_long_pipeline_prompts(
     """
     calls: list[str] = []
     fake_cache = _FakeCache()
+    prefill_mode_calls: list[bool] = []
 
     monkeypatch.setattr(generate_module, "mx_barrier", lambda _group: None)
+    monkeypatch.setattr(
+        generate_module,
+        "set_pipeline_prefill",
+        lambda _model, *, is_prefill: prefill_mode_calls.append(is_prefill),
+    )
     monkeypatch.setattr(
         generate_module,
         "_has_pipeline_communication_layer",
@@ -88,6 +94,7 @@ def test_prefill_uses_pipeline_parallel_path_for_long_pipeline_prompts(
     assert snapshots == []
     assert prefill_tps >= 0.0
     assert fake_cache.trim_calls == [2]
+    assert prefill_mode_calls == [True, False]
 
 
 def test_prefill_uses_stream_generate_for_short_pipeline_prompts(
@@ -104,8 +111,14 @@ def test_prefill_uses_stream_generate_for_short_pipeline_prompts(
     """
     calls: list[str] = []
     fake_cache = _FakeCache()
+    prefill_mode_calls: list[bool] = []
 
     monkeypatch.setattr(generate_module, "mx_barrier", lambda _group: None)
+    monkeypatch.setattr(
+        generate_module,
+        "set_pipeline_prefill",
+        lambda _model, *, is_prefill: prefill_mode_calls.append(is_prefill),
+    )
     monkeypatch.setattr(
         generate_module,
         "_has_pipeline_communication_layer",
@@ -144,6 +157,7 @@ def test_prefill_uses_stream_generate_for_short_pipeline_prompts(
     assert snapshots == []
     assert prefill_tps >= 0.0
     assert fake_cache.trim_calls == [2]
+    assert prefill_mode_calls == [False, False]
 
 
 def test_prefill_uses_stream_generate_when_model_is_not_pipeline(
