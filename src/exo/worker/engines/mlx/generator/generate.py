@@ -595,7 +595,7 @@ def warmup_inference(
                 ),
             )
         ],
-        max_output_tokens=8,
+        max_output_tokens=1024,
         enable_thinking=False,
         temperature=1.0,
         top_p=0.95,

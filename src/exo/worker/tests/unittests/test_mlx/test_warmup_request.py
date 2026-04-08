@@ -70,7 +70,7 @@ def test_warmup_inference_uses_neutral_padded_user_content_with_instructions_and
     assert task_params.temperature == 1.0
     assert task_params.top_p == 0.95
     assert task_params.top_k == 64
-    assert task_params.max_output_tokens == 8
+    assert task_params.max_output_tokens == 1024
     first_message = task_params.input[0]
     assert (
         first_message.content
