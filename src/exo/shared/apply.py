@@ -213,6 +213,31 @@ def apply_runner_status_updated(event: RunnerStatusUpdated, state: State) -> Sta
 def apply_node_timed_out(event: NodeTimedOut, state: State) -> State:
     topology = copy.deepcopy(state.topology)
     topology.remove_node(event.node_id)
+    affected_instance_ids = {
+        instance_id
+        for instance_id, instance in state.instances.items()
+        if event.node_id in instance.shard_assignments.node_to_runner
+    }
+    affected_runner_ids = {
+        runner_id
+        for instance_id in affected_instance_ids
+        for runner_id in state.instances[instance_id].shard_assignments.runner_to_shard
+    }
+    instances = {
+        instance_id: instance
+        for instance_id, instance in state.instances.items()
+        if instance_id not in affected_instance_ids
+    }
+    runners = {
+        runner_id: runner_status
+        for runner_id, runner_status in state.runners.items()
+        if runner_id not in affected_runner_ids
+    }
+    tasks = {
+        task_id: task
+        for task_id, task in state.tasks.items()
+        if task.instance_id not in affected_instance_ids
+    }
     last_seen = {
         key: value for key, value in state.last_seen.items() if key != event.node_id
     }
@@ -257,6 +282,9 @@ def apply_node_timed_out(event: NodeTimedOut, state: State) -> State:
     )
     return state.model_copy(
         update={
+            "instances": instances,
+            "runners": runners,
+            "tasks": tasks,
             "downloads": downloads,
             "topology": topology,
             "last_seen": last_seen,
