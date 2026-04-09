@@ -224,6 +224,14 @@ class MockGroup:
         return 1
 
 
+class MockDistributedGroup:
+    def rank(self) -> int:
+        return 0
+
+    def size(self) -> int:
+        return 2
+
+
 def _run(tasks: Iterable[Task], send_after_ready: list[Task] | None = None):
     bound_instance = get_bound_mlx_ring_instance(
         instance_id=INSTANCE_1_ID,
@@ -344,3 +352,89 @@ def test_events_processed_in_correct_order(patch_out_mlx: pytest.MonkeyPatch):
             RunnerStatusUpdated(runner_id=RUNNER_1_ID, runner_status=RunnerShutdown()),
         ],
     )
+
+
+def test_warmup_task_can_be_bypassed_while_runner_still_becomes_ready(
+    patch_out_mlx: pytest.MonkeyPatch, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("SKULK_SKIP_LLM_WARMUP", "1")
+
+    def fail_if_called(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("warmup() should be bypassed in this debug branch")
+
+    monkeypatch.setattr(mlx_batch_generator.BatchGenerator, "warmup", fail_if_called)
+    monkeypatch.setattr(
+        mlx_batch_generator.SequentialGenerator, "warmup", fail_if_called
+    )
+
+    events = _run([INIT_TASK, LOAD_TASK, WARMUP_TASK, SHUTDOWN_TASK])
+
+    assert any(
+        isinstance(event, RunnerStatusUpdated)
+        and isinstance(event.runner_status, RunnerWarmingUp)
+        for event in events
+    )
+    assert any(
+        isinstance(event, RunnerStatusUpdated)
+        and isinstance(event.runner_status, RunnerReady)
+        for event in events
+    )
+
+
+def test_distributed_warmup_skip_env_is_ignored(
+    patch_out_mlx: pytest.MonkeyPatch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SKULK_SKIP_LLM_WARMUP", "1")
+    monkeypatch.setattr(mlx_runner, "initialize_mlx", make_nothin(MockDistributedGroup()))
+
+    warmup_calls = 0
+
+    def fake_warmup(self: object) -> None:
+        del self
+        nonlocal warmup_calls
+        warmup_calls += 1
+
+    monkeypatch.setattr(mlx_batch_generator.BatchGenerator, "warmup", fake_warmup)
+    monkeypatch.setattr(mlx_batch_generator.SequentialGenerator, "warmup", fake_warmup)
+
+    events = _run([INIT_TASK, LOAD_TASK, WARMUP_TASK, SHUTDOWN_TASK])
+
+    assert warmup_calls == 1
+    assert any(
+        isinstance(event, RunnerStatusUpdated)
+        and isinstance(event.runner_status, RunnerReady)
+        for event in events
+    )
+
+
+def test_first_live_request_shape_is_logged_once(
+    patch_out_mlx: pytest.MonkeyPatch, monkeypatch: pytest.MonkeyPatch
+):
+    logged: list[tuple[str, TextGenerationTaskParams, str, object]] = []
+
+    def fake_log_request_shape(
+        label: str,
+        task_params: TextGenerationTaskParams,
+        prompt: str,
+        *,
+        extra: object = None,
+    ) -> None:
+        logged.append((label, task_params, prompt, extra))
+
+    monkeypatch.setattr(mlx_batch_generator, "log_request_shape", fake_log_request_shape)
+
+    _run([INIT_TASK, LOAD_TASK, WARMUP_TASK, CHAT_TASK], send_after_ready=[SHUTDOWN_TASK])
+
+    assert logged == [
+        (
+            "first-live-request",
+            CHAT_PARAMS,
+            "test prompt",
+            {
+                "command_id": str(COMMAND_1_ID),
+                "device_rank": 0,
+                "generator": "batch",
+                "task_id": str(CHAT_COMPLETION_TASK_ID),
+            },
+        )
+    ]

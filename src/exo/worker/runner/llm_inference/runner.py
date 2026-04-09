@@ -69,6 +69,28 @@ from .batch_generator import Cancelled, Finished
 from .tool_parsers import make_mlx_parser
 
 
+def _should_skip_llm_warmup(group_size: int) -> bool:
+    """Return whether the synthetic warmup request should be bypassed.
+
+    Distributed warmup uses barriers and collectives, so skipping it on only
+    one rank can strand peers inside warmup coordination. The debug bypass is
+    therefore limited to single-node groups.
+    """
+    # Temporary escape hatch for debug sessions where we want runners to reach
+    # Ready without issuing the synthetic warmup request. Normal behavior keeps
+    # warmup enabled unless SKULK_SKIP_LLM_WARMUP=1 is set explicitly.
+    if os.environ.get("SKULK_SKIP_LLM_WARMUP") != "1":
+        return False
+    if group_size > 1:
+        logger.warning(
+            "Ignoring SKULK_SKIP_LLM_WARMUP=1 for distributed warmup "
+            f"(group_size={group_size}); synthetic warmup must stay consistent "
+            "across all ranks"
+        )
+        return False
+    return True
+
+
 class ExitCode(str, Enum):
     AllTasksComplete = "AllTasksComplete"
     Shutdown = "Shutdown"
@@ -139,6 +161,17 @@ class Runner:
             f"enable_thinking={params.enable_thinking!r})"
         )
 
+    def _lifecycle_context(self) -> str:
+        """Return stable runner identity fields for lifecycle logs."""
+        return (
+            f"instance_id={self.instance.instance_id}, "
+            f"runner_id={self.runner_id}, "
+            f"node_id={self.bound_instance.bound_node_id}, "
+            f"device_rank={self.shard_metadata.device_rank}, "
+            f"world_size={self.shard_metadata.world_size}, "
+            f"layers={self.shard_metadata.start_layer}:{self.shard_metadata.end_layer}"
+        )
+
     def update_status(self, status: RunnerStatus):
         self.current_status = status
         self.event_sender.send(
@@ -174,7 +207,7 @@ class Runner:
                 self.current_status, (RunnerIdle, RunnerFailed)
             ):
                 assert isinstance(self.generator, Builder)
-                logger.info("runner connecting")
+                logger.info(f"runner connecting ({self._lifecycle_context()})")
                 self.update_status(RunnerConnecting())
                 self.acknowledge_task(task)
 
@@ -198,7 +231,7 @@ class Runner:
                 total_layers = (
                     self.shard_metadata.end_layer - self.shard_metadata.start_layer
                 )
-                logger.info("runner loading")
+                logger.info(f"runner loading ({self._lifecycle_context()})")
 
                 self.update_status(
                     RunnerLoading(layers_loaded=0, total_layers=total_layers)
@@ -234,16 +267,24 @@ class Runner:
 
                 self.send_task_status(task.task_id, TaskStatus.Complete)
                 self.update_status(RunnerLoaded())
-                logger.info("runner loaded")
+                logger.info(f"runner loaded ({self._lifecycle_context()})")
 
             case StartWarmup() if isinstance(self.current_status, RunnerLoaded):
                 assert isinstance(self.generator, InferenceGenerator)
-                logger.info("runner warming up")
+                logger.info(f"runner warming up ({self._lifecycle_context()})")
 
                 self.update_status(RunnerWarmingUp())
                 self.acknowledge_task(task)
 
-                self.generator.warmup()
+                group_size = self.generator.group.size() if self.generator.group else 1
+                if _should_skip_llm_warmup(group_size):
+                    logger.warning(
+                        "Skipping LLM warmup and marking runner ready "
+                        "(temporary debug bypass; unset SKULK_SKIP_LLM_WARMUP "
+                        "or set it to 0 to restore synthetic warmup)"
+                    )
+                else:
+                    self.generator.warmup()
 
                 logger.info(
                     f"runner initialized in {time.time() - self.setup_start_time} seconds"
@@ -251,7 +292,7 @@ class Runner:
 
                 self.send_task_status(task.task_id, TaskStatus.Complete)
                 self.update_status(RunnerReady())
-                logger.info("runner ready")
+                logger.info(f"runner ready ({self._lifecycle_context()})")
 
             case TextGeneration() if isinstance(self.current_status, RunnerReady):
                 return_code = self.handle_generation_tasks(starting_task=task)

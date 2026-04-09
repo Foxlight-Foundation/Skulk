@@ -141,6 +141,7 @@ from exo.shared.constants import (
     EXO_IMAGE_TRANSPORT_DEBUG,
     EXO_MAX_CHUNK_SIZE,
     EXO_TRACING_CACHE_DIR,
+    preferred_env_value,
 )
 from exo.shared.election import ElectionMessage
 from exo.shared.logging import InterceptLogger
@@ -200,6 +201,10 @@ from exo.utils.channels import Receiver, Sender, channel
 from exo.utils.disk_event_log import DiskEventLog
 from exo.utils.power_sampler import PowerSampler
 from exo.utils.task_group import TaskGroup
+from exo.worker.engines.mlx.constants import (
+    DEFAULT_KV_CACHE_BACKEND,
+    VALID_KV_CACHE_BACKENDS,
+)
 
 if TYPE_CHECKING:
     from exo.store.config import ExoConfig
@@ -2563,6 +2568,20 @@ class API:
     # Config & Store endpoints
     # ------------------------------------------------------------------
 
+    def _effective_kv_cache_backend(self) -> str:
+        """Return the effective KV backend after SKULK/EXO env precedence is applied."""
+        configured_backend = preferred_env_value(
+            "SKULK_KV_CACHE_BACKEND",
+            "EXO_KV_CACHE_BACKEND",
+            "",
+        )
+        if not configured_backend:
+            return DEFAULT_KV_CACHE_BACKEND
+
+        if configured_backend not in VALID_KV_CACHE_BACKENDS:
+            return DEFAULT_KV_CACHE_BACKEND
+        return configured_backend
+
     async def get_config(self) -> JSONResponse:
         if not self._config_path.exists():
             return JSONResponse(
@@ -2571,10 +2590,7 @@ class API:
                     "configPath": str(self._config_path),
                     "fileExists": False,
                     "effective": {
-                        "kv_cache_backend": os.environ.get(
-                            "SKULK_KV_CACHE_BACKEND",
-                            os.environ.get("EXO_KV_CACHE_BACKEND", "default"),
-                        ),
+                        "kv_cache_backend": self._effective_kv_cache_backend(),
                     },
                 }
             )
@@ -2591,9 +2607,7 @@ class API:
                 "configPath": str(self._config_path),
                 "fileExists": True,
                 "effective": {
-                    "kv_cache_backend": os.environ.get(
-                        "EXO_KV_CACHE_BACKEND", "default"
-                    ),
+                    "kv_cache_backend": self._effective_kv_cache_backend(),
                     "has_hf_token": has_hf_token or "HF_TOKEN" in os.environ,
                 },
             }

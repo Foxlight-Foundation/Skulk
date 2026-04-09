@@ -28,6 +28,7 @@ from exo.api.types import (
     TopLogprobItem,
     Usage,
 )
+from exo.shared.constants import preferred_env_value
 from exo.shared.models.model_cards import ModelCard
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
@@ -62,6 +63,7 @@ from exo.worker.engines.mlx.constants import (
 from exo.worker.engines.mlx.utils_mlx import (
     apply_chat_template,
     fix_unmatched_think_end_tokens,
+    log_request_shape,
     mx_barrier,
     system_prompt_token_count,
 )
@@ -77,28 +79,74 @@ from exo.worker.runner.bootstrap import logger
 generation_stream = mx.new_stream(mx.default_device())
 
 _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
+_MIN_CANCEL_CHECK_INTERVAL = 10
 
 
 def _mlx_hang_debug_enabled() -> bool:
     """Return whether verbose warmup/prefill hang diagnostics are enabled."""
-    value = os.environ.get("SKULK_MLX_HANG_DEBUG") or os.environ.get(
-        "EXO_MLX_HANG_DEBUG"
-    )
+    value = preferred_env_value("SKULK_MLX_HANG_DEBUG", "EXO_MLX_HANG_DEBUG")
     if value is None:
         return False
-    return value.strip().lower() not in {"0", "false", "no", "off"}
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def _mlx_hang_debug_interval_seconds() -> float:
     """Return the periodic interval for hang-debug watchdog logs."""
-    raw = os.environ.get("SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS") or os.environ.get(
-        "EXO_MLX_HANG_DEBUG_INTERVAL_SECONDS"
+    raw = preferred_env_value(
+        "SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS",
+        "EXO_MLX_HANG_DEBUG_INTERVAL_SECONDS",
     )
     if raw is None:
         return 30.0
     with contextlib.suppress(ValueError):
         return max(float(raw), 1.0)
     return 30.0
+
+
+def _warmup_repeat_count() -> int:
+    """Return the neutral warmup token repeat count used for debugging."""
+    raw = preferred_env_value(
+        "SKULK_DEBUG_WARMUP_REPEAT_COUNT",
+        "EXO_DEBUG_WARMUP_REPEAT_COUNT",
+    )
+    if raw is None:
+        return 1
+    with contextlib.suppress(ValueError):
+        return max(int(raw), 1)
+    return 1
+
+
+def _is_distributed_warmup(group: mx.distributed.Group | None) -> bool:
+    """Return whether warmup is running with a multi-node distributed group."""
+    return group is not None and group.size() > 1
+
+
+def _warmup_user_content(group: mx.distributed.Group | None) -> str:
+    """Return the synthetic warmup user content.
+
+    Distributed pipeline warmup intentionally stays minimal because richer
+    synthetic prompts have been observed to wedge stream_generate prefill.
+    Single-node debugging may still scale the neutral content via environment.
+    """
+    if _is_distributed_warmup(group):
+        return "hello"
+    return " ".join(["hello"] * _warmup_repeat_count())
+
+
+def _warmup_instructions(group: mx.distributed.Group | None) -> str | None:
+    """Return optional warmup instructions for prompt-shape debugging."""
+    if _is_distributed_warmup(group):
+        return None
+    raw = preferred_env_value(
+        "SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS",
+        "EXO_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS",
+    )
+    if raw is None:
+        return None
+    include = raw.strip().lower() not in {"", "0", "false", "no", "off"}
+    if not include:
+        return None
+    return "You are a helpful assistant. Answer the user in one short sentence."
 
 
 @contextlib.contextmanager
@@ -452,7 +500,41 @@ def prefill(
             distributed_prompt_progress_callback()
         progress_callback(processed, total)
 
-    set_pipeline_prefill(model, is_prefill=True)
+    is_pipeline = _has_pipeline_communication_layer(model)
+
+    prefill_step_size = 4096
+    effective_prefill_step_size = (
+        prefill_step_size // min(4, group_size) if is_pipeline else prefill_step_size
+    )
+
+    # Pipeline-parallel prefill can wedge when the prompt fits inside a single
+    # effective per-rank chunk (i.e. ``n_real == 1`` in the prefill loop).
+    # Mirror pipeline_parallel_prefill's chunking math here by reserving the
+    # final token for the post-loop pass before computing the real chunk count.
+    # That keeps multi-chunk prompts on pipeline_parallel_prefill while routing
+    # single-chunk short / warmup prompts through stream_generate.
+    real_prefill_tokens = max(num_tokens - 1, 0)
+    pipeline_chunks = (
+        (real_prefill_tokens + effective_prefill_step_size - 1)
+        // effective_prefill_step_size
+        if effective_prefill_step_size > 0
+        else 0
+    )
+    use_pipeline_prefill = is_pipeline and pipeline_chunks >= 2
+    logger.info(
+        "Prefill path selected: "
+        f"{'pipeline_parallel_prefill' if use_pipeline_prefill else 'stream_generate'} "
+        f"(rank={rank}, prompt_tokens={num_tokens}, is_pipeline={is_pipeline}, "
+        f"prefill_step_size_input={prefill_step_size}, "
+        f"prefill_step_size_effective={effective_prefill_step_size}, "
+        f"pipeline_chunks={pipeline_chunks})"
+    )
+    # Only enable pipeline-prefill mode for the true pipeline prefill path.
+    # Short prompts routed through stream_generate must behave like normal
+    # generation; leaving pipeline wrappers in prefill mode there can strand
+    # non-zero ranks in the pipeline send/recv path without the coordinated
+    # queue/flush behavior used by pipeline_parallel_prefill.
+    set_pipeline_prefill(model, is_prefill=use_pipeline_prefill)
 
     with _hang_debug_watch(f"prefill barrier rank={rank} group_size={group_size}"):
         mx_barrier(group)
@@ -460,22 +542,8 @@ def prefill(
         f"Starting prefill (rank={rank}, group_size={group_size}, prompt_tokens={num_tokens})"
     )
 
-    is_pipeline = _has_pipeline_communication_layer(model)
-
-    prefill_step_size = 4096
-    effective_prefill_step_size = (
-        prefill_step_size // min(4, group_size) if is_pipeline else prefill_step_size
-    )
-    logger.info(
-        "Prefill path selected: "
-        f"{'pipeline_parallel_prefill' if is_pipeline else 'stream_generate'} "
-        f"(rank={rank}, prompt_tokens={num_tokens}, "
-        f"prefill_step_size_input={prefill_step_size}, "
-        f"prefill_step_size_effective={effective_prefill_step_size})"
-    )
-
     try:
-        if is_pipeline:
+        if use_pipeline_prefill:
             set_pipeline_queue_sends(model, queue_sends=True)
             assert group is not None, "Pipeline prefill requires a distributed group"
             with _hang_debug_watch(
@@ -515,12 +583,10 @@ def prefill(
                     )
                     break  # Stop after first iteration - cache is now filled
     except PrefillCancelled:
+        raise
+    finally:
         set_pipeline_queue_sends(model, queue_sends=False)
         set_pipeline_prefill(model, is_prefill=False)
-        raise
-
-    set_pipeline_queue_sends(model, queue_sends=False)
-    set_pipeline_prefill(model, is_prefill=False)
 
     # stream_generate added 1 extra generated token to the cache, so we should trim it.
     # Because of needing to roll back arrays cache, we will generate on 2 tokens so trim 1 more.
@@ -553,15 +619,39 @@ def warmup_inference(
     model_id: ModelId,
     model_card: ModelCard | None = None,
 ) -> int:
+    """Run a conservative synthetic warmup request to validate the MLX path.
+
+    Distributed pipeline warmup intentionally stays on the minimal sanity-check
+    prompt shape. Richer synthetic prompt templates have been observed to hang
+    warmup prefill in that distributed path, so prompt-shaping overrides remain
+    reserved for single-node investigation.
+    """
     logger.info(f"warming up inference for instance: {model_id}")
 
-    content = "Prompt to warm up the inference engine. Repeat this."
+    if _is_distributed_warmup(group) and (
+        _warmup_repeat_count() != 1 or _warmup_instructions(None) is not None
+    ):
+        logger.info(
+            "Distributed pipeline warmup is forcing the minimal sanity-check "
+            "prompt and ignoring warmup shaping overrides"
+        )
 
     warmup_task_params = TextGenerationTaskParams(
         model=model_id,
-        input=[InputMessage(role="user", content=content)],
-        max_output_tokens=50,
-        temperature=0.0,
+        # Distributed pipeline warmup always uses the minimal sanity-check
+        # shape; single-node debugging can still opt into prompt shaping.
+        instructions=_warmup_instructions(group),
+        input=[
+            InputMessage(
+                role="user",
+                content=_warmup_user_content(group),
+            )
+        ],
+        max_output_tokens=1024,
+        enable_thinking=False,
+        temperature=1.0,
+        top_p=0.95,
+        top_k=64,
     )
 
     with _hang_debug_watch(f"warmup apply_chat_template model={model_id}"):
@@ -573,6 +663,15 @@ def warmup_inference(
     logger.info(
         "Warmup prompt prepared "
         f"(model={model_id}, prompt_chars={len(warmup_prompt)}, group_size={group.size() if group is not None else 1})"
+    )
+    log_request_shape(
+        "warmup",
+        warmup_task_params,
+        warmup_prompt,
+        extra={
+            "group_size": group.size() if group is not None else 1,
+            "model_id": str(model_id),
+        },
     )
 
     tokens_generated = 0
@@ -594,10 +693,23 @@ def warmup_inference(
             group=group,
         ):
             tokens_generated += 1
+            # Warmup is only meant to validate prefill plus the first decode
+            # step. Stopping after the first token keeps runner readiness
+            # bounded even if the model would otherwise continue sampling.
+            break
 
-    check_for_cancel_every = min(
-        math.ceil(tokens_generated / max(time.monotonic() - t, 0.001)), 100
-    )
+    # The single-token warmup path intentionally samples only the first decode
+    # step, so cold-start compile/prefill latency can dominate the elapsed
+    # measurement here. Keep cancellation checks reasonably spaced even when
+    # that first-token latency is slow, while still capping the interval for
+    # fast models.
+    if tokens_generated == 0:
+        check_for_cancel_every = 0
+    else:
+        check_for_cancel_every = max(
+            _MIN_CANCEL_CHECK_INTERVAL,
+            min(math.ceil(tokens_generated / max(time.monotonic() - t, 0.001)), 100),
+        )
 
     with _hang_debug_watch(
         f"warmup final barrier model={model_id} tokens_generated={tokens_generated}"

@@ -213,6 +213,45 @@ When enabled, the runner logs:
 `EXO_MLX_HANG_DEBUG_INTERVAL_SECONDS` remain accepted as compatibility
 fallbacks while older scripts are updated.
 
+## Pipeline Warmup Policy
+
+Distributed pipeline models now use an intentionally minimal warmup request.
+
+The goal of warmup is only to validate that MLX prefill and first-token
+generation are functional while matching the current `generate.prefill()`
+routing behavior: short single-chunk prompts are sent through
+`stream_generate` because `pipeline_parallel_prefill` has been observed to
+wedge for that case on multi-node pipeline models.
+
+For distributed pipeline warmup, Skulk always uses:
+
+- no synthetic instructions
+- a single user message with content `hello`
+- `enable_thinking=False`
+- the normal sampler defaults used by the warmup path
+
+The following debug-only environment variables are available:
+
+- `SKULK_DEBUG_WARMUP_REPEAT_COUNT`
+- `SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS`
+
+These are only honored for single-node debugging. For distributed pipeline
+warmup, Skulk intentionally ignores them and stays on the minimal sanity-check
+prompt.
+
+Legacy compatibility aliases are also accepted:
+
+- `EXO_DEBUG_WARMUP_REPEAT_COUNT`
+- `EXO_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS`
+
+There is also an emergency bypass for debugging:
+
+- `SKULK_SKIP_LLM_WARMUP=1`
+
+That bypass marks the runner ready without issuing the synthetic warmup request
+and should only be used for diagnosis, not normal operation. Distributed
+groups ignore it so warmup coordination cannot diverge across ranks.
+
 ## When to Read More
 
 If you are:
