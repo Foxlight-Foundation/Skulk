@@ -30,7 +30,9 @@ def test_deferred_prefill_keeps_storage_unallocated_during_prefill() -> None:
 
     assert cache.is_deferred is True
     assert cache.has_live_storage is False
-    assert cache.offset == 0
+    # ``offset`` is the logical token count even during the deferred
+    # phase — it must advance so downstream RoPE positioning is correct.
+    assert cache.offset == 64
     assert cache.size() == 64
 
 
@@ -112,6 +114,39 @@ def test_trim_works_in_both_phases() -> None:
     assert flushed_cache.size() == 11
     flushed_cache.trim(3)
     assert flushed_cache.size() == 8
+
+
+def test_deferred_prefill_advances_offset_across_chunks() -> None:
+    """Multi-chunk prefill must advance ``offset`` so RoPE position is right.
+
+    Regression for the bug where the deferred-prefill ``num_steps > 1``
+    branch appended to the scratch buffer but never updated
+    ``cache.offset``. Downstream attention reads ``cache.offset`` for the
+    RoPE position, so prompts longer than the per-chunk prefill step
+    (e.g. 4096 tokens) saw every chunk after the first positioned as if
+    it started at token 0, producing wrong logits.
+    """
+    cache = RotorQuantKVCache(defer_prefill=True)
+
+    chunk_one_k, chunk_one_v = _kv_chunk(100, seed=200)
+    cache.update_and_fetch(chunk_one_k, chunk_one_v)
+    assert cache.offset == 100
+    assert cache.size() == 100
+
+    chunk_two_k, chunk_two_v = _kv_chunk(150, seed=201)
+    cache.update_and_fetch(chunk_two_k, chunk_two_v)
+    assert cache.offset == 250
+    assert cache.size() == 250
+    assert cache.is_deferred is True
+    assert cache.has_live_storage is False
+
+    # After flush, ``offset`` should still equal the total prefill length
+    # (250) plus the decode token (1) — exactly 251.
+    decode_k, decode_v = _kv_chunk(1, seed=202)
+    out_k, _ = cache.update_and_fetch(decode_k, decode_v)
+    assert cache.is_deferred is False
+    assert cache.offset == 251
+    assert out_k.shape[2] == 251
 
 
 def test_first_call_decode_shaped_does_not_crash() -> None:

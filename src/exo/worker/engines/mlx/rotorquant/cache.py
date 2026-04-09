@@ -168,6 +168,12 @@ class RotorQuantKVCache:
                 self._append_pending(keys, values)
                 assert self._pending_keys is not None
                 assert self._pending_values is not None
+                # Advance the logical offset so downstream attention
+                # (RoPE position via ``cache.offset``) sees the correct
+                # token count when prefill is split into multiple
+                # chunks. Without this, every chunk after the first is
+                # positioned as if it started at token 0.
+                self.offset += num_steps
                 return self._pending_keys, self._pending_values
             self._flush_deferred(keys.dtype)
 
@@ -214,6 +220,14 @@ class RotorQuantKVCache:
         pending_values = self._pending_values
         batch_size, kv_heads, num_pending, head_dim = pending_keys.shape
 
+        # ``offset`` was advanced as tokens were appended to the pending
+        # scratch, so the live region we are about to populate is
+        # ``[offset - num_pending, offset)``. ``_expand_storage`` sizes
+        # capacity from ``offset``, so temporarily rewind it to the
+        # pre-pending position before expanding so we don't allocate
+        # ``num_pending`` extra slots.
+        live_end = self.offset
+        self.offset = live_end - num_pending
         self._expand_storage(batch_size, kv_heads, num_pending, head_dim)
         assert self._key_indices is not None
         assert self._key_norms is not None
@@ -223,12 +237,11 @@ class RotorQuantKVCache:
         key_indices, key_norms = self._quantizer.quantize(pending_keys)
         value_indices, value_norms = self._quantizer.quantize(pending_values)
 
-        end = self.offset + num_pending
-        self._key_indices[..., self.offset : end, :] = key_indices
-        self._key_norms[..., self.offset : end, :] = key_norms
-        self._value_indices[..., self.offset : end, :] = value_indices
-        self._value_norms[..., self.offset : end, :] = value_norms
-        self.offset = end
+        self._key_indices[..., self.offset : live_end, :] = key_indices
+        self._key_norms[..., self.offset : live_end, :] = key_norms
+        self._value_indices[..., self.offset : live_end, :] = value_indices
+        self._value_norms[..., self.offset : live_end, :] = value_norms
+        self.offset = live_end
 
         # Free the scratch — from now on we are in the steady-state
         # decode path and quantize on insert.
@@ -284,8 +297,8 @@ class RotorQuantKVCache:
     # ------------------------------------------------------------------
 
     def size(self) -> int:
-        if self._pending_active and self._pending_keys is not None:
-            return int(self._pending_keys.shape[2])
+        # ``offset`` is the logical token count in both the deferred and
+        # steady-state phases (it is advanced on append in either path).
         return self.offset
 
     @property
@@ -329,6 +342,9 @@ class RotorQuantKVCache:
             self._pending_keys = seq[0]
             self._pending_values = seq[1]
             self._pending_active = True
+            # Keep ``offset`` consistent with the logical token count
+            # restored from the pending scratch.
+            self.offset = int(self._pending_keys.shape[2])
             return
         if len(seq) == 4:
             self._key_indices = seq[0]
@@ -377,6 +393,7 @@ class RotorQuantKVCache:
             new_len = available - trimmed
             self._pending_keys = self._pending_keys[..., :new_len, :]
             self._pending_values = self._pending_values[..., :new_len, :]
+            self.offset -= trimmed
             return trimmed
         trimmed = min(self.offset, n)
         self.offset -= trimmed
