@@ -529,12 +529,23 @@ def prefill(
         f"prefill_step_size_effective={effective_prefill_step_size}, "
         f"pipeline_chunks={pipeline_chunks})"
     )
-    # Only enable pipeline-prefill mode for the true pipeline prefill path.
-    # Short prompts routed through stream_generate must behave like normal
-    # generation; leaving pipeline wrappers in prefill mode there can strand
-    # non-zero ranks in the pipeline send/recv path without the coordinated
-    # queue/flush behavior used by pipeline_parallel_prefill.
-    set_pipeline_prefill(model, is_prefill=use_pipeline_prefill)
+    # Pipeline models must run in prefill mode during any prefill forward
+    # pass — even the stream_generate fallback path for short prompts.
+    # With is_prefill=False, PipelineLastLayer performs all_gather on
+    # every forward pass. generate_step discards prefill logits and only
+    # evaluates cache states, so the all_gather is never consumed but
+    # remains queued. When a subsequent mx.eval triggers it, the ranks
+    # are desynchronized and the collective deadlocks (observed as a
+    # warmup hang on 3-rank pipeline with Gemma 4).
+    #
+    # With is_prefill=True, PipelineLastLayer uses point-to-point
+    # send/recv only — no collective required. The tradeoff: the first
+    # decode token sampled by generate_step is wrong on non-last ranks
+    # (they see rank-local activations, not full logits). This is
+    # acceptable because prefill() trims those decode tokens from the
+    # cache before real generation begins, and the finally block below
+    # resets is_prefill=False for subsequent decode.
+    set_pipeline_prefill(model, is_prefill=is_pipeline)
 
     with _hang_debug_watch(f"prefill barrier rank={rank} group_size={group_size}"):
         mx_barrier(group)
