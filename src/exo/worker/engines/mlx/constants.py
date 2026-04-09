@@ -1,6 +1,8 @@
 import os
 from typing import Literal, cast
 
+from exo.shared.constants import preferred_env_value
+
 # TODO: Do we want so many constants?
 #  I think we want a lot of these as parameters?
 
@@ -23,10 +25,17 @@ KVCacheBackend = Literal[
     "optiq",
 ]
 DEFAULT_KV_CACHE_BACKEND: KVCacheBackend = "default"
-_kv_cache_backend_value = (
-    os.environ["SKULK_KV_CACHE_BACKEND"]
-    if "SKULK_KV_CACHE_BACKEND" in os.environ
-    else os.environ.get("EXO_KV_CACHE_BACKEND", DEFAULT_KV_CACHE_BACKEND)
+VALID_KV_CACHE_BACKENDS: tuple[KVCacheBackend, ...] = (
+    "default",
+    "mlx_quantized",
+    "turboquant",
+    "turboquant_adaptive",
+    "optiq",
+)
+_kv_cache_backend_value = preferred_env_value(
+    "SKULK_KV_CACHE_BACKEND",
+    "EXO_KV_CACHE_BACKEND",
+    DEFAULT_KV_CACHE_BACKEND,
 )
 KV_CACHE_BACKEND: KVCacheBackend = cast(
     KVCacheBackend,

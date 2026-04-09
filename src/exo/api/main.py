@@ -141,6 +141,7 @@ from exo.shared.constants import (
     EXO_IMAGE_TRANSPORT_DEBUG,
     EXO_MAX_CHUNK_SIZE,
     EXO_TRACING_CACHE_DIR,
+    preferred_env_value,
 )
 from exo.shared.election import ElectionMessage
 from exo.shared.logging import InterceptLogger
@@ -200,7 +201,10 @@ from exo.utils.channels import Receiver, Sender, channel
 from exo.utils.disk_event_log import DiskEventLog
 from exo.utils.power_sampler import PowerSampler
 from exo.utils.task_group import TaskGroup
-from exo.worker.engines.mlx.constants import DEFAULT_KV_CACHE_BACKEND, KVCacheBackend
+from exo.worker.engines.mlx.constants import (
+    DEFAULT_KV_CACHE_BACKEND,
+    VALID_KV_CACHE_BACKENDS,
+)
 
 if TYPE_CHECKING:
     from exo.store.config import ExoConfig
@@ -2566,21 +2570,15 @@ class API:
 
     def _effective_kv_cache_backend(self) -> str:
         """Return the effective KV backend after SKULK/EXO env precedence is applied."""
-        if "SKULK_KV_CACHE_BACKEND" in os.environ:
-            configured_backend = os.environ["SKULK_KV_CACHE_BACKEND"]
-        else:
-            configured_backend = os.environ.get("EXO_KV_CACHE_BACKEND", "")
+        configured_backend = preferred_env_value(
+            "SKULK_KV_CACHE_BACKEND",
+            "EXO_KV_CACHE_BACKEND",
+            "",
+        )
         if not configured_backend:
             return DEFAULT_KV_CACHE_BACKEND
 
-        valid_backends: tuple[KVCacheBackend, ...] = (
-            "default",
-            "mlx_quantized",
-            "turboquant",
-            "turboquant_adaptive",
-            "optiq",
-        )
-        if configured_backend not in valid_backends:
+        if configured_backend not in VALID_KV_CACHE_BACKENDS:
             return DEFAULT_KV_CACHE_BACKEND
         return configured_backend
 

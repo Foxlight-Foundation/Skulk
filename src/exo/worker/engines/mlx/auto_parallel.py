@@ -62,6 +62,7 @@ from mlx_lm.models.step3p5 import Model as Step35Model
 from mlx_lm.models.step3p5 import Step3p5MLP as Step35MLP
 from mlx_lm.models.step3p5 import Step3p5Model as Step35InnerModel
 
+from exo.shared.constants import preferred_env_value
 from exo.shared.types.worker.shards import PipelineShardMetadata
 from exo.worker.runner.bootstrap import logger
 
@@ -75,22 +76,15 @@ LayerLoadedCallback = Callable[[int, int], None]  # (layers_loaded, total_layers
 _pending_prefill_sends: list[tuple[mx.array, int, mx.distributed.Group]] = []
 
 
-def _preferred_env_value(skulk_key: str, exo_key: str) -> str | None:
-    """Return the SKULK env value when present, else the legacy EXO value."""
-    if skulk_key in os.environ:
-        return os.environ[skulk_key]
-    return os.environ.get(exo_key)
-
-
 def _mlx_hang_debug_enabled() -> bool:
-    value = _preferred_env_value("SKULK_MLX_HANG_DEBUG", "EXO_MLX_HANG_DEBUG")
+    value = preferred_env_value("SKULK_MLX_HANG_DEBUG", "EXO_MLX_HANG_DEBUG")
     if value is None:
         return False
     return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def _mlx_hang_debug_interval_seconds() -> float:
-    raw = _preferred_env_value(
+    raw = preferred_env_value(
         "SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS",
         "EXO_MLX_HANG_DEBUG_INTERVAL_SECONDS",
     )

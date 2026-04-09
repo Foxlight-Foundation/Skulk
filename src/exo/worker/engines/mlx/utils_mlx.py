@@ -27,6 +27,7 @@ from mlx_lm.models.cache import KVCache
 from mlx_lm.models.deepseek_v3 import DeepseekV3Model
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
+from exo.shared.constants import preferred_env_value
 from exo.shared.models.capabilities import resolve_model_capability_profile
 from exo.shared.models.model_cards import (
     ModelCard,
@@ -79,16 +80,12 @@ from exo.worker.runner.bootstrap import logger
 Group = mx.distributed.Group
 
 
-def _preferred_env_value(skulk_key: str, exo_key: str) -> str | None:
-    """Return the SKULK env value when present, else the legacy EXO value."""
-    if skulk_key in os.environ:
-        return os.environ[skulk_key]
-    return os.environ.get(exo_key)
-
-
 def _request_shape_debug_enabled() -> bool:
     """Return whether request-shape tracing is enabled for prompt debugging."""
-    value = _preferred_env_value("SKULK_TRACE_REQUEST_SHAPES", "EXO_TRACE_REQUEST_SHAPES")
+    value = preferred_env_value(
+        "SKULK_TRACE_REQUEST_SHAPES",
+        "EXO_TRACE_REQUEST_SHAPES",
+    )
     if value is None:
         return False
     return value.strip().lower() not in {"", "0", "false", "no", "off"}

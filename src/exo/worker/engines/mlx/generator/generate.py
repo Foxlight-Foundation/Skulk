@@ -28,6 +28,7 @@ from exo.api.types import (
     TopLogprobItem,
     Usage,
 )
+from exo.shared.constants import preferred_env_value
 from exo.shared.models.model_cards import ModelCard
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
@@ -81,16 +82,9 @@ _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
 _MIN_CANCEL_CHECK_INTERVAL = 10
 
 
-def _preferred_env_value(skulk_key: str, exo_key: str) -> str | None:
-    """Return the SKULK env value when present, else the legacy EXO value."""
-    if skulk_key in os.environ:
-        return os.environ[skulk_key]
-    return os.environ.get(exo_key)
-
-
 def _mlx_hang_debug_enabled() -> bool:
     """Return whether verbose warmup/prefill hang diagnostics are enabled."""
-    value = _preferred_env_value("SKULK_MLX_HANG_DEBUG", "EXO_MLX_HANG_DEBUG")
+    value = preferred_env_value("SKULK_MLX_HANG_DEBUG", "EXO_MLX_HANG_DEBUG")
     if value is None:
         return False
     return value.strip().lower() not in {"", "0", "false", "no", "off"}
@@ -98,7 +92,7 @@ def _mlx_hang_debug_enabled() -> bool:
 
 def _mlx_hang_debug_interval_seconds() -> float:
     """Return the periodic interval for hang-debug watchdog logs."""
-    raw = _preferred_env_value(
+    raw = preferred_env_value(
         "SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS",
         "EXO_MLX_HANG_DEBUG_INTERVAL_SECONDS",
     )
@@ -111,7 +105,7 @@ def _mlx_hang_debug_interval_seconds() -> float:
 
 def _warmup_repeat_count() -> int:
     """Return the neutral warmup token repeat count used for debugging."""
-    raw = _preferred_env_value(
+    raw = preferred_env_value(
         "SKULK_DEBUG_WARMUP_REPEAT_COUNT",
         "EXO_DEBUG_WARMUP_REPEAT_COUNT",
     )
@@ -143,7 +137,7 @@ def _warmup_instructions(group: mx.distributed.Group | None) -> str | None:
     """Return optional warmup instructions for prompt-shape debugging."""
     if _is_distributed_warmup(group):
         return None
-    raw = _preferred_env_value(
+    raw = preferred_env_value(
         "SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS",
         "EXO_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS",
     )

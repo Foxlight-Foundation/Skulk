@@ -14,6 +14,23 @@ def _env(skulk_key: str, exo_key: str, default: str | None = None) -> str | None
     return os.environ.get(skulk_key, os.environ.get(exo_key, default))
 
 
+def preferred_env_value(
+    skulk_key: str,
+    exo_key: str,
+    default: str | None = None,
+) -> str | None:
+    """Return the SKULK value when its key exists, else the legacy EXO value.
+
+    This variant preserves explicitly blank `SKULK_*` values instead of
+    treating them as absent, which is important for debug/config toggles where
+    a blank value should disable the feature instead of falling back to a
+    legacy `EXO_*` env var.
+    """
+    if skulk_key in os.environ:
+        return os.environ[skulk_key]
+    return os.environ.get(exo_key, default)
+
+
 _SKULK_HOME_ENV = _env("SKULK_HOME", "EXO_HOME")
 
 
