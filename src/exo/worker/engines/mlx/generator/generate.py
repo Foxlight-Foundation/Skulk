@@ -78,6 +78,7 @@ from exo.worker.runner.bootstrap import logger
 generation_stream = mx.new_stream(mx.default_device())
 
 _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
+_MIN_CANCEL_CHECK_INTERVAL = 10
 
 
 def _preferred_env_value(skulk_key: str, exo_key: str) -> str | None:
@@ -703,9 +704,18 @@ def warmup_inference(
             # bounded even if the model would otherwise continue sampling.
             break
 
-    check_for_cancel_every = min(
-        math.ceil(tokens_generated / max(time.monotonic() - t, 0.001)), 100
-    )
+    # The single-token warmup path intentionally samples only the first decode
+    # step, so cold-start compile/prefill latency can dominate the elapsed
+    # measurement here. Keep cancellation checks reasonably spaced even when
+    # that first-token latency is slow, while still capping the interval for
+    # fast models.
+    if tokens_generated == 0:
+        check_for_cancel_every = 0
+    else:
+        check_for_cancel_every = max(
+            _MIN_CANCEL_CHECK_INTERVAL,
+            min(math.ceil(tokens_generated / max(time.monotonic() - t, 0.001)), 100),
+        )
 
     with _hang_debug_watch(
         f"warmup final barrier model={model_id} tokens_generated={tokens_generated}"

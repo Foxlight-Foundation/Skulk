@@ -277,3 +277,40 @@ def test_warmup_helpers_prefer_blank_skulk_values_over_legacy_env(
     assert (
         generate_mod._warmup_instructions(cast(object, _SingleNodeGroup())) is None
     )  # pyright: ignore[reportPrivateUsage]
+
+
+def test_warmup_inference_enforces_minimum_cancel_check_interval_on_slow_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monotonic_values = iter([100.0, 112.0])
+
+    def fake_apply_chat_template(*, tokenizer: object, task_params: object, model_card: object):
+        del tokenizer, task_params, model_card
+        return "warmup prompt"
+
+    def fake_mx_barrier(_group: object) -> None:
+        return None
+
+    def fake_mlx_generate(**_kwargs: object):
+        yield "first"
+
+    def fake_all_gather(array: object, *, group: object):
+        del group
+        return array
+
+    _clear_warmup_env(monkeypatch)
+    monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
+    monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
+    monkeypatch.setattr(generate_mod, "mlx_generate", fake_mlx_generate)
+    monkeypatch.setattr(generate_mod.mx.distributed, "all_gather", fake_all_gather)
+    monkeypatch.setattr(generate_mod.time, "monotonic", lambda: next(monotonic_values))
+
+    check_every = generate_mod.warmup_inference(
+        model=object(),  # type: ignore[arg-type]
+        tokenizer=object(),  # type: ignore[arg-type]
+        group=cast(object, _SingleNodeGroup()),  # type: ignore[arg-type]
+        model_id=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"),
+        model_card=None,
+    )
+
+    assert check_every == 10
