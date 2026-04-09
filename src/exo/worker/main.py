@@ -259,7 +259,7 @@ class Worker:
                         )
                     )
                 except (ClosedResourceError, BrokenResourceError):
-                    logger.info(
+                    logger.debug(
                         "Worker info forwarding stopped because the event stream "
                         "was already closed"
                     )

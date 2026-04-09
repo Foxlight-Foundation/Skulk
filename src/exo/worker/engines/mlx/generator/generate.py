@@ -114,8 +114,8 @@ def _warmup_repeat_count() -> int:
     return 1
 
 
-def _is_distributed_pipeline_warmup(group: mx.distributed.Group | None) -> bool:
-    """Return whether warmup is running for a multi-node pipeline model."""
+def _is_distributed_warmup(group: mx.distributed.Group | None) -> bool:
+    """Return whether warmup is running with a multi-node distributed group."""
     return group is not None and group.size() > 1
 
 
@@ -126,21 +126,21 @@ def _warmup_user_content(group: mx.distributed.Group | None) -> str:
     synthetic prompts have been observed to wedge stream_generate prefill.
     Single-node debugging may still scale the neutral content via environment.
     """
-    if _is_distributed_pipeline_warmup(group):
+    if _is_distributed_warmup(group):
         return "hello"
     return " ".join(["hello"] * _warmup_repeat_count())
 
 
 def _warmup_instructions(group: mx.distributed.Group | None) -> str | None:
     """Return optional warmup instructions for prompt-shape debugging."""
-    if _is_distributed_pipeline_warmup(group):
+    if _is_distributed_warmup(group):
         return None
     raw = os.environ.get("SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS") or os.environ.get(
         "EXO_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS"
     )
     if raw is None:
         return None
-    include = raw.strip().lower() not in {"0", "false", "no", "off"}
+    include = raw.strip().lower() not in {"", "0", "false", "no", "off"}
     if not include:
         return None
     return "You are a helpful assistant. Answer the user in one short sentence."
@@ -625,7 +625,7 @@ def warmup_inference(
     """
     logger.info(f"warming up inference for instance: {model_id}")
 
-    if _is_distributed_pipeline_warmup(group) and (
+    if _is_distributed_warmup(group) and (
         _warmup_repeat_count() != 1 or _warmup_instructions(None) is not None
     ):
         logger.info(

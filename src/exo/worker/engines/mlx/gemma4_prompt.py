@@ -1,9 +1,11 @@
 """Gemma 4 prompt rendering helpers.
 
-This module mirrors the Gemma 4 chat structure used by the reference
-Hugging Face template and Ollama's dedicated Gemma 4 renderer. We use it
-to avoid relying on generic tokenizer chat templating for Gemma 4 because
-we need exact control over the multimodal prompt the model sees.
+This module follows the Gemma 4 chat structure used by the reference Hugging
+Face template and Ollama's dedicated Gemma 4 renderer, while preserving one
+intentional divergence: when thinking is disabled we omit the empty synthetic
+thought-channel suffix because that shape wedges our distributed MLX warmup
+path. We keep a dedicated renderer so multimodal prompts stay under explicit
+repo control instead of relying on generic tokenizer chat templating.
 """
 
 from typing import Any

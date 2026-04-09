@@ -68,11 +68,11 @@ def test_plan_starts_warmup_for_accepting_rank_when_all_loaded_or_warming():
     assert result.instance_id == INSTANCE_1_ID
 
 
-def test_plan_starts_warmup_for_accepting_rank_when_peer_is_already_ready():
+def test_plan_does_not_start_warmup_for_accepting_rank_when_peer_is_ready():
     """
-    Non-zero ranks should still start warmup when a peer races through the
-    temporary debug warmup bypass and reaches Ready before they observe
-    WarmingUp.
+    Non-zero ranks should not start distributed warmup once any peer has
+    already reached Ready because that implies the coordinated warmup phase has
+    moved past the point where this runner can safely join.
     """
     shard0 = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=3)
     shard1 = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=1, world_size=3)
@@ -108,8 +108,7 @@ def test_plan_starts_warmup_for_accepting_rank_when_peer_is_already_ready():
         tasks={},
     )
 
-    assert isinstance(result, StartWarmup)
-    assert result.instance_id == INSTANCE_1_ID
+    assert result is None
 
 
 def test_plan_starts_warmup_for_rank_zero_after_others_warming():
@@ -153,10 +152,10 @@ def test_plan_starts_warmup_for_rank_zero_after_others_warming():
     assert result.instance_id == INSTANCE_1_ID
 
 
-def test_plan_starts_warmup_for_rank_zero_after_other_rank_is_already_ready():
+def test_plan_does_not_start_warmup_for_rank_zero_after_other_rank_is_ready():
     """
-    Rank zero should still start warmup when another rank races from WarmingUp
-    to Ready before the planner observes the intermediate state.
+    Rank zero should not start distributed warmup once another rank has already
+    reached Ready because the synchronized warmup phase is no longer joinable.
     """
     shard0 = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=0, world_size=2)
     shard1 = get_pipeline_shard_metadata(MODEL_A_ID, device_rank=1, world_size=2)
@@ -190,8 +189,7 @@ def test_plan_starts_warmup_for_rank_zero_after_other_rank_is_already_ready():
         tasks={},
     )
 
-    assert isinstance(result, StartWarmup)
-    assert result.instance_id == INSTANCE_1_ID
+    assert result is None
 
 
 def test_plan_does_not_start_warmup_for_non_zero_rank_until_all_loaded_or_warming():
