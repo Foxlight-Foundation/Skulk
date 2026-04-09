@@ -245,6 +245,28 @@ class InferenceConfig(FrozenModel):
     ] = "default"
 
 
+def update_config_field(section: str, key: str, value: object) -> bool:
+    """Update a single field in the config file, preserving all other content.
+
+    Reads the raw YAML, patches ``raw[section][key] = value``, and writes
+    it back.  Returns ``True`` if the file was updated, ``False`` if no
+    config file exists.
+    """
+    path = resolve_config_path()
+    if not path.exists():
+        return False
+    with path.open() as f:
+        raw: dict[str, object] = yaml.safe_load(f) or {}
+    sec = raw.get(section)
+    if not isinstance(sec, dict):
+        sec = {}
+        raw[section] = sec
+    sec[key] = value
+    with path.open("w") as f:
+        yaml.dump(raw, f, default_flow_style=False, sort_keys=False)
+    return True
+
+
 def resolve_config_path() -> Path:
     """Find the config file, preferring ``skulk.yaml`` over legacy ``exo.yaml``."""
     skulk = Path("skulk.yaml")

@@ -29,6 +29,7 @@ from exo.store.config import (
     load_exo_config,
     resolve_config_path,
     resolve_node_staging,
+    update_config_field,
 )
 from exo.store.model_store import ModelStore
 from exo.store.model_store_client import ModelStoreClient, ModelStoreDownloader
@@ -98,12 +99,26 @@ class Node:
             "1" if _user_set_kv_backend else ""
         )  # legacy compat
 
-        # Apply inference config to env var so runner subprocesses inherit it.
-        # Env var takes precedence if user set it at launch.
-        if (
+        # Env var is the source of truth for KV backend. When set at launch,
+        # write it back to the config file so they stay in sync. When not
+        # set, apply the config file value to the env var so runner
+        # subprocesses inherit it.
+        if _user_set_kv_backend:
+            launch_backend = os.environ.get(
+                "SKULK_KV_CACHE_BACKEND",
+                os.environ.get("EXO_KV_CACHE_BACKEND", ""),
+            )
+            if launch_backend:
+                if update_config_field("inference", "kv_cache_backend", launch_backend):
+                    logger.info(
+                        f"Synced launch env KV backend to config: kv_cache_backend={launch_backend}"
+                    )
+                # Ensure both env vars are in sync
+                os.environ["SKULK_KV_CACHE_BACKEND"] = launch_backend
+                os.environ["EXO_KV_CACHE_BACKEND"] = launch_backend
+        elif (
             exo_config is not None
             and exo_config.inference is not None
-            and not _user_set_kv_backend
         ):
             os.environ["SKULK_KV_CACHE_BACKEND"] = exo_config.inference.kv_cache_backend
             os.environ["EXO_KV_CACHE_BACKEND"] = (

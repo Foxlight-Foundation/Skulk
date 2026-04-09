@@ -12,6 +12,7 @@ from mlx_lm.models.cache import (
 )
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
+from exo.shared.constants import preferred_env_value
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import KVCacheType, Model
 from exo.worker.engines.mlx.constants import (
@@ -19,7 +20,6 @@ from exo.worker.engines.mlx.constants import (
     DEFAULT_KV_CACHE_BACKEND,
     DEFAULT_TURBOQUANT_K_BITS,
     DEFAULT_TURBOQUANT_V_BITS,
-    KV_CACHE_BACKEND,
     KV_CACHE_BITS,
     OPTIQ_BITS,
     OPTIQ_FP16_LAYERS,
@@ -636,10 +636,25 @@ def make_kv_cache(
 
 
 def get_kv_cache_backend() -> KVCacheBackend:
-    backend = KV_CACHE_BACKEND
+    """Return the active KV cache backend, reading ``os.environ`` at call time.
+
+    The env var is the source of truth — it can be set at launch, updated
+    by config sync via gossipsub, or changed from the dashboard.  Reading
+    it dynamically (instead of the frozen import-time constant) ensures
+    that runtime updates are always visible to the runner.
+    """
+    backend = cast(
+        KVCacheBackend,
+        preferred_env_value(
+            "SKULK_KV_CACHE_BACKEND",
+            "EXO_KV_CACHE_BACKEND",
+            DEFAULT_KV_CACHE_BACKEND,
+        )
+        or DEFAULT_KV_CACHE_BACKEND,
+    )
     if backend not in VALID_KV_CACHE_BACKENDS:
         logger.warning(
-            f"Unknown EXO_KV_CACHE_BACKEND={backend!r}; falling back to {DEFAULT_KV_CACHE_BACKEND!r}"
+            f"Unknown KV_CACHE_BACKEND={backend!r}; falling back to {DEFAULT_KV_CACHE_BACKEND!r}"
         )
         return DEFAULT_KV_CACHE_BACKEND
     return backend

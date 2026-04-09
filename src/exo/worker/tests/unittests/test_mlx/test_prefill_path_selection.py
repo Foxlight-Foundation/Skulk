@@ -157,7 +157,10 @@ def test_prefill_uses_stream_generate_for_short_pipeline_prompts(
     assert snapshots == []
     assert prefill_tps >= 0.0
     assert fake_cache.trim_calls == [2]
-    assert prefill_mode_calls == [False, False]
+    # First call sets is_prefill=True (pipeline models must run in prefill
+    # mode even on the stream_generate path to avoid all_gather deadlocks).
+    # Second call (in finally) resets to False for subsequent decode.
+    assert prefill_mode_calls == [True, False]
 
 
 def test_prefill_uses_stream_generate_at_single_chunk_boundary(
@@ -207,7 +210,9 @@ def test_prefill_uses_stream_generate_at_single_chunk_boundary(
     assert snapshots == []
     assert prefill_tps >= 0.0
     assert fake_cache.trim_calls == [2]
-    assert prefill_mode_calls == [False, False]
+    # Pipeline models use is_prefill=True during stream_generate prefill,
+    # reset to False in finally.
+    assert prefill_mode_calls == [True, False]
 
 
 def test_prefill_resets_pipeline_flags_after_unexpected_exception(
