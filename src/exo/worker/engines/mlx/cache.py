@@ -35,6 +35,7 @@ from exo.worker.engines.mlx.rotorquant import (
     make_rotorquant_adaptive_cache,
     make_rotorquant_cache_from_template,
 )
+from exo.worker.engines.mlx.rotorquant.tables import ISO3_BLOCK_SIZE
 from exo.worker.engines.mlx.turboquant import (
     make_turboquant_adaptive_cache,
     make_turboquant_cache_from_template,
@@ -423,6 +424,13 @@ def get_memory_used_percentage() -> float:
     return float(mem.percent / 100)
 
 
+def _make_default_cache(model: Model) -> KVCacheType:
+    """Build the default (unquantized) KV cache for a model."""
+    if hasattr(model, "make_cache"):
+        return model.make_cache()  # type: ignore
+    return [KVCache() for _ in model.layers]
+
+
 def make_kv_cache(
     model: Model, max_kv_size: int | None = None, keep: int = 0
 ) -> KVCacheType:
@@ -585,16 +593,33 @@ def make_kv_cache(
             for i, _ in enumerate(model.layers)
         ]
 
-    if backend == "rotorquant":
-        logger.info(
-            f"Using rotorquant KV cache (defer_prefill={ROTORQUANT_DEFER_PREFILL})"
-        )
-        return make_rotorquant_cache_from_template(
-            model,
-            defer_prefill=ROTORQUANT_DEFER_PREFILL,
-        )
+    if backend in ("rotorquant", "rotorquant_adaptive"):
+        # Preflight: RotorQuant requires head_dim divisible by the
+        # IsoQuant block size (128). Models with smaller heads (e.g. 64-d)
+        # would crash at first token; fall back to default instead.
+        if len(model.layers) > 0:
+            first_layer = model.layers[0]
+            attn = getattr(first_layer, "self_attn", first_layer)
+            model_head_dim: int = getattr(attn, "head_dim", ISO3_BLOCK_SIZE)
+        else:
+            model_head_dim = ISO3_BLOCK_SIZE
+        if model_head_dim % ISO3_BLOCK_SIZE != 0:
+            logger.warning(
+                f"RotorQuant requires head_dim divisible by {ISO3_BLOCK_SIZE}, "
+                f"but this model has head_dim={model_head_dim}; "
+                f"falling back to default KV cache"
+            )
+            return _make_default_cache(model)
 
-    if backend == "rotorquant_adaptive":
+        if backend == "rotorquant":
+            logger.info(
+                f"Using rotorquant KV cache (defer_prefill={ROTORQUANT_DEFER_PREFILL})"
+            )
+            return make_rotorquant_cache_from_template(
+                model,
+                defer_prefill=ROTORQUANT_DEFER_PREFILL,
+            )
+
         logger.info(
             f"Using rotorquant adaptive KV cache "
             f"(fp16_layers={ROTORQUANT_FP16_LAYERS}, "
@@ -606,12 +631,8 @@ def make_kv_cache(
             defer_prefill=ROTORQUANT_DEFER_PREFILL,
         )
 
-    if hasattr(model, "make_cache"):
-        logger.info("Using MLX LM's make cache")
-        return model.make_cache()  # type: ignore
-
     logger.info("Using default KV cache")
-    return [KVCache() for _ in model.layers]
+    return _make_default_cache(model)
 
 
 def get_kv_cache_backend() -> KVCacheBackend:

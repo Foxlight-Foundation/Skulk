@@ -455,7 +455,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                   `• TurboQuant Adaptive — Quantizes middle KV layers, keeps edge layers in FP16. Proven stable.\n` +
                   `• TurboQuant — Quantizes all KV layers. Most aggressive non-rotorquant compression.\n` +
                   `• MLX Quantized — MLX's built-in cache quantization.\n\n` +
-                  `Takes effect on next model launch. Incompatible models fall back to Default automatically.`
+                  `Takes effect on next model launch. OptiQ falls back to Default for unsupported architectures; other backends will error on incompatible models.`
                 }
               />
             </FieldLabel>
@@ -471,7 +471,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
             {envOverride ? (
               <HintText>Overridden by SKULK_KV_CACHE_BACKEND environment variable. Remove the env var to configure here.</HintText>
             ) : (
-              <HintText>Changes take effect on the next model launch. Models with incompatible architectures (GQA, non-power-of-two head_dim) will automatically fall back to default.</HintText>
+              <HintText>Changes take effect on the next model launch. OptiQ falls back to Default for unsupported architectures; other backends will error on incompatible models.</HintText>
             )}
           </Fieldset>
 

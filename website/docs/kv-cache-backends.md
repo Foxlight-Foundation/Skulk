@@ -35,7 +35,7 @@ The rotorquant backend implements IsoQuant 3-bit compression with two key proper
 - **Block-diagonal quaternion rotations**: each 4D group of a head dimension is rotated by a fixed unit quaternion, costing `O(d)` per token instead of the `O(d log d)` randomized Hadamard used by the legacy turboquant backend or the `O(d²)` random orthogonal matrix used by mlx-optiq. The quaternion table and 3-bit Lloyd-Max centroids are vendored verbatim from the llama.cpp fork so the math agrees with the upstream C reference.
 - **Deferred prefill**: K and V are kept in fp16 throughout prompt processing and quantized once on the first decode token. This eliminates the compounding centroid-roundtrip error that quantizing-on-insert introduces during prefill, and matches the published 5.3× prefill / PPL 6.91 numbers from the upstream llama.cpp fork. The deferred-prefill flush is the unique contribution of this MLX port — the upstream fork only ships it on CUDA.
 
-GQA models work natively (no fallback) because compression is per-(kv_head, token) and Q heads fan out at SDPA. The head dimension must be a multiple of 128 (the IsoQuant block size); standard Llama and Qwen heads at 64 / 128 / 256 are all multiples and work directly.
+GQA models work natively (no fallback) because compression is per-(kv_head, token) and Q heads fan out at SDPA. The head dimension must be a multiple of 128 (the IsoQuant block size); for example, 128- and 256-d heads work directly, while 64-d heads do not satisfy this requirement and will fall back to the default backend.
 
 ### mlx-optiq (best quality)
 
