@@ -79,11 +79,16 @@ from exo.worker.runner.bootstrap import logger
 Group = mx.distributed.Group
 
 
+def _preferred_env_value(skulk_key: str, exo_key: str) -> str | None:
+    """Return the SKULK env value when present, else the legacy EXO value."""
+    if skulk_key in os.environ:
+        return os.environ[skulk_key]
+    return os.environ.get(exo_key)
+
+
 def _request_shape_debug_enabled() -> bool:
     """Return whether request-shape tracing is enabled for prompt debugging."""
-    value = os.environ.get("SKULK_TRACE_REQUEST_SHAPES") or os.environ.get(
-        "EXO_TRACE_REQUEST_SHAPES"
-    )
+    value = _preferred_env_value("SKULK_TRACE_REQUEST_SHAPES", "EXO_TRACE_REQUEST_SHAPES")
     if value is None:
         return False
     return value.strip().lower() not in {"", "0", "false", "no", "off"}

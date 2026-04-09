@@ -23,12 +23,14 @@ KVCacheBackend = Literal[
     "optiq",
 ]
 DEFAULT_KV_CACHE_BACKEND: KVCacheBackend = "default"
+_kv_cache_backend_value = (
+    os.environ["SKULK_KV_CACHE_BACKEND"]
+    if "SKULK_KV_CACHE_BACKEND" in os.environ
+    else os.environ.get("EXO_KV_CACHE_BACKEND", DEFAULT_KV_CACHE_BACKEND)
+)
 KV_CACHE_BACKEND: KVCacheBackend = cast(
     KVCacheBackend,
-    os.environ.get(
-        "SKULK_KV_CACHE_BACKEND",
-        os.environ.get("EXO_KV_CACHE_BACKEND", DEFAULT_KV_CACHE_BACKEND),
-    ),
+    _kv_cache_backend_value if _kv_cache_backend_value else DEFAULT_KV_CACHE_BACKEND,
 )
 TURBOQUANT_K_BITS: int | None = (
     int(os.environ.get("SKULK_TQ_K_BITS", os.environ.get("EXO_TQ_K_BITS", "")))

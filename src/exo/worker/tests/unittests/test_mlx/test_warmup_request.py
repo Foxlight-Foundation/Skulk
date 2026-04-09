@@ -17,6 +17,17 @@ class _SingleNodeGroup:
         return 1
 
 
+def _clear_warmup_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reset warmup debug env vars so tests are independent from the shell."""
+    for env_name in (
+        "SKULK_DEBUG_WARMUP_REPEAT_COUNT",
+        "EXO_DEBUG_WARMUP_REPEAT_COUNT",
+        "SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS",
+        "EXO_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+
+
 def test_warmup_inference_uses_safe_default_user_content_without_instructions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -51,6 +62,7 @@ def test_warmup_inference_uses_safe_default_user_content_without_instructions(
         captured["logged_prompt"] = prompt
         captured["logged_extra"] = extra
 
+    _clear_warmup_env(monkeypatch)
     monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
     monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
     monkeypatch.setattr(generate_mod, "mlx_generate", fake_mlx_generate)
@@ -106,6 +118,7 @@ def test_warmup_inference_ignores_repeat_count_override_for_pipeline_groups(
         del group
         return array
 
+    _clear_warmup_env(monkeypatch)
     monkeypatch.setenv("SKULK_DEBUG_WARMUP_REPEAT_COUNT", "4")
     monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
     monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
@@ -146,6 +159,7 @@ def test_warmup_inference_ignores_instruction_override_for_pipeline_groups(
         del group
         return array
 
+    _clear_warmup_env(monkeypatch)
     monkeypatch.setenv("SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS", "1")
     monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
     monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
@@ -186,6 +200,7 @@ def test_warmup_inference_honors_repeat_and_instruction_overrides_for_single_nod
         del group
         return array
 
+    _clear_warmup_env(monkeypatch)
     monkeypatch.setenv("SKULK_DEBUG_WARMUP_REPEAT_COUNT", "4")
     monkeypatch.setenv("SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS", "1")
     monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
@@ -231,6 +246,7 @@ def test_warmup_inference_stops_after_first_generated_token(
         del group
         return array
 
+    _clear_warmup_env(monkeypatch)
     monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
     monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
     monkeypatch.setattr(generate_mod, "mlx_generate", fake_mlx_generate)
@@ -246,3 +262,18 @@ def test_warmup_inference_stops_after_first_generated_token(
 
     assert generated_tokens == 1
     assert check_every == 100
+
+
+def test_warmup_helpers_prefer_blank_skulk_values_over_legacy_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_warmup_env(monkeypatch)
+    monkeypatch.setenv("SKULK_DEBUG_WARMUP_REPEAT_COUNT", "")
+    monkeypatch.setenv("EXO_DEBUG_WARMUP_REPEAT_COUNT", "4")
+    monkeypatch.setenv("SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS", "")
+    monkeypatch.setenv("EXO_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS", "1")
+
+    assert generate_mod._warmup_repeat_count() == 1  # pyright: ignore[reportPrivateUsage]
+    assert (
+        generate_mod._warmup_instructions(cast(object, _SingleNodeGroup())) is None
+    )  # pyright: ignore[reportPrivateUsage]

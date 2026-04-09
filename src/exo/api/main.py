@@ -2563,6 +2563,12 @@ class API:
     # Config & Store endpoints
     # ------------------------------------------------------------------
 
+    def _effective_kv_cache_backend(self) -> str:
+        """Return the effective KV backend after SKULK/EXO env precedence is applied."""
+        if "SKULK_KV_CACHE_BACKEND" in os.environ:
+            return os.environ["SKULK_KV_CACHE_BACKEND"] or "default"
+        return os.environ.get("EXO_KV_CACHE_BACKEND") or "default"
+
     async def get_config(self) -> JSONResponse:
         if not self._config_path.exists():
             return JSONResponse(
@@ -2571,10 +2577,7 @@ class API:
                     "configPath": str(self._config_path),
                     "fileExists": False,
                     "effective": {
-                        "kv_cache_backend": os.environ.get(
-                            "SKULK_KV_CACHE_BACKEND",
-                            os.environ.get("EXO_KV_CACHE_BACKEND", "default"),
-                        ),
+                        "kv_cache_backend": self._effective_kv_cache_backend(),
                     },
                 }
             )
@@ -2591,10 +2594,7 @@ class API:
                 "configPath": str(self._config_path),
                 "fileExists": True,
                 "effective": {
-                    "kv_cache_backend": os.environ.get(
-                        "SKULK_KV_CACHE_BACKEND",
-                        os.environ.get("EXO_KV_CACHE_BACKEND", "default"),
-                    ),
+                    "kv_cache_backend": self._effective_kv_cache_backend(),
                     "has_hf_token": has_hf_token or "HF_TOKEN" in os.environ,
                 },
             }

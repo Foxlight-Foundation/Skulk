@@ -80,20 +80,26 @@ generation_stream = mx.new_stream(mx.default_device())
 _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
 
 
+def _preferred_env_value(skulk_key: str, exo_key: str) -> str | None:
+    """Return the SKULK env value when present, else the legacy EXO value."""
+    if skulk_key in os.environ:
+        return os.environ[skulk_key]
+    return os.environ.get(exo_key)
+
+
 def _mlx_hang_debug_enabled() -> bool:
     """Return whether verbose warmup/prefill hang diagnostics are enabled."""
-    value = os.environ.get("SKULK_MLX_HANG_DEBUG") or os.environ.get(
-        "EXO_MLX_HANG_DEBUG"
-    )
+    value = _preferred_env_value("SKULK_MLX_HANG_DEBUG", "EXO_MLX_HANG_DEBUG")
     if value is None:
         return False
-    return value.strip().lower() not in {"0", "false", "no", "off"}
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def _mlx_hang_debug_interval_seconds() -> float:
     """Return the periodic interval for hang-debug watchdog logs."""
-    raw = os.environ.get("SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS") or os.environ.get(
-        "EXO_MLX_HANG_DEBUG_INTERVAL_SECONDS"
+    raw = _preferred_env_value(
+        "SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS",
+        "EXO_MLX_HANG_DEBUG_INTERVAL_SECONDS",
     )
     if raw is None:
         return 30.0
@@ -104,8 +110,9 @@ def _mlx_hang_debug_interval_seconds() -> float:
 
 def _warmup_repeat_count() -> int:
     """Return the neutral warmup token repeat count used for debugging."""
-    raw = os.environ.get("SKULK_DEBUG_WARMUP_REPEAT_COUNT") or os.environ.get(
-        "EXO_DEBUG_WARMUP_REPEAT_COUNT"
+    raw = _preferred_env_value(
+        "SKULK_DEBUG_WARMUP_REPEAT_COUNT",
+        "EXO_DEBUG_WARMUP_REPEAT_COUNT",
     )
     if raw is None:
         return 1
@@ -135,8 +142,9 @@ def _warmup_instructions(group: mx.distributed.Group | None) -> str | None:
     """Return optional warmup instructions for prompt-shape debugging."""
     if _is_distributed_warmup(group):
         return None
-    raw = os.environ.get("SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS") or os.environ.get(
-        "EXO_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS"
+    raw = _preferred_env_value(
+        "SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS",
+        "EXO_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS",
     )
     if raw is None:
         return None
