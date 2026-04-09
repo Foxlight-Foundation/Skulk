@@ -200,6 +200,7 @@ from exo.utils.channels import Receiver, Sender, channel
 from exo.utils.disk_event_log import DiskEventLog
 from exo.utils.power_sampler import PowerSampler
 from exo.utils.task_group import TaskGroup
+from exo.worker.engines.mlx.constants import DEFAULT_KV_CACHE_BACKEND, KVCacheBackend
 
 if TYPE_CHECKING:
     from exo.store.config import ExoConfig
@@ -2566,8 +2567,22 @@ class API:
     def _effective_kv_cache_backend(self) -> str:
         """Return the effective KV backend after SKULK/EXO env precedence is applied."""
         if "SKULK_KV_CACHE_BACKEND" in os.environ:
-            return os.environ["SKULK_KV_CACHE_BACKEND"] or "default"
-        return os.environ.get("EXO_KV_CACHE_BACKEND") or "default"
+            configured_backend = os.environ["SKULK_KV_CACHE_BACKEND"]
+        else:
+            configured_backend = os.environ.get("EXO_KV_CACHE_BACKEND", "")
+        if not configured_backend:
+            return DEFAULT_KV_CACHE_BACKEND
+
+        valid_backends: tuple[KVCacheBackend, ...] = (
+            "default",
+            "mlx_quantized",
+            "turboquant",
+            "turboquant_adaptive",
+            "optiq",
+        )
+        if configured_backend not in valid_backends:
+            return DEFAULT_KV_CACHE_BACKEND
+        return configured_backend
 
     async def get_config(self) -> JSONResponse:
         if not self._config_path.exists():

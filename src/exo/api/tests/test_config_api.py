@@ -73,3 +73,21 @@ def test_get_config_treats_blank_skulk_kv_backend_as_default(
     assert response.status_code == 200
     data: dict[str, Any] = response.json()
     assert data["effective"]["kv_cache_backend"] == "default"
+
+
+def test_get_config_treats_invalid_skulk_kv_backend_as_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "exo.yaml"
+    config_path.write_text("inference:\n  kv_cache_backend: default\n", encoding="utf-8")
+    monkeypatch.setenv("SKULK_KV_CACHE_BACKEND", "typo-backend")
+
+    api = _build_api()
+    api._config_path = config_path  # pyright: ignore[reportPrivateUsage]
+    client = TestClient(api.app)
+
+    response = client.get("/config")
+
+    assert response.status_code == 200
+    data: dict[str, Any] = response.json()
+    assert data["effective"]["kv_cache_backend"] == "default"
