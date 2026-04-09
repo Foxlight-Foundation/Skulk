@@ -349,9 +349,7 @@ class PipelineLastLayer(CustomMlxLayer):
                 _cache: object = cache[0] if hasattr(cache, "caches") else cache  # type: ignore[index]
                 _dep_array = _cache_dep_anchor(_cache)
                 if _dep_array is not None:
-                    _set_cache_dep_anchor(
-                        _cache, mx.depends(_dep_array, output)
-                    )
+                    _set_cache_dep_anchor(_cache, mx.depends(_dep_array, output))
             with _hang_debug_watch(
                 f"pipeline_last eval_send rank={self.r} dst={(self.r + 1) % self.s} prefill={self.is_prefill}"
             ):
@@ -363,22 +361,41 @@ class PipelineLastLayer(CustomMlxLayer):
                     mx.eval(_cache_dep_anchor(_cache))  # type: ignore[possibly-undefined]
 
         if not self.is_prefill:
-            seq_len = output.shape[0]
-            with _hang_debug_watch(
-                f"pipeline_last all_gather rank={self.r} world={self.s}"
-            ):
-                # Evaluate the full all_gather BEFORE slicing. When the last
-                # rank slices [-seq_len:] it gets its own local data, and MLX's
-                # lazy evaluator can satisfy that without actually executing the
-                # collective — leaving all other ranks blocked forever. Forcing
-                # eval on the unsliced tensor ensures every rank participates in
-                # the communication before any rank proceeds.
-                gathered = mx.distributed.all_gather(output, group=self.group)
-            with _hang_debug_watch(
-                f"pipeline_last eval_all_gather rank={self.r} world={self.s}"
-            ):
-                mx.eval(gathered)
-            output = gathered[-seq_len:]
+            # Broadcast the last rank's output to all other ranks so every
+            # rank can apply lm_head and sample the same token.
+            #
+            # Previously this used all_gather, but the collective was prone
+            # to deadlock: generate_step prefetches one decode step ahead,
+            # and when the warmup generator is abandoned mid-iteration the
+            # orphaned collective from the prefetch can mismatch with the
+            # post-warmup barrier/all_gather, leaving one rank blocked.
+            #
+            # Point-to-point send/recv between specific rank pairs cannot
+            # deadlock from collective-ordering mismatches because each
+            # operation is matched bilaterally.
+            if self.r == self.s - 1:
+                # Last rank: send output to every other rank.
+                for dst in range(self.s - 1):
+                    with _hang_debug_watch(
+                        f"pipeline_last broadcast_send rank={self.r} dst={dst} world={self.s}"
+                    ):
+                        sent = mx.distributed.send(output, dst, group=self.group)
+                    with _hang_debug_watch(
+                        f"pipeline_last eval_broadcast_send rank={self.r} dst={dst} world={self.s}"
+                    ):
+                        mx.eval(sent)
+            else:
+                # Non-last rank: receive the last rank's output.
+                with _hang_debug_watch(
+                    f"pipeline_last broadcast_recv rank={self.r} src={self.s - 1} world={self.s}"
+                ):
+                    output = mx.distributed.recv_like(
+                        output, self.s - 1, group=self.group
+                    )
+                with _hang_debug_watch(
+                    f"pipeline_last eval_broadcast_recv rank={self.r} src={self.s - 1} world={self.s}"
+                ):
+                    mx.eval(output)
 
         return output
 
@@ -614,7 +631,9 @@ def patch_pipeline_model[T](model: T, group: mx.distributed.Group) -> T:
             # directly, so pipeline-parallel Gemma 4 needs this patch on both
             # the top-level model and the nested language model.
             if cache is not None:
-                logits_array: mx.array = logits.logits if hasattr(logits, "logits") else logits  # type: ignore[attr-defined]
+                logits_array: mx.array = (
+                    logits.logits if hasattr(logits, "logits") else logits
+                )  # type: ignore[attr-defined]
                 last = cast(object, cache[-1])
                 dep_cache = cast(object, last[0] if hasattr(last, "caches") else last)  # pyright: ignore[reportIndexIssue]
                 anchor = _cache_dep_anchor(dep_cache)

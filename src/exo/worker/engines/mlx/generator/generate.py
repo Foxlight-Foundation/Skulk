@@ -233,7 +233,9 @@ def _slice_native_pixel_values_for_uncached_suffix(
         return pixel_values
 
     available_images = (
-        len(pixel_values) if isinstance(pixel_values, list) else int(pixel_values.shape[0])
+        len(pixel_values)
+        if isinstance(pixel_values, list)
+        else int(pixel_values.shape[0])
     )
     remaining_indices = [
         idx
@@ -647,6 +649,12 @@ def warmup_inference(
             "prompt and ignoring warmup shaping overrides"
         )
 
+    # Distributed pipeline warmup MUST use greedy sampling so every rank
+    # samples the same token from the shared logits.  Stochastic sampling
+    # with per-rank random states can diverge, causing ranks to follow
+    # different code paths inside generate_step and issue mismatched
+    # collective operations.
+    is_distributed = _is_distributed_warmup(group)
     warmup_task_params = TextGenerationTaskParams(
         model=model_id,
         # Distributed pipeline warmup always uses the minimal sanity-check
@@ -660,9 +668,9 @@ def warmup_inference(
         ],
         max_output_tokens=1024,
         enable_thinking=False,
-        temperature=1.0,
-        top_p=0.95,
-        top_k=64,
+        temperature=0.0 if is_distributed else 1.0,
+        top_p=1.0 if is_distributed else 0.95,
+        top_k=0 if is_distributed else 64,
     )
 
     with _hang_debug_watch(f"warmup apply_chat_template model={model_id}"):
@@ -957,7 +965,9 @@ def _mlx_generate_native_vision(
         accumulated_text += final_text
 
     generation_elapsed = time.perf_counter() - generation_start_time
-    generation_tps = completion_tokens / generation_elapsed if generation_elapsed > 0 else 0.0
+    generation_tps = (
+        completion_tokens / generation_elapsed if generation_elapsed > 0 else 0.0
+    )
 
     final_stats = GenerationStats(
         prompt_tps=float(prompt_tps),
