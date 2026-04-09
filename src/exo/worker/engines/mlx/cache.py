@@ -28,6 +28,7 @@ from exo.worker.engines.mlx.constants import (
     TURBOQUANT_FP16_LAYERS,
     TURBOQUANT_K_BITS,
     TURBOQUANT_V_BITS,
+    VALID_KV_CACHE_BACKENDS,
     KVCacheBackend,
 )
 from exo.worker.engines.mlx.rotorquant import (
@@ -615,16 +616,7 @@ def make_kv_cache(
 
 def get_kv_cache_backend() -> KVCacheBackend:
     backend = KV_CACHE_BACKEND
-    valid_backends: tuple[KVCacheBackend, ...] = (
-        "default",
-        "mlx_quantized",
-        "turboquant",
-        "turboquant_adaptive",
-        "optiq",
-        "rotorquant",
-        "rotorquant_adaptive",
-    )
-    if backend not in valid_backends:
+    if backend not in VALID_KV_CACHE_BACKENDS:
         logger.warning(
             f"Unknown EXO_KV_CACHE_BACKEND={backend!r}; falling back to {DEFAULT_KV_CACHE_BACKEND!r}"
         )

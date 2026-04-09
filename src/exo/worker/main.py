@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import anyio
-from anyio import fail_after
+from anyio import BrokenResourceError, ClosedResourceError, fail_after
 from loguru import logger
 from PIL import Image
 
@@ -42,7 +42,9 @@ from exo.shared.types.tasks import (
     CreateRunner,
     DownloadModel,
     ImageEdits,
+    LoadModel,
     Shutdown,
+    StartWarmup,
     Task,
     TaskStatus,
     TextGeneration,
@@ -60,6 +62,81 @@ from exo.utils.keyed_backoff import KeyedBackoff
 from exo.utils.task_group import TaskGroup
 from exo.worker.plan import plan
 from exo.worker.runner.runner_supervisor import RunnerSupervisor
+
+
+def _summarize_worker_task(task: Task) -> str:
+    """Return a compact task summary for worker lifecycle logs."""
+    if isinstance(task, CreateRunner):
+        shard = task.bound_instance.bound_shard
+        return (
+            "CreateRunner("
+            f"instance_id={task.instance_id!r}, "
+            f"runner_id={task.bound_instance.bound_runner_id!r}, "
+            f"node_id={task.bound_instance.bound_node_id!r}, "
+            f"device_rank={shard.device_rank}, "
+            f"world_size={shard.world_size}, "
+            f"layers={shard.start_layer}:{shard.end_layer})"
+        )
+    if isinstance(task, DownloadModel):
+        shard = task.shard_metadata
+        return (
+            "DownloadModel("
+            f"instance_id={task.instance_id!r}, "
+            f"model={shard.model_card.model_id!r}, "
+            f"device_rank={shard.device_rank}, "
+            f"world_size={shard.world_size}, "
+            f"layers={shard.start_layer}:{shard.end_layer})"
+        )
+    if isinstance(task, Shutdown):
+        return (
+            "Shutdown("
+            f"instance_id={task.instance_id!r}, "
+            f"runner_id={task.runner_id!r})"
+        )
+    if isinstance(task, LoadModel):
+        return f"LoadModel(instance_id={task.instance_id!r})"
+    if isinstance(task, StartWarmup):
+        return f"StartWarmup(instance_id={task.instance_id!r})"
+    if isinstance(task, CancelTask):
+        return (
+            "CancelTask("
+            f"instance_id={task.instance_id!r}, "
+            f"runner_id={task.runner_id!r}, "
+            f"cancelled_task_id={task.cancelled_task_id!r})"
+        )
+    if isinstance(task, TextGeneration):
+        params = task.task_params
+        return (
+            "TextGeneration("
+            f"task_id={task.task_id!r}, "
+            f"command_id={task.command_id!r}, "
+            f"instance_id={task.instance_id!r}, "
+            f"model={params.model!r}, "
+            f"input_messages={len(params.input)}, "
+            f"chat_template_messages={len(params.chat_template_messages or [])}, "
+            f"images={len(params.images)}, "
+            f"cached_image_indices={sorted(params.image_hashes.keys())}, "
+            f"total_input_chunks={params.total_input_chunks}, "
+            f"image_count={params.image_count}, "
+            f"stream={params.stream}, "
+            f"reasoning_effort={params.reasoning_effort!r}, "
+            f"enable_thinking={params.enable_thinking!r})"
+        )
+    if isinstance(task, ImageEdits):
+        params = task.task_params
+        return (
+            "ImageEdits("
+            f"task_id={task.task_id!r}, "
+            f"command_id={task.command_id!r}, "
+            f"instance_id={task.instance_id!r}, "
+            f"model={params.model!r}, "
+            f"total_input_chunks={params.total_input_chunks}, "
+            f"has_inline_image_data={bool(params.image_data)}, "
+            f"n={params.n!r}, "
+            f"size={params.size!r}, "
+            f"stream={params.stream!r})"
+        )
+    return task.__class__.__name__
 
 
 def _log_image_transport(message: str) -> None:
@@ -173,13 +250,20 @@ class Worker:
     async def _forward_info(self, recv: Receiver[GatheredInfo]):
         with recv as info_stream:
             async for info in info_stream:
-                await self.event_sender.send(
-                    NodeGatheredInfo(
-                        node_id=self.node_id,
-                        when=str(datetime.now(tz=timezone.utc)),
-                        info=info,
+                try:
+                    await self.event_sender.send(
+                        NodeGatheredInfo(
+                            node_id=self.node_id,
+                            when=str(datetime.now(tz=timezone.utc)),
+                            info=info,
+                        )
                     )
-                )
+                except (ClosedResourceError, BrokenResourceError):
+                    logger.debug(
+                        "Worker info forwarding stopped because the event stream "
+                        "was already closed"
+                    )
+                    return
 
     async def _event_applier(self):
         with self.event_receiver as events:
@@ -238,7 +322,7 @@ class Worker:
                 if not self._download_backoff.should_proceed(model_id):
                     continue
 
-            logger.info(f"Worker plan: {task.__class__.__name__}")
+            logger.info(f"Worker plan: {_summarize_worker_task(task)}")
             assert task.task_status
             await self.event_sender.send(TaskCreated(task_id=task.task_id, task=task))
 
@@ -444,12 +528,29 @@ class Worker:
 
     async def _start_runner_task(self, task: Task):
         if (instance := self.state.instances.get(task.instance_id)) is not None:
-            await self.runners[
-                instance.shard_assignments.node_to_runner[self.node_id]
-            ].start_task(task)
+            runner_id = instance.shard_assignments.node_to_runner[self.node_id]
+            shard = instance.shard(runner_id)
+            logger.info(
+                "Dispatching worker task "
+                f"({_summarize_worker_task(task)}, "
+                f"target_runner_id={runner_id}, "
+                f"device_rank={shard.device_rank if shard is not None else 'unknown'}, "
+                f"world_size={shard.world_size if shard is not None else 'unknown'})"
+            )
+            await self.runners[runner_id].start_task(task)
 
     def _create_supervisor(self, task: CreateRunner) -> RunnerSupervisor:
         """Creates and stores a new AssignedRunner with initial downloading status."""
+        shard = task.bound_instance.bound_shard
+        logger.info(
+            "Creating runner supervisor "
+            f"(instance_id={task.instance_id}, "
+            f"runner_id={task.bound_instance.bound_runner_id}, "
+            f"node_id={task.bound_instance.bound_node_id}, "
+            f"device_rank={shard.device_rank}, "
+            f"world_size={shard.world_size}, "
+            f"layers={shard.start_layer}:{shard.end_layer})"
+        )
         runner = RunnerSupervisor.create(
             bound_instance=task.bound_instance,
             event_sender=self.event_sender.clone(),
