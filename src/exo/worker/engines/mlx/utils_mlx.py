@@ -117,8 +117,7 @@ def log_request_shape(
         payload.update(extra)
 
     logger.info(
-        "[request-shape] "
-        f"{json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
+        f"[request-shape] {json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
     )
     logger.info(f"[request-shape] prompt label={label}\n{prompt}")
 
@@ -287,7 +286,9 @@ class _Gemma4DynamicVisionTower(nn.Module):
         hidden_states = mx.concatenate(all_real, axis=0)[None]
 
         if getattr(getattr(self._inner, "config", None), "standardize", False):
-            hidden_states = (hidden_states - self._inner.std_bias) * self._inner.std_scale
+            hidden_states = (
+                hidden_states - self._inner.std_bias
+            ) * self._inner.std_scale
 
         return hidden_states
 
@@ -1210,10 +1211,12 @@ def mx_all_gather_tasks(
     uuid_byte_length = 36
 
     n_tasks = len(tasks)
+    logger.info(f"mx_all_gather_tasks: gathering counts (n_tasks={n_tasks})")
     all_counts = cast(
         list[int],
         mx.distributed.all_gather(mx.array([n_tasks]), group=group).tolist(),
     )
+    logger.info(f"mx_all_gather_tasks: counts gathered: {all_counts}")
     max_tasks = max(all_counts)
     world_size: int = 1 if group is None else group.size()
 

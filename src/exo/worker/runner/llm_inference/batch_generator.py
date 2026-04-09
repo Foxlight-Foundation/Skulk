@@ -165,7 +165,11 @@ class SequentialGenerator(InferenceGenerator):
 
     def agree_on_tasks(self) -> None:
         """Agree between all ranks about the task ordering (some may have received in different order or not at all)."""
+        logger.info(
+            f"agree_on_tasks: entering with {len(self._maybe_queue)} pending tasks"
+        )
         agreed, different = mx_all_gather_tasks(self._maybe_queue, self.group)
+        logger.info(f"agree_on_tasks: {len(agreed)} agreed, {len(different)} different")
         self._queue.extend(task for task in self._maybe_queue if task in agreed)
         self._maybe_queue = [task for task in self._maybe_queue if task in different]
 
@@ -395,7 +399,11 @@ class BatchGenerator(InferenceGenerator):
 
     def agree_on_tasks(self) -> None:
         """Agree between all ranks about the task ordering (some may have received in different order or not at all)."""
+        logger.info(
+            f"agree_on_tasks: entering with {len(self._maybe_queue)} pending tasks"
+        )
         agreed, different = mx_all_gather_tasks(self._maybe_queue, self.group)
+        logger.info(f"agree_on_tasks: {len(agreed)} agreed, {len(different)} different")
         self._queue.extend(task for task in self._maybe_queue if task in agreed)
         self._maybe_queue = [task for task in self._maybe_queue if task in different]
 
