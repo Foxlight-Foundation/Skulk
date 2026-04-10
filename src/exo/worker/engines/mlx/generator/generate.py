@@ -659,6 +659,7 @@ def warmup_inference(
             tokenizer=tokenizer,
             task_params=warmup_task_params,
             model_card=model_card,
+            suppress_empty_gemma4_thought_channel=True,
         )
     logger.info(
         "Warmup prompt prepared "

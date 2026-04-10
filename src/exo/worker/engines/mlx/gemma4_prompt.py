@@ -2,10 +2,10 @@
 
 This module follows the Gemma 4 chat structure used by the reference Hugging
 Face template and Ollama's dedicated Gemma 4 renderer, while preserving one
-intentional divergence: when thinking is disabled we omit the empty synthetic
-thought-channel suffix because that shape wedges our distributed MLX warmup
-path. We keep a dedicated renderer so multimodal prompts stay under explicit
-repo control instead of relying on generic tokenizer chat templating.
+intentional warmup-only divergence: distributed warmup can suppress the empty
+synthetic thought-channel suffix because that shape has wedged our distributed
+MLX warmup path. Real inference keeps the reference suffix so generation begins
+at the expected visible assistant-content boundary.
 """
 
 from typing import Any
@@ -58,6 +58,7 @@ def render_gemma4_prompt(
     *,
     add_generation_prompt: bool,
     enable_thinking: bool | None = None,
+    suppress_empty_thought_channel: bool = False,
 ) -> str:
     """Render a Gemma 4 prompt matching the reference chat template.
 
@@ -91,11 +92,12 @@ def render_gemma4_prompt(
         prompt_parts.append("<turn|>\n")
 
     if add_generation_prompt:
-        # Gemma's published chat template appends an empty thought channel even
-        # when thinking is disabled. We intentionally omit that suffix here
-        # because it appears to trigger a pipeline warmup wedge in our MLX
-        # distributed path, and real traffic succeeds without this synthetic
-        # prefix.
         prompt_parts.append("<|turn>model\n")
+        if not enable_thinking and not suppress_empty_thought_channel:
+            # Gemma 4 expects the assistant turn to pass through the thought
+            # channel boundary before emitting visible answer text. Keep the
+            # reference suffix for normal inference so generation does not
+            # begin at a raw ``<|channel>`` marker.
+            prompt_parts.append("<|channel>thought\n<channel|>")
 
     return "".join(prompt_parts)

@@ -7,7 +7,13 @@ import mlx.core as mx
 from anyio import WouldBlock
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
-from exo.shared.models.model_cards import ModelCard, ModelTask
+from exo.shared.models.model_cards import (
+    ModelCard,
+    ModelTask,
+    OutputParserType,
+    PromptRendererType,
+    ToolCallFormat,
+)
 from exo.shared.types.chunks import (
     ErrorChunk,
     TokenChunk,
@@ -89,6 +95,28 @@ def _should_skip_llm_warmup(group_size: int) -> bool:
         )
         return False
     return True
+
+
+def _is_gemma4_model(model_id: ModelId, model_card: ModelCard | None) -> bool:
+    """Return whether a model should be treated as a Gemma 4 runtime."""
+    normalized_model_id = str(model_id).lower().replace("_", "-")
+    if "gemma-4" in normalized_model_id or "gemma4" in normalized_model_id:
+        return True
+    if model_card is None:
+        return False
+
+    if model_card.vision is not None and model_card.vision.model_type == "gemma4":
+        return True
+
+    runtime = model_card.runtime
+    if runtime is not None and (
+        runtime.prompt_renderer == PromptRendererType.Gemma4
+        or runtime.output_parser == OutputParserType.Gemma4
+    ):
+        return True
+
+    tooling = model_card.tooling
+    return tooling is not None and tooling.tool_call_format == ToolCallFormat.Gemma4
 
 
 class ExitCode(str, Enum):
@@ -484,20 +512,36 @@ class Builder:
         kv_backend = get_kv_cache_backend()
         # TODO: Remove this forced sequential fallback once quantized KV cache
         # backends support BatchGenerator history merge/extract semantics.
-        force_sequential = kv_backend in (
+        force_sequential_for_kv_backend = kv_backend in (
             "mlx_quantized",
             "turboquant",
             "turboquant_adaptive",
             "optiq",
         )
-        if os.environ.get("EXO_NO_BATCH") or force_sequential:
-            if force_sequential and not os.environ.get("EXO_NO_BATCH"):
+        force_sequential_for_gemma4 = _is_gemma4_model(
+            self.model_id, self.model_card
+        )
+        no_batch_requested = os.environ.get("SKULK_NO_BATCH") or os.environ.get(
+            "EXO_NO_BATCH"
+        )
+        if (
+            no_batch_requested
+            or force_sequential_for_kv_backend
+            or force_sequential_for_gemma4
+        ):
+            if force_sequential_for_kv_backend and not no_batch_requested:
                 logger.warning(
                     "Quantized KV cache backend does not yet support "
                     "batch/history mode; forcing SequentialGenerator "
                     f"(kv_backend={kv_backend})"
                 )
                 logger.info(f"using SequentialGenerator (kv_backend={kv_backend})")
+            elif force_sequential_for_gemma4 and not no_batch_requested:
+                logger.warning(
+                    "Gemma 4 is not compatible with distributed BatchGenerator "
+                    "mode yet; forcing SequentialGenerator"
+                )
+                logger.info("using SequentialGenerator (model_family=gemma4)")
             else:
                 logger.info("using SequentialGenerator (batching disabled)")
             return SequentialGenerator(
