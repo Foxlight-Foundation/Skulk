@@ -8,11 +8,17 @@ from exo.shared.types.text_generation import TextGenerationTaskParams
 
 
 class _FakeGroup:
+    def rank(self) -> int:
+        return 0
+
     def size(self) -> int:
         return 3
 
 
 class _SingleNodeGroup:
+    def rank(self) -> int:
+        return 0
+
     def size(self) -> int:
         return 1
 
@@ -55,8 +61,8 @@ def test_warmup_inference_uses_safe_default_user_content_without_instructions(
             yield None
         return
 
-    def fake_all_gather(array: object, *, group: object):
-        del group
+    def fake_all_sum(array: object, *, group: object, stream: object = None):
+        del group, stream
         return array
 
     def fake_log_request_shape(
@@ -76,7 +82,7 @@ def test_warmup_inference_uses_safe_default_user_content_without_instructions(
     monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
     monkeypatch.setattr(generate_mod, "mlx_generate", fake_mlx_generate)
     monkeypatch.setattr(generate_mod, "log_request_shape", fake_log_request_shape)
-    monkeypatch.setattr(generate_mod.mx.distributed, "all_gather", fake_all_gather)
+    monkeypatch.setattr(generate_mod.mx.distributed, "all_sum", fake_all_sum)
 
     check_every = generate_mod.warmup_inference(
         model=object(),  # type: ignore[arg-type]
@@ -90,10 +96,10 @@ def test_warmup_inference_uses_safe_default_user_content_without_instructions(
     assert check_every == 0
     assert task_params.instructions is None
     assert task_params.enable_thinking is False
-    assert task_params.temperature == 1.0
-    assert task_params.top_p == 0.95
-    assert task_params.top_k == 64
-    assert task_params.max_output_tokens == 1024
+    assert task_params.temperature == 0.0
+    assert task_params.top_p == 1.0
+    assert task_params.top_k == 0
+    assert task_params.max_output_tokens == 1
     first_message = task_params.input[0]
     assert first_message.content == "hello"
     assert captured["suppress_empty_gemma4_thought_channel"] is True
@@ -130,8 +136,8 @@ def test_warmup_inference_ignores_repeat_count_override_for_pipeline_groups(
             yield None
         return
 
-    def fake_all_gather(array: object, *, group: object):
-        del group
+    def fake_all_sum(array: object, *, group: object, stream: object = None):
+        del group, stream
         return array
 
     _clear_warmup_env(monkeypatch)
@@ -139,7 +145,7 @@ def test_warmup_inference_ignores_repeat_count_override_for_pipeline_groups(
     monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
     monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
     monkeypatch.setattr(generate_mod, "mlx_generate", fake_mlx_generate)
-    monkeypatch.setattr(generate_mod.mx.distributed, "all_gather", fake_all_gather)
+    monkeypatch.setattr(generate_mod.mx.distributed, "all_sum", fake_all_sum)
 
     generate_mod.warmup_inference(
         model=object(),  # type: ignore[arg-type]
@@ -177,8 +183,8 @@ def test_warmup_inference_ignores_instruction_override_for_pipeline_groups(
             yield None
         return
 
-    def fake_all_gather(array: object, *, group: object):
-        del group
+    def fake_all_sum(array: object, *, group: object, stream: object = None):
+        del group, stream
         return array
 
     _clear_warmup_env(monkeypatch)
@@ -186,7 +192,7 @@ def test_warmup_inference_ignores_instruction_override_for_pipeline_groups(
     monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
     monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
     monkeypatch.setattr(generate_mod, "mlx_generate", fake_mlx_generate)
-    monkeypatch.setattr(generate_mod.mx.distributed, "all_gather", fake_all_gather)
+    monkeypatch.setattr(generate_mod.mx.distributed, "all_sum", fake_all_sum)
 
     generate_mod.warmup_inference(
         model=object(),  # type: ignore[arg-type]
@@ -224,8 +230,8 @@ def test_warmup_inference_honors_repeat_and_instruction_overrides_for_single_nod
             yield None
         return
 
-    def fake_all_gather(array: object, *, group: object):
-        del group
+    def fake_all_sum(array: object, *, group: object, stream: object = None):
+        del group, stream
         return array
 
     _clear_warmup_env(monkeypatch)
@@ -234,7 +240,7 @@ def test_warmup_inference_honors_repeat_and_instruction_overrides_for_single_nod
     monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
     monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
     monkeypatch.setattr(generate_mod, "mlx_generate", fake_mlx_generate)
-    monkeypatch.setattr(generate_mod.mx.distributed, "all_gather", fake_all_gather)
+    monkeypatch.setattr(generate_mod.mx.distributed, "all_sum", fake_all_sum)
 
     generate_mod.warmup_inference(
         model=object(),  # type: ignore[arg-type]
@@ -256,6 +262,7 @@ def test_warmup_inference_stops_after_first_generated_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     generated_tokens = 0
+    captured: dict[str, object] = {}
 
     def fake_apply_chat_template(
         *,
@@ -270,21 +277,22 @@ def test_warmup_inference_stops_after_first_generated_token(
     def fake_mx_barrier(_group: object) -> None:
         return None
 
-    def fake_mlx_generate(**_kwargs: object):
+    def fake_mlx_generate(**kwargs: object):
         nonlocal generated_tokens
-        for token in ("first", "second", "third"):
-            generated_tokens += 1
-            yield token
+        task = cast(TextGenerationTaskParams, kwargs["task"])
+        captured["max_output_tokens"] = task.max_output_tokens
+        generated_tokens += 1
+        yield "first"
 
-    def fake_all_gather(array: object, *, group: object):
-        del group
+    def fake_all_sum(array: object, *, group: object, stream: object = None):
+        del group, stream
         return array
 
     _clear_warmup_env(monkeypatch)
     monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
     monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
     monkeypatch.setattr(generate_mod, "mlx_generate", fake_mlx_generate)
-    monkeypatch.setattr(generate_mod.mx.distributed, "all_gather", fake_all_gather)
+    monkeypatch.setattr(generate_mod.mx.distributed, "all_sum", fake_all_sum)
 
     check_every = generate_mod.warmup_inference(
         model=object(),  # type: ignore[arg-type]
@@ -294,6 +302,7 @@ def test_warmup_inference_stops_after_first_generated_token(
         model_card=None,
     )
 
+    assert captured["max_output_tokens"] == 1
     assert generated_tokens == 1
     assert check_every == 100
 
@@ -334,15 +343,15 @@ def test_warmup_inference_enforces_minimum_cancel_check_interval_on_slow_start(
     def fake_mlx_generate(**_kwargs: object):
         yield "first"
 
-    def fake_all_gather(array: object, *, group: object):
-        del group
+    def fake_all_sum(array: object, *, group: object, stream: object = None):
+        del group, stream
         return array
 
     _clear_warmup_env(monkeypatch)
     monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
     monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
     monkeypatch.setattr(generate_mod, "mlx_generate", fake_mlx_generate)
-    monkeypatch.setattr(generate_mod.mx.distributed, "all_gather", fake_all_gather)
+    monkeypatch.setattr(generate_mod.mx.distributed, "all_sum", fake_all_sum)
     monkeypatch.setattr(generate_mod.time, "monotonic", lambda: next(monotonic_values))
 
     check_every = generate_mod.warmup_inference(
