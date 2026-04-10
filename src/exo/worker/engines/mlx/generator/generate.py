@@ -675,7 +675,10 @@ def warmup_inference(
                 content=_warmup_user_content(group),
             )
         ],
-        max_output_tokens=1024,
+        # Warmup is a prefill + one-token decode sanity check. Asking the
+        # generator for exactly one token lets it take its normal terminal
+        # path instead of aborting a larger generation mid-stream.
+        max_output_tokens=1,
         enable_thinking=False,
         temperature=0.0 if is_distributed else 1.0,
         top_p=1.0 if is_distributed else 0.95,
@@ -722,10 +725,6 @@ def warmup_inference(
             group=group,
         ):
             tokens_generated += 1
-            # Warmup is only meant to validate prefill plus the first decode
-            # step. Stopping after the first token keeps runner readiness
-            # bounded even if the model would otherwise continue sampling.
-            break
 
     # The single-token warmup path intentionally samples only the first decode
     # step, so cold-start compile/prefill latency can dominate the elapsed

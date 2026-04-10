@@ -101,7 +101,7 @@ def test_warmup_inference_uses_safe_default_user_content_without_instructions(
     assert task_params.temperature == 0.0
     assert task_params.top_p == 1.0
     assert task_params.top_k == 0
-    assert task_params.max_output_tokens == 1024
+    assert task_params.max_output_tokens == 1
     assert captured["suppress_empty_gemma4_thought_channel"] is True
     first_message = task_params.input[0]
     assert first_message.content == "hello"
@@ -260,10 +260,11 @@ def test_warmup_inference_honors_repeat_and_instruction_overrides_for_single_nod
     )
 
 
-def test_warmup_inference_stops_after_first_generated_token(
+def test_warmup_inference_requests_one_token_and_finishes_normally(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     generated_tokens = 0
+    captured: dict[str, object] = {}
 
     def fake_apply_chat_template(
         *,
@@ -278,11 +279,12 @@ def test_warmup_inference_stops_after_first_generated_token(
     def fake_mx_barrier(_group: object) -> None:
         return None
 
-    def fake_mlx_generate(**_kwargs: object):
+    def fake_mlx_generate(**kwargs: object):
         nonlocal generated_tokens
-        for token in ("first", "second", "third"):
-            generated_tokens += 1
-            yield token
+        task = cast(TextGenerationTaskParams, kwargs["task"])
+        captured["max_output_tokens"] = task.max_output_tokens
+        generated_tokens += 1
+        yield "first"
 
     def fake_all_sum(array: object, *, group: object, stream: object = None):
         del group, stream
@@ -302,6 +304,7 @@ def test_warmup_inference_stops_after_first_generated_token(
         model_card=None,
     )
 
+    assert captured["max_output_tokens"] == 1
     assert generated_tokens == 1
     assert check_every == 100
 
