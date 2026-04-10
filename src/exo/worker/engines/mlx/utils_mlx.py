@@ -1196,6 +1196,7 @@ def _parse_kimi_tool_calls(text: str):
 def mx_all_gather_tasks(
     tasks: list[TextGeneration],
     group: mx.distributed.Group | None,
+    label: str = "tasks",
 ) -> tuple[list[TextGeneration], list[TextGeneration]]:
     """Synchronize task lists across all ranks using only all_sum.
 
@@ -1230,7 +1231,7 @@ def mx_all_gather_tasks(
     # Each rank contributes its count in its own slot of a [world_size]
     # vector; other slots are zero.  all_sum merges them.
     n_tasks = len(tasks)
-    logger.info(f"mx_all_gather_tasks: gathering counts (n_tasks={n_tasks})")
+    logger.debug(f"mx_all_gather_tasks[{label}]: gathering counts (n_tasks={n_tasks})")
     counts_vec = [0] * world_size
     counts_vec[rank] = n_tasks
     all_counts = cast(
@@ -1241,7 +1242,7 @@ def mx_all_gather_tasks(
             stream=cpu_stream,
         ).tolist(),
     )
-    logger.info(f"mx_all_gather_tasks: counts gathered: {all_counts}")
+    logger.debug(f"mx_all_gather_tasks[{label}]: counts gathered: {all_counts}")
     max_tasks = max(all_counts)
 
     if max_tasks == 0:
