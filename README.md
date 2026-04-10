@@ -39,7 +39,7 @@ This is the running list of where Skulk diverges from upstream [exo](https://git
 - **OptiQ mixed-precision weight quantization pipeline** — async wrapper around `mlx-optiq`'s sensitivity analysis and KL-divergence per-layer bit allocation, exposed as a model-store optimization job.
 - **KV prefix cache with snapshot/restore** — LRU-evicted prompt-prefix cache that snapshots SSM and rotating-window cache states so prefix matches are reusable across conversation turns even for hybrid Mamba/Transformer architectures.
 - **Pipeline-parallel prefill for short prompts** — pipelined models now route every prefill through the pipeline path, fixing prior warmup hangs on Gemma-class models.
-- **Force-sequential fallback** — quantized backends transparently fall back to a sequential generator when batch/history mode is incompatible with their cache layout.
+- **Force-sequential fallback** — quantized backends and Gemma 4 transparently fall back to a sequential generator when batch/history mode is incompatible with their cache layout.
 
 ### Model capability system
 

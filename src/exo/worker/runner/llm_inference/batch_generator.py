@@ -62,6 +62,7 @@ class GeneratorQueue[T]:
 
 
 class InferenceGenerator(ABC):
+    group: mx.distributed.Group | None
     _cancelled_tasks: set[TaskId]
 
     def should_cancel(self, task_id: TaskId) -> bool:

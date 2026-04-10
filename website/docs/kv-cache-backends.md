@@ -145,6 +145,7 @@ Mixed cache layouts are supported:
 ## Current Limitations
 
 - All quantized KV cache backends force sequential generation (no batch/history mode)
+- Gemma 4 text generation also forces sequential generation for now because distributed BatchGenerator mode can produce degenerate repetition with its sliding-window cache layout
 - The optiq backend requires `mlx-optiq` to be installed (`pip install mlx-optiq`)
 - The optiq backend's `patch_attention()` monkey-patches MLX's SDPA — avoid switching between optiq and other backends within the same process lifetime without a restart
 - The rotorquant backends are disabled unless `SKULK_ENABLE_EXPERIMENTAL_ROTORQUANT=1` is set. If selected without the gate, Skulk falls back to `default`.
