@@ -371,11 +371,20 @@ class PipelineLastLayer(CustomMlxLayer):
             # warmup — and unlike all_gather, orphaned prefetch steps from
             # generate_step's one-step-ahead prefetch can't deadlock because
             # all_sum is commutative and tolerates collective reordering.
+            #
+            # The all_sum runs on the CPU stream rather than the default GPU
+            # stream to avoid a JACCL hang observed on 3-node pipelines when
+            # send/recv and all_sum share the same GPU stream.  CPU-stream
+            # collectives (used by mx_barrier) are proven reliable; this
+            # isolates the broadcast from pipeline point-to-point traffic.
             contribution = output if self.r == self.s - 1 else mx.zeros_like(output)
+            cpu_stream = mx.default_stream(mx.Device(mx.cpu))
             with _hang_debug_watch(
                 f"pipeline_last all_sum_broadcast rank={self.r} world={self.s}"
             ):
-                output = mx.distributed.all_sum(contribution, group=self.group)
+                output = mx.distributed.all_sum(
+                    contribution, group=self.group, stream=cpu_stream
+                )
             with _hang_debug_watch(
                 f"pipeline_last eval_all_sum_broadcast rank={self.r} world={self.s}"
             ):
