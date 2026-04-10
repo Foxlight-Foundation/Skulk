@@ -574,6 +574,30 @@ def prefill(
                     group=group,
                 )
         else:
+            # stream_generate is used for short prompts that fit in a single
+            # pipeline chunk.  We MUST NOT pass the distributed callback here:
+            #
+            # 1. mlx_lm's generate_step calls prompt_progress_callback inside
+            #    ``with mx.stream(generation_stream):``, and on the first decode
+            #    iteration it prefetches the next token via ``_step(y)`` with
+            #    ``mx.async_eval`` BEFORE firing the callback.  That prefetch
+            #    dispatches pipeline sends/recvs to generation_stream.  JACCL
+            #    cannot run an all_gather while sends/recvs are in-flight on
+            #    any stream — the collective deadlocks.
+            #
+            # 2. Warmup also uses stream_generate and abandons the generator
+            #    after one token.  The prefetched decode step leaves orphaned
+            #    sends/recvs on generation_stream.  The post-warmup barrier
+            #    synchronizes CPU stream but not generation_stream, so those
+            #    orphaned ops are still in-flight when real inference starts.
+            #
+            # 3. For short prompts the entire prefill takes milliseconds —
+            #    there is no meaningful window for task/cancellation checking.
+            #
+            # pipeline_parallel_prefill handles its own inter-chunk
+            # synchronization and safely calls the distributed callback
+            # between chunks, so it keeps the callback.
+            #
             # Use max_tokens=1 because max_tokens=0 does not work.
             # We just throw away the generated token - we only care about filling the cache
             with _hang_debug_watch(
@@ -589,7 +613,7 @@ def prefill(
                     prefill_step_size=prefill_step_size,
                     kv_group_size=KV_GROUP_SIZE,
                     kv_bits=KV_BITS,
-                    prompt_progress_callback=combined_progress_callback,
+                    prompt_progress_callback=progress_callback,
                 ):
                     logger.info(
                         f"Prefill stream_generate yielded first token (rank={rank})"
