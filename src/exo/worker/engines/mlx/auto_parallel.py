@@ -364,38 +364,22 @@ class PipelineLastLayer(CustomMlxLayer):
             # Broadcast the last rank's output to all other ranks so every
             # rank can apply lm_head and sample the same token.
             #
-            # Previously this used all_gather, but the collective was prone
-            # to deadlock: generate_step prefetches one decode step ahead,
-            # and when the warmup generator is abandoned mid-iteration the
-            # orphaned collective from the prefetch can mismatch with the
-            # post-warmup barrier/all_gather, leaving one rank blocked.
-            #
-            # Point-to-point send/recv between specific rank pairs cannot
-            # deadlock from collective-ordering mismatches because each
-            # operation is matched bilaterally.
-            if self.r == self.s - 1:
-                # Last rank: send output to every other rank.
-                for dst in range(self.s - 1):
-                    with _hang_debug_watch(
-                        f"pipeline_last broadcast_send rank={self.r} dst={dst} world={self.s}"
-                    ):
-                        sent = mx.distributed.send(output, dst, group=self.group)
-                    with _hang_debug_watch(
-                        f"pipeline_last eval_broadcast_send rank={self.r} dst={dst} world={self.s}"
-                    ):
-                        mx.eval(sent)
-            else:
-                # Non-last rank: receive the last rank's output.
-                with _hang_debug_watch(
-                    f"pipeline_last broadcast_recv rank={self.r} src={self.s - 1} world={self.s}"
-                ):
-                    output = mx.distributed.recv_like(
-                        output, self.s - 1, group=self.group
-                    )
-                with _hang_debug_watch(
-                    f"pipeline_last eval_broadcast_recv rank={self.r} src={self.s - 1} world={self.s}"
-                ):
-                    mx.eval(output)
+            # Uses all_sum instead of point-to-point send/recv: the last rank
+            # contributes its real output while other ranks contribute zeros.
+            # This avoids JACCL send/recv corruption (mlx#3149) that caused
+            # subsequent all_gather collectives to return NaN/garbage after
+            # warmup — and unlike all_gather, orphaned prefetch steps from
+            # generate_step's one-step-ahead prefetch can't deadlock because
+            # all_sum is commutative and tolerates collective reordering.
+            contribution = output if self.r == self.s - 1 else mx.zeros_like(output)
+            with _hang_debug_watch(
+                f"pipeline_last all_sum_broadcast rank={self.r} world={self.s}"
+            ):
+                output = mx.distributed.all_sum(contribution, group=self.group)
+            with _hang_debug_watch(
+                f"pipeline_last eval_all_sum_broadcast rank={self.r} world={self.s}"
+            ):
+                mx.eval(output)
 
         return output
 
