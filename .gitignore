@@ -1,7 +1,8 @@
 # gitingest
 digest.txt
 
-# cluster config (copy exo.yaml.example to exo.yaml and edit)
+# cluster config (copy skulk.yaml.example or exo.yaml.example and edit)
+skulk.yaml
 exo.yaml
 
 # python
