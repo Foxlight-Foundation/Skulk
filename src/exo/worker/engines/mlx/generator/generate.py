@@ -509,12 +509,12 @@ def prefill(
         prefill_step_size // min(4, group_size) if is_pipeline else prefill_step_size
     )
 
-    # Pipeline-parallel prefill can wedge when the prompt fits inside a single
-    # effective per-rank chunk (i.e. ``n_real == 1`` in the prefill loop).
     # Mirror pipeline_parallel_prefill's chunking math here by reserving the
     # final token for the post-loop pass before computing the real chunk count.
-    # That keeps multi-chunk prompts on pipeline_parallel_prefill while routing
-    # single-chunk short / warmup prompts through stream_generate.
+    # This value is primarily diagnostic now: all pipeline prompts use the
+    # explicit pipeline prefill path, but short one-chunk prompts intentionally
+    # suppress the distributed progress callback because there is no useful
+    # cancellation window inside a millisecond-scale prefill.
     real_prefill_tokens = max(num_tokens - 1, 0)
     pipeline_chunks = (
         (real_prefill_tokens + effective_prefill_step_size - 1)
@@ -522,7 +522,7 @@ def prefill(
         if effective_prefill_step_size > 0
         else 0
     )
-    use_pipeline_prefill = is_pipeline and pipeline_chunks >= 2
+    use_pipeline_prefill = is_pipeline
     logger.info(
         "Prefill path selected: "
         f"{'pipeline_parallel_prefill' if use_pipeline_prefill else 'stream_generate'} "
@@ -559,6 +559,9 @@ def prefill(
         if use_pipeline_prefill:
             set_pipeline_queue_sends(model, queue_sends=True)
             assert group is not None, "Pipeline prefill requires a distributed group"
+            pipeline_distributed_callback = (
+                distributed_prompt_progress_callback if pipeline_chunks >= 2 else None
+            )
             with _hang_debug_watch(
                 f"pipeline_parallel_prefill rank={rank} group_size={group_size}"
             ):
@@ -570,33 +573,15 @@ def prefill(
                     kv_group_size=KV_GROUP_SIZE,
                     kv_bits=KV_BITS,
                     prompt_progress_callback=progress_callback,
-                    distributed_prompt_progress_callback=distributed_prompt_progress_callback,
+                    distributed_prompt_progress_callback=pipeline_distributed_callback,
                     group=group,
                 )
         else:
-            # stream_generate is used for short prompts that fit in a single
-            # pipeline chunk.  We MUST NOT pass the distributed callback here:
-            #
-            # 1. mlx_lm's generate_step calls prompt_progress_callback inside
-            #    ``with mx.stream(generation_stream):``, and on the first decode
-            #    iteration it prefetches the next token via ``_step(y)`` with
-            #    ``mx.async_eval`` BEFORE firing the callback.  That prefetch
-            #    dispatches pipeline sends/recvs to generation_stream.  JACCL
-            #    cannot run an all_gather while sends/recvs are in-flight on
-            #    any stream — the collective deadlocks.
-            #
-            # 2. Warmup also uses stream_generate and abandons the generator
-            #    after one token.  The prefetched decode step leaves orphaned
-            #    sends/recvs on generation_stream.  The post-warmup barrier
-            #    synchronizes CPU stream but not generation_stream, so those
-            #    orphaned ops are still in-flight when real inference starts.
-            #
-            # 3. For short prompts the entire prefill takes milliseconds —
-            #    there is no meaningful window for task/cancellation checking.
-            #
-            # pipeline_parallel_prefill handles its own inter-chunk
-            # synchronization and safely calls the distributed callback
-            # between chunks, so it keeps the callback.
+            # Non-pipeline models can safely use upstream stream_generate for
+            # prefill. Pipeline models avoid it entirely: mlx-lm's generate_step
+            # prefetches one decode step before yielding even with max_tokens=1,
+            # which can leave hidden pipeline sends/recvs in flight and wedge
+            # the next collective.
             #
             # Use max_tokens=1 because max_tokens=0 does not work.
             # We just throw away the generated token - we only care about filling the cache
