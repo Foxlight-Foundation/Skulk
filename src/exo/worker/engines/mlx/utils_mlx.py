@@ -841,6 +841,7 @@ def apply_chat_template(
     tokenizer: TokenizerWrapper,
     task_params: TextGenerationTaskParams,
     model_card: ModelCard | None = None,
+    suppress_empty_gemma4_thought_channel: bool = False,
 ) -> str:
     """Convert TextGenerationTaskParams to a chat template prompt.
 
@@ -902,6 +903,7 @@ def apply_chat_template(
             formatted_messages,
             add_generation_prompt=True,
             enable_thinking=task_params.enable_thinking,
+            suppress_empty_thought_channel=suppress_empty_gemma4_thought_channel,
         )
         if partial_assistant_content:
             prompt += partial_assistant_content

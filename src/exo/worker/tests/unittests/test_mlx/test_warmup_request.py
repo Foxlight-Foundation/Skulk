@@ -40,10 +40,17 @@ def test_warmup_inference_uses_safe_default_user_content_without_instructions(
     captured: dict[str, object] = {}
 
     def fake_apply_chat_template(
-        *, tokenizer: object, task_params: object, model_card: object
+        *,
+        tokenizer: object,
+        task_params: object,
+        model_card: object,
+        suppress_empty_gemma4_thought_channel: bool = False,
     ):
         del tokenizer, model_card
         captured["task_params"] = task_params
+        captured["suppress_empty_gemma4_thought_channel"] = (
+            suppress_empty_gemma4_thought_channel
+        )
         return "warmup prompt"
 
     def fake_mx_barrier(_group: object) -> None:
@@ -95,6 +102,7 @@ def test_warmup_inference_uses_safe_default_user_content_without_instructions(
     assert task_params.top_p == 1.0
     assert task_params.top_k == 0
     assert task_params.max_output_tokens == 1024
+    assert captured["suppress_empty_gemma4_thought_channel"] is True
     first_message = task_params.input[0]
     assert first_message.content == "hello"
     assert captured["label"] == "warmup"
@@ -112,9 +120,13 @@ def test_warmup_inference_ignores_repeat_count_override_for_pipeline_groups(
     captured: dict[str, object] = {}
 
     def fake_apply_chat_template(
-        *, tokenizer: object, task_params: object, model_card: object
+        *,
+        tokenizer: object,
+        task_params: object,
+        model_card: object,
+        suppress_empty_gemma4_thought_channel: bool = False,
     ):
-        del tokenizer, model_card
+        del tokenizer, model_card, suppress_empty_gemma4_thought_channel
         captured["task_params"] = task_params
         return "warmup prompt"
 
@@ -155,9 +167,13 @@ def test_warmup_inference_ignores_instruction_override_for_pipeline_groups(
     captured: dict[str, object] = {}
 
     def fake_apply_chat_template(
-        *, tokenizer: object, task_params: object, model_card: object
+        *,
+        tokenizer: object,
+        task_params: object,
+        model_card: object,
+        suppress_empty_gemma4_thought_channel: bool = False,
     ):
-        del tokenizer, model_card
+        del tokenizer, model_card, suppress_empty_gemma4_thought_channel
         captured["task_params"] = task_params
         return "warmup prompt"
 
@@ -198,9 +214,13 @@ def test_warmup_inference_honors_repeat_and_instruction_overrides_for_single_nod
     captured: dict[str, object] = {}
 
     def fake_apply_chat_template(
-        *, tokenizer: object, task_params: object, model_card: object
+        *,
+        tokenizer: object,
+        task_params: object,
+        model_card: object,
+        suppress_empty_gemma4_thought_channel: bool = False,
     ):
-        del tokenizer, model_card
+        del tokenizer, model_card, suppress_empty_gemma4_thought_channel
         captured["task_params"] = task_params
         return "warmup prompt"
 
@@ -246,9 +266,13 @@ def test_warmup_inference_stops_after_first_generated_token(
     generated_tokens = 0
 
     def fake_apply_chat_template(
-        *, tokenizer: object, task_params: object, model_card: object
+        *,
+        tokenizer: object,
+        task_params: object,
+        model_card: object,
+        suppress_empty_gemma4_thought_channel: bool = False,
     ):
-        del tokenizer, task_params, model_card
+        del tokenizer, task_params, model_card, suppress_empty_gemma4_thought_channel
         return "warmup prompt"
 
     def fake_mx_barrier(_group: object) -> None:
@@ -292,7 +316,7 @@ def test_warmup_helpers_prefer_blank_skulk_values_over_legacy_env(
     monkeypatch.setenv("EXO_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS", "1")
 
     assert generate_mod._warmup_repeat_count() == 1  # pyright: ignore[reportPrivateUsage]
-    assert generate_mod._warmup_instructions(cast(object, _SingleNodeGroup())) is None  # pyright: ignore[reportPrivateUsage]
+    assert generate_mod._warmup_instructions(cast(object, _SingleNodeGroup())) is None  # pyright: ignore[reportPrivateUsage, reportArgumentType]
 
 
 def test_warmup_inference_enforces_minimum_cancel_check_interval_on_slow_start(
@@ -301,9 +325,13 @@ def test_warmup_inference_enforces_minimum_cancel_check_interval_on_slow_start(
     monotonic_values = iter([100.0, 112.0])
 
     def fake_apply_chat_template(
-        *, tokenizer: object, task_params: object, model_card: object
+        *,
+        tokenizer: object,
+        task_params: object,
+        model_card: object,
+        suppress_empty_gemma4_thought_channel: bool = False,
     ):
-        del tokenizer, task_params, model_card
+        del tokenizer, task_params, model_card, suppress_empty_gemma4_thought_channel
         return "warmup prompt"
 
     def fake_mx_barrier(_group: object) -> None:
