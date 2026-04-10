@@ -1197,6 +1197,18 @@ def mx_all_gather_tasks(
     tasks: list[TextGeneration],
     group: mx.distributed.Group | None,
 ) -> tuple[list[TextGeneration], list[TextGeneration]]:
+    """Synchronize task lists across all ranks via all_gather.
+
+    All collectives run on the CPU stream to avoid JACCL hangs when called
+    inside mlx_lm's ``with mx.stream(generation_stream):`` context.  The
+    generation_stream is a non-default GPU stream; mixing collective streams
+    (CPU for ``mx_any``, GPU-generation for ``all_gather``) causes JACCL to
+    mismatch collective ordering across ranks, deadlocking the second
+    all_gather.  Using the CPU stream for everything — matching ``mx_any``
+    and ``mx_barrier`` — keeps all collectives on a single, proven-reliable
+    stream.
+    """
+
     def encode_task_id(task_id: TaskId) -> list[int]:
         utf8_task_id = task_id.encode()
         return [
@@ -1209,12 +1221,15 @@ def mx_all_gather_tasks(
         )
 
     uuid_byte_length = 36
+    cpu_stream = mx.default_stream(mx.Device(mx.cpu))
 
     n_tasks = len(tasks)
     logger.info(f"mx_all_gather_tasks: gathering counts (n_tasks={n_tasks})")
     all_counts = cast(
         list[int],
-        mx.distributed.all_gather(mx.array([n_tasks]), group=group).tolist(),
+        mx.distributed.all_gather(
+            mx.array([n_tasks]), group=group, stream=cpu_stream
+        ).tolist(),
     )
     logger.info(f"mx_all_gather_tasks: counts gathered: {all_counts}")
     max_tasks = max(all_counts)
@@ -1231,7 +1246,9 @@ def mx_all_gather_tasks(
 
     gathered = cast(
         list[list[list[int]]],
-        mx.distributed.all_gather(mx.array(padded), group=group)
+        mx.distributed.all_gather(
+            mx.array(padded), group=group, stream=cpu_stream
+        )
         .reshape(world_size, max_tasks, -1)
         .tolist(),
     )
