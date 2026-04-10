@@ -15,27 +15,26 @@ Skulk includes several opt-in KV cache backends for MLX text generation. These b
 - `turboquant`: correctness-first TurboQuant-inspired KV cache for standard `KVCache` layers
 - `turboquant_adaptive`: keeps outer KV layers in FP16 and applies TurboQuant to middle KV layers
 - `optiq`: rotation-based KV cache via [mlx-optiq](https://mlx-optiq.pages.dev/) — uses randomized orthogonal rotations with Lloyd-Max quantization and rotated-space attention. Falls back to default for GQA models.
-- `rotorquant`: **[NEW]** pure-MLX port of IsoQuant 3-bit from [scrya-com/rotorquant](https://github.com/scrya-com/rotorquant) and [johndpope/llama-cpp-turboquant](https://github.com/johndpope/llama-cpp-turboquant). Block-diagonal quaternion rotations + deferred prefill. GQA-native.
-- `rotorquant_adaptive`: **[NEW]** as above with FP16 protection on the first/last N attention layers. Recommended starting point.
+- `rotorquant`: **experimental, gated** pure-MLX IsoQuant-style storage/dequant cache. This is not the fused RotorQuant+QJL implementation from the RotorQuant paper.
+- `rotorquant_adaptive`: **experimental, gated** as above with FP16 protection on the first/last N attention layers.
 
 If `SKULK_KV_CACHE_BACKEND` is unset, or is set to `default`, Skulk behaves as before.
 
 ## Recommended Settings
 
-### RotorQuant Adaptive (recommended starting point)
+### Default Baseline (recommended while debugging)
 
 ```bash
-SKULK_KV_CACHE_BACKEND=rotorquant_adaptive \
-SKULK_ROTORQUANT_FP16_LAYERS=4 \
-uv run skulk
+SKULK_KV_CACHE_BACKEND=default \
+SKULK_MLX_HANG_DEBUG=1 \
+SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS=5 \
+uv run skulk -vv
 ```
 
-The rotorquant backend implements IsoQuant 3-bit compression with two key properties:
-
-- **Block-diagonal quaternion rotations**: each 4D group of a head dimension is rotated by a fixed unit quaternion, costing `O(d)` per token instead of the `O(d log d)` randomized Hadamard used by the legacy turboquant backend or the `O(d²)` random orthogonal matrix used by mlx-optiq. The quaternion table and 3-bit Lloyd-Max centroids are vendored verbatim from the llama.cpp fork so the math agrees with the upstream C reference.
-- **Deferred prefill**: K and V are kept in fp16 throughout prompt processing and quantized once on the first decode token. This eliminates the compounding centroid-roundtrip error that quantizing-on-insert introduces during prefill, and matches the published 5.3× prefill / PPL 6.91 numbers from the upstream llama.cpp fork. The deferred-prefill flush is the unique contribution of this MLX port — the upstream fork only ships it on CUDA.
-
-GQA models work natively (no fallback) because compression is per-(kv_head, token) and Q heads fan out at SDPA. The head dimension must be a multiple of 128 (the IsoQuant block size); for example, 128- and 256-d heads work directly, while 64-d heads do not satisfy this requirement and will fall back to the default backend.
+Use the default backend first when validating distributed pipeline behavior. It
+removes KV-cache compression from the failure surface so hangs can be attributed
+to pipeline scheduling, task agreement, or the model path rather than an
+experimental cache implementation.
 
 ### mlx-optiq (best quality)
 
@@ -60,6 +59,23 @@ uv run skulk
 
 This mode keeps the first and last 4 KV layers in normal FP16-style cache and applies TurboQuant only to the middle KV layers. Proven stable across most models.
 
+### RotorQuant / IsoQuant (experimental only)
+
+The `rotorquant` names are intentionally gated behind an explicit opt-in:
+
+```bash
+SKULK_ENABLE_EXPERIMENTAL_ROTORQUANT=1 \
+SKULK_KV_CACHE_BACKEND=rotorquant_adaptive \
+SKULK_ROTORQUANT_FP16_LAYERS=4 \
+uv run skulk
+```
+
+This backend is a pure-MLX IsoQuant-style cache that compresses storage and
+then returns fully dequantized fp16 K/V to normal MLX attention. It does not
+implement RotorQuant's fused Metal/CUDA attention path or QJL residual
+correction, so it should not be used as the default distributed inference
+baseline.
+
 ## Available Environment Variables
 
 | Variable | Backends | Default | Description |
@@ -71,8 +87,9 @@ This mode keeps the first and last 4 KV layers in normal FP16-style cache and ap
 | `SKULK_TQ_K_BITS` | `turboquant`, `turboquant_adaptive` | `3` | Key quantization bits |
 | `SKULK_TQ_V_BITS` | `turboquant`, `turboquant_adaptive` | `4` | Value quantization bits |
 | `SKULK_TQ_FP16_LAYERS` | `turboquant_adaptive` | `4` | Edge layers kept in FP16 |
+| `SKULK_ENABLE_EXPERIMENTAL_ROTORQUANT` | `rotorquant`, `rotorquant_adaptive` | `0` | Required opt-in for experimental RotorQuant/IsoQuant backends |
 | `SKULK_ROTORQUANT_FP16_LAYERS` | `rotorquant_adaptive` | `4` | Edge layers kept in FP16 |
-| `SKULK_ROTORQUANT_DEFER_PREFILL` | `rotorquant`, `rotorquant_adaptive` | `1` | Set to `0` to disable deferred prefill (debugging only) |
+| `SKULK_ROTORQUANT_DEFER_PREFILL` | `rotorquant`, `rotorquant_adaptive` | `1` | Set to `0` to disable deferred prefill while debugging |
 
 ## Invocation Examples
 
@@ -105,16 +122,16 @@ SKULK_KV_CACHE_BACKEND=turboquant_adaptive SKULK_TQ_K_BITS=3 SKULK_TQ_V_BITS=4 S
 | Backend | Memory | Quality | Speed | Notes |
 |---------|--------|---------|-------|-------|
 | `default` | Highest | Baseline | Fastest | No quantization |
-| `rotorquant_adaptive` | Low | Best quantized | Near-baseline | IsoQuant 3-bit + deferred prefill, GQA-native |
-| `rotorquant` | Lowest | Good | Near-baseline | All layers IsoQuant 3-bit + deferred prefill |
 | `optiq` | Low | Good | Near-baseline | Rotation-based, no GQA support |
 | `turboquant_adaptive` | Low | Good | Moderate | Proven stable, Hadamard-based |
 | `turboquant` | Low | Variable | Moderate | All layers, Hadamard-based |
 | `mlx_quantized` | Low | Good | Moderate | MLX built-in quantization |
+| `rotorquant_adaptive` | Low | Experimental | Experimental | Gated pure-MLX IsoQuant storage/dequant cache |
+| `rotorquant` | Lowest | Experimental | Experimental | Gated pure-MLX IsoQuant storage/dequant cache |
 
 ## Supported Cache Layouts
 
-All quantized backends (rotorquant, optiq, turboquant, mlx_quantized) compress only standard `KVCache` entries and preserve these cache types unchanged:
+All quantized backends (optiq, turboquant, mlx_quantized, and the gated rotorquant variants) compress only standard `KVCache` entries and preserve these cache types unchanged:
 
 - `ArraysCache`
 - `RotatingKVCache`
@@ -130,6 +147,7 @@ Mixed cache layouts are supported:
 - All quantized KV cache backends force sequential generation (no batch/history mode)
 - The optiq backend requires `mlx-optiq` to be installed (`pip install mlx-optiq`)
 - The optiq backend's `patch_attention()` monkey-patches MLX's SDPA — avoid switching between optiq and other backends within the same process lifetime without a restart
+- The rotorquant backends are disabled unless `SKULK_ENABLE_EXPERIMENTAL_ROTORQUANT=1` is set. If selected without the gate, Skulk falls back to `default`.
 
 ## About mlx-optiq
 

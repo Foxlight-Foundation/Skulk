@@ -1,7 +1,10 @@
-"""RotorQuant KV cache backend (IsoQuant variant).
+"""Experimental RotorQuant-named KV cache backend (IsoQuant variant).
 
 Pure-MLX port of the IsoQuant 3-bit KV cache compression from
 johndpope/llama-cpp-turboquant (MIT) and scrya-com/rotorquant (MIT).
+This is not the fused RotorQuant+QJL attention implementation described in
+the RotorQuant paper; it is a storage/dequant cache used for isolated MLX
+experiments.
 
 Key properties vs the older TurboQuant native backend:
 - Block-diagonal 4D quaternion rotations instead of randomized Hadamard

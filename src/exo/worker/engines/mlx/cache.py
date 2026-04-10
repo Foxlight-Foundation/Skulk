@@ -20,6 +20,7 @@ from exo.worker.engines.mlx.constants import (
     DEFAULT_KV_CACHE_BACKEND,
     DEFAULT_TURBOQUANT_K_BITS,
     DEFAULT_TURBOQUANT_V_BITS,
+    EXPERIMENTAL_ROTORQUANT_BACKENDS,
     KV_CACHE_BITS,
     OPTIQ_BITS,
     OPTIQ_FP16_LAYERS,
@@ -30,6 +31,8 @@ from exo.worker.engines.mlx.constants import (
     TURBOQUANT_V_BITS,
     VALID_KV_CACHE_BACKENDS,
     KVCacheBackend,
+    experimental_rotorquant_enabled,
+    resolve_kv_cache_backend,
 )
 from exo.worker.engines.mlx.rotorquant import (
     make_rotorquant_adaptive_cache,
@@ -654,18 +657,35 @@ def get_kv_cache_backend() -> KVCacheBackend:
     it dynamically (instead of the frozen import-time constant) ensures
     that runtime updates are always visible to the runner.
     """
-    backend = cast(
-        KVCacheBackend,
+    configured_backend = (
         preferred_env_value(
-            "SKULK_KV_CACHE_BACKEND",
-            "EXO_KV_CACHE_BACKEND",
-            DEFAULT_KV_CACHE_BACKEND,
+            "SKULK_KV_CACHE_BACKEND", "EXO_KV_CACHE_BACKEND", DEFAULT_KV_CACHE_BACKEND
         )
-        or DEFAULT_KV_CACHE_BACKEND,
+        or DEFAULT_KV_CACHE_BACKEND
     )
+    backend = resolve_kv_cache_backend(configured_backend)
+
+    if configured_backend not in VALID_KV_CACHE_BACKENDS:
+        logger.warning(
+            f"Unknown KV_CACHE_BACKEND={configured_backend!r}; "
+            f"falling back to {DEFAULT_KV_CACHE_BACKEND!r}"
+        )
+        return backend
+
     if backend not in VALID_KV_CACHE_BACKENDS:
         logger.warning(
             f"Unknown KV_CACHE_BACKEND={backend!r}; falling back to {DEFAULT_KV_CACHE_BACKEND!r}"
         )
         return DEFAULT_KV_CACHE_BACKEND
+
+    if (
+        configured_backend in EXPERIMENTAL_ROTORQUANT_BACKENDS
+        and not experimental_rotorquant_enabled()
+    ):
+        logger.warning(
+            f"KV_CACHE_BACKEND={configured_backend!r} requested, but RotorQuant is "
+            "an experimental pure-MLX IsoQuant storage/dequant backend. Falling "
+            "back to 'default'. Set SKULK_ENABLE_EXPERIMENTAL_ROTORQUANT=1 to "
+            "force this backend for isolated testing."
+        )
     return backend

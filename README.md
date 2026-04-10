@@ -454,6 +454,7 @@ uv run exo --bootstrap-peers /ip4/192.168.1.20/tcp/5678/p2p/12D3KooW...
 | `EXO_NO_BATCH` | Force sequential generation | `false` |
 | `EXO_OPTIQ_BITS` | Bit width for `optiq` | `4` |
 | `EXO_OPTIQ_FP16_LAYERS` | Edge FP16 layers for `optiq` | `4` |
+| `SKULK_ENABLE_EXPERIMENTAL_ROTORQUANT` | Enable experimental pure-MLX RotorQuant/IsoQuant cache backends | `false` |
 | `SKULK_ROTORQUANT_FP16_LAYERS` | Edge FP16 layers for `rotorquant_adaptive` | `4` |
 | `SKULK_ROTORQUANT_DEFER_PREFILL` | Set to `0` to disable deferred prefill (debugging only) | `1` |
 | `EXO_BOOTSTRAP_PEERS` | Comma-separated static peers to dial on startup | None |
@@ -465,8 +466,14 @@ Examples:
 EXO_OFFLINE=true uv run skulk
 EXO_ENABLE_IMAGE_MODELS=true uv run skulk
 EXO_KV_CACHE_BACKEND=optiq EXO_OPTIQ_BITS=4 EXO_OPTIQ_FP16_LAYERS=4 uv run skulk
-SKULK_KV_CACHE_BACKEND=rotorquant_adaptive SKULK_ROTORQUANT_FP16_LAYERS=4 uv run skulk
+SKULK_KV_CACHE_BACKEND=default SKULK_MLX_HANG_DEBUG=1 uv run skulk -vv
 ```
+
+The `rotorquant` and `rotorquant_adaptive` cache backends are experimental
+pure-MLX IsoQuant storage/dequant backends, not the fused RotorQuant+QJL
+implementation from the paper. They fall back to `default` unless
+`SKULK_ENABLE_EXPERIMENTAL_ROTORQUANT=1` is also set, and should be used only
+for isolated cache experiments.
 
 ## RDMA on macOS
 

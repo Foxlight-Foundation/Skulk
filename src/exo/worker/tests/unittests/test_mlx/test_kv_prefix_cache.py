@@ -113,6 +113,26 @@ class TestKVCacheBackends:
         with patch.dict(os.environ, {"SKULK_KV_CACHE_BACKEND": "mystery"}):
             assert get_kv_cache_backend() == "default"
 
+    def test_rotorquant_backend_requires_experimental_gate(self):
+        with patch.dict(
+            os.environ,
+            {
+                "SKULK_KV_CACHE_BACKEND": "rotorquant_adaptive",
+                "SKULK_ENABLE_EXPERIMENTAL_ROTORQUANT": "",
+            },
+        ):
+            assert get_kv_cache_backend() == "default"
+
+    def test_rotorquant_backend_can_be_explicitly_enabled(self):
+        with patch.dict(
+            os.environ,
+            {
+                "SKULK_KV_CACHE_BACKEND": "rotorquant",
+                "SKULK_ENABLE_EXPERIMENTAL_ROTORQUANT": "1",
+            },
+        ):
+            assert get_kv_cache_backend() == "rotorquant"
+
     def test_make_kv_cache_default_backend(self):
         model = cast(Model, type("FakeModel", (), {"layers": [object(), object()]})())
         with patch.dict(os.environ, {"SKULK_KV_CACHE_BACKEND": "default"}):

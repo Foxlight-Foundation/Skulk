@@ -1,16 +1,16 @@
-"""RotorQuant KV cache class with optional deferred prefill.
+"""Experimental pure-MLX IsoQuant KV cache with optional deferred prefill.
 
-The deferred-prefill path is the load-bearing accuracy improvement that
-the upstream llama.cpp fork only ships on CUDA (``#ifdef GGML_USE_CUDA``
-in ``llama-context.cpp:1690``). On Metal/MLX it has not existed before
-this port.
+This module intentionally does not implement the fused RotorQuant+QJL
+attention path from the RotorQuant paper. It stores compressed K/V indices
+and norms, then materializes dequantized fp16 K/V for normal MLX attention.
+That makes it useful for isolated cache experiments, but not a production
+substitute for the upstream fused llama.cpp path.
 
 The idea: while the engine is processing a prompt (``update_and_fetch``
 called with ``num_steps > 1``), keep K and V in fp16. Quantization only
 happens once, on the first decode-shaped call (``num_steps == 1``).
-This avoids compounding centroid-roundtrip errors through every
-prefill attention chain and matches the published 5.3× prefill / PPL
-6.91 numbers from the llama.cpp fork.
+This avoids compounding centroid-roundtrip errors through every prefill
+attention chain.
 """
 
 from collections.abc import Sequence

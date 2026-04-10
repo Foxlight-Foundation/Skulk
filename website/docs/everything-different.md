@@ -36,7 +36,7 @@ If you are about to land a feature or fix that adds, removes, or materially chan
 - **OpenAI Responses API** — `/v1/responses` adapter alongside chat completions.
 - **Embeddings endpoint** for non-chat workloads.
 - **Model store endpoints** — search, add, download, capability resolution, optimization jobs, and registry management, all exposed under stable URLs and documented in the OpenAPI spec.
-- **Cluster-wide config endpoints** — `GET`/`POST` config that gossipsubs to every node and writes back to `skulk.yaml`. The KV cache backend selection (including the new `rotorquant` and `rotorquant_adaptive` values) goes through this same endpoint, so the dashboard Settings panel can switch backends cluster-wide without env vars.
+- **Cluster-wide config endpoints** — `GET`/`POST` config that gossipsubs to every node and writes back to `skulk.yaml`. Stable KV cache backend selection goes through this same endpoint, so the dashboard Settings panel can switch supported backends cluster-wide without env vars. Experimental `rotorquant` values remain env-gated and fall back to `default` unless explicitly enabled.
 - **Tracing, downloads, instance previews, and placement endpoints** — distributed-system observability and pre-launch placement inspection that upstream does not expose.
 
 ## Dashboard
