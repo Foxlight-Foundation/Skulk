@@ -344,17 +344,28 @@ class KVPrefixCache:
             )
 
     def get_memory_used_percentage(self) -> float:
+        """Return the maximum memory pressure across all ranks.
+
+        Uses all_sum with slotted contributions instead of all_gather.
+        JACCL all_gather deadlocks intermittently on 3-node pipelines;
+        all_sum is proven reliable.
+        """
         local_pressure: float = get_memory_used_percentage()
 
         if self._group is None:
             return local_pressure
 
-        all_pressure = mx.distributed.all_gather(
-            mx.array([local_pressure], dtype=mx.float32),
+        world_size = self._group.size()
+        rank = self._group.rank()
+        slots = [0.0] * world_size
+        slots[rank] = local_pressure
+        cpu_stream = mx.default_stream(mx.Device(mx.cpu))
+        merged = mx.distributed.all_sum(
+            mx.array(slots, dtype=mx.float32),
             group=self._group,
+            stream=cpu_stream,
         )
-        # .item() evals.
-        max_pressure = float(mx.max(all_pressure).item())
+        max_pressure = float(mx.max(merged).item())
         return max_pressure
 
 

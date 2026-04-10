@@ -1197,16 +1197,17 @@ def mx_all_gather_tasks(
     tasks: list[TextGeneration],
     group: mx.distributed.Group | None,
 ) -> tuple[list[TextGeneration], list[TextGeneration]]:
-    """Synchronize task lists across all ranks via all_gather.
+    """Synchronize task lists across all ranks using only all_sum.
 
-    All collectives run on the CPU stream to avoid JACCL hangs when called
-    inside mlx_lm's ``with mx.stream(generation_stream):`` context.  The
-    generation_stream is a non-default GPU stream; mixing collective streams
-    (CPU for ``mx_any``, GPU-generation for ``all_gather``) causes JACCL to
-    mismatch collective ordering across ranks, deadlocking the second
-    all_gather.  Using the CPU stream for everything — matching ``mx_any``
-    and ``mx_barrier`` — keeps all collectives on a single, proven-reliable
-    stream.
+    JACCL's ``all_gather`` deadlocks intermittently on 3-node pipelines —
+    the first all_gather in a sequence may succeed, but subsequent ones
+    hang.  ``all_sum`` is proven reliable (used by ``mx_any``,
+    ``mx_barrier``, and PipelineLastLayer decode broadcast without issue).
+
+    Strategy: use the same zero-contribution pattern as PipelineLastLayer.
+    Each rank fills its own slot in a ``[world_size, max_tasks, id_len]``
+    tensor with encoded task IDs and contributes zeros elsewhere.
+    ``all_sum`` merges them (non-overlapping slots ⇒ sum == gather).
     """
 
     def encode_task_id(task_id: TaskId) -> list[int]:
@@ -1222,36 +1223,52 @@ def mx_all_gather_tasks(
 
     uuid_byte_length = 36
     cpu_stream = mx.default_stream(mx.Device(mx.cpu))
+    world_size: int = 1 if group is None else group.size()
+    rank: int = 0 if group is None else group.rank()
 
+    # --- Phase 1: exchange counts via all_sum ---
+    # Each rank contributes its count in its own slot of a [world_size]
+    # vector; other slots are zero.  all_sum merges them.
     n_tasks = len(tasks)
     logger.info(f"mx_all_gather_tasks: gathering counts (n_tasks={n_tasks})")
+    counts_vec = [0] * world_size
+    counts_vec[rank] = n_tasks
     all_counts = cast(
         list[int],
-        mx.distributed.all_gather(
-            mx.array([n_tasks]), group=group, stream=cpu_stream
+        mx.distributed.all_sum(
+            mx.array(counts_vec, dtype=mx.int32),
+            group=group,
+            stream=cpu_stream,
         ).tolist(),
     )
     logger.info(f"mx_all_gather_tasks: counts gathered: {all_counts}")
     max_tasks = max(all_counts)
-    world_size: int = 1 if group is None else group.size()
 
     if max_tasks == 0:
         return [], []
 
-    padded = [encode_task_id(task.task_id) for task in tasks] + [
+    # --- Phase 2: exchange task IDs via all_sum ---
+    # Build a [world_size, max_tasks, uuid_byte_length] tensor.  This rank
+    # fills its own slice; all other slices are zero.  all_sum merges them
+    # without overlap (each rank owns a unique slice).
+    padded_ids = [encode_task_id(task.task_id) for task in tasks] + [
         [0] * uuid_byte_length
     ] * (max_tasks - n_tasks)
+    assert all(len(eid) == uuid_byte_length for eid in padded_ids)
 
-    assert all(len(encoded_task_id) == uuid_byte_length for encoded_task_id in padded)
+    full = [[[0] * uuid_byte_length] * max_tasks for _ in range(world_size)]
+    full[rank] = padded_ids
 
+    gathered_flat = mx.distributed.all_sum(
+        mx.array(full, dtype=mx.int32),
+        group=group,
+        stream=cpu_stream,
+    )
     gathered = cast(
         list[list[list[int]]],
-        mx.distributed.all_gather(
-            mx.array(padded), group=group, stream=cpu_stream
-        )
-        .reshape(world_size, max_tasks, -1)
-        .tolist(),
+        gathered_flat.reshape(world_size, max_tasks, uuid_byte_length).tolist(),
     )
+
     all_task_ids: list[list[TaskId]] = [
         [decode_task_id(encoded_task_id) for encoded_task_id in rank_tasks[:count]]
         for rank_tasks, count in zip(gathered, all_counts, strict=True)

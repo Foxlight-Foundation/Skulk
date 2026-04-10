@@ -761,14 +761,19 @@ def warmup_inference(
 
     logger.info(f"warmed up by generating {tokens_generated} tokens")
     if group is not None:
-        check_for_cancel_every = int(
-            mx.max(
-                mx.distributed.all_gather(
-                    mx.array([check_for_cancel_every]),
-                    group=group,
-                )
-            ).item()
+        # Use all_sum with slotted contribution instead of all_gather.
+        # JACCL all_gather deadlocks intermittently on 3-node pipelines;
+        # all_sum is proven reliable.  Each rank puts its value in its
+        # own slot; we take the max across all slots.
+        world_size = group.size()
+        rank = group.rank()
+        slots = [0] * world_size
+        slots[rank] = check_for_cancel_every
+        cpu_stream = mx.default_stream(mx.Device(mx.cpu))
+        merged = mx.distributed.all_sum(
+            mx.array(slots, dtype=mx.int32), group=group, stream=cpu_stream
         )
+        check_for_cancel_every = int(mx.max(merged).item())
 
     logger.info(
         f"runner checking for cancellation every {check_for_cancel_every} tokens"
