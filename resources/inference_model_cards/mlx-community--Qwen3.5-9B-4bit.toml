@@ -7,8 +7,14 @@ tasks = ["TextGeneration"]
 family = "qwen"
 quantization = "4bit"
 base_model = "Qwen3.5 9B"
-capabilities = ["text", "thinking"]
+capabilities = ["text", "thinking", "thinking_toggle"]
 context_length = 262144
+
+[reasoning]
+supports_toggle = true
+format = "token_delimited"
+default_effort = "medium"
+disabled_effort = "none"
 
 [storage_size]
 in_bytes = 5950062560

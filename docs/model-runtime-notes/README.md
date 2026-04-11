@@ -38,3 +38,4 @@ Keep notes compact and practical. A good note usually covers:
 
 - `gemma4.md`
 - `nemotron.md`
+- `qwen35.md`
