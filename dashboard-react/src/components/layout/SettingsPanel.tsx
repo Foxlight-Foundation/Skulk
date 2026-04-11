@@ -449,16 +449,22 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                 filled
                 content={
                   `• Default — No cache quantization. Best baseline quality, highest memory use.\n` +
-                  `• OptiQ — Rotation-based quantization via mlx-optiq. Best long-context quality.\n` +
+                  `• OptiQ — Rotation-based quantization via mlx-optiq. Good long-context quality, no GQA support.\n` +
                   `• TurboQuant Adaptive — Quantizes middle KV layers, keeps edge layers in FP16. Proven stable.\n` +
-                  `• TurboQuant — Quantizes all KV layers. Most aggressive compression, higher quality risk.\n` +
+                  `• TurboQuant — Quantizes all KV layers. Most aggressive non-OptiQ compression.\n` +
                   `• MLX Quantized — MLX's built-in cache quantization.\n\n` +
-                  `Takes effect on next model launch. Incompatible models fall back to Default automatically.`
+                  `RotorQuant/IsoQuant is hidden from normal settings because it is experimental and must be enabled with SKULK_ENABLE_EXPERIMENTAL_ROTORQUANT=1.`
                 }
               />
             </FieldLabel>
             <Select value={kvBackend} onChange={(e) => setKvBackend(e.target.value)} disabled={!!envOverride}>
               <option value="default">Default (no quantization)</option>
+              {kvBackend === 'rotorquant_adaptive' ? (
+                <option value="rotorquant_adaptive">RotorQuant Adaptive (experimental, env-gated)</option>
+              ) : null}
+              {kvBackend === 'rotorquant' ? (
+                <option value="rotorquant">RotorQuant (experimental, env-gated)</option>
+              ) : null}
               <option value="optiq">OptiQ (rotation-based)</option>
               <option value="turboquant_adaptive">TurboQuant Adaptive</option>
               <option value="turboquant">TurboQuant</option>
@@ -467,7 +473,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
             {envOverride ? (
               <HintText>Overridden by SKULK_KV_CACHE_BACKEND environment variable. Remove the env var to configure here.</HintText>
             ) : (
-              <HintText>Changes take effect on the next model launch. Models with incompatible architectures (GQA, non-power-of-two head_dim) will automatically fall back to default.</HintText>
+              <HintText>Changes take effect on the next model launch. RotorQuant is experimental and intentionally unavailable from normal settings.</HintText>
             )}
           </Fieldset>
 

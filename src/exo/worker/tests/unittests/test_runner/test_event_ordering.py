@@ -120,11 +120,16 @@ def patch_out_mlx(monkeypatch: pytest.MonkeyPatch):
     )
     monkeypatch.setattr(mlx_batch_generator, "warmup_inference", make_nothin(1))
     monkeypatch.setattr(mlx_batch_generator, "_check_for_debug_prompts", nothin)
-    monkeypatch.setattr(mlx_batch_generator, "mx_any", make_nothin(False))
+
+    def fake_mx_any(bool_: bool, _group: object) -> bool:
+        return bool_
+
+    monkeypatch.setattr(mlx_batch_generator, "mx_any", fake_mx_any)
 
     def fake_all_gather(
-        tasks: list[TextGeneration], group: object
+        tasks: list[TextGeneration], group: object, label: str = "tasks"
     ) -> tuple[list[TextGeneration], list[TextGeneration]]:
+        del label
         return (tasks, [])
 
     monkeypatch.setattr(mlx_batch_generator, "mx_all_gather_tasks", fake_all_gather)
@@ -230,6 +235,77 @@ class MockDistributedGroup:
 
     def size(self) -> int:
         return 2
+
+
+class EmptyCancelReceiver:
+    def collect(self) -> list[TaskId]:
+        return []
+
+
+def _make_sequential_generator() -> mlx_batch_generator.SequentialGenerator:
+    return mlx_batch_generator.SequentialGenerator(
+        model=object(),  # type: ignore[arg-type]
+        tokenizer=MockTokenizer(),  # type: ignore[arg-type]
+        group=MockGroup(),  # type: ignore[arg-type]
+        kv_prefix_cache=None,
+        tool_parser=None,
+        model_card=None,
+        model_id=MODEL_A_ID,
+        device_rank=0,
+        cancel_receiver=EmptyCancelReceiver(),  # type: ignore[arg-type]
+        event_sender=EventCollector(),  # type: ignore[arg-type]
+    )
+
+
+def test_empty_task_agreement_skips_task_id_collective(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mx_any_calls: list[bool] = []
+
+    def fake_mx_any(bool_: bool, _group: object) -> bool:
+        mx_any_calls.append(bool_)
+        return False
+
+    def fail_all_gather(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("empty task agreement should not gather task IDs")
+
+    monkeypatch.setattr(mlx_batch_generator, "mx_any", fake_mx_any)
+    monkeypatch.setattr(mlx_batch_generator, "mx_all_gather_tasks", fail_all_gather)
+
+    _make_sequential_generator().agree_on_tasks()
+
+    assert mx_any_calls == [False]
+
+
+def test_empty_cancellation_agreement_skips_task_id_collective(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mx_any_calls: list[bool] = []
+
+    def fake_mx_any(bool_: bool, _group: object) -> bool:
+        mx_any_calls.append(bool_)
+        return False
+
+    def fail_all_gather(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("empty cancellation agreement should not gather task IDs")
+
+    monkeypatch.setattr(mlx_batch_generator, "mx_any", fake_mx_any)
+    monkeypatch.setattr(mlx_batch_generator, "mx_all_gather_tasks", fail_all_gather)
+
+    _make_sequential_generator().agree_on_cancellations()
+
+    assert mx_any_calls == [False, False]
+
+
+def test_zero_warmup_cancel_interval_falls_back_to_safe_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator = _make_sequential_generator()
+    monkeypatch.setattr(mlx_batch_generator, "warmup_inference", make_nothin(0))
+
+    generator.warmup()
+
+    assert generator.check_for_cancel_every == 50
 
 
 def _run(tasks: Iterable[Task], send_after_ready: list[Task] | None = None):
@@ -385,7 +461,9 @@ def test_distributed_warmup_skip_env_is_ignored(
     patch_out_mlx: pytest.MonkeyPatch, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("SKULK_SKIP_LLM_WARMUP", "1")
-    monkeypatch.setattr(mlx_runner, "initialize_mlx", make_nothin(MockDistributedGroup()))
+    monkeypatch.setattr(
+        mlx_runner, "initialize_mlx", make_nothin(MockDistributedGroup())
+    )
 
     warmup_calls = 0
 
@@ -421,9 +499,13 @@ def test_first_live_request_shape_is_logged_once(
     ) -> None:
         logged.append((label, task_params, prompt, extra))
 
-    monkeypatch.setattr(mlx_batch_generator, "log_request_shape", fake_log_request_shape)
+    monkeypatch.setattr(
+        mlx_batch_generator, "log_request_shape", fake_log_request_shape
+    )
 
-    _run([INIT_TASK, LOAD_TASK, WARMUP_TASK, CHAT_TASK], send_after_ready=[SHUTDOWN_TASK])
+    _run(
+        [INIT_TASK, LOAD_TASK, WARMUP_TASK, CHAT_TASK], send_after_ready=[SHUTDOWN_TASK]
+    )
 
     assert logged == [
         (

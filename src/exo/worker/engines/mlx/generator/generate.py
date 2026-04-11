@@ -233,7 +233,9 @@ def _slice_native_pixel_values_for_uncached_suffix(
         return pixel_values
 
     available_images = (
-        len(pixel_values) if isinstance(pixel_values, list) else int(pixel_values.shape[0])
+        len(pixel_values)
+        if isinstance(pixel_values, list)
+        else int(pixel_values.shape[0])
     )
     remaining_indices = [
         idx
@@ -507,12 +509,12 @@ def prefill(
         prefill_step_size // min(4, group_size) if is_pipeline else prefill_step_size
     )
 
-    # Pipeline-parallel prefill can wedge when the prompt fits inside a single
-    # effective per-rank chunk (i.e. ``n_real == 1`` in the prefill loop).
     # Mirror pipeline_parallel_prefill's chunking math here by reserving the
     # final token for the post-loop pass before computing the real chunk count.
-    # That keeps multi-chunk prompts on pipeline_parallel_prefill while routing
-    # single-chunk short / warmup prompts through stream_generate.
+    # This value is primarily diagnostic now: all pipeline prompts use the
+    # explicit pipeline prefill path, but short one-chunk prompts intentionally
+    # suppress the distributed progress callback because there is no useful
+    # cancellation window inside a millisecond-scale prefill.
     real_prefill_tokens = max(num_tokens - 1, 0)
     pipeline_chunks = (
         (real_prefill_tokens + effective_prefill_step_size - 1)
@@ -520,7 +522,7 @@ def prefill(
         if effective_prefill_step_size > 0
         else 0
     )
-    use_pipeline_prefill = is_pipeline and pipeline_chunks >= 2
+    use_pipeline_prefill = is_pipeline
     logger.info(
         "Prefill path selected: "
         f"{'pipeline_parallel_prefill' if use_pipeline_prefill else 'stream_generate'} "
@@ -529,12 +531,23 @@ def prefill(
         f"prefill_step_size_effective={effective_prefill_step_size}, "
         f"pipeline_chunks={pipeline_chunks})"
     )
-    # Only enable pipeline-prefill mode for the true pipeline prefill path.
-    # Short prompts routed through stream_generate must behave like normal
-    # generation; leaving pipeline wrappers in prefill mode there can strand
-    # non-zero ranks in the pipeline send/recv path without the coordinated
-    # queue/flush behavior used by pipeline_parallel_prefill.
-    set_pipeline_prefill(model, is_prefill=use_pipeline_prefill)
+    # Pipeline models must run in prefill mode during any prefill forward
+    # pass — even the stream_generate fallback path for short prompts.
+    # With is_prefill=False, PipelineLastLayer performs all_gather on
+    # every forward pass. generate_step discards prefill logits and only
+    # evaluates cache states, so the all_gather is never consumed but
+    # remains queued. When a subsequent mx.eval triggers it, the ranks
+    # are desynchronized and the collective deadlocks (observed as a
+    # warmup hang on 3-rank pipeline with Gemma 4).
+    #
+    # With is_prefill=True, PipelineLastLayer uses point-to-point
+    # send/recv only — no collective required. The tradeoff: the first
+    # decode token sampled by generate_step is wrong on non-last ranks
+    # (they see rank-local activations, not full logits). This is
+    # acceptable because prefill() trims those decode tokens from the
+    # cache before real generation begins, and the finally block below
+    # resets is_prefill=False for subsequent decode.
+    set_pipeline_prefill(model, is_prefill=is_pipeline)
 
     with _hang_debug_watch(f"prefill barrier rank={rank} group_size={group_size}"):
         mx_barrier(group)
@@ -546,6 +559,9 @@ def prefill(
         if use_pipeline_prefill:
             set_pipeline_queue_sends(model, queue_sends=True)
             assert group is not None, "Pipeline prefill requires a distributed group"
+            pipeline_distributed_callback = (
+                distributed_prompt_progress_callback if pipeline_chunks >= 2 else None
+            )
             with _hang_debug_watch(
                 f"pipeline_parallel_prefill rank={rank} group_size={group_size}"
             ):
@@ -557,10 +573,16 @@ def prefill(
                     kv_group_size=KV_GROUP_SIZE,
                     kv_bits=KV_BITS,
                     prompt_progress_callback=progress_callback,
-                    distributed_prompt_progress_callback=distributed_prompt_progress_callback,
+                    distributed_prompt_progress_callback=pipeline_distributed_callback,
                     group=group,
                 )
         else:
+            # Non-pipeline models can safely use upstream stream_generate for
+            # prefill. Pipeline models avoid it entirely: mlx-lm's generate_step
+            # prefetches one decode step before yielding even with max_tokens=1,
+            # which can leave hidden pipeline sends/recvs in flight and wedge
+            # the next collective.
+            #
             # Use max_tokens=1 because max_tokens=0 does not work.
             # We just throw away the generated token - we only care about filling the cache
             with _hang_debug_watch(
@@ -576,7 +598,7 @@ def prefill(
                     prefill_step_size=prefill_step_size,
                     kv_group_size=KV_GROUP_SIZE,
                     kv_bits=KV_BITS,
-                    prompt_progress_callback=combined_progress_callback,
+                    prompt_progress_callback=progress_callback,
                 ):
                     logger.info(
                         f"Prefill stream_generate yielded first token (rank={rank})"
@@ -636,6 +658,12 @@ def warmup_inference(
             "prompt and ignoring warmup shaping overrides"
         )
 
+    # Distributed pipeline warmup MUST use greedy sampling so every rank
+    # samples the same token from the shared logits.  Stochastic sampling
+    # with per-rank random states can diverge, causing ranks to follow
+    # different code paths inside generate_step and issue mismatched
+    # collective operations.
+    is_distributed = _is_distributed_warmup(group)
     warmup_task_params = TextGenerationTaskParams(
         model=model_id,
         # Distributed pipeline warmup always uses the minimal sanity-check
@@ -647,11 +675,14 @@ def warmup_inference(
                 content=_warmup_user_content(group),
             )
         ],
-        max_output_tokens=1024,
+        # Warmup is a prefill + one-token decode sanity check. Asking the
+        # generator for exactly one token lets it take its normal terminal
+        # path instead of aborting a larger generation mid-stream.
+        max_output_tokens=1,
         enable_thinking=False,
-        temperature=1.0,
-        top_p=0.95,
-        top_k=64,
+        temperature=0.0 if is_distributed else 1.0,
+        top_p=1.0 if is_distributed else 0.95,
+        top_k=0 if is_distributed else 64,
     )
 
     with _hang_debug_watch(f"warmup apply_chat_template model={model_id}"):
@@ -659,6 +690,7 @@ def warmup_inference(
             tokenizer=tokenizer,
             task_params=warmup_task_params,
             model_card=model_card,
+            suppress_empty_gemma4_thought_channel=True,
         )
     logger.info(
         "Warmup prompt prepared "
@@ -693,10 +725,6 @@ def warmup_inference(
             group=group,
         ):
             tokens_generated += 1
-            # Warmup is only meant to validate prefill plus the first decode
-            # step. Stopping after the first token keeps runner readiness
-            # bounded even if the model would otherwise continue sampling.
-            break
 
     # The single-token warmup path intentionally samples only the first decode
     # step, so cold-start compile/prefill latency can dominate the elapsed
@@ -718,14 +746,19 @@ def warmup_inference(
 
     logger.info(f"warmed up by generating {tokens_generated} tokens")
     if group is not None:
-        check_for_cancel_every = int(
-            mx.max(
-                mx.distributed.all_gather(
-                    mx.array([check_for_cancel_every]),
-                    group=group,
-                )
-            ).item()
+        # Use all_sum with slotted contribution instead of all_gather.
+        # JACCL all_gather deadlocks intermittently on 3-node pipelines;
+        # all_sum is proven reliable.  Each rank puts its value in its
+        # own slot; we take the max across all slots.
+        world_size = group.size()
+        rank = group.rank()
+        slots = [0] * world_size
+        slots[rank] = check_for_cancel_every
+        cpu_stream = mx.default_stream(mx.Device(mx.cpu))
+        merged = mx.distributed.all_sum(
+            mx.array(slots, dtype=mx.int32), group=group, stream=cpu_stream
         )
+        check_for_cancel_every = int(mx.max(merged).item())
 
     logger.info(
         f"runner checking for cancellation every {check_for_cancel_every} tokens"
@@ -946,7 +979,9 @@ def _mlx_generate_native_vision(
         accumulated_text += final_text
 
     generation_elapsed = time.perf_counter() - generation_start_time
-    generation_tps = completion_tokens / generation_elapsed if generation_elapsed > 0 else 0.0
+    generation_tps = (
+        completion_tokens / generation_elapsed if generation_elapsed > 0 else 0.0
+    )
 
     final_stats = GenerationStats(
         prompt_tps=float(prompt_tps),

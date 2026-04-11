@@ -97,17 +97,15 @@ def test_prefill_uses_pipeline_parallel_path_for_long_pipeline_prompts(
     assert prefill_mode_calls == [True, False]
 
 
-def test_prefill_uses_stream_generate_for_short_pipeline_prompts(
+def test_prefill_uses_pipeline_parallel_path_for_short_pipeline_prompts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Short prompts that fit in a single per-rank chunk must avoid pipeline prefill.
+    """Short pipeline prompts must avoid upstream stream_generate prefill.
 
-    Regression for the Gemma 4 warmup wedge: pipeline_parallel_prefill hangs
-    when ``n_real == 1`` (the prompt fits inside a single per-rank chunk),
-    so any such prompt — including the 23-token warmup prompt — must route
-    through stream_generate even on pipeline-parallel models. PR #101's
-    pipeline-prefill widening removed this guard and reintroduced the hang
-    on Gemma 4; this test locks the guard back in.
+    ``mlx_lm.generate_step`` prefetches a decode step before yielding even with
+    ``max_tokens=1``. In pipeline mode that hidden prefetch can leave sends/recvs
+    in flight, so short prompts use Skulk's explicit pipeline prefill path while
+    suppressing distributed progress callbacks.
     """
     calls: list[str] = []
     fake_cache = _FakeCache()
@@ -127,6 +125,12 @@ def test_prefill_uses_stream_generate_for_short_pipeline_prompts(
 
     def _pipeline_parallel_prefill(**kwargs: object) -> None:
         calls.append("pipeline_parallel_prefill")
+        assert kwargs["distributed_prompt_progress_callback"] is None
+        prompt_progress_callback = kwargs["prompt_progress_callback"]
+        assert callable(prompt_progress_callback)
+        prompt = kwargs["prompt"]
+        assert isinstance(prompt, list)
+        prompt_progress_callback(len(prompt), len(prompt))
 
     monkeypatch.setattr(
         generate_module,
@@ -140,6 +144,9 @@ def test_prefill_uses_stream_generate_for_short_pipeline_prompts(
 
     monkeypatch.setattr(generate_module, "stream_generate", _stream_generate)
 
+    def _fail_distributed_callback() -> None:
+        raise AssertionError("single-chunk pipeline prefill should not poll tasks")
+
     prefill_tps, prefill_tokens, snapshots = generate_module.prefill(
         model=_FakeModel(),
         tokenizer=object(),
@@ -148,22 +155,22 @@ def test_prefill_uses_stream_generate_for_short_pipeline_prompts(
         cache=[fake_cache],
         group=_FakeGroup(),
         on_prefill_progress=None,
-        distributed_prompt_progress_callback=None,
+        distributed_prompt_progress_callback=_fail_distributed_callback,
     )
 
-    assert calls == ["stream_generate"]
-    assert "pipeline_parallel_prefill" not in calls
+    assert calls == ["pipeline_parallel_prefill"]
+    assert "stream_generate" not in calls
     assert prefill_tokens == 23
     assert snapshots == []
     assert prefill_tps >= 0.0
     assert fake_cache.trim_calls == [2]
-    assert prefill_mode_calls == [False, False]
+    assert prefill_mode_calls == [True, False]
 
 
-def test_prefill_uses_stream_generate_at_single_chunk_boundary(
+def test_prefill_uses_pipeline_parallel_path_at_single_chunk_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Prompts with only one real pipeline chunk must stay off pipeline prefill."""
+    """Prompts with one real pipeline chunk still use explicit pipeline prefill."""
     calls: list[str] = []
     fake_cache = _FakeCache()
     prefill_mode_calls: list[bool] = []
@@ -202,12 +209,12 @@ def test_prefill_uses_stream_generate_at_single_chunk_boundary(
         distributed_prompt_progress_callback=None,
     )
 
-    assert calls == ["stream_generate"]
+    assert calls == ["pipeline_parallel_prefill"]
     assert prefill_tokens == 1366
     assert snapshots == []
     assert prefill_tps >= 0.0
     assert fake_cache.trim_calls == [2]
-    assert prefill_mode_calls == [False, False]
+    assert prefill_mode_calls == [True, False]
 
 
 def test_prefill_resets_pipeline_flags_after_unexpected_exception(

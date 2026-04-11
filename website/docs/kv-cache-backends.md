@@ -14,11 +14,27 @@ Skulk includes several opt-in KV cache backends for MLX text generation. These b
 - `mlx_quantized`: MLX LM built-in `QuantizedKVCache`
 - `turboquant`: correctness-first TurboQuant-inspired KV cache for standard `KVCache` layers
 - `turboquant_adaptive`: keeps outer KV layers in FP16 and applies TurboQuant to middle KV layers
-- `optiq`: **[NEW]** rotation-based KV cache via [mlx-optiq](https://mlx-optiq.pages.dev/) — uses randomized orthogonal rotations with Lloyd-Max quantization and rotated-space attention for superior long-context quality
+- `optiq`: rotation-based KV cache via [mlx-optiq](https://mlx-optiq.pages.dev/) — uses randomized orthogonal rotations with Lloyd-Max quantization and rotated-space attention. Falls back to default for GQA models.
+- `rotorquant`: **experimental, gated** pure-MLX IsoQuant-style storage/dequant cache. This is not the fused RotorQuant+QJL implementation from the RotorQuant paper.
+- `rotorquant_adaptive`: **experimental, gated** as above with FP16 protection on the first/last N attention layers.
 
 If `SKULK_KV_CACHE_BACKEND` is unset, or is set to `default`, Skulk behaves as before.
 
 ## Recommended Settings
+
+### Default Baseline (recommended while debugging)
+
+```bash
+SKULK_KV_CACHE_BACKEND=default \
+SKULK_MLX_HANG_DEBUG=1 \
+SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS=5 \
+uv run skulk -vv
+```
+
+Use the default backend first when validating distributed pipeline behavior. It
+removes KV-cache compression from the failure surface so hangs can be attributed
+to pipeline scheduling, task agreement, or the model path rather than an
+experimental cache implementation.
 
 ### mlx-optiq (best quality)
 
@@ -43,6 +59,23 @@ uv run skulk
 
 This mode keeps the first and last 4 KV layers in normal FP16-style cache and applies TurboQuant only to the middle KV layers. Proven stable across most models.
 
+### RotorQuant / IsoQuant (experimental only)
+
+The `rotorquant` names are intentionally gated behind an explicit opt-in:
+
+```bash
+SKULK_ENABLE_EXPERIMENTAL_ROTORQUANT=1 \
+SKULK_KV_CACHE_BACKEND=rotorquant_adaptive \
+SKULK_ROTORQUANT_FP16_LAYERS=4 \
+uv run skulk
+```
+
+This backend is a pure-MLX IsoQuant-style cache that compresses storage and
+then returns fully dequantized fp16 K/V to normal MLX attention. It does not
+implement RotorQuant's fused Metal/CUDA attention path or QJL residual
+correction, so it should not be used as the default distributed inference
+baseline.
+
 ## Available Environment Variables
 
 | Variable | Backends | Default | Description |
@@ -54,6 +87,9 @@ This mode keeps the first and last 4 KV layers in normal FP16-style cache and ap
 | `SKULK_TQ_K_BITS` | `turboquant`, `turboquant_adaptive` | `3` | Key quantization bits |
 | `SKULK_TQ_V_BITS` | `turboquant`, `turboquant_adaptive` | `4` | Value quantization bits |
 | `SKULK_TQ_FP16_LAYERS` | `turboquant_adaptive` | `4` | Edge layers kept in FP16 |
+| `SKULK_ENABLE_EXPERIMENTAL_ROTORQUANT` | `rotorquant`, `rotorquant_adaptive` | `0` | Required opt-in for experimental RotorQuant/IsoQuant backends |
+| `SKULK_ROTORQUANT_FP16_LAYERS` | `rotorquant_adaptive` | `4` | Edge layers kept in FP16 |
+| `SKULK_ROTORQUANT_DEFER_PREFILL` | `rotorquant`, `rotorquant_adaptive` | `1` | Set to `0` to disable deferred prefill while debugging |
 
 ## Invocation Examples
 
@@ -86,14 +122,16 @@ SKULK_KV_CACHE_BACKEND=turboquant_adaptive SKULK_TQ_K_BITS=3 SKULK_TQ_V_BITS=4 S
 | Backend | Memory | Quality | Speed | Notes |
 |---------|--------|---------|-------|-------|
 | `default` | Highest | Baseline | Fastest | No quantization |
-| `optiq` | Low | Best quantized | Near-baseline | Rotation-based, best long-context |
+| `optiq` | Low | Good | Near-baseline | Rotation-based, no GQA support |
 | `turboquant_adaptive` | Low | Good | Moderate | Proven stable, Hadamard-based |
-| `turboquant` | Lowest | Variable | Moderate | Most aggressive compression |
+| `turboquant` | Low | Variable | Moderate | All layers, Hadamard-based |
 | `mlx_quantized` | Low | Good | Moderate | MLX built-in quantization |
+| `rotorquant_adaptive` | Low | Experimental | Experimental | Gated pure-MLX IsoQuant storage/dequant cache |
+| `rotorquant` | Lowest | Experimental | Experimental | Gated pure-MLX IsoQuant storage/dequant cache |
 
 ## Supported Cache Layouts
 
-All quantized backends (optiq, turboquant, mlx_quantized) compress only standard `KVCache` entries and preserve these cache types unchanged:
+All quantized backends (optiq, turboquant, mlx_quantized, and the gated rotorquant variants) compress only standard `KVCache` entries and preserve these cache types unchanged:
 
 - `ArraysCache`
 - `RotatingKVCache`
@@ -107,8 +145,10 @@ Mixed cache layouts are supported:
 ## Current Limitations
 
 - All quantized KV cache backends force sequential generation (no batch/history mode)
+- Gemma 4 text generation also forces sequential generation for now because distributed BatchGenerator mode can produce degenerate repetition with its sliding-window cache layout
 - The optiq backend requires `mlx-optiq` to be installed (`pip install mlx-optiq`)
 - The optiq backend's `patch_attention()` monkey-patches MLX's SDPA — avoid switching between optiq and other backends within the same process lifetime without a restart
+- The rotorquant backends are disabled unless `SKULK_ENABLE_EXPERIMENTAL_ROTORQUANT=1` is set. If selected without the gate, Skulk falls back to `default`.
 
 ## About mlx-optiq
 

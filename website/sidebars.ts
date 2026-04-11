@@ -16,6 +16,11 @@ const sidebars: SidebarsConfig = {
       label: "Introduction",
     },
     {
+      type: "doc",
+      id: "everything-different",
+      label: "Everything Different About Skulk",
+    },
+    {
       type: "category",
       label: "Guides",
       collapsed: false,

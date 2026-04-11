@@ -117,8 +117,7 @@ def log_request_shape(
         payload.update(extra)
 
     logger.info(
-        "[request-shape] "
-        f"{json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
+        f"[request-shape] {json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
     )
     logger.info(f"[request-shape] prompt label={label}\n{prompt}")
 
@@ -287,7 +286,9 @@ class _Gemma4DynamicVisionTower(nn.Module):
         hidden_states = mx.concatenate(all_real, axis=0)[None]
 
         if getattr(getattr(self._inner, "config", None), "standardize", False):
-            hidden_states = (hidden_states - self._inner.std_bias) * self._inner.std_scale
+            hidden_states = (
+                hidden_states - self._inner.std_bias
+            ) * self._inner.std_scale
 
         return hidden_states
 
@@ -840,6 +841,7 @@ def apply_chat_template(
     tokenizer: TokenizerWrapper,
     task_params: TextGenerationTaskParams,
     model_card: ModelCard | None = None,
+    suppress_empty_gemma4_thought_channel: bool = False,
 ) -> str:
     """Convert TextGenerationTaskParams to a chat template prompt.
 
@@ -901,6 +903,7 @@ def apply_chat_template(
             formatted_messages,
             add_generation_prompt=True,
             enable_thinking=task_params.enable_thinking,
+            suppress_empty_thought_channel=suppress_empty_gemma4_thought_channel,
         )
         if partial_assistant_content:
             prompt += partial_assistant_content
@@ -1195,7 +1198,21 @@ def _parse_kimi_tool_calls(text: str):
 def mx_all_gather_tasks(
     tasks: list[TextGeneration],
     group: mx.distributed.Group | None,
+    label: str = "tasks",
 ) -> tuple[list[TextGeneration], list[TextGeneration]]:
+    """Synchronize task lists across all ranks using only all_sum.
+
+    JACCL's ``all_gather`` deadlocks intermittently on 3-node pipelines —
+    the first all_gather in a sequence may succeed, but subsequent ones
+    hang.  ``all_sum`` is proven reliable (used by ``mx_any``,
+    ``mx_barrier``, and PipelineLastLayer decode broadcast without issue).
+
+    Strategy: use the same zero-contribution pattern as PipelineLastLayer.
+    Each rank fills its own slot in a ``[world_size, max_tasks, id_len]``
+    tensor with encoded task IDs and contributes zeros elsewhere.
+    ``all_sum`` merges them (non-overlapping slots ⇒ sum == gather).
+    """
+
     def encode_task_id(task_id: TaskId) -> list[int]:
         utf8_task_id = task_id.encode()
         return [
@@ -1208,30 +1225,53 @@ def mx_all_gather_tasks(
         )
 
     uuid_byte_length = 36
+    cpu_stream = mx.default_stream(mx.Device(mx.cpu))
+    world_size: int = 1 if group is None else group.size()
+    rank: int = 0 if group is None else group.rank()
 
+    # --- Phase 1: exchange counts via all_sum ---
+    # Each rank contributes its count in its own slot of a [world_size]
+    # vector; other slots are zero.  all_sum merges them.
     n_tasks = len(tasks)
+    logger.debug(f"mx_all_gather_tasks[{label}]: gathering counts (n_tasks={n_tasks})")
+    counts_vec = [0] * world_size
+    counts_vec[rank] = n_tasks
     all_counts = cast(
         list[int],
-        mx.distributed.all_gather(mx.array([n_tasks]), group=group).tolist(),
+        mx.distributed.all_sum(
+            mx.array(counts_vec, dtype=mx.int32),
+            group=group,
+            stream=cpu_stream,
+        ).tolist(),
     )
+    logger.debug(f"mx_all_gather_tasks[{label}]: counts gathered: {all_counts}")
     max_tasks = max(all_counts)
-    world_size: int = 1 if group is None else group.size()
 
     if max_tasks == 0:
         return [], []
 
-    padded = [encode_task_id(task.task_id) for task in tasks] + [
+    # --- Phase 2: exchange task IDs via all_sum ---
+    # Build a [world_size, max_tasks, uuid_byte_length] tensor.  This rank
+    # fills its own slice; all other slices are zero.  all_sum merges them
+    # without overlap (each rank owns a unique slice).
+    padded_ids = [encode_task_id(task.task_id) for task in tasks] + [
         [0] * uuid_byte_length
     ] * (max_tasks - n_tasks)
+    assert all(len(eid) == uuid_byte_length for eid in padded_ids)
 
-    assert all(len(encoded_task_id) == uuid_byte_length for encoded_task_id in padded)
+    full = [[[0] * uuid_byte_length] * max_tasks for _ in range(world_size)]
+    full[rank] = padded_ids
 
+    gathered_flat = mx.distributed.all_sum(
+        mx.array(full, dtype=mx.int32),
+        group=group,
+        stream=cpu_stream,
+    )
     gathered = cast(
         list[list[list[int]]],
-        mx.distributed.all_gather(mx.array(padded), group=group)
-        .reshape(world_size, max_tasks, -1)
-        .tolist(),
+        gathered_flat.reshape(world_size, max_tasks, uuid_byte_length).tolist(),
     )
+
     all_task_ids: list[list[TaskId]] = [
         [decode_task_id(encoded_task_id) for encoded_task_id in rank_tasks[:count]]
         for rank_tasks, count in zip(gathered, all_counts, strict=True)

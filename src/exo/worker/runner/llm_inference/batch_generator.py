@@ -62,6 +62,7 @@ class GeneratorQueue[T]:
 
 
 class InferenceGenerator(ABC):
+    group: mx.distributed.Group | None
     _cancelled_tasks: set[TaskId]
 
     def should_cancel(self, task_id: TaskId) -> bool:
@@ -93,6 +94,7 @@ class InferenceGenerator(ABC):
 EXO_RUNNER_MUST_FAIL = "EXO RUNNER MUST FAIL"
 EXO_RUNNER_MUST_OOM = "EXO RUNNER MUST OOM"
 EXO_RUNNER_MUST_TIMEOUT = "EXO RUNNER MUST TIMEOUT"
+_DEFAULT_CANCEL_CHECK_INTERVAL = 50
 
 
 def _check_for_debug_prompts(task_params: TextGenerationTaskParams) -> None:
@@ -110,6 +112,18 @@ def _check_for_debug_prompts(task_params: TextGenerationTaskParams) -> None:
         mlx_force_oom()
     if EXO_RUNNER_MUST_TIMEOUT in prompt:
         time.sleep(100)
+
+
+def _safe_cancel_check_interval(interval: int) -> int:
+    """Normalize warmup-derived cancellation polling intervals for live generation."""
+    if interval > 0:
+        return interval
+
+    logger.warning(
+        "warmup returned a non-positive cancellation interval "
+        f"({interval}); using {_DEFAULT_CANCEL_CHECK_INTERVAL} tokens"
+    )
+    return _DEFAULT_CANCEL_CHECK_INTERVAL
 
 
 @dataclass(eq=False)
@@ -147,12 +161,14 @@ class SequentialGenerator(InferenceGenerator):
     _logged_first_request_shape: bool = field(default=False, init=False)
 
     def warmup(self):
-        self.check_for_cancel_every = warmup_inference(
-            model=self.model,
-            tokenizer=self.tokenizer,
-            group=self.group,
-            model_id=self.model_id,
-            model_card=self.model_card,
+        self.check_for_cancel_every = _safe_cancel_check_interval(
+            warmup_inference(
+                model=self.model,
+                tokenizer=self.tokenizer,
+                group=self.group,
+                model_id=self.model_id,
+                model_card=self.model_card,
+            )
         )
 
     def submit(
@@ -165,7 +181,17 @@ class SequentialGenerator(InferenceGenerator):
 
     def agree_on_tasks(self) -> None:
         """Agree between all ranks about the task ordering (some may have received in different order or not at all)."""
-        agreed, different = mx_all_gather_tasks(self._maybe_queue, self.group)
+        if not mx_any(bool(self._maybe_queue), self.group):
+            logger.debug("agree_on_tasks: no pending tasks on any rank")
+            return
+
+        logger.info(
+            f"agree_on_tasks: entering with {len(self._maybe_queue)} pending tasks"
+        )
+        agreed, different = mx_all_gather_tasks(
+            self._maybe_queue, self.group, label="task-queue"
+        )
+        logger.info(f"agree_on_tasks: {len(agreed)} agreed, {len(different)} different")
         self._queue.extend(task for task in self._maybe_queue if task in agreed)
         self._maybe_queue = [task for task in self._maybe_queue if task in different]
 
@@ -182,7 +208,13 @@ class SequentialGenerator(InferenceGenerator):
         if mx_any(has_cancel_all, self.group):
             self._cancelled_tasks.add(CANCEL_ALL_TASKS)
 
-        agreed, different = mx_all_gather_tasks(self._maybe_cancel, self.group)
+        if not mx_any(bool(self._maybe_cancel), self.group):
+            logger.debug("agree_on_cancellations: no pending cancellations on any rank")
+            return
+
+        agreed, different = mx_all_gather_tasks(
+            self._maybe_cancel, self.group, label="cancellations"
+        )
         self._cancelled_tasks.update(task.task_id for task in agreed)
         self._maybe_cancel = list(different)
 
@@ -377,12 +409,14 @@ class BatchGenerator(InferenceGenerator):
         )
 
     def warmup(self):
-        self.check_for_cancel_every = warmup_inference(
-            model=self.model,
-            tokenizer=self.tokenizer,
-            group=self.group,
-            model_id=self.model_id,
-            model_card=self.model_card,
+        self.check_for_cancel_every = _safe_cancel_check_interval(
+            warmup_inference(
+                model=self.model,
+                tokenizer=self.tokenizer,
+                group=self.group,
+                model_id=self.model_id,
+                model_card=self.model_card,
+            )
         )
 
     def submit(
@@ -395,7 +429,17 @@ class BatchGenerator(InferenceGenerator):
 
     def agree_on_tasks(self) -> None:
         """Agree between all ranks about the task ordering (some may have received in different order or not at all)."""
-        agreed, different = mx_all_gather_tasks(self._maybe_queue, self.group)
+        if not mx_any(bool(self._maybe_queue), self.group):
+            logger.debug("agree_on_tasks: no pending tasks on any rank")
+            return
+
+        logger.info(
+            f"agree_on_tasks: entering with {len(self._maybe_queue)} pending tasks"
+        )
+        agreed, different = mx_all_gather_tasks(
+            self._maybe_queue, self.group, label="task-queue"
+        )
+        logger.info(f"agree_on_tasks: {len(agreed)} agreed, {len(different)} different")
         self._queue.extend(task for task in self._maybe_queue if task in agreed)
         self._maybe_queue = [task for task in self._maybe_queue if task in different]
 
@@ -412,7 +456,13 @@ class BatchGenerator(InferenceGenerator):
         if mx_any(has_cancel_all, self.group):
             self._cancelled_tasks.add(CANCEL_ALL_TASKS)
 
-        agreed, different = mx_all_gather_tasks(self._maybe_cancel, self.group)
+        if not mx_any(bool(self._maybe_cancel), self.group):
+            logger.debug("agree_on_cancellations: no pending cancellations on any rank")
+            return
+
+        agreed, different = mx_all_gather_tasks(
+            self._maybe_cancel, self.group, label="cancellations"
+        )
         self._cancelled_tasks.update(task.task_id for task in agreed)
         self._maybe_cancel = list(different)
 

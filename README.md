@@ -20,10 +20,89 @@ a more modern dashboard, richer API workflows, sophisticated cache quantization,
 - Form a small cluster of Macs and split larger models across them.
 - Use a central model store so the cluster downloads once and stages locally.
 - Talk to the cluster through OpenAI Chat Completions, OpenAI Responses, Claude Messages, or Ollama-compatible APIs.
+- Push KV cache memory down hard with rotation-based 3-bit quantization (RotorQuant, OptiQ, TurboQuant) and pick a backend per workload from the dashboard.
+- Use a model-aware reasoning contract that handles toggleable and non-toggleable thinking models without baking assumptions into client code.
 - Experiment with advanced placement modes, RDMA, and KV cache backends when you are ready.
 - Run non-chat workloads such as embeddings and other specialized model flows.
 - Build TTS-oriented and other API-driven workflows on top of the cluster.
 - Actually use your cluster for real inference workloads instead of treating it as a demo.
+
+## Everything Different About Skulk
+
+This is the running list of where Skulk diverges from upstream [exo](https://github.com/exo-explore/exo). It is a living section — every meaningful change should land here when it ships, so anyone evaluating Skulk can see the surface area at a glance.
+
+### Inference and KV cache
+
+- **RotorQuant KV cache backend** — pure-MLX port of IsoQuant 3-bit (block-diagonal quaternion rotations + Lloyd-Max centroids) with **deferred prefill on Metal**, a contribution that does not exist in any upstream project (the llama.cpp fork ships it CUDA-only). GQA-native; no fallback for grouped-query models. See [docs/kv-cache-backends.md](docs/kv-cache-backends.md).
+- **TurboQuant native and adaptive backends** — randomized Hadamard rotation + Lloyd-Max centroids, with an adaptive variant that keeps edge attention layers in fp16 for accuracy.
+- **OptiQ KV cache integration** — wraps `mlx-optiq`'s rotated-space attention path so the rotation cost stays out of the per-token loop on supported (non-GQA) models.
+- **OptiQ mixed-precision weight quantization pipeline** — async wrapper around `mlx-optiq`'s sensitivity analysis and KL-divergence per-layer bit allocation, exposed as a model-store optimization job.
+- **KV prefix cache with snapshot/restore** — LRU-evicted prompt-prefix cache that snapshots SSM and rotating-window cache states so prefix matches are reusable across conversation turns even for hybrid Mamba/Transformer architectures.
+- **Pipeline-parallel prefill for short prompts** — pipelined models now route every prefill through the pipeline path, fixing prior warmup hangs on Gemma-class models.
+- **Force-sequential fallback** — quantized backends and Gemma 4 transparently fall back to a sequential generator when batch/history mode is incompatible with their cache layout.
+
+### Model capability system
+
+- **Two-layer capability model** — declarative `ModelCard` (with optional `reasoning`, `modalities`, `tooling`, and `runtime` sections) plus a normalized `ResolvedCapabilityProfile` derived from the card and conservative family defaults. This is the source of truth for prompt rendering, output parsing, tool-call handling, and the `/v1/models` `resolved_capabilities` field.
+- **Phase 2 thinking contract** — `enable_thinking`, `reasoning_effort`, and the dashboard thinking toggle are all driven by `supports_thinking_toggle`, so non-toggleable reasoning models behave correctly without leaking model-specific quirks into client code.
+- **Output parser selection** — model cards declare `output_parser` (`generic`, `gemma4`, `gpt_oss`, `deepseek_v32`, etc.), so reasoning markers are normalized into structured `reasoning_content` per family.
+- **Model store metadata pipeline** — capability resolution feeds `/v1/models` so dashboards and clients can discover thinking, multimodal, and tool support without hardcoding model lists.
+
+### API surface
+
+- **Claude Messages API** — `/v1/messages` adapter, including streaming, tool use, image inputs, and capability-aware thinking controls.
+- **Ollama compatibility** — both `/api/chat` and `/api/generate`, with adapter-side reasoning normalization.
+- **OpenAI Responses API** — `/v1/responses` adapter alongside chat completions.
+- **Embeddings endpoint** for non-chat workloads.
+- **Model store endpoints** — search, add, download, capability resolution, optimization jobs, and registry management, all exposed under stable URLs and documented in the OpenAPI spec.
+- **Cluster-wide config endpoints** — `GET`/`POST` config that gossipsubs to every node and writes back to `skulk.yaml`.
+- **Tracing, downloads, instance previews, and placement endpoints** — distributed-system observability and pre-launch placement inspection that upstream does not expose.
+
+### Dashboard
+
+- **React dashboard (default)** — replaces upstream's Svelte UI with a typed React + styled-components app that ships with the binary. The legacy Svelte dashboard is kept only as a fallback in the repo.
+- **Cluster topology view** with live device icons, GPU stats, network mesh visualization, and connection status banners.
+- **Placement preview / placement manager** for inspecting and choosing valid placements before launching.
+- **Model store browser** with HuggingFace search, family sidebar, model filters, capability badges, recent models, and per-model launch controls.
+- **Reasoning-aware chat UI** that splits inline `<think>` and Gemma `<|channel>` markers into a dedicated thinking panel and merges them with `reasoning_content` deltas from the API.
+- **Image attachments and multimodal chat affordances** for vision models.
+- **Cluster-wide settings panel** that writes to `skulk.yaml` and syncs across nodes via gossipsub.
+- **Light and dark themes** with first-class theme tokens, screenshots in both modes for documentation work.
+
+### Centralized logging and observability
+
+- **Structured JSON stdout** when `logging.enabled` is set, configurable from the dashboard Settings panel and synced cluster-wide.
+- **Vector + VictoriaLogs + Grafana stack** — local Vector log shipper on each node, central VictoriaLogs storage, ready-made Grafana dashboards. Stack definition lives in `deployment/logging/`.
+- **Distributed tracing** opt-in via `EXO_TRACING_ENABLED`.
+
+### Model store
+
+- **Centralized model store host** — one node downloads, the rest of the cluster stages over the LAN.
+- **Persistent registry** with capability resolution and download tracking.
+- **Custom model card support** — add your own model with `POST /models/add`.
+- **Image and embedding model cards** behind feature flags.
+- **Optimization job pipeline** for mlx-optiq mixed-precision weight quantization.
+
+### Cluster operation
+
+- **Cluster-wide settings sync** for KV cache backend, logging, model store host, HF token, and other inference toggles.
+- **Bootstrap peer config from `skulk.yaml`, env, or CLI** for fixed-topology clusters.
+- **Election (bully algorithm) + master/worker split** for indexing events and broadcasting state.
+- **`SKULK_*` environment variables** alongside the legacy `EXO_*` set, so new options can land without colliding with upstream.
+- **`skulk.yaml`** as the canonical config file, with `exo.yaml` kept for backwards compatibility.
+
+### Build, type system, and dev workflow
+
+- **Strict basedpyright** type checking — zero-error policy for new code.
+- **Ruff** linting and **`nix fmt`** formatting in CI.
+- **Nix flake** for reproducible toolchain setup.
+- **Docusaurus docs site** with auto-generated OpenAPI per-endpoint pages and TypeDoc HTML reference for the dashboard, both built from source.
+- **Pre-commit checklist** documented in `CLAUDE.md` and enforced in CI.
+
+### Hardware and platform
+
+- **Apple Silicon as the primary target**, including RDMA over Thunderbolt 5 on supported hardware and matched macOS versions.
+- **Linux supported** (CPU-oriented in this fork; GPU work happens on Apple Silicon).
 
 ## Prerequisites
 
@@ -106,7 +185,9 @@ Important behavior:
 - **Placement previews**: inspect valid placements before launching a model.
 - **Thinking-aware chat UI**: chat with compatible models and surface reasoning content.
 - **Alternative API compatibility**: OpenAI Chat Completions, OpenAI Responses, Claude Messages, and Ollama.
-- **Experimental inference tuning**: OptiQ and other KV cache backends for long-context and memory experiments.
+- **Rotation-based KV cache backends**: RotorQuant (IsoQuant 3-bit + deferred prefill), OptiQ, TurboQuant, and TurboQuant Adaptive — pick per workload from the dashboard.
+- **Capability-driven thinking contract**: model cards declare reasoning support; the API and dashboard route accordingly.
+- **Experimental inference tuning**: long-context and memory experiments via the KV cache backends above.
 
 ## Dashboard
 
@@ -373,16 +454,26 @@ uv run exo --bootstrap-peers /ip4/192.168.1.20/tcp/5678/p2p/12D3KooW...
 | `EXO_NO_BATCH` | Force sequential generation | `false` |
 | `EXO_OPTIQ_BITS` | Bit width for `optiq` | `4` |
 | `EXO_OPTIQ_FP16_LAYERS` | Edge FP16 layers for `optiq` | `4` |
+| `SKULK_ENABLE_EXPERIMENTAL_ROTORQUANT` | Enable experimental pure-MLX RotorQuant/IsoQuant cache backends | `false` |
+| `SKULK_ROTORQUANT_FP16_LAYERS` | Edge FP16 layers for `rotorquant_adaptive` | `4` |
+| `SKULK_ROTORQUANT_DEFER_PREFILL` | Set to `0` to disable deferred prefill (debugging only) | `1` |
 | `EXO_BOOTSTRAP_PEERS` | Comma-separated static peers to dial on startup | None |
 | `HF_TOKEN` | Hugging Face token | None |
 
 Examples:
 
 ```bash
-EXO_OFFLINE=true uv run exo
-EXO_ENABLE_IMAGE_MODELS=true uv run exo
-EXO_KV_CACHE_BACKEND=optiq EXO_OPTIQ_BITS=4 EXO_OPTIQ_FP16_LAYERS=4 uv run exo
+EXO_OFFLINE=true uv run skulk
+EXO_ENABLE_IMAGE_MODELS=true uv run skulk
+EXO_KV_CACHE_BACKEND=optiq EXO_OPTIQ_BITS=4 EXO_OPTIQ_FP16_LAYERS=4 uv run skulk
+SKULK_KV_CACHE_BACKEND=default SKULK_MLX_HANG_DEBUG=1 uv run skulk -vv
 ```
+
+The `rotorquant` and `rotorquant_adaptive` cache backends are experimental
+pure-MLX IsoQuant storage/dequant backends, not the fused RotorQuant+QJL
+implementation from the paper. They fall back to `default` unless
+`SKULK_ENABLE_EXPERIMENTAL_ROTORQUANT=1` is also set, and should be used only
+for isolated cache experiments.
 
 ## RDMA on macOS
 

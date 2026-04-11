@@ -8,11 +8,17 @@ from exo.shared.types.text_generation import TextGenerationTaskParams
 
 
 class _FakeGroup:
+    def rank(self) -> int:
+        return 0
+
     def size(self) -> int:
         return 3
 
 
 class _SingleNodeGroup:
+    def rank(self) -> int:
+        return 0
+
     def size(self) -> int:
         return 1
 
@@ -33,9 +39,18 @@ def test_warmup_inference_uses_safe_default_user_content_without_instructions(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def fake_apply_chat_template(*, tokenizer: object, task_params: object, model_card: object):
+    def fake_apply_chat_template(
+        *,
+        tokenizer: object,
+        task_params: object,
+        model_card: object,
+        suppress_empty_gemma4_thought_channel: bool = False,
+    ):
         del tokenizer, model_card
         captured["task_params"] = task_params
+        captured["suppress_empty_gemma4_thought_channel"] = (
+            suppress_empty_gemma4_thought_channel
+        )
         return "warmup prompt"
 
     def fake_mx_barrier(_group: object) -> None:
@@ -46,8 +61,8 @@ def test_warmup_inference_uses_safe_default_user_content_without_instructions(
             yield None
         return
 
-    def fake_all_gather(array: object, *, group: object):
-        del group
+    def fake_all_sum(array: object, *, group: object, stream: object = None):
+        del group, stream
         return array
 
     def fake_log_request_shape(
@@ -67,7 +82,7 @@ def test_warmup_inference_uses_safe_default_user_content_without_instructions(
     monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
     monkeypatch.setattr(generate_mod, "mlx_generate", fake_mlx_generate)
     monkeypatch.setattr(generate_mod, "log_request_shape", fake_log_request_shape)
-    monkeypatch.setattr(generate_mod.mx.distributed, "all_gather", fake_all_gather)
+    monkeypatch.setattr(generate_mod.mx.distributed, "all_sum", fake_all_sum)
 
     check_every = generate_mod.warmup_inference(
         model=object(),  # type: ignore[arg-type]
@@ -81,10 +96,13 @@ def test_warmup_inference_uses_safe_default_user_content_without_instructions(
     assert check_every == 0
     assert task_params.instructions is None
     assert task_params.enable_thinking is False
-    assert task_params.temperature == 1.0
-    assert task_params.top_p == 0.95
-    assert task_params.top_k == 64
-    assert task_params.max_output_tokens == 1024
+    # Distributed warmup uses greedy sampling so every rank samples the same
+    # token from the shared logits (stochastic sampling can diverge).
+    assert task_params.temperature == 0.0
+    assert task_params.top_p == 1.0
+    assert task_params.top_k == 0
+    assert task_params.max_output_tokens == 1
+    assert captured["suppress_empty_gemma4_thought_channel"] is True
     first_message = task_params.input[0]
     assert first_message.content == "hello"
     assert captured["label"] == "warmup"
@@ -101,8 +119,14 @@ def test_warmup_inference_ignores_repeat_count_override_for_pipeline_groups(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def fake_apply_chat_template(*, tokenizer: object, task_params: object, model_card: object):
-        del tokenizer, model_card
+    def fake_apply_chat_template(
+        *,
+        tokenizer: object,
+        task_params: object,
+        model_card: object,
+        suppress_empty_gemma4_thought_channel: bool = False,
+    ):
+        del tokenizer, model_card, suppress_empty_gemma4_thought_channel
         captured["task_params"] = task_params
         return "warmup prompt"
 
@@ -114,8 +138,8 @@ def test_warmup_inference_ignores_repeat_count_override_for_pipeline_groups(
             yield None
         return
 
-    def fake_all_gather(array: object, *, group: object):
-        del group
+    def fake_all_sum(array: object, *, group: object, stream: object = None):
+        del group, stream
         return array
 
     _clear_warmup_env(monkeypatch)
@@ -123,7 +147,7 @@ def test_warmup_inference_ignores_repeat_count_override_for_pipeline_groups(
     monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
     monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
     monkeypatch.setattr(generate_mod, "mlx_generate", fake_mlx_generate)
-    monkeypatch.setattr(generate_mod.mx.distributed, "all_gather", fake_all_gather)
+    monkeypatch.setattr(generate_mod.mx.distributed, "all_sum", fake_all_sum)
 
     generate_mod.warmup_inference(
         model=object(),  # type: ignore[arg-type]
@@ -142,8 +166,14 @@ def test_warmup_inference_ignores_instruction_override_for_pipeline_groups(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def fake_apply_chat_template(*, tokenizer: object, task_params: object, model_card: object):
-        del tokenizer, model_card
+    def fake_apply_chat_template(
+        *,
+        tokenizer: object,
+        task_params: object,
+        model_card: object,
+        suppress_empty_gemma4_thought_channel: bool = False,
+    ):
+        del tokenizer, model_card, suppress_empty_gemma4_thought_channel
         captured["task_params"] = task_params
         return "warmup prompt"
 
@@ -155,8 +185,8 @@ def test_warmup_inference_ignores_instruction_override_for_pipeline_groups(
             yield None
         return
 
-    def fake_all_gather(array: object, *, group: object):
-        del group
+    def fake_all_sum(array: object, *, group: object, stream: object = None):
+        del group, stream
         return array
 
     _clear_warmup_env(monkeypatch)
@@ -164,7 +194,7 @@ def test_warmup_inference_ignores_instruction_override_for_pipeline_groups(
     monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
     monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
     monkeypatch.setattr(generate_mod, "mlx_generate", fake_mlx_generate)
-    monkeypatch.setattr(generate_mod.mx.distributed, "all_gather", fake_all_gather)
+    monkeypatch.setattr(generate_mod.mx.distributed, "all_sum", fake_all_sum)
 
     generate_mod.warmup_inference(
         model=object(),  # type: ignore[arg-type]
@@ -183,8 +213,14 @@ def test_warmup_inference_honors_repeat_and_instruction_overrides_for_single_nod
 ) -> None:
     captured: dict[str, object] = {}
 
-    def fake_apply_chat_template(*, tokenizer: object, task_params: object, model_card: object):
-        del tokenizer, model_card
+    def fake_apply_chat_template(
+        *,
+        tokenizer: object,
+        task_params: object,
+        model_card: object,
+        suppress_empty_gemma4_thought_channel: bool = False,
+    ):
+        del tokenizer, model_card, suppress_empty_gemma4_thought_channel
         captured["task_params"] = task_params
         return "warmup prompt"
 
@@ -196,8 +232,8 @@ def test_warmup_inference_honors_repeat_and_instruction_overrides_for_single_nod
             yield None
         return
 
-    def fake_all_gather(array: object, *, group: object):
-        del group
+    def fake_all_sum(array: object, *, group: object, stream: object = None):
+        del group, stream
         return array
 
     _clear_warmup_env(monkeypatch)
@@ -206,7 +242,7 @@ def test_warmup_inference_honors_repeat_and_instruction_overrides_for_single_nod
     monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
     monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
     monkeypatch.setattr(generate_mod, "mlx_generate", fake_mlx_generate)
-    monkeypatch.setattr(generate_mod.mx.distributed, "all_gather", fake_all_gather)
+    monkeypatch.setattr(generate_mod.mx.distributed, "all_sum", fake_all_sum)
 
     generate_mod.warmup_inference(
         model=object(),  # type: ignore[arg-type]
@@ -224,33 +260,41 @@ def test_warmup_inference_honors_repeat_and_instruction_overrides_for_single_nod
     )
 
 
-def test_warmup_inference_stops_after_first_generated_token(
+def test_warmup_inference_requests_one_token_and_finishes_normally(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     generated_tokens = 0
+    captured: dict[str, object] = {}
 
-    def fake_apply_chat_template(*, tokenizer: object, task_params: object, model_card: object):
-        del tokenizer, task_params, model_card
+    def fake_apply_chat_template(
+        *,
+        tokenizer: object,
+        task_params: object,
+        model_card: object,
+        suppress_empty_gemma4_thought_channel: bool = False,
+    ):
+        del tokenizer, task_params, model_card, suppress_empty_gemma4_thought_channel
         return "warmup prompt"
 
     def fake_mx_barrier(_group: object) -> None:
         return None
 
-    def fake_mlx_generate(**_kwargs: object):
+    def fake_mlx_generate(**kwargs: object):
         nonlocal generated_tokens
-        for token in ("first", "second", "third"):
-            generated_tokens += 1
-            yield token
+        task = cast(TextGenerationTaskParams, kwargs["task"])
+        captured["max_output_tokens"] = task.max_output_tokens
+        generated_tokens += 1
+        yield "first"
 
-    def fake_all_gather(array: object, *, group: object):
-        del group
+    def fake_all_sum(array: object, *, group: object, stream: object = None):
+        del group, stream
         return array
 
     _clear_warmup_env(monkeypatch)
     monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
     monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
     monkeypatch.setattr(generate_mod, "mlx_generate", fake_mlx_generate)
-    monkeypatch.setattr(generate_mod.mx.distributed, "all_gather", fake_all_gather)
+    monkeypatch.setattr(generate_mod.mx.distributed, "all_sum", fake_all_sum)
 
     check_every = generate_mod.warmup_inference(
         model=object(),  # type: ignore[arg-type]
@@ -260,6 +304,7 @@ def test_warmup_inference_stops_after_first_generated_token(
         model_card=None,
     )
 
+    assert captured["max_output_tokens"] == 1
     assert generated_tokens == 1
     assert check_every == 100
 
@@ -274,9 +319,7 @@ def test_warmup_helpers_prefer_blank_skulk_values_over_legacy_env(
     monkeypatch.setenv("EXO_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS", "1")
 
     assert generate_mod._warmup_repeat_count() == 1  # pyright: ignore[reportPrivateUsage]
-    assert (
-        generate_mod._warmup_instructions(cast(object, _SingleNodeGroup())) is None
-    )  # pyright: ignore[reportPrivateUsage]
+    assert generate_mod._warmup_instructions(cast(object, _SingleNodeGroup())) is None  # pyright: ignore[reportPrivateUsage, reportArgumentType]
 
 
 def test_warmup_inference_enforces_minimum_cancel_check_interval_on_slow_start(
@@ -284,8 +327,14 @@ def test_warmup_inference_enforces_minimum_cancel_check_interval_on_slow_start(
 ) -> None:
     monotonic_values = iter([100.0, 112.0])
 
-    def fake_apply_chat_template(*, tokenizer: object, task_params: object, model_card: object):
-        del tokenizer, task_params, model_card
+    def fake_apply_chat_template(
+        *,
+        tokenizer: object,
+        task_params: object,
+        model_card: object,
+        suppress_empty_gemma4_thought_channel: bool = False,
+    ):
+        del tokenizer, task_params, model_card, suppress_empty_gemma4_thought_channel
         return "warmup prompt"
 
     def fake_mx_barrier(_group: object) -> None:
@@ -294,15 +343,15 @@ def test_warmup_inference_enforces_minimum_cancel_check_interval_on_slow_start(
     def fake_mlx_generate(**_kwargs: object):
         yield "first"
 
-    def fake_all_gather(array: object, *, group: object):
-        del group
+    def fake_all_sum(array: object, *, group: object, stream: object = None):
+        del group, stream
         return array
 
     _clear_warmup_env(monkeypatch)
     monkeypatch.setattr(generate_mod, "apply_chat_template", fake_apply_chat_template)
     monkeypatch.setattr(generate_mod, "mx_barrier", fake_mx_barrier)
     monkeypatch.setattr(generate_mod, "mlx_generate", fake_mlx_generate)
-    monkeypatch.setattr(generate_mod.mx.distributed, "all_gather", fake_all_gather)
+    monkeypatch.setattr(generate_mod.mx.distributed, "all_sum", fake_all_sum)
     monkeypatch.setattr(generate_mod.time, "monotonic", lambda: next(monotonic_values))
 
     check_every = generate_mod.warmup_inference(

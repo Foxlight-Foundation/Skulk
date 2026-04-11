@@ -181,24 +181,48 @@ class DownloadCoordinator:
 
     async def _sync_config(self, config_yaml: str) -> None:
         """Write received config YAML to the local config file and
-        apply runtime-effective settings (e.g., KV cache backend)."""
+        apply runtime-effective settings (e.g., KV cache backend).
+
+        When the user set ``SKULK_KV_CACHE_BACKEND`` at launch, their
+        value is the source of truth. The cluster sync must not
+        overwrite it — neither in ``os.environ`` nor in the config
+        file.
+        """
         config_path = resolve_config_path()
         try:
+            import yaml
+
+            raw = yaml.safe_load(config_yaml)
+            user_set_kv = bool(
+                os.environ.get("_SKULK_KV_BACKEND_USER_SET")
+                or os.environ.get("_EXO_KV_BACKEND_USER_SET")
+            )
+
+            # Preserve the user's KV backend in the config file when
+            # the env var was set at launch — don't let cluster sync
+            # clobber it.
+            if user_set_kv and raw and isinstance(raw, dict):
+                local_backend = os.environ.get("SKULK_KV_CACHE_BACKEND")
+                if local_backend:
+                    inference = raw.get("inference")
+                    if isinstance(inference, dict):
+                        inference["kv_cache_backend"] = local_backend
+                    else:
+                        raw["inference"] = {"kv_cache_backend": local_backend}
+                    config_yaml = yaml.safe_dump(
+                        raw, default_flow_style=False, sort_keys=False
+                    )
+
             config_path.write_text(config_yaml)
             logger.info(
                 f"DownloadCoordinator: synced {config_path.name} from cluster ({len(config_yaml)} bytes)"
             )
-            # Apply inference config to env var so next runner spawn picks it up
-            import yaml
 
-            raw = yaml.safe_load(config_yaml)
+            # Apply inference config to env var so next runner spawn picks it up
             if raw and isinstance(raw, dict):
                 inference = raw.get("inference")
                 if isinstance(inference, dict) and "kv_cache_backend" in inference:
-                    # Don't overwrite if user provided the env var at launch
-                    if not os.environ.get(
-                        "_SKULK_KV_BACKEND_USER_SET"
-                    ) and not os.environ.get("_EXO_KV_BACKEND_USER_SET"):
+                    if not user_set_kv:
                         os.environ["SKULK_KV_CACHE_BACKEND"] = str(
                             inference["kv_cache_backend"]
                         )
@@ -210,7 +234,8 @@ class DownloadCoordinator:
                         )
                     else:
                         logger.info(
-                            "DownloadCoordinator: skipping KV backend update (user env var override active)"
+                            "DownloadCoordinator: keeping user-set KV_CACHE_BACKEND="
+                            f"{os.environ.get('SKULK_KV_CACHE_BACKEND', '?')}"
                         )
                 # Apply HF token if not user-set
                 hf_token = raw.get("hf_token")

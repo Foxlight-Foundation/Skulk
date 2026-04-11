@@ -1,4 +1,5 @@
 # type: ignore
+import os
 import time
 from typing import cast
 from unittest.mock import patch
@@ -109,15 +110,32 @@ class TestKVPrefix:
 
 class TestKVCacheBackends:
     def test_unknown_backend_falls_back_to_default(self):
-        with patch(
-            "exo.worker.engines.mlx.cache.KV_CACHE_BACKEND",
-            cast(object, "mystery"),
+        with patch.dict(os.environ, {"SKULK_KV_CACHE_BACKEND": "mystery"}):
+            assert get_kv_cache_backend() == "default"
+
+    def test_rotorquant_backend_requires_experimental_gate(self):
+        with patch.dict(
+            os.environ,
+            {
+                "SKULK_KV_CACHE_BACKEND": "rotorquant_adaptive",
+                "SKULK_ENABLE_EXPERIMENTAL_ROTORQUANT": "",
+            },
         ):
             assert get_kv_cache_backend() == "default"
 
+    def test_rotorquant_backend_can_be_explicitly_enabled(self):
+        with patch.dict(
+            os.environ,
+            {
+                "SKULK_KV_CACHE_BACKEND": "rotorquant",
+                "SKULK_ENABLE_EXPERIMENTAL_ROTORQUANT": "1",
+            },
+        ):
+            assert get_kv_cache_backend() == "rotorquant"
+
     def test_make_kv_cache_default_backend(self):
         model = cast(Model, type("FakeModel", (), {"layers": [object(), object()]})())
-        with patch("exo.worker.engines.mlx.cache.KV_CACHE_BACKEND", "default"):
+        with patch.dict(os.environ, {"SKULK_KV_CACHE_BACKEND": "default"}):
             cache = make_kv_cache(model)
 
         assert len(cache) == 2
@@ -126,7 +144,7 @@ class TestKVCacheBackends:
     def test_make_kv_cache_mlx_quantized_backend(self):
         model = cast(Model, type("FakeModel", (), {"layers": [object(), object()]})())
         with (
-            patch("exo.worker.engines.mlx.cache.KV_CACHE_BACKEND", "mlx_quantized"),
+            patch.dict(os.environ, {"SKULK_KV_CACHE_BACKEND": "mlx_quantized"}),
             patch("exo.worker.engines.mlx.cache.KV_CACHE_BITS", 4),
             patch("exo.worker.engines.mlx.cache.CACHE_GROUP_SIZE", 32),
         ):
@@ -144,7 +162,7 @@ class TestKVCacheBackends:
 
         model = cast(Model, FakeModel())
         with (
-            patch("exo.worker.engines.mlx.cache.KV_CACHE_BACKEND", "mlx_quantized"),
+            patch.dict(os.environ, {"SKULK_KV_CACHE_BACKEND": "mlx_quantized"}),
             patch("exo.worker.engines.mlx.cache.KV_CACHE_BITS", 4),
             patch("exo.worker.engines.mlx.cache.CACHE_GROUP_SIZE", 32),
         ):
@@ -163,7 +181,7 @@ class TestKVCacheBackends:
 
         model = cast(Model, FakeModel())
         with (
-            patch("exo.worker.engines.mlx.cache.KV_CACHE_BACKEND", "mlx_quantized"),
+            patch.dict(os.environ, {"SKULK_KV_CACHE_BACKEND": "mlx_quantized"}),
             patch("exo.worker.engines.mlx.cache.KV_CACHE_BITS", 4),
             patch("exo.worker.engines.mlx.cache.CACHE_GROUP_SIZE", 32),
         ):
@@ -176,7 +194,7 @@ class TestKVCacheBackends:
     def test_make_kv_cache_mlx_quantized_backend_requires_bits(self):
         model = cast(Model, type("FakeModel", (), {"layers": [object()]})())
         with (
-            patch("exo.worker.engines.mlx.cache.KV_CACHE_BACKEND", "mlx_quantized"),
+            patch.dict(os.environ, {"SKULK_KV_CACHE_BACKEND": "mlx_quantized"}),
             patch("exo.worker.engines.mlx.cache.KV_CACHE_BITS", None),
             pytest.raises(ValueError, match="EXO_KV_CACHE_BITS"),
         ):
@@ -191,7 +209,7 @@ class TestKVCacheBackends:
 
         model = cast(Model, FakeModel())
         with (
-            patch("exo.worker.engines.mlx.cache.KV_CACHE_BACKEND", "turboquant"),
+            patch.dict(os.environ, {"SKULK_KV_CACHE_BACKEND": "turboquant"}),
             patch("exo.worker.engines.mlx.cache.TURBOQUANT_K_BITS", 3),
             patch("exo.worker.engines.mlx.cache.TURBOQUANT_V_BITS", 4),
         ):
@@ -208,10 +226,7 @@ class TestKVCacheBackends:
 
         model = cast(Model, FakeModel())
         with (
-            patch(
-                "exo.worker.engines.mlx.cache.KV_CACHE_BACKEND",
-                "turboquant_adaptive",
-            ),
+            patch.dict(os.environ, {"SKULK_KV_CACHE_BACKEND": "turboquant_adaptive"}),
             patch("exo.worker.engines.mlx.cache.TURBOQUANT_K_BITS", 3),
             patch("exo.worker.engines.mlx.cache.TURBOQUANT_V_BITS", 4),
             patch("exo.worker.engines.mlx.cache.TURBOQUANT_FP16_LAYERS", 1),

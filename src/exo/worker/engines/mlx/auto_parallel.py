@@ -192,6 +192,46 @@ def eval_with_timeout(
         completed.set()
 
 
+def _cache_dep_anchor(cache: object) -> mx.array | None:
+    """Return an array from ``cache`` suitable for ``mx.depends`` ordering.
+
+    Standard ``KVCache`` exposes ``.keys``; quantized caches like
+    ``RotorQuantKVCache`` do not.  Fall back to the first leaf of
+    ``.state`` so we can order cache evaluation relative to distributed
+    sends on *any* cache backend.
+    """
+    # Fast path: mlx-lm KVCache and friends
+    keys = getattr(cache, "keys", None)
+    if isinstance(keys, mx.array):
+        return keys
+
+    # Generic path: first array in cache.state
+    state: object = getattr(cache, "state", None)
+    if isinstance(state, (list, tuple)):
+        for leaf in list(cast(list[object], state)):
+            if isinstance(leaf, mx.array):
+                return leaf
+    return None
+
+
+def _set_cache_dep_anchor(cache: object, value: mx.array) -> None:
+    """Write back a dependency-updated anchor array to ``cache``.
+
+    Mirrors :func:`_cache_dep_anchor`: if the cache has ``.keys`` we set
+    it directly; otherwise we update the first matching private attribute
+    from the state pytree.
+    """
+    if hasattr(cache, "keys") and isinstance(getattr(cache, "keys", None), mx.array):
+        cache.keys = value  # type: ignore[attr-defined]
+        return
+
+    # Walk common private attributes that back the state pytree.
+    for attr in ("_key_indices", "_pending_keys"):
+        if hasattr(cache, attr) and isinstance(getattr(cache, attr, None), mx.array):
+            setattr(cache, attr, value)
+            return
+
+
 class _LayerCallable(Protocol):
     """Structural type that any compatible layer must satisfy.
 
@@ -302,31 +342,51 @@ class PipelineLastLayer(CustomMlxLayer):
                     output = mx.distributed.send(
                         output, (self.r + 1) % self.s, group=self.group
                     )
+            _dep_array: mx.array | None = None
             if cache is not None:
                 # CacheList (used by MLA models like DeepSeekV32, GLM MoE DSA)
                 # doesn't have .keys directly; access via first sub-cache.
-                _cache = cache[0] if hasattr(cache, "caches") else cache  # type: ignore
-                if hasattr(_cache, "keys"):  # pyright: ignore[reportAny]
-                    _cache.keys = mx.depends(_cache.keys, output)  # type: ignore
+                _cache: object = cache[0] if hasattr(cache, "caches") else cache  # type: ignore[index]
+                _dep_array = _cache_dep_anchor(_cache)
+                if _dep_array is not None:
+                    _set_cache_dep_anchor(_cache, mx.depends(_dep_array, output))
             with _hang_debug_watch(
                 f"pipeline_last eval_send rank={self.r} dst={(self.r + 1) % self.s} prefill={self.is_prefill}"
             ):
                 mx.eval(output)
-            if cache is not None and hasattr(_cache, "keys"):  # type: ignore
+            if _dep_array is not None:
                 with _hang_debug_watch(
                     f"pipeline_last eval_cache_dep rank={self.r} dst={(self.r + 1) % self.s} prefill={self.is_prefill}"
                 ):
-                    mx.eval(_cache.keys)  # type: ignore
+                    mx.eval(_cache_dep_anchor(_cache))  # type: ignore[possibly-undefined]
 
         if not self.is_prefill:
+            # Broadcast the last rank's output to all other ranks so every
+            # rank can apply lm_head and sample the same token.
+            #
+            # Uses all_sum instead of point-to-point send/recv: the last rank
+            # contributes its real output while other ranks contribute zeros.
+            # This avoids JACCL send/recv corruption (mlx#3149) that caused
+            # subsequent all_gather collectives to return NaN/garbage after
+            # warmup — and unlike all_gather, orphaned prefetch steps from
+            # generate_step's one-step-ahead prefetch can't deadlock because
+            # all_sum is commutative and tolerates collective reordering.
+            #
+            # The all_sum runs on the CPU stream rather than the default GPU
+            # stream to avoid a JACCL hang observed on 3-node pipelines when
+            # send/recv and all_sum share the same GPU stream.  CPU-stream
+            # collectives (used by mx_barrier) are proven reliable; this
+            # isolates the broadcast from pipeline point-to-point traffic.
+            contribution = output if self.r == self.s - 1 else mx.zeros_like(output)
+            cpu_stream = mx.default_stream(mx.Device(mx.cpu))
             with _hang_debug_watch(
-                f"pipeline_last all_gather rank={self.r} world={self.s}"
+                f"pipeline_last all_sum_broadcast rank={self.r} world={self.s}"
             ):
-                output = mx.distributed.all_gather(output, group=self.group)[
-                    -output.shape[0] :
-                ]
+                output = mx.distributed.all_sum(
+                    contribution, group=self.group, stream=cpu_stream
+                )
             with _hang_debug_watch(
-                f"pipeline_last eval_all_gather rank={self.r} world={self.s}"
+                f"pipeline_last eval_all_sum_broadcast rank={self.r} world={self.s}"
             ):
                 mx.eval(output)
 
@@ -564,11 +624,16 @@ def patch_pipeline_model[T](model: T, group: mx.distributed.Group) -> T:
             # directly, so pipeline-parallel Gemma 4 needs this patch on both
             # the top-level model and the nested language model.
             if cache is not None:
-                logits_array = logits.logits if hasattr(logits, "logits") else logits  # type: ignore[attr-defined]
-                last = cache[-1]  # type: ignore[index]
-                dep_cache = last[0] if hasattr(last, "caches") else last  # type: ignore[index]
-                if hasattr(dep_cache, "keys") and dep_cache.keys is not None:  # type: ignore[attr-defined]
-                    dep_cache.keys = mx.depends(dep_cache.keys, logits_array)  # type: ignore[attr-defined]
+                logits_array: mx.array = (
+                    logits.logits if hasattr(logits, "logits") else logits
+                )  # type: ignore[attr-defined]
+                last = cast(object, cache[-1])
+                dep_cache = cast(object, last[0] if hasattr(last, "caches") else last)  # pyright: ignore[reportIndexIssue]
+                anchor = _cache_dep_anchor(dep_cache)
+                if anchor is not None:
+                    _set_cache_dep_anchor(
+                        dep_cache, mx.depends(anchor, cast(mx.array, logits_array))
+                    )
 
             return logits
 

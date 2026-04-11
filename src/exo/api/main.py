@@ -204,6 +204,7 @@ from exo.utils.task_group import TaskGroup
 from exo.worker.engines.mlx.constants import (
     DEFAULT_KV_CACHE_BACKEND,
     VALID_KV_CACHE_BACKENDS,
+    resolve_kv_cache_backend,
 )
 
 if TYPE_CHECKING:
@@ -1197,8 +1198,7 @@ class API:
             )
         for idx, h in cached_hashes.items():
             _log_image_transport(
-                f"TextGeneration cached image {idx}: "
-                f"b64_sha256={h[:12]}..."
+                f"TextGeneration cached image {idx}: b64_sha256={h[:12]}..."
             )
 
         if not new_images:
@@ -2214,9 +2214,7 @@ class API:
                         downloaded_model_ids.add(dl.shard_metadata.model_card.model_id)
             cards = [c for c in cards if c.model_id in downloaded_model_ids]
 
-        return ModelList(
-            data=[self._model_list_entry(card) for card in cards]
-        )
+        return ModelList(data=[self._model_list_entry(card) for card in cards])
 
     async def add_custom_model(self, payload: AddCustomModelParams) -> ModelListModel:
         """Fetch a model from HuggingFace and save as a custom model card, then sync across the cluster."""
@@ -2580,7 +2578,7 @@ class API:
 
         if configured_backend not in VALID_KV_CACHE_BACKENDS:
             return DEFAULT_KV_CACHE_BACKEND
-        return configured_backend
+        return resolve_kv_cache_backend(configured_backend)
 
     async def get_config(self) -> JSONResponse:
         if not self._config_path.exists():
@@ -2678,7 +2676,9 @@ class API:
             log_on = bool(logging_cfg_update.get("enabled", False)) and bool(
                 logging_cfg_update.get("ingest_url")
             )
-            set_structured_stdout(log_on, ingest_url=str(logging_cfg_update.get("ingest_url", "")))
+            set_structured_stdout(
+                log_on, ingest_url=str(logging_cfg_update.get("ingest_url", ""))
+            )
         # model_store changes still require restart; inference-only changes don't
         has_store_changes = "model_store" in config_data
         return JSONResponse(

@@ -12,6 +12,7 @@ from mlx_lm.models.cache import (
 )
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
+from exo.shared.constants import preferred_env_value
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import KVCacheType, Model
 from exo.worker.engines.mlx.constants import (
@@ -19,16 +20,25 @@ from exo.worker.engines.mlx.constants import (
     DEFAULT_KV_CACHE_BACKEND,
     DEFAULT_TURBOQUANT_K_BITS,
     DEFAULT_TURBOQUANT_V_BITS,
-    KV_CACHE_BACKEND,
+    EXPERIMENTAL_ROTORQUANT_BACKENDS,
     KV_CACHE_BITS,
     OPTIQ_BITS,
     OPTIQ_FP16_LAYERS,
+    ROTORQUANT_DEFER_PREFILL,
+    ROTORQUANT_FP16_LAYERS,
     TURBOQUANT_FP16_LAYERS,
     TURBOQUANT_K_BITS,
     TURBOQUANT_V_BITS,
     VALID_KV_CACHE_BACKENDS,
     KVCacheBackend,
+    experimental_rotorquant_enabled,
+    resolve_kv_cache_backend,
 )
+from exo.worker.engines.mlx.rotorquant import (
+    make_rotorquant_adaptive_cache,
+    make_rotorquant_cache_from_template,
+)
+from exo.worker.engines.mlx.rotorquant.tables import ISO3_BLOCK_SIZE
 from exo.worker.engines.mlx.turboquant import (
     make_turboquant_adaptive_cache,
     make_turboquant_cache_from_template,
@@ -337,17 +347,28 @@ class KVPrefixCache:
             )
 
     def get_memory_used_percentage(self) -> float:
+        """Return the maximum memory pressure across all ranks.
+
+        Uses all_sum with slotted contributions instead of all_gather.
+        JACCL all_gather deadlocks intermittently on 3-node pipelines;
+        all_sum is proven reliable.
+        """
         local_pressure: float = get_memory_used_percentage()
 
         if self._group is None:
             return local_pressure
 
-        all_pressure = mx.distributed.all_gather(
-            mx.array([local_pressure], dtype=mx.float32),
+        world_size = self._group.size()
+        rank = self._group.rank()
+        slots = [0.0] * world_size
+        slots[rank] = local_pressure
+        cpu_stream = mx.default_stream(mx.Device(mx.cpu))
+        merged = mx.distributed.all_sum(
+            mx.array(slots, dtype=mx.float32),
             group=self._group,
+            stream=cpu_stream,
         )
-        # .item() evals.
-        max_pressure = float(mx.max(all_pressure).item())
+        max_pressure = float(mx.max(merged).item())
         return max_pressure
 
 
@@ -415,6 +436,13 @@ def get_memory_used_percentage() -> float:
     mem = psutil.virtual_memory()
     # percent is 0-100
     return float(mem.percent / 100)
+
+
+def _make_default_cache(model: Model) -> KVCacheType:
+    """Build the default (unquantized) KV cache for a model."""
+    if hasattr(model, "make_cache"):
+        return model.make_cache()  # type: ignore
+    return [KVCache() for _ in model.layers]
 
 
 def make_kv_cache(
@@ -579,19 +607,85 @@ def make_kv_cache(
             for i, _ in enumerate(model.layers)
         ]
 
-    if hasattr(model, "make_cache"):
-        logger.info("Using MLX LM's make cache")
-        return model.make_cache()  # type: ignore
+    if backend in ("rotorquant", "rotorquant_adaptive"):
+        # Preflight: RotorQuant requires head_dim divisible by the
+        # IsoQuant block size (128). Models with smaller heads (e.g. 64-d)
+        # would crash at first token; fall back to default instead.
+        if len(model.layers) > 0:
+            first_layer = model.layers[0]
+            attn = getattr(first_layer, "self_attn", first_layer)
+            model_head_dim: int = getattr(attn, "head_dim", ISO3_BLOCK_SIZE)
+        else:
+            model_head_dim = ISO3_BLOCK_SIZE
+        if model_head_dim % ISO3_BLOCK_SIZE != 0:
+            logger.warning(
+                f"RotorQuant requires head_dim divisible by {ISO3_BLOCK_SIZE}, "
+                f"but this model has head_dim={model_head_dim}; "
+                f"falling back to default KV cache"
+            )
+            return _make_default_cache(model)
+
+        if backend == "rotorquant":
+            logger.info(
+                f"Using rotorquant KV cache (defer_prefill={ROTORQUANT_DEFER_PREFILL})"
+            )
+            return make_rotorquant_cache_from_template(
+                model,
+                defer_prefill=ROTORQUANT_DEFER_PREFILL,
+            )
+
+        logger.info(
+            f"Using rotorquant adaptive KV cache "
+            f"(fp16_layers={ROTORQUANT_FP16_LAYERS}, "
+            f"defer_prefill={ROTORQUANT_DEFER_PREFILL})"
+        )
+        return make_rotorquant_adaptive_cache(
+            model,
+            fp16_layers=ROTORQUANT_FP16_LAYERS,
+            defer_prefill=ROTORQUANT_DEFER_PREFILL,
+        )
 
     logger.info("Using default KV cache")
-    return [KVCache() for _ in model.layers]
+    return _make_default_cache(model)
 
 
 def get_kv_cache_backend() -> KVCacheBackend:
-    backend = KV_CACHE_BACKEND
+    """Return the active KV cache backend, reading ``os.environ`` at call time.
+
+    The env var is the source of truth — it can be set at launch, updated
+    by config sync via gossipsub, or changed from the dashboard.  Reading
+    it dynamically (instead of the frozen import-time constant) ensures
+    that runtime updates are always visible to the runner.
+    """
+    configured_backend = (
+        preferred_env_value(
+            "SKULK_KV_CACHE_BACKEND", "EXO_KV_CACHE_BACKEND", DEFAULT_KV_CACHE_BACKEND
+        )
+        or DEFAULT_KV_CACHE_BACKEND
+    )
+    backend = resolve_kv_cache_backend(configured_backend)
+
+    if configured_backend not in VALID_KV_CACHE_BACKENDS:
+        logger.warning(
+            f"Unknown KV_CACHE_BACKEND={configured_backend!r}; "
+            f"falling back to {DEFAULT_KV_CACHE_BACKEND!r}"
+        )
+        return backend
+
     if backend not in VALID_KV_CACHE_BACKENDS:
         logger.warning(
-            f"Unknown EXO_KV_CACHE_BACKEND={backend!r}; falling back to {DEFAULT_KV_CACHE_BACKEND!r}"
+            f"Unknown KV_CACHE_BACKEND={backend!r}; falling back to {DEFAULT_KV_CACHE_BACKEND!r}"
         )
         return DEFAULT_KV_CACHE_BACKEND
+
+    if (
+        configured_backend in EXPERIMENTAL_ROTORQUANT_BACKENDS
+        and not experimental_rotorquant_enabled()
+    ):
+        logger.warning(
+            f"KV_CACHE_BACKEND={configured_backend!r} requested, but RotorQuant is "
+            "an experimental pure-MLX IsoQuant storage/dequant backend. Falling "
+            "back to 'default'. Set SKULK_ENABLE_EXPERIMENTAL_ROTORQUANT=1 to "
+            "force this backend for isolated testing."
+        )
     return backend
