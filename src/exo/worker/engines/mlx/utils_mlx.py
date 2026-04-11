@@ -80,6 +80,52 @@ from exo.worker.runner.bootstrap import logger
 Group = mx.distributed.Group
 
 
+def _apply_nemotron_reasoning_controls(
+    formatted_messages: list[dict[str, Any]],
+    *,
+    enable_thinking: bool | None,
+    family: str,
+) -> list[dict[str, Any]]:
+    """Translate explicit thinking toggles into Nemotron chat-template controls.
+
+    Nemotron v2 models expect `/think` or `/no_think` to appear in the rendered
+    chat messages. Passing ``enable_thinking`` as a template kwarg is not enough
+    because their tokenizer template keys off literal control strings in system
+    or user turns.
+
+    We only inject a control message when the caller explicitly asked for
+    thinking on/off and the conversation does not already contain a turn-level
+    Nemotron control string.
+    """
+    if family != "nemotron" or enable_thinking is None:
+        return formatted_messages
+
+    control_text = "/think" if enable_thinking else "/no_think"
+    existing_controls = {"/think", "/no_think"}
+    for msg in formatted_messages:
+        if msg.get("role") not in {"system", "user", "developer"}:
+            continue
+        content = msg.get("content")
+        if isinstance(content, str) and any(
+            marker in content for marker in existing_controls
+        ):
+            return formatted_messages
+
+    updated_messages = [dict(msg) for msg in formatted_messages]
+    if updated_messages and updated_messages[0].get("role") == "system":
+        existing_content = updated_messages[0].get("content")
+        if isinstance(existing_content, str) and existing_content:
+            updated_messages[0] = {
+                **updated_messages[0],
+                "content": f"{control_text}\n{existing_content}",
+            }
+        else:
+            updated_messages[0] = {**updated_messages[0], "content": control_text}
+        return updated_messages
+
+    return [{"role": "system", "content": control_text}, *updated_messages]
+
+
 def _request_shape_debug_enabled() -> bool:
     """Return whether request-shape tracing is enabled for prompt debugging."""
     value = preferred_env_value(
@@ -879,6 +925,12 @@ def apply_chat_template(
         model_card=model_card,
         tokenizer=tokenizer,
         task_params=task_params,
+    )
+
+    formatted_messages = _apply_nemotron_reasoning_controls(
+        formatted_messages,
+        enable_thinking=task_params.enable_thinking,
+        family=capability_profile.family,
     )
 
     if capability_profile.prompt_renderer == PromptRendererType.Dsml:
