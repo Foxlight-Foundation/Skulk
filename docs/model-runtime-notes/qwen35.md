@@ -26,12 +26,16 @@ Observed symptom:
 
 - `mlx-community/Qwen3.5-9B-4bit` was not clearly surfaced as toggleable in the
   project metadata even though the model definitely reasons by default
+- `mlx-community/Qwen3.5-9B-MLX-4bit` appeared as a separate model id without a
+  built-in card, so it fell back to generic metadata despite being the same
+  validated runtime family
 
 What was wrong:
 
 - the local `Qwen3.5-{9B,27B}` model cards only declared `thinking`
 - they omitted `thinking_toggle` and did not include explicit reasoning
   metadata
+- the `Qwen3.5-9B-MLX-4bit` alias did not have its own built-in card
 
 Current fix:
 
@@ -40,6 +44,8 @@ Current fix:
 - set `supports_toggle = true`
 - keep conservative defaults of `default_effort = "medium"` and
   `disabled_effort = "none"`
+- add a built-in card for `mlx-community/Qwen3.5-9B-MLX-4bit` that matches the
+  validated `Qwen3.5-9B-4bit` runtime metadata
 
 ## Current Trusted Runtime Envelope
 
@@ -49,6 +55,8 @@ For the Qwen 3.5 text variants currently covered by local cards:
 - thinking markers: token-delimited `<think>...</think>`
 - toggle behavior: `enable_thinking=True/False` via template/API parameters
 - no soft-switch `/think` / `/no_think` prompt controls
+- `mlx-community/Qwen3.5-9B-MLX-4bit` is treated as the same runtime family as
+  `mlx-community/Qwen3.5-9B-4bit`
 
 ## Sources
 
