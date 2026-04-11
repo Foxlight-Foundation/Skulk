@@ -46,6 +46,7 @@ Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard),
 - `resources/inference_model_cards/` — Model metadata TOML files
 - `deployment/logging/` — VictoriaLogs + Grafana stack and Vector config
 - `docs/` — Technical documentation
+- `docs/model-runtime-notes/` — Internal per-model clustered runtime notes
 
 ### Dashboard (React)
 
