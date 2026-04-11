@@ -37,5 +37,6 @@ Keep notes compact and practical. A good note usually covers:
 ## Current Notes
 
 - `gemma4.md`
+- `llama31_nemotron_nano.md`
 - `nemotron.md`
 - `qwen35.md`
