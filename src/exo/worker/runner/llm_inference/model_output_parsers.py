@@ -450,26 +450,128 @@ def parse_thinking_models(
 ) -> Generator[GenerationResponse | None]:
     """Route thinking tokens via is_thinking flag.
 
-    Swallows think tag tokens, sets is_thinking on all others.
-    Always yields tokens with finish_reason to avoid hanging the chunk stream.
+    Swallows think tag tokens, sets ``is_thinking`` on all others, and buffers
+    partial marker fragments so split or fused ``<think>`` tags do not leak into
+    visible output.
+
+    Always yields a terminal chunk with ``finish_reason`` so the stream closes
+    cleanly even when the model ends inside a thinking block.
     """
+    if think_start is None or think_end is None:
+        for response in responses:
+            yield response
+        return
+
+    buffer = ""
     is_thinking = starts_in_thinking
+
+    def _emit_text(
+        template: GenerationResponse,
+        text: str,
+        *,
+        thinking: bool,
+    ) -> GenerationResponse | None:
+        if not text:
+            return None
+        return template.model_copy(
+            update={"text": text, "is_thinking": thinking, "finish_reason": None}
+        )
+
     for response in responses:
         if response is None:
             yield None
             continue
-        if response.finish_reason is not None:
-            yield response.model_copy(update={"is_thinking": False})
+
+        buffer += response.text
+
+        if response.finish_reason is None:
+            while True:
+                if not is_thinking:
+                    start_index = buffer.find(think_start)
+                    if start_index != -1:
+                        emitted = _emit_text(
+                            response,
+                            buffer[:start_index],
+                            thinking=False,
+                        )
+                        if emitted is not None:
+                            yield emitted
+                        buffer = buffer[start_index + len(think_start) :]
+                        is_thinking = True
+                        continue
+
+                    safe_length = len(buffer) - (len(think_start) - 1)
+                    if safe_length > 0:
+                        emitted = _emit_text(
+                            response,
+                            buffer[:safe_length],
+                            thinking=False,
+                        )
+                        if emitted is not None:
+                            yield emitted
+                        buffer = buffer[safe_length:]
+                    break
+
+                end_index = buffer.find(think_end)
+                if end_index != -1:
+                    emitted = _emit_text(
+                        response,
+                        buffer[:end_index],
+                        thinking=True,
+                    )
+                    if emitted is not None:
+                        yield emitted
+                    buffer = buffer[end_index + len(think_end) :]
+                    is_thinking = False
+                    continue
+
+                safe_length = len(buffer) - (len(think_end) - 1)
+                if safe_length > 0:
+                    emitted = _emit_text(
+                        response,
+                        buffer[:safe_length],
+                        thinking=True,
+                    )
+                    if emitted is not None:
+                        yield emitted
+                    buffer = buffer[safe_length:]
+                break
             continue
 
-        if response.text == think_start:
-            is_thinking = True
-            continue
-        if response.text == think_end:
+        while buffer:
+            if not is_thinking:
+                start_index = buffer.find(think_start)
+                if start_index == -1:
+                    emitted = _emit_text(response, buffer, thinking=False)
+                    if emitted is not None:
+                        yield emitted
+                    buffer = ""
+                    break
+
+                emitted = _emit_text(response, buffer[:start_index], thinking=False)
+                if emitted is not None:
+                    yield emitted
+                buffer = buffer[start_index + len(think_start) :]
+                is_thinking = True
+                continue
+
+            end_index = buffer.find(think_end)
+            if end_index == -1:
+                emitted = _emit_text(response, buffer, thinking=True)
+                if emitted is not None:
+                    yield emitted
+                buffer = ""
+                break
+
+            emitted = _emit_text(response, buffer[:end_index], thinking=True)
+            if emitted is not None:
+                yield emitted
+            buffer = buffer[end_index + len(think_end) :]
             is_thinking = False
-            continue
 
-        yield response.model_copy(update={"is_thinking": is_thinking})
+        yield response.model_copy(
+            update={"text": "", "is_thinking": False, "finish_reason": response.finish_reason}
+        )
 
 
 def parse_tool_calls(

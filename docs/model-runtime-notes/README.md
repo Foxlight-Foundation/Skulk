@@ -37,4 +37,4 @@ Keep notes compact and practical. A good note usually covers:
 ## Current Notes
 
 - `gemma4.md`
-
+- `nemotron.md`

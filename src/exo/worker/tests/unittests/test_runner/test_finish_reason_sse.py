@@ -249,6 +249,40 @@ class TestThinkingModelsFinishReason:
         )
         assert _got_finish(results)
 
+    def test_split_and_fused_thinking_markers_are_hidden(self):
+        tokens = [
+            _make_response("<th", 0),
+            _make_response("ink>\nWorking", 1),
+            _make_response(" through it</th", 2),
+            _make_response("ink>Answer", 3, finish_reason="stop"),
+        ]
+        results = _step_until_finish(
+            parse_thinking_models(
+                _queue_source(tokens),
+                think_start="<think>",
+                think_end="</think>",
+                starts_in_thinking=False,
+            )
+        )
+
+        all_text = "".join(r.text for r in results if isinstance(r, GenerationResponse))
+        thinking_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and r.is_thinking
+        )
+        visible_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and not r.is_thinking
+        )
+
+        assert "<think>" not in all_text
+        assert "</think>" not in all_text
+        assert thinking_text == "\nWorking through it"
+        assert visible_text == "Answer"
+        assert _got_finish(results)
+
 
 class _NoThinkingTokenizer:
     has_thinking = False
