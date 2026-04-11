@@ -113,6 +113,7 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 ### Skulk Control APIs
 
 - `GET /v1/models`
+- `POST /v1/tools/web_search`
 - `GET /models/search`
 - `POST /models/add`
 - `DELETE /models/custom/{model_id}`
@@ -330,7 +331,41 @@ Notes:
 - Phase 2 semantics are model-aware:
   - if `supports_thinking_toggle` is `true`, send `enable_thinking=true` or `false` explicitly
   - `reasoning_effort="none"` disables thinking for toggleable models
-  - if a model does not support toggleable thinking, Skulk ignores explicit toggle overrides and falls back to the model's default supported behavior
+  - if a model does not support toggleable thinking, Skulk ignores explicit toggle overrides but still preserves explicit non-disabled reasoning-effort hints when the model family supports them
+
+## Builtin Web Search Tool
+
+**POST** `/v1/tools/web_search`
+
+Execute Skulk's generic `web_search` tool and return structured search results.
+
+```bash
+curl -X POST http://localhost:52415/v1/tools/web_search \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query": "foxlight skulk distributed inference",
+    "top_k": 5
+  }'
+```
+
+Request fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `query` | string | Required search query. |
+| `top_k` | integer | Optional max results, `1` to `10`, default `5`. |
+
+Response fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `query` | string | Original search query. |
+| `provider` | string | Search backend identifier. |
+| `results` | array | Ordered search results with `title`, `url`, and `snippet`. |
+
+This endpoint is designed for client-executed tool loops. GPT-OSS can request
+`web_search`, the client can call this endpoint, then send the JSON result back
+as a `tool` message.
 
 ## Structured Output
 

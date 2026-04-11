@@ -97,9 +97,9 @@ def _patch_arrays_cache_make_mask_signature() -> None:
         return
 
     def _patched_make_mask(
-        self: ArraysCache, N: int, **_kwargs: object
+        self: ArraysCache, n_tokens: int, **_kwargs: object
     ) -> mx.array | None:
-        return current(self, N)
+        return current(self, n_tokens)
 
     _patched_make_mask._skulk_accepts_attention_kwargs = True  # type: ignore[attr-defined]
     ArraysCache.make_mask = _patched_make_mask  # type: ignore[assignment]

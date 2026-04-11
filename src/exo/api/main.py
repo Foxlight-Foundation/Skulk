@@ -107,6 +107,8 @@ from exo.api.types import (
     TraceRankStats,
     TraceResponse,
     TraceStatsResponse,
+    WebSearchToolRequest,
+    WebSearchToolResponse,
     normalize_image_size,
 )
 from exo.api.types.claude_api import (
@@ -196,6 +198,7 @@ from exo.shared.types.worker.downloads import DownloadCompleted
 from exo.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from exo.shared.types.worker.shards import Sharding
 from exo.store.config import resolve_config_path
+from exo.tools.web_search import default_web_search_provider
 from exo.utils.banner import print_startup_banner
 from exo.utils.channels import Receiver, Sender, channel
 from exo.utils.disk_event_log import DiskEventLog
@@ -233,6 +236,10 @@ API_TAGS_METADATA = [
     {
         "name": "Store",
         "description": "Shared model-store health, registry inspection, download workflows, deletion, and optimization.",
+    },
+    {
+        "name": "Tools",
+        "description": "Builtin tool endpoints that clients can execute and feed back into model conversations.",
     },
     {
         "name": "Config",
@@ -582,6 +589,15 @@ class API:
             summary="Cancel an active text or image command",
             description="Request cancellation for an in-flight text or image generation command by its command ID.",
         )(self.cancel_command)
+        self.app.post(
+            "/v1/tools/web_search",
+            tags=["Tools"],
+            summary="Execute the generic web-search tool",
+            description=(
+                "Run the generic `web_search` tool and return structured search results that "
+                "clients can feed back into a tool-calling conversation loop."
+            ),
+        )(self.web_search)
 
         # Ollama API
         self.app.head(
@@ -1976,6 +1992,23 @@ class API:
                 ),
                 media_type="application/json",
             )
+
+    async def web_search(self, payload: WebSearchToolRequest) -> WebSearchToolResponse:
+        """Execute the generic web-search tool and return structured results."""
+        provider = default_web_search_provider()
+        try:
+            results = await provider.search(payload.query, top_k=payload.top_k)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Web search failed: {exc}",
+            ) from exc
+
+        return WebSearchToolResponse(
+            query=payload.query,
+            results=results,
+            provider=provider.provider_name,
+        )
 
     async def _ollama_root(self) -> JSONResponse:
         """Respond to HEAD / from Ollama CLI connectivity checks."""

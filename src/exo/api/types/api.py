@@ -120,6 +120,10 @@ class ResolvedModelCapabilities(BaseModel):
         default=False,
         description="Whether the runtime expects the model to support structured tool calling.",
     )
+    builtin_tools: list[str] = Field(
+        default_factory=list,
+        description="Builtin platform tool contracts that Skulk may expose to this model family.",
+    )
     tool_call_format: str = Field(
         default="generic",
         description="Resolved tool-call output format family used for parsing.",
@@ -152,6 +156,7 @@ class ResolvedModelCapabilities(BaseModel):
             supports_image_input=profile.supports_image_input,
             supports_audio_input=profile.supports_audio_input,
             supports_tool_calling=profile.supports_tool_calling,
+            builtin_tools=[tool.value for tool in profile.builtin_tools],
             tool_call_format=profile.tool_call_format.value,
             prompt_renderer=profile.prompt_renderer.value,
             output_parser=profile.output_parser.value,
@@ -203,6 +208,7 @@ class ToolingCapabilitySection(BaseModel):
     """Snake-case tool-calling metadata exposed by the models API."""
 
     supports_tool_calling: bool | None = None
+    builtin_tools: list[str] | None = None
     tool_call_format: str | None = None
 
     @classmethod
@@ -212,6 +218,11 @@ class ToolingCapabilitySection(BaseModel):
             return None
         return cls(
             supports_tool_calling=config.supports_tool_calling,
+            builtin_tools=(
+                [tool.value for tool in config.builtin_tools]
+                if config.builtin_tools is not None
+                else None
+            ),
             tool_call_format=(
                 config.tool_call_format.value
                 if config.tool_call_format is not None
@@ -272,6 +283,42 @@ class ToolCall(BaseModel):
     index: int | None = None
     type: Literal["function"] = "function"
     function: ToolCallItem
+
+
+class WebSearchToolRequest(BaseModel):
+    """Request body for the generic web-search tool endpoint."""
+
+    query: str = Field(
+        min_length=1,
+        description="Natural-language search query to execute.",
+    )
+    top_k: int = Field(
+        default=5,
+        ge=1,
+        le=10,
+        description="Maximum number of search results to return.",
+    )
+
+
+class WebSearchResult(BaseModel):
+    """One structured result returned by the web-search tool."""
+
+    title: str = Field(description="Human-readable page title.")
+    url: str = Field(description="Canonical result URL.")
+    snippet: str = Field(description="Short result snippet suitable for tool context.")
+
+
+class WebSearchToolResponse(BaseModel):
+    """Structured response returned by the web-search tool endpoint."""
+
+    query: str = Field(description="Original search query.")
+    results: list[WebSearchResult] = Field(
+        default_factory=list,
+        description="Structured search results ordered by provider relevance.",
+    )
+    provider: str = Field(
+        description="Backend provider implementation that produced the results."
+    )
 
 
 class ChatCompletionMessage(BaseModel):

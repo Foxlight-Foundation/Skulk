@@ -67,4 +67,7 @@ from .api import TraceRankStats as TraceRankStats
 from .api import TraceResponse as TraceResponse
 from .api import TraceStatsResponse as TraceStatsResponse
 from .api import Usage as Usage
+from .api import WebSearchResult as WebSearchResult
+from .api import WebSearchToolRequest as WebSearchToolRequest
+from .api import WebSearchToolResponse as WebSearchToolResponse
 from .api import normalize_image_size as normalize_image_size

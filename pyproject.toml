@@ -25,6 +25,7 @@ dependencies = [
   "hypercorn>=0.18.0",
   "openai-harmony>=0.0.8",
   "httpx>=0.28.1",
+  "ddgs>=9.6.1",
   "tomlkit>=0.14.0",
   "mflux>=0.16.9",
   "python-multipart>=0.0.21",

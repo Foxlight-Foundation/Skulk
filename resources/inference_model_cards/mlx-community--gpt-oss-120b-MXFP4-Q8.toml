@@ -12,8 +12,14 @@ capabilities = ["text", "thinking"]
 [storage_size]
 in_bytes = 70652212224
 
+[reasoning]
+supports_toggle = false
+default_effort = "medium"
+disabled_effort = "none"
+
 [tooling]
 supports_tool_calling = true
+builtin_tools = ["web_search"]
 tool_call_format = "gpt_oss"
 
 [runtime]

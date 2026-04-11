@@ -3,6 +3,7 @@ from exo.shared.models.capabilities import (
     resolve_model_capability_profile,
 )
 from exo.shared.models.model_cards import (
+    BuiltinToolType,
     ModalitiesCardConfig,
     ModelCard,
     ModelId,
@@ -142,7 +143,8 @@ def test_resolve_reasoning_params_ignores_toggle_inputs_for_non_toggleable_profi
     )
 
     assert resolve_reasoning_params(None, False, profile) == (None, None)
-    assert resolve_reasoning_params("minimal", None, profile) == (None, None)
+    assert resolve_reasoning_params("minimal", None, profile) == ("minimal", None)
+    assert resolve_reasoning_params("high", False, profile) == ("high", None)
 
 
 def test_resolve_model_capability_profile_uses_safe_generic_fallback() -> None:
@@ -292,9 +294,32 @@ def test_resolve_model_capability_profile_uses_gpt_oss_family_defaults() -> None
     profile = resolve_model_capability_profile(card.model_id, model_card=card)
 
     assert profile.family == "gpt-oss"
+    assert profile.supports_thinking is True
     assert profile.supports_tool_calling is True
     assert profile.tool_call_format == ToolCallFormat.GptOss
     assert profile.output_parser == OutputParserType.GptOss
+
+
+def test_resolve_model_capability_profile_exposes_builtin_tools() -> None:
+    card = ModelCard(
+        model_id=ModelId("mlx-community/gpt-oss-20b-MXFP4-Q8"),
+        storage_size=Memory.from_mb(100),
+        n_layers=10,
+        hidden_size=1024,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        family="gpt-oss",
+        capabilities=["text", "thinking"],
+        tooling=ToolingCardConfig(
+            supports_tool_calling=True,
+            builtin_tools=[BuiltinToolType.WebSearch],
+            tool_call_format=ToolCallFormat.GptOss,
+        ),
+    )
+
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+
+    assert profile.builtin_tools == (BuiltinToolType.WebSearch,)
 
 
 def test_resolve_model_capability_profile_uses_deepseek_v32_family_defaults() -> None:
