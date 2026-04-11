@@ -76,6 +76,38 @@ LayerLoadedCallback = Callable[[int, int], None]  # (layers_loaded, total_layers
 _pending_prefill_sends: list[tuple[mx.array, int, mx.distributed.Group]] = []
 
 
+def _patch_arrays_cache_make_mask_signature() -> None:
+    """Make ``ArraysCache.make_mask`` tolerant of newer MLX call signatures.
+
+    Some installed ``mlx_lm`` versions expose ``ArraysCache.make_mask(N)``
+    while newer callers invoke it as ``make_mask(N, return_array=..., ...)``.
+    Batch prompt-cache merging can create fresh ``ArraysCache`` instances, so
+    this compatibility shim must live at the class level rather than on one
+    cache instance.
+    """
+
+    current = ArraysCache.make_mask
+    if getattr(current, "_skulk_accepts_attention_kwargs", False):
+        return
+
+    params = signature(current).parameters.values()
+    supports_kwargs = any(param.kind.name == "VAR_KEYWORD" for param in params)
+    supports_return_array = "return_array" in signature(current).parameters
+    if supports_kwargs or supports_return_array:
+        return
+
+    def _patched_make_mask(
+        self: ArraysCache, N: int, **_kwargs: object
+    ) -> mx.array | None:
+        return current(self, N)
+
+    _patched_make_mask._skulk_accepts_attention_kwargs = True  # type: ignore[attr-defined]
+    ArraysCache.make_mask = _patched_make_mask  # type: ignore[assignment]
+
+
+_patch_arrays_cache_make_mask_signature()
+
+
 def _mlx_hang_debug_enabled() -> bool:
     value = preferred_env_value("SKULK_MLX_HANG_DEBUG", "EXO_MLX_HANG_DEBUG")
     if value is None:

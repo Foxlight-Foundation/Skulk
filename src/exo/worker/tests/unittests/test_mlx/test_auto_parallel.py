@@ -7,6 +7,7 @@ from typing import Any
 import mlx.core as mx
 import mlx.nn as mlx_nn
 import pytest
+from mlx_lm.models.cache import ArraysCache
 
 from exo.worker.engines.mlx.auto_parallel import (
     CustomMlxLayer,
@@ -20,6 +21,12 @@ from exo.worker.tests.unittests.test_mlx.conftest import MockLayer
 class _FakeCacheEntry:
     def __init__(self) -> None:
         self.keys = mx.array([1.0])
+
+
+def test_arrays_cache_make_mask_accepts_attention_kwargs() -> None:
+    cache = ArraysCache(1)
+
+    assert cache.make_mask(1, return_array=False, window_size=None) is None
 
 
 def run_pipeline_device(
