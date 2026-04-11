@@ -32,6 +32,8 @@ from exo.worker.runner.llm_inference.tool_parsers import ToolParser
 
 _GEMMA4_THINK_START = "<|channel>thought\n"
 _GEMMA4_THINK_END = "<channel|>"
+_DEFAULT_TOKEN_THINK_START = "<think>"
+_DEFAULT_TOKEN_THINK_END = "</think>"
 
 
 def _thinking_stream_debug_enabled() -> bool:
@@ -103,16 +105,17 @@ def apply_all_parsers(
 
     if capability_profile.thinking_format == ReasoningFormat.ChannelDelimited:
         mlx_generator = parse_gemma4_thinking_channels(mlx_generator)
-    elif (
-        capability_profile.thinking_format == ReasoningFormat.TokenDelimited
-        and tokenizer.think_start is not None
-        and tokenizer.think_end is not None
-    ):
+    elif capability_profile.thinking_format == ReasoningFormat.TokenDelimited:
+        think_start, think_end = _resolve_token_delimited_markers(tokenizer)
         mlx_generator = parse_thinking_models(
             mlx_generator,
-            tokenizer.think_start,
-            tokenizer.think_end,
-            starts_in_thinking=detect_thinking_prompt_suffix(prompt, tokenizer),
+            think_start,
+            think_end,
+            starts_in_thinking=_detect_thinking_prompt_suffix(
+                prompt,
+                tokenizer,
+                fallback_think_start=think_start,
+            ),
         )
         mlx_generator = _trace_generation_stream("post-thinking-parser", model_id, mlx_generator)
 
@@ -129,6 +132,30 @@ def apply_all_parsers(
 
     mlx_generator = _trace_generation_stream("post-all-parsers", model_id, mlx_generator)
     return mlx_generator
+
+
+def _resolve_token_delimited_markers(
+    tokenizer: TokenizerWrapper,
+) -> tuple[str, str]:
+    """Resolve token-delimited thinking markers from tokenizer metadata or fallbacks."""
+    think_start = tokenizer.think_start or _DEFAULT_TOKEN_THINK_START
+    think_end = tokenizer.think_end or _DEFAULT_TOKEN_THINK_END
+    return think_start, think_end
+
+
+def _detect_thinking_prompt_suffix(
+    prompt: str,
+    tokenizer: TokenizerWrapper,
+    *,
+    fallback_think_start: str | None = None,
+) -> bool:
+    """Detect whether the prompt already ends in an opening thinking marker."""
+    if detect_thinking_prompt_suffix(prompt, tokenizer):
+        return True
+    return (
+        fallback_think_start is not None
+        and prompt.rstrip().endswith(fallback_think_start)
+    )
 
 
 def parse_gemma4_thinking_channels(

@@ -454,6 +454,53 @@ class TestGemma4ThinkingChannels:
         assert len(tool_results) == 1
         assert tool_results[0].tool_calls[0].name == "get_weather"
 
+    def test_apply_all_parsers_uses_token_delimited_fallback_without_tokenizer_metadata(
+        self,
+    ):
+        tokens = [
+            _make_response("<think>", 100),
+            _make_response("Reason silently.", 101),
+            _make_response("</think>", 102),
+            _make_response("Final answer.", 103, finish_reason="stop"),
+        ]
+
+        results = _step_until_finish(
+            apply_all_parsers(
+                _queue_source(tokens),
+                prompt="<SPECIAL_10>System\n/no_think\n<SPECIAL_11>User\nHello\n<SPECIAL_11>Assistant\n",
+                tool_parser=None,
+                tokenizer=_NoThinkingTokenizer(),
+                model_type=Model,
+                model_id=ModelId("mlx-community/NVIDIA-Nemotron-Nano-9B-v2-4bits"),
+                tools=None,
+                model_card=ModelCard(
+                    model_id=ModelId("mlx-community/NVIDIA-Nemotron-Nano-9B-v2-4bits"),
+                    storage_size=Memory.from_bytes(1024),
+                    n_layers=1,
+                    hidden_size=1,
+                    supports_tensor=False,
+                    tasks=[ModelTask.TextGeneration],
+                    family="nemotron",
+                    capabilities=["text", "thinking", "thinking_toggle"],
+                    reasoning={"supports_toggle": True, "format": "token_delimited"},
+                ),
+            )
+        )
+
+        thinking_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and r.is_thinking
+        )
+        visible_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and not r.is_thinking
+        )
+
+        assert thinking_text == "Reason silently."
+        assert visible_text == "Final answer."
+
 
 # ── parse_tool_calls (generic) ──────────────────────────────────
 
