@@ -312,14 +312,22 @@ def test_resolve_model_capability_profile_exposes_builtin_tools() -> None:
         capabilities=["text", "thinking"],
         tooling=ToolingCardConfig(
             supports_tool_calling=True,
-            builtin_tools=[BuiltinToolType.WebSearch],
+            builtin_tools=[
+                BuiltinToolType.WebSearch,
+                BuiltinToolType.OpenUrl,
+                BuiltinToolType.ExtractPage,
+            ],
             tool_call_format=ToolCallFormat.GptOss,
         ),
     )
 
     profile = resolve_model_capability_profile(card.model_id, model_card=card)
 
-    assert profile.builtin_tools == (BuiltinToolType.WebSearch,)
+    assert profile.builtin_tools == (
+        BuiltinToolType.WebSearch,
+        BuiltinToolType.OpenUrl,
+        BuiltinToolType.ExtractPage,
+    )
 
 
 def test_resolve_model_capability_profile_uses_deepseek_v32_family_defaults() -> None:

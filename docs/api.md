@@ -110,6 +110,8 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 
 - `GET /v1/models`
 - `POST /v1/tools/web_search`
+- `POST /v1/tools/open_url`
+- `POST /v1/tools/extract_page`
 - `GET /models/search`
 - `POST /models/add`
 - `DELETE /models/custom/{model_id}`
@@ -327,7 +329,7 @@ Notes:
   - `reasoning_effort="none"` disables thinking for toggleable models
   - if a model does not support toggleable thinking, Skulk ignores explicit toggle overrides but still preserves explicit non-disabled reasoning-effort hints when the model family supports them
 
-## Builtin Web Search Tool
+## Builtin Browser Tools
 
 **POST** `/v1/tools/web_search`
 
@@ -360,6 +362,72 @@ Response fields:
 This endpoint is designed for client-executed tool loops. GPT-OSS can request
 `web_search`, the client can call this endpoint, then send the JSON result back
 as a `tool` message.
+
+**POST** `/v1/tools/open_url`
+
+Fetch one HTTP or HTTPS URL, follow redirects, and return structured metadata.
+
+```bash
+curl -X POST http://localhost:52415/v1/tools/open_url \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "url": "https://example.com/article"
+  }'
+```
+
+Request fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `url` | string | Required absolute `http://` or `https://` URL. |
+
+Response fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `url` | string | Original requested URL. |
+| `final_url` | string | Final URL after redirects. |
+| `title` | string or null | Best-effort page title. |
+| `status_code` | integer | Final HTTP status code. |
+| `content_type` | string or null | Normalized response content type. |
+| `provider` | string | Backend provider identifier. |
+
+**POST** `/v1/tools/extract_page`
+
+Fetch one HTTP or HTTPS URL and return bounded readable text extracted from the
+response body.
+
+```bash
+curl -X POST http://localhost:52415/v1/tools/extract_page \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "url": "https://example.com/article",
+    "max_chars": 12000
+  }'
+```
+
+Request fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `url` | string | Required absolute `http://` or `https://` URL. |
+| `max_chars` | integer | Optional maximum characters, `500` to `50000`, default `12000`. |
+
+Response fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `url` | string | Original requested URL. |
+| `final_url` | string | Final URL after redirects. |
+| `title` | string or null | Best-effort page title. |
+| `text` | string | Readable extracted text. |
+| `truncated` | boolean | Whether the text was clipped to `max_chars`. |
+| `provider` | string | Backend provider identifier. |
+
+These browser-tool endpoints are designed for client-executed tool loops. In
+dashboard chat, GPT-OSS can request `web_search`, `open_url`, or
+`extract_page`; the dashboard executes the endpoint call, then sends the JSON
+result back as a `tool` message.
 
 ## Structured Output
 
@@ -635,7 +703,7 @@ Important `resolved_capabilities` fields include:
 | `supports_image_input` | boolean | Whether image input is supported |
 | `supports_audio_input` | boolean | Whether audio input is supported |
 | `supports_tool_calling` | boolean | Whether structured tool calling is expected |
-| `builtin_tools` | array | Builtin platform tool contracts such as `web_search` |
+| `builtin_tools` | array | Builtin platform tool contracts such as `web_search`, `open_url`, or `extract_page` |
 | `thinking_format` | string | The normalized reasoning marker format, such as `none`, `token_delimited`, or `channel_delimited` |
 | `prompt_renderer` | string | The resolved prompt rendering strategy, such as `tokenizer`, `gemma4`, or `dsml` |
 | `output_parser` | string | The resolved output parsing strategy, such as `generic`, `gemma4`, `gpt_oss`, or `deepseek_v32` |

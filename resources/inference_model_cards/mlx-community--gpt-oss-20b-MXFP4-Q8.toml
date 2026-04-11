@@ -20,7 +20,7 @@ disabled_effort = "none"
 
 [tooling]
 supports_tool_calling = true
-builtin_tools = ["web_search"]
+builtin_tools = ["web_search", "open_url", "extract_page"]
 tool_call_format = "gpt_oss"
 
 [runtime]

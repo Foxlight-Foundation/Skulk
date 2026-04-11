@@ -28,7 +28,10 @@ The built-in GPT-OSS cards now declare:
 - tool-calling support
 - GPT-OSS tool-call format
 - GPT-OSS output parser selection
-- the generic `web_search` builtin tool contract
+- builtin browser tools:
+  - `web_search`
+  - `open_url`
+  - `extract_page`
 
 That moves GPT-OSS support out of “only infer it from the model id” territory
 and into the same declarative-plus-resolved model that Gemma 4 uses.
@@ -39,9 +42,9 @@ Current GPT-OSS support is intentionally narrow:
 
 - Harmony parsing stays GPT-OSS-specific
 - reasoning effort is explicit, but a true “thinking off” mode is not promised
-- browsing is search-style tool use, not browser automation
-- the dashboard executes GPT-OSS `web_search` tool calls and feeds the result
-  back into the conversation loop
+- browsing is static fetch + extraction, not browser automation
+- the dashboard executes GPT-OSS browser tool calls and feeds the result back
+  into the conversation loop
 
 ## Why This Matters
 

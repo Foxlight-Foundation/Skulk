@@ -136,7 +136,7 @@ Declares tool-calling behavior:
 - `supports_tool_calling`
   - whether tool calling is supported
 - `builtin_tools`
-  - optional list of builtin platform tool contracts such as `web_search`
+  - optional list of builtin platform tool contracts such as `web_search`, `open_url`, or `extract_page`
 - `tool_call_format`
   - expected tool-call output format such as `generic`, `gemma4`, `gpt_oss`, or `dsml`
 

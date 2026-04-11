@@ -74,6 +74,8 @@ from exo.api.types import (
     EmbeddingUsage,
     ErrorInfo,
     ErrorResponse,
+    ExtractPageToolRequest,
+    ExtractPageToolResponse,
     FinishReason,
     GenerationStats,
     HuggingFaceSearchResult,
@@ -88,6 +90,8 @@ from exo.api.types import (
     ModalitiesCapabilitySection,
     ModelList,
     ModelListModel,
+    OpenUrlToolRequest,
+    OpenUrlToolResponse,
     PlaceInstanceParams,
     PlacementPreview,
     PlacementPreviewResponse,
@@ -198,7 +202,7 @@ from exo.shared.types.worker.downloads import DownloadCompleted
 from exo.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from exo.shared.types.worker.shards import Sharding
 from exo.store.config import resolve_config_path
-from exo.tools.web_search import default_web_search_provider
+from exo.tools.web_search import default_browser_tool_provider
 from exo.utils.banner import print_startup_banner
 from exo.utils.channels import Receiver, Sender, channel
 from exo.utils.disk_event_log import DiskEventLog
@@ -598,6 +602,24 @@ class API:
                 "clients can feed back into a tool-calling conversation loop."
             ),
         )(self.web_search)
+        self.app.post(
+            "/v1/tools/open_url",
+            tags=["Tools"],
+            summary="Open one URL and inspect its metadata",
+            description=(
+                "Fetch one HTTP or HTTPS URL, follow redirects, and return structured "
+                "metadata that clients can feed back into a tool-calling conversation loop."
+            ),
+        )(self.open_url)
+        self.app.post(
+            "/v1/tools/extract_page",
+            tags=["Tools"],
+            summary="Fetch one URL and extract readable page text",
+            description=(
+                "Fetch one HTTP or HTTPS URL and return bounded readable text extracted "
+                "from the response body for tool-calling conversation loops."
+            ),
+        )(self.extract_page)
 
         # Ollama API
         self.app.head(
@@ -1995,7 +2017,7 @@ class API:
 
     async def web_search(self, payload: WebSearchToolRequest) -> WebSearchToolResponse:
         """Execute the generic web-search tool and return structured results."""
-        provider = default_web_search_provider()
+        provider = default_browser_tool_provider()
         try:
             results = await provider.search(payload.query, top_k=payload.top_k)
         except Exception as exc:
@@ -2009,6 +2031,34 @@ class API:
             results=results,
             provider=provider.provider_name,
         )
+
+    async def open_url(self, payload: OpenUrlToolRequest) -> OpenUrlToolResponse:
+        """Execute the generic URL-open tool and return structured metadata."""
+        provider = default_browser_tool_provider()
+        try:
+            return await provider.open_url(payload.url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Open URL failed: {exc}",
+            ) from exc
+
+    async def extract_page(
+        self, payload: ExtractPageToolRequest
+    ) -> ExtractPageToolResponse:
+        """Execute the generic page-extraction tool and return readable text."""
+        provider = default_browser_tool_provider()
+        try:
+            return await provider.extract_page(payload.url, max_chars=payload.max_chars)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Extract page failed: {exc}",
+            ) from exc
 
     async def _ollama_root(self) -> JSONResponse:
         """Respond to HEAD / from Ollama CLI connectivity checks."""

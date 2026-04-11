@@ -84,7 +84,11 @@ def test_model_list_entry_exposes_gpt_oss_runtime_capabilities() -> None:
         ),
         tooling=ToolingCardConfig(
             supports_tool_calling=True,
-            builtin_tools=[BuiltinToolType.WebSearch],
+            builtin_tools=[
+                BuiltinToolType.WebSearch,
+                BuiltinToolType.OpenUrl,
+                BuiltinToolType.ExtractPage,
+            ],
             tool_call_format=ToolCallFormat.GptOss,
         ),
         runtime=RuntimeCapabilityCardConfig(
@@ -96,13 +100,17 @@ def test_model_list_entry_exposes_gpt_oss_runtime_capabilities() -> None:
 
     assert entry.tooling is not None
     assert entry.tooling.supports_tool_calling is True
-    assert entry.tooling.builtin_tools == ["web_search"]
+    assert entry.tooling.builtin_tools == ["web_search", "open_url", "extract_page"]
     assert entry.resolved_capabilities is not None
     assert entry.resolved_capabilities.supports_thinking is True
     assert entry.resolved_capabilities.supports_thinking_toggle is False
     assert entry.resolved_capabilities.default_reasoning_effort == "medium"
     assert entry.resolved_capabilities.supports_tool_calling is True
-    assert entry.resolved_capabilities.builtin_tools == ["web_search"]
+    assert entry.resolved_capabilities.builtin_tools == [
+        "web_search",
+        "open_url",
+        "extract_page",
+    ]
     assert entry.resolved_capabilities.tool_call_format == "gpt_oss"
     assert entry.resolved_capabilities.output_parser == "gpt_oss"
 
@@ -224,7 +232,11 @@ def test_model_list_entry_serializes_builtin_tools_in_snake_case() -> None:
         family="gpt-oss",
         tooling=ToolingCardConfig(
             supports_tool_calling=True,
-            builtin_tools=[BuiltinToolType.WebSearch],
+            builtin_tools=[
+                BuiltinToolType.WebSearch,
+                BuiltinToolType.OpenUrl,
+                BuiltinToolType.ExtractPage,
+            ],
             tool_call_format=ToolCallFormat.GptOss,
         ),
         runtime=RuntimeCapabilityCardConfig(
@@ -234,5 +246,13 @@ def test_model_list_entry_serializes_builtin_tools_in_snake_case() -> None:
 
     payload = API._model_list_entry(card).model_dump(by_alias=True)
 
-    assert payload["tooling"]["builtin_tools"] == ["web_search"]
-    assert payload["resolved_capabilities"]["builtin_tools"] == ["web_search"]
+    assert payload["tooling"]["builtin_tools"] == [
+        "web_search",
+        "open_url",
+        "extract_page",
+    ]
+    assert payload["resolved_capabilities"]["builtin_tools"] == [
+        "web_search",
+        "open_url",
+        "extract_page",
+    ]

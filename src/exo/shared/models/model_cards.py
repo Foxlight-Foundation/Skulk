@@ -169,6 +169,8 @@ class BuiltinToolType(str, Enum):
     """Builtin tool contracts that Skulk can advertise to model families."""
 
     WebSearch = "web_search"
+    OpenUrl = "open_url"
+    ExtractPage = "extract_page"
 
 
 class ReasoningCardConfig(CamelCaseModel):

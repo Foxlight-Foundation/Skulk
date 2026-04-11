@@ -321,6 +321,75 @@ class WebSearchToolResponse(BaseModel):
     )
 
 
+class OpenUrlToolRequest(BaseModel):
+    """Request body for the generic URL-open tool endpoint."""
+
+    url: str = Field(
+        min_length=1,
+        description="HTTP or HTTPS URL to inspect.",
+    )
+
+
+class OpenUrlToolResponse(BaseModel):
+    """Structured response returned by the generic URL-open tool endpoint."""
+
+    url: str = Field(description="Original URL requested by the caller.")
+    final_url: str = Field(
+        description="Final URL after redirects were followed."
+    )
+    title: str | None = Field(
+        default=None,
+        description="Best-effort page title when one could be determined.",
+    )
+    status_code: int = Field(
+        description="HTTP response status code observed for the final response."
+    )
+    content_type: str | None = Field(
+        default=None,
+        description="Normalized response Content-Type when the server provided one.",
+    )
+    provider: str = Field(
+        description="Backend provider implementation that produced the result."
+    )
+
+
+class ExtractPageToolRequest(BaseModel):
+    """Request body for the generic page-extraction tool endpoint."""
+
+    url: str = Field(
+        min_length=1,
+        description="HTTP or HTTPS URL to fetch and extract readable text from.",
+    )
+    max_chars: int = Field(
+        default=12000,
+        ge=500,
+        le=50000,
+        description="Maximum number of characters of extracted text to return.",
+    )
+
+
+class ExtractPageToolResponse(BaseModel):
+    """Structured response returned by the generic page-extraction tool endpoint."""
+
+    url: str = Field(description="Original URL requested by the caller.")
+    final_url: str = Field(
+        description="Final URL after redirects were followed."
+    )
+    title: str | None = Field(
+        default=None,
+        description="Best-effort page title when one could be determined.",
+    )
+    text: str = Field(
+        description="Readable extracted text content from the fetched page."
+    )
+    truncated: bool = Field(
+        description="Whether the extracted text was truncated to satisfy the max_chars limit."
+    )
+    provider: str = Field(
+        description="Backend provider implementation that produced the result."
+    )
+
+
 class ChatCompletionMessage(BaseModel):
     role: Literal["system", "user", "assistant", "developer", "tool", "function"]
     content: (

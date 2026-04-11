@@ -77,30 +77,76 @@ const THINK_TAG_END = '</think>';
 const GEMMA_THINK_START = '<|channel>thought\n';
 const GEMMA_THINK_END = '<channel|>';
 const MAX_TOOL_ROUNDS = 4;
-const GPT_OSS_WEB_SEARCH_TOOL = {
-  type: 'function',
-  function: {
-    name: 'web_search',
-    description: 'Search the public web and return structured results with titles, URLs, and snippets.',
-    parameters: {
-      type: 'object',
-      properties: {
-        query: {
-          type: 'string',
-          description: 'Natural-language search query.',
+const GPT_OSS_BROWSER_TOOLS = {
+  web_search: {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'Search the public web and return structured results with titles, URLs, and snippets.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Natural-language search query.',
+          },
+          top_k: {
+            type: 'integer',
+            description: 'Maximum number of results to return.',
+            minimum: 1,
+            maximum: 10,
+          },
         },
-        top_k: {
-          type: 'integer',
-          description: 'Maximum number of results to return.',
-          minimum: 1,
-          maximum: 10,
-        },
+        required: ['query'],
+        additionalProperties: false,
       },
-      required: ['query'],
-      additionalProperties: false,
+    },
+  },
+  open_url: {
+    type: 'function',
+    function: {
+      name: 'open_url',
+      description: 'Open one HTTP or HTTPS URL, follow redirects, and inspect page metadata such as title and content type.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: {
+            type: 'string',
+            description: 'HTTP or HTTPS URL to inspect.',
+          },
+        },
+        required: ['url'],
+        additionalProperties: false,
+      },
+    },
+  },
+  extract_page: {
+    type: 'function',
+    function: {
+      name: 'extract_page',
+      description: 'Fetch one HTTP or HTTPS URL and return bounded readable text extracted from the page body.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: {
+            type: 'string',
+            description: 'HTTP or HTTPS URL to extract readable text from.',
+          },
+          max_chars: {
+            type: 'integer',
+            description: 'Maximum number of characters of extracted text to return.',
+            minimum: 500,
+            maximum: 50000,
+          },
+        },
+        required: ['url'],
+        additionalProperties: false,
+      },
     },
   },
 } as const;
+
+type BuiltinBrowserToolName = keyof typeof GPT_OSS_BROWSER_TOOLS;
 
 type ApiMessagePayload = Record<string, unknown>;
 
@@ -121,6 +167,24 @@ interface WebSearchToolResponse {
     url: string;
     snippet: string;
   }>;
+}
+
+interface OpenUrlToolResponse {
+  url: string;
+  final_url: string;
+  title?: string | null;
+  status_code: number;
+  content_type?: string | null;
+  provider: string;
+}
+
+interface ExtractPageToolResponse {
+  url: string;
+  final_url: string;
+  title?: string | null;
+  text: string;
+  truncated: boolean;
+  provider: string;
 }
 
 function splitReasoningDecoratedContent(raw: string): { content: string; thinking: string } {
@@ -214,25 +278,104 @@ function normalizeToolArguments(rawArguments: string | undefined): { query: stri
   };
 }
 
-async function executeWebSearchToolCall(toolCall: StreamToolCall): Promise<string> {
+function normalizeUrlToolArguments(
+  rawArguments: string | undefined,
+): { url: string } {
+  if (!rawArguments) {
+    throw new Error('Tool call arguments were empty.');
+  }
+  const parsed = JSON.parse(rawArguments) as { url?: unknown };
+  if (typeof parsed.url !== 'string' || parsed.url.trim() === '') {
+    throw new Error('Tool call did not provide a valid URL.');
+  }
+  return { url: parsed.url.trim() };
+}
+
+function normalizeExtractPageArguments(
+  rawArguments: string | undefined,
+): { url: string; max_chars?: number } {
+  if (!rawArguments) {
+    throw new Error('Tool call arguments were empty.');
+  }
+  const parsed = JSON.parse(rawArguments) as { url?: unknown; max_chars?: unknown };
+  if (typeof parsed.url !== 'string' || parsed.url.trim() === '') {
+    throw new Error('Tool call did not provide a valid URL.');
+  }
+  const maxChars = typeof parsed.max_chars === 'number' && Number.isFinite(parsed.max_chars)
+    ? Math.max(500, Math.min(50000, Math.trunc(parsed.max_chars)))
+    : undefined;
+  return {
+    url: parsed.url.trim(),
+    ...(maxChars !== undefined ? { max_chars: maxChars } : {}),
+  };
+}
+
+function builtinToolDefinitions(toolNames: string[]): ReadonlyArray<(typeof GPT_OSS_BROWSER_TOOLS)[BuiltinBrowserToolName]> {
+  return toolNames
+    .filter((toolName): toolName is BuiltinBrowserToolName => toolName in GPT_OSS_BROWSER_TOOLS)
+    .map((toolName) => GPT_OSS_BROWSER_TOOLS[toolName]);
+}
+
+async function executeBuiltinToolCall(toolCall: StreamToolCall): Promise<string> {
   const functionCall = toolCall.function;
-  if (!functionCall?.name || functionCall.name !== 'web_search') {
+  if (!functionCall?.name) {
+    throw new Error('Tool call did not include a function name.');
+  }
+
+  if (functionCall.name === 'web_search') {
+    const payload = normalizeToolArguments(functionCall.arguments);
+    const res = await fetch('/v1/tools/web_search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({})) as WebSearchToolResponse | { detail?: string };
+    if (!res.ok) {
+      const detail = 'detail' in body && typeof body.detail === 'string'
+        ? body.detail
+        : `HTTP ${res.status}`;
+      throw new Error(detail);
+    }
+    return JSON.stringify(body);
+  }
+
+  if (functionCall.name === 'open_url') {
+    const payload = normalizeUrlToolArguments(functionCall.arguments);
+    const res = await fetch('/v1/tools/open_url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({})) as OpenUrlToolResponse | { detail?: string };
+    if (!res.ok) {
+      const detail = 'detail' in body && typeof body.detail === 'string'
+        ? body.detail
+        : `HTTP ${res.status}`;
+      throw new Error(detail);
+    }
+    return JSON.stringify(body);
+  }
+
+  if (functionCall.name === 'extract_page') {
+    const payload = normalizeExtractPageArguments(functionCall.arguments);
+    const res = await fetch('/v1/tools/extract_page', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({})) as ExtractPageToolResponse | { detail?: string };
+    if (!res.ok) {
+      const detail = 'detail' in body && typeof body.detail === 'string'
+        ? body.detail
+        : `HTTP ${res.status}`;
+      throw new Error(detail);
+    }
+    return JSON.stringify(body);
+  }
+
+  {
     throw new Error(`Unsupported tool call: ${functionCall?.name ?? 'unknown'}`);
   }
-  const payload = normalizeToolArguments(functionCall.arguments);
-  const res = await fetch('/v1/tools/web_search', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  const body = await res.json().catch(() => ({})) as WebSearchToolResponse | { detail?: string };
-  if (!res.ok) {
-    const detail = 'detail' in body && typeof body.detail === 'string'
-      ? body.detail
-      : `HTTP ${res.status}`;
-    throw new Error(detail);
-  }
-  return JSON.stringify(body);
 }
 
 async function readUploadedImageAsDataUrl(file: ChatUploadedFile): Promise<string> {
@@ -300,7 +443,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [modelThinkingToggleSupport, setModelThinkingToggleSupport] = useState<Record<string, boolean>>({});
   const [modelImageInputSupport, setModelImageInputSupport] = useState<Record<string, boolean>>({});
-  const [modelWebSearchToolSupport, setModelWebSearchToolSupport] = useState<Record<string, boolean>>({});
+  const [modelBuiltinTools, setModelBuiltinTools] = useState<Record<string, string[]>>({});
   const [modelContextLengths, setModelContextLengths] = useState<Record<string, number>>({});
 
   // Restore scroll position after store hydration + DOM render
@@ -347,22 +490,21 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
         const data = await res.json() as { data?: ModelInfo[] };
         const toggleSupport: Record<string, boolean> = {};
         const imageSupport: Record<string, boolean> = {};
-        const webSearchSupport: Record<string, boolean> = {};
+        const builtinTools: Record<string, string[]> = {};
         const ctxLens: Record<string, number> = {};
         for (const m of data.data ?? []) {
           if (m.id) {
             toggleSupport[m.id] = m.resolved_capabilities?.supports_thinking_toggle ?? false;
             imageSupport[m.id] = m.resolved_capabilities?.supports_image_input ?? false;
-            webSearchSupport[m.id] = Boolean(
-              m.tooling?.builtin_tools?.includes('web_search')
-              || m.resolved_capabilities?.builtin_tools?.includes('web_search'),
-            );
+            builtinTools[m.id] = m.tooling?.builtin_tools
+              ?? m.resolved_capabilities?.builtin_tools
+              ?? [];
           }
           if (m.id && m.context_length) ctxLens[m.id] = m.context_length;
         }
         setModelThinkingToggleSupport(toggleSupport);
         setModelImageInputSupport(imageSupport);
-        setModelWebSearchToolSupport(webSearchSupport);
+        setModelBuiltinTools(builtinTools);
         setModelContextLengths(ctxLens);
       } catch { /* ignore */ }
     })();
@@ -376,9 +518,9 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   const supportsImageAttachments = selectedModelId
     ? (modelImageInputSupport[selectedModelId] ?? false)
     : false;
-  const supportsBuiltinWebSearch = selectedModelId
-    ? (modelWebSearchToolSupport[selectedModelId] ?? false)
-    : false;
+  const selectedBuiltinTools = selectedModelId
+    ? (modelBuiltinTools[selectedModelId] ?? [])
+    : [];
 
   useEffect(() => {
     if (!supportsThinking && thinkingEnabled) {
@@ -481,7 +623,9 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
 
     try {
       const apiMessages: ApiMessagePayload[] = buildApiMessages(allMessages);
-      const requestTools = supportsBuiltinWebSearch ? [GPT_OSS_WEB_SEARCH_TOOL] : undefined;
+      const requestTools = selectedBuiltinTools.length > 0
+        ? builtinToolDefinitions(selectedBuiltinTools)
+        : undefined;
 
       for (let toolRound = 0; toolRound < MAX_TOOL_ROUNDS; toolRound++) {
         resetStallTimer();
@@ -606,7 +750,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
           let toolOutput: string;
 
           try {
-            toolOutput = await executeWebSearchToolCall(toolCall);
+            toolOutput = await executeBuiltinToolCall(toolCall);
           } catch (error) {
             const message = error instanceof Error ? error.message : 'Tool execution failed.';
             toolOutput = JSON.stringify({ error: message });
@@ -680,7 +824,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     setIsLoading(false);
     abortRef.current = null;
 
-  }, [selectedModelId, isLoading, thinkingEnabled, supportsThinking, supportsBuiltinWebSearch, addMessage]);
+  }, [selectedModelId, isLoading, thinkingEnabled, supportsThinking, selectedBuiltinTools, addMessage]);
 
   const handleCancel = useCallback(() => {
     abortRef.current?.abort();

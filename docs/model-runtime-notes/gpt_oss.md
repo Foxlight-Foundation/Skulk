@@ -25,22 +25,25 @@ generic reasoning or generic tool parsing.
 - default reasoning effort is `medium`
 - explicit non-disabled `reasoning_effort` values are preserved even though the
   model is not marked toggleable
-- builtin browsing exposure is currently one generic tool:
+- builtin browsing exposure currently includes:
   - `web_search(query, top_k?) -> { query, provider, results[] }`
+  - `open_url(url) -> { url, final_url, title, status_code, content_type }`
+  - `extract_page(url, max_chars?) -> { url, final_url, title, text, truncated }`
 
 ## Browsing Support
 
-Current browsing support is intentionally search-style retrieval only.
+Current browsing support is intentionally static and bounded.
 
 - no page navigation
 - no browser session state
 - no click-following loop
+- no JavaScript rendering
 
 Dashboard chat handles GPT-OSS tool calls client-side:
 
-1. advertise the `web_search` tool to GPT-OSS
+1. advertise the builtin browser tools to GPT-OSS
 2. receive a Harmony tool call
-3. execute `/v1/tools/web_search`
+3. execute `/v1/tools/web_search`, `/v1/tools/open_url`, or `/v1/tools/extract_page`
 4. send the tool result back as a `tool` message
 5. continue generation
 
