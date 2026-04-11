@@ -14,6 +14,7 @@ from openai_harmony import (  # pyright: ignore[reportMissingTypeStubs]
 )
 
 from exo.api.types import ToolCallItem
+from exo.shared.constants import preferred_env_value
 from exo.shared.models.capabilities import resolve_model_capability_profile
 from exo.shared.models.model_cards import (
     ModelCard,
@@ -33,6 +34,49 @@ _GEMMA4_THINK_START = "<|channel>thought\n"
 _GEMMA4_THINK_END = "<channel|>"
 
 
+def _thinking_stream_debug_enabled() -> bool:
+    """Return whether opt-in thinking stream tracing is enabled."""
+    value = preferred_env_value(
+        "SKULK_TRACE_THINKING_STREAM",
+        "EXO_TRACE_THINKING_STREAM",
+    )
+    if value is None:
+        return False
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _trace_generation_stream(
+    label: str,
+    model_id: ModelId,
+    responses: Generator[GenerationResponse | ToolCallResponse | None],
+) -> Generator[GenerationResponse | ToolCallResponse | None]:
+    """Log parser-stage generation chunks when thinking stream tracing is enabled."""
+    if not _thinking_stream_debug_enabled():
+        yield from responses
+        return
+
+    for response in responses:
+        if response is None:
+            logger.info(f"[thinking-stream] stage={label} model={model_id} chunk=None")
+            yield None
+            continue
+
+        if isinstance(response, ToolCallResponse):
+            logger.info(
+                f"[thinking-stream] stage={label} model={model_id} "
+                f"tool_calls={len(response.tool_calls)}"
+            )
+            yield response
+            continue
+
+        logger.info(
+            f"[thinking-stream] stage={label} model={model_id} "
+            f"text={response.text!r} token={response.token} "
+            f"is_thinking={response.is_thinking} finish_reason={response.finish_reason!r}"
+        )
+        yield response
+
+
 @cache
 def get_gpt_oss_encoding():
     encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
@@ -50,6 +94,7 @@ def apply_all_parsers(
     model_card: ModelCard | None = None,
 ) -> Generator[GenerationResponse | ToolCallResponse | None]:
     mlx_generator = receiver
+    mlx_generator = _trace_generation_stream("raw", model_id, mlx_generator)
     capability_profile = resolve_model_capability_profile(
         model_id,
         model_card=model_card,
@@ -69,6 +114,7 @@ def apply_all_parsers(
             tokenizer.think_end,
             starts_in_thinking=detect_thinking_prompt_suffix(prompt, tokenizer),
         )
+        mlx_generator = _trace_generation_stream("post-thinking-parser", model_id, mlx_generator)
 
     if capability_profile.output_parser == OutputParserType.GptOss or issubclass(
         model_type, GptOssModel
@@ -81,6 +127,7 @@ def apply_all_parsers(
     elif tool_parser:
         mlx_generator = parse_tool_calls(mlx_generator, tool_parser, tools)
 
+    mlx_generator = _trace_generation_stream("post-all-parsers", model_id, mlx_generator)
     return mlx_generator
 
 

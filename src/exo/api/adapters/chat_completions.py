@@ -6,6 +6,8 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from loguru import logger
+
 from exo.api.types import (
     ChatCompletionChoice,
     ChatCompletionMessage,
@@ -23,6 +25,7 @@ from exo.api.types import (
     Usage,
 )
 from exo.download.download_utils import create_http_session
+from exo.shared.constants import preferred_env_value
 from exo.shared.models.capabilities import resolve_model_capability_profile
 from exo.shared.models.model_cards import ModelCard
 from exo.shared.types.chunks import (
@@ -37,6 +40,17 @@ from exo.shared.types.text_generation import (
     TextGenerationTaskParams,
     resolve_reasoning_params,
 )
+
+
+def _thinking_stream_debug_enabled() -> bool:
+    """Return whether opt-in thinking stream tracing is enabled."""
+    value = preferred_env_value(
+        "SKULK_TRACE_THINKING_STREAM",
+        "EXO_TRACE_THINKING_STREAM",
+    )
+    if value is None:
+        return False
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def extract_base64_from_data_url(data_url: str) -> str:
@@ -205,6 +219,14 @@ def chunk_to_response(
         delta = ChatCompletionMessage(role="assistant", reasoning_content=chunk.text)
     else:
         delta = ChatCompletionMessage(role="assistant", content=chunk.text)
+
+    if _thinking_stream_debug_enabled():
+        logger.info(
+            "[thinking-stream] stage=chat-completions "
+            f"model={chunk.model} text={chunk.text!r} is_thinking={chunk.is_thinking} "
+            f"mapped_field={'reasoning_content' if chunk.is_thinking else 'content'} "
+            f"finish_reason={chunk.finish_reason!r}"
+        )
 
     return ChatCompletionResponse(
         id=command_id,
