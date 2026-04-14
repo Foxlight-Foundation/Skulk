@@ -9,6 +9,8 @@ import { TopologyGraph } from './components/topology/TopologyGraph';
 import { ConnectionBanner } from './components/status/ConnectionBanner';
 import { ToastContainer } from './components/status/ToastContainer';
 import { NetworkMesh } from './components/common/NetworkMesh';
+import { StarField } from './components/common/StarField';
+import { ShootingStars } from './components/common/ShootingStars';
 import { SettingsPanel } from './components/layout/SettingsPanel';
 import { ModelStorePage } from './components/pages/DownloadsPage';
 import { ChatView } from './components/pages/ChatView';
@@ -266,7 +268,14 @@ export function App() {
   return (
     <ThemeProvider theme={activeTheme}>
       <GlobalStyle />
-      <NetworkMesh radius={2.5} count={43} linkDistance={430} />
+      {themeName === 'dark' ? (
+        <>
+          <StarField />
+          <ShootingStars />
+        </>
+      ) : (
+        <NetworkMesh radius={2.5} count={43} linkDistance={430} />
+      )}
       <Shell>
         <ConnectionBanner connected={connected} />
         <HeaderNav
