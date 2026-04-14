@@ -22,39 +22,6 @@ export const GlobalStyle = createGlobalStyle`
     transition: background 0.2s ease, color 0.2s ease;
   }
 
-  /*
-   * Dark mode gets the Foxlight-style fixed sky image plus a subtle veil.
-   * These sit behind the app shell so the dashboard content keeps its own
-   * surface tokens and scrolling behavior.
-   */
-  html[data-theme='dark'] body::after {
-    content: '';
-    position: fixed;
-    inset: 0;
-    z-index: -1;
-    pointer-events: none;
-    background-image: url('/starry_bg.webp');
-    background-size: cover;
-    background-position: center center;
-    background-repeat: no-repeat;
-  }
-
-  html[data-theme='dark'] body::before {
-    content: '';
-    position: fixed;
-    inset: 0;
-    z-index: 0;
-    pointer-events: none;
-    background: linear-gradient(
-      to bottom,
-      rgba(4, 6, 16, 0.74) 0%,
-      rgba(4, 6, 16, 0.16) 26%,
-      rgba(4, 6, 16, 0.08) 50%,
-      rgba(4, 6, 16, 0.24) 74%,
-      rgba(4, 6, 16, 0.74) 100%
-    );
-  }
-
   a {
     color: inherit;
     text-decoration: none;
