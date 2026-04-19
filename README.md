@@ -3,7 +3,7 @@
 <!-- Copyright 2025 Foxlight Foundation -->
 
 <div align="center">
-  <img src="docs/imgs/skulk-logo.svg" width="200" height="200" alt="Skulk logo">
+  <img src="docs/imgs/skulk-logo-2.png" width="200" height="200" alt="Skulk logo">
 </div>
 
 Skulk is a fork of EXO for running AI models across one or more machines as a cluster.
