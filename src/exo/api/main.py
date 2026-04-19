@@ -201,6 +201,7 @@ from exo.shared.types.text_generation import TextGenerationTaskParams
 from exo.shared.types.worker.downloads import DownloadCompleted
 from exo.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from exo.shared.types.worker.shards import Sharding
+from exo.shared.version import get_skulk_version, get_skulk_version_label
 from exo.store.config import resolve_config_path
 from exo.tools.web_search import default_browser_tool_provider
 from exo.utils.banner import print_startup_banner
@@ -356,7 +357,7 @@ def _create_fastapi_app() -> FastAPI:
             "Most text-generation requests require the target model to already be placed "
             "and running on the node or cluster."
         ),
-        version="0.1.0",
+        version=get_skulk_version(),
         openapi_url="/api/openapi.json",
         docs_url="/api/docs",
         redoc_url="/api/redoc",
@@ -2281,7 +2282,7 @@ class API:
 
     async def ollama_version(self) -> dict[str, str]:
         """Returns version information for Ollama API compatibility."""
-        return {"version": "exo v1.0"}
+        return {"version": get_skulk_version_label()}
 
     def _calculate_total_available_memory(self) -> Memory:
         """Calculate total available memory across all nodes in bytes."""

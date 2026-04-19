@@ -8,11 +8,13 @@
         workspaceRoot = inputs.self;
       };
 
-      # Create overlay from workspace
-      # Use wheels from PyPI for most packages; we override mlx with our pure Nix Metal build
+      # Create overlay from workspace.
+      # The Nix environment follows the uv-managed wheel contract for runtime
+      # packages, then layers on development-only overrides where needed.
       overlay = workspace.mkPyprojectOverlay { sourcePreference = "wheel"; };
 
-      # Override overlay to inject Nix-built components
+      # Override overlay to inject Nix-built components that are specific to the
+      # development environment.
       exoOverlay = final: prev: {
         # Replace workspace exo_pyo3_bindings with Nix-built wheel.
         # Preserve passthru so mkVirtualEnv can resolve dependency groups.
@@ -64,9 +66,6 @@
             final.setuptools
           ];
         });
-      } // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
-        # Use our pure Nix-built MLX with Metal support (macOS only)
-        mlx = self'.packages.mlx;
       };
 
       # Additional overlay for Linux-specific fixes (type checking env).

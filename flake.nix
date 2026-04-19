@@ -45,9 +45,6 @@
       inputs.uv2nix.follows = "uv2nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-
-    # Pinned nixpkgs for swift-format (swift is broken on x86_64-linux in newer nixpkgs)
-    nixpkgs-swift.url = "github:NixOS/nixpkgs/08dacfca559e1d7da38f3cf05f1f45ee9bfd213c";
   };
 
   nixConfig = {
@@ -72,20 +69,8 @@
       ];
 
       perSystem =
-        { config, self', inputs', pkgs, lib, system, ... }:
-        let
-          # Use pinned nixpkgs for swift-format (swift is broken on x86_64-linux in newer nixpkgs)
-          pkgsSwift = import inputs.nixpkgs-swift { inherit system; };
-        in
+        { config, self', pkgs, lib, system, ... }:
         {
-          # Allow unfree for metal-toolchain (needed for Darwin Metal packages)
-          _module.args.pkgs = import inputs.nixpkgs {
-            inherit system;
-            config.allowUnfreePredicate = pkg: (pkg.pname or "") == "metal-toolchain";
-            overlays = [
-              (import ./nix/apple-sdk-overlay.nix)
-            ];
-          };
           treefmt = {
             projectRootFile = "flake.nix";
             programs = {
@@ -93,22 +78,12 @@
             };
           };
 
-          packages = lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin (
-            let
-              uvLock = builtins.fromTOML (builtins.readFile ./uv.lock);
-              mlxPackage = builtins.head (builtins.filter (p: p.name == "mlx" && p.source ? git) uvLock.package);
-              uvLockMlxVersion = mlxPackage.version;
-              uvLockMlxRev = builtins.elemAt (builtins.split "#" mlxPackage.source.git) 2;
-            in
-            {
-              metal-toolchain = pkgs.callPackage ./nix/metal-toolchain.nix { };
-              mlx = pkgs.callPackage ./nix/mlx.nix {
-                inherit (self'.packages) metal-toolchain;
-                inherit uvLockMlxVersion uvLockMlxRev;
-              };
-              default = self'.packages.exo;
-            }
-          );
+          packages = lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+            # Keep the flake runtime aligned with the uv-managed app runtime on macOS.
+            # Nix provides the dev shell, formatter, and CI environment; uv remains the
+            # source of truth for the packaged MLX wheel stack used by the app itself.
+            default = self'.packages.exo;
+          };
 
           devShells.default = with pkgs; pkgs.mkShell {
             inputsFrom = [ self'.checks.cargo-build ];

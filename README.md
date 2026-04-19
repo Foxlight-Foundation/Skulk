@@ -12,7 +12,7 @@ a more modern dashboard, richer API workflows, sophisticated cache quantization,
 
 > Skulk is maintained by [Foxlight Foundation](https://github.com/foxlight-foundation) and forked from [exo](https://github.com/exo-explore/exo).
 
-**[Documentation](https://foxlight-foundation.github.io/Skulk/)** · **[API Guide](https://foxlight-foundation.github.io/Skulk/api/)** · **[Architecture](https://foxlight-foundation.github.io/Skulk/architecture/)**
+**[Documentation](https://foxlight-foundation.github.io/Skulk/)** · **[Build And Runtime Paths](https://foxlight-foundation.github.io/Skulk/build-and-runtime/)** · **[Release Notes](https://foxlight-foundation.github.io/Skulk/release-notes/1.0.2/)** · **[Architecture](https://foxlight-foundation.github.io/Skulk/architecture/)**
 
 ## What Skulk Is Good At
 
@@ -34,6 +34,7 @@ a more modern dashboard, richer API workflows, sophisticated cache quantization,
 - [node](https://github.com/nodejs/node)
 - [rustup](https://rustup.rs/)
 - `macmon` for Apple Silicon monitoring
+- [Nix](https://nixos.org/download/) for `nix fmt`, `nix flake check`, and the repo dev shell
 
 ```bash
 brew install uv macmon node
@@ -80,6 +81,11 @@ Important behavior:
 
 - The dashboard will not let you chat unless a model is already placed and ready.
 - The API behaves the same way in practice. If you send a chat request too early, you will usually get `404 No instance found for model ...`.
+
+Build/runtime note:
+
+- `uv` is the canonical source and runtime path for Skulk on macOS, including the official `mlx` + `mlx-metal` wheel stack.
+- Nix is kept for reproducible development tooling, formatting, and `flake`-based validation. It should match the `uv` runtime contract instead of silently substituting a different MLX build.
 
 ## Choose Your Path
 

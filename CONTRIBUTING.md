@@ -21,6 +21,7 @@ To run Skulk from source:
   ```bash
   brew install node
   ```
+- [Nix](https://nixos.org/download/) (for `nix fmt`, `nix flake check`, and the repo dev shell)
 - [rust](https://github.com/rust-lang/rustup) (to build Rust bindings, nightly for now)
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -33,6 +34,10 @@ cd Skulk/dashboard-react && npm install && npm run build && cd ..
 uv sync
 uv run skulk
 ```
+
+Skulk's runtime contract on macOS follows the `uv` environment and the
+official `mlx`/`mlx-metal` wheel stack. Nix is used for reproducible
+development tooling and validation, not as a hidden alternate MLX runtime.
 
 ## Project Structure
 
@@ -83,6 +88,10 @@ Before starting work:
 - Avoid combining unrelated changes, even if they seem small
 
 This makes reviews faster and helps us maintain code quality as the project evolves.
+
+When a branch is release-worthy or bumps the project version, update both
+`CHANGELOG.md` and the public docs release notes under `website/docs/` in the
+same change.
 
 ## Pull Request Review Loop
 

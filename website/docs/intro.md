@@ -19,11 +19,13 @@ Skulk is a distributed inference platform, so these docs try to serve both of th
 If you are getting oriented, start with these pages:
 
 - [README](https://github.com/Foxlight-Foundation/Skulk/blob/main/README.md) for installation, first run, and quick-start paths
+- [Build and runtime paths](build-and-runtime) for how `uv` and Nix fit together
 - [API guide](api-guide) for the happy path: place a model, then call the API
 - [Model store guide](model-store) for shared model storage and download workflows
 - [KV cache backends](kv-cache-backends) for backend and runtime tuning
 - [Model cards](model-cards) for the metadata and capability declarations Skulk uses to describe models
 - [Model capabilities](model-capabilities) for how declarative card fields become runtime behavior
+- [Release notes 1.0.2](release-notes/1.0.2) for the latest branch stabilization and model-support work
 - [Architecture overview](architecture) for how the node, cluster, and event model fit together
 
 ## Common Jobs

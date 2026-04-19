@@ -43,6 +43,11 @@ uv run ruff check
 nix fmt
 ```
 
+`uv` is the canonical Skulk runtime path on macOS, including the official
+`mlx` + `mlx-metal` wheel stack. Nix is kept for formatting, flake-based
+validation, and reproducible development shells; it should not silently swap
+in a different MLX runtime contract.
+
 ## Docs Build Commands
 
 ```bash
@@ -152,6 +157,7 @@ These rules apply to every change. No exceptions.
 ### Documentation
 
 - **Every API endpoint must be documented** in `website/docs/api-guide.md` with method, path, parameters, and behavior. If you add or modify an endpoint, update the docs in the same commit or PR.
+- **Every release-worthy branch or version bump must update release notes** in both `CHANGELOG.md` and the public docs under `website/docs/`.
 - **Every API endpoint must appear in the OpenAPI spec.** FastAPI auto-generates this from route decorators — ensure every route has `tags`, `summary`, and `description` set. Verify with `uv run python scripts/export_openapi.py` (output is gitignored but CI regenerates it). The Docusaurus build runs `gen-api-docs` to produce interactive per-endpoint pages from that spec.
 - **All public Python functions, classes, and methods must have docstrings** that are clear enough for generative documentation tools (docusaurus, pdoc, sphinx) to produce useful output. Describe what it does, parameters, return value, and any side effects.
 - **All Pydantic models and their fields must have descriptions** via docstrings or `Field(description=...)` for anything non-obvious. These flow into the OpenAPI spec.
