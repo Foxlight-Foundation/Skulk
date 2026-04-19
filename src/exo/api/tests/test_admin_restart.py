@@ -1,22 +1,30 @@
-# pyright: reportUnusedFunction=false, reportAny=false, reportPrivateUsage=false
 """Tests for the POST /admin/restart API endpoint."""
 
-from typing import Any
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
+from httpx import Response
 
 from exo.api.main import API
+from exo.shared.election import ElectionMessage
+from exo.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
 from exo.shared.types.common import NodeId
+from exo.shared.types.events import IndexedEvent
 from exo.utils.channels import channel
+
+
+def _json_object(response: Response) -> dict[str, object]:
+    """Return a JSON response payload as a typed object mapping."""
+    return cast(dict[str, object], cast(object, response.json()))
 
 
 def _build_api(node_id: str = "test-node") -> API:
     """Create a minimal API instance for testing."""
-    command_sender, _ = channel()
-    download_sender, _ = channel()
-    _, event_receiver = channel()
-    _, election_receiver = channel()
+    command_sender, _ = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    _, event_receiver = channel[IndexedEvent]()
+    _, election_receiver = channel[ElectionMessage]()
     return API(
         NodeId(node_id),
         port=52415,
@@ -38,7 +46,7 @@ def test_restart_local_node() -> None:
         response = client.post("/admin/restart")
 
     assert response.status_code == 200
-    data: dict[str, Any] = response.json()
+    data = _json_object(response)
     assert data["status"] == "restarting"
     assert data["node_id"] == "test-node"
     mock.assert_called_once()
@@ -53,7 +61,7 @@ def test_restart_local_node_with_explicit_id() -> None:
         response = client.post("/admin/restart?node_id=test-node")
 
     assert response.status_code == 200
-    data: dict[str, Any] = response.json()
+    data = _json_object(response)
     assert data["status"] == "restarting"
     mock.assert_called_once()
 
@@ -67,7 +75,7 @@ def test_restart_idempotent_returns_409() -> None:
         response = client.post("/admin/restart")
 
     assert response.status_code == 409
-    data: dict[str, Any] = response.json()
+    data = _json_object(response)
     assert data["status"] == "restart_already_pending"
 
 
@@ -80,7 +88,7 @@ def test_restart_remote_node() -> None:
         response = client.post("/admin/restart?node_id=remote-node")
 
     assert response.status_code == 200
-    data: dict[str, Any] = response.json()
+    data = _json_object(response)
     assert data["status"] == "restart_sent"
     assert data["node_id"] == "remote-node"
     mock_send.assert_called_once()
@@ -88,6 +96,6 @@ def test_restart_remote_node() -> None:
     # Verify the command type and target
     from exo.shared.types.commands import RestartNode
 
-    cmd = mock_send.call_args[0][0]
+    cmd = cast(object, mock_send.call_args[0][0])
     assert isinstance(cmd, RestartNode)
     assert cmd.target_node_id == NodeId("remote-node")

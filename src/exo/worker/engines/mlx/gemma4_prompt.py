@@ -8,7 +8,10 @@ MLX warmup path. Real inference keeps the reference suffix so generation begins
 at the expected visible assistant-content boundary.
 """
 
-from typing import Any
+from typing import cast
+
+GemmaContentPart = dict[str, object]
+GemmaMessage = dict[str, object]
 
 
 def strip_gemma4_thinking(text: str) -> str:
@@ -28,7 +31,7 @@ def strip_gemma4_thinking(text: str) -> str:
     return "".join(result).strip()
 
 
-def _render_gemma4_content(content: Any, role: str) -> str:
+def _render_gemma4_content(content: object, role: str) -> str:
     """Render one Gemma 4 message body."""
     if isinstance(content, str):
         return strip_gemma4_thinking(content) if role == "model" else content.strip()
@@ -37,12 +40,13 @@ def _render_gemma4_content(content: Any, role: str) -> str:
         return str(content).strip()
 
     parts: list[str] = []
-    for item in content:
+    for item in cast(list[object], content):
         if not isinstance(item, dict):
             continue
-        item_type = str(item.get("type", ""))
+        part = cast(GemmaContentPart, item)
+        item_type = str(part.get("type", ""))
         if item_type == "text":
-            text = str(item.get("text", ""))
+            text = str(part.get("text", ""))
             parts.append(strip_gemma4_thinking(text) if role == "model" else text.strip())
         elif item_type == "image":
             parts.append("\n\n<|image|>\n\n")
@@ -54,7 +58,7 @@ def _render_gemma4_content(content: Any, role: str) -> str:
 
 
 def render_gemma4_prompt(
-    messages: list[dict[str, Any]],
+    messages: list[GemmaMessage],
     *,
     add_generation_prompt: bool,
     enable_thinking: bool | None = None,

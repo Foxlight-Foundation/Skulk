@@ -5,12 +5,46 @@ quantization pipeline for integration with the Skulk API.
 """
 
 import asyncio
+import importlib
 import logging
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol, TypedDict, cast
 
 logger = logging.getLogger("exo.store.model_optimizer")
+
+
+class OptimizationPipelineResult(TypedDict):
+    """Normalized OptiQ output fields consumed by the API layer."""
+
+    optiq_path: str
+    achieved_bpw: float | None
+    estimated_size_mb: float | None
+
+
+class _RunLlmPipeline(Protocol):
+    """Minimal callable surface used from mlx-optiq."""
+
+    def __call__(
+        self,
+        *,
+        model_name: str,
+        output_dir: str,
+        target_bpw: float = 4.5,
+        n_calibration: int = 8,
+        candidate_bits: list[int] | None = None,
+        group_size: int = 64,
+        skip_baselines: bool = False,
+        low_bits: int = 4,
+        high_bits: int = 8,
+    ) -> dict[str, object]: ...
+
+
+def _float_attr(value: object, attr_name: str) -> float | None:
+    """Extract one optional float attribute from an opaque third-party object."""
+    attr_value = cast(object, getattr(value, attr_name, None))
+    return float(attr_value) if isinstance(attr_value, int | float) else None
 
 
 @dataclass
@@ -158,15 +192,19 @@ def _run_optiq_pipeline(
     candidate_bits: list[int],
     group_size: int,
     n_calibration: int,
-) -> dict:
+) -> OptimizationPipelineResult:
     """Synchronous wrapper around mlx-optiq pipeline (runs in thread)."""
     try:
-        from optiq.models.llm import run_llm_pipeline
+        optiq_llm = importlib.import_module("optiq.models.llm")
     except ImportError as exc:
         raise RuntimeError(
             "mlx-optiq[convert] is required for model optimization. "
             "Install with: pip install 'mlx-optiq[convert]'"
         ) from exc
+    run_llm_pipeline = cast(
+        _RunLlmPipeline,
+        cast(dict[str, object], vars(optiq_llm))["run_llm_pipeline"],
+    )
 
     result = run_llm_pipeline(
         model_name=model_id,
@@ -180,13 +218,18 @@ def _run_optiq_pipeline(
 
     # Extract key metrics from result
     optimization = result.get("optimization")
-    achieved_bpw = getattr(optimization, "achieved_bpw", None) if optimization else None
-    estimated_size_mb = (
-        getattr(optimization, "estimated_size_mb", None) if optimization else None
+    achieved_bpw = (
+        _float_attr(optimization, "achieved_bpw") if optimization is not None else None
     )
+    estimated_size_mb = (
+        _float_attr(optimization, "estimated_size_mb")
+        if optimization is not None
+        else None
+    )
+    optiq_path = result.get("optiq_path")
 
     return {
-        "optiq_path": result.get("optiq_path", output_dir),
+        "optiq_path": optiq_path if isinstance(optiq_path, str) else output_dir,
         "achieved_bpw": achieved_bpw,
         "estimated_size_mb": estimated_size_mb,
     }

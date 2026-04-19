@@ -161,6 +161,7 @@ These rules apply to every change. No exceptions.
 
 ### Code Quality
 
+- **Production workload quality is the bar.** Optimize for reliability, debuggability, and correctness under sustained real-world workloads, not demo-only success or “good enough for upstream.”
 - **Strict, exhaustive typing** — never bypass the type-checker. Use `Literal[...]` for enum-like sets, `typing.NewType` for primitives.
 - **Pydantic models** with `frozen=True` and `strict=True`.
 - **Pure functions** with injectable effect handlers for side-effects.

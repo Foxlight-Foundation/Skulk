@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from typing import cast
 
+import mlx.core as mx
 import pytest
+from mlx_lm.tokenizer_utils import TokenizerWrapper
 
+from exo.shared.types.mlx import KVCacheType, Model
 from exo.worker.engines.mlx.generator import generate as generate_module
 
 
@@ -34,6 +38,64 @@ class _FakeModel:
         self.layers: list[object] = []
 
 
+def _identity_sampler(logits: mx.array) -> mx.array:
+    return logits
+
+
+def _fake_model() -> Model:
+    return cast(Model, cast(object, _FakeModel()))
+
+
+def _fake_tokenizer() -> TokenizerWrapper:
+    return cast(TokenizerWrapper, object())
+
+
+def _fake_group() -> mx.distributed.Group:
+    return cast(mx.distributed.Group, cast(object, _FakeGroup()))
+
+
+def _fake_cache_list(cache: _FakeCache) -> KVCacheType:
+    return cast(KVCacheType, [cache])
+
+
+def _noop_barrier(_group: object) -> None:
+    return None
+
+
+def _record_prefill_mode(target: list[bool]):
+    def _set_prefill(_model: object, *, is_prefill: bool) -> None:
+        target.append(is_prefill)
+
+    return _set_prefill
+
+
+def _record_queue_sends(target: list[bool]):
+    def _set_queue_sends(_model: object, *, queue_sends: bool) -> None:
+        target.append(queue_sends)
+
+    return _set_queue_sends
+
+
+def _pipeline_enabled(_model: object) -> bool:
+    return True
+
+
+def _pipeline_disabled(_model: object) -> bool:
+    return False
+
+
+def _empty_stream(*args: object, **kwargs: object) -> Iterator[object]:
+    if False:
+        yield args, kwargs
+
+
+def _record_pipeline_prefill(calls: list[str]) -> Callable[..., None]:
+    def _pipeline_prefill(**_kwargs: object) -> None:
+        calls.append("pipeline_parallel_prefill")
+
+    return _pipeline_prefill
+
+
 def test_prefill_uses_pipeline_parallel_path_for_long_pipeline_prompts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -47,29 +109,25 @@ def test_prefill_uses_pipeline_parallel_path_for_long_pipeline_prompts(
     fake_cache = _FakeCache()
     prefill_mode_calls: list[bool] = []
 
-    monkeypatch.setattr(generate_module, "mx_barrier", lambda _group: None)
+    monkeypatch.setattr(generate_module, "mx_barrier", _noop_barrier)
     monkeypatch.setattr(
         generate_module,
         "set_pipeline_prefill",
-        lambda _model, *, is_prefill: prefill_mode_calls.append(is_prefill),
+        _record_prefill_mode(prefill_mode_calls),
     )
     monkeypatch.setattr(
         generate_module,
         "_has_pipeline_communication_layer",
-        lambda _model: True,
+        _pipeline_enabled,
     )
-    monkeypatch.setattr(
-        generate_module,
-        "stream_generate",
-        lambda *args, **kwargs: (_ for _ in () if False),
-    )
+    monkeypatch.setattr(generate_module, "stream_generate", _empty_stream)
 
     def _pipeline_parallel_prefill(**kwargs: object) -> None:
         calls.append("pipeline_parallel_prefill")
-        prompt_progress_callback = kwargs["prompt_progress_callback"]
-        assert callable(prompt_progress_callback)
-        prompt = kwargs["prompt"]
-        assert isinstance(prompt, list)
+        prompt_progress_callback = cast(
+            Callable[[int, int], None], kwargs["prompt_progress_callback"]
+        )
+        prompt = cast(mx.array, kwargs["prompt"])
         prompt_progress_callback(len(prompt), len(prompt))
 
     monkeypatch.setattr(
@@ -79,12 +137,12 @@ def test_prefill_uses_pipeline_parallel_path_for_long_pipeline_prompts(
     )
 
     prefill_tps, prefill_tokens, snapshots = generate_module.prefill(
-        model=_FakeModel(),
-        tokenizer=object(),
-        sampler=object(),
-        prompt_tokens=list(range(5000)),
-        cache=[fake_cache],
-        group=_FakeGroup(),
+        model=_fake_model(),
+        tokenizer=_fake_tokenizer(),
+        sampler=_identity_sampler,
+        prompt_tokens=mx.array(list(range(5000))),
+        cache=_fake_cache_list(fake_cache),
+        group=_fake_group(),
         on_prefill_progress=None,
         distributed_prompt_progress_callback=None,
     )
@@ -111,25 +169,25 @@ def test_prefill_uses_pipeline_parallel_path_for_short_pipeline_prompts(
     fake_cache = _FakeCache()
     prefill_mode_calls: list[bool] = []
 
-    monkeypatch.setattr(generate_module, "mx_barrier", lambda _group: None)
+    monkeypatch.setattr(generate_module, "mx_barrier", _noop_barrier)
     monkeypatch.setattr(
         generate_module,
         "set_pipeline_prefill",
-        lambda _model, *, is_prefill: prefill_mode_calls.append(is_prefill),
+        _record_prefill_mode(prefill_mode_calls),
     )
     monkeypatch.setattr(
         generate_module,
         "_has_pipeline_communication_layer",
-        lambda _model: True,
+        _pipeline_enabled,
     )
 
     def _pipeline_parallel_prefill(**kwargs: object) -> None:
         calls.append("pipeline_parallel_prefill")
         assert kwargs["distributed_prompt_progress_callback"] is None
-        prompt_progress_callback = kwargs["prompt_progress_callback"]
-        assert callable(prompt_progress_callback)
-        prompt = kwargs["prompt"]
-        assert isinstance(prompt, list)
+        prompt_progress_callback = cast(
+            Callable[[int, int], None], kwargs["prompt_progress_callback"]
+        )
+        prompt = cast(mx.array, kwargs["prompt"])
         prompt_progress_callback(len(prompt), len(prompt))
 
     monkeypatch.setattr(
@@ -148,12 +206,12 @@ def test_prefill_uses_pipeline_parallel_path_for_short_pipeline_prompts(
         raise AssertionError("single-chunk pipeline prefill should not poll tasks")
 
     prefill_tps, prefill_tokens, snapshots = generate_module.prefill(
-        model=_FakeModel(),
-        tokenizer=object(),
-        sampler=object(),
-        prompt_tokens=list(range(23)),  # exactly the gemma 4 warmup prompt size
-        cache=[fake_cache],
-        group=_FakeGroup(),
+        model=_fake_model(),
+        tokenizer=_fake_tokenizer(),
+        sampler=_identity_sampler,
+        prompt_tokens=mx.array(list(range(23))),  # exactly the gemma 4 warmup prompt size
+        cache=_fake_cache_list(fake_cache),
+        group=_fake_group(),
         on_prefill_progress=None,
         distributed_prompt_progress_callback=_fail_distributed_callback,
     )
@@ -175,21 +233,21 @@ def test_prefill_uses_pipeline_parallel_path_at_single_chunk_boundary(
     fake_cache = _FakeCache()
     prefill_mode_calls: list[bool] = []
 
-    monkeypatch.setattr(generate_module, "mx_barrier", lambda _group: None)
+    monkeypatch.setattr(generate_module, "mx_barrier", _noop_barrier)
     monkeypatch.setattr(
         generate_module,
         "set_pipeline_prefill",
-        lambda _model, *, is_prefill: prefill_mode_calls.append(is_prefill),
+        _record_prefill_mode(prefill_mode_calls),
     )
     monkeypatch.setattr(
         generate_module,
         "_has_pipeline_communication_layer",
-        lambda _model: True,
+        _pipeline_enabled,
     )
     monkeypatch.setattr(
         generate_module,
         "pipeline_parallel_prefill",
-        lambda **kwargs: calls.append("pipeline_parallel_prefill"),
+        _record_pipeline_prefill(calls),
     )
 
     def _stream_generate(*args: object, **kwargs: object) -> Iterator[object]:
@@ -199,12 +257,12 @@ def test_prefill_uses_pipeline_parallel_path_at_single_chunk_boundary(
     monkeypatch.setattr(generate_module, "stream_generate", _stream_generate)
 
     prefill_tps, prefill_tokens, snapshots = generate_module.prefill(
-        model=_FakeModel(),
-        tokenizer=object(),
-        sampler=object(),
-        prompt_tokens=list(range(1366)),
-        cache=[fake_cache],
-        group=_FakeGroup(),
+        model=_fake_model(),
+        tokenizer=_fake_tokenizer(),
+        sampler=_identity_sampler,
+        prompt_tokens=mx.array(list(range(1366))),
+        cache=_fake_cache_list(fake_cache),
+        group=_fake_group(),
         on_prefill_progress=None,
         distributed_prompt_progress_callback=None,
     )
@@ -225,27 +283,23 @@ def test_prefill_resets_pipeline_flags_after_unexpected_exception(
     prefill_mode_calls: list[bool] = []
     queue_send_calls: list[bool] = []
 
-    monkeypatch.setattr(generate_module, "mx_barrier", lambda _group: None)
+    monkeypatch.setattr(generate_module, "mx_barrier", _noop_barrier)
     monkeypatch.setattr(
         generate_module,
         "set_pipeline_prefill",
-        lambda _model, *, is_prefill: prefill_mode_calls.append(is_prefill),
+        _record_prefill_mode(prefill_mode_calls),
     )
     monkeypatch.setattr(
         generate_module,
         "set_pipeline_queue_sends",
-        lambda _model, *, queue_sends: queue_send_calls.append(queue_sends),
+        _record_queue_sends(queue_send_calls),
     )
     monkeypatch.setattr(
         generate_module,
         "_has_pipeline_communication_layer",
-        lambda _model: True,
+        _pipeline_enabled,
     )
-    monkeypatch.setattr(
-        generate_module,
-        "stream_generate",
-        lambda *args, **kwargs: (_ for _ in () if False),
-    )
+    monkeypatch.setattr(generate_module, "stream_generate", _empty_stream)
 
     def _pipeline_parallel_prefill(**kwargs: object) -> None:
         raise RuntimeError("boom")
@@ -258,12 +312,12 @@ def test_prefill_resets_pipeline_flags_after_unexpected_exception(
 
     with pytest.raises(RuntimeError, match="boom"):
         generate_module.prefill(
-            model=_FakeModel(),
-            tokenizer=object(),
-            sampler=object(),
-            prompt_tokens=list(range(5000)),
-            cache=[fake_cache],
-            group=_FakeGroup(),
+            model=_fake_model(),
+            tokenizer=_fake_tokenizer(),
+            sampler=_identity_sampler,
+            prompt_tokens=mx.array(list(range(5000))),
+            cache=_fake_cache_list(fake_cache),
+            group=_fake_group(),
             on_prefill_progress=None,
             distributed_prompt_progress_callback=None,
         )
@@ -278,16 +332,16 @@ def test_prefill_uses_stream_generate_when_model_is_not_pipeline(
     calls: list[str] = []
     fake_cache = _FakeCache()
 
-    monkeypatch.setattr(generate_module, "mx_barrier", lambda _group: None)
+    monkeypatch.setattr(generate_module, "mx_barrier", _noop_barrier)
     monkeypatch.setattr(
         generate_module,
         "_has_pipeline_communication_layer",
-        lambda _model: False,
+        _pipeline_disabled,
     )
     monkeypatch.setattr(
         generate_module,
         "pipeline_parallel_prefill",
-        lambda **kwargs: calls.append("pipeline_parallel_prefill"),
+        _record_pipeline_prefill(calls),
     )
 
     def _stream_generate(*args: object, **kwargs: object) -> Iterator[object]:
@@ -297,12 +351,12 @@ def test_prefill_uses_stream_generate_when_model_is_not_pipeline(
     monkeypatch.setattr(generate_module, "stream_generate", _stream_generate)
 
     prefill_tps, prefill_tokens, snapshots = generate_module.prefill(
-        model=_FakeModel(),
-        tokenizer=object(),
-        sampler=object(),
-        prompt_tokens=list(range(128)),
-        cache=[fake_cache],
-        group=_FakeGroup(),
+        model=_fake_model(),
+        tokenizer=_fake_tokenizer(),
+        sampler=_identity_sampler,
+        prompt_tokens=mx.array(list(range(128))),
+        cache=_fake_cache_list(fake_cache),
+        group=_fake_group(),
         on_prefill_progress=None,
         distributed_prompt_progress_callback=None,
     )

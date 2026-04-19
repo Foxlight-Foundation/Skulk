@@ -34,6 +34,7 @@ _GEMMA4_THINK_START = "<|channel>thought\n"
 _GEMMA4_THINK_END = "<channel|>"
 _DEFAULT_TOKEN_THINK_START = "<think>"
 _DEFAULT_TOKEN_THINK_END = "</think>"
+ParserChunk = GenerationResponse | ToolCallResponse | None
 
 
 def _thinking_stream_debug_enabled() -> bool:
@@ -50,8 +51,8 @@ def _thinking_stream_debug_enabled() -> bool:
 def _trace_generation_stream(
     label: str,
     model_id: ModelId,
-    responses: Generator[GenerationResponse | ToolCallResponse | None],
-) -> Generator[GenerationResponse | ToolCallResponse | None]:
+    responses: Generator[ParserChunk],
+) -> Generator[ParserChunk]:
     """Log parser-stage generation chunks when thinking stream tracing is enabled."""
     if not _thinking_stream_debug_enabled():
         yield from responses
@@ -94,7 +95,7 @@ def apply_all_parsers(
     model_id: ModelId,
     tools: list[dict[str, Any]] | None,
     model_card: ModelCard | None = None,
-) -> Generator[GenerationResponse | ToolCallResponse | None]:
+) -> Generator[ParserChunk]:
     mlx_generator = receiver
     mlx_generator = _trace_generation_stream("raw", model_id, mlx_generator)
     capability_profile = resolve_model_capability_profile(
@@ -159,8 +160,8 @@ def _detect_thinking_prompt_suffix(
 
 
 def parse_gemma4_thinking_channels(
-    responses: Generator[GenerationResponse | None],
-) -> Generator[GenerationResponse | None]:
+    responses: Generator[ParserChunk],
+) -> Generator[ParserChunk]:
     """Route Gemma 4 channel-delimited reasoning via ``is_thinking``.
 
     Gemma 4 does not expose ``TokenizerWrapper.has_thinking`` metadata, but its
@@ -188,6 +189,9 @@ def parse_gemma4_thinking_channels(
     for response in responses:
         if response is None:
             yield None
+            continue
+        if isinstance(response, ToolCallResponse):
+            yield response
             continue
 
         buffer += response.text
@@ -284,8 +288,8 @@ def parse_gemma4_thinking_channels(
 
 
 def parse_gpt_oss(
-    responses: Generator[GenerationResponse | None],
-) -> Generator[GenerationResponse | ToolCallResponse | None]:
+    responses: Generator[ParserChunk],
+) -> Generator[ParserChunk]:
     encoding = get_gpt_oss_encoding()
     stream = StreamableParser(encoding, role=Role.ASSISTANT)
     thinking = False
@@ -295,6 +299,9 @@ def parse_gpt_oss(
     for response in responses:
         if response is None:
             yield None
+            continue
+        if isinstance(response, ToolCallResponse):
+            yield response
             continue
         try:
             stream.process(response.token)
@@ -356,8 +363,8 @@ def parse_gpt_oss(
 
 
 def parse_deepseek_v32(
-    responses: Generator[GenerationResponse | None],
-) -> Generator[GenerationResponse | ToolCallResponse | None]:
+    responses: Generator[ParserChunk],
+) -> Generator[ParserChunk]:
     """Parse DeepSeek V3.2 DSML tool calls from the generation stream.
 
     Uses accumulated-text matching (not per-token marker checks) because
@@ -394,6 +401,9 @@ def parse_deepseek_v32(
     for response in responses:
         if response is None:
             yield None
+            continue
+        if isinstance(response, ToolCallResponse):
+            yield response
             continue
 
         if response.finish_reason is not None:
@@ -517,11 +527,11 @@ def _could_be_dsml_prefix(text: str) -> bool:
 
 
 def parse_thinking_models(
-    responses: Generator[GenerationResponse | None],
+    responses: Generator[ParserChunk],
     think_start: str | None,
     think_end: str | None,
     starts_in_thinking: bool = True,
-) -> Generator[GenerationResponse | None]:
+) -> Generator[ParserChunk]:
     """Route thinking tokens via is_thinking flag.
 
     Swallows think tag tokens, sets ``is_thinking`` on all others, and buffers
@@ -554,6 +564,9 @@ def parse_thinking_models(
     for response in responses:
         if response is None:
             yield None
+            continue
+        if isinstance(response, ToolCallResponse):
+            yield response
             continue
 
         buffer += response.text
@@ -649,15 +662,18 @@ def parse_thinking_models(
 
 
 def parse_tool_calls(
-    responses: Generator[GenerationResponse | None],
+    responses: Generator[ParserChunk],
     tool_parser: ToolParser,
     tools: list[dict[str, Any]] | None,
-) -> Generator[GenerationResponse | ToolCallResponse | None]:
+) -> Generator[ParserChunk]:
     in_tool_call = False
     tool_call_text_parts: list[str] = []
     for response in responses:
         if response is None:
             yield None
+            continue
+        if isinstance(response, ToolCallResponse):
+            yield response
             continue
 
         if not in_tool_call and response.text.startswith(tool_parser.start_parsing):

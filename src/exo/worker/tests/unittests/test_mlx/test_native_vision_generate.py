@@ -1,19 +1,54 @@
 """Tests for native-vision generation routing."""
 
+from collections.abc import Callable, Generator
 from importlib import import_module
+from typing import cast
 
 import mlx.core as mx
+import pytest
+from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 from exo.shared.types.common import ModelId
+from exo.shared.types.mlx import KVCacheType, Model
 from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from exo.shared.types.worker.runner_response import GenerationResponse
-from exo.worker.engines.mlx.generator.generate import (
-    _mlx_generate_native_vision,
-    _should_use_native_vision_reference_path,
-    _slice_native_pixel_values_for_uncached_suffix,
-    mlx_generate,
-)
-from exo.worker.engines.mlx.vision import MediaRegion, VisionResult
+from exo.worker.engines.mlx.cache import CacheSnapshot, KVPrefixCache
+from exo.worker.engines.mlx.generator import generate as generate_module
+from exo.worker.engines.mlx.vision import MediaRegion, VisionProcessor, VisionResult
+
+mlx_generate = generate_module.mlx_generate
+
+
+def _mlx_generate_native_vision_fn() -> Callable[
+    ..., Generator[GenerationResponse, None, None]
+]:
+    module_dict = cast(dict[str, object], generate_module.__dict__)
+    return cast(
+        Callable[..., Generator[GenerationResponse, None, None]],
+        module_dict["_mlx_generate_native_vision"],
+    )
+
+
+def _should_use_native_vision_reference_path_fn() -> Callable[[], bool]:
+    module_dict = cast(dict[str, object], generate_module.__dict__)
+    return cast(
+        Callable[[], bool],
+        module_dict["_should_use_native_vision_reference_path"],
+    )
+
+
+def _slice_native_pixel_values_fn() -> Callable[
+    [mx.array | list[mx.array], list[MediaRegion], int],
+    mx.array | list[mx.array] | None,
+]:
+    module_dict = cast(dict[str, object], generate_module.__dict__)
+    return cast(
+        Callable[
+            [mx.array | list[mx.array], list[MediaRegion], int],
+            mx.array | list[mx.array] | None,
+        ],
+        module_dict["_slice_native_pixel_values_for_uncached_suffix"],
+    )
 
 
 class _FakeDetokenizer:
@@ -53,7 +88,37 @@ class _FakeTokenizer:
         return [1, 2, 3]
 
 
-def test_native_vision_generation_uses_mlx_vlm_generate_step(monkeypatch) -> None:
+def _fake_tokenizer() -> TokenizerWrapper:
+    return cast(TokenizerWrapper, cast(object, _FakeTokenizer()))
+
+
+def _fake_model() -> Model:
+    return cast(Model, object())
+
+
+def _fake_vision_processor() -> VisionProcessor:
+    return cast(VisionProcessor, object())
+
+
+def _identity_sampler(logits: mx.array) -> mx.array:
+    return logits
+
+
+def _empty_cache_list(**_kwargs: object) -> list[object]:
+    return []
+
+
+def _version_map(package: str, *, mlx_version: str, mlx_vlm_version: str) -> str:
+    return {"mlx": mlx_version, "mlx-vlm": mlx_vlm_version}[package]
+
+
+def _raise_patch_embed_tokens_error(*_args: object, **_kwargs: object) -> None:
+    raise AssertionError("native fully-cached requests should not patch embeddings")
+
+
+def test_native_vision_generation_uses_mlx_vlm_generate_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Native vision should stream through MLX-VLM's multimodal generate path."""
 
     def _fake_generate_step(
@@ -90,13 +155,13 @@ def test_native_vision_generation_uses_mlx_vlm_generate_step(monkeypatch) -> Non
     )
 
     responses = list(
-        _mlx_generate_native_vision(
-            model=object(),  # type: ignore[arg-type]
-            tokenizer=_FakeTokenizer(),  # type: ignore[arg-type]
+        _mlx_generate_native_vision_fn()(
+            model=_fake_model(),
+            tokenizer=_fake_tokenizer(),
             task=task,
             all_prompt_tokens=vision.prompt_tokens,
             vision=vision,
-            sampler=lambda logits: logits,  # type: ignore[arg-type]
+            sampler=_identity_sampler,
             logits_processors=[],
             on_prefill_progress=None,
             on_generation_token=None,
@@ -111,7 +176,9 @@ def test_native_vision_generation_uses_mlx_vlm_generate_step(monkeypatch) -> Non
     assert responses[-1].usage.completion_tokens == 2
 
 
-def test_mlx_generate_routes_native_vision_through_reference_path(monkeypatch) -> None:
+def test_mlx_generate_routes_native_vision_through_reference_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """``mlx_generate`` should bypass generic text generation for native vision."""
 
     vision = VisionResult(
@@ -137,7 +204,7 @@ def test_mlx_generate_routes_native_vision_through_reference_path(monkeypatch) -
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate._should_use_native_vision_reference_path",
-        lambda: True,
+        cast(Callable[[], bool], lambda: True),
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate._mlx_generate_native_vision",
@@ -149,7 +216,7 @@ def test_mlx_generate_routes_native_vision_through_reference_path(monkeypatch) -
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate.make_kv_cache",
-        lambda **_kwargs: [],
+        _empty_cache_list,
     )
 
     task = TextGenerationTaskParams(
@@ -171,20 +238,22 @@ def test_mlx_generate_routes_native_vision_through_reference_path(monkeypatch) -
 
     responses = list(
         mlx_generate(
-            model=object(),  # type: ignore[arg-type]
-            tokenizer=_FakeTokenizer(),  # type: ignore[arg-type]
+            model=_fake_model(),
+            tokenizer=_fake_tokenizer(),
             task=task,
             prompt="<bos>",
             kv_prefix_cache=None,
             group=None,
-            vision_processor=object(),  # type: ignore[arg-type]
+            vision_processor=_fake_vision_processor(),
         )
     )
 
     assert [response.text for response in responses] == ["native"]
 
 
-def test_mlx_generate_uses_pipeline_aware_path_on_fixed_stack(monkeypatch) -> None:
+def test_mlx_generate_uses_pipeline_aware_path_on_fixed_stack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Fixed upstream stacks should use the faster legacy generation path."""
 
     vision = VisionResult(
@@ -205,7 +274,7 @@ def test_mlx_generate_uses_pipeline_aware_path_on_fixed_stack(monkeypatch) -> No
     def _fake_prepare_vision(**_kwargs: object) -> VisionResult:
         return vision
 
-    def _fake_prefill(*_args: object, **_kwargs: object):
+    def _fake_prefill(*_args: object, **_kwargs: object) -> tuple[float, int, list[CacheSnapshot]]:
         return 0.0, 2, []
 
     def _fake_stream_generate(*_args: object, **_kwargs: object):
@@ -220,7 +289,7 @@ def test_mlx_generate_uses_pipeline_aware_path_on_fixed_stack(monkeypatch) -> No
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate._should_use_native_vision_reference_path",
-        lambda: False,
+        cast(Callable[[], bool], lambda: False),
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate._mlx_generate_native_vision",
@@ -236,7 +305,7 @@ def test_mlx_generate_uses_pipeline_aware_path_on_fixed_stack(monkeypatch) -> No
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate.make_kv_cache",
-        lambda **_kwargs: [],
+        _empty_cache_list,
     )
 
     task = TextGenerationTaskParams(
@@ -259,13 +328,13 @@ def test_mlx_generate_uses_pipeline_aware_path_on_fixed_stack(monkeypatch) -> No
     model = _FakeModel()
     responses = list(
         mlx_generate(
-            model=model,  # type: ignore[arg-type]
-            tokenizer=_FakeTokenizer(),  # type: ignore[arg-type]
+            model=cast(Model, cast(object, model)),
+            tokenizer=_fake_tokenizer(),
             task=task,
             prompt="<bos>",
             kv_prefix_cache=None,
             group=None,
-            vision_processor=object(),  # type: ignore[arg-type]
+            vision_processor=_fake_vision_processor(),
         )
     )
 
@@ -273,30 +342,44 @@ def test_mlx_generate_uses_pipeline_aware_path_on_fixed_stack(monkeypatch) -> No
     assert model.pixel_values is None
 
 
-def test_native_vision_reference_path_version_gate(monkeypatch) -> None:
+def test_native_vision_reference_path_version_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Recent upstream MLX versions should disable the slower reference path."""
 
     monkeypatch.delenv("EXO_NATIVE_VISION_REFERENCE_PATH", raising=False)
+    def _fake_version(package: str) -> str:
+        return _version_map(
+            package, mlx_version="0.31.1", mlx_vlm_version="0.4.4"
+        )
+
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate.metadata.version",
-        lambda package: {"mlx": "0.31.1", "mlx-vlm": "0.4.4"}[package],
+        _fake_version,
     )
 
-    assert _should_use_native_vision_reference_path() is False
+    assert _should_use_native_vision_reference_path_fn()() is False
 
 
 def test_native_vision_reference_path_keeps_prereleases_on_safe_path(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Prerelease builds should keep the safer reference path enabled."""
 
     monkeypatch.delenv("EXO_NATIVE_VISION_REFERENCE_PATH", raising=False)
+    def _fake_version(package: str) -> str:
+        return _version_map(
+            package, mlx_version="0.31.1rc1", mlx_vlm_version="0.4.4.dev1"
+        )
+
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate.metadata.version",
-        lambda package: {"mlx": "0.31.1rc1", "mlx-vlm": "0.4.4.dev1"}[package],
+        _fake_version,
     )
 
-    assert _should_use_native_vision_reference_path() is True
+    assert _should_use_native_vision_reference_path_fn()() is True
+
+
 def test_slice_native_pixel_values_for_uncached_suffix_drops_cached_images() -> None:
     """Prefix hits should remove already-cached native images from pixel_values."""
 
@@ -306,10 +389,10 @@ def test_slice_native_pixel_values_for_uncached_suffix_drops_cached_images() -> 
         MediaRegion("second", 5, 8),
     ]
 
-    result = _slice_native_pixel_values_for_uncached_suffix(
+    result = _slice_native_pixel_values_fn()(
         pixel_values,
         media_regions,
-        prefix_hit_length=5,
+        5,
     )
 
     assert isinstance(result, list)
@@ -328,37 +411,42 @@ def test_slice_native_pixel_values_for_uncached_suffix_returns_none_when_fully_c
         MediaRegion("second", 5, 8),
     ]
 
-    result = _slice_native_pixel_values_for_uncached_suffix(
+    result = _slice_native_pixel_values_fn()(
         pixel_values,
         media_regions,
-        prefix_hit_length=8,
+        8,
     )
 
     assert result is None
 
 
 def test_mlx_generate_slices_native_pixel_values_after_prefix_hit(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Follow-up turns should not reuse stale pixel values from cached images."""
 
     class _FakePrefixCache:
-        def get_kv_cache(self, _model, _prompt_tokens, media_regions=None):
+        def get_kv_cache(
+            self,
+            _model: object,
+            _prompt_tokens: object,
+            media_regions: list[MediaRegion] | None = None,
+        ) -> tuple[KVCacheType, mx.array, int]:
             assert media_regions is not None
-            return [], mx.array([6, 7, 8]), 0
+            return cast(KVCacheType, []), mx.array([6, 7, 8]), 0
 
-        def add_kv_cache(self, *args, **kwargs) -> None:
+        def add_kv_cache(self, *args: object, **kwargs: object) -> None:
             return None
 
-        def update_kv_cache(self, *args, **kwargs) -> None:
+        def update_kv_cache(self, *args: object, **kwargs: object) -> None:
             return None
 
     class _FakeModel:
         def __init__(self) -> None:
-            self.pixel_values = None
-            self.seen_pixel_values = None
+            self.pixel_values: list[mx.array] | mx.array | None = None
+            self.seen_pixel_values: list[mx.array] | mx.array | None = None
 
-        def set_pixel_values(self, pixel_values) -> None:
+        def set_pixel_values(self, pixel_values: list[mx.array] | mx.array | None) -> None:
             self.pixel_values = pixel_values
 
     vision = VisionResult(
@@ -375,7 +463,9 @@ def test_mlx_generate_slices_native_pixel_values_after_prefix_hit(
     def _fake_prepare_vision(**_kwargs: object) -> VisionResult:
         return vision
 
-    def _fake_prefill(model, *_args, **_kwargs):
+    def _fake_prefill(
+        model: _FakeModel, *_args: object, **_kwargs: object
+    ) -> tuple[float, int, list[CacheSnapshot]]:
         assert isinstance(model.pixel_values, list)
         assert len(model.pixel_values) == 1
         assert model.pixel_values[0].tolist() == [20.0]
@@ -391,7 +481,7 @@ def test_mlx_generate_slices_native_pixel_values_after_prefix_hit(
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate._should_use_native_vision_reference_path",
-        lambda: False,
+        cast(Callable[[], bool], lambda: False),
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate.prefill",
@@ -430,13 +520,13 @@ def test_mlx_generate_slices_native_pixel_values_after_prefix_hit(
     model = _FakeModel()
     responses = list(
         mlx_generate(
-            model=model,  # type: ignore[arg-type]
-            tokenizer=_FakeTokenizer(),  # type: ignore[arg-type]
+            model=cast(Model, cast(object, model)),
+            tokenizer=_fake_tokenizer(),
             task=task,
             prompt="<bos>",
-            kv_prefix_cache=_FakePrefixCache(),  # type: ignore[arg-type]
+            kv_prefix_cache=cast(KVPrefixCache, cast(object, _FakePrefixCache())),
             group=None,
-            vision_processor=object(),  # type: ignore[arg-type]
+            vision_processor=_fake_vision_processor(),
         )
     )
 
@@ -446,27 +536,32 @@ def test_mlx_generate_slices_native_pixel_values_after_prefix_hit(
 
 
 def test_mlx_generate_skips_embedding_patch_when_native_images_are_fully_cached(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Fully cached native images should fall back to plain text prefill only."""
 
     class _FakePrefixCache:
-        def get_kv_cache(self, _model, _prompt_tokens, media_regions=None):
+        def get_kv_cache(
+            self,
+            _model: object,
+            _prompt_tokens: object,
+            media_regions: list[MediaRegion] | None = None,
+        ) -> tuple[KVCacheType, mx.array, int]:
             assert media_regions is not None
-            return [], mx.array([7, 8]), 0
+            return cast(KVCacheType, []), mx.array([7, 8]), 0
 
-        def add_kv_cache(self, *args, **kwargs) -> None:
+        def add_kv_cache(self, *args: object, **kwargs: object) -> None:
             return None
 
-        def update_kv_cache(self, *args, **kwargs) -> None:
+        def update_kv_cache(self, *args: object, **kwargs: object) -> None:
             return None
 
     class _FakeModel:
         def __init__(self) -> None:
-            self.pixel_values = None
-            self.seen_pixel_values = "unset"
+            self.pixel_values: list[mx.array] | mx.array | None = None
+            self.seen_pixel_values: list[mx.array] | mx.array | None = None
 
-        def set_pixel_values(self, pixel_values) -> None:
+        def set_pixel_values(self, pixel_values: list[mx.array] | mx.array | None) -> None:
             self.pixel_values = pixel_values
             self.seen_pixel_values = pixel_values
 
@@ -484,7 +579,9 @@ def test_mlx_generate_skips_embedding_patch_when_native_images_are_fully_cached(
     def _fake_prepare_vision(**_kwargs: object) -> VisionResult:
         return vision
 
-    def _fake_prefill(model, *_args, **_kwargs):
+    def _fake_prefill(
+        model: _FakeModel, *_args: object, **_kwargs: object
+    ) -> tuple[float, int, list[CacheSnapshot]]:
         assert model.pixel_values is None
         return 0.0, 2, []
 
@@ -497,7 +594,7 @@ def test_mlx_generate_skips_embedding_patch_when_native_images_are_fully_cached(
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate._should_use_native_vision_reference_path",
-        lambda: False,
+        cast(Callable[[], bool], lambda: False),
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate.prefill",
@@ -509,9 +606,7 @@ def test_mlx_generate_skips_embedding_patch_when_native_images_are_fully_cached(
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate.patch_embed_tokens",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("native fully-cached requests should not patch embeddings")
-        ),
+        _raise_patch_embed_tokens_error,
     )
 
     task = TextGenerationTaskParams(
@@ -542,13 +637,13 @@ def test_mlx_generate_skips_embedding_patch_when_native_images_are_fully_cached(
     model = _FakeModel()
     responses = list(
         mlx_generate(
-            model=model,  # type: ignore[arg-type]
-            tokenizer=_FakeTokenizer(),  # type: ignore[arg-type]
+            model=cast(Model, cast(object, model)),
+            tokenizer=_fake_tokenizer(),
             task=task,
             prompt="<bos>",
-            kv_prefix_cache=_FakePrefixCache(),  # type: ignore[arg-type]
+            kv_prefix_cache=cast(KVPrefixCache, cast(object, _FakePrefixCache())),
             group=None,
-            vision_processor=object(),  # type: ignore[arg-type]
+            vision_processor=_fake_vision_processor(),
         )
     )
 

@@ -180,10 +180,10 @@ impl PyNetworkingHandle {
     // ---- Lifecycle management methods ----
 
     #[new]
-    #[pyo3(signature = (identity, bootstrap_peers, listen_port))]
+    #[pyo3(signature = (identity, bootstrap_peers=None, listen_port=0))]
     fn py_new(
         identity: Bound<'_, PyKeypair>,
-        bootstrap_peers: Vec<String>,
+        bootstrap_peers: Option<Vec<String>>,
         listen_port: u16,
     ) -> PyResult<Self> {
         // create communication channels
@@ -194,7 +194,12 @@ impl PyNetworkingHandle {
 
         // create networking swarm (within tokio context!! or it crashes)
         let _guard = pyo3_async_runtimes::tokio::get_runtime().enter();
-        let swarm = create_swarm(identity, from_client, bootstrap_peers, listen_port)
+        let swarm = create_swarm(
+            identity,
+            from_client,
+            bootstrap_peers.unwrap_or_default(),
+            listen_port,
+        )
             .pyerr()?
             .into_stream();
 

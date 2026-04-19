@@ -1,7 +1,14 @@
 from collections.abc import Generator
-from typing import Any
+from typing import Any, cast
 
-from exo.shared.models.model_cards import ModelCard, ModelTask
+from mlx_lm.tokenizer_utils import TokenizerWrapper
+
+from exo.shared.models.model_cards import (
+    ModelCard,
+    ModelTask,
+    ReasoningCardConfig,
+    ReasoningFormat,
+)
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import Model
@@ -290,6 +297,10 @@ class _NoThinkingTokenizer:
     think_end = None
 
 
+def _no_thinking_tokenizer() -> TokenizerWrapper:
+    return cast(TokenizerWrapper, cast(object, _NoThinkingTokenizer()))
+
+
 class TestGemma4ThinkingChannels:
     def test_closed_thinking_block_is_flagged_and_markers_are_stripped(self):
         tokens = [
@@ -392,7 +403,7 @@ class TestGemma4ThinkingChannels:
                 _queue_source(tokens),
                 prompt="<bos><|turn>user\nDescribe this.<turn|>\n<|turn>model\n",
                 tool_parser=None,
-                tokenizer=_NoThinkingTokenizer(),
+                tokenizer=_no_thinking_tokenizer(),
                 model_type=Model,
                 model_id=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"),
                 tools=None,
@@ -433,7 +444,7 @@ class TestGemma4ThinkingChannels:
                 _queue_source(tokens),
                 prompt="",
                 tool_parser=None,
-                tokenizer=_NoThinkingTokenizer(),
+                tokenizer=_no_thinking_tokenizer(),
                 model_type=Model,
                 model_id=ModelId("custom/deepseek-compatible"),
                 tools=None,
@@ -469,7 +480,7 @@ class TestGemma4ThinkingChannels:
                 _queue_source(tokens),
                 prompt="<SPECIAL_10>System\n/no_think\n<SPECIAL_11>User\nHello\n<SPECIAL_11>Assistant\n",
                 tool_parser=None,
-                tokenizer=_NoThinkingTokenizer(),
+                tokenizer=_no_thinking_tokenizer(),
                 model_type=Model,
                 model_id=ModelId("mlx-community/NVIDIA-Nemotron-Nano-9B-v2-4bits"),
                 tools=None,
@@ -482,7 +493,10 @@ class TestGemma4ThinkingChannels:
                     tasks=[ModelTask.TextGeneration],
                     family="nemotron",
                     capabilities=["text", "thinking", "thinking_toggle"],
-                    reasoning={"supports_toggle": True, "format": "token_delimited"},
+                    reasoning=ReasoningCardConfig(
+                        supports_toggle=True,
+                        format=ReasoningFormat.TokenDelimited,
+                    ),
                 ),
             )
         )

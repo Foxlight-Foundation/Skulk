@@ -6,9 +6,10 @@ import sys
 import threading
 import time
 import traceback
+import types
 from copy import deepcopy
-from importlib import metadata
-from typing import Callable, Generator, cast, get_args
+from importlib import import_module, metadata
+from typing import Callable, Generator, Protocol, cast, get_args
 
 import mlx.core as mx
 from mlx_lm.generate import (
@@ -80,6 +81,49 @@ generation_stream = mx.new_stream(mx.default_device())
 
 _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
 _MIN_CANCEL_CHECK_INTERVAL = 10
+
+
+class _FrameLookup(Protocol):
+    """Typed callable surface for CPython's private frame lookup helper."""
+
+    def __call__(self) -> dict[int, types.FrameType]: ...
+
+
+class _DetokenizerProtocol(Protocol):
+    """Minimal detokenizer surface used by native-vision generation."""
+
+    last_segment: str
+
+    def reset(self) -> None: ...
+
+    def add_token(self, token: int) -> None: ...
+
+    def finalize(self) -> None: ...
+
+
+class _VlmGenerateStep(Protocol):
+    """Typed callable surface for mlx-vlm's multimodal generate step."""
+
+    def __call__(
+        self,
+        *,
+        input_ids: mx.array,
+        model: Model,
+        pixel_values: mx.array | list[mx.array],
+        mask: object,
+        max_tokens: int,
+        sampler: Callable[[mx.array], mx.array],
+        logits_processors: list[Callable[[mx.array, mx.array], mx.array]],
+        prefill_step_size: int,
+        kv_group_size: int,
+        kv_bits: int | None,
+    ) -> Generator[tuple[mx.array, mx.array], None, None]: ...
+
+
+def _current_frames() -> dict[int, types.FrameType]:
+    """Return the current Python frames when the interpreter exposes them."""
+    lookup = cast(_FrameLookup | None, getattr(sys, "_current_frames", None))
+    return lookup() if lookup is not None else {}
 
 
 def _mlx_hang_debug_enabled() -> bool:
@@ -168,7 +212,7 @@ def _hang_debug_watch(label: str) -> Generator[None]:
     def watchdog() -> None:
         while not finished.wait(timeout=interval_seconds):
             elapsed = time.monotonic() - started_at
-            frame = sys._current_frames().get(monitored_thread_id)
+            frame = _current_frames().get(monitored_thread_id)
             if frame is None:
                 stack_text = "<no Python frame available>"
             else:
@@ -271,6 +315,23 @@ def _slice_native_pixel_values_for_uncached_suffix(
         return pixel_values[first_idx:]
 
     return mx.stack([pixel_values[idx] for idx in remaining_indices], axis=0)
+
+
+def slice_native_pixel_values_for_uncached_suffix(
+    pixel_values: mx.array | list[mx.array],
+    media_regions: list[MediaRegion],
+    prefix_hit_length: int,
+) -> mx.array | list[mx.array] | None:
+    """Public wrapper for native-vision pixel-value trimming.
+
+    Batch and single-request generators both need the same cache-aware image
+    slicing behavior, so this helper is intentionally shared across modules.
+    """
+    return _slice_native_pixel_values_for_uncached_suffix(
+        pixel_values,
+        media_regions,
+        prefix_hit_length,
+    )
 
 
 @contextlib.contextmanager
@@ -494,11 +555,6 @@ def prefill(
 
         if on_prefill_progress is not None:
             on_prefill_progress(processed, total)
-
-    def combined_progress_callback(processed: int, total: int) -> None:
-        if distributed_prompt_progress_callback is not None:
-            distributed_prompt_progress_callback()
-        progress_callback(processed, total)
 
     is_pipeline = _has_pipeline_communication_layer(model)
 
@@ -826,7 +882,12 @@ def _mlx_generate_native_vision(
     when prompt tokens and image preprocessing are correct, so we follow the
     reference execution strategy here.
     """
-    from mlx_vlm.generate import generate_step as vlm_generate_step
+    vlm_generate_step = cast(
+        _VlmGenerateStep,
+        cast(dict[str, object], vars(import_module("mlx_vlm.generate")))[
+            "generate_step"
+        ],
+    )
 
     if vision.pixel_values is None:
         raise ValueError("Native vision generation requires pixel values")
@@ -840,7 +901,7 @@ def _mlx_generate_native_vision(
     )
     eos_token_ids = set(eos_ids_from_tokenizer(tokenizer))
 
-    detokenizer = tokenizer.detokenizer
+    detokenizer = cast(_DetokenizerProtocol, cast(object, tokenizer.detokenizer))
     detokenizer.reset()
 
     if on_prefill_progress is not None:
@@ -868,7 +929,7 @@ def _mlx_generate_native_vision(
         sampler=sampler,
         logits_processors=logits_processors,
         prefill_step_size=4096,
-        kv_group_size=KV_GROUP_SIZE,
+        kv_group_size=KV_GROUP_SIZE or 32,
         kv_bits=KV_BITS,
     ):
         token_id = int(token)
@@ -1102,6 +1163,8 @@ def mlx_generate(
     native_pixel_values: mx.array | list[mx.array] | None = None
     if is_native_vision:
         assert vision is not None
+        if vision.pixel_values is None:
+            raise ValueError("Native vision generation requires pixel values")
         native_pixel_values = _slice_native_pixel_values_for_uncached_suffix(
             vision.pixel_values,
             media_regions,
@@ -1110,9 +1173,12 @@ def mlx_generate(
 
     if native_pixel_values is not None:
         if hasattr(model, "set_pixel_values"):
-            model.set_pixel_values(native_pixel_values)  # type: ignore[attr-defined]
+            cast(
+                Callable[[mx.array | list[mx.array] | None], None],
+                object.__getattribute__(model, "set_pixel_values"),
+            )(native_pixel_values)
         else:
-            model._pixel_values = native_pixel_values  # type: ignore[attr-defined]
+            object.__setattr__(model, "_pixel_values", native_pixel_values)
         maybe_vision_ctx = contextlib.nullcontext()
     elif vision is not None and not is_native_vision:
         maybe_vision_ctx = patch_embed_tokens(
@@ -1134,9 +1200,12 @@ def mlx_generate(
             )
     finally:
         if hasattr(model, "set_pixel_values"):
-            model.set_pixel_values(None)  # type: ignore[attr-defined]
+            cast(
+                Callable[[mx.array | list[mx.array] | None], None],
+                object.__getattribute__(model, "set_pixel_values"),
+            )(None)
         elif hasattr(model, "_pixel_values"):
-            model._pixel_values = None  # type: ignore[attr-defined]
+            object.__setattr__(model, "_pixel_values", None)
     cache_snapshots: list[CacheSnapshot] | None = ssm_snapshots_list or None
 
     # stream_generate starts from the last token

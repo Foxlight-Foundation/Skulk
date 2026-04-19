@@ -34,12 +34,12 @@ from exo.worker.engines.mlx.cache import (
 )
 from exo.worker.engines.mlx.constants import DEFAULT_TOP_LOGPROBS, MAX_TOKENS
 from exo.worker.engines.mlx.generator.generate import (
-    _slice_native_pixel_values_for_uncached_suffix,
     ban_token_ids,
     eos_ids_from_tokenizer,
     extract_top_logprobs,
     patch_embed_tokens,
     prefill,
+    slice_native_pixel_values_for_uncached_suffix,
 )
 from exo.worker.engines.mlx.utils_mlx import (
     fix_unmatched_think_end_tokens,
@@ -188,7 +188,8 @@ class ExoBatchGenerator:
         native_pixel_values: mx.array | list[mx.array] | None = None
         if is_native_vision:
             assert vision is not None
-            native_pixel_values = _slice_native_pixel_values_for_uncached_suffix(
+            assert vision.pixel_values is not None
+            native_pixel_values = slice_native_pixel_values_for_uncached_suffix(
                 vision.pixel_values,
                 media_regions,
                 prefix_hit_length,
@@ -196,9 +197,12 @@ class ExoBatchGenerator:
 
         if native_pixel_values is not None:
             if hasattr(self.model, "set_pixel_values"):
-                self.model.set_pixel_values(native_pixel_values)  # type: ignore[attr-defined]
+                cast(
+                    Callable[[mx.array | list[mx.array] | None], None],
+                    object.__getattribute__(self.model, "set_pixel_values"),
+                )(native_pixel_values)
             else:
-                self.model._pixel_values = native_pixel_values  # type: ignore[attr-defined]
+                object.__setattr__(self.model, "_pixel_values", native_pixel_values)
             vision_ctx = contextlib.nullcontext()
         elif vision is not None and not is_native_vision:
             vision_ctx = patch_embed_tokens(
@@ -220,9 +224,12 @@ class ExoBatchGenerator:
                 )
         finally:
             if hasattr(self.model, "set_pixel_values"):
-                self.model.set_pixel_values(None)  # type: ignore[attr-defined]
+                cast(
+                    Callable[[mx.array | list[mx.array] | None], None],
+                    object.__getattribute__(self.model, "set_pixel_values"),
+                )(None)
             elif hasattr(self.model, "_pixel_values"):
-                self.model._pixel_values = None  # type: ignore[attr-defined]
+                object.__setattr__(self.model, "_pixel_values", None)
 
         # We need to clamp rotating kv caches to max size so that mlx lm's _merge_caches behaves
         for c in cache:

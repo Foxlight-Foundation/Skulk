@@ -122,9 +122,7 @@ def resolve_model_in_path(model_id: ModelId) -> Path | None:
     """
     import exo.shared.constants as _constants
 
-    search_path = _constants.EXO_MODELS_PATH
-    if search_path is None:
-        return None
+    search_path: tuple[Path, ...] = _constants.EXO_MODELS_PATH or ()
     normalized = model_id.normalize()
     for search_dir in search_path:
         candidate = search_dir / normalized

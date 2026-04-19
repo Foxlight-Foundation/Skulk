@@ -304,7 +304,11 @@ class Runner:
                 self.update_status(RunnerWarmingUp())
                 self.acknowledge_task(task)
 
-                group_size = self.generator.group.size() if self.generator.group else 1
+                warmup_generator = self.generator
+                assert isinstance(warmup_generator, (SequentialGenerator, BatchGenerator))
+                group_size = (
+                    warmup_generator.group.size() if warmup_generator.group else 1
+                )
                 if _should_skip_llm_warmup(group_size):
                     logger.warning(
                         "Skipping LLM warmup and marking runner ready "
@@ -312,7 +316,7 @@ class Runner:
                         "or set it to 0 to restore synthetic warmup)"
                     )
                 else:
-                    self.generator.warmup()
+                    warmup_generator.warmup()
 
                 logger.info(
                     f"runner initialized in {time.time() - self.setup_start_time} seconds"

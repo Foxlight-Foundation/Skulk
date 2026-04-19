@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import cast
 
 import pytest
@@ -5,6 +6,15 @@ import pytest
 import exo.worker.engines.mlx.generator.generate as generate_mod
 from exo.shared.types.common import ModelId
 from exo.shared.types.text_generation import TextGenerationTaskParams
+
+
+def _warmup_instructions(group: object | None) -> str | None:
+    module_dict = cast(dict[str, object], generate_mod.__dict__)
+    warmup_instructions = cast(
+        Callable[[object | None], str | None],
+        module_dict["_warmup_instructions"],
+    )
+    return warmup_instructions(group)
 
 
 class _FakeGroup:
@@ -316,10 +326,12 @@ def test_warmup_helpers_prefer_blank_skulk_values_over_legacy_env(
     monkeypatch.setenv("SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS", "")
     monkeypatch.setenv("EXO_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS", "1")
 
-    assert generate_mod._warmup_repeat_count() == 1  # pyright: ignore[reportPrivateUsage]
-    assert (
-        generate_mod._warmup_instructions(cast(object, _SingleNodeGroup())) is None
-    )  # pyright: ignore[reportPrivateUsage]
+    repeat_count = cast(
+        Callable[[], int],
+        cast(dict[str, object], generate_mod.__dict__)["_warmup_repeat_count"],
+    )
+    assert repeat_count() == 1
+    assert _warmup_instructions(_SingleNodeGroup()) is None
 
 
 def test_warmup_inference_enforces_minimum_cancel_check_interval_on_slow_start(

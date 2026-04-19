@@ -3,8 +3,10 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 import anyio
+import yaml
 from anyio import current_time
 from loguru import logger
 
@@ -15,7 +17,7 @@ from exo.download.download_utils import (
     resolve_model_in_path,
 )
 from exo.download.shard_downloader import ShardDownloader
-from exo.shared.constants import EXO_MODELS_DIR, EXO_MODELS_PATH
+from exo.shared.constants import EXO_MODELS_DIR
 from exo.shared.models.model_cards import ModelId, get_model_cards
 from exo.shared.types.commands import (
     CancelDownload,
@@ -42,6 +44,16 @@ from exo.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 from exo.store.config import resolve_config_path
 from exo.utils.channels import Receiver, Sender
 from exo.utils.task_group import TaskGroup
+
+JsonObject = dict[str, object]
+
+
+def _coerce_json_object(value: object) -> JsonObject:
+    """Normalize one decoded config object into a string-keyed mapping."""
+    if not isinstance(value, dict):
+        return {}
+    raw_dict = cast(dict[object, object], value)
+    return {str(key): item for key, item in raw_dict.items()}
 
 
 @dataclass
@@ -189,45 +201,42 @@ class DownloadCoordinator:
                 f"DownloadCoordinator: synced {config_path.name} from cluster ({len(config_yaml)} bytes)"
             )
             # Apply inference config to env var so next runner spawn picks it up
-            import yaml
-
-            raw = yaml.safe_load(config_yaml)
-            if raw and isinstance(raw, dict):
-                inference = raw.get("inference")
-                if isinstance(inference, dict) and "kv_cache_backend" in inference:
-                    # Don't overwrite if user provided the env var at launch
-                    if not os.environ.get(
-                        "_SKULK_KV_BACKEND_USER_SET"
-                    ) and not os.environ.get("_EXO_KV_BACKEND_USER_SET"):
-                        os.environ["SKULK_KV_CACHE_BACKEND"] = str(
-                            inference["kv_cache_backend"]
-                        )
-                        os.environ["EXO_KV_CACHE_BACKEND"] = str(
-                            inference["kv_cache_backend"]
-                        )  # legacy compat
-                        logger.info(
-                            f"DownloadCoordinator: updated KV_CACHE_BACKEND={inference['kv_cache_backend']}"
-                        )
-                    else:
-                        logger.info(
-                            "DownloadCoordinator: skipping KV backend update (user env var override active)"
-                        )
-                # Apply HF token if not user-set
-                hf_token = raw.get("hf_token")
-                if hf_token and "HF_TOKEN" not in os.environ:
-                    os.environ["HF_TOKEN"] = str(hf_token)
+            raw = _coerce_json_object(cast(object, yaml.safe_load(config_yaml)))
+            inference = _coerce_json_object(raw.get("inference"))
+            if "kv_cache_backend" in inference:
+                # Don't overwrite if user provided the env var at launch
+                if not os.environ.get("_SKULK_KV_BACKEND_USER_SET") and not os.environ.get(
+                    "_EXO_KV_BACKEND_USER_SET"
+                ):
+                    os.environ["SKULK_KV_CACHE_BACKEND"] = str(
+                        inference["kv_cache_backend"]
+                    )
+                    os.environ["EXO_KV_CACHE_BACKEND"] = str(
+                        inference["kv_cache_backend"]
+                    )  # legacy compat
                     logger.info(
-                        "DownloadCoordinator: updated HF_TOKEN from config sync"
+                        f"DownloadCoordinator: updated KV_CACHE_BACKEND={inference['kv_cache_backend']}"
                     )
-                # Apply logging config — enable/disable structured stdout
-                logging_cfg = raw.get("logging")
-                if isinstance(logging_cfg, dict):
-                    from exo.shared.logging import set_structured_stdout
+                else:
+                    logger.info(
+                        "DownloadCoordinator: skipping KV backend update (user env var override active)"
+                    )
+            # Apply HF token if not user-set
+            hf_token = raw.get("hf_token")
+            if hf_token and "HF_TOKEN" not in os.environ:
+                os.environ["HF_TOKEN"] = str(hf_token)
+                logger.info("DownloadCoordinator: updated HF_TOKEN from config sync")
+            # Apply logging config — enable/disable structured stdout
+            logging_cfg = _coerce_json_object(raw.get("logging"))
+            if logging_cfg:
+                from exo.shared.logging import set_structured_stdout
 
-                    log_enabled = bool(logging_cfg.get("enabled", False)) and bool(
-                        logging_cfg.get("ingest_url")
-                    )
-                    set_structured_stdout(log_enabled, ingest_url=str(logging_cfg.get("ingest_url", "")))
+                log_enabled = bool(logging_cfg.get("enabled", False)) and bool(
+                    logging_cfg.get("ingest_url")
+                )
+                set_structured_stdout(
+                    log_enabled, ingest_url=str(logging_cfg.get("ingest_url", ""))
+                )
         except Exception as exc:
             logger.warning(f"DownloadCoordinator: failed to sync config: {exc}")
 
@@ -604,40 +613,39 @@ class DownloadCoordinator:
 
                 _search_paths = _dbg_constants.EXO_MODELS_PATH
                 logger.debug(f"DownloadCoordinator: EXO_MODELS_PATH={_search_paths}")
-                if EXO_MODELS_PATH is not None:
-                    for card in await get_model_cards():
-                        mid = card.model_id
-                        if mid in self.active_downloads:
-                            continue
-                        if isinstance(
-                            self.download_status.get(mid),
-                            (DownloadCompleted, DownloadOngoing, DownloadFailed),
-                        ):
-                            continue
-                        found = resolve_model_in_path(mid)
-                        if found is not None:
-                            logger.info(
-                                f"DownloadCoordinator: EXO_MODELS_PATH hit: {mid} -> {found}"
-                            )
-                            path_shard = PipelineShardMetadata(
-                                model_card=card,
-                                device_rank=0,
-                                world_size=1,
-                                start_layer=0,
-                                end_layer=card.n_layers,
-                                n_layers=card.n_layers,
-                            )
-                            path_completed: DownloadProgress = DownloadCompleted(
-                                node_id=self.node_id,
-                                shard_metadata=path_shard,
-                                total=card.storage_size,
-                                model_directory=str(found),
-                                read_only=True,
-                            )
-                            self.download_status[mid] = path_completed
-                            await self.event_sender.send(
-                                NodeDownloadProgress(download_progress=path_completed)
-                            )
+                for card in await get_model_cards():
+                    mid = card.model_id
+                    if mid in self.active_downloads:
+                        continue
+                    if isinstance(
+                        self.download_status.get(mid),
+                        (DownloadCompleted, DownloadOngoing, DownloadFailed),
+                    ):
+                        continue
+                    found = resolve_model_in_path(mid)
+                    if found is not None:
+                        logger.info(
+                            f"DownloadCoordinator: EXO_MODELS_PATH hit: {mid} -> {found}"
+                        )
+                        path_shard = PipelineShardMetadata(
+                            model_card=card,
+                            device_rank=0,
+                            world_size=1,
+                            start_layer=0,
+                            end_layer=card.n_layers,
+                            n_layers=card.n_layers,
+                        )
+                        path_completed: DownloadProgress = DownloadCompleted(
+                            node_id=self.node_id,
+                            shard_metadata=path_shard,
+                            total=card.storage_size,
+                            model_directory=str(found),
+                            read_only=True,
+                        )
+                        self.download_status[mid] = path_completed
+                        await self.event_sender.send(
+                            NodeDownloadProgress(download_progress=path_completed)
+                        )
 
                 logger.debug(
                     "DownloadCoordinator: Done emitting existing download progress."

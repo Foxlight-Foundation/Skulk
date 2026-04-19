@@ -1,23 +1,36 @@
-# pyright: reportUnusedFunction=false, reportPrivateUsage=false
 """Tests for the GET /config API endpoint."""
 
 from pathlib import Path
-from typing import Any
+from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import Response
 
 from exo.api.main import API
+from exo.shared.election import ElectionMessage
+from exo.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
 from exo.shared.types.common import NodeId
+from exo.shared.types.events import IndexedEvent
 from exo.utils.channels import channel
+
+
+def _json_object(response: Response) -> dict[str, object]:
+    """Return a JSON response payload as a typed object mapping."""
+    return cast(dict[str, object], cast(object, response.json()))
+
+
+def _json_mapping(value: object) -> dict[str, object]:
+    """Narrow one nested JSON object from a response payload."""
+    return cast(dict[str, object], value)
 
 
 def _build_api(node_id: str = "test-node") -> API:
     """Create a minimal API instance for config endpoint testing."""
-    command_sender, _ = channel()
-    download_sender, _ = channel()
-    _, event_receiver = channel()
-    _, election_receiver = channel()
+    command_sender, _ = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    _, event_receiver = channel[IndexedEvent]()
+    _, election_receiver = channel[ElectionMessage]()
     return API(
         NodeId(node_id),
         port=52415,
@@ -41,19 +54,22 @@ def test_get_config_reports_effective_kv_backend_when_file_exists(
     monkeypatch.setenv("SKULK_KV_CACHE_BACKEND", "optiq")
 
     api = _build_api()
-    api._config_path = config_path  # pyright: ignore[reportPrivateUsage]
+    object.__setattr__(api, "_config_path", config_path)
     client = TestClient(api.app)
 
     response = client.get("/config")
 
     assert response.status_code == 200
-    data: dict[str, Any] = response.json()
+    data = _json_object(response)
+    config = _json_mapping(data["config"])
+    inference = _json_mapping(config["inference"])
+    effective = _json_mapping(data["effective"])
     assert data["fileExists"] is True
     assert data["configPath"] == str(config_path)
-    assert data["config"]["inference"]["kv_cache_backend"] == "default"
-    assert data["config"].get("hf_token") is None
-    assert data["effective"]["kv_cache_backend"] == "optiq"
-    assert data["effective"]["has_hf_token"] is True
+    assert inference["kv_cache_backend"] == "default"
+    assert config.get("hf_token") is None
+    assert effective["kv_cache_backend"] == "optiq"
+    assert effective["has_hf_token"] is True
 
 
 def test_get_config_treats_blank_skulk_kv_backend_as_default(
@@ -65,14 +81,15 @@ def test_get_config_treats_blank_skulk_kv_backend_as_default(
     monkeypatch.setenv("EXO_KV_CACHE_BACKEND", "optiq")
 
     api = _build_api()
-    api._config_path = config_path  # pyright: ignore[reportPrivateUsage]
+    object.__setattr__(api, "_config_path", config_path)
     client = TestClient(api.app)
 
     response = client.get("/config")
 
     assert response.status_code == 200
-    data: dict[str, Any] = response.json()
-    assert data["effective"]["kv_cache_backend"] == "default"
+    data = _json_object(response)
+    effective = _json_mapping(data["effective"])
+    assert effective["kv_cache_backend"] == "default"
 
 
 def test_get_config_treats_invalid_skulk_kv_backend_as_default(
@@ -83,11 +100,12 @@ def test_get_config_treats_invalid_skulk_kv_backend_as_default(
     monkeypatch.setenv("SKULK_KV_CACHE_BACKEND", "typo-backend")
 
     api = _build_api()
-    api._config_path = config_path  # pyright: ignore[reportPrivateUsage]
+    object.__setattr__(api, "_config_path", config_path)
     client = TestClient(api.app)
 
     response = client.get("/config")
 
     assert response.status_code == 200
-    data: dict[str, Any] = response.json()
-    assert data["effective"]["kv_cache_backend"] == "default"
+    data = _json_object(response)
+    effective = _json_mapping(data["effective"])
+    assert effective["kv_cache_backend"] == "default"

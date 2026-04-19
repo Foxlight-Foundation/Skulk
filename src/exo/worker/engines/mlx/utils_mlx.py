@@ -5,8 +5,9 @@ import re
 import sys
 import tempfile
 import time
+from importlib import import_module
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 if TYPE_CHECKING:
     from exo.worker.engines.mlx.vision import VisionProcessor
@@ -78,6 +79,84 @@ from exo.worker.engines.mlx.gemma4_prompt import render_gemma4_prompt
 from exo.worker.runner.bootstrap import logger
 
 Group = mx.distributed.Group
+
+
+def _object_dict(value: object) -> dict[str, object]:
+    """Return a string-keyed object mapping for dynamic Python objects."""
+    return cast(dict[str, object], value)
+
+
+class _Gemma4PatchEmbedder(Protocol):
+    """Typed callable surface for Gemma 4 patch embedding."""
+
+    def __call__(
+        self,
+        pixel_values: mx.array,
+        patch_positions: mx.array,
+        padding_positions: mx.array,
+    ) -> mx.array: ...
+
+
+class _Gemma4Encoder(Protocol):
+    """Typed callable surface for Gemma 4 vision encoding."""
+
+    def __call__(
+        self,
+        inputs_embeds: mx.array,
+        patch_positions: mx.array,
+        attn_mask: mx.array,
+    ) -> mx.array: ...
+
+
+class _Gemma4Pooler(Protocol):
+    """Typed callable surface for Gemma 4 pooled patch selection."""
+
+    def __call__(
+        self,
+        hidden_states: mx.array,
+        patch_positions: mx.array,
+        padding_positions: mx.array,
+        *,
+        output_length: int,
+    ) -> tuple[mx.array, mx.array]: ...
+
+
+class _Gemma4Config(Protocol):
+    """Subset of Gemma 4 config used by the dynamic native-vision wrapper."""
+
+    standardize: bool
+
+
+class _Gemma4NativeVisionTower(Protocol):
+    """Typed view of the Gemma 4 vision tower fields used by Skulk."""
+
+    patch_size: int
+    pooling_kernel_size: int
+    max_patches: int
+    patch_embedder: _Gemma4PatchEmbedder
+    encoder: _Gemma4Encoder
+    pooler: _Gemma4Pooler
+    config: _Gemma4Config | None
+    std_bias: mx.array
+    std_scale: mx.array
+
+
+class _HasLogits(Protocol):
+    """Minimal model output that exposes logits."""
+
+    logits: mx.array
+
+
+class _VlmModelLoader(Protocol):
+    """Typed callable surface for mlx-vlm's model loader."""
+
+    def __call__(self, model_path: Path, **kwargs: object) -> nn.Module: ...
+
+
+class _MlxLmLoadModel(Protocol):
+    """Typed callable surface for mlx-lm's model loader."""
+
+    def __call__(self, model_path: Path, **kwargs: object) -> tuple[nn.Module, object]: ...
 
 
 def _apply_nemotron_reasoning_controls(
@@ -259,9 +338,11 @@ class _Gemma4DynamicVisionTower(nn.Module):
     pooling length from the actual preprocessed image size.
     """
 
-    def __init__(self, inner: nn.Module) -> None:
+    _inner: _Gemma4NativeVisionTower
+
+    def __init__(self, inner: _Gemma4NativeVisionTower) -> None:
         super().__init__()
-        self._inner = inner
+        object.__setattr__(self, "_inner", inner)
 
     def _encode_one(self, pixel_values: mx.array) -> mx.array:
         if pixel_values.ndim != 4:
@@ -332,7 +413,8 @@ class _Gemma4DynamicVisionTower(nn.Module):
 
         hidden_states = mx.concatenate(all_real, axis=0)[None]
 
-        if getattr(getattr(self._inner, "config", None), "standardize", False):
+        config = self._inner.config
+        if config is not None and config.standardize:
             hidden_states = (hidden_states - self._inner.std_bias) * self._inner.std_scale
 
         return hidden_states
@@ -349,8 +431,8 @@ class _Gemma4DynamicVisionTower(nn.Module):
 
     def __getattr__(self, name: str) -> object:
         if name == "_inner":
-            return super().__getattr__(name)
-        return getattr(self._inner, name)
+            return cast(object, object.__getattribute__(self, name))
+        return cast(object, getattr(self._inner, name))
 
 
 def _patch_gemma4_native_vision(model: nn.Module) -> nn.Module:
@@ -365,7 +447,9 @@ def _patch_gemma4_native_vision(model: nn.Module) -> nn.Module:
     logger.info(
         "Patching Gemma 4 vision tower to use dynamic pooling lengths for native vision"
     )
-    model.vision_tower = _Gemma4DynamicVisionTower(vision_tower)
+    model.vision_tower = _Gemma4DynamicVisionTower(
+        cast(_Gemma4NativeVisionTower, vision_tower)
+    )
     return model
 
 
@@ -379,9 +463,11 @@ class _VlmModelWrapper(nn.Module):
     subclass override.
     """
 
+    _inner: nn.Module
+
     def __init__(self, inner: nn.Module) -> None:
         super().__init__()
-        self._inner = inner
+        object.__setattr__(self, "_inner", inner)
         # Set by the vision pipeline before prefill for native-vision models
         # like Gemma 4, then cleared once prefill has populated the KV cache.
         object.__setattr__(self, "_pixel_values", None)
@@ -393,38 +479,48 @@ class _VlmModelWrapper(nn.Module):
     def __call__(self, *args: object, **kwargs: object) -> mx.array:
         pixel_values = cast(
             mx.array | list[mx.array] | None,
-            object.__getattribute__(self, "__dict__").get("_pixel_values"),
+            _object_dict(cast(object, object.__getattribute__(self, "__dict__"))).get(
+                "_pixel_values"
+            ),
         )
         if pixel_values is not None:
             kwargs["pixel_values"] = pixel_values
-        result = self._inner(*args, **kwargs)
+        result = cast(object, self._inner(*args, **kwargs))
         if hasattr(result, "logits"):
-            return result.logits  # type: ignore
-        return result  # type: ignore
+            return cast(_HasLogits, result).logits
+        return cast(mx.array, result)
 
     def __getattr__(self, name: str) -> object:
         # Delegate attribute access to the inner model so layer iteration,
         # parameter access, etc. all work transparently.
         if name == "_pixel_values":
-            return object.__getattribute__(self, "__dict__").get("_pixel_values")
+            return _object_dict(cast(object, object.__getattribute__(self, "__dict__"))).get(
+                "_pixel_values"
+            )
         if name == "_inner":
-            return super().__getattr__(name)
-        return getattr(self._inner, name)
+            return cast(object, object.__getattribute__(self, name))
+        return cast(object, getattr(self._inner, name))
 
 
 def load_model(model_path: Path, **kwargs: object) -> tuple[nn.Module, object]:
     """Load a model, trying mlx-lm first then falling back to mlx-vlm for vision models."""
+    model_kwargs = kwargs
+    mlx_lm_load_model = cast(_MlxLmLoadModel, _mlx_lm_load_model)
     try:
-        return _mlx_lm_load_model(model_path, **kwargs)
+        return mlx_lm_load_model(model_path, **model_kwargs)
     except ValueError as e:
         if "not supported" not in str(e):
             raise
         # Model type not in mlx-lm (e.g. gemma4 vision model) — try mlx-vlm
         logger.info(f"Model type not supported by mlx-lm, trying mlx-vlm: {e}")
         try:
-            from mlx_vlm.utils import load_model as _mlx_vlm_load_model
-
-            model = _mlx_vlm_load_model(model_path, **kwargs)
+            mlx_vlm_utils = import_module("mlx_vlm.utils")
+            mlx_vlm_utils_dict = cast(dict[str, object], vars(mlx_vlm_utils))
+            mlx_vlm_load_model = cast(
+                _VlmModelLoader,
+                mlx_vlm_utils_dict["load_model"],
+            )
+            model = mlx_vlm_load_model(model_path, **model_kwargs)
             model = _patch_gemma4_native_vision(model)
             # Wrap so mlx-lm's generation pipeline sees plain arrays
             return _VlmModelWrapper(model), None
@@ -803,9 +899,9 @@ def load_tokenizer_for_model_id(
             tokenizer.eos_token_ids = [gemma_eos_id, gemma_end_of_turn_id]
 
     if capability_profile.tool_call_format == ToolCallFormat.Gemma4:
-        tokenizer.tool_call_start = "<|tool_call>"
-        tokenizer.tool_call_end = "<tool_call|>"
-        tokenizer.tool_parser = _parse_gemma4_tool_calls
+        object.__setattr__(tokenizer, "tool_call_start", "<|tool_call>")
+        object.__setattr__(tokenizer, "tool_call_end", "<tool_call|>")
+        object.__setattr__(tokenizer, "tool_parser", _parse_gemma4_tool_calls)
 
     return tokenizer
 
@@ -1200,11 +1296,11 @@ def _parse_gemma4_tool_calls(text: str) -> list[dict[str, Any]]:
         raw_args = match.group(2)
         args_json = "{" + _args_to_json(raw_args) + "}"
         try:
-            args_dict: dict[str, Any] = json.loads(args_json)  # pyright: ignore[reportAny]
+            args_dict = cast(dict[str, object], json.loads(args_json))
         except json.JSONDecodeError:
             logger.warning(f"Failed to parse Gemma 4 tool call args: {args_json}")
             args_dict = {}
-        results.append(dict(name=func_name, arguments=args_dict))  # pyright: ignore[reportAny]
+        results.append(dict(name=func_name, arguments=args_dict))
 
     if not results:
         raise ValueError(f"No Gemma 4 tool calls found in: {text}")

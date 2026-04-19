@@ -1,4 +1,6 @@
-from typing import Any, cast
+from typing import cast
+
+from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 from exo.shared.models.model_cards import ModelCard, ModelTask
 from exo.shared.types.common import ModelId
@@ -9,18 +11,18 @@ from exo.worker.engines.mlx.utils_mlx import apply_chat_template
 
 class _FakeTokenizer:
     def __init__(self) -> None:
-        self.messages: list[dict[str, Any]] | None = None
-        self.kwargs: dict[str, Any] | None = None
+        self.messages: list[dict[str, object]] | None = None
+        self.kwargs: dict[str, object] | None = None
         self.chat_template = "{{ messages }}"
 
     def apply_chat_template(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, object]],
         *,
         tokenize: bool,
         add_generation_prompt: bool,
-        tools: list[dict[str, Any]] | None = None,
-        **kwargs: Any,
+        tools: list[dict[str, object]] | None = None,
+        **kwargs: object,
     ) -> str:
         self.messages = messages
         self.kwargs = {
@@ -54,7 +56,7 @@ def test_apply_chat_template_injects_no_think_system_control_for_nemotron() -> N
     )
 
     prompt = apply_chat_template(
-        cast(Any, tokenizer),
+        cast(TokenizerWrapper, cast(object, tokenizer)),
         task,
         model_card=_nemotron_card("mlx-community/NVIDIA-Nemotron-Nano-9B-v2-4bits"),
     )
@@ -79,7 +81,7 @@ def test_apply_chat_template_prefixes_existing_system_message_for_nemotron_think
     )
 
     apply_chat_template(
-        cast(Any, tokenizer),
+        cast(TokenizerWrapper, cast(object, tokenizer)),
         task,
         model_card=_nemotron_card("mlx-community/NVIDIA-Nemotron-Nano-9B-v2-4bits"),
     )
@@ -100,7 +102,7 @@ def test_apply_chat_template_does_not_duplicate_existing_nemotron_control() -> N
     )
 
     apply_chat_template(
-        cast(Any, tokenizer),
+        cast(TokenizerWrapper, cast(object, tokenizer)),
         task,
         model_card=_nemotron_card("mlx-community/NVIDIA-Nemotron-Nano-9B-v2-4bits"),
     )
