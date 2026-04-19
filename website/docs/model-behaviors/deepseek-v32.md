@@ -32,13 +32,18 @@ Phase 1 supports DeepSeek V3.2 through resolved family defaults:
 
 ## Built-In Card Status
 
-At the moment, Phase 1 documents DeepSeek V3.2 as a first-class resolved family,
-but built-in declarative card coverage may still lag behind Gemma 4 and GPT-OSS.
+The validated built-in `mlx-community/DeepSeek-V3.2-{4bit,8bit}` cards now
+declare the same DSML contract that the runtime already used through resolved
+family defaults:
 
-That is acceptable for Phase 1 because:
+- toggleable reasoning metadata
+- DSML tool-call format
+- DSML prompt rendering
+- DeepSeek V3.2 output parsing
 
-- the runtime behavior is now covered by the resolved capability layer
-- the docs make the gap explicit instead of leaving it hidden
+The resolved capability layer still matters for compatibility and future aliases,
+but the trusted V3.2 quantizations no longer rely on hidden family inference
+alone.
 
 ## Why This Matters
 

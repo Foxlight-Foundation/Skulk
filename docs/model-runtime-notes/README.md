@@ -36,6 +36,7 @@ Keep notes compact and practical. A good note usually covers:
 
 ## Current Notes
 
+- `deepseek_v32.md`
 - `gemma4.md`
 - `gpt_oss.md`
 - `llama31_nemotron_nano.md`

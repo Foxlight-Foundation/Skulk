@@ -253,6 +253,43 @@ def test_resolve_model_capability_profile_honors_qwen35_reasoning_metadata() -> 
     assert profile.disabled_reasoning_effort == "none"
 
 
+def test_resolve_model_capability_profile_honors_deepseek_v32_metadata() -> None:
+    card = ModelCard(
+        model_id=ModelId("mlx-community/DeepSeek-V3.2-4bit"),
+        storage_size=Memory.from_mb(100),
+        n_layers=10,
+        hidden_size=1024,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        family="deepseek",
+        capabilities=["text", "thinking", "thinking_toggle"],
+        reasoning=ReasoningCardConfig(
+            supports_toggle=True,
+            format=ReasoningFormat.TokenDelimited,
+            default_effort="medium",
+            disabled_effort="none",
+        ),
+        tooling=ToolingCardConfig(
+            supports_tool_calling=True,
+            tool_call_format=ToolCallFormat.Dsml,
+        ),
+        runtime=RuntimeCapabilityCardConfig(
+            prompt_renderer=PromptRendererType.Dsml,
+            output_parser=OutputParserType.DeepseekV32,
+        ),
+    )
+
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+
+    assert profile.supports_thinking is True
+    assert profile.supports_thinking_toggle is True
+    assert profile.thinking_format == ReasoningFormat.TokenDelimited
+    assert profile.supports_tool_calling is True
+    assert profile.prompt_renderer == PromptRendererType.Dsml
+    assert profile.output_parser == OutputParserType.DeepseekV32
+    assert profile.tool_call_format == ToolCallFormat.Dsml
+
+
 def test_resolve_model_capability_profile_uses_declared_tooling_without_model_id_match() -> None:
     card = ModelCard(
         model_id=ModelId("custom/open-model"),
