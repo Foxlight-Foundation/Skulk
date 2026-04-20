@@ -433,6 +433,7 @@ class DefaultBrowserToolProvider:
             follow_redirects=False,
             headers=self._headers,
             timeout=httpx.Timeout(15.0, connect=10.0),
+            trust_env=False,
         ) as client:
             for _ in range(_MAX_REDIRECTS + 1):
                 validated_url = await _validate_public_http_target(current_url)

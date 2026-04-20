@@ -60,6 +60,16 @@ class _FakeAsyncClient:
         return self._responses.pop(0)
 
 
+class _CapturingAsyncClientFactory:
+    def __init__(self, client: _FakeAsyncClient) -> None:
+        self.client = client
+        self.calls: list[dict[str, object]] = []
+
+    def __call__(self, **kwargs: object) -> _FakeAsyncClient:
+        self.calls.append(kwargs)
+        return self.client
+
+
 @pytest.mark.anyio
 async def test_open_url_returns_redirected_metadata(
     monkeypatch: pytest.MonkeyPatch,
@@ -222,6 +232,35 @@ async def test_fetch_url_keeps_non_2xx_status_metadata(
     assert response.status_code == 404
     assert response.title == "Missing"
     assert response.final_url == "https://example.com/missing"
+
+
+@pytest.mark.anyio
+async def test_fetch_url_disables_proxy_env_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DefaultBrowserToolProvider()
+    fake_client = _FakeAsyncClient(
+        [
+            _FakeStreamResponse(
+                url="https://example.com/ok",
+                status_code=200,
+                headers={"content-type": "text/html"},
+                body=b"<html><body>ok</body></html>",
+            )
+        ]
+    )
+    capturing_factory = _CapturingAsyncClientFactory(fake_client)
+
+    monkeypatch.setattr(
+        "exo.tools.web_search.httpx.AsyncClient",
+        capturing_factory,
+    )
+
+    response = await provider.open_url("https://example.com/ok")
+
+    assert response.status_code == 200
+    assert capturing_factory.calls
+    assert capturing_factory.calls[0]["trust_env"] is False
 
 
 @pytest.mark.anyio
