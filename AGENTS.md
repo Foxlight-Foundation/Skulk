@@ -178,13 +178,54 @@ These rules apply to every change. No exceptions.
 
 ### Handling Review Comments
 
-Evaluate each review comment on a 1–5 severity scale:
+Evaluate each actionable review comment on a 1–5 severity scale using a
+Skulk-adapted version of the
+[Hacken severity formula](https://github.com/hknio/severity-formula). Score
+each comment across four metrics before deciding whether to act:
 
-- **1 — Nitpick**: Style preferences, minor wording, subjective suggestions. Ignore.
-- **2 — Low**: Nice-to-have improvements, minor refactors, cosmetic. Ignore.
-- **3 — Medium**: Valid point but not blocking. Note for future work, do not fix in this PR.
-- **4 — High**: Real bug, meaningful correctness issue, missing test coverage for critical path. **Fix.**
-- **5 — Critical**: Security vulnerability, data loss risk, will break production. **Fix immediately.**
+- **Likelihood (1–5)**: How likely the reported bug or regression is to be real
+  and to occur on normal workloads if we merge without a fix.
+- **Impact (1–5)**: How serious the consequence would be if the issue is real
+  and reaches users, operators, or data.
+- **Exploitability / Triggerability (0–2)**:
+  - `0` = independent/common-path; any normal user or workload can hit it
+  - `1` = semi-dependent; requires a specific configuration, authenticated user,
+    or plausible but narrower setup
+  - `2` = dependent; requires admin/operator action, privileged access, or an
+    unusual orchestration chain
+- **Complexity (0–2)**:
+  - `0` = simple; obvious trigger or easy-to-understand failure mode
+  - `1` = medium; needs some system knowledge or a narrower edge case
+  - `2` = complex; requires deep system knowledge, rare timing, or advanced
+    setup to trigger or even recognize
+
+Use the following scoring process:
+
+1. Set `likelihood_component = 0` when likelihood is `1`; otherwise use
+   `0.5 * likelihood`.
+2. Set `impact_component = 0` when impact is `1`; otherwise use `0.5 * impact`.
+3. Compute `base_score = likelihood_component + impact_component - (0.2 * complexity)`.
+4. If both likelihood and impact are `1`, assign severity `1` immediately.
+5. If impact is `1`, assign severity `1` immediately because a no-impact issue
+   is informational for review triage.
+6. If `base_score < 1.0`, use `base_score` directly.
+7. Otherwise compute
+   `score = base_score ** (1 / (1 + (0.25 * exploitability)))`.
+
+Map the final score to the review severity:
+
+- **5 — Critical**: `score > 4.5`. Security vulnerability, data loss, cluster
+  correctness failure, or production breakage. **Fix immediately.**
+- **4 — High**: `4.5 >= score > 3.5`. Real bug, meaningful correctness issue,
+  missing test coverage on a critical path, or substantial operational risk.
+  **Fix in this PR.**
+- **3 — Medium**: `3.5 >= score > 2.5`. Valid point with limited blast radius
+  or a narrower edge case. Note it for follow-up, but do not fix it in the
+  current PR unless explicitly requested.
+- **2 — Low**: `2.5 >= score > 1.7`. Nice-to-have improvement, minor refactor,
+  cosmetic inconsistency, or speculative concern. Ignore for the current PR.
+- **1 — Informational / Nitpick**: `score <= 1.7`. Style preference, wording,
+  or clearly non-blocking observation. Ignore.
 
 Only fix comments rated 4 or 5. Do not iterate on minor wording, style, or speculative improvements from automated reviewers (e.g., Copilot). Time spent on low-severity feedback is time not spent on real work.
 
