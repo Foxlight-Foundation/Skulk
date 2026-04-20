@@ -229,8 +229,10 @@ async def _validate_public_http_target(url: str) -> str:
             socket.AF_UNSPEC,
             socket.SOCK_STREAM,
         )
-    except socket.gaierror:
-        return validated_url
+    except socket.gaierror as exc:
+        raise ValueError(
+            f"Could not resolve URL host during validation: {hostname}"
+        ) from exc
 
     for family, _, _, _, sockaddr in address_infos:
         raw_address = sockaddr[0]

@@ -204,6 +204,21 @@ async def test_browser_tools_reject_loopback_dns_targets(
 
 
 @pytest.mark.anyio
+async def test_browser_tools_fail_closed_when_dns_validation_cannot_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DefaultBrowserToolProvider()
+
+    def fake_getaddrinfo(*_args: object, **_kwargs: object) -> list[tuple[Any, ...]]:
+        raise socket.gaierror("lookup failed")
+
+    monkeypatch.setattr("exo.tools.web_search.socket.getaddrinfo", fake_getaddrinfo)
+
+    with pytest.raises(ValueError, match="Could not resolve URL host during validation"):
+        await provider.open_url("https://example.com/unresolved")
+
+
+@pytest.mark.anyio
 async def test_fetch_url_keeps_non_2xx_status_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

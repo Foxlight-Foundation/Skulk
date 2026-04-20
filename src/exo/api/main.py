@@ -315,7 +315,13 @@ def _coerce_json_object(value: object) -> JsonObject:
 
 async def _read_request_json_object(request: Request) -> JsonObject:
     """Parse one request body into a string-keyed JSON object."""
-    return _coerce_json_object(cast(object, await request.json()))
+    payload = cast(object, await request.json())
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="Request body must be a JSON object.",
+        )
+    return _coerce_json_object(cast(dict[object, object], payload))
 
 
 def _load_yaml_object(path: Path) -> JsonObject:
@@ -2762,7 +2768,16 @@ class API:
 
     async def update_config(self, request: Request) -> JSONResponse:
         body = await _read_request_json_object(request)
-        config_data = _coerce_json_object(body.get("config", body))
+        if "config" in body:
+            raw_config = body["config"]
+            if not isinstance(raw_config, dict):
+                raise HTTPException(
+                    status_code=422,
+                    detail="'config' field must be a JSON object.",
+                )
+            config_data = _coerce_json_object(cast(dict[object, object], raw_config))
+        else:
+            config_data = dict(body)
         # Preserve existing secrets if not provided in this update
         # (GET /config strips them for security, so saves won't have them)
         if self._config_path.exists():

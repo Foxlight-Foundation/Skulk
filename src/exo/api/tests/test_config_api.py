@@ -1,4 +1,4 @@
-"""Tests for the GET /config API endpoint."""
+"""Tests for the /config API endpoint."""
 
 from pathlib import Path
 from typing import cast
@@ -109,3 +109,25 @@ def test_get_config_treats_invalid_skulk_kv_backend_as_default(
     data = _json_object(response)
     effective = _json_mapping(data["effective"])
     assert effective["kv_cache_backend"] == "default"
+
+
+def test_update_config_rejects_non_object_request_body(tmp_path: Path) -> None:
+    api = _build_api()
+    object.__setattr__(api, "_config_path", tmp_path / "exo.yaml")
+    client = TestClient(api.app)
+
+    response = client.put("/config", json=["not", "an", "object"])
+
+    assert response.status_code == 422
+    assert response.json()["error"]["message"] == "Request body must be a JSON object."
+
+
+def test_update_config_rejects_non_object_config_field(tmp_path: Path) -> None:
+    api = _build_api()
+    object.__setattr__(api, "_config_path", tmp_path / "exo.yaml")
+    client = TestClient(api.app)
+
+    response = client.put("/config", json={"config": True})
+
+    assert response.status_code == 422
+    assert response.json()["error"]["message"] == "'config' field must be a JSON object."
