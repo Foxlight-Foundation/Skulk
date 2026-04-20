@@ -1,6 +1,8 @@
 """Tests for static browser-tool helpers."""
 
+import socket
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 
@@ -15,6 +17,47 @@ class _FetchedUrlFixture:
     content_type: str | None
     body: bytes
     encoding: str | None
+
+
+@dataclass(frozen=True)
+class _FakeStreamResponse:
+    url: str
+    status_code: int
+    headers: dict[str, str]
+    body: bytes
+    encoding: str | None = "utf-8"
+
+    @property
+    def is_redirect(self) -> bool:
+        return 300 <= self.status_code < 400
+
+    async def __aenter__(self) -> "_FakeStreamResponse":
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    async def aiter_bytes(self):
+        yield self.body
+
+
+class _FakeAsyncClient:
+    def __init__(self, responses: list[_FakeStreamResponse]) -> None:
+        self._responses = responses
+        self.requested_urls: list[str] = []
+
+    async def __aenter__(self) -> "_FakeAsyncClient":
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    def stream(self, method: str, url: str) -> _FakeStreamResponse:
+        assert method == "GET"
+        self.requested_urls.append(url)
+        if not self._responses:
+            raise AssertionError(f"No fake response queued for {url}")
+        return self._responses.pop(0)
 
 
 @pytest.mark.anyio
@@ -113,3 +156,101 @@ async def test_browser_tools_reject_unsupported_schemes() -> None:
 
     with pytest.raises(ValueError, match="http:// and https://"):
         await provider.extract_page("ftp://example.com/nope", max_chars=500)
+
+
+@pytest.mark.anyio
+async def test_browser_tools_reject_private_ip_literal_targets() -> None:
+    provider = DefaultBrowserToolProvider()
+
+    with pytest.raises(
+        ValueError, match="Private, loopback, and link-local targets"
+    ):
+        await provider.open_url("http://127.0.0.1:8080/private")
+
+
+@pytest.mark.anyio
+async def test_browser_tools_reject_loopback_dns_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DefaultBrowserToolProvider()
+
+    def fake_getaddrinfo(*_args: object, **_kwargs: object) -> list[tuple[Any, ...]]:
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                6,
+                "",
+                ("127.0.0.1", 443),
+            )
+        ]
+
+    monkeypatch.setattr("exo.tools.web_search.socket.getaddrinfo", fake_getaddrinfo)
+
+    with pytest.raises(
+        ValueError, match="Private, loopback, and link-local targets"
+    ):
+        await provider.open_url("https://example.com/internal")
+
+
+@pytest.mark.anyio
+async def test_fetch_url_keeps_non_2xx_status_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DefaultBrowserToolProvider()
+    fake_client = _FakeAsyncClient(
+        [
+            _FakeStreamResponse(
+                url="https://example.com/missing",
+                status_code=404,
+                headers={"content-type": "text/html"},
+                body=b"<html><head><title>Missing</title></head><body>not found</body></html>",
+            )
+        ]
+    )
+
+    def fake_async_client(**_kwargs: object) -> _FakeAsyncClient:
+        return fake_client
+
+    monkeypatch.setattr(
+        "exo.tools.web_search.httpx.AsyncClient",
+        fake_async_client,
+    )
+
+    response = await provider.open_url("https://example.com/missing")
+
+    assert response.status_code == 404
+    assert response.title == "Missing"
+    assert response.final_url == "https://example.com/missing"
+
+
+@pytest.mark.anyio
+async def test_fetch_url_rejects_private_redirect_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DefaultBrowserToolProvider()
+    fake_client = _FakeAsyncClient(
+        [
+            _FakeStreamResponse(
+                url="https://example.com/start",
+                status_code=302,
+                headers={"location": "http://127.0.0.1:8080/admin"},
+                body=b"",
+            )
+        ]
+    )
+
+    def fake_async_client(**_kwargs: object) -> _FakeAsyncClient:
+        return fake_client
+
+    monkeypatch.setattr(
+        "exo.tools.web_search.httpx.AsyncClient",
+        fake_async_client,
+    )
+
+    with pytest.raises(
+        ValueError, match="Private, loopback, and link-local targets"
+    ):
+        await provider.open_url("https://example.com/start")
+
+    assert fake_client.requested_urls == ["https://example.com/start"]

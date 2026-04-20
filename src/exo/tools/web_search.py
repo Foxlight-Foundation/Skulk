@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import ipaddress
 import json
 import re
+import socket
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Protocol, Self, cast, final
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -26,6 +28,7 @@ from exo.api.types import (
 )
 
 _MAX_FETCH_BYTES = 1_000_000
+_MAX_REDIRECTS = 5
 _DEFAULT_USER_AGENT = (
     "SkulkBrowserTools/1.0 (+https://github.com/Foxlight-Foundation/Skulk)"
 )
@@ -177,9 +180,67 @@ def _validate_http_url(url: str) -> str:
     """Validate that a model-supplied URL uses HTTP or HTTPS."""
 
     parsed = urlparse(url.strip())
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("Only absolute http:// and https:// URLs are supported.")
     return url.strip()
+
+
+def _is_blocked_ip_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return whether one resolved IP should be rejected for browser-tool fetches."""
+
+    return (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    )
+
+
+async def _validate_public_http_target(url: str) -> str:
+    """Reject loopback and private-network targets before any outbound fetch."""
+
+    validated_url = _validate_http_url(url)
+    parsed = urlparse(validated_url)
+    hostname = parsed.hostname
+    if hostname is None:
+        raise ValueError("Only absolute http:// and https:// URLs are supported.")
+
+    normalized_host = hostname.rstrip(".").lower()
+    if normalized_host == "localhost" or normalized_host.endswith(".localhost"):
+        raise ValueError("Private, loopback, and link-local targets are not allowed.")
+
+    try:
+        direct_address = ipaddress.ip_address(normalized_host)
+    except ValueError:
+        direct_address = None
+
+    if direct_address is not None:
+        if _is_blocked_ip_address(direct_address):
+            raise ValueError("Private, loopback, and link-local targets are not allowed.")
+        return validated_url
+
+    try:
+        address_infos = await asyncio.to_thread(
+            socket.getaddrinfo,
+            hostname,
+            parsed.port or (443 if parsed.scheme == "https" else 80),
+            socket.AF_UNSPEC,
+            socket.SOCK_STREAM,
+        )
+    except socket.gaierror:
+        return validated_url
+
+    for family, _, _, _, sockaddr in address_infos:
+        raw_address = sockaddr[0]
+        if family not in {socket.AF_INET, socket.AF_INET6}:
+            continue
+        resolved_address = ipaddress.ip_address(raw_address)
+        if _is_blocked_ip_address(resolved_address):
+            raise ValueError("Private, loopback, and link-local targets are not allowed.")
+
+    return validated_url
 
 
 def _decode_body(body: bytes, encoding: str | None) -> str:
@@ -367,33 +428,43 @@ class DefaultBrowserToolProvider:
     async def _fetch_url(self, url: str) -> _FetchedUrl:
         """Fetch one URL with redirect following and a bounded response body."""
 
-        validated_url = _validate_http_url(url)
-        async with (
-            httpx.AsyncClient(
-            follow_redirects=True,
+        current_url = url
+        async with httpx.AsyncClient(
+            follow_redirects=False,
             headers=self._headers,
             timeout=httpx.Timeout(15.0, connect=10.0),
-            ) as client,
-            client.stream("GET", validated_url) as response,
-        ):
-                response.raise_for_status()
-                body = bytearray()
-                async for chunk in response.aiter_bytes():
-                    remaining = _MAX_FETCH_BYTES - len(body)
-                    if remaining <= 0:
-                        break
-                    body.extend(chunk[:remaining])
+        ) as client:
+            for _ in range(_MAX_REDIRECTS + 1):
+                validated_url = await _validate_public_http_target(current_url)
+                async with client.stream("GET", validated_url) as response:
+                    redirect_location = cast(
+                        str | None, response.headers.get("location")
+                    )
+                    if response.is_redirect and redirect_location:
+                        current_url = urljoin(str(response.url), redirect_location)
+                        continue
 
-                return _FetchedUrl(
-                    url=validated_url,
-                    final_url=str(response.url),
-                    status_code=response.status_code,
-                    content_type=_normalize_content_type(
-                        cast(str | None, response.headers.get("content-type"))
-                    ),
-                    body=bytes(body),
-                    encoding=response.encoding,
-                )
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        remaining = _MAX_FETCH_BYTES - len(body)
+                        if remaining <= 0:
+                            break
+                        body.extend(chunk[:remaining])
+
+                    return _FetchedUrl(
+                        url=_validate_http_url(url),
+                        final_url=str(response.url),
+                        status_code=response.status_code,
+                        content_type=_normalize_content_type(
+                            cast(str | None, response.headers.get("content-type"))
+                        ),
+                        body=bytes(body),
+                        encoding=response.encoding,
+                    )
+
+        raise ValueError(
+            f"Too many redirects while fetching URL (limit: {_MAX_REDIRECTS})."
+        )
 
 
 def default_browser_tool_provider() -> BrowserToolProvider:
