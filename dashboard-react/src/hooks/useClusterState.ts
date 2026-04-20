@@ -57,6 +57,16 @@ interface RawThunderboltBridge {
   serviceName?: string | null;
 }
 
+interface RawThunderboltInterface {
+  rdmaInterface: string;
+  domainUuid: string;
+  linkSpeed: string;
+}
+
+interface RawThunderboltInfo {
+  interfaces: RawThunderboltInterface[];
+}
+
 interface RawRdmaCtl {
   enabled: boolean;
   interfacesPresent?: boolean;
@@ -72,8 +82,10 @@ interface RawStateResponse {
   nodeSystem?: Record<string, RawSystemPerformanceProfile>;
   nodeNetwork?: Record<string, RawNodeNetworkInfo>;
   nodeDisk?: Record<string, { total: { inBytes: number }; available: { inBytes: number } }>;
+  nodeThunderbolt?: Record<string, RawThunderboltInfo>;
   nodeThunderboltBridge?: Record<string, RawThunderboltBridge>;
   nodeRdmaCtl?: Record<string, RawRdmaCtl>;
+  thunderboltBridgeCycles?: string[][];
 }
 
 /* ================================================================
@@ -244,6 +256,10 @@ export interface ClusterState {
   nodeDisk: NodeDiskInfo;
   instances: RawInstances;
   runners: RawRunners;
+  nodeThunderbolt: Record<string, RawThunderboltInfo>;
+  nodeThunderboltBridge: Record<string, RawThunderboltBridge>;
+  nodeRdmaCtl: Record<string, RawRdmaCtl>;
+  thunderboltBridgeCycles: string[][];
 }
 
 /** Poll the Skulk `/state` endpoint and normalize it into dashboard-friendly topology and status data. */
@@ -255,6 +271,10 @@ export function useClusterState(): ClusterState {
   const [nodeDisk, setNodeDisk] = useState<NodeDiskInfo>({});
   const [instances, setInstances] = useState<RawInstances>({});
   const [runners, setRunners] = useState<RawRunners>({});
+  const [nodeThunderbolt, setNodeThunderbolt] = useState<Record<string, RawThunderboltInfo>>({});
+  const [nodeThunderboltBridge, setNodeThunderboltBridge] = useState<Record<string, RawThunderboltBridge>>({});
+  const [nodeRdmaCtl, setNodeRdmaCtl] = useState<Record<string, RawRdmaCtl>>({});
+  const [thunderboltBridgeCycles, setThunderboltBridgeCycles] = useState<string[][]>([]);
   const failuresRef = useRef(0);
 
   const fetchState = useCallback(async () => {
@@ -280,6 +300,10 @@ export function useClusterState(): ClusterState {
       setNodeDisk(data.nodeDisk ?? {});
       setInstances((data.instances ?? {}) as RawInstances);
       setRunners((data.runners ?? {}) as RawRunners);
+      setNodeThunderbolt(data.nodeThunderbolt ?? {});
+      setNodeThunderboltBridge(data.nodeThunderboltBridge ?? {});
+      setNodeRdmaCtl(data.nodeRdmaCtl ?? {});
+      setThunderboltBridgeCycles(data.thunderboltBridgeCycles ?? []);
       setLastUpdate(Date.now());
       failuresRef.current = 0;
       setConnected(true);
@@ -297,5 +321,17 @@ export function useClusterState(): ClusterState {
     return () => clearInterval(id);
   }, [fetchState]);
 
-  return { topology, connected, lastUpdate, downloads, nodeDisk, instances, runners };
+  return {
+    topology,
+    connected,
+    lastUpdate,
+    downloads,
+    nodeDisk,
+    instances,
+    runners,
+    nodeThunderbolt,
+    nodeThunderboltBridge,
+    nodeRdmaCtl,
+    thunderboltBridgeCycles,
+  };
 }

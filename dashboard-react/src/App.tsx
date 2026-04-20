@@ -12,6 +12,8 @@ import { NetworkMesh } from './components/common/NetworkMesh';
 import { SettingsPanel } from './components/layout/SettingsPanel';
 import { ModelStorePage } from './components/pages/DownloadsPage';
 import { ChatView } from './components/pages/ChatView';
+import { TracesPage } from './components/pages/TracesPage';
+import { TraceDetailPage } from './components/pages/TraceDetailPage';
 import { InstancePanel, type InstanceCardData } from './components/layout/InstancePanel';
 import { ConversationPanel } from './components/layout/ConversationPanel';
 import { addToast } from './hooks/useToast';
@@ -104,7 +106,18 @@ function deriveInstanceStatus(
 }
 
 export function App() {
-  const { topology, connected, downloads, nodeDisk, instances, runners } = useClusterState();
+  const {
+    topology,
+    connected,
+    downloads,
+    nodeDisk,
+    instances,
+    runners,
+    nodeThunderbolt,
+    nodeThunderboltBridge,
+    nodeRdmaCtl,
+    thunderboltBridgeCycles,
+  } = useClusterState();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [storeDownloads, setStoreDownloads] = useState<StoreDownload[]>([]);
   const activeRoute = useUIStore((s) => s.activeRoute);
@@ -112,6 +125,7 @@ export function App() {
   const historyPanelOpen = useUIStore((s) => s.historyPanelOpen);
   const themeName = useUIStore((s) => s.theme);
   const activeTheme = themeName === 'light' ? lightTheme : darkTheme;
+  const selectedTraceTaskId = useUIStore((s) => s.selectedTraceTaskId);
 
   // Reflect theme on the html root so non-styled-components surfaces (highlight.js,
   // scrollbars, etc.) can react via `html[data-theme='light'] …` selectors.
@@ -120,6 +134,7 @@ export function App() {
     document.documentElement.setAttribute('data-theme', themeName);
   }, [themeName]);
   const setActiveRoute = useUIStore((s) => s.setActiveRoute);
+  const setSelectedTraceTaskId = useUIStore((s) => s.setSelectedTraceTaskId);
   const togglePanel = useUIStore((s) => s.togglePanel);
   const toggleHistoryPanel = useUIStore((s) => s.toggleHistoryPanel);
   const conversationsMap = useChatStore((s) => s.conversations);
@@ -139,6 +154,9 @@ export function App() {
     if (!nodes) return null;
     const items: { level: 'error' | 'warning'; message: string }[] = [];
 
+    const getNodeName = (nodeId: string): string =>
+      nodes[nodeId]?.friendly_name ?? `${nodeId.slice(0, 8)}...`;
+
     // Version mismatch (error)
     const entries = Object.values(nodes).filter(
       (n) => n.exo_commit && n.exo_commit !== 'Unknown' && n.exo_commit !== 'unknown',
@@ -155,6 +173,24 @@ export function App() {
       }
     }
 
+    // macOS build mismatch (warning)
+    const macosNodes = Object.entries(nodes).filter(([, node]) => {
+      const version = node.os_version;
+      return typeof version === 'string' && /^\d/.test(version);
+    });
+    if (macosNodes.length >= 2) {
+      const builds = new Set(macosNodes.map(([, node]) => node.os_build_version ?? node.os_version ?? 'unknown'));
+      if (builds.size > 1) {
+        const details = macosNodes
+          .map(([nodeId, node]) => `${node.friendly_name ?? getNodeName(nodeId)} (macOS ${node.os_version ?? '?'} ${node.os_build_version ?? 'unknown'})`)
+          .join(', ');
+        items.push({
+          level: 'warning',
+          message: `macOS version mismatch: ${details}. Keep cluster nodes on the same macOS build for best compatibility.`,
+        });
+      }
+    }
+
     // RDMA phantom (warning)
     const hasRdmaPhantom = Object.values(nodes).some(
       (n) => n.rdma_enabled && n.rdma_interfaces_present === false,
@@ -163,10 +199,60 @@ export function App() {
       items.push({ level: 'warning', message: 'RDMA reported as enabled but no RDMA interfaces exist. Thunderbolt 5 (M4 Pro/Max+) is required for tensor parallel.' });
     }
 
+    // TB5 present but RDMA disabled (warning)
+    const thunderboltNodeIds = Object.entries(nodeThunderbolt)
+      .filter(([, info]) => info.interfaces.length > 0)
+      .map(([nodeId]) => nodeId);
+    if (thunderboltNodeIds.length >= 2) {
+      const nodesWithRdmaDisabled = thunderboltNodeIds.filter((nodeId) => nodeRdmaCtl[nodeId]?.enabled !== true);
+      if (nodesWithRdmaDisabled.length > 0) {
+        const details = nodesWithRdmaDisabled.map(getNodeName).join(', ');
+        items.push({
+          level: 'warning',
+          message: `Thunderbolt 5 detected but RDMA is not enabled on: ${details}. Enable rdma_ctl on those nodes to unlock tensor parallel.`,
+        });
+      }
+    }
+
+    // Mac Studio en2 RDMA misuse (warning)
+    const affectedMacStudioNodes = new Set<string>();
+    for (const edge of topology.edges) {
+      if (edge.sourceRdmaIface === 'rdma_en2') {
+        const node = nodes[edge.source];
+        if (node?.system_info?.model_id === 'Mac Studio' && nodeRdmaCtl[edge.source]?.enabled) {
+          affectedMacStudioNodes.add(`${getNodeName(edge.source)} → ${getNodeName(edge.target)} (en2)`);
+        }
+      }
+      if (edge.sinkRdmaIface === 'rdma_en2') {
+        const node = nodes[edge.target];
+        if (node?.system_info?.model_id === 'Mac Studio' && nodeRdmaCtl[edge.target]?.enabled) {
+          affectedMacStudioNodes.add(`${getNodeName(edge.target)} → ${getNodeName(edge.source)} (en2)`);
+        }
+      }
+    }
+    if (affectedMacStudioNodes.size > 0) {
+      items.push({
+        level: 'warning',
+        message: `Mac Studio RDMA is using the Ethernet-adjacent en2 Thunderbolt port on: ${[...affectedMacStudioNodes].join(', ')}. Move those cables to one of the other TB ports.`,
+      });
+    }
+
+    // Thunderbolt bridge cycle detection (warning)
+    if (thunderboltBridgeCycles.length > 0) {
+      const cycle = thunderboltBridgeCycles[0];
+      const serviceName = cycle
+        .map((nodeId) => nodeThunderboltBridge[nodeId]?.serviceName)
+        .find((name): name is string => typeof name === 'string' && name.length > 0) ?? 'Thunderbolt Bridge';
+      items.push({
+        level: 'warning',
+        message: `Thunderbolt Bridge cycle detected across ${cycle.map(getNodeName).join(' -> ')}. Disable "${serviceName}" on one affected node to break the loop.`,
+      });
+    }
+
     if (items.length === 0) return null;
     const worstLevel = items.some((i) => i.level === 'error') ? 'error' : 'warning';
     return { level: worstLevel as 'error' | 'warning', items };
-  }, [topology]);
+  }, [nodeRdmaCtl, nodeThunderbolt, nodeThunderboltBridge, thunderboltBridgeCycles, topology]);
 
   // Poll store downloads for the header progress indicator
   const pollStoreDownloads = useCallback(async () => {
@@ -272,7 +358,12 @@ export function App() {
         <HeaderNav
           showHome
           activeRoute={activeRoute}
-          onNavigate={setActiveRoute}
+          onNavigate={(route) => {
+            setActiveRoute(route);
+            if (route === 'traces') {
+              setSelectedTraceTaskId(null);
+            }
+          }}
           onOpenSettings={() => setSettingsOpen(true)}
           downloadProgress={downloadProgress}
           warnings={clusterWarnings}
@@ -304,6 +395,20 @@ export function App() {
                 runners={runners}
                 onChat={(modelId) => { useChatStore.getState().selectModel(modelId); setActiveRoute('chat'); }}
               />
+            ) : activeRoute === 'traces' ? (
+              selectedTraceTaskId ? (
+                <TraceDetailPage
+                  taskId={selectedTraceTaskId}
+                  onBack={() => setSelectedTraceTaskId(null)}
+                />
+              ) : (
+                <TracesPage
+                  onOpenTrace={(taskId) => {
+                    setSelectedTraceTaskId(taskId);
+                    setActiveRoute('traces');
+                  }}
+                />
+              )
             ) : activeRoute === 'chat' ? (
               <ChatView readyInstances={instanceCards} />
             ) : topology ? (

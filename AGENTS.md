@@ -135,7 +135,7 @@ Rust code in `rust/` provides:
 - `system_custodian`: System-level operations
 
 ### Dashboard
-React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API. The legacy Svelte dashboard in `dashboard/` is from upstream exo and is not actively used.
+React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API.
 
 ### Model Capability System
 Skulk now treats model capability handling as two layers:

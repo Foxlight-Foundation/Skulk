@@ -117,7 +117,7 @@ Build/runtime note:
 ## Dashboard
 
 Skulk serves a built-in dashboard at `http://localhost:52415`.
-The React dashboard is the default UI. The legacy Svelte dashboard is kept only as a fallback in the repo.
+The React dashboard in `dashboard-react/` is the only supported UI.
 The normal dashboard flow is: confirm topology, launch a model, wait for it to become ready, then open chat.
 
 <p align="center">

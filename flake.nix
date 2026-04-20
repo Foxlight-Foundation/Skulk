@@ -63,7 +63,6 @@
 
       imports = [
         inputs.treefmt-nix.flakeModule
-        ./dashboard/parts.nix
         ./rust/parts.nix
         ./python/parts.nix
       ];
@@ -106,7 +105,7 @@
                 # NIX
                 nixpkgs-fmt
 
-                # SVELTE
+                # FRONTEND
                 nodejs
 
                 # LOGGING

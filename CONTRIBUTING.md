@@ -46,7 +46,6 @@ Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard),
 ### Key directories:
 - `src/exo/` — Python backend (inference, API, store, worker, routing)
 - `dashboard-react/` — React dashboard (Skulk UI)
-- `dashboard/` — Legacy Svelte dashboard (upstream EXO)
 - `rust/` — Rust components (networking, libp2p, PyO3 bindings)
 - `resources/inference_model_cards/` — Model metadata TOML files
 - `deployment/logging/` — VictoriaLogs + Grafana stack and Vector config

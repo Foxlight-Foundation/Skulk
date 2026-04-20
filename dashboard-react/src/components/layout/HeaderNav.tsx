@@ -1,12 +1,12 @@
 import styled, { css, useTheme } from 'styled-components';
-import { FiSettings, FiMenu, FiX, FiSidebar, FiDatabase, FiMessageSquare, FiSun, FiMoon } from 'react-icons/fi';
+import { FiSettings, FiMenu, FiX, FiSidebar, FiDatabase, FiMessageSquare, FiSun, FiMoon, FiActivity } from 'react-icons/fi';
 import { MdHub } from 'react-icons/md';
 import { Button } from '../common/Button';
 import SkulkIcon from '../icons/SkulkIcon';
 import type { Theme } from '../../theme';
 import { useUIStore } from '../../stores/uiStore';
 
-export type NavRoute = 'cluster' | 'model-store' | 'chat';
+export type NavRoute = 'cluster' | 'model-store' | 'chat' | 'traces';
 
 export interface HeaderNavProps {
   showHome?: boolean;
@@ -230,6 +230,7 @@ const SidebarIcon = () => <FiSidebar size={18} />;
 const ClusterIcon = () => <MdHub size={16} />;
 const StoreIcon = () => <FiDatabase size={16} />;
 const ChatIcon = () => <FiMessageSquare size={16} />;
+const TraceIcon = () => <FiActivity size={16} />;
 const SettingsIcon = () => <FiSettings size={16} />;
 
 function ProgressCircle({ count, percentage }: { count: number; percentage: number }) {
@@ -333,6 +334,10 @@ export function HeaderNav({
 
         <NavLink $active={activeRoute === 'chat'} onClick={() => navigate('chat')}>
           <ChatIcon /> Chat
+        </NavLink>
+
+        <NavLink $active={activeRoute === 'traces'} onClick={() => navigate('traces')}>
+          <TraceIcon /> Traces
         </NavLink>
 
         {instanceCount > 0 && (
