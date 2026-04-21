@@ -363,13 +363,21 @@ export function useClusterState(): ClusterState {
 
   const fetchState = useCallback(async () => {
     try {
-      const [stateResponse, nodeIdResponse, nodeIdentityResponse] = await Promise.all([
-        fetch('/state'),
-        localNodeId == null ? fetch('/node_id') : Promise.resolve(null),
-        localNodeIdentity == null ? fetch('/node_identity') : Promise.resolve(null),
+      const stateResponse = await fetch('/state');
+      if (!stateResponse.ok) throw new Error(`HTTP ${stateResponse.status}`);
+      const data: RawStateResponse = await stateResponse.json();
+
+      const topologyNodeIds = new Set(data.topology?.nodes ?? []);
+      const shouldRefreshLocalNodeId =
+        localNodeId == null || (topologyNodeIds.size > 0 && !topologyNodeIds.has(localNodeId));
+      const shouldRefreshLocalIdentity =
+        localNodeIdentity == null || shouldRefreshLocalNodeId;
+
+      const [nodeIdResponse, nodeIdentityResponse] = await Promise.all([
+        shouldRefreshLocalNodeId ? fetch('/node_id') : Promise.resolve(null),
+        shouldRefreshLocalIdentity ? fetch('/node/identity') : Promise.resolve(null),
       ]);
-      const res = stateResponse;
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
       let resolvedLocalNodeId = localNodeId;
       if (nodeIdResponse && nodeIdResponse.ok) {
         const nodeId = (await nodeIdResponse.json()) as string;
@@ -386,7 +394,6 @@ export function useClusterState(): ClusterState {
           resolvedLocalNodeId = identity.nodeId;
         }
       }
-      const data: RawStateResponse = await res.json();
 
       if (data.topology) {
         const topo = ensureLocalNodePresent(
