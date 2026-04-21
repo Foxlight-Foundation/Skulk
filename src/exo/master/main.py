@@ -1,6 +1,9 @@
+import copy
 from datetime import datetime, timedelta, timezone
+from typing import cast
 
 import anyio
+import yaml
 from loguru import logger
 
 from exo.master.placement import (
@@ -77,6 +80,8 @@ from exo.utils.task_group import TaskGroup
 
 EVENT_LOG_REPLAY_BATCH_SIZE = 10_000
 SNAPSHOT_EVENT_CADENCE = 10_000
+REPLAY_TAIL_RETENTION_EVENTS = SNAPSHOT_EVENT_CADENCE
+JsonObject = dict[str, object]
 
 
 class Master:
@@ -545,10 +550,7 @@ class Master:
                 if message.session_id != self.session_id:
                     continue
 
-                config_path = resolve_config_path()
-                config_yaml = (
-                    config_path.read_text() if config_path.exists() else None
-                )
+                config_yaml = self._load_state_sync_config_yaml()
                 await self.state_sync_sender.send(
                     StateSyncMessage(
                         kind="response",
@@ -562,6 +564,46 @@ class Master:
                         config_yaml=config_yaml,
                     )
                 )
+
+    def _load_state_sync_config_yaml(self) -> str | None:
+        """Return a sanitized config payload for bootstrap responses.
+
+        State-sync responses travel over cluster pub/sub, so they must never
+        include secrets such as ``hf_token``. Read/parse failures are treated
+        as non-fatal so bootstrap requests cannot crash master coordination.
+        """
+
+        config_path = resolve_config_path()
+        if not config_path.exists():
+            return None
+
+        try:
+            decoded_config = cast(object, yaml.safe_load(config_path.read_text()))
+        except Exception as exc:
+            logger.opt(exception=exc).warning(
+                "Failed to read local config for state-sync response"
+            )
+            return None
+
+        if decoded_config is None:
+            return None
+
+        if not isinstance(decoded_config, dict):
+            logger.warning(
+                "Ignoring non-object config while preparing state-sync response"
+            )
+            return None
+
+        raw_config = cast(dict[object, object], decoded_config)
+        sanitized_config: JsonObject = {
+            str(key): copy.deepcopy(value) for key, value in raw_config.items()
+        }
+        sanitized_config.pop("hf_token", None)
+        return yaml.safe_dump(
+            sanitized_config,
+            default_flow_style=False,
+            sort_keys=False,
+        )
 
     async def _persist_snapshot(self, force: bool = False) -> None:
         snapshot_idx = self.state.last_event_applied_idx
@@ -585,5 +627,13 @@ class Master:
             logger.opt(exception=exc).warning("Failed to persist state snapshot")
             return
 
-        self._event_log.compact(snapshot.last_event_applied_idx + 1)
+        # Keep a bounded overlap after the latest durable snapshot so a
+        # follower that bootstrapped from a recently served snapshot can still
+        # replay the missing tail even if another snapshot is persisted before
+        # its replay request arrives.
+        keep_from_idx = max(
+            snapshot.last_event_applied_idx + 1 - REPLAY_TAIL_RETENTION_EVENTS,
+            0,
+        )
+        self._event_log.compact(keep_from_idx)
         self._last_snapshot_idx = snapshot.last_event_applied_idx

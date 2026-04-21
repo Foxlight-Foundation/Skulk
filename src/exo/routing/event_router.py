@@ -47,6 +47,7 @@ class EventRouter:
     nack_base_seconds: float = 0.5
     nack_cap_seconds: float = 10.0
     snapshot_request_timeout_seconds: float = 1.0
+    snapshot_request_attempts: int = 3
     _bootstrap_complete: anyio.Event = field(init=False, default_factory=anyio.Event)
 
     async def run(self):
@@ -122,14 +123,6 @@ class EventRouter:
     async def _bootstrap(self) -> None:
         replay_start_idx = 0
 
-        await self.state_sync_sender.send(
-            StateSyncMessage(
-                kind="request",
-                requester=self._system_id,
-                session_id=self.session_id,
-            )
-        )
-
         snapshot = await self._await_snapshot()
         if snapshot is not None:
             await self._hydrate_from_snapshot(snapshot)
@@ -146,24 +139,37 @@ class EventRouter:
 
     async def _await_snapshot(self) -> StateSnapshot | None:
         with self.state_sync_receiver as messages:
-            with anyio.move_on_after(self.snapshot_request_timeout_seconds):
-                async for message in messages:
-                    if message.kind != "response":
-                        continue
-                    if message.requester != self._system_id:
-                        continue
-                    if message.session_id != self.session_id:
-                        logger.warning(
-                            "Ignoring state snapshot response for mismatched session"
-                        )
-                        continue
-                    assert message.snapshot is not None
-                    if message.snapshot.session_id != self.session_id:
-                        logger.warning(
-                            "Ignoring state snapshot with mismatched embedded session"
-                        )
-                        continue
-                    return message.snapshot
+            for attempt in range(self.snapshot_request_attempts):
+                await self.state_sync_sender.send(
+                    StateSyncMessage(
+                        kind="request",
+                        requester=self._system_id,
+                        session_id=self.session_id,
+                    )
+                )
+                with anyio.move_on_after(self.snapshot_request_timeout_seconds):
+                    async for message in messages:
+                        if message.kind != "response":
+                            continue
+                        if message.requester != self._system_id:
+                            continue
+                        if message.session_id != self.session_id:
+                            logger.warning(
+                                "Ignoring state snapshot response for mismatched session"
+                            )
+                            continue
+                        assert message.snapshot is not None
+                        if message.snapshot.session_id != self.session_id:
+                            logger.warning(
+                                "Ignoring state snapshot with mismatched embedded session"
+                            )
+                            continue
+                        return message.snapshot
+                if attempt < self.snapshot_request_attempts - 1:
+                    logger.debug(
+                        "Retrying state snapshot bootstrap request "
+                        f"(attempt={attempt + 2}/{self.snapshot_request_attempts})"
+                    )
         return None
 
     async def _hydrate_from_snapshot(self, snapshot: StateSnapshot) -> None:

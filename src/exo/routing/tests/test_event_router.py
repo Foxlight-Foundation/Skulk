@@ -17,6 +17,8 @@ from exo.utils.channels import Receiver, Sender, channel
 
 def _make_router(
     session_id: SessionId,
+    *,
+    snapshot_request_attempts: int = 3,
 ) -> tuple[
     EventRouter,
     Receiver[ForwarderCommand],
@@ -38,6 +40,7 @@ def _make_router(
         external_inbound=external_receiver,
         external_outbound=external_outbound,
         snapshot_request_timeout_seconds=0.05,
+        snapshot_request_attempts=snapshot_request_attempts,
         nack_base_seconds=0.01,
         nack_cap_seconds=0.02,
     )
@@ -247,6 +250,46 @@ async def test_snapshot_gap_triggers_nack_recovery() -> None:
         drained_late_event = await internal_receiver.receive()
         assert drained_late_event.idx == 6
         assert drained_late_event.event == late_event
+
+        router.shutdown()
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_bootstrap_retries_before_full_replay_fallback() -> None:
+    session_id = SessionId(master_node_id=NodeId("master"), election_clock=11)
+    router, command_receiver, state_sync_requests, state_sync_responses, _event_sender = (
+        _make_router(session_id)
+    )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(router.run)
+
+        first_request = await state_sync_requests.receive()
+        assert first_request.kind == "request"
+        assert first_request.session_id == session_id
+
+        second_request = await state_sync_requests.receive()
+        assert second_request.kind == "request"
+        assert second_request.requester == first_request.requester
+
+        snapshot_state = State(last_event_applied_idx=7)
+        await state_sync_responses.send(
+            StateSyncMessage(
+                kind="response",
+                requester=second_request.requester,
+                session_id=session_id,
+                snapshot=StateSnapshot(
+                    session_id=session_id,
+                    last_event_applied_idx=7,
+                    state=snapshot_state,
+                ),
+            )
+        )
+
+        replay_request = await command_receiver.receive()
+        assert isinstance(replay_request.command, RequestEventLog)
+        assert replay_request.command.since_idx == 8
 
         router.shutdown()
         tg.cancel_scope.cancel()

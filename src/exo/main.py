@@ -359,22 +359,25 @@ class Node:
         state_sync_sender = self.router.sender(topics.STATE_SYNC_MESSAGES)
         state_sync_receiver = self.router.receiver(topics.STATE_SYNC_MESSAGES)
         with state_sync_receiver as messages:
-            await state_sync_sender.send(
-                StateSyncMessage(
-                    kind="request",
-                    requester=requester,
-                    session_id=session_id,
+            for attempt in range(3):
+                await state_sync_sender.send(
+                    StateSyncMessage(
+                        kind="request",
+                        requester=requester,
+                        session_id=session_id,
+                    )
                 )
-            )
-            with anyio.move_on_after(1.0):
-                async for message in messages:
-                    if message.kind != "response":
-                        continue
-                    if message.requester != requester:
-                        continue
-                    if message.session_id != session_id:
-                        continue
-                    return message.config_yaml
+                with anyio.move_on_after(1.0):
+                    async for message in messages:
+                        if message.kind != "response":
+                            continue
+                        if message.requester != requester:
+                            continue
+                        if message.session_id != session_id:
+                            continue
+                        return message.config_yaml
+                if attempt < 2:
+                    await anyio.sleep(0.2)
         return None
 
     def _apply_cluster_config_yaml(self, config_yaml: str) -> None:
@@ -463,23 +466,9 @@ class Node:
                 # - Shut down and re-create the API
 
                 start_replacement_event_router = False
+                previous_store_server = self.store_server
                 if result.is_new_master:
                     await anyio.sleep(0)
-                    authoritative_config_yaml = await self._request_cluster_config(
-                        result.session_id
-                    )
-                    previous_store_server = self.store_server
-                    if authoritative_config_yaml is not None:
-                        self._apply_cluster_config_yaml(authoritative_config_yaml)
-                        new_store_client, new_store_server = (
-                            _configure_model_store_runtime(self.node_id, self.exo_config)
-                        )
-                        self.store_client = new_store_client
-                        self.store_server = (
-                            previous_store_server
-                            if previous_store_server is not None
-                            else new_store_server
-                        )
                     self.event_router.shutdown()
                     self.event_router = EventRouter(
                         result.session_id,
@@ -541,6 +530,24 @@ class Node:
                     logger.info(
                         f"Node {result.session_id.master_node_id} elected master"
                     )
+                if (
+                    result.is_new_master
+                    and result.session_id.master_node_id != self.node_id
+                ):
+                    authoritative_config_yaml = await self._request_cluster_config(
+                        result.session_id
+                    )
+                    if authoritative_config_yaml is not None:
+                        self._apply_cluster_config_yaml(authoritative_config_yaml)
+                        new_store_client, new_store_server = (
+                            _configure_model_store_runtime(self.node_id, self.exo_config)
+                        )
+                        self.store_client = new_store_client
+                        self.store_server = (
+                            previous_store_server
+                            if previous_store_server is not None
+                            else new_store_server
+                        )
                 if result.is_new_master:
                     if self.download_coordinator:
                         await self.download_coordinator.shutdown()

@@ -170,3 +170,23 @@ def test_compact_keeps_tail_and_absolute_indices(log_dir: Path):
     assert list(log.read_range(5, 6)) == events[5:]
 
     log.close()
+
+
+def test_read_range_does_not_cache_stale_offsets_after_compaction(log_dir: Path):
+    log = DiskEventLog(log_dir)
+    events = [TestEvent() for _ in range(6)]
+    for event in events:
+        log.append(event)
+
+    in_flight = log.read_range(1, 5)
+    first = next(in_flight)
+    assert first.event_id == events[1].event_id
+
+    log.compact(4)
+    assert [event.event_id for event in in_flight] == [events[2].event_id, events[3].event_id, events[4].event_id]
+
+    reread = list(log.read_range(5, 6))
+    assert len(reread) == 1
+    assert reread[0].event_id == events[5].event_id
+
+    log.close()

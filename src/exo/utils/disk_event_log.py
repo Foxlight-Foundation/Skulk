@@ -177,6 +177,7 @@ class DiskEventLog:
         if start >= end:
             return
 
+        base_idx_at_open = self._base_idx
         self._file.flush()
         with open(self._active_path, "rb") as f:
             self._seek_to(f, start)
@@ -187,7 +188,7 @@ class DiskEventLog:
                 yield event
 
             # Cache where we ended up so the next sequential read is a hit
-            if end < len(self):
+            if base_idx_at_open == self._base_idx and end < len(self):
                 self._cache_offset(end, f.tell())
 
     def read_all(self) -> Iterator[Event]:

@@ -330,6 +330,7 @@ export function ChatMessages({
   className,
 }: ChatMessagesProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const pinnedToBottomRef = useRef(true);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState('');
@@ -343,6 +344,31 @@ export function ChatMessages({
   const lastCountRef = useRef(messages.length);
   const theme = useTheme() as Theme;
 
+  const getScrollParent = useCallback(
+    () => containerRef.current?.parentElement ?? null,
+    [],
+  );
+
+  const updateScrollState = useCallback(() => {
+    const parent = getScrollParent();
+    if (!parent) return;
+    const dist = parent.scrollHeight - parent.scrollTop - parent.clientHeight;
+    const pinnedToBottom = dist <= 100;
+    pinnedToBottomRef.current = pinnedToBottom;
+    setShowScrollBtn(!pinnedToBottom);
+  }, [getScrollParent]);
+
+  const scrollToBottom = useCallback(
+    (behavior: ScrollBehavior = 'smooth') => {
+      const parent = getScrollParent();
+      if (!parent) return;
+      parent.scrollTo({ top: parent.scrollHeight, behavior });
+      pinnedToBottomRef.current = true;
+      setShowScrollBtn(false);
+    },
+    [getScrollParent],
+  );
+
   // Reset streaming thinking toggle when new stream starts
   const prevStreamingThinking = useRef(streamingThinking);
   useEffect(() => {
@@ -355,26 +381,35 @@ export function ChatMessages({
   // Auto-scroll on new messages
   useEffect(() => {
     if (messages.length > lastCountRef.current) {
-      containerRef.current?.parentElement?.scrollTo({ top: containerRef.current.parentElement.scrollHeight, behavior: 'smooth' });
+      scrollToBottom();
     }
     lastCountRef.current = messages.length;
-  }, [messages.length]);
+  }, [messages.length, scrollToBottom]);
+
+  // Keep the viewport pinned while a streamed assistant response grows.
+  useEffect(() => {
+    if (
+      !pinnedToBottomRef.current
+      || (streamingContent == null && !streamingThinking)
+    ) {
+      return;
+    }
+
+    const animationFrameId = requestAnimationFrame(() => {
+      scrollToBottom('auto');
+    });
+
+    return () => cancelAnimationFrame(animationFrameId);
+  }, [streamingContent, streamingThinking, scrollToBottom]);
 
   // Scroll button visibility
   useEffect(() => {
-    const parent = containerRef.current?.parentElement;
+    const parent = getScrollParent();
     if (!parent) return;
-    const handler = () => {
-      const dist = parent.scrollHeight - parent.scrollTop - parent.clientHeight;
-      setShowScrollBtn(dist > 100);
-    };
-    parent.addEventListener('scroll', handler, { passive: true });
-    return () => parent.removeEventListener('scroll', handler);
-  }, []);
-
-  const scrollToBottom = useCallback(() => {
-    containerRef.current?.parentElement?.scrollTo({ top: containerRef.current.parentElement.scrollHeight, behavior: 'smooth' });
-  }, []);
+    updateScrollState();
+    parent.addEventListener('scroll', updateScrollState, { passive: true });
+    return () => parent.removeEventListener('scroll', updateScrollState);
+  }, [getScrollParent, updateScrollState]);
 
   const copyMessage = useCallback((id: string, content: string) => {
     navigator.clipboard.writeText(content);
