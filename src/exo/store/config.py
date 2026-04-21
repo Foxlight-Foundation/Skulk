@@ -76,6 +76,57 @@ import yaml
 from exo.utils.pydantic_ext import FrozenModel
 
 
+def _normalize_hostname(hostname: str) -> str:
+    """Return a comparable hostname token.
+
+    Hostname matching is intended to be user-friendly for the common macOS
+    case where one surface reports ``kite3`` while config may use
+    ``kite3.local``.  We therefore compare hostnames case-insensitively and
+    ignore any trailing dot used in FQDN notation.
+    """
+
+    return hostname.strip().rstrip(".").lower()
+
+
+def hostname_aliases(hostname: str) -> set[str]:
+    """Return hostname aliases that should identify the same machine.
+
+    The alias set includes the normalized hostname itself, the short hostname,
+    and a ``.local`` variant for short names.  This keeps config matching
+    stable across macOS host reporting differences without weakening node-id
+    matching semantics.
+    """
+
+    normalized = _normalize_hostname(hostname)
+    if not normalized:
+        return set()
+
+    aliases = {normalized}
+    short_hostname = normalized.split(".", 1)[0]
+    if short_hostname:
+        aliases.add(short_hostname)
+        aliases.add(f"{short_hostname}.local")
+    return aliases
+
+
+def node_matches_store_host(
+    store_host: str,
+    node_id: str,
+    hostname: str | None = None,
+) -> bool:
+    """Return whether the local node should consider itself the store host.
+
+    Matching remains strict for libp2p peer IDs, while hostname matching is
+    tolerant of short-name versus ``.local`` spelling differences.
+    """
+
+    if store_host == node_id:
+        return True
+    return _normalize_hostname(store_host) in hostname_aliases(
+        hostname or socket.gethostname()
+    )
+
+
 @final
 class StagingNodeConfig(FrozenModel):
     """Per-node staging configuration.
@@ -146,9 +197,9 @@ class ModelStoreConfig(FrozenModel):
             to standard HF downloads without removing the file.
         store_host: Hostname or node_id of the node that hosts the model
             store.  Used only for identity resolution (determining whether
-            this node is the store host).  Must match
-            ``socket.gethostname()`` or the libp2p peer ID of the
-            designated store node.
+            this node is the store host).  Hostname matching accepts the
+            usual short-name and ``.local`` variants for the same machine,
+            while node_id matching remains exact.
         store_http_host: Hostname or IP address used by worker nodes to
             reach the store host over HTTP.  Defaults to ``store_host``
             when ``None``.  Set this when ``store_host`` is a libp2p peer
@@ -306,10 +357,14 @@ def resolve_node_staging(
     Returns:
         The :class:`StagingNodeConfig` that should be used on this node.
     """
-    hostname = socket.gethostname()
-    for key in (node_id, hostname):
-        override = config.node_overrides.get(key)
-        if override is not None and override.staging is not None:
+    local_hostname_aliases = hostname_aliases(socket.gethostname())
+    for key, override in config.node_overrides.items():
+        key_matches_node = key == node_id
+        key_matches_hostname = _normalize_hostname(key) in local_hostname_aliases
+        if (
+            override.staging is not None
+            and (key_matches_node or key_matches_hostname)
+        ):
             # Merge: start from the base config and overlay only the fields
             # that the override explicitly sets, so a partial override like
             # ``cleanup_on_deactivate: false`` inherits node_cache_path etc.

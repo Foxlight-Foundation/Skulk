@@ -27,6 +27,7 @@ from exo.shared.types.common import NodeId, SessionId, SystemId
 from exo.store.config import (
     ExoConfig,
     load_exo_config,
+    node_matches_store_host,
     resolve_config_path,
     resolve_node_staging,
 )
@@ -134,8 +135,11 @@ class Node:
             and exo_config.model_store.enabled
         ):
             ms = exo_config.model_store
-            local_hostname = socket.gethostname()
-            is_store_host = ms.store_host in (str(node_id), local_hostname)
+            is_store_host = node_matches_store_host(
+                ms.store_host,
+                str(node_id),
+                hostname=socket.gethostname(),
+            )
 
             # Store host gets a local path so the client uses shutil instead of HTTP.
             # Use store_http_host (when set) as the HTTP hostname so that a PeerId
