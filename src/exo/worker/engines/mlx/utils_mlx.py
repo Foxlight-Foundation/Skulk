@@ -899,9 +899,13 @@ def load_tokenizer_for_model_id(
             tokenizer.eos_token_ids = [gemma_eos_id, gemma_end_of_turn_id]
 
     if capability_profile.tool_call_format == ToolCallFormat.Gemma4:
-        object.__setattr__(tokenizer, "tool_call_start", "<|tool_call>")
-        object.__setattr__(tokenizer, "tool_call_end", "<tool_call|>")
-        object.__setattr__(tokenizer, "tool_parser", _parse_gemma4_tool_calls)
+        # mlx-lm exposes tool-call markers through read-only properties on
+        # TokenizerWrapper. Configure the internal fields directly so Gemma 4
+        # tool parsing works across mlx-lm versions without mutating the
+        # wrapped HF tokenizer.
+        object.__setattr__(tokenizer, "_tool_call_start", "<|tool_call>")
+        object.__setattr__(tokenizer, "_tool_call_end", "<tool_call|>")
+        object.__setattr__(tokenizer, "_tool_parser", _parse_gemma4_tool_calls)
 
     return tokenizer
 
