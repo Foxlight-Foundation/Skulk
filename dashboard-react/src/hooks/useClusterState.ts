@@ -88,6 +88,12 @@ interface RawStateResponse {
   thunderboltBridgeCycles?: string[][];
 }
 
+interface RawLocalNodeIdentityResponse {
+  nodeId?: string;
+  hostname?: string;
+  ipAddress?: string;
+}
+
 /* ================================================================
    Transformation
    ================================================================ */
@@ -110,6 +116,14 @@ function extractIpFromMultiaddr(addr?: string): string | undefined {
   if (!addr) return undefined;
   const match = addr.match(/\/ip[46]\/([\d.]+|[a-fA-F0-9:]+)/);
   return match?.[1];
+}
+
+function normalizeNodeLabel(value?: string): string {
+  return (value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\.local$/, '')
+    .replace(/[\s._-]+/g, '');
 }
 
 function transformTopology(
@@ -218,9 +232,39 @@ function transformTopology(
 function ensureLocalNodePresent(
   topology: TopologyData,
   localNodeId: string | null,
+  localNodeIdentity: RawLocalNodeIdentityResponse | null,
   identities: Record<string, RawNodeIdentity>,
 ): TopologyData {
-  if (!localNodeId || topology.nodes[localNodeId]) {
+  if (!localNodeId) {
+    return topology;
+  }
+
+  if (topology.nodes[localNodeId]) {
+    return topology;
+  }
+
+  const normalizedLocalHostname = normalizeNodeLabel(localNodeIdentity?.hostname);
+  const localIpAddress = localNodeIdentity?.ipAddress?.trim();
+  const matchedRealLocalNode = Object.values(topology.nodes).some((node) => {
+    const normalizedFriendlyName = normalizeNodeLabel(node.friendly_name);
+    if (
+      normalizedLocalHostname.length > 0 &&
+      normalizedFriendlyName.length > 0 &&
+      normalizedFriendlyName === normalizedLocalHostname
+    ) {
+      return true;
+    }
+
+    if (!localIpAddress || localIpAddress.length === 0) {
+      return false;
+    }
+
+    return (node.network_interfaces ?? []).some((iface) =>
+      (iface.addresses ?? []).includes(localIpAddress),
+    );
+  });
+
+  if (matchedRealLocalNode) {
     return topology;
   }
 
@@ -314,13 +358,15 @@ export function useClusterState(): ClusterState {
   const [nodeRdmaCtl, setNodeRdmaCtl] = useState<Record<string, RawRdmaCtl>>({});
   const [thunderboltBridgeCycles, setThunderboltBridgeCycles] = useState<string[][]>([]);
   const [localNodeId, setLocalNodeId] = useState<string | null>(null);
+  const [localNodeIdentity, setLocalNodeIdentity] = useState<RawLocalNodeIdentityResponse | null>(null);
   const failuresRef = useRef(0);
 
   const fetchState = useCallback(async () => {
     try {
-      const [stateResponse, nodeIdResponse] = await Promise.all([
+      const [stateResponse, nodeIdResponse, nodeIdentityResponse] = await Promise.all([
         fetch('/state'),
         localNodeId == null ? fetch('/node_id') : Promise.resolve(null),
+        localNodeIdentity == null ? fetch('/node_identity') : Promise.resolve(null),
       ]);
       const res = stateResponse;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -329,6 +375,16 @@ export function useClusterState(): ClusterState {
         const nodeId = (await nodeIdResponse.json()) as string;
         setLocalNodeId(nodeId);
         resolvedLocalNodeId = nodeId;
+      }
+      let resolvedLocalNodeIdentity = localNodeIdentity;
+      if (nodeIdentityResponse && nodeIdentityResponse.ok) {
+        const identity = (await nodeIdentityResponse.json()) as RawLocalNodeIdentityResponse;
+        setLocalNodeIdentity(identity);
+        resolvedLocalNodeIdentity = identity;
+        if (identity.nodeId) {
+          setLocalNodeId(identity.nodeId);
+          resolvedLocalNodeId = identity.nodeId;
+        }
       }
       const data: RawStateResponse = await res.json();
 
@@ -344,6 +400,7 @@ export function useClusterState(): ClusterState {
             data.nodeRdmaCtl ?? {},
           ),
           resolvedLocalNodeId,
+          resolvedLocalNodeIdentity,
           data.nodeIdentities ?? {},
         );
         setTopology(topo);
@@ -366,7 +423,7 @@ export function useClusterState(): ClusterState {
         setConnected(false);
       }
     }
-  }, [localNodeId]);
+  }, [localNodeIdentity, localNodeId]);
 
   useEffect(() => {
     fetchState();
