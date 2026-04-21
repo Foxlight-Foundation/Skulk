@@ -362,7 +362,11 @@ class Node:
         if not ms.enabled:
             return
         local_hostname = socket.gethostname()
-        is_store_host = ms.store_host in (str(self.node_id), local_hostname)
+        is_store_host = node_matches_store_host(
+            ms.store_host,
+            str(self.node_id),
+            hostname=local_hostname,
+        )
         if not is_store_host:
             return
 
@@ -424,6 +428,7 @@ class Node:
                 # - Shutdown and re-create the worker
                 # - Shut down and re-create the API
 
+                start_replacement_event_router = False
                 if result.is_new_master:
                     await anyio.sleep(0)
                     self.event_router.shutdown()
@@ -437,7 +442,12 @@ class Node:
                         external_inbound=self.router.receiver(topics.GLOBAL_EVENTS),
                         external_outbound=self.router.sender(topics.LOCAL_EVENTS),
                     )
-                    self._tg.start_soon(self.event_router.run)
+                    # Wait to bootstrap the replacement event router until the
+                    # replacement worker/API receivers are attached. Otherwise,
+                    # a fast snapshot hydrate can be emitted before those
+                    # consumers exist, and the next live event will arrive out
+                    # of sequence against blank local state.
+                    start_replacement_event_router = True
 
                 if (
                     result.session_id.master_node_id == self.node_id
@@ -550,6 +560,8 @@ class Node:
                         self._tg.start_soon(self.worker.run)
                     if self.api:
                         self.api.reset(result.won_clock, self.event_router.receiver())
+                    if start_replacement_event_router:
+                        self._tg.start_soon(self.event_router.run)
                     # Broadcast config to cluster so worker nodes get the right store address
                     await self._broadcast_config_if_store_host()
                 else:
