@@ -34,6 +34,11 @@ class _FakeModel:
     layers = []
 
 
+class _FalseyModel(_FakeModel):
+    def __bool__(self) -> bool:
+        return False
+
+
 @pytest.mark.parametrize(
     "kv_backend",
     ["mlx_quantized", "turboquant", "turboquant_adaptive"],
@@ -63,6 +68,32 @@ def test_builder_forces_sequential_for_quantized_kv_backends(
 
     assert isinstance(generator, SequentialGenerator)
     assert not isinstance(generator, BatchGenerator)
+
+
+def test_builder_accepts_falsey_but_present_inference_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, cancel_recv = mp_channel[TaskId]()
+    event_send, _ = mp_channel[Event]()
+
+    monkeypatch.setattr(
+        "exo.worker.runner.llm_inference.runner.get_kv_cache_backend",
+        lambda: "default",
+    )
+
+    builder = Builder(
+        model_id=ModelId("test-model"),
+        event_sender=event_send,
+        cancel_receiver=cancel_recv,
+        inference_model=cast(Model, cast(object, _FalseyModel())),
+        tokenizer=cast(TokenizerWrapper, cast(object, _FakeTokenizer())),
+        group=cast(mx.distributed.Group | None, None),
+    )
+
+    generator = builder.build()
+
+    assert isinstance(generator, BatchGenerator)
+    assert not isinstance(generator, SequentialGenerator)
 
 
 def test_builder_forces_sequential_for_gemma4_runtime(

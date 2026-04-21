@@ -490,8 +490,10 @@ class Builder:
         self,
     ) -> InferenceGenerator:
         assert self.model_id
-        assert self.inference_model
-        assert self.tokenizer
+        # Some valid MLX model wrappers can be falsey, so bootstrap should only
+        # reject missing objects here rather than truthy-but-non-empty values.
+        assert self.inference_model is not None
+        assert self.tokenizer is not None
 
         vision_processor = self.vision_processor
 
