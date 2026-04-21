@@ -798,12 +798,16 @@ class ModelStoreDownloader(ShardDownloader):
             logger.info(
                 f"ModelStoreDownloader: staging {model_id} from store → {dest_path}"
             )
-            await self._emit_progress(shard, status="in_progress")
             try:
                 path = await self._store_client.stage_shard(
                     model_id,
                     dest_path,
-                    on_progress=None,
+                    on_progress=lambda downloaded, total: self._emit_progress(
+                        shard,
+                        status="in_progress",
+                        downloaded_bytes=downloaded,
+                        total_bytes=total,
+                    ),
                 )
                 await self._emit_progress(shard, status="complete")
                 return path
@@ -839,7 +843,12 @@ class ModelStoreDownloader(ShardDownloader):
             path = await self._store_client.stage_shard(
                 model_id,
                 dest_path,
-                on_progress=None,
+                on_progress=lambda downloaded, total: self._emit_progress(
+                    shard,
+                    status="in_progress",
+                    downloaded_bytes=downloaded,
+                    total_bytes=total,
+                ),
             )
             await self._emit_progress(shard, status="complete")
             return path
@@ -869,6 +878,8 @@ class ModelStoreDownloader(ShardDownloader):
         self,
         shard: ShardMetadata,
         status: str,
+        downloaded_bytes: int = 0,
+        total_bytes: int | None = None,
     ) -> None:
         """Emit a synthetic download progress event to all registered callbacks.
 
@@ -876,15 +887,23 @@ class ModelStoreDownloader(ShardDownloader):
         store-staged models (which don't go through the normal HF download
         pipeline that would emit these events naturally).
         """
+        total_memory = (
+            Memory.from_bytes(total_bytes)
+            if total_bytes is not None
+            else shard.model_card.storage_size
+        )
+        downloaded_memory = Memory.from_bytes(downloaded_bytes)
         progress = RepoDownloadProgress(
             repo_id=str(shard.model_card.model_id),
             repo_revision="store",
             shard=shard,
-            completed_files=0,
+            completed_files=1 if status == "complete" else 0,
             total_files=1,
-            downloaded=Memory.from_bytes(0),
-            downloaded_this_session=Memory.from_bytes(0),
-            total=shard.model_card.storage_size,
+            downloaded=downloaded_memory if status == "in_progress" else total_memory,
+            downloaded_this_session=(
+                downloaded_memory if status == "in_progress" else total_memory
+            ),
+            total=total_memory,
             overall_speed=0.0,
             overall_eta=timedelta(seconds=0),
             status="in_progress" if status == "in_progress" else "complete",
