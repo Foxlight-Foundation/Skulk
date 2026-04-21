@@ -193,6 +193,7 @@ from exo.shared.types.events import (
     ChunkGenerated,
     Event,
     IndexedEvent,
+    StateSnapshotHydrated,
     TracesMerged,
 )
 from exo.shared.types.memory import Memory
@@ -2488,10 +2489,13 @@ class API:
     async def _apply_state(self):
         with self.event_receiver as events:
             async for i_event in events:
-                if self._event_log is not None:
-                    self._event_log.append(i_event.event)
-                self.state = apply(self.state, i_event)
                 event = i_event.event
+                if (
+                    self._event_log is not None
+                    and not isinstance(event, StateSnapshotHydrated)
+                ):
+                    self._event_log.append(event)
+                self.state = apply(self.state, i_event)
 
                 if isinstance(event, ChunkGenerated):
                     if queue := self._image_generation_queues.get(

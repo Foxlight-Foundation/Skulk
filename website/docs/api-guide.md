@@ -743,6 +743,16 @@ If a local restart is already scheduled, returns HTTP 409 with `{"status": "rest
 
 Returns the cluster state as Skulk currently sees it.
 
+Operational note:
+
+- a follower may briefly report a local view that is behind the elected master
+  while it is catching up
+- on newer builds, catch-up can start from a snapshot plus retained replay tail
+  instead of always rebuilding from event `0`
+- if your cluster is mixed-version during rollout, upgrade all nodes before you
+  rely on bounded replay retention on the master; an older restarted node may
+  not be able to fully resync after old history has been compacted away
+
 ### Event log
 
 **GET** `/events`

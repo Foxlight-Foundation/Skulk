@@ -217,6 +217,12 @@ Use this path when you want more than one machine in the cluster.
 
 Skulk can discover peers automatically in many local setups. If you want a fixed cluster topology, use `--bootstrap-peers` or the `EXO_BOOTSTRAP_PEERS` environment variable.
 
+If you are rolling out a version that uses snapshot bootstrap plus bounded
+master replay retention, plan to upgrade every node in the cluster.
+Mixed-version operation is acceptable during rollout, but once a new master has
+compacted old replay history, an older restarted node that only knows how to
+rebuild from event `0` may no longer be able to fully resync.
+
 Example:
 
 ```bash

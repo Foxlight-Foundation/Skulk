@@ -153,3 +153,20 @@ def test_rotation_keeps_at_most_5_archives(log_dir: Path):
         assert not old.exists()
     for recent in all_archives[2:]:
         assert recent.exists()
+
+
+def test_compact_keeps_tail_and_absolute_indices(log_dir: Path):
+    log = DiskEventLog(log_dir)
+    events = [TestEvent() for _ in range(6)]
+    for event in events:
+        log.append(event)
+
+    log.compact(4)
+
+    assert log.start_idx == 4
+    assert len(log) == 6
+    assert list(log.read_range(0, 6)) == events[4:]
+    assert list(log.read_range(4, 6)) == events[4:]
+    assert list(log.read_range(5, 6)) == events[5:]
+
+    log.close()

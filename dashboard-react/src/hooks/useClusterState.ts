@@ -215,6 +215,44 @@ function transformTopology(
   return { nodes, edges };
 }
 
+function ensureLocalNodePresent(
+  topology: TopologyData,
+  localNodeId: string | null,
+  identities: Record<string, RawNodeIdentity>,
+): TopologyData {
+  if (!localNodeId || topology.nodes[localNodeId]) {
+    return topology;
+  }
+
+  const localIdentity = identities[localNodeId];
+
+  return {
+    nodes: {
+      ...topology.nodes,
+      [localNodeId]: {
+        system_info: {
+          model_id: localIdentity?.modelId ?? 'Unknown',
+          chip: localIdentity?.chipId,
+          memory: 0,
+        },
+        network_interfaces: [],
+        ip_to_interface: {},
+        macmon_info: {
+          memory: { ram_usage: 0, ram_total: 0 },
+        },
+        last_macmon_update: Date.now() / 1000,
+        friendly_name: localIdentity?.friendlyName ?? 'Local node (syncing)',
+        os_version: localIdentity?.osVersion,
+        os_build_version: localIdentity?.osBuildVersion,
+        exo_version: localIdentity?.exoVersion,
+        exo_commit: localIdentity?.exoCommit,
+        syncing: true,
+      },
+    },
+    edges: topology.edges,
+  };
+}
+
 /* ================================================================
    Hook
    ================================================================ */
@@ -275,23 +313,38 @@ export function useClusterState(): ClusterState {
   const [nodeThunderboltBridge, setNodeThunderboltBridge] = useState<Record<string, RawThunderboltBridge>>({});
   const [nodeRdmaCtl, setNodeRdmaCtl] = useState<Record<string, RawRdmaCtl>>({});
   const [thunderboltBridgeCycles, setThunderboltBridgeCycles] = useState<string[][]>([]);
+  const [localNodeId, setLocalNodeId] = useState<string | null>(null);
   const failuresRef = useRef(0);
 
   const fetchState = useCallback(async () => {
     try {
-      const res = await fetch('/state');
+      const [stateResponse, nodeIdResponse] = await Promise.all([
+        fetch('/state'),
+        localNodeId == null ? fetch('/node_id') : Promise.resolve(null),
+      ]);
+      const res = stateResponse;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      let resolvedLocalNodeId = localNodeId;
+      if (nodeIdResponse && nodeIdResponse.ok) {
+        const nodeId = (await nodeIdResponse.json()) as string;
+        setLocalNodeId(nodeId);
+        resolvedLocalNodeId = nodeId;
+      }
       const data: RawStateResponse = await res.json();
 
       if (data.topology) {
-        const topo = transformTopology(
-          data.topology,
+        const topo = ensureLocalNodePresent(
+          transformTopology(
+            data.topology,
+            data.nodeIdentities ?? {},
+            data.nodeMemory ?? {},
+            data.nodeSystem ?? {},
+            data.nodeNetwork ?? {},
+            data.nodeThunderboltBridge ?? {},
+            data.nodeRdmaCtl ?? {},
+          ),
+          resolvedLocalNodeId,
           data.nodeIdentities ?? {},
-          data.nodeMemory ?? {},
-          data.nodeSystem ?? {},
-          data.nodeNetwork ?? {},
-          data.nodeThunderboltBridge ?? {},
-          data.nodeRdmaCtl ?? {},
         );
         setTopology(topo);
       }
@@ -313,7 +366,7 @@ export function useClusterState(): ClusterState {
         setConnected(false);
       }
     }
-  }, []);
+  }, [localNodeId]);
 
   useEffect(() => {
     fetchState();

@@ -20,6 +20,8 @@ export interface NodeLabelProps {
   debugContent?: React.ReactNode;
   /** When set, shows a restart icon before the name. */
   onRestart?: () => void;
+  /** Optional status line that replaces the memory summary. */
+  statusText?: string;
 }
 
 export function NodeLabel({
@@ -32,6 +34,7 @@ export function NodeLabel({
   memoryY = 20,
   debugContent,
   onRestart,
+  statusText,
 }: NodeLabelProps) {
   const theme = useTheme() as Theme;
   const ramPercent = ramTotal > 0 ? ((ramUsed / ramTotal) * 100).toFixed(0) : '0';
@@ -119,13 +122,27 @@ export function NodeLabel({
           />
         </foreignObject>
       )}
-      {/* Memory below: "15.4GB" in grey, "/24GB (64%)" in yellow */}
-      <text x={cx} y={memoryY} textAnchor="middle" dominantBaseline="middle"
-        fontFamily="SF Mono, Monaco, monospace" fontSize={13}>
-        <tspan fill={theme.colors.textSecondary}>{usedStr}</tspan>
-        <tspan fill={theme.colors.gold}>/{totalStr}</tspan>
-        <tspan fill={theme.colors.textSecondary}>{' '}({ramPercent}%)</tspan>
-      </text>
+      {/* Secondary line: memory summary for live nodes, status text for placeholders */}
+      {statusText ? (
+        <text
+          x={cx}
+          y={memoryY}
+          textAnchor="middle"
+          dominantBaseline="middle"
+          fill={theme.colors.textSecondary}
+          fontFamily="SF Mono, Monaco, monospace"
+          fontSize={12}
+        >
+          {statusText}
+        </text>
+      ) : (
+        <text x={cx} y={memoryY} textAnchor="middle" dominantBaseline="middle"
+          fontFamily="SF Mono, Monaco, monospace" fontSize={13}>
+          <tspan fill={theme.colors.textSecondary}>{usedStr}</tspan>
+          <tspan fill={theme.colors.gold}>/{totalStr}</tspan>
+          <tspan fill={theme.colors.textSecondary}>{' '}({ramPercent}%)</tspan>
+        </text>
+      )}
     </g>
   );
 }

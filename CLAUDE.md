@@ -109,6 +109,7 @@ Components communicate via typed pub/sub topics (src/exo/routing/topics.py):
 - `GLOBAL_EVENTS`: Master broadcasts indexed events to all workers
 - `LOCAL_EVENTS`: Workers send events to master for indexing
 - `COMMANDS`: Workers/API send commands to master
+- `STATE_SYNC_MESSAGES`: Followers request the current session snapshot before replaying the retained tail
 - `ELECTION_MESSAGES`: Election protocol messages
 - `CONNECTION_MESSAGES`: libp2p connection updates
 

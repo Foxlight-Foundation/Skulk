@@ -9,15 +9,23 @@ from pathlib import Path
 import msgspec
 import zstandard
 from loguru import logger
-from pydantic import TypeAdapter
+from pydantic import Field, TypeAdapter
 
 from exo.shared.types.events import Event
+from exo.utils.pydantic_ext import CamelCaseModel
 
 _EVENT_ADAPTER: TypeAdapter[Event] = TypeAdapter(Event)
 
 _HEADER_SIZE = 4  # uint32 big-endian
 _OFFSET_CACHE_SIZE = 128
 _MAX_ARCHIVES = 5
+
+
+class EventLogMetadata(CamelCaseModel):
+    """Metadata describing the absolute index range of the active replay tail."""
+
+    start_idx: int = Field(ge=0)
+    count: int = Field(ge=0)
 
 
 def _serialize_event(event: Event) -> bytes:
@@ -73,14 +81,31 @@ class DiskEventLog:
         self._directory = directory
         self._directory.mkdir(parents=True, exist_ok=True)
         self._active_path = directory / "events.bin"
+        self._metadata_path = directory / "events.meta.json"
         self._offset_cache: OrderedDict[int, int] = OrderedDict()
+        self._base_idx: int = 0
         self._count: int = 0
 
         # Rotate stale active file from a previous session/crash
         if self._active_path.exists():
             self._rotate(self._active_path, self._directory)
+        with contextlib.suppress(FileNotFoundError):
+            self._metadata_path.unlink()
 
         self._file: BufferedRandom = open(self._active_path, "w+b")  # noqa: SIM115
+        self._write_metadata()
+
+    @property
+    def start_idx(self) -> int:
+        return self._base_idx
+
+    def _write_metadata(self) -> None:
+        self._metadata_path.write_text(
+            EventLogMetadata(
+                start_idx=self._base_idx,
+                count=self._count,
+            ).model_dump_json()
+        )
 
     def _cache_offset(self, idx: int, offset: int) -> None:
         self._offset_cache[idx] = offset
@@ -96,7 +121,7 @@ class DiskEventLog:
             return
 
         # Find the highest cached index before target_idx
-        scan_from_idx = 0
+        scan_from_idx = self._base_idx
         scan_from_offset = 0
         for cached_idx in self._offset_cache:
             if cached_idx < target_idx:
@@ -115,11 +140,41 @@ class DiskEventLog:
         self._file.write(len(packed).to_bytes(_HEADER_SIZE, byteorder="big"))
         self._file.write(packed)
         self._count += 1
+        self._write_metadata()
+
+    def compact(self, keep_from_idx: int) -> None:
+        """Discard events before ``keep_from_idx`` while preserving absolute indices."""
+
+        keep_from_idx = max(keep_from_idx, self._base_idx)
+        keep_from_idx = min(keep_from_idx, len(self))
+        if keep_from_idx == self._base_idx:
+            return
+
+        retained_events = list(self.read_range(keep_from_idx, len(self)))
+        replacement_path = self._directory / "events.bin.tmp"
+        with open(replacement_path, "w+b") as replacement_file:
+            for event in retained_events:
+                packed = _serialize_event(event)
+                replacement_file.write(
+                    len(packed).to_bytes(_HEADER_SIZE, byteorder="big")
+                )
+                replacement_file.write(packed)
+
+        self._file.close()
+        replacement_path.replace(self._active_path)
+        self._file = open(self._active_path, "r+b")  # noqa: SIM115
+        self._base_idx = keep_from_idx
+        self._count = len(retained_events)
+        self._offset_cache.clear()
+        self._write_metadata()
 
     def read_range(self, start: int, end: int) -> Iterator[Event]:
         """Yield events from index start (inclusive) to end (exclusive)."""
-        end = min(end, self._count)
-        if start < 0 or end < 0 or start >= end:
+        if start < 0 or end < 0:
+            return
+        start = max(start, self._base_idx)
+        end = min(end, len(self))
+        if start >= end:
             return
 
         self._file.flush()
@@ -132,7 +187,7 @@ class DiskEventLog:
                 yield event
 
             # Cache where we ended up so the next sequential read is a hit
-            if end < self._count:
+            if end < len(self):
                 self._cache_offset(end, f.tell())
 
     def read_all(self) -> Iterator[Event]:
@@ -148,7 +203,7 @@ class DiskEventLog:
                 yield event
 
     def __len__(self) -> int:
-        return self._count
+        return self._base_idx + self._count
 
     def close(self) -> None:
         """Close the file and rotate active file to compressed archive."""
@@ -159,6 +214,8 @@ class DiskEventLog:
             self._rotate(self._active_path, self._directory)
         elif self._active_path.exists():
             self._active_path.unlink()
+        with contextlib.suppress(FileNotFoundError):
+            self._metadata_path.unlink()
 
     @staticmethod
     def _rotate(source: Path, directory: Path) -> None:

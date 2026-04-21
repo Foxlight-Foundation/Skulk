@@ -73,9 +73,12 @@ class Node:
         await router.register_topic(topics.ELECTION_MESSAGES)
         await router.register_topic(topics.CONNECTION_MESSAGES)
         await router.register_topic(topics.DOWNLOAD_COMMANDS)
+        await router.register_topic(topics.STATE_SYNC_MESSAGES)
         event_router = EventRouter(
             session_id,
             command_sender=router.sender(topics.COMMANDS),
+            state_sync_sender=router.sender(topics.STATE_SYNC_MESSAGES),
+            state_sync_receiver=router.receiver(topics.STATE_SYNC_MESSAGES),
             external_outbound=router.sender(topics.LOCAL_EVENTS),
             external_inbound=router.receiver(topics.GLOBAL_EVENTS),
         )
@@ -281,6 +284,8 @@ class Node:
             global_event_sender=router.sender(topics.GLOBAL_EVENTS),
             local_event_receiver=router.receiver(topics.LOCAL_EVENTS),
             command_receiver=router.receiver(topics.COMMANDS),
+            state_sync_receiver=router.receiver(topics.STATE_SYNC_MESSAGES),
+            state_sync_sender=router.sender(topics.STATE_SYNC_MESSAGES),
             download_command_sender=router.sender(topics.DOWNLOAD_COMMANDS),
         )
 
@@ -420,9 +425,13 @@ class Node:
                     self.event_router.shutdown()
                     self.event_router = EventRouter(
                         result.session_id,
-                        self.router.sender(topics.COMMANDS),
-                        self.router.receiver(topics.GLOBAL_EVENTS),
-                        self.router.sender(topics.LOCAL_EVENTS),
+                        command_sender=self.router.sender(topics.COMMANDS),
+                        state_sync_sender=self.router.sender(topics.STATE_SYNC_MESSAGES),
+                        state_sync_receiver=self.router.receiver(
+                            topics.STATE_SYNC_MESSAGES
+                        ),
+                        external_inbound=self.router.receiver(topics.GLOBAL_EVENTS),
+                        external_outbound=self.router.sender(topics.LOCAL_EVENTS),
                     )
                     self._tg.start_soon(self.event_router.run)
 
@@ -443,6 +452,12 @@ class Node:
                         global_event_sender=self.router.sender(topics.GLOBAL_EVENTS),
                         local_event_receiver=self.router.receiver(topics.LOCAL_EVENTS),
                         command_receiver=self.router.receiver(topics.COMMANDS),
+                        state_sync_receiver=self.router.receiver(
+                            topics.STATE_SYNC_MESSAGES
+                        ),
+                        state_sync_sender=self.router.sender(
+                            topics.STATE_SYNC_MESSAGES
+                        ),
                         download_command_sender=self.router.sender(
                             topics.DOWNLOAD_COMMANDS
                         ),

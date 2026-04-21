@@ -31,6 +31,22 @@ function buildDebugContent(
   allNodes: Record<string, NodeInfo>,
   theme: Theme,
 ): React.ReactNode {
+  if (nodeInfo.syncing) {
+    return (
+      <div style={{ lineHeight: 1.6 }}>
+        <div style={{ color: theme.colors.gold, fontWeight: 600, marginBottom: 4 }}>
+          Joining cluster
+        </div>
+        <div style={{ color: theme.colors.textSecondary }}>
+          This dashboard is still replaying the cluster event log for the current master session.
+        </div>
+        <div style={{ color: theme.colors.textSecondary }}>
+          The node will switch to live telemetry once its join events have been applied locally.
+        </div>
+      </div>
+    );
+  }
+
   const chip = nodeInfo.system_info?.chip ?? '';
   const modelId = nodeInfo.system_info?.model_id ?? 'Unknown';
   const os = nodeInfo.os_version
@@ -139,6 +155,7 @@ export function ClusterNode({
 
   // Display name
   const name = nodeInfo.friendly_name ?? nodeId.slice(-8);
+  const statusText = nodeInfo.syncing ? 'Syncing cluster state' : undefined;
 
   // Label sizing
   const labelFontSize = 15;
@@ -158,6 +175,7 @@ export function ClusterNode({
         name={name}
         ramUsed={ramUsed}
         ramTotal={ramTotal}
+        statusText={statusText}
         cx={0}
         fontSize={labelFontSize}
         nameY={iconTop - nameOffset}

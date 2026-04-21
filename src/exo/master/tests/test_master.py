@@ -29,6 +29,7 @@ from exo.shared.types.memory import Memory
 from exo.shared.types.profiling import (
     MemoryUsage,
 )
+from exo.shared.types.state_sync import StateSyncMessage
 from exo.shared.types.tasks import TaskStatus
 from exo.shared.types.tasks import TextGeneration as TextGenerationTask
 from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
@@ -50,6 +51,7 @@ async def test_master():
     ge_sender, global_event_receiver = channel[GlobalForwarderEvent]()
     command_sender, co_receiver = channel[ForwarderCommand]()
     local_event_sender, le_receiver = channel[LocalForwarderEvent]()
+    state_sync_sender, state_sync_receiver = channel[StateSyncMessage]()
     fcds, _fcdr = channel[ForwarderDownloadCommand]()
     ev_send, ev_recv = channel[Event]()
 
@@ -88,6 +90,8 @@ async def test_master():
         global_event_sender=ge_sender,
         local_event_receiver=le_receiver,
         command_receiver=co_receiver,
+        state_sync_receiver=state_sync_receiver,
+        state_sync_sender=state_sync_sender,
         download_command_sender=fcds,
     )
     logger.info("run the master")

@@ -45,6 +45,7 @@ export interface NodeInfo {
   thunderbolt_bridge?: boolean;
   rdma_enabled?: boolean;
   rdma_interfaces_present?: boolean;
+  syncing?: boolean;
 }
 
 /** Directed edge between two nodes in the cluster topology graph. */

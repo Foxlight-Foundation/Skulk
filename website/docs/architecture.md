@@ -115,6 +115,18 @@ In practice, that means:
 - those events are ordered and applied into a shared state object
 - commands and current state together drive future work
 
+Follower recovery does not have to mean replaying an entire session forever.
+Newer Skulk builds can bootstrap from a master-published snapshot and then
+replay only the retained tail after that snapshot. This keeps restart and
+rejoin time bounded on long-lived clusters while preserving the same
+authoritative model: master state plus indexed events.
+
+This does introduce an operational rollout rule: once a master starts
+compacting old replay history after writing snapshots, older nodes that only
+understand "replay from event `0`" should be considered temporary guests during
+the rollout window, not indefinitely supported members of the cluster. Upgrade
+all nodes before relying on bounded retention as the normal steady state.
+
 A simple rule of thumb:
 
 - events are past tense

@@ -5,6 +5,23 @@
 This project records release notes here and mirrors public-facing notes in
 `website/docs/release-notes/`.
 
+## [Unreleased]
+
+### Changed
+
+- Added snapshot bootstrap for follower recovery so newer nodes can hydrate
+  cluster state from a master-published snapshot and replay only the retained
+  tail instead of rebuilding from event `0`.
+- Added bounded live master replay retention so long-lived sessions no longer
+  need to grow the active `events.bin` without limit.
+
+### Docs
+
+- Documented the rollout caveat for snapshot bootstrap plus bounded retention:
+  mixed-version clusters are acceptable during upgrade, but all nodes should be
+  upgraded before operators rely on compacted replay history as the steady
+  state.
+
 ## [1.0.2] - 2026-04-19
 
 ### Added
