@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Sequence
 
 import anyio
@@ -222,3 +223,64 @@ async def test_master():
 
         ev_send.close()
         await master.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_state_sync_response_includes_config_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keypair = get_node_id_keypair()
+    node_id = NodeId(keypair.to_node_id())
+    session_id = SessionId(master_node_id=node_id, election_clock=0)
+
+    config_path = tmp_path / "skulk.yaml"
+    config_yaml = (
+        "model_store:\n"
+        "  enabled: true\n"
+        "  store_host: kite3.local\n"
+        "  store_path: /Volumes/models\n"
+    )
+    config_path.write_text(config_yaml)
+    monkeypatch.setattr("exo.master.main.resolve_config_path", lambda: config_path)
+
+    global_sender, _global_receiver = channel[GlobalForwarderEvent]()
+    _command_sender, command_receiver = channel[ForwarderCommand]()
+    _local_event_sender, local_event_receiver = channel[LocalForwarderEvent]()
+    request_sender, state_sync_receiver = channel[StateSyncMessage]()
+    state_sync_sender, response_receiver = channel[StateSyncMessage]()
+    download_sender, _download_receiver = channel[ForwarderDownloadCommand]()
+    event_sender, _event_receiver = channel[Event]()
+
+    master = Master(
+        node_id,
+        session_id,
+        event_sender=event_sender,
+        global_event_sender=global_sender,
+        local_event_receiver=local_event_receiver,
+        command_receiver=command_receiver,
+        state_sync_receiver=state_sync_receiver,
+        state_sync_sender=state_sync_sender,
+        download_command_sender=download_sender,
+    )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(master.run)
+        await request_sender.send(
+            StateSyncMessage(
+                kind="request",
+                requester=SystemId("requester"),
+                session_id=session_id,
+            )
+        )
+
+        response: StateSyncMessage | None = None
+        while response is None:
+            candidate = await response_receiver.receive()
+            if candidate.kind == "response":
+                response = candidate
+
+        assert response.config_yaml == config_yaml
+        assert response.snapshot is not None
+        assert response.snapshot.session_id == session_id
+
+        tg.cancel_scope.cancel()

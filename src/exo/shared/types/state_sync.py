@@ -30,11 +30,16 @@ class StateSyncMessage(CamelCaseModel):
     requester: SystemId
     session_id: SessionId
     snapshot: StateSnapshot | None = None
+    config_yaml: str | None = None
 
     @model_validator(mode="after")
     def _validate_shape(self) -> "StateSyncMessage":
-        if self.kind == "request" and self.snapshot is not None:
-            raise ValueError("State sync requests cannot carry snapshots")
+        if self.kind == "request" and (
+            self.snapshot is not None or self.config_yaml is not None
+        ):
+            raise ValueError(
+                "State sync requests cannot carry snapshots or config payloads"
+            )
         if self.kind == "response" and self.snapshot is None:
             raise ValueError("State sync responses must carry a snapshot")
         return self

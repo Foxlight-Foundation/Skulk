@@ -68,6 +68,7 @@ from exo.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
 )
 from exo.shared.types.worker.instances import InstanceId
+from exo.store.config import resolve_config_path
 from exo.utils.channels import Receiver, Sender
 from exo.utils.disk_event_log import DiskEventLog
 from exo.utils.event_buffer import MultiSourceBuffer
@@ -544,6 +545,10 @@ class Master:
                 if message.session_id != self.session_id:
                     continue
 
+                config_path = resolve_config_path()
+                config_yaml = (
+                    config_path.read_text() if config_path.exists() else None
+                )
                 await self.state_sync_sender.send(
                     StateSyncMessage(
                         kind="response",
@@ -554,6 +559,7 @@ class Master:
                             last_event_applied_idx=self.state.last_event_applied_idx,
                             state=self.state,
                         ),
+                        config_yaml=config_yaml,
                     )
                 )
 

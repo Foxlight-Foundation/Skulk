@@ -93,6 +93,12 @@ async def test_election_restarts_event_router_after_receivers_are_rewired(
 
     monkeypatch.setattr("exo.main.EventRouter", NewEventRouter)
     monkeypatch.setattr("exo.main.Worker", NewWorker)
+    async def _fake_request_cluster_config(
+        *_args: Any, **_kwargs: Any
+    ) -> str | None:
+        return None
+
+    monkeypatch.setattr(Node, "_request_cluster_config", _fake_request_cluster_config)
 
     election_sender, election_receiver = channel[ElectionResult]()
     node = Node(
