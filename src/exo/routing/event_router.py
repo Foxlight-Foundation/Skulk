@@ -49,6 +49,7 @@ class EventRouter:
     snapshot_request_timeout_seconds: float = 1.0
     snapshot_request_attempts: int = 3
     _bootstrap_complete: anyio.Event = field(init=False, default_factory=anyio.Event)
+    _release_lock: anyio.Lock = field(init=False, default_factory=anyio.Lock)
 
     async def run(self):
         try:
@@ -189,22 +190,26 @@ class EventRouter:
         )
 
     async def _release_ready_events(self) -> None:
-        drained = self.event_buffer.drain_indexed()
-        if drained:
-            self._nack_attempts = 0
-            if self._nack_cancel_scope:
-                self._nack_cancel_scope.cancel()
+        # Bootstrap replay and live event ingestion can both try to drain the ordered
+        # buffer. Serialize release so `next_idx_to_release` cannot advance past
+        # events that are still waiting to be delivered to consumers.
+        async with self._release_lock:
+            drained = self.event_buffer.drain_indexed()
+            if drained:
+                self._nack_attempts = 0
+                if self._nack_cancel_scope:
+                    self._nack_cancel_scope.cancel()
 
-        if not drained and (
-            self._nack_cancel_scope is None or self._nack_cancel_scope.cancel_called
-        ):
-            self._tg.start_soon(
-                self._nack_request, self.event_buffer.next_idx_to_release
-            )
-            return
+            if not drained and (
+                self._nack_cancel_scope is None or self._nack_cancel_scope.cancel_called
+            ):
+                self._tg.start_soon(
+                    self._nack_request, self.event_buffer.next_idx_to_release
+                )
+                return
 
-        for idx, event in drained:
-            await self._send_internal_event(IndexedEvent(idx=idx, event=event))
+            for idx, event in drained:
+                await self._send_internal_event(IndexedEvent(idx=idx, event=event))
 
     async def _send_internal_event(self, indexed_event: IndexedEvent) -> None:
         to_clear = set[int]()

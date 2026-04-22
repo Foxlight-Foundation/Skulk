@@ -190,3 +190,29 @@ def test_read_range_does_not_cache_stale_offsets_after_compaction(log_dir: Path)
     assert reread[0].event_id == events[5].event_id
 
     log.close()
+
+
+def test_compact_aborts_when_retained_tail_is_incomplete(
+    log_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    log = DiskEventLog(log_dir)
+    events = [TestEvent() for _ in range(6)]
+    for event in events:
+        log.append(event)
+
+    def fake_read_range(start: int, end: int):
+        assert start == 4
+        assert end == 6
+        return iter(events[4:5])
+
+    monkeypatch.setattr(log, "read_range", fake_read_range)
+
+    log.compact(4)
+
+    assert log.start_idx == 0
+    assert len(log) == 6
+    assert [event.event_id for event in log.read_all()] == [
+        event.event_id for event in events
+    ]
+
+    log.close()

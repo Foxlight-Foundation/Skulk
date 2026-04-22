@@ -145,12 +145,30 @@ class DiskEventLog:
     def compact(self, keep_from_idx: int) -> None:
         """Discard events before ``keep_from_idx`` while preserving absolute indices."""
 
+        absolute_end = len(self)
         keep_from_idx = max(keep_from_idx, self._base_idx)
-        keep_from_idx = min(keep_from_idx, len(self))
+        keep_from_idx = min(keep_from_idx, absolute_end)
         if keep_from_idx == self._base_idx:
             return
 
-        retained_events = list(self.read_range(keep_from_idx, len(self)))
+        expected_retained_count = absolute_end - keep_from_idx
+
+        # Compaction must rebuild the retained tail from authoritative disk
+        # positions. If a cached absolute index points at the wrong byte
+        # offset, rewriting a partial tail would make the active log's absolute
+        # length fall behind the in-memory state index and break future event
+        # application on the master.
+        self._offset_cache.clear()
+        retained_events = list(self.read_range(keep_from_idx, absolute_end))
+        if len(retained_events) != expected_retained_count:
+            logger.error(
+                "Refusing to compact event log because the retained tail was read "
+                f"incompletely (expected={expected_retained_count}, "
+                f"actual={len(retained_events)}, keep_from_idx={keep_from_idx}, "
+                f"absolute_end={absolute_end})"
+            )
+            return
+
         replacement_path = self._directory / "events.bin.tmp"
         with open(replacement_path, "w+b") as replacement_file:
             for event in retained_events:

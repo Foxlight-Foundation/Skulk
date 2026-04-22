@@ -1,3 +1,6 @@
+from dataclasses import dataclass, field
+from typing import cast
+
 import anyio
 import pytest
 
@@ -6,6 +9,7 @@ from exo.shared.types.commands import ForwarderCommand, RequestEventLog
 from exo.shared.types.common import NodeId, SessionId
 from exo.shared.types.events import (
     GlobalForwarderEvent,
+    IndexedEvent,
     LocalForwarderEvent,
     StateSnapshotHydrated,
     TestEvent,
@@ -19,6 +23,7 @@ def _make_router(
     session_id: SessionId,
     *,
     snapshot_request_attempts: int = 3,
+    router_cls: type[EventRouter] = EventRouter,
 ) -> tuple[
     EventRouter,
     Receiver[ForwarderCommand],
@@ -32,7 +37,7 @@ def _make_router(
     external_sender, external_receiver = channel[GlobalForwarderEvent]()
     external_outbound, _unused_external_outbound = channel[LocalForwarderEvent]()
 
-    router = EventRouter(
+    router = router_cls(
         session_id,
         command_sender=command_sender,
         state_sync_sender=state_sync_sender,
@@ -51,6 +56,24 @@ def _make_router(
         state_sync_responses,
         external_sender,
     )
+
+
+@dataclass
+class _ControlledSendEventRouter(EventRouter):
+    delivered_indices: list[int] = field(init=False, default_factory=list)
+    first_send_started: anyio.Event = field(init=False, default_factory=anyio.Event)
+    allow_first_send_finish: anyio.Event = field(
+        init=False, default_factory=anyio.Event
+    )
+
+    async def _send_internal_event(self, indexed_event: IndexedEvent) -> None:
+        self.delivered_indices.append(indexed_event.idx)
+        if indexed_event.idx == 0:
+            self.first_send_started.set()
+            await self.allow_first_send_finish.wait()
+
+    async def release_ready_events_for_test(self) -> None:
+        await self._release_ready_events()
 
 
 @pytest.mark.asyncio
@@ -293,3 +316,34 @@ async def test_snapshot_bootstrap_retries_before_full_replay_fallback() -> None:
 
         router.shutdown()
         tg.cancel_scope.cancel()
+
+
+@pytest.mark.asyncio
+async def test_release_ready_events_preserves_order_during_concurrent_drains() -> None:
+    session_id = SessionId(master_node_id=NodeId("master"), election_clock=13)
+    router, _command_receiver, _state_sync_requests, _state_sync_responses, _sender = cast(
+        tuple[
+            _ControlledSendEventRouter,
+            Receiver[ForwarderCommand],
+            Receiver[StateSyncMessage],
+            Sender[StateSyncMessage],
+            Sender[GlobalForwarderEvent],
+        ],
+        _make_router(session_id, router_cls=_ControlledSendEventRouter),
+    )
+
+    router.event_buffer.ingest(0, TestEvent())
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(router.release_ready_events_for_test)
+        await router.first_send_started.wait()
+
+        router.event_buffer.ingest(1, TestEvent())
+        tg.start_soon(router.release_ready_events_for_test)
+        await anyio.sleep(0)
+
+        assert router.delivered_indices == [0]
+
+        router.allow_first_send_finish.set()
+
+    assert router.delivered_indices == [0, 1]
