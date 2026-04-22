@@ -60,6 +60,7 @@ class StartWarmup(BaseTask):  # emitted by Worker
 class TextGeneration(BaseTask):  # emitted by Master
     command_id: CommandId
     task_params: TextGenerationTaskParams
+    trace_enabled: bool = False
 
     error_type: str | None = Field(default=None)
     error_message: str | None = Field(default=None)
@@ -73,6 +74,7 @@ class CancelTask(BaseTask):
 class ImageGeneration(BaseTask):  # emitted by Master
     command_id: CommandId
     task_params: ImageGenerationTaskParams
+    trace_enabled: bool = False
 
     error_type: str | None = Field(default=None)
     error_message: str | None = Field(default=None)
@@ -81,6 +83,7 @@ class ImageGeneration(BaseTask):  # emitted by Master
 class ImageEdits(BaseTask):  # emitted by Master
     command_id: CommandId
     task_params: ImageEditsTaskParams
+    trace_enabled: bool = False
 
     error_type: str | None = Field(default=None)
     error_message: str | None = Field(default=None)
@@ -89,6 +92,7 @@ class ImageEdits(BaseTask):  # emitted by Master
 class TextEmbedding(BaseTask):  # emitted by Master
     command_id: CommandId
     task_params: TextEmbeddingTaskParams
+    trace_enabled: bool = False
 
     error_type: str | None = Field(default=None)
     error_message: str | None = Field(default=None)

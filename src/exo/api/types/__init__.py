@@ -69,7 +69,11 @@ from .api import TraceListItem as TraceListItem
 from .api import TraceListResponse as TraceListResponse
 from .api import TraceRankStats as TraceRankStats
 from .api import TraceResponse as TraceResponse
+from .api import TraceSourceNode as TraceSourceNode
 from .api import TraceStatsResponse as TraceStatsResponse
+from .api import TraceTaskKind as TraceTaskKind
+from .api import TracingStateResponse as TracingStateResponse
+from .api import UpdateTracingStateRequest as UpdateTracingStateRequest
 from .api import Usage as Usage
 from .api import WebSearchResult as WebSearchResult
 from .api import WebSearchToolRequest as WebSearchToolRequest

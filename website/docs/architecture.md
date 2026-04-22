@@ -204,6 +204,26 @@ The key pieces:
 
 This is opt-in. Without the logging config, skulk behaves identically to before.
 
+## Where Tracing Fits
+
+Skulk also has a separate tracing surface for debugging live inference work.
+
+The important user-facing model is:
+
+- tracing is off by default
+- you turn it on at runtime from the dashboard traces view
+- the toggle applies cluster-wide for new requests
+- traces can be browsed from any reachable node through cluster trace endpoints
+- local trace deletion remains local-only in v1
+
+Tracing is meant for targeted debugging sessions, not as a permanently enabled
+always-on telemetry pipeline. When you need it, use the dashboard bug icon or
+the `/v1/tracing` API to enable it, reproduce the workload, then inspect the
+result through the traces UI or the `/v1/traces*` endpoints.
+
+For operator workflow and endpoint details, read [Tracing and debugging](tracing)
+and the [API guide](api-guide).
+
 ## Debugging MLX Hangs
 
 When a model appears to stall during warmup, prefill, or distributed generation,

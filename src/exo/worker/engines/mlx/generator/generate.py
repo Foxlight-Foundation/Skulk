@@ -31,6 +31,7 @@ from exo.api.types import (
 )
 from exo.shared.constants import preferred_env_value
 from exo.shared.models.model_cards import ModelCard
+from exo.shared.tracing import trace
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import KVCacheType, Model
@@ -1051,6 +1052,8 @@ def mlx_generate(
     distributed_prompt_progress_callback: Callable[[], None] | None = None,
     on_generation_token: Callable[[], None] | None = None,
     vision_processor: VisionProcessor | None = None,
+    trace_task_id: str | None = None,
+    trace_rank: int = 0,
 ) -> Generator[GenerationResponse]:
     # Ensure that generation stats only contains peak memory for this generation
     mx.reset_peak_memory()
@@ -1066,13 +1069,19 @@ def mlx_generate(
     vision: VisionResult | None = None
     if vision_processor is not None:
         try:
-            vision = prepare_vision(
-                images=task.images,
-                chat_template_messages=task.chat_template_messages,
-                vision_processor=vision_processor,
-                tokenizer=tokenizer,
-                model=model,
-            )
+            with trace(
+                "native_vision_preprocess",
+                trace_rank,
+                "vision",
+                task_id=trace_task_id,
+            ):
+                vision = prepare_vision(
+                    images=task.images,
+                    chat_template_messages=task.chat_template_messages,
+                    vision_processor=vision_processor,
+                    tokenizer=tokenizer,
+                    model=model,
+                )
         except Exception:
             logger.opt(exception=True).warning(
                 "Vision processing failed, falling back to text-only"
@@ -1187,7 +1196,12 @@ def mlx_generate(
     else:
         maybe_vision_ctx = contextlib.nullcontext()
     try:
-        with maybe_vision_ctx:
+        with maybe_vision_ctx, trace(
+            "prefill",
+            trace_rank,
+            "prefill",
+            task_id=trace_task_id,
+        ):
             prefill_tps, prefill_tokens, ssm_snapshots_list = prefill(
                 model,
                 tokenizer,

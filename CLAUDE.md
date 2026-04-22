@@ -151,6 +151,19 @@ Centralized logging uses a three-layer stack:
 - **Vector**: A local log shipper on each node reads exo's stdout and forwards to VictoriaLogs. Config at `deployment/logging/vector.yaml`.
 - **VictoriaLogs + Grafana**: Central log storage and dashboards on the R720. Stack definition at `deployment/logging/docker-compose.yml`.
 
+### Tracing
+Runtime tracing is a cluster-scoped debugging feature controlled by command and
+event flow rather than a required env-var-only launch mode:
+- `SetTracingEnabled` toggles tracing for new requests across the live cluster session
+- `TracingStateChanged` updates `State.tracing_enabled` through the normal event-sourced apply path
+- workers collect task-scoped trace sessions and emit `TracesCollected`
+- the master waits for expected ranks, merges trace payloads, and emits `TracesMerged`
+- the API persists Chrome trace JSON locally and exposes both local `/v1/traces*`
+  and cluster-browsed `/v1/traces/cluster*` endpoints
+
+Cluster browsing is read-only in v1 and works by fan-out/proxy against reachable
+peer APIs rather than through a central authoritative trace store.
+
 ## Mandatory Workflow Rules
 
 These rules apply to every change. No exceptions.

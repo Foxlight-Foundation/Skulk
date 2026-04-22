@@ -24,6 +24,7 @@ const sidebars: SidebarsConfig = {
         "build-and-runtime",
         "model-store",
         "kv-cache-backends",
+        "tracing",
         "model-cards",
         "model-capabilities",
         {

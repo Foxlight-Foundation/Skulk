@@ -14,18 +14,25 @@ from exo.shared.models.model_cards import (
     PromptRendererType,
     ToolCallFormat,
 )
+from exo.shared.tracing import (
+    begin_trace_session,
+    pop_trace_session,
+    record_trace_marker,
+)
 from exo.shared.types.chunks import (
     ErrorChunk,
     TokenChunk,
     ToolCallChunk,
 )
-from exo.shared.types.common import CommandId, ModelId
+from exo.shared.types.common import ModelId
 from exo.shared.types.events import (
     ChunkGenerated,
     Event,
     RunnerStatusUpdated,
     TaskAcknowledged,
     TaskStatusUpdated,
+    TraceEventData,
+    TracesCollected,
 )
 from exo.shared.types.mlx import Model
 from exo.shared.types.tasks import (
@@ -355,8 +362,42 @@ class Runner:
 
     def submit_text_generation(self, task: TextGeneration):
         assert isinstance(self.generator, InferenceGenerator)
+        if task.trace_enabled:
+            begin_trace_session(
+                task.task_id,
+                rank=self.device_rank,
+                node_id=str(self.bound_instance.bound_node_id),
+                model_id=str(self.model_id),
+                task_kind="text",
+                tags=["text_generation"],
+            )
+            record_trace_marker("queued", self.device_rank, task_id=task.task_id)
         self.active_tasks[task.task_id] = task
         self.generator.submit(task)
+
+    def _flush_trace_session(self, task_id: TaskId) -> None:
+        traces = pop_trace_session(task_id)
+        self.event_sender.send(
+            TracesCollected(
+                task_id=task_id,
+                rank=self.device_rank,
+                traces=[
+                    TraceEventData(
+                        name=trace_event.name,
+                        start_us=trace_event.start_us,
+                        duration_us=trace_event.duration_us,
+                        rank=trace_event.rank,
+                        category=trace_event.category,
+                        node_id=trace_event.node_id,
+                        model_id=trace_event.model_id,
+                        task_kind=trace_event.task_kind,
+                        tags=list(trace_event.tags),
+                        attrs=trace_event.attrs,
+                    )
+                    for trace_event in traces
+                ],
+            )
+        )
 
     def handle_generation_tasks(self, starting_task: TextGeneration):
         assert isinstance(self.current_status, RunnerReady)
@@ -380,16 +421,29 @@ class Runner:
             for task_id, result in results:
                 match result:
                     case Cancelled():
+                        task = self.active_tasks.get(task_id)
+                        if task is not None and task.trace_enabled:
+                            record_trace_marker(
+                                "cancel", self.device_rank, task_id=task_id
+                            )
                         finished.append(task_id)
                     case Finished():
+                        task = self.active_tasks.get(task_id)
+                        if task is not None and task.trace_enabled:
+                            record_trace_marker(
+                                "finish", self.device_rank, task_id=task_id
+                            )
                         self.send_task_status(task_id, TaskStatus.Complete)
                         finished.append(task_id)
                     case _:
                         self.send_response(
-                            result, self.active_tasks[task_id].command_id
+                            result, self.active_tasks[task_id]
                         )
 
             for task_id in finished:
+                task = self.active_tasks.get(task_id)
+                if task is not None and task.trace_enabled:
+                    self._flush_trace_session(task_id)
                 self.active_tasks.pop(task_id, None)
 
             try:
@@ -423,14 +477,22 @@ class Runner:
     def send_response(
         self,
         response: GenerationResponse | ToolCallResponse,
-        command_id: CommandId,
+        task: TextGeneration,
     ):
         match response:
             case GenerationResponse():
+                if response.finish_reason == "error" and task.trace_enabled:
+                    record_trace_marker(
+                        "error",
+                        self.device_rank,
+                        task_id=task.task_id,
+                        tags=["error"],
+                        attrs={"message": response.text},
+                    )
                 if self.device_rank == 0 and response.finish_reason == "error":
                     self.event_sender.send(
                         ChunkGenerated(
-                            command_id=command_id,
+                            command_id=task.command_id,
                             chunk=ErrorChunk(
                                 error_message=response.text,
                                 model=self.model_id,
@@ -446,7 +508,7 @@ class Runner:
                     )
                     self.event_sender.send(
                         ChunkGenerated(
-                            command_id=command_id,
+                            command_id=task.command_id,
                             chunk=TokenChunk(
                                 model=self.model_id,
                                 text=response.text,
@@ -461,10 +523,19 @@ class Runner:
                         )
                     )
             case ToolCallResponse():
+                if task.trace_enabled:
+                    record_trace_marker(
+                        "tool_call_emitted",
+                        self.device_rank,
+                        task_id=task.task_id,
+                        category="tooling",
+                        tags=["tool_call"],
+                        attrs={"tool_call_count": len(response.tool_calls)},
+                    )
                 if self.device_rank == 0:
                     self.event_sender.send(
                         ChunkGenerated(
-                            command_id=command_id,
+                            command_id=task.command_id,
                             chunk=ToolCallChunk(
                                 tool_calls=response.tool_calls,
                                 model=self.model_id,

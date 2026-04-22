@@ -5,9 +5,14 @@ from typing import TYPE_CHECKING, Literal
 import mlx.core as mx
 
 from exo.api.types import ImageGenerationStats
-from exo.shared.constants import EXO_MAX_CHUNK_SIZE, EXO_TRACING_ENABLED
+from exo.shared.constants import EXO_MAX_CHUNK_SIZE
 from exo.shared.models.model_cards import ModelTask
-from exo.shared.tracing import clear_trace_buffer, get_trace_buffer
+from exo.shared.tracing import (
+    begin_trace_session,
+    bind_trace_session,
+    pop_trace_session,
+    record_trace_marker,
+)
 from exo.shared.types.chunks import ErrorChunk, ImageChunk
 from exo.shared.types.common import CommandId, ModelId
 from exo.shared.types.events import (
@@ -115,29 +120,29 @@ def _send_traces_if_enabled(
     task_id: TaskId,
     rank: int,
 ) -> None:
-    if not EXO_TRACING_ENABLED:
-        return
-
-    traces = get_trace_buffer()
-    if traces:
-        trace_data = [
-            TraceEventData(
-                name=t.name,
-                start_us=t.start_us,
-                duration_us=t.duration_us,
-                rank=t.rank,
-                category=t.category,
-            )
-            for t in traces
-        ]
-        event_sender.send(
-            TracesCollected(
-                task_id=task_id,
-                rank=rank,
-                traces=trace_data,
-            )
+    traces = pop_trace_session(task_id)
+    trace_data = [
+        TraceEventData(
+            name=t.name,
+            start_us=t.start_us,
+            duration_us=t.duration_us,
+            rank=t.rank,
+            category=t.category,
+            node_id=t.node_id,
+            model_id=t.model_id,
+            task_kind=t.task_kind,
+            tags=list(t.tags),
+            attrs=t.attrs,
         )
-    clear_trace_buffer()
+        for t in traces
+    ]
+    event_sender.send(
+        TracesCollected(
+            task_id=task_id,
+            rank=rank,
+            traces=trace_data,
+        )
+    )
 
 
 def _send_image_chunk(
@@ -315,38 +320,65 @@ class Runner:
                 self.update_status(RunnerRunning())
                 self.acknowledge_task(task)
 
+                if task.trace_enabled:
+                    begin_trace_session(
+                        task.task_id,
+                        rank=self.device_rank,
+                        node_id=str(self.bound_instance.bound_node_id),
+                        model_id=str(self.shard_metadata.model_card.model_id),
+                        task_kind="image",
+                        tags=["image_generation"],
+                    )
+                    record_trace_marker(
+                        "queued",
+                        self.device_rank,
+                        task_id=task.task_id,
+                        attrs={"request_type": "generate"},
+                    )
+
                 try:
                     image_index = 0
-                    for response in generate_image(
-                        model=self.image_model, task=task_params
-                    ):
-                        is_primary_output = _is_primary_output_node(self.shard_metadata)
+                    with bind_trace_session(task.task_id):
+                        for response in generate_image(
+                            model=self.image_model, task=task_params
+                        ):
+                            is_primary_output = _is_primary_output_node(
+                                self.shard_metadata
+                            )
 
-                        if is_primary_output:
-                            match response:
-                                case PartialImageResponse():
-                                    logger.info(
-                                        f"sending partial ImageChunk {response.partial_index}/{response.total_partials}"
-                                    )
-                                    _process_image_response(
-                                        response,
-                                        command_id,
-                                        self.shard_metadata,
-                                        self.event_sender,
-                                        image_index,
-                                    )
-                                case ImageGenerationResponse():
-                                    logger.info("sending final ImageChunk")
-                                    _process_image_response(
-                                        response,
-                                        command_id,
-                                        self.shard_metadata,
-                                        self.event_sender,
-                                        image_index,
-                                    )
-                                    image_index += 1
+                            if is_primary_output:
+                                match response:
+                                    case PartialImageResponse():
+                                        logger.info(
+                                            f"sending partial ImageChunk {response.partial_index}/{response.total_partials}"
+                                        )
+                                        _process_image_response(
+                                            response,
+                                            command_id,
+                                            self.shard_metadata,
+                                            self.event_sender,
+                                            image_index,
+                                        )
+                                    case ImageGenerationResponse():
+                                        logger.info("sending final ImageChunk")
+                                        _process_image_response(
+                                            response,
+                                            command_id,
+                                            self.shard_metadata,
+                                            self.event_sender,
+                                            image_index,
+                                        )
+                                        image_index += 1
                 # can we make this more explicit?
                 except Exception as e:
+                    if task.trace_enabled:
+                        record_trace_marker(
+                            "error",
+                            self.device_rank,
+                            task_id=task.task_id,
+                            tags=["error"],
+                            attrs={"message": str(e)},
+                        )
                     if _is_primary_output_node(self.shard_metadata):
                         self.event_sender.send(
                             ChunkGenerated(
@@ -360,9 +392,15 @@ class Runner:
                         )
                     raise
                 finally:
-                    _send_traces_if_enabled(
-                        self.event_sender, task.task_id, self.device_rank
-                    )
+                    if task.trace_enabled:
+                        record_trace_marker(
+                            "finish",
+                            self.device_rank,
+                            task_id=task.task_id,
+                        )
+                        _send_traces_if_enabled(
+                            self.event_sender, task.task_id, self.device_rank
+                        )
 
                 self.current_status = RunnerReady()
                 logger.info("runner ready")
@@ -376,35 +414,60 @@ class Runner:
                 self.update_status(RunnerRunning())
                 self.acknowledge_task(task)
 
+                if task.trace_enabled:
+                    begin_trace_session(
+                        task.task_id,
+                        rank=self.device_rank,
+                        node_id=str(self.bound_instance.bound_node_id),
+                        model_id=str(self.shard_metadata.model_card.model_id),
+                        task_kind="image",
+                        tags=["image_edit"],
+                    )
+                    record_trace_marker(
+                        "queued",
+                        self.device_rank,
+                        task_id=task.task_id,
+                        attrs={"request_type": "edit"},
+                    )
+
                 try:
                     image_index = 0
-                    for response in generate_image(
-                        model=self.image_model, task=task_params
-                    ):
-                        if _is_primary_output_node(self.shard_metadata):
-                            match response:
-                                case PartialImageResponse():
-                                    logger.info(
-                                        f"sending partial ImageChunk {response.partial_index}/{response.total_partials}"
-                                    )
-                                    _process_image_response(
-                                        response,
-                                        command_id,
-                                        self.shard_metadata,
-                                        self.event_sender,
-                                        image_index,
-                                    )
-                                case ImageGenerationResponse():
-                                    logger.info("sending final ImageChunk")
-                                    _process_image_response(
-                                        response,
-                                        command_id,
-                                        self.shard_metadata,
-                                        self.event_sender,
-                                        image_index,
-                                    )
-                                    image_index += 1
+                    with bind_trace_session(task.task_id):
+                        for response in generate_image(
+                            model=self.image_model, task=task_params
+                        ):
+                            if _is_primary_output_node(self.shard_metadata):
+                                match response:
+                                    case PartialImageResponse():
+                                        logger.info(
+                                            f"sending partial ImageChunk {response.partial_index}/{response.total_partials}"
+                                        )
+                                        _process_image_response(
+                                            response,
+                                            command_id,
+                                            self.shard_metadata,
+                                            self.event_sender,
+                                            image_index,
+                                        )
+                                    case ImageGenerationResponse():
+                                        logger.info("sending final ImageChunk")
+                                        _process_image_response(
+                                            response,
+                                            command_id,
+                                            self.shard_metadata,
+                                            self.event_sender,
+                                            image_index,
+                                        )
+                                        image_index += 1
                 except Exception as e:
+                    if task.trace_enabled:
+                        record_trace_marker(
+                            "error",
+                            self.device_rank,
+                            task_id=task.task_id,
+                            tags=["error"],
+                            attrs={"message": str(e)},
+                        )
                     if _is_primary_output_node(self.shard_metadata):
                         self.event_sender.send(
                             ChunkGenerated(
@@ -418,9 +481,15 @@ class Runner:
                         )
                     raise
                 finally:
-                    _send_traces_if_enabled(
-                        self.event_sender, task.task_id, self.device_rank
-                    )
+                    if task.trace_enabled:
+                        record_trace_marker(
+                            "finish",
+                            self.device_rank,
+                            task_id=task.task_id,
+                        )
+                        _send_traces_if_enabled(
+                            self.event_sender, task.task_id, self.device_rank
+                        )
 
                 self.current_status = RunnerReady()
                 logger.info("runner ready")

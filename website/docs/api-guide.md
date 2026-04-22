@@ -142,11 +142,17 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `GET /store/models/{model_id}/optimize/status`
 - `GET /filesystem/browse`
 - `GET /node/identity`
+- `GET /v1/tracing`
+- `PUT /v1/tracing`
 - `GET /v1/traces`
+- `GET /v1/traces/cluster`
 - `POST /v1/traces/delete`
 - `GET /v1/traces/{task_id}`
 - `GET /v1/traces/{task_id}/stats`
 - `GET /v1/traces/{task_id}/raw`
+- `GET /v1/traces/cluster/{task_id}`
+- `GET /v1/traces/cluster/{task_id}/stats`
+- `GET /v1/traces/cluster/{task_id}/raw`
 
 For the full interactive reference with request/response schemas, see the [API Reference](/api/skulk-api).
 
@@ -761,17 +767,113 @@ Returns stored events from the API-side event log.
 
 ### Traces
 
+- `GET /v1/tracing`
+- `PUT /v1/tracing`
 - `GET /v1/traces`
+- `GET /v1/traces/cluster`
 - `POST /v1/traces/delete`
 - `GET /v1/traces/{task_id}`
 - `GET /v1/traces/{task_id}/stats`
 - `GET /v1/traces/{task_id}/raw`
+- `GET /v1/traces/cluster/{task_id}`
+- `GET /v1/traces/cluster/{task_id}/stats`
+- `GET /v1/traces/cluster/{task_id}/raw`
 
 Use these endpoints when you are debugging generation behavior, cluster execution, or performance.
+
+Behavior notes:
+
+- `GET /v1/tracing` returns whether runtime tracing is currently enabled for new
+  requests across the live cluster session.
+- `PUT /v1/tracing` toggles tracing cluster-wide for new requests only. It does
+  not retroactively trace in-flight work.
+- `GET /v1/traces*` reads local trace artifacts stored on the current node.
+- `GET /v1/traces/cluster*` fans out to reachable peer APIs, deduplicates by
+  `task_id`, and proxies read-only trace access from any reachable node.
+- `POST /v1/traces/delete` remains local-only in v1 even when cluster browsing
+  is enabled.
+
+### Runtime tracing control
+
+**GET** `/v1/tracing`
+
+Returns the current cluster tracing state:
+
+```json
+{"enabled": false}
+```
+
+**PUT** `/v1/tracing`
+
+Enable or disable tracing for new requests across the current cluster session.
+
+Request body:
+
+```json
+{"enabled": true}
+```
+
+Response body:
+
+```json
+{"enabled": true}
+```
+
+Operational notes:
+
+- this is a runtime toggle, not a restart-required config edit
+- it applies to new requests only
+- it does not retroactively trace work already in flight
+- the dashboard traces page uses this same API
+
+### Local trace endpoints
+
+These endpoints operate on trace artifacts stored on the current node:
+
+- `GET /v1/traces` lists local trace artifacts with metadata such as task kind,
+  model, source nodes, and tool-activity tags
+- `GET /v1/traces/{task_id}` returns structured trace events for one task
+- `GET /v1/traces/{task_id}/stats` returns aggregated timing summaries
+- `GET /v1/traces/{task_id}/raw` downloads Chrome-trace-compatible JSON
+- `POST /v1/traces/delete` deletes one or more local trace artifacts
+
+Example:
+
+```bash
+curl http://localhost:52415/v1/traces
+curl http://localhost:52415/v1/traces/<task_id>/stats
+curl -OJ http://localhost:52415/v1/traces/<task_id>/raw
+```
+
+### Cluster trace endpoints
+
+These endpoints let a dashboard or script on any reachable node browse traces
+across the cluster:
+
+- `GET /v1/traces/cluster`
+- `GET /v1/traces/cluster/{task_id}`
+- `GET /v1/traces/cluster/{task_id}/stats`
+- `GET /v1/traces/cluster/{task_id}/raw`
+
+Operational notes:
+
+- cluster browsing is read-only in v1
+- the API fans out to reachable peer APIs and deduplicates traces by `task_id`
+- if some peers are unreachable, cluster results may be partial
+- source node metadata in responses tells you which nodes contributed trace content
+
+Example:
+
+```bash
+curl http://localhost:52415/v1/traces/cluster
+curl http://localhost:52415/v1/traces/cluster/<task_id>/stats
+curl -OJ http://localhost:52415/v1/traces/cluster/<task_id>/raw
+```
 
 ## Helpful Next Docs
 
 - [README](https://github.com/Foxlight-Foundation/Skulk/blob/main/README.md)
+- [Tracing and debugging](tracing)
 - [Model store guide](model-store)
 - [Architecture overview](architecture)
 - [API Reference](/api/skulk-api)

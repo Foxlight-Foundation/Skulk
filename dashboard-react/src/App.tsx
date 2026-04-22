@@ -126,6 +126,7 @@ export function App() {
   const themeName = useUIStore((s) => s.theme);
   const activeTheme = themeName === 'light' ? lightTheme : darkTheme;
   const selectedTraceTaskId = useUIStore((s) => s.selectedTraceTaskId);
+  const [traceScope, setTraceScope] = useState<'cluster' | 'local'>('cluster');
 
   // Reflect theme on the html root so non-styled-components surfaces (highlight.js,
   // scrollbars, etc.) can react via `html[data-theme='light'] …` selectors.
@@ -399,10 +400,13 @@ export function App() {
               selectedTraceTaskId ? (
                 <TraceDetailPage
                   taskId={selectedTraceTaskId}
+                  scope={traceScope}
                   onBack={() => setSelectedTraceTaskId(null)}
                 />
               ) : (
                 <TracesPage
+                  scope={traceScope}
+                  onScopeChange={setTraceScope}
                   onOpenTrace={(taskId) => {
                     setSelectedTraceTaskId(taskId);
                     setActiveRoute('traces');

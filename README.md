@@ -268,6 +268,7 @@ Skulk exposes several API surfaces:
 The most important API doc lives here:
 
 - [docs/api.md](docs/api.md)
+- [website/docs/tracing.md](website/docs/tracing.md)
 
 That guide is written to be both newcomer-friendly and integration-friendly. It includes:
 
@@ -276,6 +277,34 @@ That guide is written to be both newcomer-friendly and integration-friendly. It 
 - copy-paste examples
 - common failure cases
 - store and config endpoints
+
+For live debugging, the tracing guide explains the runtime cluster toggle, the
+dashboard traces view, and the difference between local trace browsing and
+cluster trace browsing.
+
+## Tracing and Debugging
+
+Tracing is now a runtime feature, not an env-var-first workflow.
+
+Recommended path:
+
+1. Open the dashboard.
+2. Click the bug icon.
+3. Enable tracing from the traces page.
+4. Reproduce the workload.
+5. Inspect traces in local or cluster scope.
+
+The main control and browsing endpoints are:
+
+- `GET /v1/tracing`
+- `PUT /v1/tracing`
+- `GET /v1/traces`
+- `GET /v1/traces/cluster`
+
+For details, examples, and operational notes:
+
+- [website/docs/tracing.md](website/docs/tracing.md)
+- [docs/api.md](docs/api.md)
 
 ## Common Workflows
 
@@ -376,7 +405,7 @@ uv run exo --bootstrap-peers /ip4/192.168.1.20/tcp/5678/p2p/12D3KooW...
 | `EXO_ENABLE_IMAGE_MODELS` | Enable image model cards and image workflows | `false` |
 | `EXO_LIBP2P_NAMESPACE` | Custom namespace for cluster isolation | None |
 | `EXO_FAST_SYNCH` | Control MLX fast synch behavior | Auto |
-| `EXO_TRACING_ENABLED` | Enable distributed tracing | `false` |
+| `SKULK_TRACING_ENABLED` | Developer boot override for tracing. Prefer the dashboard traces toggle or `PUT /v1/tracing` for normal use. Legacy `EXO_TRACING_ENABLED` is still accepted. | `false` |
 | `EXO_KV_CACHE_BACKEND` | KV cache backend selection | `default` |
 | `EXO_KV_CACHE_BITS` | Bit width for `mlx_quantized` | None |
 | `EXO_TQ_K_BITS` | Key-cache bits for TurboQuant backends | `3` |

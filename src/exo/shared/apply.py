@@ -29,6 +29,7 @@ from exo.shared.types.events import (
     TopologyEdgeDeleted,
     TracesCollected,
     TracesMerged,
+    TracingStateChanged,
 )
 from exo.shared.types.profiling import (
     NodeIdentity,
@@ -96,6 +97,8 @@ def event_apply(event: Event, state: State) -> State:
             return apply_topology_edge_created(event, state)
         case TopologyEdgeDeleted():
             return apply_topology_edge_deleted(event, state)
+        case TracingStateChanged():
+            return state.model_copy(update={"tracing_enabled": event.enabled})
         case StateSnapshotHydrated():
             return event.state
 

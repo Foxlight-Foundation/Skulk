@@ -12,6 +12,13 @@ from typing import Any
 import torch
 from transformers import AutoModel, AutoTokenizer
 
+from exo.shared.tracing import (
+    begin_trace_session,
+    bind_trace_session,
+    pop_trace_session,
+    record_trace_marker,
+    trace,
+)
 from exo.shared.types.chunks import EmbeddingChunk, ErrorChunk
 from exo.shared.types.events import (
     ChunkGenerated,
@@ -19,6 +26,8 @@ from exo.shared.types.events import (
     RunnerStatusUpdated,
     TaskAcknowledged,
     TaskStatusUpdated,
+    TraceEventData,
+    TracesCollected,
 )
 from exo.shared.types.tasks import (
     CANCEL_ALL_TASKS,
@@ -52,31 +61,39 @@ def _get_device() -> torch.device:
 
 
 def _forward(
-    model: Any, tokenizer: Any, texts: list[str], device: torch.device
+    model: Any,
+    tokenizer: Any,
+    texts: list[str],
+    device: torch.device,
+    *,
+    rank: int,
 ) -> tuple[list[list[float]], int]:
     """Run embedding forward pass: tokenize -> model -> mean pool -> L2 normalize."""
-    inputs = tokenizer(
-        texts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=512,
-    )
+    with trace("tokenize", rank, "embedding"):
+        inputs = tokenizer(
+            texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=512,
+        )
     token_count = int(inputs["attention_mask"].sum().item())
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    with torch.no_grad():
+    with trace("forward", rank, "embedding"), torch.no_grad():
         outputs = model(**inputs)
 
     # Mean pooling over non-padding tokens
-    attention_mask = inputs["attention_mask"].unsqueeze(-1)
-    hidden_states = outputs.last_hidden_state
-    summed = (hidden_states * attention_mask).sum(dim=1)
-    counts = attention_mask.sum(dim=1).clamp(min=1)
-    embeddings = summed / counts
+    with trace("pooling", rank, "embedding"):
+        attention_mask = inputs["attention_mask"].unsqueeze(-1)
+        hidden_states = outputs.last_hidden_state
+        summed = (hidden_states * attention_mask).sum(dim=1)
+        counts = attention_mask.sum(dim=1).clamp(min=1)
+        embeddings = summed / counts
 
     # L2 normalize
-    embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+    with trace("normalization", rank, "embedding"):
+        embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
 
     result: list[list[float]] = embeddings.tolist()
     return result, token_count
@@ -203,10 +220,36 @@ class Runner:
                 assert self.model is not None and self.tokenizer is not None
                 model_id = self.shard_metadata.model_card.model_id
 
-                try:
-                    result_embeddings, token_count = _forward(
-                        self.model, self.tokenizer, task_params.input_texts, self.device
+                if task.trace_enabled:
+                    begin_trace_session(
+                        task.task_id,
+                        rank=self.shard_metadata.device_rank,
+                        node_id=str(self.bound_instance.bound_node_id),
+                        model_id=str(model_id),
+                        task_kind="embedding",
+                        tags=["embedding"],
                     )
+                    record_trace_marker(
+                        "queued",
+                        self.shard_metadata.device_rank,
+                        task_id=task.task_id,
+                    )
+
+                try:
+                    with bind_trace_session(task.task_id):
+                        result_embeddings, token_count = _forward(
+                            self.model,
+                            self.tokenizer,
+                            task_params.input_texts,
+                            self.device,
+                            rank=self.shard_metadata.device_rank,
+                        )
+                    if task.trace_enabled:
+                        record_trace_marker(
+                            "finish",
+                            self.shard_metadata.device_rank,
+                            task_id=task.task_id,
+                        )
                     self.event_sender.send(
                         ChunkGenerated(
                             command_id=command_id,
@@ -218,6 +261,14 @@ class Runner:
                         )
                     )
                 except Exception as exc:
+                    if task.trace_enabled:
+                        record_trace_marker(
+                            "error",
+                            self.shard_metadata.device_rank,
+                            task_id=task.task_id,
+                            tags=["error"],
+                            attrs={"message": str(exc)},
+                        )
                     logger.opt(exception=exc).warning("embedding forward pass failed")
                     self.event_sender.send(
                         ChunkGenerated(
@@ -228,6 +279,30 @@ class Runner:
                             ),
                         )
                     )
+                finally:
+                    if task.trace_enabled:
+                        traces = pop_trace_session(task.task_id)
+                        self.event_sender.send(
+                            TracesCollected(
+                                task_id=task.task_id,
+                                rank=self.shard_metadata.device_rank,
+                                traces=[
+                                    TraceEventData(
+                                        name=trace_event.name,
+                                        start_us=trace_event.start_us,
+                                        duration_us=trace_event.duration_us,
+                                        rank=trace_event.rank,
+                                        category=trace_event.category,
+                                        node_id=trace_event.node_id,
+                                        model_id=trace_event.model_id,
+                                        task_kind=trace_event.task_kind,
+                                        tags=list(trace_event.tags),
+                                        attrs=trace_event.attrs,
+                                    )
+                                    for trace_event in traces
+                                ],
+                            )
+                        )
 
                 self.current_status = RunnerReady()
 

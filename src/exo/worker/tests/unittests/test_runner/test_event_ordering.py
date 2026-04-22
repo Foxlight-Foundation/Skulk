@@ -150,11 +150,14 @@ class FakeExoBatchGenerator:
 
     def submit(
         self,
+        task_id: object = None,
         task_params: object = None,
         prompt: object = None,
         on_prefill_progress: object = None,
         distributed_prompt_progress_callback: object = None,
         on_generation_token: object = None,
+        trace_rank: object = None,
+        **_kwargs: object,
     ) -> int:
         uid = self._uid_counter
         self._uid_counter += 1

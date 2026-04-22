@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
 from uuid import uuid4
 
 import anyio
+import httpx
 import hypercorn.asyncio as hypercorn_asyncio
 import yaml
 from anyio import BrokenResourceError
@@ -110,7 +111,11 @@ from exo.api.types import (
     TraceListResponse,
     TraceRankStats,
     TraceResponse,
+    TraceSourceNode,
     TraceStatsResponse,
+    TraceTaskKind,
+    TracingStateResponse,
+    UpdateTracingStateRequest,
     WebSearchToolRequest,
     WebSearchToolResponse,
     normalize_image_size,
@@ -182,6 +187,7 @@ from exo.shared.types.commands import (
     ImageGeneration,
     PlaceInstance,
     SendInputChunk,
+    SetTracingEnabled,
     StartDownload,
     TaskCancelled,
     TaskFinished,
@@ -208,6 +214,7 @@ from exo.tools.web_search import default_browser_tool_provider
 from exo.utils.banner import print_startup_banner
 from exo.utils.channels import Receiver, Sender, channel
 from exo.utils.disk_event_log import DiskEventLog
+from exo.utils.info_gatherer.net_profile import check_reachable
 from exo.utils.power_sampler import PowerSampler
 from exo.utils.task_group import TaskGroup
 from exo.worker.engines.mlx.constants import (
@@ -783,17 +790,54 @@ class API:
             description="Delete or cancel a download associated with a given node and model.",
         )(self.delete_download)
         self.app.get(
+            "/v1/tracing",
+            tags=["State & Tracing"],
+            summary="Get cluster tracing state",
+            description="Return whether runtime tracing is currently enabled for new requests across the cluster session.",
+        )(self.get_tracing_state)
+        self.app.put(
+            "/v1/tracing",
+            tags=["State & Tracing"],
+            summary="Set cluster tracing state",
+            description="Enable or disable runtime tracing for new requests across the cluster session.",
+        )(self.update_tracing_state)
+        self.app.get(
             "/v1/traces",
             tags=["State & Tracing"],
             summary="List saved traces",
             description="List saved trace files that can be inspected for debugging and performance analysis.",
         )(self.list_traces)
+        self.app.get(
+            "/v1/traces/cluster",
+            tags=["State & Tracing"],
+            summary="List cluster traces",
+            description="List deduplicated traces discoverable from this node across reachable peer APIs.",
+        )(self.list_cluster_traces)
         self.app.post(
             "/v1/traces/delete",
             tags=["State & Tracing"],
             summary="Delete saved traces",
             description="Delete one or more saved trace artifacts by task ID.",
         )(self.delete_traces)
+        self.app.get(
+            "/v1/traces/cluster/{task_id}",
+            tags=["State & Tracing"],
+            summary="Get one cluster trace",
+            description="Return a trace from local storage or proxy it from a reachable peer node.",
+        )(self.get_cluster_trace)
+        self.app.get(
+            "/v1/traces/cluster/{task_id}/stats",
+            tags=["State & Tracing"],
+            summary="Get one cluster trace summary",
+            description="Return aggregated timing statistics for a trace available locally or on a reachable peer node.",
+        )(self.get_cluster_trace_stats)
+        self.app.get(
+            "/v1/traces/cluster/{task_id}/raw",
+            tags=["State & Tracing"],
+            summary="Download raw cluster trace JSON",
+            description="Download a raw Chrome trace artifact from local storage or a reachable peer node.",
+            response_model=None,
+        )(self.get_cluster_trace_raw)
         self.app.get(
             "/v1/traces/{task_id}",
             tags=["State & Tracing"],
@@ -811,6 +855,7 @@ class API:
             tags=["State & Tracing"],
             summary="Download raw trace JSON",
             description="Download the raw Chrome trace JSON artifact for one task.",
+            response_model=None,
         )(self.get_trace_raw)
         self.app.get(
             "/onboarding",
@@ -2531,6 +2576,11 @@ class API:
                 duration_us=t.duration_us,
                 rank=t.rank,
                 category=t.category,
+                node_id=t.node_id,
+                model_id=t.model_id,
+                task_kind=t.task_kind,
+                tags=tuple(t.tags),
+                attrs=t.attrs,
             )
             for t in event.traces
         ]
@@ -2607,38 +2657,37 @@ class API:
             raise HTTPException(status_code=400, detail=f"Invalid task ID: {task_id}")
         return trace_path
 
-    async def list_traces(self) -> TraceListResponse:
-        traces: list[TraceListItem] = []
+    def _friendly_name_for_trace_node(self, node_id: str) -> str | None:
+        for known_node_id, identity in self.state.node_identities.items():
+            if str(known_node_id) != node_id:
+                continue
+            if identity.friendly_name and identity.friendly_name != "Unknown":
+                return identity.friendly_name
+            return None
+        return None
 
-        for trace_file in sorted(
-            EXO_TRACING_CACHE_DIR.glob("trace_*.json"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        ):
-            # Extract task_id from filename (trace_{task_id}.json)
-            task_id = trace_file.stem.removeprefix("trace_")
-            stat = trace_file.stat()
-            created_at = datetime.fromtimestamp(
-                stat.st_mtime, tz=timezone.utc
-            ).isoformat()
-            traces.append(
-                TraceListItem(
-                    task_id=task_id,
-                    created_at=created_at,
-                    file_size=stat.st_size,
-                )
-            )
+    def _trace_source_node(self, node_id: str) -> TraceSourceNode:
+        return TraceSourceNode(
+            node_id=node_id,
+            friendly_name=self._friendly_name_for_trace_node(node_id),
+        )
 
-        return TraceListResponse(traces=traces)
+    def _trace_source_nodes(self, trace_events: list[TraceEvent]) -> list[TraceSourceNode]:
+        node_ids = [event.node_id for event in trace_events if event.node_id]
+        if not node_ids:
+            node_ids = [str(self.node_id)]
 
-    async def get_trace(self, task_id: str) -> TraceResponse:
-        trace_path = self._get_trace_path(task_id)
+        unique_node_ids: list[str] = []
+        for node_id in node_ids:
+            assert node_id is not None
+            if node_id not in unique_node_ids:
+                unique_node_ids.append(node_id)
 
-        if not trace_path.exists():
-            raise HTTPException(status_code=404, detail=f"Trace not found: {task_id}")
+        return [self._trace_source_node(node_id) for node_id in unique_node_ids]
 
-        trace_events = load_trace_file(trace_path)
-
+    def _build_trace_response(
+        self, task_id: str, trace_events: list[TraceEvent]
+    ) -> TraceResponse:
         return TraceResponse(
             task_id=task_id,
             traces=[
@@ -2648,20 +2697,21 @@ class API:
                     duration_us=event.duration_us,
                     rank=event.rank,
                     category=event.category,
+                    node_id=event.node_id,
+                    model_id=event.model_id,
+                    task_kind=event.task_kind,
+                    tags=list(event.tags),
+                    attrs=event.attrs,
                 )
                 for event in trace_events
             ],
+            source_nodes=self._trace_source_nodes(trace_events),
         )
 
-    async def get_trace_stats(self, task_id: str) -> TraceStatsResponse:
-        trace_path = self._get_trace_path(task_id)
-
-        if not trace_path.exists():
-            raise HTTPException(status_code=404, detail=f"Trace not found: {task_id}")
-
-        trace_events = load_trace_file(trace_path)
+    def _build_trace_stats_response(
+        self, task_id: str, trace_events: list[TraceEvent]
+    ) -> TraceStatsResponse:
         stats = compute_stats(trace_events)
-
         return TraceStatsResponse(
             task_id=task_id,
             total_wall_time_us=stats.total_wall_time_us,
@@ -2690,7 +2740,160 @@ class API:
                 )
                 for rank, rank_stats in stats.by_rank.items()
             },
+            source_nodes=self._trace_source_nodes(trace_events),
         )
+
+    def _build_trace_list_item(self, task_id: str, trace_path: Path) -> TraceListItem:
+        stat = trace_path.stat()
+        created_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+        trace_events = load_trace_file(trace_path)
+
+        model_id = next((event.model_id for event in trace_events if event.model_id), None)
+        task_kind = cast(
+            TraceTaskKind | None,
+            next((event.task_kind for event in trace_events if event.task_kind), None),
+        )
+        categories = sorted({event.category for event in trace_events if event.category})
+        tags = sorted({tag for event in trace_events for tag in event.tags})
+        has_tool_activity = any("tool_call" in event.tags for event in trace_events)
+
+        return TraceListItem(
+            task_id=task_id,
+            created_at=created_at,
+            file_size=stat.st_size,
+            model_id=model_id,
+            task_kind=task_kind,
+            categories=categories,
+            tags=tags,
+            has_tool_activity=has_tool_activity,
+            source_nodes=self._trace_source_nodes(trace_events),
+        )
+
+    @staticmethod
+    def _merge_trace_list_item(existing: TraceListItem, incoming: TraceListItem) -> TraceListItem:
+        source_nodes_by_id = {
+            source.node_id: source for source in [*existing.source_nodes, *incoming.source_nodes]
+        }
+        return existing.model_copy(
+            update={
+                "created_at": max(existing.created_at, incoming.created_at),
+                "file_size": max(existing.file_size, incoming.file_size),
+                "model_id": existing.model_id or incoming.model_id,
+                "task_kind": existing.task_kind or incoming.task_kind,
+                "categories": sorted({*existing.categories, *incoming.categories}),
+                "tags": sorted({*existing.tags, *incoming.tags}),
+                "has_tool_activity": existing.has_tool_activity or incoming.has_tool_activity,
+                "source_nodes": list(source_nodes_by_id.values()),
+            }
+        )
+
+    async def _reachable_peer_trace_urls(self) -> list[str]:
+        reachable_by_node: dict[str, str] = {}
+        async for ip_address, node_id in check_reachable(
+            self.state.topology,
+            self.node_id,
+            self.state.node_network,
+        ):
+            normalized_node_id = str(node_id)
+            if normalized_node_id in reachable_by_node:
+                continue
+            host = f"[{ip_address}]" if ":" in ip_address else ip_address
+            reachable_by_node[normalized_node_id] = f"http://{host}:52415"
+        return list(reachable_by_node.values())
+
+    async def get_tracing_state(self) -> TracingStateResponse:
+        return TracingStateResponse(enabled=self.state.tracing_enabled)
+
+    async def update_tracing_state(
+        self, payload: UpdateTracingStateRequest
+    ) -> TracingStateResponse:
+        await self._send(SetTracingEnabled(enabled=payload.enabled))
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if self.state.tracing_enabled == payload.enabled:
+                break
+            await anyio.sleep(0.05)
+        return TracingStateResponse(enabled=self.state.tracing_enabled)
+
+    async def list_traces(self) -> TraceListResponse:
+        traces: list[TraceListItem] = []
+
+        for trace_file in sorted(
+            EXO_TRACING_CACHE_DIR.glob("trace_*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ):
+            task_id = trace_file.stem.removeprefix("trace_")
+            try:
+                traces.append(self._build_trace_list_item(task_id, trace_file))
+            except OSError as exc:
+                logger.opt(exception=exc).warning(
+                    f"Failed to inspect trace file {trace_file}"
+                )
+
+        return TraceListResponse(traces=traces)
+
+    async def list_cluster_traces(self) -> TraceListResponse:
+        deduped: dict[str, TraceListItem] = {
+            trace.task_id: trace for trace in (await self.list_traces()).traces
+        }
+        peer_urls = await self._reachable_peer_trace_urls()
+        if not peer_urls:
+            return TraceListResponse(
+                traces=sorted(
+                    deduped.values(),
+                    key=lambda trace: trace.created_at,
+                    reverse=True,
+                )
+            )
+
+        timeout = httpx.Timeout(timeout=5.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            for base_url in peer_urls:
+                try:
+                    response = await client.get(f"{base_url}/v1/traces")
+                    if response.status_code != 200:
+                        continue
+                    peer_traces = TraceListResponse.model_validate(response.json())
+                except (httpx.HTTPError, ValueError) as exc:
+                    logger.opt(exception=exc).debug(
+                        f"Skipping peer trace index from {base_url}"
+                    )
+                    continue
+
+                for trace in peer_traces.traces:
+                    if trace.task_id in deduped:
+                        deduped[trace.task_id] = self._merge_trace_list_item(
+                            deduped[trace.task_id], trace
+                        )
+                    else:
+                        deduped[trace.task_id] = trace
+
+        return TraceListResponse(
+            traces=sorted(
+                deduped.values(),
+                key=lambda trace: trace.created_at,
+                reverse=True,
+            )
+        )
+
+    async def get_trace(self, task_id: str) -> TraceResponse:
+        trace_path = self._get_trace_path(task_id)
+
+        if not trace_path.exists():
+            raise HTTPException(status_code=404, detail=f"Trace not found: {task_id}")
+
+        trace_events = load_trace_file(trace_path)
+        return self._build_trace_response(task_id, trace_events)
+
+    async def get_trace_stats(self, task_id: str) -> TraceStatsResponse:
+        trace_path = self._get_trace_path(task_id)
+
+        if not trace_path.exists():
+            raise HTTPException(status_code=404, detail=f"Trace not found: {task_id}")
+
+        trace_events = load_trace_file(trace_path)
+        return self._build_trace_stats_response(task_id, trace_events)
 
     async def get_trace_raw(self, task_id: str) -> FileResponse:
         trace_path = self._get_trace_path(task_id)
@@ -2703,6 +2906,100 @@ class API:
             media_type="application/json",
             filename=f"trace_{task_id}.json",
         )
+
+    async def get_cluster_trace(self, task_id: str) -> TraceResponse:
+        try:
+            return await self.get_trace(task_id)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+
+        peer_urls = await self._reachable_peer_trace_urls()
+        timeout = httpx.Timeout(timeout=10.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            for base_url in peer_urls:
+                try:
+                    response = await client.get(f"{base_url}/v1/traces/{task_id}")
+                except httpx.HTTPError as exc:
+                    logger.opt(exception=exc).debug(
+                        f"Failed to proxy trace {task_id} from {base_url}"
+                    )
+                    continue
+                if response.status_code == 404:
+                    continue
+                response.raise_for_status()
+                return TraceResponse.model_validate(response.json())
+
+        raise HTTPException(status_code=404, detail=f"Trace not found: {task_id}")
+
+    async def get_cluster_trace_stats(self, task_id: str) -> TraceStatsResponse:
+        try:
+            return await self.get_trace_stats(task_id)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+
+        peer_urls = await self._reachable_peer_trace_urls()
+        timeout = httpx.Timeout(timeout=10.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            for base_url in peer_urls:
+                try:
+                    response = await client.get(
+                        f"{base_url}/v1/traces/{task_id}/stats"
+                    )
+                except httpx.HTTPError as exc:
+                    logger.opt(exception=exc).debug(
+                        f"Failed to proxy trace stats {task_id} from {base_url}"
+                    )
+                    continue
+                if response.status_code == 404:
+                    continue
+                response.raise_for_status()
+                return TraceStatsResponse.model_validate(response.json())
+
+        raise HTTPException(status_code=404, detail=f"Trace not found: {task_id}")
+
+    async def get_cluster_trace_raw(self, task_id: str) -> FileResponse | StreamingResponse:
+        try:
+            return await self.get_trace_raw(task_id)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+
+        peer_urls = await self._reachable_peer_trace_urls()
+        timeout = httpx.Timeout(timeout=30.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            for base_url in peer_urls:
+                try:
+                    response = await client.get(
+                        f"{base_url}/v1/traces/{task_id}/raw"
+                    )
+                except httpx.HTTPError as exc:
+                    logger.opt(exception=exc).debug(
+                        f"Failed to proxy raw trace {task_id} from {base_url}"
+                    )
+                    continue
+                if response.status_code == 404:
+                    continue
+                response.raise_for_status()
+                content_type = cast(
+                    str,
+                    response.headers.get("content-type", "application/json"),
+                )
+                content_disposition = cast(
+                    str,
+                    response.headers.get(
+                        "content-disposition",
+                        f'attachment; filename="trace_{task_id}.json"',
+                    ),
+                )
+                return StreamingResponse(
+                    iter([response.content]),
+                    media_type=content_type,
+                    headers={"content-disposition": content_disposition},
+                )
+
+        raise HTTPException(status_code=404, detail=f"Trace not found: {task_id}")
 
     async def delete_traces(self, request: DeleteTracesRequest) -> DeleteTracesResponse:
         deleted: list[str] = []

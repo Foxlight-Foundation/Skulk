@@ -10,6 +10,7 @@ from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 from exo.shared.constants import EXO_MAX_CONCURRENT_REQUESTS
 from exo.shared.models.model_cards import ModelCard
+from exo.shared.tracing import now_us, record_shared_span, record_trace_marker, trace
 from exo.shared.types.chunks import ErrorChunk, PrefillProgressChunk
 from exo.shared.types.common import ModelId
 from exo.shared.types.events import ChunkGenerated, Event
@@ -59,6 +60,21 @@ class GeneratorQueue[T]:
                 yield None
             else:
                 yield self._q.popleft()
+
+
+@dataclass
+class _ActiveSequentialTask:
+    task: TextGeneration
+    mlx_generator: Generator[GenerationResponse]
+    queue: GeneratorQueue[GenerationResponse]
+    output_generator: Generator[GenerationResponse | ToolCallResponse | None]
+
+
+@dataclass
+class _ActiveBatchTask:
+    task: TextGeneration
+    queue: GeneratorQueue[GenerationResponse]
+    output_generator: Generator[GenerationResponse | ToolCallResponse | None]
 
 
 class InferenceGenerator(ABC):
@@ -132,19 +148,10 @@ class SequentialGenerator(InferenceGenerator):
     _maybe_cancel: list[TextGeneration] = field(default_factory=list, init=False)
     _all_tasks: dict[TaskId, TextGeneration] = field(default_factory=dict, init=False)
     _queue: deque[TextGeneration] = field(default_factory=deque, init=False)
-    _active: (
-        tuple[
-            TextGeneration,
-            # mlx generator that does work
-            Generator[GenerationResponse],
-            # queue that the 1st generator should push to and 3rd generator should pull from
-            GeneratorQueue[GenerationResponse],
-            # generator to get parsed outputs
-            Generator[GenerationResponse | ToolCallResponse | None],
-        ]
-        | None
-    ) = field(default=None, init=False)
+    _active: _ActiveSequentialTask | None = field(default=None, init=False)
     _logged_first_request_shape: bool = field(default=False, init=False)
+    _decode_started_us: dict[TaskId, int] = field(default_factory=dict, init=False)
+    _first_token_seen: set[TaskId] = field(default_factory=set, init=False)
 
     def warmup(self):
         self.check_for_cancel_every = warmup_inference(
@@ -201,24 +208,36 @@ class SequentialGenerator(InferenceGenerator):
 
         assert self._active is not None
 
-        task, mlx_gen, queue, output_generator = self._active
+        active = self._active
+        task = active.task
         output: list[
             tuple[TaskId, GenerationResponse | ToolCallResponse | Cancelled | Finished]
         ] = []
         try:
-            response = next(mlx_gen)
-            queue.push(response)
+            response = next(active.mlx_generator)
+            active.queue.push(response)
             # drain potentially many responses every time
-            while (parsed := next(output_generator, None)) is not None:
+            while (parsed := next(active.output_generator, None)) is not None:
                 output.append((task.task_id, parsed))
+            if task.task_id not in self._first_token_seen:
+                self._first_token_seen.add(task.task_id)
+                self._decode_started_us[task.task_id] = now_us()
+                record_trace_marker(
+                    "first_token",
+                    self.device_rank,
+                    category="decode",
+                    task_id=task.task_id,
+                )
 
         except (StopIteration, PrefillCancelled):
+            self._record_decode_span(task.task_id)
             output.append((task.task_id, Finished()))
             self._active = None
             if self._queue:
                 self._start_next()
 
         except Exception as e:
+            self._record_decode_span(task.task_id)
             self._send_error(task, e)
             self._active = None
             raise
@@ -230,6 +249,13 @@ class SequentialGenerator(InferenceGenerator):
 
     def _start_next(self) -> None:
         task = self._queue.popleft()
+        record_trace_marker(
+            "admitted_to_batch",
+            self.device_rank,
+            task_id=task.task_id,
+            category="lifecycle",
+            attrs={"batch_size": 1},
+        )
         try:
             mlx_gen = self._build_generator(task)
         except Exception as e:
@@ -251,10 +277,24 @@ class SequentialGenerator(InferenceGenerator):
                 self.model_id,
                 task.task_params.tools,
                 self.model_card,
+                trace_task_id=task.task_id,
+                trace_rank=self.device_rank,
             )
-        self._active = (task, mlx_gen, queue, output_generator)
+        self._active = _ActiveSequentialTask(
+            task=task,
+            mlx_generator=mlx_gen,
+            queue=queue,
+            output_generator=output_generator,
+        )
 
     def _send_error(self, task: TextGeneration, e: Exception) -> None:
+        record_trace_marker(
+            "error",
+            self.device_rank,
+            task_id=task.task_id,
+            tags=["error"],
+            attrs={"message": str(e)},
+        )
         if self.device_rank == 0:
             self.event_sender.send(
                 ChunkGenerated(
@@ -269,9 +309,15 @@ class SequentialGenerator(InferenceGenerator):
 
     def _build_generator(self, task: TextGeneration) -> Generator[GenerationResponse]:
         _check_for_debug_prompts(task.task_params)
-        prompt = apply_chat_template(
-            self.tokenizer, task.task_params, model_card=self.model_card
-        )
+        with trace(
+            "prompt_build",
+            self.device_rank,
+            "prompt",
+            task_id=task.task_id,
+        ):
+            prompt = apply_chat_template(
+                self.tokenizer, task.task_params, model_card=self.model_card
+            )
         if not self._logged_first_request_shape:
             log_request_shape(
                 "first-live-request",
@@ -330,10 +376,26 @@ class SequentialGenerator(InferenceGenerator):
             on_generation_token=on_generation_token,
             group=self.group,
             vision_processor=self.vision_processor,
+            trace_task_id=task.task_id,
+            trace_rank=self.device_rank,
         )
 
     def close(self) -> None:
         del self.model, self.tokenizer, self.group
+
+    def _record_decode_span(self, task_id: TaskId) -> None:
+        start_us = self._decode_started_us.pop(task_id, None)
+        self._first_token_seen.discard(task_id)
+        if start_us is None:
+            return
+        record_shared_span(
+            [task_id],
+            name="decode",
+            start_us=start_us,
+            duration_us=max(now_us() - start_us, 0),
+            rank=self.device_rank,
+            category="decode",
+        )
 
 
 @dataclass(eq=False)
@@ -357,15 +419,10 @@ class BatchGenerator(InferenceGenerator):
     _all_tasks: dict[TaskId, TextGeneration] = field(default_factory=dict, init=False)
     _queue: deque[TextGeneration] = field(default_factory=deque, init=False)
     _mlx_gen: ExoBatchGenerator = field(init=False)
-    _active_tasks: dict[
-        int,
-        tuple[
-            TextGeneration,
-            GeneratorQueue[GenerationResponse],
-            Generator[GenerationResponse | ToolCallResponse | None],
-        ],
-    ] = field(default_factory=dict, init=False)
+    _active_tasks: dict[int, _ActiveBatchTask] = field(default_factory=dict, init=False)
     _logged_first_request_shape: bool = field(default=False, init=False)
+    _decode_started_us: dict[TaskId, int] = field(default_factory=dict, init=False)
+    _first_token_seen: set[TaskId] = field(default_factory=set, init=False)
 
     def __post_init__(self) -> None:
         self._mlx_gen = ExoBatchGenerator(
@@ -427,6 +484,13 @@ class BatchGenerator(InferenceGenerator):
         # Submit any queued tasks to the engine
         while self._queue and len(self._active_tasks) < EXO_MAX_CONCURRENT_REQUESTS:
             task = self._queue.popleft()
+            record_trace_marker(
+                "admitted_to_batch",
+                self.device_rank,
+                task_id=task.task_id,
+                category="lifecycle",
+                attrs={"batch_size": len(self._active_tasks) + 1},
+            )
             try:
                 uid = self._start_task(task)
             except PrefillCancelled:
@@ -450,13 +514,37 @@ class BatchGenerator(InferenceGenerator):
                     self.model_id,
                     task.task_params.tools,
                     self.model_card,
+                    trace_task_id=task.task_id,
+                    trace_rank=self.device_rank,
                 )
-            self._active_tasks[uid] = (task, queue, output_generator)
+            self._active_tasks[uid] = _ActiveBatchTask(
+                task=task,
+                queue=queue,
+                output_generator=output_generator,
+            )
 
         if not self._mlx_gen.has_work:
             return self._apply_cancellations()
 
+        shared_task_ids = [active.task.task_id for active in self._active_tasks.values()]
+        decode_step_start_us = now_us()
         results = self._mlx_gen.step()
+        decode_step_duration_us = max(now_us() - decode_step_start_us, 0)
+        if shared_task_ids:
+            record_shared_span(
+                shared_task_ids,
+                name="decode_step",
+                start_us=decode_step_start_us,
+                duration_us=decode_step_duration_us,
+                rank=self.device_rank,
+                category="decode",
+                tags=["shared"],
+                attrs={
+                    "shared_span": True,
+                    "batch_size": len(shared_task_ids),
+                    "participant_task_ids": [str(task_id) for task_id in shared_task_ids],
+                },
+            )
 
         output: list[
             tuple[TaskId, GenerationResponse | ToolCallResponse | Cancelled | Finished]
@@ -467,14 +555,25 @@ class BatchGenerator(InferenceGenerator):
                 logger.warning(f"{uid=} not found in active tasks")
                 continue
 
-            task, queue, output_generator = self._active_tasks[uid]
-            queue.push(response)
+            active = self._active_tasks[uid]
+            task = active.task
+            active.queue.push(response)
             # If a generator fails to parse for some reason and returns early, we should not crash
-            while (parsed := next(output_generator, None)) is not None:
+            while (parsed := next(active.output_generator, None)) is not None:
                 output.append((task.task_id, parsed))
+            if task.task_id not in self._first_token_seen:
+                self._first_token_seen.add(task.task_id)
+                self._decode_started_us[task.task_id] = now_us()
+                record_trace_marker(
+                    "first_token",
+                    self.device_rank,
+                    category="decode",
+                    task_id=task.task_id,
+                )
 
             # check if original response was terminal and append a Finished()
             if response.finish_reason is not None:
+                self._record_decode_span(task.task_id)
                 output.append((task.task_id, Finished()))
                 del self._active_tasks[uid]
 
@@ -491,10 +590,12 @@ class BatchGenerator(InferenceGenerator):
         uids_to_cancel: list[int] = []
         results: list[tuple[TaskId, Cancelled]] = []
 
-        for uid, (task, _, _) in list(self._active_tasks.items()):
+        for uid, active in list(self._active_tasks.items()):
+            task = active.task
             if task.task_id in self._cancelled_tasks or cancel_all:
                 uids_to_cancel.append(uid)
                 results.append((task.task_id, Cancelled()))
+                self._record_decode_span(task.task_id)
                 del self._active_tasks[uid]
 
         if uids_to_cancel:
@@ -509,6 +610,13 @@ class BatchGenerator(InferenceGenerator):
         return results
 
     def _send_error(self, task: TextGeneration, e: Exception) -> None:
+        record_trace_marker(
+            "error",
+            self.device_rank,
+            task_id=task.task_id,
+            tags=["error"],
+            attrs={"message": str(e)},
+        )
         if self.device_rank == 0:
             self.event_sender.send(
                 ChunkGenerated(
@@ -523,9 +631,15 @@ class BatchGenerator(InferenceGenerator):
 
     def _start_task(self, task: TextGeneration) -> int:
         _check_for_debug_prompts(task.task_params)
-        prompt = apply_chat_template(
-            self.tokenizer, task.task_params, model_card=self.model_card
-        )
+        with trace(
+            "prompt_build",
+            self.device_rank,
+            "prompt",
+            task_id=task.task_id,
+        ):
+            prompt = apply_chat_template(
+                self.tokenizer, task.task_params, model_card=self.model_card
+            )
         if not self._logged_first_request_shape:
             log_request_shape(
                 "first-live-request",
@@ -574,13 +688,29 @@ class BatchGenerator(InferenceGenerator):
                 self.agree_on_tasks()
 
         return self._mlx_gen.submit(
+            task_id=task.task_id,
             task_params=task.task_params,
             prompt=prompt,
             on_prefill_progress=on_prefill_progress,
             distributed_prompt_progress_callback=distributed_prompt_progress_callback,
             on_generation_token=on_generation_token,
+            trace_rank=self.device_rank,
         )
 
     def close(self) -> None:
         self._mlx_gen.close()
         del self.model, self.tokenizer, self.group
+
+    def _record_decode_span(self, task_id: TaskId) -> None:
+        start_us = self._decode_started_us.pop(task_id, None)
+        self._first_token_seen.discard(task_id)
+        if start_us is None:
+            return
+        record_shared_span(
+            [task_id],
+            name="decode",
+            start_us=start_us,
+            duration_us=max(now_us() - start_us, 0),
+            rank=self.device_rank,
+            category="decode",
+        )
