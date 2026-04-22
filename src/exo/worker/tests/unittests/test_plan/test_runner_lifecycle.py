@@ -1,7 +1,9 @@
 from typing import Any
 
 import exo.worker.plan as plan_mod
-from exo.shared.types.tasks import Shutdown
+from exo.shared.types.common import CommandId
+from exo.shared.types.tasks import Shutdown, TaskId, TaskStatus, TextGeneration
+from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from exo.shared.types.worker.instances import BoundInstance, Instance, InstanceId
 from exo.shared.types.worker.runners import (
     RunnerFailed,
@@ -52,6 +54,49 @@ def test_plan_kills_runner_when_instance_missing():
         instances=instances,
         all_runners=all_runners,
         tasks={},
+    )
+
+    assert isinstance(result, Shutdown)
+    assert result.instance_id == INSTANCE_1_ID
+    assert result.runner_id == RUNNER_1_ID
+
+
+def test_plan_prefers_shutdown_over_cancel_for_missing_instance() -> None:
+    """
+    If the authoritative instance has already been deleted, plan() should tear
+    down the local runner immediately instead of spending cycles on task-level
+    cancellation first.
+    """
+    shard = get_pipeline_shard_metadata(model_id=MODEL_A_ID, device_rank=0)
+    instance = get_mlx_ring_instance(
+        instance_id=INSTANCE_1_ID,
+        model_id=MODEL_A_ID,
+        node_to_runner={NODE_A: RUNNER_1_ID},
+        runner_to_shard={RUNNER_1_ID: shard},
+    )
+    bound_instance = BoundInstance(
+        instance=instance, bound_runner_id=RUNNER_1_ID, bound_node_id=NODE_A
+    )
+    runner = FakeRunnerSupervisor(bound_instance=bound_instance, status=RunnerReady())
+
+    cancelled_task = TextGeneration(
+        task_id=TaskId("cancelled-task"),
+        instance_id=INSTANCE_1_ID,
+        task_status=TaskStatus.Cancelled,
+        command_id=CommandId("cmd-1"),
+        task_params=TextGenerationTaskParams(
+            model=MODEL_A_ID,
+            input=[InputMessage(role="user", content="stop")],
+        ),
+    )
+
+    result = plan_mod.plan(
+        node_id=NODE_A,
+        runners={RUNNER_1_ID: runner},  # type: ignore[arg-type]
+        global_download_status={NODE_A: []},
+        instances={},
+        all_runners={RUNNER_1_ID: RunnerReady()},
+        tasks={cancelled_task.task_id: cancelled_task},
     )
 
     assert isinstance(result, Shutdown)
