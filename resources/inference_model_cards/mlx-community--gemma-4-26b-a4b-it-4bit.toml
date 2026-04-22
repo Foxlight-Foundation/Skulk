@@ -8,6 +8,7 @@ family = "gemma"
 quantization = "4bit"
 base_model = "Gemma 4 26B A4B"
 capabilities = ["text", "vision", "thinking"]
+context_length = 262144
 
 [reasoning]
 supports_toggle = true

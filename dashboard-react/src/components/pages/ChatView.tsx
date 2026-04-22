@@ -440,6 +440,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   const [ttftMs, setTtftMs] = useState<number | null>(null);
   const [tps, setTps] = useState<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const activeCommandIdRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [modelThinkingToggleSupport, setModelThinkingToggleSupport] = useState<Record<string, boolean>>({});
   const [modelImageInputSupport, setModelImageInputSupport] = useState<Record<string, boolean>>({});
@@ -596,6 +597,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    activeCommandIdRef.current = null;
     let stallTimer: number | null = null;
     let requestTimedOut = false;
     let lastStallTimeoutMs = INITIAL_STREAM_STALL_TIMEOUT_MS;
@@ -671,6 +673,10 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
 
           for (const line of lines) {
             const trimmed = line.trim();
+            if (trimmed.startsWith(': command_id ')) {
+              activeCommandIdRef.current = trimmed.slice(': command_id '.length).trim();
+              continue;
+            }
             if (!trimmed || trimmed.startsWith(':')) continue;
             if (!trimmed.startsWith('data: ')) continue;
             const data = trimmed.slice(6);
@@ -678,6 +684,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
 
             try {
               const parsed = JSON.parse(data) as {
+                id?: string;
                 choices?: Array<{
                   delta?: {
                     content?: string;
@@ -686,6 +693,9 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
                   };
                 }>;
               };
+              if (parsed.id) {
+                activeCommandIdRef.current = parsed.id;
+              }
               const delta = parsed.choices?.[0]?.delta;
               const hasToken = delta?.content || delta?.reasoning_content;
 
@@ -823,11 +833,25 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     setStreamingThinking(null);
     setIsLoading(false);
     abortRef.current = null;
+    activeCommandIdRef.current = null;
 
   }, [selectedModelId, isLoading, thinkingEnabled, supportsThinking, selectedBuiltinTools, addMessage]);
 
-  const handleCancel = useCallback(() => {
+  const handleCancel = useCallback(async () => {
+    const commandId = activeCommandIdRef.current;
+    activeCommandIdRef.current = null;
+
     abortRef.current?.abort();
+
+    if (!commandId) return;
+
+    try {
+      await fetch(`/v1/cancel/${encodeURIComponent(commandId)}`, {
+        method: 'POST',
+      });
+    } catch {
+      // The UI should still stop immediately even if the cancel request races with teardown.
+    }
   }, []);
 
   const handleDelete = useCallback((id: string) => {

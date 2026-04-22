@@ -252,6 +252,10 @@ async def generate_chat_stream(
     """Generate Chat Completions API streaming events from chunks."""
     last_usage: Usage | None = None
 
+    # Emit the command id immediately so first-party clients can cancel during
+    # long prefill/model-load phases before the first visible token arrives.
+    yield f": command_id {command_id}\n\n"
+
     async for chunk in chunk_stream:
         match chunk:
             case PrefillProgressChunk():
