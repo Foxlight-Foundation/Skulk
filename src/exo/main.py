@@ -148,6 +148,7 @@ class Node:
         await router.register_topic(topics.DOWNLOAD_COMMANDS)
         await router.register_topic(topics.STATE_SYNC_MESSAGES)
         event_router = EventRouter(
+            node_id,
             session_id,
             command_sender=router.sender(topics.COMMANDS),
             state_sync_sender=router.sender(topics.STATE_SYNC_MESSAGES),
@@ -477,6 +478,7 @@ class Node:
                     await anyio.sleep(0)
                     self.event_router.shutdown()
                     self.event_router = EventRouter(
+                        self.node_id,
                         result.session_id,
                         command_sender=self.router.sender(topics.COMMANDS),
                         state_sync_sender=self.router.sender(topics.STATE_SYNC_MESSAGES),

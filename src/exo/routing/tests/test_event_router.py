@@ -22,6 +22,7 @@ from exo.utils.channels import Receiver, Sender, channel
 def _make_router(
     session_id: SessionId,
     *,
+    node_id: NodeId | None = None,
     snapshot_request_attempts: int = 3,
     router_cls: type[EventRouter] = EventRouter,
 ) -> tuple[
@@ -40,6 +41,7 @@ def _make_router(
     external_outbound, _unused_external_outbound = channel[LocalForwarderEvent]()
 
     router = router_cls(
+        node_id or NodeId("self"),
         session_id,
         command_sender=command_sender,
         state_sync_sender=state_sync_sender,
@@ -368,8 +370,50 @@ async def test_snapshot_bootstrap_ignores_non_master_origin() -> None:
 
 
 @pytest.mark.asyncio
+async def test_snapshot_bootstrap_accepts_local_self_master_origin() -> None:
+    session_id = SessionId(master_node_id=NodeId("self"), election_clock=13)
+    router, command_receiver, state_sync_requests, state_sync_responses, _event_sender = (
+        _make_router(session_id, node_id=NodeId("self"))
+    )
+    internal_receiver = router.receiver()
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(router.run)
+
+        request = await state_sync_requests.receive()
+        snapshot_state = State(last_event_applied_idx=3)
+        await state_sync_responses.send(
+            (
+                None,
+                StateSyncMessage(
+                    kind="response",
+                    requester=request.requester,
+                    session_id=session_id,
+                    snapshot=StateSnapshot(
+                        session_id=session_id,
+                        last_event_applied_idx=3,
+                        state=snapshot_state,
+                    ),
+                ),
+            )
+        )
+
+        replay_request = await command_receiver.receive()
+        assert isinstance(replay_request.command, RequestEventLog)
+        assert replay_request.command.since_idx == 4
+
+        hydrated = await internal_receiver.receive()
+        assert hydrated.idx == 3
+        assert isinstance(hydrated.event, StateSnapshotHydrated)
+        assert hydrated.event.state == snapshot_state
+
+        router.shutdown()
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.asyncio
 async def test_release_ready_events_preserves_order_during_concurrent_drains() -> None:
-    session_id = SessionId(master_node_id=NodeId("master"), election_clock=13)
+    session_id = SessionId(master_node_id=NodeId("master"), election_clock=14)
     router, _command_receiver, _state_sync_requests, _state_sync_responses, _sender = cast(
         tuple[
             _ControlledSendEventRouter,
@@ -400,7 +444,7 @@ async def test_release_ready_events_preserves_order_during_concurrent_drains() -
 
 @pytest.mark.asyncio
 async def test_conflicting_duplicate_index_requests_replay_instead_of_crashing() -> None:
-    session_id = SessionId(master_node_id=NodeId("master"), election_clock=14)
+    session_id = SessionId(master_node_id=NodeId("master"), election_clock=15)
     router, command_receiver, state_sync_requests, state_sync_responses, event_sender = (
         _make_router(session_id)
     )

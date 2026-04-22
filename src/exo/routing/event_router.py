@@ -7,7 +7,7 @@ from anyio.abc import CancelScope
 from loguru import logger
 
 from exo.shared.types.commands import ForwarderCommand, RequestEventLog
-from exo.shared.types.common import SessionId, SystemId
+from exo.shared.types.common import NodeId, SessionId, SystemId
 from exo.shared.types.events import (
     Event,
     EventId,
@@ -24,6 +24,7 @@ from exo.utils.task_group import TaskGroup
 
 @dataclass
 class EventRouter:
+    node_id: NodeId
     session_id: SessionId
     command_sender: Sender[ForwarderCommand]
     state_sync_sender: Sender[StateSyncMessage]
@@ -181,7 +182,7 @@ class EventRouter:
                                 "Ignoring state snapshot response for mismatched session"
                             )
                             continue
-                        if origin != str(self.session_id.master_node_id):
+                        if not self._is_trusted_snapshot_origin(origin):
                             logger.warning(
                                 "Ignoring state snapshot response from non-master origin"
                             )
@@ -199,6 +200,12 @@ class EventRouter:
                         f"(attempt={attempt + 2}/{self.snapshot_request_attempts})"
                     )
         return None
+
+    def _is_trusted_snapshot_origin(self, origin: str | None) -> bool:
+        """Accept authenticated master responses, including local self-master replies."""
+        if origin == str(self.session_id.master_node_id):
+            return True
+        return origin is None and self.node_id == self.session_id.master_node_id
 
     async def _hydrate_from_snapshot(self, snapshot: StateSnapshot) -> None:
         self.event_buffer.next_idx_to_release = snapshot.last_event_applied_idx + 1
