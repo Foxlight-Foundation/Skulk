@@ -55,8 +55,12 @@ def plan(
 ) -> Task | None:
     # Python short circuiting OR logic should evaluate these sequentially.
     return (
-        _cancel_tasks(runners, tasks)
-        or _kill_runner(runners, all_runners, instances)
+        # Kill orphaned or poisoned runners before issuing cooperative task
+        # cancellation. Once an instance disappears from authoritative state we
+        # should not strand local runner processes behind best-effort cancel
+        # handshakes; shutting them down is the safest recovery path.
+        _kill_runner(runners, all_runners, instances)
+        or _cancel_tasks(runners, tasks)
         or _create_runner(node_id, runners, instances)
         or _model_needs_download(node_id, runners, global_download_status)
         or _init_distributed_backend(runners, all_runners)

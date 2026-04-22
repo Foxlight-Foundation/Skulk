@@ -158,6 +158,23 @@ class TestGemma4ExtendedModelCard:
         assert card.runtime is not None
         assert card.runtime.output_parser == OutputParserType.GptOss
 
+    async def test_deepseek_v32_builtin_card_includes_dsml_sections(self):
+        card = await ModelCard.load_from_path(
+            Path(RESOURCES_DIR)
+            / "inference_model_cards"
+            / "mlx-community--DeepSeek-V3.2-4bit.toml"
+        )
+
+        assert card.reasoning is not None
+        assert card.reasoning.supports_toggle is True
+        assert card.reasoning.format == ReasoningFormat.TokenDelimited
+        assert card.tooling is not None
+        assert card.tooling.supports_tool_calling is True
+        assert card.tooling.tool_call_format == ToolCallFormat.Dsml
+        assert card.runtime is not None
+        assert card.runtime.prompt_renderer == PromptRendererType.Dsml
+        assert card.runtime.output_parser == OutputParserType.DeepseekV32
+
 class TestModelTypePriority:
     """Auto-detection should prefer top-level model_type over vision_config.model_type."""
 

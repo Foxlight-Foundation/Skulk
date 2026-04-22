@@ -1,5 +1,8 @@
 from pathlib import Path
-from types import SimpleNamespace
+from typing import Callable, cast
+
+import pytest
+from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 from exo.shared.models.model_cards import (
     ModelCard,
@@ -9,23 +12,54 @@ from exo.shared.models.model_cards import (
     ToolingCardConfig,
 )
 from exo.shared.types.memory import Memory
-from exo.worker.engines.mlx.utils_mlx import (
-    _parse_gemma4_tool_calls,
-    get_tokenizer,
-    load_tokenizer_for_model_id,
-)
+from exo.shared.types.worker.shards import PipelineShardMetadata
+from exo.worker.engines.mlx import utils_mlx as utils_mlx_module
+from exo.worker.engines.mlx.utils_mlx import get_tokenizer, load_tokenizer_for_model_id
 
 
 class _FakeTokenizer:
     def __init__(self) -> None:
         self.eos_token_ids: list[int] | None = None
-        self.tool_call_start: str | None = None
-        self.tool_call_end: str | None = None
-        self.tool_parser = None
+        self._tool_call_start: str | None = None
+        self._tool_call_end: str | None = None
+        self._tool_parser: Callable[[str], list[dict[str, object]]] | None = None
+
+    @property
+    def tool_call_start(self) -> str | None:
+        return self._tool_call_start
+
+    @property
+    def tool_call_end(self) -> str | None:
+        return self._tool_call_end
+
+    @property
+    def tool_parser(self) -> Callable[[str], list[dict[str, object]]] | None:
+        return self._tool_parser
+
+
+class _TokenizerBackend:
+    def __init__(self) -> None:
+        self.eos_token_id = 1
+        self.chat_template = None
+
+    def get_vocab(self) -> dict[str, int]:
+        return {
+            "<|tool_call>": 10,
+            "<tool_call|>": 11,
+            "<bos>": 0,
+        }
+
+
+def _gemma4_tool_parser() -> Callable[[str], list[dict[str, object]]]:
+    module_dict = cast(dict[str, object], utils_mlx_module.__dict__)
+    return cast(
+        Callable[[str], list[dict[str, object]]],
+        module_dict["_parse_gemma4_tool_calls"],
+    )
 
 
 def test_load_tokenizer_for_model_id_uses_explicit_model_card_when_cache_is_empty(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     card = ModelCard(
@@ -39,13 +73,60 @@ def test_load_tokenizer_for_model_id_uses_explicit_model_card_when_cache_is_empt
         tooling=ToolingCardConfig(tool_call_format=ToolCallFormat.Gemma4),
     )
 
+    def _missing_card(_model_id: ModelId) -> None:
+        return None
+
+    def _fake_load_tokenizer(*_args: object, **_kwargs: object) -> _FakeTokenizer:
+        return _FakeTokenizer()
+
     monkeypatch.setattr(
         "exo.worker.engines.mlx.utils_mlx.get_card",
-        lambda _model_id: None,
+        _missing_card,
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.utils_mlx.load_tokenizer",
-        lambda *_args, **_kwargs: _FakeTokenizer(),
+        _fake_load_tokenizer,
+    )
+
+    tokenizer = cast(
+        _FakeTokenizer,
+        cast(
+            object,
+            load_tokenizer_for_model_id(
+                card.model_id,
+                tmp_path,
+                model_card=card,
+            ),
+        ),
+    )
+
+    assert tokenizer.tool_call_start == "<|tool_call>"
+    assert tokenizer.tool_call_end == "<tool_call|>"
+    assert tokenizer.tool_parser is _gemma4_tool_parser()
+
+
+def test_load_tokenizer_for_model_id_patches_real_tokenizer_wrapper_for_gemma4(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    card = ModelCard(
+        model_id=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"),
+        storage_size=Memory.from_mb(100),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        capabilities=["text"],
+        family="gemma4",
+        tooling=ToolingCardConfig(tool_call_format=ToolCallFormat.Gemma4),
+    )
+
+    def _fake_load_tokenizer(*_args: object, **_kwargs: object) -> TokenizerWrapper:
+        return TokenizerWrapper(_TokenizerBackend())
+
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.utils_mlx.load_tokenizer",
+        _fake_load_tokenizer,
     )
 
     tokenizer = load_tokenizer_for_model_id(
@@ -53,14 +134,18 @@ def test_load_tokenizer_for_model_id_uses_explicit_model_card_when_cache_is_empt
         tmp_path,
         model_card=card,
     )
+    tool_parser = cast(
+        Callable[[str], list[dict[str, object]]] | None,
+        tokenizer.tool_parser,
+    )
 
     assert tokenizer.tool_call_start == "<|tool_call>"
     assert tokenizer.tool_call_end == "<tool_call|>"
-    assert tokenizer.tool_parser is _parse_gemma4_tool_calls
+    assert tool_parser is _gemma4_tool_parser()
 
 
 def test_get_tokenizer_passes_shard_model_card_to_tokenizer_loader(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     card = ModelCard(
@@ -73,7 +158,14 @@ def test_get_tokenizer_passes_shard_model_card_to_tokenizer_loader(
         capabilities=["text"],
         tooling=ToolingCardConfig(tool_call_format=ToolCallFormat.Gemma4),
     )
-    shard_metadata = SimpleNamespace(model_card=card)
+    shard_metadata = PipelineShardMetadata(
+        model_card=card,
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=1,
+        n_layers=1,
+    )
 
     captured: dict[str, object] = {}
 

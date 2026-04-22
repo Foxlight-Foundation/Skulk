@@ -6,9 +6,11 @@ sidebar_position: 1
 
 <!-- Copyright 2025 Foxlight Foundation -->
 
-Gemma 4 is one of the first model families in Skulk that required explicit, model-specific runtime handling.
+Gemma 4 is one of the first model families in Skulk that required explicit,
+model-specific runtime handling.
 
-That makes it a useful reference point for how the capability system is meant to work.
+That makes it a useful reference point for how the capability system is meant to
+work.
 
 ## Why Gemma 4 Is Special
 
@@ -108,8 +110,26 @@ minimal synthetic prompt by design:
 
 This is intentional. During debugging, richer synthetic warmup prompts were
 observed to trigger the distributed warmup hang path on multi-node pipeline
-setups. Short single-chunk prompts are therefore routed through
-`stream_generate`, while richer synthetic warmup shapes are avoided entirely.
+setups. Pipeline models now stay on Skulk's explicit pipeline-prefill path even
+for short one-chunk prompts, while distributed warmup keeps the synthetic prompt
+minimal and suppresses unnecessary distributed progress polling for those tiny
+prefills.
+
+## Current Clustered Runtime Envelope
+
+Gemma 4 currently has a narrower trusted clustered path than more generic text
+models.
+
+Today, the boring path is:
+
+- Gemma 4-specific prompt rendering
+- Gemma 4-specific thinking-channel parsing
+- `SequentialGenerator` for distributed inference
+- explicit pipeline prefill during warmup
+- default KV cache as the baseline
+
+This is conservative by design. It reflects the current support envelope that
+has proven stable in cluster debugging.
 
 Two debug-only warmup shaping env vars exist:
 

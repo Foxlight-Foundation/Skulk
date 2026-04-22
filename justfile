@@ -27,7 +27,7 @@ rust-rebuild:
 
 build-dashboard:
     #!/usr/bin/env bash
-    cd dashboard
+    cd dashboard-react
     npm install
     npm run build
 
@@ -38,6 +38,5 @@ clean:
     rm -rf **/__pycache__
     rm -rf target/
     rm -rf .venv
-    rm -rf dashboard/node_modules
-    rm -rf dashboard/.svelte-kit
-    rm -rf dashboard/build
+    rm -rf dashboard-react/node_modules
+    rm -rf dashboard-react/dist

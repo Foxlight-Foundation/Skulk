@@ -24,9 +24,11 @@ from exo.shared.election import Election, ElectionResult
 from exo.shared.logging import logger_cleanup, logger_setup
 from exo.shared.types.commands import ForwarderDownloadCommand, SyncConfig
 from exo.shared.types.common import NodeId, SessionId, SystemId
+from exo.shared.types.state_sync import StateSyncMessage
 from exo.store.config import (
     ExoConfig,
     load_exo_config,
+    node_matches_store_host,
     resolve_config_path,
     resolve_node_staging,
 )
@@ -37,6 +39,77 @@ from exo.utils.channels import Receiver, channel
 from exo.utils.pydantic_ext import CamelCaseModel
 from exo.utils.task_group import TaskGroup
 from exo.worker.main import Worker
+
+
+def _add_model_search_path(path: Path) -> None:
+    """Ensure the given model path is visible to the current process and children."""
+
+    expanded = path.expanduser()
+    existing_path = os.environ.get("SKULK_MODELS_PATH", os.environ.get("EXO_MODELS_PATH", ""))
+    paths = [p for p in existing_path.split(":") if p]
+    path_str = str(expanded)
+    if path_str not in paths:
+        paths.append(path_str)
+    joined = ":".join(paths)
+    os.environ["SKULK_MODELS_PATH"] = joined
+    os.environ["EXO_MODELS_PATH"] = joined  # legacy compat
+
+    from exo.shared.constants import add_model_search_path
+
+    add_model_search_path(expanded)
+
+
+def _configure_model_store_runtime(
+    node_id: NodeId,
+    exo_config: ExoConfig | None,
+) -> tuple[ModelStoreClient | None, ModelStoreServer | None]:
+    """Build store client/server wiring from the current config."""
+
+    if (
+        exo_config is None
+        or exo_config.model_store is None
+        or not exo_config.model_store.enabled
+    ):
+        return None, None
+
+    ms = exo_config.model_store
+    is_store_host = node_matches_store_host(
+        ms.store_host,
+        str(node_id),
+        hostname=socket.gethostname(),
+    )
+
+    local_store_path: Path | None = Path(ms.store_path) if is_store_host else None
+    store_client = ModelStoreClient(
+        store_host=ms.store_http_host or ms.store_host,
+        store_port=ms.store_port,
+        local_store_path=local_store_path,
+    )
+
+    store_server: ModelStoreServer | None = None
+    if is_store_host:
+        model_store = ModelStore(Path(ms.store_path))
+        store_server = ModelStoreServer(model_store, port=ms.store_port)
+        logger.info(
+            f"ModelStore: this node is the store host — "
+            f"store at {ms.store_path}, server on port {ms.store_port}"
+        )
+
+    staging_cfg = resolve_node_staging(ms, str(node_id))
+    staging_path = Path(staging_cfg.node_cache_path)
+    _add_model_search_path(staging_path)
+    logger.info(
+        f"ModelStore: added staging path {staging_path.expanduser()} to SKULK_MODELS_PATH"
+    )
+
+    if is_store_host:
+        store_root = Path(ms.store_path)
+        _add_model_search_path(store_root)
+        logger.info(
+            f"ModelStore: store host — added store root {store_root.expanduser()} to SKULK_MODELS_PATH (skip staging)"
+        )
+
+    return store_client, store_server
 
 
 @dataclass
@@ -73,9 +146,15 @@ class Node:
         await router.register_topic(topics.ELECTION_MESSAGES)
         await router.register_topic(topics.CONNECTION_MESSAGES)
         await router.register_topic(topics.DOWNLOAD_COMMANDS)
+        await router.register_topic(topics.STATE_SYNC_MESSAGES)
         event_router = EventRouter(
+            node_id,
             session_id,
             command_sender=router.sender(topics.COMMANDS),
+            state_sync_sender=router.sender(topics.STATE_SYNC_MESSAGES),
+            state_sync_receiver=router.receiver_with_origin(
+                topics.STATE_SYNC_MESSAGES
+            ),
             external_outbound=router.sender(topics.LOCAL_EVENTS),
             external_inbound=router.receiver(topics.GLOBAL_EVENTS),
         )
@@ -122,76 +201,9 @@ class Node:
             os.environ["HF_TOKEN"] = exo_config.hf_token
             logger.info("HF token loaded from config")
 
-        store_client: ModelStoreClient | None = None
-        store_server: ModelStoreServer | None = None
-
-        if (
-            exo_config is not None
-            and exo_config.model_store is not None
-            and exo_config.model_store.enabled
-        ):
-            ms = exo_config.model_store
-            local_hostname = socket.gethostname()
-            is_store_host = ms.store_host in (str(node_id), local_hostname)
-
-            # Store host gets a local path so the client uses shutil instead of HTTP.
-            # Use store_http_host (when set) as the HTTP hostname so that a PeerId
-            # in store_host does not get used as a DNS name by worker nodes.
-            local_store_path: Path | None = (
-                Path(ms.store_path) if is_store_host else None
-            )
-            store_client = ModelStoreClient(
-                store_host=ms.store_http_host or ms.store_host,
-                store_port=ms.store_port,
-                local_store_path=local_store_path,
-            )
-
-            if is_store_host:
-                model_store = ModelStore(Path(ms.store_path))
-                store_server = ModelStoreServer(model_store, port=ms.store_port)
-                logger.info(
-                    f"ModelStore: this node is the store host — "
-                    f"store at {ms.store_path}, server on port {ms.store_port}"
-                )
-
-            # Register the node-local staging directory in the model search
-            # path so that build_model_path() / MLX finds staged models.
-            # Set via environment variable so that runner subprocesses
-            # (spawned via multiprocessing) also pick it up at import time.
-            staging_cfg = resolve_node_staging(ms, str(node_id))
-            staging_path = str(Path(staging_cfg.node_cache_path).expanduser())
-            existing_path = os.environ.get(
-                "SKULK_MODELS_PATH", os.environ.get("EXO_MODELS_PATH", "")
-            )
-            paths = [p for p in existing_path.split(":") if p]
-            if staging_path not in paths:
-                paths.append(staging_path)
-            joined = ":".join(paths)
-            os.environ["SKULK_MODELS_PATH"] = joined
-            os.environ["EXO_MODELS_PATH"] = joined  # legacy compat
-            # Also update the in-process constants for the main process
-            from exo.shared.constants import add_model_search_path
-
-            add_model_search_path(Path(staging_cfg.node_cache_path))
-            logger.info(
-                f"ModelStore: added staging path {staging_path} to SKULK_MODELS_PATH"
-            )
-
-            # If this node is the store host, also add the store root to the
-            # search path.  This lets the worker detect store-resident models
-            # as "pre-downloaded" (via resolve_model_in_path), which skips
-            # the redundant staging copy to the system disk.
-            if is_store_host:
-                store_root = str(Path(ms.store_path).expanduser())
-                if store_root not in paths:
-                    paths.append(store_root)
-                    joined = ":".join(paths)
-                    os.environ["SKULK_MODELS_PATH"] = joined
-                    os.environ["EXO_MODELS_PATH"] = joined  # legacy compat
-                    add_model_search_path(Path(ms.store_path))
-                    logger.info(
-                        f"ModelStore: store host — added store root {store_root} to SKULK_MODELS_PATH (skip staging)"
-                    )
+        store_client, store_server = _configure_model_store_runtime(
+            node_id, exo_config
+        )
 
         # Create DownloadCoordinator (unless --no-downloads)
         if not args.no_downloads:
@@ -281,6 +293,8 @@ class Node:
             global_event_sender=router.sender(topics.GLOBAL_EVENTS),
             local_event_receiver=router.receiver(topics.LOCAL_EVENTS),
             command_receiver=router.receiver(topics.COMMANDS),
+            state_sync_receiver=router.receiver(topics.STATE_SYNC_MESSAGES),
+            state_sync_sender=router.sender(topics.STATE_SYNC_MESSAGES),
             download_command_sender=router.sender(topics.DOWNLOAD_COMMANDS),
         )
 
@@ -341,6 +355,45 @@ class Node:
             sys.exit(1)
         self._tg.cancel_tasks()
 
+    async def _request_cluster_config(self, session_id: SessionId) -> str | None:
+        """Request the authoritative cluster config from the current master."""
+
+        requester = SystemId()
+        state_sync_sender = self.router.sender(topics.STATE_SYNC_MESSAGES)
+        state_sync_receiver = self.router.receiver_with_origin(
+            topics.STATE_SYNC_MESSAGES
+        )
+        with state_sync_receiver as messages:
+            for attempt in range(3):
+                await state_sync_sender.send(
+                    StateSyncMessage(
+                        kind="request",
+                        requester=requester,
+                        session_id=session_id,
+                    )
+                )
+                with anyio.move_on_after(1.0):
+                    async for origin, message in messages:
+                        if message.kind != "response":
+                            continue
+                        if message.requester != requester:
+                            continue
+                        if message.session_id != session_id:
+                            continue
+                        if origin != str(session_id.master_node_id):
+                            continue
+                        return message.config_yaml
+                if attempt < 2:
+                    await anyio.sleep(0.2)
+        return None
+
+    def _apply_cluster_config_yaml(self, config_yaml: str) -> None:
+        """Persist cluster config locally and rebuild derived runtime wiring."""
+
+        config_path = resolve_config_path()
+        config_path.write_text(config_yaml)
+        self.exo_config = load_exo_config(config_path)
+
     async def _broadcast_config_if_store_host(self) -> None:
         """If this node is the store host, broadcast a valid config to all nodes.
 
@@ -353,7 +406,11 @@ class Node:
         if not ms.enabled:
             return
         local_hostname = socket.gethostname()
-        is_store_host = ms.store_host in (str(self.node_id), local_hostname)
+        is_store_host = node_matches_store_host(
+            ms.store_host,
+            str(self.node_id),
+            hostname=local_hostname,
+        )
         if not is_store_host:
             return
 
@@ -415,16 +472,30 @@ class Node:
                 # - Shutdown and re-create the worker
                 # - Shut down and re-create the API
 
+                start_replacement_event_router = False
+                previous_store_server = self.store_server
                 if result.is_new_master:
                     await anyio.sleep(0)
                     self.event_router.shutdown()
                     self.event_router = EventRouter(
+                        self.node_id,
                         result.session_id,
-                        self.router.sender(topics.COMMANDS),
-                        self.router.receiver(topics.GLOBAL_EVENTS),
-                        self.router.sender(topics.LOCAL_EVENTS),
+                        command_sender=self.router.sender(topics.COMMANDS),
+                        state_sync_sender=self.router.sender(topics.STATE_SYNC_MESSAGES),
+                        state_sync_receiver=self.router.receiver_with_origin(
+                            topics.STATE_SYNC_MESSAGES
+                        ),
+                        external_inbound=self.router.receiver(topics.GLOBAL_EVENTS),
+                        external_outbound=self.router.sender(topics.LOCAL_EVENTS),
                     )
-                    self._tg.start_soon(self.event_router.run)
+                    # Wait to bootstrap the replacement event router until the
+                    # replacement worker/API receivers are attached. Otherwise,
+                    # a fast snapshot hydrate can be emitted before those
+                    # consumers exist, and the next live event will arrive out
+                    # of sequence against blank local state.
+                    start_replacement_event_router = True
+                    if previous_store_server is None and self.store_server is not None:
+                        self._tg.start_soon(self.store_server.start)
 
                 if (
                     result.session_id.master_node_id == self.node_id
@@ -443,6 +514,12 @@ class Node:
                         global_event_sender=self.router.sender(topics.GLOBAL_EVENTS),
                         local_event_receiver=self.router.receiver(topics.LOCAL_EVENTS),
                         command_receiver=self.router.receiver(topics.COMMANDS),
+                        state_sync_receiver=self.router.receiver(
+                            topics.STATE_SYNC_MESSAGES
+                        ),
+                        state_sync_sender=self.router.sender(
+                            topics.STATE_SYNC_MESSAGES
+                        ),
                         download_command_sender=self.router.sender(
                             topics.DOWNLOAD_COMMANDS
                         ),
@@ -461,6 +538,24 @@ class Node:
                     logger.info(
                         f"Node {result.session_id.master_node_id} elected master"
                     )
+                if (
+                    result.is_new_master
+                    and result.session_id.master_node_id != self.node_id
+                ):
+                    authoritative_config_yaml = await self._request_cluster_config(
+                        result.session_id
+                    )
+                    if authoritative_config_yaml is not None:
+                        self._apply_cluster_config_yaml(authoritative_config_yaml)
+                        new_store_client, new_store_server = (
+                            _configure_model_store_runtime(self.node_id, self.exo_config)
+                        )
+                        self.store_client = new_store_client
+                        self.store_server = (
+                            previous_store_server
+                            if previous_store_server is not None
+                            else new_store_server
+                        )
                 if result.is_new_master:
                     if self.download_coordinator:
                         await self.download_coordinator.shutdown()
@@ -531,6 +626,8 @@ class Node:
                         self._tg.start_soon(self.worker.run)
                     if self.api:
                         self.api.reset(result.won_clock, self.event_router.receiver())
+                    if start_replacement_event_router:
+                        self._tg.start_soon(self.event_router.run)
                     # Broadcast config to cluster so worker nodes get the right store address
                     await self._broadcast_config_if_store_host()
                 else:

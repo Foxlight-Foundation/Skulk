@@ -13,8 +13,14 @@ context_length = 131072
 [storage_size]
 in_bytes = 12025908224
 
+[reasoning]
+supports_toggle = false
+default_effort = "medium"
+disabled_effort = "none"
+
 [tooling]
 supports_tool_calling = true
+builtin_tools = ["web_search", "open_url", "extract_page"]
 tool_call_format = "gpt_oss"
 
 [runtime]

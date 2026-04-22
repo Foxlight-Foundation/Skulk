@@ -76,6 +76,116 @@ const THINK_TAG_START = '<think>';
 const THINK_TAG_END = '</think>';
 const GEMMA_THINK_START = '<|channel>thought\n';
 const GEMMA_THINK_END = '<channel|>';
+const MAX_TOOL_ROUNDS = 4;
+const GPT_OSS_BROWSER_TOOLS = {
+  web_search: {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'Search the public web and return structured results with titles, URLs, and snippets.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Natural-language search query.',
+          },
+          top_k: {
+            type: 'integer',
+            description: 'Maximum number of results to return.',
+            minimum: 1,
+            maximum: 10,
+          },
+        },
+        required: ['query'],
+        additionalProperties: false,
+      },
+    },
+  },
+  open_url: {
+    type: 'function',
+    function: {
+      name: 'open_url',
+      description: 'Open one HTTP or HTTPS URL, follow redirects, and inspect page metadata such as title and content type.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: {
+            type: 'string',
+            description: 'HTTP or HTTPS URL to inspect.',
+          },
+        },
+        required: ['url'],
+        additionalProperties: false,
+      },
+    },
+  },
+  extract_page: {
+    type: 'function',
+    function: {
+      name: 'extract_page',
+      description: 'Fetch one HTTP or HTTPS URL and return bounded readable text extracted from the page body.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: {
+            type: 'string',
+            description: 'HTTP or HTTPS URL to extract readable text from.',
+          },
+          max_chars: {
+            type: 'integer',
+            description: 'Maximum number of characters of extracted text to return.',
+            minimum: 500,
+            maximum: 50000,
+          },
+        },
+        required: ['url'],
+        additionalProperties: false,
+      },
+    },
+  },
+} as const;
+
+type BuiltinBrowserToolName = keyof typeof GPT_OSS_BROWSER_TOOLS;
+
+type ApiMessagePayload = Record<string, unknown>;
+
+interface StreamToolCall {
+  id: string;
+  type?: string;
+  function?: {
+    name?: string;
+    arguments?: string;
+  };
+}
+
+interface WebSearchToolResponse {
+  query: string;
+  provider: string;
+  results: Array<{
+    title: string;
+    url: string;
+    snippet: string;
+  }>;
+}
+
+interface OpenUrlToolResponse {
+  url: string;
+  final_url: string;
+  title?: string | null;
+  status_code: number;
+  content_type?: string | null;
+  provider: string;
+}
+
+interface ExtractPageToolResponse {
+  url: string;
+  final_url: string;
+  title?: string | null;
+  text: string;
+  truncated: boolean;
+  provider: string;
+}
 
 function splitReasoningDecoratedContent(raw: string): { content: string; thinking: string } {
   let content = '';
@@ -131,6 +241,141 @@ function mergeThinkingContent(existing: string, incoming: string): string {
     return existing;
   }
   return existing + incoming;
+}
+
+function buildApiMessages(messages: ChatMessage[]): ApiMessagePayload[] {
+  return messages.map((message) => {
+    if (message.attachments?.some((attachment) => attachment.type.startsWith('image/') && attachment.preview)) {
+      const parts: Array<{ type: string; text?: string; image_url?: { url: string } }> = [];
+      for (const attachment of message.attachments) {
+        if (attachment.type.startsWith('image/') && attachment.preview) {
+          parts.push({ type: 'image_url', image_url: { url: attachment.preview } });
+        }
+      }
+      if (message.content) {
+        parts.push({ type: 'text', text: message.content });
+      }
+      return { role: message.role, content: parts };
+    }
+    return { role: message.role, content: message.content };
+  });
+}
+
+function normalizeToolArguments(rawArguments: string | undefined): { query: string; top_k?: number } {
+  if (!rawArguments) {
+    throw new Error('Tool call arguments were empty.');
+  }
+  const parsed = JSON.parse(rawArguments) as { query?: unknown; top_k?: unknown };
+  if (typeof parsed.query !== 'string' || parsed.query.trim() === '') {
+    throw new Error('Tool call did not provide a valid search query.');
+  }
+  const topK = typeof parsed.top_k === 'number' && Number.isFinite(parsed.top_k)
+    ? Math.max(1, Math.min(10, Math.trunc(parsed.top_k)))
+    : undefined;
+  return {
+    query: parsed.query,
+    ...(topK !== undefined ? { top_k: topK } : {}),
+  };
+}
+
+function normalizeUrlToolArguments(
+  rawArguments: string | undefined,
+): { url: string } {
+  if (!rawArguments) {
+    throw new Error('Tool call arguments were empty.');
+  }
+  const parsed = JSON.parse(rawArguments) as { url?: unknown };
+  if (typeof parsed.url !== 'string' || parsed.url.trim() === '') {
+    throw new Error('Tool call did not provide a valid URL.');
+  }
+  return { url: parsed.url.trim() };
+}
+
+function normalizeExtractPageArguments(
+  rawArguments: string | undefined,
+): { url: string; max_chars?: number } {
+  if (!rawArguments) {
+    throw new Error('Tool call arguments were empty.');
+  }
+  const parsed = JSON.parse(rawArguments) as { url?: unknown; max_chars?: unknown };
+  if (typeof parsed.url !== 'string' || parsed.url.trim() === '') {
+    throw new Error('Tool call did not provide a valid URL.');
+  }
+  const maxChars = typeof parsed.max_chars === 'number' && Number.isFinite(parsed.max_chars)
+    ? Math.max(500, Math.min(50000, Math.trunc(parsed.max_chars)))
+    : undefined;
+  return {
+    url: parsed.url.trim(),
+    ...(maxChars !== undefined ? { max_chars: maxChars } : {}),
+  };
+}
+
+function builtinToolDefinitions(toolNames: string[]): ReadonlyArray<(typeof GPT_OSS_BROWSER_TOOLS)[BuiltinBrowserToolName]> {
+  return toolNames
+    .filter((toolName): toolName is BuiltinBrowserToolName => toolName in GPT_OSS_BROWSER_TOOLS)
+    .map((toolName) => GPT_OSS_BROWSER_TOOLS[toolName]);
+}
+
+async function executeBuiltinToolCall(toolCall: StreamToolCall): Promise<string> {
+  const functionCall = toolCall.function;
+  if (!functionCall?.name) {
+    throw new Error('Tool call did not include a function name.');
+  }
+
+  if (functionCall.name === 'web_search') {
+    const payload = normalizeToolArguments(functionCall.arguments);
+    const res = await fetch('/v1/tools/web_search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({})) as WebSearchToolResponse | { detail?: string };
+    if (!res.ok) {
+      const detail = 'detail' in body && typeof body.detail === 'string'
+        ? body.detail
+        : `HTTP ${res.status}`;
+      throw new Error(detail);
+    }
+    return JSON.stringify(body);
+  }
+
+  if (functionCall.name === 'open_url') {
+    const payload = normalizeUrlToolArguments(functionCall.arguments);
+    const res = await fetch('/v1/tools/open_url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({})) as OpenUrlToolResponse | { detail?: string };
+    if (!res.ok) {
+      const detail = 'detail' in body && typeof body.detail === 'string'
+        ? body.detail
+        : `HTTP ${res.status}`;
+      throw new Error(detail);
+    }
+    return JSON.stringify(body);
+  }
+
+  if (functionCall.name === 'extract_page') {
+    const payload = normalizeExtractPageArguments(functionCall.arguments);
+    const res = await fetch('/v1/tools/extract_page', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({})) as ExtractPageToolResponse | { detail?: string };
+    if (!res.ok) {
+      const detail = 'detail' in body && typeof body.detail === 'string'
+        ? body.detail
+        : `HTTP ${res.status}`;
+      throw new Error(detail);
+    }
+    return JSON.stringify(body);
+  }
+
+  {
+    throw new Error(`Unsupported tool call: ${functionCall?.name ?? 'unknown'}`);
+  }
 }
 
 async function readUploadedImageAsDataUrl(file: ChatUploadedFile): Promise<string> {
@@ -195,9 +440,11 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   const [ttftMs, setTtftMs] = useState<number | null>(null);
   const [tps, setTps] = useState<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const activeCommandIdRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [modelThinkingToggleSupport, setModelThinkingToggleSupport] = useState<Record<string, boolean>>({});
   const [modelImageInputSupport, setModelImageInputSupport] = useState<Record<string, boolean>>({});
+  const [modelBuiltinTools, setModelBuiltinTools] = useState<Record<string, string[]>>({});
   const [modelContextLengths, setModelContextLengths] = useState<Record<string, number>>({});
 
   // Restore scroll position after store hydration + DOM render
@@ -244,16 +491,21 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
         const data = await res.json() as { data?: ModelInfo[] };
         const toggleSupport: Record<string, boolean> = {};
         const imageSupport: Record<string, boolean> = {};
+        const builtinTools: Record<string, string[]> = {};
         const ctxLens: Record<string, number> = {};
         for (const m of data.data ?? []) {
           if (m.id) {
             toggleSupport[m.id] = m.resolved_capabilities?.supports_thinking_toggle ?? false;
             imageSupport[m.id] = m.resolved_capabilities?.supports_image_input ?? false;
+            builtinTools[m.id] = m.tooling?.builtin_tools
+              ?? m.resolved_capabilities?.builtin_tools
+              ?? [];
           }
           if (m.id && m.context_length) ctxLens[m.id] = m.context_length;
         }
         setModelThinkingToggleSupport(toggleSupport);
         setModelImageInputSupport(imageSupport);
+        setModelBuiltinTools(builtinTools);
         setModelContextLengths(ctxLens);
       } catch { /* ignore */ }
     })();
@@ -267,6 +519,9 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   const supportsImageAttachments = selectedModelId
     ? (modelImageInputSupport[selectedModelId] ?? false)
     : false;
+  const selectedBuiltinTools = selectedModelId
+    ? (modelBuiltinTools[selectedModelId] ?? [])
+    : [];
 
   useEffect(() => {
     if (!supportsThinking && thinkingEnabled) {
@@ -342,6 +597,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    activeCommandIdRef.current = null;
     let stallTimer: number | null = null;
     let requestTimedOut = false;
     let lastStallTimeoutMs = INITIAL_STREAM_STALL_TIMEOUT_MS;
@@ -362,125 +618,190 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     const startTime = performance.now();
     let firstTokenTime: number | null = null;
     let tokenCount = 0;
-    let rawContent = '';
+    let finalRawContent = '';
     let fullThinking = '';
     let lastTps: number | undefined;
+    let toolLoopLimitHit = false;
 
     try {
-      resetStallTimer();
+      const apiMessages: ApiMessagePayload[] = buildApiMessages(allMessages);
+      const requestTools = selectedBuiltinTools.length > 0
+        ? builtinToolDefinitions(selectedBuiltinTools)
+        : undefined;
 
-      // Build messages array — use multimodal content format when images are attached
-      const apiMessages = allMessages.map((m) => {
-        if (m.attachments?.some((a) => a.type.startsWith('image/') && a.preview)) {
-          const parts: Array<{ type: string; text?: string; image_url?: { url: string } }> = [];
-          for (const att of m.attachments) {
-            if (att.type.startsWith('image/') && att.preview) {
-              parts.push({ type: 'image_url', image_url: { url: att.preview } });
-            }
-          }
-          if (m.content) {
-            parts.push({ type: 'text', text: m.content });
-          }
-          return { role: m.role, content: parts };
-        }
-        return { role: m.role, content: m.content };
-      });
-
-      const res = await fetch('/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: selectedModelId,
-          messages: apiMessages,
-          stream: true,
-          ...(supportsThinking ? { enable_thinking: thinkingEnabled } : {}),
-        }),
-        signal: controller.signal,
-      });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error((err as Record<string, string>).detail ?? `HTTP ${res.status}`);
-      }
-
-      const reader = res.body?.getReader();
-      const decoder = new TextDecoder();
-
-      if (!reader) throw new Error('No response body');
-
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
+      for (let toolRound = 0; toolRound < MAX_TOOL_ROUNDS; toolRound++) {
         resetStallTimer();
 
-        buffer += decoder.decode(value, { stream: true });
+        let iterationRawContent = '';
+        let iterationThinking = '';
+        const iterationToolCalls: StreamToolCall[] = [];
 
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
+        const res = await fetch('/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: selectedModelId,
+            messages: apiMessages,
+            stream: true,
+            ...(requestTools ? { tools: requestTools } : {}),
+            ...(supportsThinking ? { enable_thinking: thinkingEnabled } : {}),
+          }),
+          signal: controller.signal,
+        });
 
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed.startsWith(':')) continue;
-          if (!trimmed.startsWith('data: ')) continue;
-          const data = trimmed.slice(6);
-          if (data === '[DONE]') continue;
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error((err as Record<string, string>).detail ?? `HTTP ${res.status}`);
+        }
 
-          try {
-            const parsed = JSON.parse(data);
-            const delta = parsed.choices?.[0]?.delta;
+        const reader = res.body?.getReader();
+        const decoder = new TextDecoder();
 
-            const hasToken = delta?.content || delta?.reasoning_content;
+        if (!reader) throw new Error('No response body');
 
-            // Record TTFT on first token of any kind
-            if (hasToken && firstTokenTime === null) {
-              firstTokenTime = performance.now();
-              setTtftMs(firstTokenTime - startTime);
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          resetStallTimer();
+          buffer += decoder.decode(value, { stream: true });
+
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith(': command_id ')) {
+              activeCommandIdRef.current = trimmed.slice(': command_id '.length).trim();
+              continue;
             }
+            if (!trimmed || trimmed.startsWith(':')) continue;
+            if (!trimmed.startsWith('data: ')) continue;
+            const data = trimmed.slice(6);
+            if (data === '[DONE]') continue;
 
-            // Thinking via reasoning_content field
-            if (delta?.reasoning_content) {
-              fullThinking += delta.reasoning_content;
-              setStreamingThinking(fullThinking);
-            }
-
-            // Content — parse out inline <think> tags
-            if (delta?.content) {
-              rawContent += delta.content;
-              const separated = splitReasoningDecoratedContent(rawContent);
-              if (separated.thinking) {
-                fullThinking = mergeThinkingContent(fullThinking, separated.thinking);
-                setStreamingThinking(fullThinking);
+            try {
+              const parsed = JSON.parse(data) as {
+                id?: string;
+                choices?: Array<{
+                  delta?: {
+                    content?: string;
+                    reasoning_content?: string;
+                    tool_calls?: StreamToolCall[];
+                  };
+                }>;
+              };
+              if (parsed.id) {
+                activeCommandIdRef.current = parsed.id;
               }
-              setStreamingContent(separated.content || null);
-            }
+              const delta = parsed.choices?.[0]?.delta;
+              const hasToken = delta?.content || delta?.reasoning_content;
 
-            // Update TPS on every token (thinking or content)
-            if (hasToken) {
-              tokenCount++;
-              if (firstTokenTime !== null && tokenCount > 1) {
-                const elapsed = (performance.now() - firstTokenTime) / 1000;
-                if (elapsed > 0) {
-                  lastTps = tokenCount / elapsed;
-                  setTps(lastTps);
+              if (hasToken && firstTokenTime === null) {
+                firstTokenTime = performance.now();
+                setTtftMs(firstTokenTime - startTime);
+              }
+
+              if (delta?.reasoning_content) {
+                iterationThinking += delta.reasoning_content;
+                const combinedThinking = mergeThinkingContent(fullThinking, iterationThinking);
+                setStreamingThinking(combinedThinking);
+              }
+
+              if (delta?.content) {
+                iterationRawContent += delta.content;
+                const separated = splitReasoningDecoratedContent(iterationRawContent);
+                if (separated.thinking) {
+                  iterationThinking = mergeThinkingContent(iterationThinking, separated.thinking);
+                  const combinedThinking = mergeThinkingContent(fullThinking, iterationThinking);
+                  setStreamingThinking(combinedThinking);
+                }
+                setStreamingContent(separated.content || null);
+              }
+
+              if (delta?.tool_calls?.length) {
+                iterationToolCalls.push(...delta.tool_calls);
+              }
+
+              if (hasToken) {
+                tokenCount++;
+                if (firstTokenTime !== null && tokenCount > 1) {
+                  const elapsed = (performance.now() - firstTokenTime) / 1000;
+                  if (elapsed > 0) {
+                    lastTps = tokenCount / elapsed;
+                    setTps(lastTps);
+                  }
                 }
               }
+            } catch {
+              // skip malformed JSON
             }
-          } catch {
-            // skip malformed JSON
           }
         }
+
+        const separatedContent = splitReasoningDecoratedContent(iterationRawContent);
+        if (separatedContent.thinking) {
+          iterationThinking = mergeThinkingContent(iterationThinking, separatedContent.thinking);
+        }
+
+        if (iterationToolCalls.length === 0) {
+          fullThinking = mergeThinkingContent(fullThinking, iterationThinking);
+          finalRawContent = separatedContent.content;
+          break;
+        }
+
+        fullThinking = mergeThinkingContent(fullThinking, iterationThinking);
+
+        for (const toolCall of iterationToolCalls) {
+          const toolName = toolCall.function?.name ?? 'unknown';
+          const toolCallId = toolCall.id || crypto.randomUUID();
+          let toolOutput: string;
+
+          try {
+            toolOutput = await executeBuiltinToolCall(toolCall);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'Tool execution failed.';
+            toolOutput = JSON.stringify({ error: message });
+          }
+
+          apiMessages.push({
+            role: 'assistant',
+            content: '',
+            tool_calls: [{
+              id: toolCallId,
+              type: toolCall.type ?? 'function',
+              function: {
+                name: toolName,
+                arguments: toolCall.function?.arguments ?? '{}',
+              },
+            }],
+          });
+          apiMessages.push({
+            role: 'tool',
+            tool_call_id: toolCallId,
+            content: toolOutput,
+          });
+        }
+
+        setStreamingContent(null);
+        if (toolRound === MAX_TOOL_ROUNDS - 1) {
+          toolLoopLimitHit = true;
+        }
+      }
+
+      if (!finalRawContent && toolLoopLimitHit) {
+        finalRawContent = 'Error: web search tool loop exceeded the safety limit.';
       }
     } catch (err) {
       if ((err as Error).name === 'AbortError') {
         // User cancelled
         if (requestTimedOut) {
-          rawContent = `Error: generation stalled for more than ${Math.round(lastStallTimeoutMs / 1000)} seconds.`;
+          finalRawContent = `Error: generation stalled for more than ${Math.round(lastStallTimeoutMs / 1000)} seconds.`;
         }
       } else {
-        rawContent = rawContent || `Error: ${(err as Error).message}`;
+        finalRawContent = finalRawContent || `Error: ${(err as Error).message}`;
       }
     } finally {
       if (stallTimer !== null) {
@@ -489,7 +810,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     }
 
     // Finalize assistant message
-    const separatedContent = splitReasoningDecoratedContent(rawContent);
+    const separatedContent = splitReasoningDecoratedContent(finalRawContent);
     if (separatedContent.thinking) {
       fullThinking = mergeThinkingContent(fullThinking, separatedContent.thinking);
     }
@@ -512,11 +833,25 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     setStreamingThinking(null);
     setIsLoading(false);
     abortRef.current = null;
+    activeCommandIdRef.current = null;
 
-  }, [selectedModelId, isLoading, thinkingEnabled, supportsThinking, addMessage]);
+  }, [selectedModelId, isLoading, thinkingEnabled, supportsThinking, selectedBuiltinTools, addMessage]);
 
-  const handleCancel = useCallback(() => {
+  const handleCancel = useCallback(async () => {
+    const commandId = activeCommandIdRef.current;
+    activeCommandIdRef.current = null;
+
     abortRef.current?.abort();
+
+    if (!commandId) return;
+
+    try {
+      await fetch(`/v1/cancel/${encodeURIComponent(commandId)}`, {
+        method: 'POST',
+      });
+    } catch {
+      // The UI should still stop immediately even if the cancel request races with teardown.
+    }
   }, []);
 
   const handleDelete = useCallback((id: string) => {

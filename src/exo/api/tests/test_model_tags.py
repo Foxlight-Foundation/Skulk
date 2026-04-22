@@ -3,6 +3,7 @@
 
 from exo.api.main import API
 from exo.shared.models.model_cards import (
+    BuiltinToolType,
     ModelCard,
     ModelTask,
     OutputParserType,
@@ -76,8 +77,18 @@ def test_model_list_entry_exposes_gpt_oss_runtime_capabilities() -> None:
         tasks=[ModelTask.TextGeneration],
         capabilities=["text", "thinking"],
         family="gpt-oss",
+        reasoning=ReasoningCardConfig(
+            supports_toggle=False,
+            default_effort="medium",
+            disabled_effort="none",
+        ),
         tooling=ToolingCardConfig(
             supports_tool_calling=True,
+            builtin_tools=[
+                BuiltinToolType.WebSearch,
+                BuiltinToolType.OpenUrl,
+                BuiltinToolType.ExtractPage,
+            ],
             tool_call_format=ToolCallFormat.GptOss,
         ),
         runtime=RuntimeCapabilityCardConfig(
@@ -89,8 +100,17 @@ def test_model_list_entry_exposes_gpt_oss_runtime_capabilities() -> None:
 
     assert entry.tooling is not None
     assert entry.tooling.supports_tool_calling is True
+    assert entry.tooling.builtin_tools == ["web_search", "open_url", "extract_page"]
     assert entry.resolved_capabilities is not None
+    assert entry.resolved_capabilities.supports_thinking is True
+    assert entry.resolved_capabilities.supports_thinking_toggle is False
+    assert entry.resolved_capabilities.default_reasoning_effort == "medium"
     assert entry.resolved_capabilities.supports_tool_calling is True
+    assert entry.resolved_capabilities.builtin_tools == [
+        "web_search",
+        "open_url",
+        "extract_page",
+    ]
     assert entry.resolved_capabilities.tool_call_format == "gpt_oss"
     assert entry.resolved_capabilities.output_parser == "gpt_oss"
 
@@ -197,3 +217,42 @@ def test_model_list_entry_serializes_declared_capabilities_in_snake_case() -> No
     assert payload["tooling"]["supports_tool_calling"] is True
     assert payload["tooling"]["tool_call_format"] == "gemma4"
     assert payload["runtime"]["prompt_renderer"] == "gemma4"
+
+
+def test_model_list_entry_serializes_builtin_tools_in_snake_case() -> None:
+    """Builtin tool declarations should be exposed as snake_case API fields."""
+    card = ModelCard(
+        model_id=ModelId("mlx-community/gpt-oss-20b-MXFP4-Q8"),
+        storage_size=Memory.from_bytes(1024),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        capabilities=["text", "thinking"],
+        family="gpt-oss",
+        tooling=ToolingCardConfig(
+            supports_tool_calling=True,
+            builtin_tools=[
+                BuiltinToolType.WebSearch,
+                BuiltinToolType.OpenUrl,
+                BuiltinToolType.ExtractPage,
+            ],
+            tool_call_format=ToolCallFormat.GptOss,
+        ),
+        runtime=RuntimeCapabilityCardConfig(
+            output_parser=OutputParserType.GptOss,
+        ),
+    )
+
+    payload = API._model_list_entry(card).model_dump(by_alias=True)
+
+    assert payload["tooling"]["builtin_tools"] == [
+        "web_search",
+        "open_url",
+        "extract_page",
+    ]
+    assert payload["resolved_capabilities"]["builtin_tools"] == [
+        "web_search",
+        "open_url",
+        "extract_page",
+    ]

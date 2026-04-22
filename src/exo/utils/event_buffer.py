@@ -1,4 +1,17 @@
 from loguru import logger
+from pydantic import BaseModel
+
+
+class ConflictingDuplicateIndexError(ValueError):
+    """Raised when two different payloads claim the same sequence index."""
+
+    def __init__(self, idx: int, existing: object, incoming: object) -> None:
+        super().__init__(
+            "Received different messages with identical indices, probable race condition"
+        )
+        self.idx = idx
+        self.existing = existing
+        self.incoming = incoming
 
 
 class OrderedBuffer[T]:
@@ -19,11 +32,19 @@ class OrderedBuffer[T]:
         if idx < self.next_idx_to_release:
             return
         if idx in self.store:
-            assert self.store[idx] == t, (
-                "Received different messages with identical indices, probable race condition"
-            )
-            return
+            if self._messages_match(self.store[idx], t):
+                return
+            raise ConflictingDuplicateIndexError(idx, self.store[idx], t)
         self.store[idx] = t
+
+    def truncate_from(self, idx: int) -> None:
+        """Drop the buffered tail from ``idx`` onward so it can be replayed."""
+        self.store = {
+            stored_idx: event
+            for stored_idx, event in self.store.items()
+            if stored_idx < idx
+        }
+        self.next_idx_to_release = min(self.next_idx_to_release, idx)
 
     def drain(self) -> list[T]:
         """Drain all available events from the buffer"""
@@ -46,6 +67,19 @@ class OrderedBuffer[T]:
             self.next_idx_to_release += 1
         logger.trace(f"Releasing event {ret}")
         return ret
+
+    @staticmethod
+    def _messages_match(existing: T, incoming: T) -> bool:
+        """Compare payload identity while ignoring private debug-only fields."""
+        if existing == incoming:
+            return True
+        if isinstance(existing, BaseModel) and isinstance(incoming, BaseModel):
+            if type(existing) is not type(incoming):
+                return False
+            return existing.model_dump(mode="json") == incoming.model_dump(
+                mode="json"
+            )
+        return False
 
 
 class MultiSourceBuffer[SourceId, T]:

@@ -397,7 +397,7 @@ class Worker:
                         runner.shutdown()
                         if instance_deleted:
                             await self._maybe_evict_shard(shard_for_eviction)
-                        elif shard_for_eviction is not None:
+                        else:
                             # Runner crashed but instance still exists — reset
                             # download status so the planner re-stages the model
                             # instead of assuming it's still on disk.

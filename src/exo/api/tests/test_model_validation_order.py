@@ -1,7 +1,7 @@
 """Tests that request validation happens before capability-driven card loading."""
 
-from types import SimpleNamespace
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import Never, cast
 
 import pytest
 from fastapi import HTTPException
@@ -10,6 +10,8 @@ from starlette.requests import Request
 from exo.api.main import API
 from exo.api.types import (
     BenchChatCompletionRequest,
+    BenchChatCompletionResponse,
+    ChatCompletionChoice,
     ChatCompletionMessage,
     ChatCompletionRequest,
 )
@@ -21,17 +23,58 @@ from exo.api.types.ollama_api import (
 )
 from exo.api.types.openai_responses import ResponsesRequest
 from exo.shared.models.model_cards import ModelCard, ModelTask
-from exo.shared.types.common import ModelId
+from exo.shared.types.commands import TextGeneration
+from exo.shared.types.common import CommandId, ModelId, NodeId
 from exo.shared.types.memory import Memory
-from exo.shared.types.worker.runners import RunnerId
+from exo.shared.types.state import State
+from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
+from exo.shared.types.worker.instances import InstanceId, MlxRingInstance
+from exo.shared.types.worker.runners import RunnerId, ShardAssignments
 from exo.shared.types.worker.shards import PipelineShardMetadata
+
+
+def _get_running_model_card_fn(api: API) -> Callable[[ModelId], Awaitable[ModelCard]]:
+    """Return the protected running-card helper with an explicit callable type."""
+    return cast(
+        Callable[[ModelId], Awaitable[ModelCard]],
+        object.__getattribute__(api, "_get_running_model_card"),
+    )
+
+
+def _build_running_state(running_card: ModelCard) -> State:
+    """Build a minimal typed State containing one running pipeline instance."""
+    runner_id = RunnerId("runner-1")
+    node_id = NodeId("node-1")
+    return State(
+        instances={
+            InstanceId("instance-1"): MlxRingInstance(
+                instance_id=InstanceId("instance-1"),
+                shard_assignments=ShardAssignments(
+                    model_id=running_card.model_id,
+                    runner_to_shard={
+                        runner_id: PipelineShardMetadata(
+                            model_card=running_card,
+                            device_rank=0,
+                            world_size=1,
+                            start_layer=0,
+                            end_layer=1,
+                            n_layers=1,
+                        )
+                    },
+                    node_to_runner={node_id: runner_id},
+                ),
+                hosts_by_node={node_id: []},
+                ephemeral_port=52415,
+            )
+        }
+    )
 
 
 @pytest.mark.anyio
 async def test_chat_completions_validates_model_before_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
     """Invalid chat models should fail locally before the adapter tries to build task params."""
 
-    async def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+    async def _fail_if_called(*_args: object, **_kwargs: object) -> Never:
         raise AssertionError("chat_request_to_text_generation should not run before validation")
 
     async def _raise_not_found(self: API, model_id: ModelId) -> ModelId:
@@ -56,7 +99,7 @@ async def test_chat_completions_validates_model_before_adapter(monkeypatch: pyte
 async def test_openai_responses_validates_model_before_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
     """Invalid responses models should fail locally before the adapter tries to build task params."""
 
-    async def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+    async def _fail_if_called(*_args: object, **_kwargs: object) -> Never:
         raise AssertionError(
             "responses_request_to_text_generation should not run before validation"
         )
@@ -83,7 +126,7 @@ async def test_openai_responses_validates_model_before_adapter(monkeypatch: pyte
 async def test_claude_messages_validates_model_before_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
     """Invalid Claude models should fail before adapter conversion runs."""
 
-    async def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+    async def _fail_if_called(*_args: object, **_kwargs: object) -> Never:
         raise AssertionError("claude_request_to_text_generation should not run before validation")
 
     async def _raise_not_found(self: API, model_id: ModelId) -> ModelId:
@@ -126,27 +169,9 @@ async def test_running_text_requests_use_in_memory_model_card(monkeypatch: pytes
     monkeypatch.setattr("exo.api.main.ModelCard.load", _fail_if_called)
 
     api = object.__new__(API)
-    api.state = SimpleNamespace(
-        instances={
-            "running": SimpleNamespace(
-                shard_assignments=SimpleNamespace(
-                    model_id=running_card.model_id,
-                    runner_to_shard={
-                        RunnerId("runner-1"): PipelineShardMetadata(
-                            model_card=running_card,
-                            device_rank=0,
-                            world_size=1,
-                            start_layer=0,
-                            end_layer=1,
-                            n_layers=1,
-                        )
-                    },
-                )
-            )
-        }
-    )
+    api.state = _build_running_state(running_card)
 
-    resolved = await api._get_running_model_card(running_card.model_id)
+    resolved = await _get_running_model_card_fn(api)(running_card.model_id)
 
     assert resolved == running_card
 
@@ -155,7 +180,7 @@ async def test_running_text_requests_use_in_memory_model_card(monkeypatch: pytes
 async def test_ollama_chat_validates_model_before_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
     """Invalid Ollama chat models should fail locally before adapter conversion."""
 
-    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+    def _fail_if_called(*_args: object, **_kwargs: object) -> Never:
         raise AssertionError("ollama_request_to_text_generation should not run before validation")
 
     async def _raise_not_found(self: API, model_id: ModelId) -> ModelId:
@@ -190,7 +215,7 @@ async def test_ollama_chat_validates_model_before_adapter(monkeypatch: pytest.Mo
 async def test_ollama_generate_validates_model_before_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
     """Invalid Ollama generate models should fail locally before adapter conversion."""
 
-    def _fail_if_called(*args: Any, **kwargs: Any) -> Any:
+    def _fail_if_called(*_args: object, **_kwargs: object) -> Never:
         raise AssertionError("ollama_generate_request_to_text_generation should not run before validation")
 
     async def _raise_not_found(self: API, model_id: ModelId) -> ModelId:
@@ -237,16 +262,7 @@ async def test_bench_chat_completions_uses_running_model_card(monkeypatch: pytes
     )
 
     api = object.__new__(API)
-    api.state = SimpleNamespace(
-        instances={
-            "running": SimpleNamespace(
-                shard_assignments=SimpleNamespace(
-                    model_id=running_card.model_id,
-                    model_card=running_card,
-                )
-            )
-        }
-    )
+    api.state = _build_running_state(running_card)
 
     captured: dict[str, object] = {}
 
@@ -254,32 +270,37 @@ async def test_bench_chat_completions_uses_running_model_card(monkeypatch: pytes
         request: BenchChatCompletionRequest,
         *,
         model_card: ModelCard | None = None,
-    ):
+    ) -> TextGenerationTaskParams:
         captured["request_model"] = request.model
         captured["model_card"] = model_card
-        return SimpleNamespace(
+        return TextGenerationTaskParams(
             model=request.model,
+            input=[InputMessage(role="user", content="hello")],
             stream=False,
             bench=False,
-            model_copy=lambda update: SimpleNamespace(
-                model=update.get("model", request.model),
-                stream=update.get("stream", False),
-                bench=update.get("bench", False),
-                model_copy=lambda nested_update: SimpleNamespace(
-                    model=nested_update.get("model", update.get("model", request.model)),
-                    stream=nested_update.get("stream", update.get("stream", False)),
-                    bench=nested_update.get("bench", update.get("bench", False)),
-                ),
-            ),
         )
 
-    async def _send_task(task_params):
+    async def _send_task(task_params: TextGenerationTaskParams) -> TextGeneration:
         captured["task_params"] = task_params
-        return SimpleNamespace(command_id="cmd-1")
+        return TextGeneration(
+            command_id=CommandId("cmd-1"),
+            task_params=task_params,
+        )
 
-    async def _collect_stats(command_id: str):
+    async def _collect_stats(command_id: CommandId) -> BenchChatCompletionResponse:
         captured["command_id"] = command_id
-        return SimpleNamespace(model=str(running_card.model_id))
+        return BenchChatCompletionResponse(
+            id=str(command_id),
+            created=0,
+            model=str(running_card.model_id),
+            choices=[
+                ChatCompletionChoice(
+                    index=0,
+                    message=ChatCompletionMessage(role="assistant", content="done"),
+                    finish_reason="stop",
+                )
+            ],
+        )
 
     monkeypatch.setattr("exo.api.main.chat_request_to_text_generation", _capture_adapter)
     monkeypatch.setattr(api, "_send_text_generation_with_images", _send_task)
@@ -294,5 +315,5 @@ async def test_bench_chat_completions_uses_running_model_card(monkeypatch: pytes
 
     assert captured["request_model"] == running_card.model_id
     assert captured["model_card"] == running_card
-    assert captured["command_id"] == "cmd-1"
+    assert captured["command_id"] == CommandId("cmd-1")
     assert response.model == str(running_card.model_id)

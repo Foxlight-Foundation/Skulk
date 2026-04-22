@@ -1,6 +1,7 @@
+import importlib
 import os
 from copy import deepcopy
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Callable, Protocol, cast
 
 import mlx.core as mx
 import psutil
@@ -66,6 +67,12 @@ class CacheSnapshot:
     ):
         self.states = states
         self.token_count = token_count
+
+
+class _OptiqKVCacheFactory(Protocol):
+    """Typed constructor surface for mlx-optiq KV cache entries."""
+
+    def __call__(self, *, head_dim: int, bits: int, seed: int) -> object: ...
 
 
 def snapshot_ssm_states(cache: KVCacheType) -> CacheSnapshot:
@@ -440,18 +447,18 @@ def make_kv_cache(
                 list[object],
                 model.make_cache(),  # type: ignore[reportUnknownMemberType]
             )
-            caches: list[object] = []
+            quantized_caches: list[object] = []
             for entry in template_cache:
                 if isinstance(entry, KVCache):
-                    caches.append(
+                    quantized_caches.append(
                         QuantizedKVCache(
                             group_size=CACHE_GROUP_SIZE,
                             bits=KV_CACHE_BITS,
                         )
                     )
                 else:
-                    caches.append(entry)
-            return caches
+                    quantized_caches.append(entry)
+            return quantized_caches
         return [
             QuantizedKVCache(group_size=CACHE_GROUP_SIZE, bits=KV_CACHE_BITS)
             for _ in model.layers
@@ -483,11 +490,17 @@ def make_kv_cache(
 
     if backend == "optiq":
         try:
-            from optiq.core.turbo_kv_cache import (  # type: ignore[import-untyped]
-                TurboQuantKVCache as OptiqKVCache,
+            optiq_turbo_kv_cache = importlib.import_module(
+                "optiq.core.turbo_kv_cache"
             )
-            from optiq.core.turbo_kv_cache import (
-                patch_attention,
+            optiq_turbo_kv_cache_dict = cast(dict[str, object], vars(optiq_turbo_kv_cache))
+            optiq_kv_cache = cast(
+                _OptiqKVCacheFactory,
+                optiq_turbo_kv_cache_dict["TurboQuantKVCache"],
+            )
+            patch_attention = cast(
+                Callable[[], None],
+                optiq_turbo_kv_cache_dict["patch_attention"],
             )
         except ImportError as exc:
             raise RuntimeError(
@@ -557,7 +570,7 @@ def make_kv_cache(
                         else:
                             head_dim = 128
                         caches.append(
-                            OptiqKVCache(
+                            optiq_kv_cache(
                                 head_dim=head_dim, bits=OPTIQ_BITS, seed=42 + kv_pos
                             )
                         )
@@ -575,7 +588,7 @@ def make_kv_cache(
         return [
             KVCache()
             if (i < OPTIQ_FP16_LAYERS or i >= n_layers - OPTIQ_FP16_LAYERS)
-            else OptiqKVCache(head_dim=head_dim, bits=OPTIQ_BITS, seed=42 + i)
+            else optiq_kv_cache(head_dim=head_dim, bits=OPTIQ_BITS, seed=42 + i)
             for i, _ in enumerate(model.layers)
         ]
 

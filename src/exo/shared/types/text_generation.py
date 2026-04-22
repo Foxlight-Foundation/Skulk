@@ -27,7 +27,8 @@ def resolve_reasoning_params(
 
     The Phase 2 contract is:
     - models without thinking support ignore reasoning controls entirely
-    - models without toggle support ignore explicit thinking/toggle overrides
+    - models without toggle support ignore explicit thinking/toggle overrides,
+      but still preserve explicit non-disabled reasoning-effort hints
     - ``reasoning_effort="none"`` always normalizes to the profile's disabled effort
       and disables thinking for toggleable models
     - ``enable_thinking=False`` disables thinking for toggleable models
@@ -62,6 +63,8 @@ def resolve_reasoning_params(
         return None, None
 
     if not supports_toggle:
+        if reasoning_effort is not None and reasoning_effort != "none":
+            return reasoning_effort, None
         return None, None
 
     if reasoning_effort == "none" or enable_thinking is False:

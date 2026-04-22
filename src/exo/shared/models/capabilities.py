@@ -8,6 +8,7 @@ sprinkling optional-field checks throughout the hot path.
 from typing import TYPE_CHECKING
 
 from exo.shared.models.model_cards import (
+    BuiltinToolType,
     ModelCard,
     ModelId,
     OutputParserType,
@@ -36,6 +37,7 @@ class ResolvedCapabilityProfile(FrozenModel):
     supports_image_input: bool = False
     supports_audio_input: bool = False
     supports_tool_calling: bool = False
+    builtin_tools: tuple[BuiltinToolType, ...] = ()
     tool_call_format: ToolCallFormat = ToolCallFormat.Generic
     prompt_renderer: PromptRendererType = PromptRendererType.Tokenizer
     output_parser: OutputParserType = OutputParserType.Generic
@@ -208,6 +210,8 @@ def resolve_model_capability_profile(
         updates = {}
         if card.tooling.supports_tool_calling is not None:
             updates["supports_tool_calling"] = card.tooling.supports_tool_calling
+        if card.tooling.builtin_tools is not None:
+            updates["builtin_tools"] = tuple(card.tooling.builtin_tools)
         if card.tooling.tool_call_format is not None:
             updates["tool_call_format"] = card.tooling.tool_call_format
         if updates:

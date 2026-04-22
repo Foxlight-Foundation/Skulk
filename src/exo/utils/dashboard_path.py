@@ -32,11 +32,7 @@ def _find_resources_in_bundle() -> Path | None:
 
 
 def find_dashboard() -> Path:
-    dashboard = (
-        _find_react_dashboard_in_repo()
-        or _find_legacy_dashboard_in_repo()
-        or _find_dashboard_in_bundle()
-    )
+    dashboard = _find_react_dashboard_in_repo() or _find_dashboard_in_bundle()
     if not dashboard:
         raise FileNotFoundError(
             "Unable to locate dashboard assets — run: cd dashboard-react && npm install && npm run build && cd .."
@@ -45,7 +41,7 @@ def find_dashboard() -> Path:
 
 
 def _find_react_dashboard_in_repo() -> Path | None:
-    """Skulk React dashboard (preferred)."""
+    """Skulk React dashboard assets inside the source tree."""
     current_module = Path(__file__).resolve()
     for parent in current_module.parents:
         build = parent / "dashboard-react" / "dist"
@@ -54,17 +50,8 @@ def _find_react_dashboard_in_repo() -> Path | None:
     return None
 
 
-def _find_legacy_dashboard_in_repo() -> Path | None:
-    """Legacy Svelte dashboard (fallback)."""
-    current_module = Path(__file__).resolve()
-    for parent in current_module.parents:
-        build = parent / "dashboard" / "build"
-        if build.is_dir() and (build / "index.html").exists():
-            return build
-    return None
-
-
 def _find_dashboard_in_bundle() -> Path | None:
+    """Bundled dashboard assets for packaged desktop builds."""
     frozen_root = cast(str | None, getattr(sys, "_MEIPASS", None))
     if frozen_root is None:
         return None

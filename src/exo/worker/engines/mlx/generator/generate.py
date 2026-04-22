@@ -6,9 +6,10 @@ import sys
 import threading
 import time
 import traceback
+import types
 from copy import deepcopy
-from importlib import metadata
-from typing import Callable, Generator, cast, get_args
+from importlib import import_module, metadata
+from typing import Callable, Generator, Protocol, cast, get_args
 
 import mlx.core as mx
 from mlx_lm.generate import (
@@ -80,6 +81,49 @@ generation_stream = mx.new_stream(mx.default_device())
 
 _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
 _MIN_CANCEL_CHECK_INTERVAL = 10
+
+
+class _FrameLookup(Protocol):
+    """Typed callable surface for CPython's private frame lookup helper."""
+
+    def __call__(self) -> dict[int, types.FrameType]: ...
+
+
+class _DetokenizerProtocol(Protocol):
+    """Minimal detokenizer surface used by native-vision generation."""
+
+    last_segment: str
+
+    def reset(self) -> None: ...
+
+    def add_token(self, token: int) -> None: ...
+
+    def finalize(self) -> None: ...
+
+
+class _VlmGenerateStep(Protocol):
+    """Typed callable surface for mlx-vlm's multimodal generate step."""
+
+    def __call__(
+        self,
+        *,
+        input_ids: mx.array,
+        model: Model,
+        pixel_values: mx.array | list[mx.array],
+        mask: object,
+        max_tokens: int,
+        sampler: Callable[[mx.array], mx.array],
+        logits_processors: list[Callable[[mx.array, mx.array], mx.array]],
+        prefill_step_size: int,
+        kv_group_size: int,
+        kv_bits: int | None,
+    ) -> Generator[tuple[mx.array, mx.array], None, None]: ...
+
+
+def _current_frames() -> dict[int, types.FrameType]:
+    """Return the current Python frames when the interpreter exposes them."""
+    lookup = cast(_FrameLookup | None, getattr(sys, "_current_frames", None))
+    return lookup() if lookup is not None else {}
 
 
 def _mlx_hang_debug_enabled() -> bool:
@@ -168,7 +212,7 @@ def _hang_debug_watch(label: str) -> Generator[None]:
     def watchdog() -> None:
         while not finished.wait(timeout=interval_seconds):
             elapsed = time.monotonic() - started_at
-            frame = sys._current_frames().get(monitored_thread_id)
+            frame = _current_frames().get(monitored_thread_id)
             if frame is None:
                 stack_text = "<no Python frame available>"
             else:
@@ -271,6 +315,23 @@ def _slice_native_pixel_values_for_uncached_suffix(
         return pixel_values[first_idx:]
 
     return mx.stack([pixel_values[idx] for idx in remaining_indices], axis=0)
+
+
+def slice_native_pixel_values_for_uncached_suffix(
+    pixel_values: mx.array | list[mx.array],
+    media_regions: list[MediaRegion],
+    prefix_hit_length: int,
+) -> mx.array | list[mx.array] | None:
+    """Public wrapper for native-vision pixel-value trimming.
+
+    Batch and single-request generators both need the same cache-aware image
+    slicing behavior, so this helper is intentionally shared across modules.
+    """
+    return _slice_native_pixel_values_for_uncached_suffix(
+        pixel_values,
+        media_regions,
+        prefix_hit_length,
+    )
 
 
 @contextlib.contextmanager
@@ -495,11 +556,6 @@ def prefill(
         if on_prefill_progress is not None:
             on_prefill_progress(processed, total)
 
-    def combined_progress_callback(processed: int, total: int) -> None:
-        if distributed_prompt_progress_callback is not None:
-            distributed_prompt_progress_callback()
-        progress_callback(processed, total)
-
     is_pipeline = _has_pipeline_communication_layer(model)
 
     prefill_step_size = 4096
@@ -507,12 +563,12 @@ def prefill(
         prefill_step_size // min(4, group_size) if is_pipeline else prefill_step_size
     )
 
-    # Pipeline-parallel prefill can wedge when the prompt fits inside a single
-    # effective per-rank chunk (i.e. ``n_real == 1`` in the prefill loop).
     # Mirror pipeline_parallel_prefill's chunking math here by reserving the
     # final token for the post-loop pass before computing the real chunk count.
-    # That keeps multi-chunk prompts on pipeline_parallel_prefill while routing
-    # single-chunk short / warmup prompts through stream_generate.
+    # This value is primarily diagnostic now: all pipeline prompts use the
+    # explicit pipeline prefill path, but short one-chunk prompts intentionally
+    # suppress the distributed progress callback because there is no useful
+    # cancellation window inside a millisecond-scale prefill.
     real_prefill_tokens = max(num_tokens - 1, 0)
     pipeline_chunks = (
         (real_prefill_tokens + effective_prefill_step_size - 1)
@@ -520,7 +576,7 @@ def prefill(
         if effective_prefill_step_size > 0
         else 0
     )
-    use_pipeline_prefill = is_pipeline and pipeline_chunks >= 2
+    use_pipeline_prefill = is_pipeline
     logger.info(
         "Prefill path selected: "
         f"{'pipeline_parallel_prefill' if use_pipeline_prefill else 'stream_generate'} "
@@ -529,12 +585,10 @@ def prefill(
         f"prefill_step_size_effective={effective_prefill_step_size}, "
         f"pipeline_chunks={pipeline_chunks})"
     )
-    # Only enable pipeline-prefill mode for the true pipeline prefill path.
-    # Short prompts routed through stream_generate must behave like normal
-    # generation; leaving pipeline wrappers in prefill mode there can strand
-    # non-zero ranks in the pipeline send/recv path without the coordinated
-    # queue/flush behavior used by pipeline_parallel_prefill.
-    set_pipeline_prefill(model, is_prefill=use_pipeline_prefill)
+    # Pipeline models must run in prefill mode during any prefill forward
+    # pass. With is_prefill=False, pipeline wrappers can queue collectives
+    # that are never consumed during prefill and later deadlock the ranks.
+    set_pipeline_prefill(model, is_prefill=is_pipeline)
 
     with _hang_debug_watch(f"prefill barrier rank={rank} group_size={group_size}"):
         mx_barrier(group)
@@ -546,6 +600,9 @@ def prefill(
         if use_pipeline_prefill:
             set_pipeline_queue_sends(model, queue_sends=True)
             assert group is not None, "Pipeline prefill requires a distributed group"
+            pipeline_distributed_callback = (
+                distributed_prompt_progress_callback if pipeline_chunks >= 2 else None
+            )
             with _hang_debug_watch(
                 f"pipeline_parallel_prefill rank={rank} group_size={group_size}"
             ):
@@ -557,10 +614,14 @@ def prefill(
                     kv_group_size=KV_GROUP_SIZE,
                     kv_bits=KV_BITS,
                     prompt_progress_callback=progress_callback,
-                    distributed_prompt_progress_callback=distributed_prompt_progress_callback,
+                    distributed_prompt_progress_callback=pipeline_distributed_callback,
                     group=group,
                 )
         else:
+            # Non-pipeline models can safely use upstream stream_generate for
+            # prefill. Pipeline models avoid it entirely: mlx-lm can prefetch
+            # a decode step before yielding, leaving hidden sends/recvs in
+            # flight and wedging the next collective.
             # Use max_tokens=1 because max_tokens=0 does not work.
             # We just throw away the generated token - we only care about filling the cache
             with _hang_debug_watch(
@@ -576,7 +637,7 @@ def prefill(
                     prefill_step_size=prefill_step_size,
                     kv_group_size=KV_GROUP_SIZE,
                     kv_bits=KV_BITS,
-                    prompt_progress_callback=combined_progress_callback,
+                    prompt_progress_callback=progress_callback,
                 ):
                     logger.info(
                         f"Prefill stream_generate yielded first token (rank={rank})"
@@ -636,6 +697,7 @@ def warmup_inference(
             "prompt and ignoring warmup shaping overrides"
         )
 
+    is_distributed = _is_distributed_warmup(group)
     warmup_task_params = TextGenerationTaskParams(
         model=model_id,
         # Distributed pipeline warmup always uses the minimal sanity-check
@@ -647,11 +709,11 @@ def warmup_inference(
                 content=_warmup_user_content(group),
             )
         ],
-        max_output_tokens=1024,
+        max_output_tokens=1,
         enable_thinking=False,
-        temperature=1.0,
-        top_p=0.95,
-        top_k=64,
+        temperature=0.0 if is_distributed else 1.0,
+        top_p=1.0 if is_distributed else 0.95,
+        top_k=0 if is_distributed else 64,
     )
 
     with _hang_debug_watch(f"warmup apply_chat_template model={model_id}"):
@@ -659,6 +721,7 @@ def warmup_inference(
             tokenizer=tokenizer,
             task_params=warmup_task_params,
             model_card=model_card,
+            suppress_empty_gemma4_thought_channel=True,
         )
     logger.info(
         "Warmup prompt prepared "
@@ -693,10 +756,6 @@ def warmup_inference(
             group=group,
         ):
             tokens_generated += 1
-            # Warmup is only meant to validate prefill plus the first decode
-            # step. Stopping after the first token keeps runner readiness
-            # bounded even if the model would otherwise continue sampling.
-            break
 
     # The single-token warmup path intentionally samples only the first decode
     # step, so cold-start compile/prefill latency can dominate the elapsed
@@ -718,14 +777,15 @@ def warmup_inference(
 
     logger.info(f"warmed up by generating {tokens_generated} tokens")
     if group is not None:
-        check_for_cancel_every = int(
-            mx.max(
-                mx.distributed.all_gather(
-                    mx.array([check_for_cancel_every]),
-                    group=group,
-                )
-            ).item()
+        world_size = group.size()
+        rank = group.rank()
+        slots = [0] * world_size
+        slots[rank] = check_for_cancel_every
+        cpu_stream = mx.default_stream(mx.Device(mx.cpu))
+        merged = mx.distributed.all_sum(
+            mx.array(slots, dtype=mx.int32), group=group, stream=cpu_stream
         )
+        check_for_cancel_every = int(mx.max(merged).item())
 
     logger.info(
         f"runner checking for cancellation every {check_for_cancel_every} tokens"
@@ -822,7 +882,12 @@ def _mlx_generate_native_vision(
     when prompt tokens and image preprocessing are correct, so we follow the
     reference execution strategy here.
     """
-    from mlx_vlm.generate import generate_step as vlm_generate_step
+    vlm_generate_step = cast(
+        _VlmGenerateStep,
+        cast(dict[str, object], vars(import_module("mlx_vlm.generate")))[
+            "generate_step"
+        ],
+    )
 
     if vision.pixel_values is None:
         raise ValueError("Native vision generation requires pixel values")
@@ -836,7 +901,7 @@ def _mlx_generate_native_vision(
     )
     eos_token_ids = set(eos_ids_from_tokenizer(tokenizer))
 
-    detokenizer = tokenizer.detokenizer
+    detokenizer = cast(_DetokenizerProtocol, cast(object, tokenizer.detokenizer))
     detokenizer.reset()
 
     if on_prefill_progress is not None:
@@ -864,7 +929,7 @@ def _mlx_generate_native_vision(
         sampler=sampler,
         logits_processors=logits_processors,
         prefill_step_size=4096,
-        kv_group_size=KV_GROUP_SIZE,
+        kv_group_size=KV_GROUP_SIZE or 32,
         kv_bits=KV_BITS,
     ):
         token_id = int(token)
@@ -1098,6 +1163,8 @@ def mlx_generate(
     native_pixel_values: mx.array | list[mx.array] | None = None
     if is_native_vision:
         assert vision is not None
+        if vision.pixel_values is None:
+            raise ValueError("Native vision generation requires pixel values")
         native_pixel_values = _slice_native_pixel_values_for_uncached_suffix(
             vision.pixel_values,
             media_regions,
@@ -1106,9 +1173,12 @@ def mlx_generate(
 
     if native_pixel_values is not None:
         if hasattr(model, "set_pixel_values"):
-            model.set_pixel_values(native_pixel_values)  # type: ignore[attr-defined]
+            cast(
+                Callable[[mx.array | list[mx.array] | None], None],
+                object.__getattribute__(model, "set_pixel_values"),
+            )(native_pixel_values)
         else:
-            model._pixel_values = native_pixel_values  # type: ignore[attr-defined]
+            object.__setattr__(model, "_pixel_values", native_pixel_values)
         maybe_vision_ctx = contextlib.nullcontext()
     elif vision is not None and not is_native_vision:
         maybe_vision_ctx = patch_embed_tokens(
@@ -1130,9 +1200,12 @@ def mlx_generate(
             )
     finally:
         if hasattr(model, "set_pixel_values"):
-            model.set_pixel_values(None)  # type: ignore[attr-defined]
+            cast(
+                Callable[[mx.array | list[mx.array] | None], None],
+                object.__getattribute__(model, "set_pixel_values"),
+            )(None)
         elif hasattr(model, "_pixel_values"):
-            model._pixel_values = None  # type: ignore[attr-defined]
+            object.__setattr__(model, "_pixel_values", None)
     cache_snapshots: list[CacheSnapshot] | None = ssm_snapshots_list or None
 
     # stream_generate starts from the last token

@@ -98,7 +98,8 @@ If a model supports reasoning but does not support thinking toggle:
 
 - clients should not offer a toggle
 - explicit toggle overrides are normalized away
-- requests fall back to the model's supported default behavior
+- explicit non-disabled `reasoning_effort` values are still preserved
+- requests otherwise fall back to the model's supported default behavior
 
 This keeps the public API stable without pretending every reasoning-capable model can switch on and off cleanly.
 
@@ -126,6 +127,10 @@ The resolved runtime profile follows a simple precedence model:
 Phase 1 intentionally keeps those heuristics conservative. The goal is not to
 guess every possible advanced feature, but to preserve current behavior while
 letting extended cards make support more precise.
+
+That same approach now applies to builtin platform tools such as `web_search`:
+cards can declare the tool contract, while exposure and execution stay
+deployment-aware and family-specific.
 
 ## What This Enables
 

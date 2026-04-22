@@ -3,7 +3,7 @@
 <!-- Copyright 2025 Foxlight Foundation -->
 
 <div align="center">
-  <img src="docs/imgs/skulk-logo.svg" width="200" height="200" alt="Skulk logo">
+  <img src="docs/imgs/skulk-logo-2.png" width="200" height="200" alt="Skulk logo">
 </div>
 
 Skulk is a fork of EXO for running AI models across one or more machines as a cluster.
@@ -12,7 +12,7 @@ a more modern dashboard, richer API workflows, sophisticated cache quantization,
 
 > Skulk is maintained by [Foxlight Foundation](https://github.com/foxlight-foundation) and forked from [exo](https://github.com/exo-explore/exo).
 
-**[Documentation](https://foxlight-foundation.github.io/Skulk/)** · **[API Guide](https://foxlight-foundation.github.io/Skulk/api/)** · **[Architecture](https://foxlight-foundation.github.io/Skulk/architecture/)**
+**[Documentation](https://foxlight-foundation.github.io/Skulk/)** · **[Build And Runtime Paths](https://foxlight-foundation.github.io/Skulk/build-and-runtime/)** · **[Release Notes](https://foxlight-foundation.github.io/Skulk/release-notes/1.0.2/)** · **[Architecture](https://foxlight-foundation.github.io/Skulk/architecture/)**
 
 ## What Skulk Is Good At
 
@@ -34,6 +34,7 @@ a more modern dashboard, richer API workflows, sophisticated cache quantization,
 - [node](https://github.com/nodejs/node)
 - [rustup](https://rustup.rs/)
 - `macmon` for Apple Silicon monitoring
+- [Nix](https://nixos.org/download/) for `nix fmt`, `nix flake check`, and the repo dev shell
 
 ```bash
 brew install uv macmon node
@@ -81,6 +82,11 @@ Important behavior:
 - The dashboard will not let you chat unless a model is already placed and ready.
 - The API behaves the same way in practice. If you send a chat request too early, you will usually get `404 No instance found for model ...`.
 
+Build/runtime note:
+
+- `uv` is the canonical source and runtime path for Skulk on macOS, including the official `mlx` + `mlx-metal` wheel stack.
+- Nix is kept for reproducible development tooling, formatting, and `flake`-based validation. It should match the `uv` runtime contract instead of silently substituting a different MLX build.
+
 ## Choose Your Path
 
 - **I want the fastest first success**: follow [Single-Node Quick Start](#single-node-quick-start).
@@ -111,7 +117,7 @@ Important behavior:
 ## Dashboard
 
 Skulk serves a built-in dashboard at `http://localhost:52415`.
-The React dashboard is the default UI. The legacy Svelte dashboard is kept only as a fallback in the repo.
+The React dashboard in `dashboard-react/` is the only supported UI.
 The normal dashboard flow is: confirm topology, launch a model, wait for it to become ready, then open chat.
 
 <p align="center">
@@ -210,6 +216,12 @@ Use this path when you want more than one machine in the cluster.
 6. Send chat requests through the dashboard or API.
 
 Skulk can discover peers automatically in many local setups. If you want a fixed cluster topology, use `--bootstrap-peers` or the `EXO_BOOTSTRAP_PEERS` environment variable.
+
+If you are rolling out a version that uses snapshot bootstrap plus bounded
+master replay retention, plan to upgrade every node in the cluster.
+Mixed-version operation is acceptable during rollout, but once a new master has
+compacted old replay history, an older restarted node that only knows how to
+rebuild from event `0` may no longer be able to fully resync.
 
 Example:
 

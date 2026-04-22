@@ -18,6 +18,7 @@ from exo.shared.types.events import (
     NodeGatheredInfo,
     NodeTimedOut,
     RunnerStatusUpdated,
+    StateSnapshotHydrated,
     TaskAcknowledged,
     TaskCreated,
     TaskDeleted,
@@ -95,9 +96,15 @@ def event_apply(event: Event, state: State) -> State:
             return apply_topology_edge_created(event, state)
         case TopologyEdgeDeleted():
             return apply_topology_edge_deleted(event, state)
+        case StateSnapshotHydrated():
+            return event.state
 
 
 def apply(state: State, event: IndexedEvent) -> State:
+    if isinstance(event.event, StateSnapshotHydrated):
+        assert event.event.state.last_event_applied_idx == event.idx
+        return event.event.state
+
     # Just to test that events are only applied in correct order
     if state.last_event_applied_idx != event.idx - 1:
         logger.warning(

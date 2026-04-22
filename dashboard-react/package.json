@@ -1,7 +1,7 @@
 {
   "name": "dashboard-react",
   "private": true,
-  "version": "1.01",
+  "version": "1.0.2",
   "type": "module",
   "scripts": {
     "dev": "vite",

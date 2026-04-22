@@ -4,6 +4,7 @@ import atexit
 import contextlib
 import json
 import logging
+import os
 import shutil
 import socket
 import subprocess
@@ -154,7 +155,7 @@ def _start_vector(ingest_url: str) -> bool:
         return False
 
     env = {
-        **dict(__import__("os").environ),
+        **dict(os.environ),
         "SKULK_LOGGING_INGEST_URL": ingest_url,
         "EXO_LOGGING_INGEST_URL": ingest_url,  # legacy compat for vector.yaml
         "SKULK_VECTOR_DATA_DIR": str(Path.home() / ".skulk" / "vector"),

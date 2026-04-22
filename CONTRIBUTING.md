@@ -21,6 +21,7 @@ To run Skulk from source:
   ```bash
   brew install node
   ```
+- [Nix](https://nixos.org/download/) (for `nix fmt`, `nix flake check`, and the repo dev shell)
 - [rust](https://github.com/rust-lang/rustup) (to build Rust bindings, nightly for now)
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -34,6 +35,10 @@ uv sync
 uv run skulk
 ```
 
+Skulk's runtime contract on macOS follows the `uv` environment and the
+official `mlx`/`mlx-metal` wheel stack. Nix is used for reproducible
+development tooling and validation, not as a hidden alternate MLX runtime.
+
 ## Project Structure
 
 Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard), and the codebase is actively evolving.
@@ -41,11 +46,11 @@ Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard),
 ### Key directories:
 - `src/exo/` — Python backend (inference, API, store, worker, routing)
 - `dashboard-react/` — React dashboard (Skulk UI)
-- `dashboard/` — Legacy Svelte dashboard (upstream EXO)
 - `rust/` — Rust components (networking, libp2p, PyO3 bindings)
 - `resources/inference_model_cards/` — Model metadata TOML files
 - `deployment/logging/` — VictoriaLogs + Grafana stack and Vector config
 - `docs/` — Technical documentation
+- `docs/model-runtime-notes/` — Internal per-model clustered runtime notes
 
 ### Dashboard (React)
 
@@ -82,6 +87,10 @@ Before starting work:
 - Avoid combining unrelated changes, even if they seem small
 
 This makes reviews faster and helps us maintain code quality as the project evolves.
+
+When a branch is release-worthy or bumps the project version, update both
+`CHANGELOG.md` and the public docs release notes under `website/docs/` in the
+same change.
 
 ## Pull Request Review Loop
 

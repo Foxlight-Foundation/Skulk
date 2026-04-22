@@ -25,10 +25,8 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any, Callable, Protocol, cast
 
-if TYPE_CHECKING:
-    from mlx_vlm.utils import ImageProcessor
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
@@ -49,15 +47,81 @@ from exo.worker.engines.mlx.gemma4_prompt import render_gemma4_prompt
 from exo.worker.engines.mlx.utils_mlx import fix_unmatched_think_end_tokens
 from exo.worker.runner.bootstrap import logger
 
+JsonDict = dict[str, object]
+MxArrayInput = (
+    mx.array
+    | np.ndarray[Any, Any]
+    | list[object]
+    | tuple[object, ...]
+    | int
+    | float
+    | bool
+)
 
-def _filter_config(cls: type, d: dict[str, Any]) -> dict[str, Any]:
+
+def _object_dict(value: object) -> JsonDict:
+    """Return a string-keyed object mapping for dynamic config data."""
+    if isinstance(value, dict):
+        return {
+            str(key): item for key, item in cast(dict[object, object], value).items()
+        }
+    return {}
+
+
+def _module_attr(module: object, name: str) -> object:
+    """Read one attribute from a dynamic module through its dict."""
+    module_dict = cast(dict[str, object], getattr(module, "__dict__", {}))
+    return module_dict[name]
+
+
+def _int_value(value: object, default: int) -> int:
+    """Return ``value`` as an int when possible, otherwise ``default``."""
+    return int(value) if isinstance(value, (int, float, str)) else default
+
+
+class _ImageProcessorProtocol(Protocol):
+    """Minimal processor surface used by the vision pipeline."""
+
+    max_soft_tokens: int | None
+
+    def preprocess(
+        self,
+        messages: list[JsonDict],
+        *,
+        return_tensors: str,
+        **kwargs: object,
+    ) -> JsonDict: ...
+
+    def __call__(
+        self,
+        *,
+        images: list[Image.Image],
+        return_tensors: str,
+        **kwargs: object,
+    ) -> object: ...
+
+
+class _ProcessorContainer(Protocol):
+    """Container returned by mlx-vlm processor factories."""
+
+    image_processor: _ImageProcessorProtocol | None
+
+
+class _FromPretrainedProcessor(Protocol):
+    """Processor class surface that supports ``from_pretrained``."""
+
+    @classmethod
+    def from_pretrained(cls, repo: str) -> _ProcessorContainer: ...
+
+
+def _filter_config(cls: type, d: JsonDict) -> JsonDict:
     valid = set(inspect.signature(cls.__init__).parameters.keys()) - {"self"}
-    return {k: v for k, v in d.items() if k in valid}  # type: ignore
+    return {k: v for k, v in d.items() if k in valid}
 
 
 def _load_mlx_vlm_image_processor_from_pretrained(
-    proc_mod: Any, repo: str
-) -> Any | None:
+    proc_mod: object, repo: str
+) -> _ImageProcessorProtocol | None:
     """Load an MLX-VLM processor via ``from_pretrained`` and extract its image processor.
 
     Gemma 4's standalone ``Gemma4ImageProcessor`` defaults to a low visual token
@@ -67,7 +131,7 @@ def _load_mlx_vlm_image_processor_from_pretrained(
     settings are preserved.
     """
     for attr_name in dir(proc_mod):
-        obj = getattr(proc_mod, attr_name)
+        obj = cast(object, getattr(proc_mod, attr_name))
         if (
             isinstance(obj, type)
             and attr_name.endswith("Processor")
@@ -75,13 +139,13 @@ def _load_mlx_vlm_image_processor_from_pretrained(
             and hasattr(obj, "from_pretrained")
         ):
             try:
-                processor = obj.from_pretrained(repo)
+                processor = cast(_FromPretrainedProcessor, obj).from_pretrained(repo)
             except Exception as exc:
                 logger.info(
                     f"mlx_vlm {attr_name}.from_pretrained failed for {repo}: {exc}"
                 )
                 continue
-            image_processor = getattr(processor, "image_processor", None)
+            image_processor = processor.image_processor
             if image_processor is not None:
                 logger.info(f"Using mlx_vlm {attr_name}.from_pretrained image processor")
                 return image_processor
@@ -89,8 +153,8 @@ def _load_mlx_vlm_image_processor_from_pretrained(
 
 
 def _gemma4_native_processor_kwargs(
-    chat_template_messages: list[dict[str, Any]], processor: Any
-) -> dict[str, Any]:
+    chat_template_messages: list[JsonDict], processor: _ImageProcessorProtocol
+) -> JsonDict:
     """Select processor kwargs for Gemma 4 native vision preprocessing.
 
     By default we keep the processor's built-in token budget so Gemma 4
@@ -102,8 +166,9 @@ def _gemma4_native_processor_kwargs(
     for message in chat_template_messages:
         content = message.get("content")
         if isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict) and str(part.get("type", "")) == "image":
+            for raw_part in cast(list[object], content):
+                part = _object_dict(raw_part)
+                if str(part.get("type", "")) == "image":
                     has_image = True
                     break
         if has_image:
@@ -226,37 +291,44 @@ def _maybe_dump_debug_image(
 
 
 def _format_vlm_messages(
-    messages: list[dict[str, Any]],
+    messages: list[JsonDict],
     model_type: str,
-) -> list[dict[str, Any]]:
-    formatted: list[dict[str, Any]] = []
+) -> list[JsonDict]:
+    formatted: list[JsonDict] = []
     for msg in messages:
-        role: str = str(msg.get("role", "user"))  # type: ignore
-        content: Any = msg.get("content")
+        role = str(msg.get("role", "user"))
+        content = msg.get("content")
         if not isinstance(content, list):
             formatted.append(msg)
             continue
-        parts: list[dict[str, Any]] = content  # type: ignore
+        parts: list[JsonDict] = []
+        for raw_part in cast(list[object], content):
+            parts.append(_object_dict(raw_part))
 
         # Preserve the original multimodal ordering for Gemma family prompts.
         # Rebuilding the message from "all text + image count" destroys
         # interleaving such as text -> image -> text, which Gemma 4 explicitly
         # supports and which its chat template can represent directly.
         if model_type in {"gemma3n", "gemma4"}:
-            normalized_parts: list[dict[str, Any]] = []
+            normalized_parts: list[JsonDict] = []
             for part in parts:
                 part_type = str(part.get("type", ""))
                 if part_type == "text":
-                    normalized_parts.append({"type": "text", "text": str(part["text"])})  # type: ignore[index]
+                    normalized_parts.append(
+                        {"type": "text", "text": str(part.get("text", ""))}
+                    )
                 elif part_type in {"image", "image_url"}:
                     normalized_parts.append({"type": "image"})
             formatted.append({"role": role, "content": normalized_parts})
             continue
 
-        text_parts = [str(p["text"]) for p in parts if p.get("type") == "text"]  # type: ignore
+        text_parts = [str(p.get("text", "")) for p in parts if p.get("type") == "text"]
         n_images = sum(1 for p in parts if p.get("type") in ("image", "image_url"))
-        result: dict[str, Any] = get_message_json(
-            model_type, " ".join(text_parts), role, num_images=n_images
+        result = cast(
+            JsonDict,
+            get_message_json(
+                model_type, " ".join(text_parts), role, num_images=n_images
+            ),
         )
         formatted.append(result)
     return formatted
@@ -264,7 +336,7 @@ def _format_vlm_messages(
 
 def build_vision_prompt(
     tokenizer: TokenizerWrapper,
-    chat_template_messages: list[dict[str, Any]],
+    chat_template_messages: list[JsonDict],
     n_tokens_per_image: list[int],
     image_token: str,
     model_type: str | None = None,
@@ -277,9 +349,14 @@ def build_vision_prompt(
     For models that use BOI/EOI framing (Gemma 3n/4), each expanded image
     sequence is wrapped as ``BOI + (IMAGE × N) + EOI`` matching the format
     the model was trained on."""
-    logger.info(
-        f"Vision prompt messages: {[{k: (v[:50] if isinstance(v, str) else v) for k, v in m.items()} for m in chat_template_messages]}"  # type: ignore
-    )
+    prompt_debug_messages = [
+        {
+            key: (value[:50] if isinstance(value, str) else value)
+            for key, value in message.items()
+        }
+        for message in chat_template_messages
+    ]
+    logger.info(f"Vision prompt messages: {prompt_debug_messages}")
     uses_gemma4_reference_prompt = model_type == "gemma4"
     if uses_gemma4_reference_prompt:
         prompt = render_gemma4_prompt(
@@ -348,7 +425,7 @@ _QUANTIZATION_SUFFIXES = (".biases", ".scales")
 
 
 def _load_projector_weights(
-    projector: nn.Module, weights: dict[str, mx.array], config: dict[str, Any]
+    projector: nn.Module, weights: dict[str, mx.array], config: JsonDict
 ) -> None:
     """Load projector weights, quantizing the module first if needed.
 
@@ -358,22 +435,26 @@ def _load_projector_weights(
     before loading so the shapes match."""
     has_quantized = any(k.endswith(_QUANTIZATION_SUFFIXES) for k in weights)
     if has_quantized:
-        quant_cfg = config.get("quantization", {})  # pyright: ignore[reportAny]
-        bits = int(quant_cfg.get("bits", 4))  # pyright: ignore[reportAny]
-        group_size = int(quant_cfg.get("group_size", 64))  # pyright: ignore[reportAny]
+        quant_cfg = _object_dict(config.get("quantization", {}))
+        bits = _int_value(quant_cfg.get("bits", 4), 4)
+        group_size = _int_value(quant_cfg.get("group_size", 64), 64)
         logger.info(
             f"Quantizing projector module ({bits}-bit, group_size={group_size}) "
             "to match checkpoint format"
         )
-        nn.quantize(projector, bits=bits, group_size=group_size)
+        cast(Callable[..., object], nn.quantize)(
+            projector,
+            bits=bits,
+            group_size=group_size,
+        )
     projector.load_weights(list(weights.items()))
 
 
 def _instantiate_projector(
     cls: type,
-    model_config: Any,  # pyright: ignore[reportAny]
-    vision_config: Any,  # pyright: ignore[reportAny]
-    text_config: Any,  # pyright: ignore[reportAny]
+    model_config: object,
+    vision_config: object,
+    text_config: object,
 ) -> nn.Module:
     """Try multiple calling conventions for projector/embedder classes.
 
@@ -386,26 +467,29 @@ def _instantiate_projector(
     # Try single ModelConfig arg first (Qwen/Kimi pattern)
     if "config" in params or len(params) == 1:
         try:
-            return cls(model_config)  # type: ignore
+            return cast(nn.Module, cls(model_config))
         except TypeError:
             pass
     # Try (multimodal_config, text_config) pattern (Gemma 3n)
     if "multimodal_config" in params or "text_config" in params:
         try:
-            return cls(vision_config, text_config=text_config)  # type: ignore
+            return cast(nn.Module, cls(vision_config, text_config=text_config))
         except TypeError:
             pass
     # Try raw dims pattern (Gemma 4: embedding_dim, text_hidden_size, eps)
     if "embedding_dim" in params:
-        kwargs: dict[str, Any] = {
-            "embedding_dim": getattr(vision_config, "hidden_size", 768),  # pyright: ignore[reportAny]
-            "text_hidden_size": getattr(text_config, "hidden_size", 2048),  # pyright: ignore[reportAny]
+        kwargs: JsonDict = {
+            "embedding_dim": getattr(vision_config, "hidden_size", 768),
+            "text_hidden_size": getattr(text_config, "hidden_size", 2048),
         }
         if "eps" in params:
-            kwargs["eps"] = getattr(vision_config, "rms_norm_eps", 1e-6)  # pyright: ignore[reportAny]
-        return cls(**kwargs)  # type: ignore
+            kwargs["eps"] = getattr(vision_config, "rms_norm_eps", 1e-6)
+        return cast(nn.Module, cls(**cast(dict[str, Any], kwargs)))
     # Fallback: pass through _filter_config
-    return cls(**_filter_config(cls, vars(model_config)))  # type: ignore
+    return cast(
+        nn.Module,
+        cls(**cast(dict[str, Any], _filter_config(cls, vars(model_config)))),
+    )
 
 
 class VisionEncoder:
@@ -419,24 +503,29 @@ class VisionEncoder:
         self._model_path = build_model_path(ModelId(config.weights_repo))
         self._vision_tower: nn.Module | None = None
         self._projector: nn.Module | None = None
-        self._processor: "ImageProcessor | None" = None
+        self._processor: _ImageProcessorProtocol | None = None
         self._spatial_merge_size: int = 2
         self._merge_kernel_size: list[int] | None = None
         self._needs_nhwc: bool = False
         self._processor_loaded = False
         self._loaded = False
 
-    def _load_config_json(self) -> dict[str, Any]:
+    @property
+    def processor(self) -> _ImageProcessorProtocol | None:
+        """Return the loaded image processor, if available."""
+        return self._processor
+
+    def _load_config_json(self) -> JsonDict:
         for candidate in (self._main_model_path, self._model_path):
             path = candidate / "config.json"
             if path.exists():
                 with open(path) as f:
-                    return json.load(f)  # type: ignore
+                    return _object_dict(cast(object, json.load(f)))
         return {}
 
-    def _import_mlx_vlm(self, *submodules: str) -> Any:  # type: ignore
+    def _import_mlx_vlm(self, *submodules: str) -> object | tuple[object, ...]:
         mt = self._config.model_type
-        results: list[Any] = []
+        results: list[object] = []
         for sub in submodules:
             name = f"mlx_vlm.models.{mt}.{sub}"
             results.append(importlib.import_module(name))
@@ -467,28 +556,37 @@ class VisionEncoder:
         if not config:
             raise FileNotFoundError(f"config.json not found in {self._model_path}")
 
-        vision_cfg = config.get("vision_config", {})  # type: ignore
+        vision_cfg = _object_dict(config.get("vision_config", {}))
 
-        config_mod, vision_mod = self._import_mlx_vlm("config", "vision")  # type: ignore
-        vision_config_cls = config_mod.VisionConfig  # type: ignore
-        vision_model_cls = vision_mod.VisionModel  # type: ignore
-
-        vision_config = vision_config_cls(  # type: ignore
-            **_filter_config(vision_config_cls, vision_cfg)  # type: ignore
+        config_mod, vision_mod = cast(
+            tuple[object, object],
+            self._import_mlx_vlm("config", "vision"),
         )
-        self._spatial_merge_size = getattr(vision_config, "spatial_merge_size", 2)  # type: ignore
-        self._vision_tower = vision_model_cls(vision_config)
-        model_mod: Any = None
+        vision_config_cls = cast(type, _module_attr(config_mod, "VisionConfig"))
+        vision_model_cls = cast(type, _module_attr(vision_mod, "VisionModel"))
+
+        vision_config = cast(
+            object,
+            vision_config_cls(
+            **cast(dict[str, Any], _filter_config(vision_config_cls, vision_cfg))
+            ),
+        )
+        self._spatial_merge_size = _int_value(
+            cast(object, getattr(vision_config, "spatial_merge_size", 2)),
+            2,
+        )
+        self._vision_tower = cast(nn.Module, vision_model_cls(vision_config))
+        model_mod: object | None = None
         with contextlib.suppress(ImportError):
-            model_mod = self._import_mlx_vlm(self._config.model_type)  # type: ignore
+            model_mod = self._import_mlx_vlm(self._config.model_type)
 
         projector_cls = None
         # Match common projector class naming conventions across model
         # families: *Projector (Qwen, Kimi), *Embedder (Gemma 3n/4).
         _projector_patterns = ("Projector", "Embedder")
         if model_mod is not None:
-            for attr_name in dir(model_mod):  # type: ignore
-                obj = getattr(model_mod, attr_name)  # type: ignore
+            for attr_name in dir(model_mod):
+                obj = cast(object, getattr(model_mod, attr_name))
                 if (
                     isinstance(obj, type)
                     and issubclass(obj, nn.Module)
@@ -498,19 +596,33 @@ class VisionEncoder:
                     break
 
         if projector_cls is not None:
-            text_config = config_mod.TextConfig(  # type: ignore
-                **_filter_config(config_mod.TextConfig, config.get("text_config", {}))  # type: ignore
+            text_config_cls = cast(type, _module_attr(config_mod, "TextConfig"))
+            model_config_cls = cast(type, _module_attr(config_mod, "ModelConfig"))
+            text_config = cast(
+                object,
+                text_config_cls(
+                **cast(
+                    dict[str, Any],
+                    _filter_config(
+                        text_config_cls,
+                        _object_dict(config.get("text_config", {})),
+                    ),
+                ),
+                ),
             )
             extra = {
                 k: v
-                for k, v in config.items()  # type: ignore
+                for k, v in config.items()
                 if k not in ("text_config", "vision_config")
             }
             extra.setdefault("model_type", self._config.model_type)
-            model_config = config_mod.ModelConfig(  # type: ignore
+            model_config = cast(
+                object,
+                model_config_cls(
                 text_config=text_config,
                 vision_config=vision_config,
-                **_filter_config(config_mod.ModelConfig, extra),  # type: ignore
+                **cast(dict[str, Any], _filter_config(model_config_cls, extra)),
+                ),
             )
             self._projector = _instantiate_projector(
                 projector_cls, model_config, vision_config, text_config
@@ -527,38 +639,43 @@ class VisionEncoder:
     def _load_processor(
         self,
         *,
-        config: dict[str, Any] | None = None,
-        vision_cfg: dict[str, Any] | None = None,
+        config: JsonDict | None = None,
+        vision_cfg: JsonDict | None = None,
     ) -> None:
         """Load the image processor without forcing vision-weight initialization."""
         _patch_video_processor()
         config = config or self._load_config_json()
         if not config:
             raise FileNotFoundError(f"config.json not found in {self._model_path}")
-        vision_cfg = vision_cfg or config.get("vision_config", {})  # type: ignore
+        vision_cfg = vision_cfg or _object_dict(config.get("vision_config", {}))
 
         processor_repo = self._config.processor_repo
         repo = processor_repo or str(self._model_path)
-        image_proc = load_image_processor(repo)
+        image_proc = cast(_ImageProcessorProtocol | None, load_image_processor(repo))
         if image_proc is not None:
             self._processor = image_proc
         else:
             try:
-                self._processor = AutoImageProcessor.from_pretrained(  # type: ignore
-                    repo, trust_remote_code=True
+                auto_from_pretrained = cast(
+                    Callable[..., object],
+                    AutoImageProcessor.from_pretrained,
+                )
+                self._processor = cast(
+                    _ImageProcessorProtocol,
+                    auto_from_pretrained(repo, trust_remote_code=True),
                 )
             except (ValueError, OSError):
                 # transformers may not recognize newer model types (e.g.
                 # gemma4). Fall back to the mlx_vlm processor class.
-                proc_mod = self._import_mlx_vlm(  # type: ignore
+                proc_mod = self._import_mlx_vlm(
                     f"processing_{self._config.model_type}"
                 )
                 self._processor = _load_mlx_vlm_image_processor_from_pretrained(
                     proc_mod, repo
                 )
                 proc_cls = None
-                for attr in dir(proc_mod):  # type: ignore
-                    obj = getattr(proc_mod, attr)  # type: ignore
+                for attr in dir(proc_mod):
+                    obj = cast(object, getattr(proc_mod, attr))
                     if isinstance(obj, type) and "ImageProcessor" in attr:
                         proc_cls = obj
                         break
@@ -568,10 +685,14 @@ class VisionEncoder:
                         f"{self._config.model_type}.processing_{self._config.model_type}"
                     ) from None
                 if self._processor is None:
-                    self._processor = proc_cls()  # type: ignore[operator]
+                    assert proc_cls is not None
+                    self._processor = cast(_ImageProcessorProtocol, proc_cls())
                     logger.info(f"Using mlx_vlm {proc_cls.__name__} as image processor")
         if processor_repo:
-            self._merge_kernel_size = vision_cfg.get("merge_kernel_size", [2, 2])  # type: ignore
+            self._merge_kernel_size = cast(
+                list[int],
+                vision_cfg.get("merge_kernel_size", [2, 2]),
+            )
             self._needs_nhwc = True
         max_soft_tokens = getattr(self._processor, "max_soft_tokens", None)
         if isinstance(max_soft_tokens, int):
@@ -692,7 +813,7 @@ class VisionEncoder:
         self,
         pil_images: list[Image.Image],
         *,
-        processor_kwargs: dict[str, Any] | None = None,
+        processor_kwargs: JsonDict | None = None,
     ) -> tuple[mx.array | list[mx.array], mx.array | None, list[int]]:
         """Public interface to image preprocessing (pixel_values + token counts)."""
         self.ensure_processor_loaded()
@@ -724,7 +845,7 @@ class VisionEncoder:
         self,
         pil_images: list[Image.Image],
         *,
-        processor_kwargs: dict[str, Any] | None = None,
+        processor_kwargs: JsonDict | None = None,
     ) -> tuple[mx.array | list[mx.array], mx.array | None, list[int]]:
         """Run the image processor and return pixel values, optional grid, and token counts."""
         assert self._processor is not None
@@ -746,29 +867,35 @@ class VisionEncoder:
             ]
             return pixel_values, grid_thw, n_tokens_per_image
 
-        raw: Any = self._processor(
+        raw = self._processor(
             images=pil_images, return_tensors="np", **processor_kwargs
         )
 
         # Gemma 4's processor returns (data_dict, num_soft_tokens_per_image).
         if isinstance(raw, tuple):
-            data_dict = dict(raw[0])  # type: ignore
-            soft_tokens: list[int] = list(raw[1])  # type: ignore
-            pv_raw = data_dict["pixel_values"]  # pyright: ignore[reportUnknownVariableType]
+            raw_tuple = cast(tuple[object, object], raw)
+            data_dict = _object_dict(raw_tuple[0])
+            soft_tokens = [
+                _int_value(token, 0)
+                for token in cast(list[object], raw_tuple[1])
+            ]
+            pv_raw = data_dict["pixel_values"]
             if isinstance(pv_raw, list):
                 # Variable-sized images — keep as list for per-image encoding.
-                pixel_values_list: list[mx.array] = [mx.array(v) for v in pv_raw]  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+                pixel_values_list = [
+                    mx.array(cast(MxArrayInput, v))
+                    for v in cast(list[object], pv_raw)
+                ]
                 return pixel_values_list, None, soft_tokens
-            return mx.array(pv_raw), None, soft_tokens  # pyright: ignore[reportUnknownArgumentType]
+            return mx.array(cast(MxArrayInput, pv_raw)), None, soft_tokens
 
         # Standard HuggingFace processor (Qwen, SiglipImageProcessor, etc.)
-        pv_key = "pixel_values"
-        pixel_values = mx.array(raw[pv_key])  # type: ignore
+        raw_dict = _object_dict(raw)
+        pixel_values = mx.array(cast(MxArrayInput, raw_dict["pixel_values"]))
 
         # Processors that return grid info (Qwen-VL family).
-        grid_key = "image_grid_thw"
-        if grid_key in raw:
-            grid_thw = mx.array(raw[grid_key])  # type: ignore
+        if "image_grid_thw" in raw_dict:
+            grid_thw = mx.array(cast(MxArrayInput, raw_dict["image_grid_thw"]))
             merge_unit = self._spatial_merge_size**2
             n_tokens_per_image = [
                 int(
@@ -791,9 +918,9 @@ class VisionEncoder:
         """Determine the number of soft tokens per image from model config.
 
         Caches the result to avoid re-reading config.json on every call."""
-        cached = getattr(self, "_soft_tokens_cache", None)
+        cached = cast(object | None, getattr(self, "_soft_tokens_cache", None))
         if cached is not None:
-            return int(cached)
+            return _int_value(cached, 256)
 
         result = 256  # sensible default for SiglipImageProcessor-based models
         config = self._load_config_json()
@@ -801,13 +928,13 @@ class VisionEncoder:
             # Top-level vision_soft_tokens_per_image (gemma3n, gemma4).
             vst = config.get("vision_soft_tokens_per_image")
             if vst is not None:
-                result = int(vst)  # pyright: ignore[reportAny]
+                result = _int_value(vst, result)
             else:
                 # VisionConfig.default_output_length (gemma4).
-                vc: dict[str, Any] = config.get("vision_config", {})  # pyright: ignore[reportAny]
+                vc = _object_dict(config.get("vision_config", {}))
                 dol = vc.get("default_output_length")
                 if dol is not None:
-                    result = int(dol)  # pyright: ignore[reportAny]
+                    result = _int_value(dol, result)
 
         self._soft_tokens_cache = result
         return result
@@ -1110,7 +1237,7 @@ class VisionProcessor:
         path as mlx-vlm: vision tower -> projector -> masked_scatter."""
         logger.info("Using native vision pipeline (model has built-in vision tower)")
         self._encoder.ensure_processor_loaded()
-        processor = self._encoder._processor
+        processor = self._encoder.processor
         assert processor is not None
 
         debug_enabled = _vision_transport_debug_enabled()

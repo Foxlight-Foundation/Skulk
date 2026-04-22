@@ -1,6 +1,9 @@
+import copy
 from datetime import datetime, timedelta, timezone
+from typing import cast
 
 import anyio
+import yaml
 from loguru import logger
 
 from exo.master.placement import (
@@ -50,6 +53,7 @@ from exo.shared.types.events import (
     TracesMerged,
 )
 from exo.shared.types.state import State
+from exo.shared.types.state_sync import StateSnapshot, StateSyncMessage
 from exo.shared.types.tasks import (
     ImageEdits as ImageEditsTask,
 )
@@ -67,10 +71,17 @@ from exo.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
 )
 from exo.shared.types.worker.instances import InstanceId
+from exo.store.config import resolve_config_path
 from exo.utils.channels import Receiver, Sender
 from exo.utils.disk_event_log import DiskEventLog
 from exo.utils.event_buffer import MultiSourceBuffer
+from exo.utils.state_snapshot_store import StateSnapshotStore
 from exo.utils.task_group import TaskGroup
+
+EVENT_LOG_REPLAY_BATCH_SIZE = 10_000
+SNAPSHOT_EVENT_CADENCE = 10_000
+REPLAY_TAIL_RETENTION_EVENTS = SNAPSHOT_EVENT_CADENCE
+JsonObject = dict[str, object]
 
 
 class Master:
@@ -83,7 +94,10 @@ class Master:
         event_sender: Sender[Event],
         local_event_receiver: Receiver[LocalForwarderEvent],
         global_event_sender: Sender[GlobalForwarderEvent],
+        state_sync_receiver: Receiver[StateSyncMessage],
+        state_sync_sender: Sender[StateSyncMessage],
         download_command_sender: Sender[ForwarderDownloadCommand],
+        snapshot_event_cadence: int = SNAPSHOT_EVENT_CADENCE,
     ):
         self.node_id = node_id
         self.session_id = session_id
@@ -93,11 +107,18 @@ class Master:
         self.command_receiver = command_receiver
         self.local_event_receiver = local_event_receiver
         self.global_event_sender = global_event_sender
+        self.state_sync_receiver = state_sync_receiver
+        self.state_sync_sender = state_sync_sender
         self.download_command_sender = download_command_sender
         self.event_sender = event_sender
         self._system_id = SystemId()
         self._multi_buffer = MultiSourceBuffer[SystemId, Event]()
         self._event_log = DiskEventLog(EXO_EVENT_LOG_DIR / "master")
+        self._snapshot_store = StateSnapshotStore(
+            EXO_EVENT_LOG_DIR / "master" / "snapshots"
+        )
+        self._snapshot_event_cadence = snapshot_event_cadence
+        self._last_snapshot_idx = -1
         self._pending_traces: dict[TaskId, dict[int, list[TraceEventData]]] = {}
         self._expected_ranks: dict[TaskId, set[int]] = {}
 
@@ -108,12 +129,15 @@ class Master:
             async with self._tg as tg:
                 tg.start_soon(self._event_processor)
                 tg.start_soon(self._command_processor)
+                tg.start_soon(self._state_sync_processor)
                 tg.start_soon(self._plan)
         finally:
+            await self._persist_snapshot(force=True)
             self._event_log.close()
             self.global_event_sender.close()
             self.local_event_receiver.close()
             self.command_receiver.close()
+            self.state_sync_receiver.close()
 
     async def shutdown(self):
         logger.info("Stopping Master")
@@ -405,11 +429,24 @@ class Master:
                             )
                         case RequestEventLog():
                             # We should just be able to send everything, since other buffers will ignore old messages
-                            # rate limit to 1000 at a time
-                            end = min(command.since_idx + 1000, len(self._event_log))
+                            # Large sessions can take many minutes to replay at 1k events per request,
+                            # which leaves freshly joined nodes with an incomplete topology view.
+                            replay_start = max(
+                                command.since_idx,
+                                self._event_log.start_idx,
+                            )
+                            if replay_start != command.since_idx:
+                                logger.warning(
+                                    "Requested replay index predates retained master tail; "
+                                    f"serving from {replay_start} instead of {command.since_idx}"
+                                )
+                            end = min(
+                                replay_start + EVENT_LOG_REPLAY_BATCH_SIZE,
+                                len(self._event_log),
+                            )
                             for i, event in enumerate(
-                                self._event_log.read_range(command.since_idx, end),
-                                start=command.since_idx,
+                                self._event_log.read_range(replay_start, end),
+                                start=replay_start,
                             ):
                                 await self._send_event(IndexedEvent(idx=i, event=event))
                     for event in generated_events:
@@ -465,6 +502,7 @@ class Master:
 
                     self._event_log.append(event)
                     await self._send_event(indexed)
+                    await self._persist_snapshot()
 
     # This function is re-entrant, take care!
     async def _send_event(self, event: IndexedEvent):
@@ -503,3 +541,99 @@ class Master:
         del self._pending_traces[task_id]
         if task_id in self._expected_ranks:
             del self._expected_ranks[task_id]
+
+    async def _state_sync_processor(self) -> None:
+        with self.state_sync_receiver as messages:
+            async for message in messages:
+                if message.kind != "request":
+                    continue
+                if message.session_id != self.session_id:
+                    continue
+
+                config_yaml = self._load_state_sync_config_yaml()
+                await self.state_sync_sender.send(
+                    StateSyncMessage(
+                        kind="response",
+                        requester=message.requester,
+                        session_id=self.session_id,
+                        snapshot=StateSnapshot(
+                            session_id=self.session_id,
+                            last_event_applied_idx=self.state.last_event_applied_idx,
+                            state=self.state,
+                        ),
+                        config_yaml=config_yaml,
+                    )
+                )
+
+    def _load_state_sync_config_yaml(self) -> str | None:
+        """Return a sanitized config payload for bootstrap responses.
+
+        State-sync responses travel over cluster pub/sub, so they must never
+        include secrets such as ``hf_token``. Read/parse failures are treated
+        as non-fatal so bootstrap requests cannot crash master coordination.
+        """
+
+        config_path = resolve_config_path()
+        if not config_path.exists():
+            return None
+
+        try:
+            decoded_config = cast(object, yaml.safe_load(config_path.read_text()))
+        except Exception as exc:
+            logger.opt(exception=exc).warning(
+                "Failed to read local config for state-sync response"
+            )
+            return None
+
+        if decoded_config is None:
+            return None
+
+        if not isinstance(decoded_config, dict):
+            logger.warning(
+                "Ignoring non-object config while preparing state-sync response"
+            )
+            return None
+
+        raw_config = cast(dict[object, object], decoded_config)
+        sanitized_config: JsonObject = {
+            str(key): copy.deepcopy(value) for key, value in raw_config.items()
+        }
+        sanitized_config.pop("hf_token", None)
+        return yaml.safe_dump(
+            sanitized_config,
+            default_flow_style=False,
+            sort_keys=False,
+        )
+
+    async def _persist_snapshot(self, force: bool = False) -> None:
+        snapshot_idx = self.state.last_event_applied_idx
+        if snapshot_idx < 0:
+            return
+        if not force and (
+            snapshot_idx - self._last_snapshot_idx < self._snapshot_event_cadence
+        ):
+            return
+        if snapshot_idx == self._last_snapshot_idx:
+            return
+
+        snapshot = StateSnapshot(
+            session_id=self.session_id,
+            last_event_applied_idx=snapshot_idx,
+            state=self.state,
+        )
+        try:
+            self._snapshot_store.write(snapshot)
+        except Exception as exc:
+            logger.opt(exception=exc).warning("Failed to persist state snapshot")
+            return
+
+        # Keep a bounded overlap after the latest durable snapshot so a
+        # follower that bootstrapped from a recently served snapshot can still
+        # replay the missing tail even if another snapshot is persisted before
+        # its replay request arrives.
+        keep_from_idx = max(
+            snapshot.last_event_applied_idx + 1 - REPLAY_TAIL_RETENTION_EVENTS,
+            0,
+        )
+        self._event_log.compact(keep_from_idx)
+        self._last_snapshot_idx = snapshot.last_event_applied_idx

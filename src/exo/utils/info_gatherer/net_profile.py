@@ -1,3 +1,4 @@
+import ipaddress
 from collections import defaultdict
 from collections.abc import AsyncGenerator, Mapping
 
@@ -12,6 +13,30 @@ from exo.shared.types.profiling import NodeNetworkInfo
 from exo.utils.channels import Sender, channel
 
 REACHABILITY_ATTEMPTS = 3
+
+
+def _should_probe_remote_ip(target_ip: str) -> bool:
+    """Return whether a remote reachability probe should target this address.
+
+    Remote-node probing should ignore loopback and unspecified addresses such as
+    ``127.0.0.1`` or ``::1`` because they resolve back to the local node on the
+    probing machine and create misleading identity-mismatch logs.
+    """
+
+    candidate = target_ip.strip()
+    if not candidate:
+        return False
+
+    zone_delimiter = candidate.find("%")
+    if zone_delimiter != -1:
+        candidate = candidate[:zone_delimiter]
+
+    try:
+        parsed = ipaddress.ip_address(candidate)
+    except ValueError:
+        return candidate not in {"localhost"}
+
+    return not (parsed.is_loopback or parsed.is_unspecified)
 
 
 async def check_reachability(
@@ -117,6 +142,8 @@ async def check_reachable(
             if node_id == self_node_id:
                 continue
             for iface in node_network[node_id].interfaces:
+                if not _should_probe_remote_ip(iface.ip_address):
+                    continue
                 tg.start_soon(_probe, iface.ip_address, node_id, client, send.clone())
         send.close()
 

@@ -18,7 +18,7 @@ def test_explicit_none_disables_thinking_even_with_explicit_flag() -> None:
     assert resolve_reasoning_params("none", False) == ("none", False)
 
 
-def test_non_toggleable_thinking_models_ignore_explicit_controls() -> None:
+def test_non_toggleable_thinking_models_preserve_explicit_effort_only() -> None:
     profile = ResolvedCapabilityProfile(
         supports_thinking=True,
         supports_thinking_toggle=False,
@@ -28,7 +28,8 @@ def test_non_toggleable_thinking_models_ignore_explicit_controls() -> None:
 
     assert resolve_reasoning_params(None, True, profile) == (None, None)
     assert resolve_reasoning_params("none", None, profile) == (None, None)
-    assert resolve_reasoning_params("high", True, profile) == (None, None)
+    assert resolve_reasoning_params("high", True, profile) == ("high", None)
+    assert resolve_reasoning_params("low", False, profile) == ("low", None)
 
 
 def test_models_without_thinking_support_drop_reasoning_controls() -> None:

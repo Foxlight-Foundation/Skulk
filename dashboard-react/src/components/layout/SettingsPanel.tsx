@@ -12,6 +12,22 @@ export interface SettingsPanelProps {
   onClose: () => void;
 }
 
+const defaultStoreConfig = (): StoreConfig => ({
+  enabled: false,
+  store_host: '',
+  store_http_host: '',
+  store_port: 58080,
+  store_path: '',
+  download: {
+    allow_hf_fallback: true,
+  },
+  staging: {
+    enabled: true,
+    node_cache_path: '~/.exo/staging',
+    cleanup_on_deactivate: true,
+  },
+});
+
 /* ---- animations ---- */
 
 const fadeIn = keyframes`
@@ -242,16 +258,24 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     });
   }, [fullConfig, effective]);
 
+  const modelStoreDraft = draft ?? defaultStoreConfig();
+
   const update = useCallback((patch: Partial<StoreConfig>) => {
-    setDraft((prev) => prev ? { ...prev, ...patch } : prev);
+    setDraft((prev) => ({ ...(prev ?? defaultStoreConfig()), ...patch }));
   }, []);
 
   const updateDownload = useCallback((patch: Partial<StoreConfig['download']>) => {
-    setDraft((prev) => prev ? { ...prev, download: { ...prev.download, ...patch } } : prev);
+    setDraft((prev) => {
+      const base = prev ?? defaultStoreConfig();
+      return { ...base, download: { ...base.download, ...patch } };
+    });
   }, []);
 
   const updateStaging = useCallback((patch: Partial<StoreConfig['staging']>) => {
-    setDraft((prev) => prev ? { ...prev, staging: { ...prev.staging, ...patch } } : prev);
+    setDraft((prev) => {
+      const base = prev ?? defaultStoreConfig();
+      return { ...base, staging: { ...base.staging, ...patch } };
+    });
   }, []);
 
   const handleSave = useCallback(async () => {
@@ -316,129 +340,127 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
             </Row>
           </Fieldset>
 
-          {draft && (
-            <>
-              {/* Model Store */}
-              <Fieldset>
-                <Legend>Model Store</Legend>
-                <Row>
-                  <FieldLabel>
-                    Enabled
-                    <InfoTooltip
-                      filled
-                      content="When enabled, model store allows specification of a single cluster attached storage device where downloaded models will be saved."
-                    />
-                  </FieldLabel>
-                  <Toggle $on={draft.enabled} onClick={() => update({ enabled: !draft.enabled })} />
-                </Row>
-                {draft.enabled && (
-                  <>
-                    <Row>
-                      <FieldLabel>Store host</FieldLabel>
-                      <StyledField
-                        size="sm"
-                        value={draft.store_host}
-                        onChange={(e) => update({ store_host: (e.target as HTMLInputElement).value })}
-                        placeholder="hostname or node_id"
-                      />
-                    </Row>
-                    <Row>
-                      <FieldLabel>HTTP host</FieldLabel>
-                      <StyledField
-                        size="sm"
-                        value={draft.store_http_host}
-                        onChange={(e) => update({ store_http_host: (e.target as HTMLInputElement).value })}
-                        placeholder="defaults to store host"
-                      />
-                    </Row>
-                    <Row>
-                      <FieldLabel>Port</FieldLabel>
-                      <StyledField
-                        size="sm"
-                        type="number"
-                        value={String(draft.store_port)}
-                        onChange={(e) => update({ store_port: parseInt((e.target as HTMLInputElement).value) || 58080 })}
-                        style={{ maxWidth: 80 }}
-                      />
-                    </Row>
-                    <Row>
-                      <FieldLabel>Store path</FieldLabel>
-                      <StyledField
-                        size="sm"
-                        value={draft.store_path}
-                        onChange={(e) => update({ store_path: (e.target as HTMLInputElement).value })}
-                        placeholder="/path/to/models"
-                      />
-                    </Row>
-                  </>
-                )}
-              </Fieldset>
-
-              {/* Download */}
-              <Fieldset>
-                <Legend>Download</Legend>
-                <Row>
-                  <FieldLabel>
-                    Allow HuggingFace fallback
-                    <InfoTooltip
-                      filled
-                      content="When enabled, nodes can download models directly from HuggingFace if the model is not in the store. Disable for air-gapped clusters where all models must be pre-loaded into the store."
-                    />
-                  </FieldLabel>
-                  <Toggle
-                    $on={draft.download.allow_hf_fallback}
-                    onClick={() => updateDownload({ allow_hf_fallback: !draft.download.allow_hf_fallback })}
+          <>
+            {/* Model Store */}
+            <Fieldset>
+              <Legend>Model Store</Legend>
+              <Row>
+                <FieldLabel>
+                  Enabled
+                  <InfoTooltip
+                    filled
+                    content="When enabled, model store allows specification of a single cluster attached storage device where downloaded models will be saved."
                   />
-                </Row>
-              </Fieldset>
-
-              {/* Staging */}
-              <Fieldset>
-                <Legend>Staging</Legend>
-                <Row>
-                  <FieldLabel>
-                    Enabled
-                    <InfoTooltip
-                      filled
-                      content="When enabled, worker nodes copy model files from the store to a local cache directory before loading. This gives MLX a local filesystem path for fast access. Disable only on the store host to load directly from the store path."
+                </FieldLabel>
+                <Toggle $on={modelStoreDraft.enabled} onClick={() => update({ enabled: !modelStoreDraft.enabled })} />
+              </Row>
+              {modelStoreDraft.enabled && (
+                <>
+                  <Row>
+                    <FieldLabel>Store host</FieldLabel>
+                    <StyledField
+                      size="sm"
+                      value={modelStoreDraft.store_host}
+                      onChange={(e) => update({ store_host: (e.target as HTMLInputElement).value })}
+                      placeholder="hostname or node_id"
                     />
-                  </FieldLabel>
-                  <Toggle
-                    $on={draft.staging.enabled}
-                    onClick={() => updateStaging({ enabled: !draft.staging.enabled })}
-                  />
-                </Row>
-                {draft.staging.enabled && (
-                  <>
-                    <Row>
-                      <FieldLabel>Cache path</FieldLabel>
-                      <StyledField
-                        size="sm"
-                        value={draft.staging.node_cache_path}
-                        onChange={(e) => updateStaging({ node_cache_path: (e.target as HTMLInputElement).value })}
-                        placeholder="~/.skulk/staging"
-                      />
-                    </Row>
-                    <Row>
-                      <FieldLabel>
-                        Cleanup on deactivate
-                        <InfoTooltip
-                          filled
-                          content="When enabled, on deactivate staged models will be removed from cluster nodes to prevent storage bloat on cluster nodes."
-                        />
-                      </FieldLabel>
-                      <Toggle
-                        $on={draft.staging.cleanup_on_deactivate}
-                        onClick={() => updateStaging({ cleanup_on_deactivate: !draft.staging.cleanup_on_deactivate })}
-                      />
-                    </Row>
-                  </>
-                )}
-              </Fieldset>
+                  </Row>
+                  <Row>
+                    <FieldLabel>HTTP host</FieldLabel>
+                    <StyledField
+                      size="sm"
+                      value={modelStoreDraft.store_http_host}
+                      onChange={(e) => update({ store_http_host: (e.target as HTMLInputElement).value })}
+                      placeholder="defaults to store host"
+                    />
+                  </Row>
+                  <Row>
+                    <FieldLabel>Port</FieldLabel>
+                    <StyledField
+                      size="sm"
+                      type="number"
+                      value={String(modelStoreDraft.store_port)}
+                      onChange={(e) => update({ store_port: parseInt((e.target as HTMLInputElement).value) || 58080 })}
+                      style={{ maxWidth: 80 }}
+                    />
+                  </Row>
+                  <Row>
+                    <FieldLabel>Store path</FieldLabel>
+                    <StyledField
+                      size="sm"
+                      value={modelStoreDraft.store_path}
+                      onChange={(e) => update({ store_path: (e.target as HTMLInputElement).value })}
+                      placeholder="/path/to/models"
+                    />
+                  </Row>
+                </>
+              )}
+            </Fieldset>
 
-              {configPath && <ConfigPath>Config: {configPath}</ConfigPath>}
-            </>
-          )}
+            {/* Download */}
+            <Fieldset>
+              <Legend>Download</Legend>
+              <Row>
+                <FieldLabel>
+                  Allow HuggingFace fallback
+                  <InfoTooltip
+                    filled
+                    content="When enabled, nodes can download models directly from HuggingFace if the model is not in the store. Disable for air-gapped clusters where all models must be pre-loaded into the store."
+                  />
+                </FieldLabel>
+                <Toggle
+                  $on={modelStoreDraft.download.allow_hf_fallback}
+                  onClick={() => updateDownload({ allow_hf_fallback: !modelStoreDraft.download.allow_hf_fallback })}
+                />
+              </Row>
+            </Fieldset>
+
+            {/* Staging */}
+            <Fieldset>
+              <Legend>Staging</Legend>
+              <Row>
+                <FieldLabel>
+                  Enabled
+                  <InfoTooltip
+                    filled
+                    content="When enabled, worker nodes copy model files from the store to a local cache directory before loading. This gives MLX a local filesystem path for fast access. Disable only on the store host to load directly from the store path."
+                  />
+                </FieldLabel>
+                <Toggle
+                  $on={modelStoreDraft.staging.enabled}
+                  onClick={() => updateStaging({ enabled: !modelStoreDraft.staging.enabled })}
+                />
+              </Row>
+              {modelStoreDraft.staging.enabled && (
+                <>
+                  <Row>
+                    <FieldLabel>Cache path</FieldLabel>
+                    <StyledField
+                      size="sm"
+                      value={modelStoreDraft.staging.node_cache_path}
+                      onChange={(e) => updateStaging({ node_cache_path: (e.target as HTMLInputElement).value })}
+                      placeholder="~/.skulk/staging"
+                    />
+                  </Row>
+                  <Row>
+                    <FieldLabel>
+                      Cleanup on deactivate
+                      <InfoTooltip
+                        filled
+                        content="When enabled, on deactivate staged models will be removed from cluster nodes to prevent storage bloat on cluster nodes."
+                      />
+                    </FieldLabel>
+                    <Toggle
+                      $on={modelStoreDraft.staging.cleanup_on_deactivate}
+                      onClick={() => updateStaging({ cleanup_on_deactivate: !modelStoreDraft.staging.cleanup_on_deactivate })}
+                    />
+                  </Row>
+                </>
+              )}
+            </Fieldset>
+
+            {configPath && <ConfigPath>Config: {configPath}</ConfigPath>}
+          </>
 
           {/* Inference — always shown, not gated on model_store config */}
           <Fieldset>

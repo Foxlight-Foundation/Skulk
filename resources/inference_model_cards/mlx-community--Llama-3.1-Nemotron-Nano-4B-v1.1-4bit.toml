@@ -6,7 +6,7 @@ tasks = ["TextGeneration"]
 family = "llama"
 quantization = "4bit"
 base_model = "NVIDIA Llama-3.1-Nemotron-Nano-4B-v1.1"
-capabilities = ["text"]
+capabilities = ["text", "thinking", "thinking_toggle"]
 context_length = 131072
 
 [storage_size]

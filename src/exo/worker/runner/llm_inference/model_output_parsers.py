@@ -14,6 +14,7 @@ from openai_harmony import (  # pyright: ignore[reportMissingTypeStubs]
 )
 
 from exo.api.types import ToolCallItem
+from exo.shared.constants import preferred_env_value
 from exo.shared.models.capabilities import resolve_model_capability_profile
 from exo.shared.models.model_cards import (
     ModelCard,
@@ -31,6 +32,52 @@ from exo.worker.runner.llm_inference.tool_parsers import ToolParser
 
 _GEMMA4_THINK_START = "<|channel>thought\n"
 _GEMMA4_THINK_END = "<channel|>"
+_DEFAULT_TOKEN_THINK_START = "<think>"
+_DEFAULT_TOKEN_THINK_END = "</think>"
+ParserChunk = GenerationResponse | ToolCallResponse | None
+
+
+def _thinking_stream_debug_enabled() -> bool:
+    """Return whether opt-in thinking stream tracing is enabled."""
+    value = preferred_env_value(
+        "SKULK_TRACE_THINKING_STREAM",
+        "EXO_TRACE_THINKING_STREAM",
+    )
+    if value is None:
+        return False
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _trace_generation_stream(
+    label: str,
+    model_id: ModelId,
+    responses: Generator[ParserChunk],
+) -> Generator[ParserChunk]:
+    """Log parser-stage generation chunks when thinking stream tracing is enabled."""
+    if not _thinking_stream_debug_enabled():
+        yield from responses
+        return
+
+    for response in responses:
+        if response is None:
+            logger.info(f"[thinking-stream] stage={label} model={model_id} chunk=None")
+            yield None
+            continue
+
+        if isinstance(response, ToolCallResponse):
+            logger.info(
+                f"[thinking-stream] stage={label} model={model_id} "
+                f"tool_calls={len(response.tool_calls)}"
+            )
+            yield response
+            continue
+
+        logger.info(
+            f"[thinking-stream] stage={label} model={model_id} "
+            f"text={response.text!r} token={response.token} "
+            f"is_thinking={response.is_thinking} finish_reason={response.finish_reason!r}"
+        )
+        yield response
 
 
 @cache
@@ -48,8 +95,9 @@ def apply_all_parsers(
     model_id: ModelId,
     tools: list[dict[str, Any]] | None,
     model_card: ModelCard | None = None,
-) -> Generator[GenerationResponse | ToolCallResponse | None]:
+) -> Generator[ParserChunk]:
     mlx_generator = receiver
+    mlx_generator = _trace_generation_stream("raw", model_id, mlx_generator)
     capability_profile = resolve_model_capability_profile(
         model_id,
         model_card=model_card,
@@ -58,17 +106,19 @@ def apply_all_parsers(
 
     if capability_profile.thinking_format == ReasoningFormat.ChannelDelimited:
         mlx_generator = parse_gemma4_thinking_channels(mlx_generator)
-    elif (
-        capability_profile.thinking_format == ReasoningFormat.TokenDelimited
-        and tokenizer.think_start is not None
-        and tokenizer.think_end is not None
-    ):
+    elif capability_profile.thinking_format == ReasoningFormat.TokenDelimited:
+        think_start, think_end = _resolve_token_delimited_markers(tokenizer)
         mlx_generator = parse_thinking_models(
             mlx_generator,
-            tokenizer.think_start,
-            tokenizer.think_end,
-            starts_in_thinking=detect_thinking_prompt_suffix(prompt, tokenizer),
+            think_start,
+            think_end,
+            starts_in_thinking=_detect_thinking_prompt_suffix(
+                prompt,
+                tokenizer,
+                fallback_think_start=think_start,
+            ),
         )
+        mlx_generator = _trace_generation_stream("post-thinking-parser", model_id, mlx_generator)
 
     if capability_profile.output_parser == OutputParserType.GptOss or issubclass(
         model_type, GptOssModel
@@ -81,12 +131,37 @@ def apply_all_parsers(
     elif tool_parser:
         mlx_generator = parse_tool_calls(mlx_generator, tool_parser, tools)
 
+    mlx_generator = _trace_generation_stream("post-all-parsers", model_id, mlx_generator)
     return mlx_generator
 
 
+def _resolve_token_delimited_markers(
+    tokenizer: TokenizerWrapper,
+) -> tuple[str, str]:
+    """Resolve token-delimited thinking markers from tokenizer metadata or fallbacks."""
+    think_start = tokenizer.think_start or _DEFAULT_TOKEN_THINK_START
+    think_end = tokenizer.think_end or _DEFAULT_TOKEN_THINK_END
+    return think_start, think_end
+
+
+def _detect_thinking_prompt_suffix(
+    prompt: str,
+    tokenizer: TokenizerWrapper,
+    *,
+    fallback_think_start: str | None = None,
+) -> bool:
+    """Detect whether the prompt already ends in an opening thinking marker."""
+    if detect_thinking_prompt_suffix(prompt, tokenizer):
+        return True
+    return (
+        fallback_think_start is not None
+        and prompt.rstrip().endswith(fallback_think_start)
+    )
+
+
 def parse_gemma4_thinking_channels(
-    responses: Generator[GenerationResponse | None],
-) -> Generator[GenerationResponse | None]:
+    responses: Generator[ParserChunk],
+) -> Generator[ParserChunk]:
     """Route Gemma 4 channel-delimited reasoning via ``is_thinking``.
 
     Gemma 4 does not expose ``TokenizerWrapper.has_thinking`` metadata, but its
@@ -114,6 +189,9 @@ def parse_gemma4_thinking_channels(
     for response in responses:
         if response is None:
             yield None
+            continue
+        if isinstance(response, ToolCallResponse):
+            yield response
             continue
 
         buffer += response.text
@@ -210,8 +288,8 @@ def parse_gemma4_thinking_channels(
 
 
 def parse_gpt_oss(
-    responses: Generator[GenerationResponse | None],
-) -> Generator[GenerationResponse | ToolCallResponse | None]:
+    responses: Generator[ParserChunk],
+) -> Generator[ParserChunk]:
     encoding = get_gpt_oss_encoding()
     stream = StreamableParser(encoding, role=Role.ASSISTANT)
     thinking = False
@@ -221,6 +299,9 @@ def parse_gpt_oss(
     for response in responses:
         if response is None:
             yield None
+            continue
+        if isinstance(response, ToolCallResponse):
+            yield response
             continue
         try:
             stream.process(response.token)
@@ -282,8 +363,8 @@ def parse_gpt_oss(
 
 
 def parse_deepseek_v32(
-    responses: Generator[GenerationResponse | None],
-) -> Generator[GenerationResponse | ToolCallResponse | None]:
+    responses: Generator[ParserChunk],
+) -> Generator[ParserChunk]:
     """Parse DeepSeek V3.2 DSML tool calls from the generation stream.
 
     Uses accumulated-text matching (not per-token marker checks) because
@@ -320,6 +401,9 @@ def parse_deepseek_v32(
     for response in responses:
         if response is None:
             yield None
+            continue
+        if isinstance(response, ToolCallResponse):
+            yield response
             continue
 
         if response.finish_reason is not None:
@@ -443,45 +527,153 @@ def _could_be_dsml_prefix(text: str) -> bool:
 
 
 def parse_thinking_models(
-    responses: Generator[GenerationResponse | None],
+    responses: Generator[ParserChunk],
     think_start: str | None,
     think_end: str | None,
     starts_in_thinking: bool = True,
-) -> Generator[GenerationResponse | None]:
+) -> Generator[ParserChunk]:
     """Route thinking tokens via is_thinking flag.
 
-    Swallows think tag tokens, sets is_thinking on all others.
-    Always yields tokens with finish_reason to avoid hanging the chunk stream.
+    Swallows think tag tokens, sets ``is_thinking`` on all others, and buffers
+    partial marker fragments so split or fused ``<think>`` tags do not leak into
+    visible output.
+
+    Always yields a terminal chunk with ``finish_reason`` so the stream closes
+    cleanly even when the model ends inside a thinking block.
     """
+    if think_start is None or think_end is None:
+        for response in responses:
+            yield response
+        return
+
+    buffer = ""
     is_thinking = starts_in_thinking
+
+    def _emit_text(
+        template: GenerationResponse,
+        text: str,
+        *,
+        thinking: bool,
+    ) -> GenerationResponse | None:
+        if not text:
+            return None
+        return template.model_copy(
+            update={"text": text, "is_thinking": thinking, "finish_reason": None}
+        )
+
     for response in responses:
         if response is None:
             yield None
             continue
-        if response.finish_reason is not None:
-            yield response.model_copy(update={"is_thinking": False})
+        if isinstance(response, ToolCallResponse):
+            yield response
             continue
 
-        if response.text == think_start:
-            is_thinking = True
+        buffer += response.text
+
+        if response.finish_reason is None:
+            while True:
+                if not is_thinking:
+                    start_index = buffer.find(think_start)
+                    if start_index != -1:
+                        emitted = _emit_text(
+                            response,
+                            buffer[:start_index],
+                            thinking=False,
+                        )
+                        if emitted is not None:
+                            yield emitted
+                        buffer = buffer[start_index + len(think_start) :]
+                        is_thinking = True
+                        continue
+
+                    safe_length = len(buffer) - (len(think_start) - 1)
+                    if safe_length > 0:
+                        emitted = _emit_text(
+                            response,
+                            buffer[:safe_length],
+                            thinking=False,
+                        )
+                        if emitted is not None:
+                            yield emitted
+                        buffer = buffer[safe_length:]
+                    break
+
+                end_index = buffer.find(think_end)
+                if end_index != -1:
+                    emitted = _emit_text(
+                        response,
+                        buffer[:end_index],
+                        thinking=True,
+                    )
+                    if emitted is not None:
+                        yield emitted
+                    buffer = buffer[end_index + len(think_end) :]
+                    is_thinking = False
+                    continue
+
+                safe_length = len(buffer) - (len(think_end) - 1)
+                if safe_length > 0:
+                    emitted = _emit_text(
+                        response,
+                        buffer[:safe_length],
+                        thinking=True,
+                    )
+                    if emitted is not None:
+                        yield emitted
+                    buffer = buffer[safe_length:]
+                break
             continue
-        if response.text == think_end:
+
+        while buffer:
+            if not is_thinking:
+                start_index = buffer.find(think_start)
+                if start_index == -1:
+                    emitted = _emit_text(response, buffer, thinking=False)
+                    if emitted is not None:
+                        yield emitted
+                    buffer = ""
+                    break
+
+                emitted = _emit_text(response, buffer[:start_index], thinking=False)
+                if emitted is not None:
+                    yield emitted
+                buffer = buffer[start_index + len(think_start) :]
+                is_thinking = True
+                continue
+
+            end_index = buffer.find(think_end)
+            if end_index == -1:
+                emitted = _emit_text(response, buffer, thinking=True)
+                if emitted is not None:
+                    yield emitted
+                buffer = ""
+                break
+
+            emitted = _emit_text(response, buffer[:end_index], thinking=True)
+            if emitted is not None:
+                yield emitted
+            buffer = buffer[end_index + len(think_end) :]
             is_thinking = False
-            continue
 
-        yield response.model_copy(update={"is_thinking": is_thinking})
+        yield response.model_copy(
+            update={"text": "", "is_thinking": False, "finish_reason": response.finish_reason}
+        )
 
 
 def parse_tool_calls(
-    responses: Generator[GenerationResponse | None],
+    responses: Generator[ParserChunk],
     tool_parser: ToolParser,
     tools: list[dict[str, Any]] | None,
-) -> Generator[GenerationResponse | ToolCallResponse | None]:
+) -> Generator[ParserChunk]:
     in_tool_call = False
     tool_call_text_parts: list[str] = []
     for response in responses:
         if response is None:
             yield None
+            continue
+        if isinstance(response, ToolCallResponse):
+            yield response
             continue
 
         if not in_tool_call and response.text.startswith(tool_parser.start_parsing):

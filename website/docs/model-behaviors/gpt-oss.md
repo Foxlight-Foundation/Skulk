@@ -23,28 +23,35 @@ The runtime needs to know:
 
 The built-in GPT-OSS cards now declare:
 
+- reasoning support with a default effort of `medium`
+- non-toggleable reasoning semantics
 - tool-calling support
 - GPT-OSS tool-call format
 - GPT-OSS output parser selection
+- builtin browser tools:
+  - `web_search`
+  - `open_url`
+  - `extract_page`
 
 That moves GPT-OSS support out of “only infer it from the model id” territory
 and into the same declarative-plus-resolved model that Gemma 4 uses.
 
 ## Current Gaps
 
-Phase 1 does not attempt to make every GPT-OSS behavior card-driven yet.
+Current GPT-OSS support is intentionally narrow:
 
-It focuses on:
-
-- parser selection
-- tool-call format selection
-- API/dashboard capability surfacing
+- Harmony parsing stays GPT-OSS-specific
+- reasoning effort is explicit, but a true “thinking off” mode is not promised
+- browsing is static fetch + extraction, not browser automation
+- the dashboard executes GPT-OSS browser tool calls and feeds the result back
+  into the conversation loop
 
 ## Why This Matters
 
 GPT-OSS is the proof that the capability system is not just a Gemma 4 special
 case. It shows that model-card-backed runtime behavior can cleanly cover a
-second specialized family with different parser and tool semantics.
+second specialized family with different parser, reasoning, and tool semantics
+without changing generic-model behavior.
 
 ## Related
 

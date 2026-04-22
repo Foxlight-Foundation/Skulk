@@ -5,6 +5,53 @@ import { ModelBrowser } from '../models/ModelBrowser';
 import type { ModelInfo, HuggingFaceModel, DownloadAvailability } from '../../types/models';
 import { addToast } from '../../hooks/useToast';
 
+const FAVORITES_KEY = 'exo-favorite-models';
+const RECENTS_KEY = 'exo-recent-models';
+const MAX_RECENT_MODELS = 20;
+
+interface RecentEntry {
+  modelId: string;
+  launchedAt: number;
+}
+
+function loadFavorites(): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  try {
+    const stored = window.localStorage.getItem(FAVORITES_KEY);
+    if (!stored) return new Set();
+    const parsed = JSON.parse(stored) as unknown;
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((value): value is string => typeof value === 'string'));
+  } catch {
+    return new Set();
+  }
+}
+
+function loadRecentIds(): string[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const stored = window.localStorage.getItem(RECENTS_KEY);
+    if (!stored) return [];
+    const parsed = JSON.parse(stored) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .flatMap((entry) => {
+        if (typeof entry === 'string') return [entry];
+        if (
+          entry
+          && typeof entry === 'object'
+          && typeof (entry as RecentEntry).modelId === 'string'
+        ) {
+          return [(entry as RecentEntry).modelId];
+        }
+        return [];
+      })
+      .slice(0, MAX_RECENT_MODELS);
+  } catch {
+    return [];
+  }
+}
+
 interface ModelSearchModalProps {
   open: boolean;
   onClose: () => void;
@@ -19,12 +66,34 @@ export function ModelSearchModal({
   onDownloadStarted,
 }: ModelSearchModalProps) {
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [favorites, setFavorites] = useState<Set<string>>(new Set());
-  const [recentIds, setRecentIds] = useState<string[]>([]);
+  const [favorites, setFavorites] = useState<Set<string>>(() => loadFavorites());
+  const [recentIds, setRecentIds] = useState<string[]>(() => loadRecentIds());
   const [hfResults, setHfResults] = useState<HuggingFaceModel[]>([]);
   const [hfTrending, setHfTrending] = useState<HuggingFaceModel[]>([]);
   const [hfSearching, setHfSearching] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(FAVORITES_KEY, JSON.stringify([...favorites]));
+    } catch {
+      /* ignore */
+    }
+  }, [favorites]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const recents: RecentEntry[] = recentIds.slice(0, MAX_RECENT_MODELS).map((modelId, index) => ({
+        modelId,
+        launchedAt: Date.now() - index,
+      }));
+      window.localStorage.setItem(RECENTS_KEY, JSON.stringify(recents));
+    } catch {
+      /* ignore */
+    }
+  }, [recentIds]);
 
   // Fetch models on open
   useEffect(() => {
@@ -71,7 +140,7 @@ export function ModelSearchModal({
       });
       if (res.ok) {
         addToast({ type: 'success', message: `Downloading ${modelId} to store` });
-        setRecentIds((prev) => [modelId, ...prev.filter((id) => id !== modelId)]);
+        setRecentIds((prev) => [modelId, ...prev.filter((id) => id !== modelId)].slice(0, MAX_RECENT_MODELS));
         onDownloadStarted();
       } else {
         addToast({ type: 'error', message: `Failed to start download for ${modelId}` });

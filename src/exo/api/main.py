@@ -10,17 +10,17 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
 from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal, cast
+from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
 from uuid import uuid4
 
 import anyio
+import hypercorn.asyncio as hypercorn_asyncio
 import yaml
 from anyio import BrokenResourceError
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from hypercorn.asyncio import serve
 from hypercorn.config import Config
 from hypercorn.typing import ASGIFramework
 from loguru import logger
@@ -74,6 +74,8 @@ from exo.api.types import (
     EmbeddingUsage,
     ErrorInfo,
     ErrorResponse,
+    ExtractPageToolRequest,
+    ExtractPageToolResponse,
     FinishReason,
     GenerationStats,
     HuggingFaceSearchResult,
@@ -88,6 +90,8 @@ from exo.api.types import (
     ModalitiesCapabilitySection,
     ModelList,
     ModelListModel,
+    OpenUrlToolRequest,
+    OpenUrlToolResponse,
     PlaceInstanceParams,
     PlacementPreview,
     PlacementPreviewResponse,
@@ -107,6 +111,8 @@ from exo.api.types import (
     TraceRankStats,
     TraceResponse,
     TraceStatsResponse,
+    WebSearchToolRequest,
+    WebSearchToolResponse,
     normalize_image_size,
 )
 from exo.api.types.claude_api import (
@@ -187,6 +193,7 @@ from exo.shared.types.events import (
     ChunkGenerated,
     Event,
     IndexedEvent,
+    StateSnapshotHydrated,
     TracesMerged,
 )
 from exo.shared.types.memory import Memory
@@ -195,7 +202,9 @@ from exo.shared.types.text_generation import TextGenerationTaskParams
 from exo.shared.types.worker.downloads import DownloadCompleted
 from exo.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from exo.shared.types.worker.shards import Sharding
+from exo.shared.version import get_skulk_version, get_skulk_version_label
 from exo.store.config import resolve_config_path
+from exo.tools.web_search import default_browser_tool_provider
 from exo.utils.banner import print_startup_banner
 from exo.utils.channels import Receiver, Sender, channel
 from exo.utils.disk_event_log import DiskEventLog
@@ -209,6 +218,25 @@ from exo.worker.engines.mlx.constants import (
 if TYPE_CHECKING:
     from exo.store.config import ExoConfig
     from exo.store.model_store_client import ModelStoreClient
+
+JsonObject = dict[str, object]
+_DEFAULT_OPTIMIZER_CANDIDATE_BITS = [4, 8]
+
+
+class _HypercornServe(Protocol):
+    """Typed surface for Hypercorn's asyncio serve entrypoint."""
+
+    def __call__(
+        self,
+        app: ASGIFramework,
+        config: Config,
+        *,
+        shutdown_trigger: Callable[[], Awaitable[object]] | None = None,
+        mode: Literal["asgi", "wsgi"] | None = None,
+    ) -> Awaitable[None]: ...
+
+
+serve = cast(_HypercornServe, hypercorn_asyncio.serve)
 
 _API_EVENT_LOG_DIR = EXO_EVENT_LOG_DIR / "api"
 ONBOARDING_COMPLETE_FILE = EXO_CACHE_HOME / "onboarding_complete"
@@ -233,6 +261,10 @@ API_TAGS_METADATA = [
     {
         "name": "Store",
         "description": "Shared model-store health, registry inspection, download workflows, deletion, and optimization.",
+    },
+    {
+        "name": "Tools",
+        "description": "Builtin tool endpoints that clients can execute and feed back into model conversations.",
     },
     {
         "name": "Config",
@@ -274,6 +306,54 @@ def _log_image_transport(message: str) -> None:
         logger.debug(message)
 
 
+def _coerce_json_object(value: object) -> JsonObject:
+    """Return a string-keyed object dict or an empty mapping for non-objects."""
+    if not isinstance(value, dict):
+        return {}
+    raw_dict = cast(dict[object, object], value)
+    return {str(key): item for key, item in raw_dict.items()}
+
+
+async def _read_request_json_object(request: Request) -> JsonObject:
+    """Parse one request body into a string-keyed JSON object."""
+    payload = cast(object, await request.json())
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="Request body must be a JSON object.",
+        )
+    return _coerce_json_object(cast(dict[object, object], payload))
+
+
+def _load_yaml_object(path: Path) -> JsonObject:
+    """Read one YAML document from disk as a string-keyed object."""
+    with path.open() as handle:
+        return _coerce_json_object(cast(object, yaml.safe_load(handle)))
+
+
+def _coerce_float(value: object, *, default: float) -> float:
+    """Normalize numeric request values to float with a conservative default."""
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _coerce_candidate_bits(value: object) -> list[int]:
+    """Normalize OptiQ candidate bits to a clean integer list."""
+    if not isinstance(value, list):
+        return list(_DEFAULT_OPTIMIZER_CANDIDATE_BITS)
+    raw_items = cast(list[object], value)
+    normalized = [item for item in raw_items if isinstance(item, int) and not isinstance(item, bool)]
+    return normalized or list(_DEFAULT_OPTIMIZER_CANDIDATE_BITS)
+
+
 def _create_fastapi_app() -> FastAPI:
     return FastAPI(
         title="Skulk API",
@@ -284,7 +364,7 @@ def _create_fastapi_app() -> FastAPI:
             "Most text-generation requests require the target model to already be placed "
             "and running on the node or cluster."
         ),
-        version="0.1.0",
+        version=get_skulk_version(),
         openapi_url="/api/openapi.json",
         docs_url="/api/docs",
         redoc_url="/api/redoc",
@@ -348,14 +428,14 @@ class API:
 
         self.app = _create_fastapi_app()
 
-        @self.app.middleware("http")
-        async def _log_requests(
+        async def log_requests_middleware(
             request: Request,
             call_next: Callable[[Request], Awaitable[StreamingResponse]],
         ) -> StreamingResponse:
             logger.debug(f"API request: {request.method} {request.url.path}")
             return await call_next(request)
 
+        self.app.middleware("http")(log_requests_middleware)
         self._setup_exception_handlers()
         self._setup_cors()
         self._setup_routes()
@@ -582,6 +662,33 @@ class API:
             summary="Cancel an active text or image command",
             description="Request cancellation for an in-flight text or image generation command by its command ID.",
         )(self.cancel_command)
+        self.app.post(
+            "/v1/tools/web_search",
+            tags=["Tools"],
+            summary="Execute the generic web-search tool",
+            description=(
+                "Run the generic `web_search` tool and return structured search results that "
+                "clients can feed back into a tool-calling conversation loop."
+            ),
+        )(self.web_search)
+        self.app.post(
+            "/v1/tools/open_url",
+            tags=["Tools"],
+            summary="Open one URL and inspect its metadata",
+            description=(
+                "Fetch one HTTP or HTTPS URL, follow redirects, and return structured "
+                "metadata that clients can feed back into a tool-calling conversation loop."
+            ),
+        )(self.open_url)
+        self.app.post(
+            "/v1/tools/extract_page",
+            tags=["Tools"],
+            summary="Fetch one URL and extract readable page text",
+            description=(
+                "Fetch one HTTP or HTTPS URL and return bounded readable text extracted "
+                "from the response body for tool-calling conversation loops."
+            ),
+        )(self.extract_page)
 
         # Ollama API
         self.app.head(
@@ -1321,11 +1428,16 @@ class API:
                 runner_to_shard = getattr(
                     instance.shard_assignments, "runner_to_shard", None
                 )
-                if runner_to_shard is not None:
-                    for shard in runner_to_shard.values():
-                        return shard.model_card
-                fallback_card = getattr(instance.shard_assignments, "model_card", None)
-                if fallback_card is not None:
+                if isinstance(runner_to_shard, dict):
+                    for shard in cast(dict[object, object], runner_to_shard).values():
+                        shard_model_card = cast(object, getattr(shard, "model_card", None))
+                        if isinstance(shard_model_card, ModelCard):
+                            return shard_model_card
+                fallback_card = cast(
+                    object,
+                    getattr(instance.shard_assignments, "model_card", None),
+                )
+                if isinstance(fallback_card, ModelCard):
                     # Older tests and any simplified in-memory stubs may attach the
                     # card directly to shard_assignments instead of runner_to_shard.
                     return fallback_card
@@ -1977,6 +2089,51 @@ class API:
                 media_type="application/json",
             )
 
+    async def web_search(self, payload: WebSearchToolRequest) -> WebSearchToolResponse:
+        """Execute the generic web-search tool and return structured results."""
+        provider = default_browser_tool_provider()
+        try:
+            results = await provider.search(payload.query, top_k=payload.top_k)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Web search failed: {exc}",
+            ) from exc
+
+        return WebSearchToolResponse(
+            query=payload.query,
+            results=results,
+            provider=provider.provider_name,
+        )
+
+    async def open_url(self, payload: OpenUrlToolRequest) -> OpenUrlToolResponse:
+        """Execute the generic URL-open tool and return structured metadata."""
+        provider = default_browser_tool_provider()
+        try:
+            return await provider.open_url(payload.url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Open URL failed: {exc}",
+            ) from exc
+
+    async def extract_page(
+        self, payload: ExtractPageToolRequest
+    ) -> ExtractPageToolResponse:
+        """Execute the generic page-extraction tool and return readable text."""
+        provider = default_browser_tool_provider()
+        try:
+            return await provider.extract_page(payload.url, max_chars=payload.max_chars)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Extract page failed: {exc}",
+            ) from exc
+
     async def _ollama_root(self) -> JSONResponse:
         """Respond to HEAD / from Ollama CLI connectivity checks."""
         return JSONResponse(content="Ollama is running")
@@ -2132,7 +2289,7 @@ class API:
 
     async def ollama_version(self) -> dict[str, str]:
         """Returns version information for Ollama API compatibility."""
-        return {"version": "exo v1.0"}
+        return {"version": get_skulk_version_label()}
 
     def _calculate_total_available_memory(self) -> Memory:
         """Calculate total available memory across all nodes in bytes."""
@@ -2332,10 +2489,13 @@ class API:
     async def _apply_state(self):
         with self.event_receiver as events:
             async for i_event in events:
-                if self._event_log is not None:
-                    self._event_log.append(i_event.event)
-                self.state = apply(self.state, i_event)
                 event = i_event.event
+                if (
+                    self._event_log is not None
+                    and not isinstance(event, StateSnapshotHydrated)
+                ):
+                    self._event_log.append(event)
+                self.state = apply(self.state, i_event)
 
                 if isinstance(event, ChunkGenerated):
                     if queue := self._image_generation_queues.get(
@@ -2594,12 +2754,9 @@ class API:
                     },
                 }
             )
-        with self._config_path.open() as f:
-            raw = yaml.safe_load(f)
-        if raw is None:
-            raw = {}
+        raw = _load_yaml_object(self._config_path)
         # Remove sensitive fields — tokens/passwords managed separately
-        safe_raw = dict(raw) if raw else {}
+        safe_raw = dict(raw)
         has_hf_token = bool(safe_raw.pop("hf_token", None))
         return JSONResponse(
             {
@@ -2614,14 +2771,22 @@ class API:
         )
 
     async def update_config(self, request: Request) -> JSONResponse:
-        body = await request.json()
-        config_data = body.get("config", body)
+        body = await _read_request_json_object(request)
+        if "config" in body:
+            raw_config = body["config"]
+            if not isinstance(raw_config, dict):
+                raise HTTPException(
+                    status_code=422,
+                    detail="'config' field must be a JSON object.",
+                )
+            config_data = _coerce_json_object(cast(dict[object, object], raw_config))
+        else:
+            config_data = dict(body)
         # Preserve existing secrets if not provided in this update
         # (GET /config strips them for security, so saves won't have them)
         if self._config_path.exists():
             try:
-                with self._config_path.open() as f:
-                    existing = yaml.safe_load(f) or {}
+                existing = _load_yaml_object(self._config_path)
                 if "hf_token" not in config_data and "hf_token" in existing:
                     config_data["hf_token"] = existing["hf_token"]
                 # Preserve logging config when omitted from the request
@@ -2655,10 +2820,9 @@ class API:
         await self._send_download(SyncConfig(config_yaml=broadcast_yaml))
         # Apply inference config to env var immediately so next model launch uses it.
         # Don't overwrite if user provided the env var at launch.
-        inference = config_data.get("inference")
+        inference = _coerce_json_object(config_data.get("inference"))
         if (
-            isinstance(inference, dict)
-            and "kv_cache_backend" in inference
+            "kv_cache_backend" in inference
             and not os.environ.get("_SKULK_KV_BACKEND_USER_SET")
             and not os.environ.get("_EXO_KV_BACKEND_USER_SET")
         ):
@@ -2671,14 +2835,16 @@ class API:
         if hf_token and "HF_TOKEN" not in os.environ:
             os.environ["HF_TOKEN"] = str(hf_token)
         # Apply logging config immediately
-        logging_cfg_update = config_data.get("logging")
-        if isinstance(logging_cfg_update, dict):
+        logging_cfg_update = _coerce_json_object(config_data.get("logging"))
+        if logging_cfg_update:
             from exo.shared.logging import set_structured_stdout
 
             log_on = bool(logging_cfg_update.get("enabled", False)) and bool(
                 logging_cfg_update.get("ingest_url")
             )
-            set_structured_stdout(log_on, ingest_url=str(logging_cfg_update.get("ingest_url", "")))
+            set_structured_stdout(
+                log_on, ingest_url=str(logging_cfg_update.get("ingest_url", ""))
+            )
         # model_store changes still require restart; inference-only changes don't
         has_store_changes = "model_store" in config_data
         return JSONResponse(
@@ -2803,11 +2969,13 @@ class API:
                 detail="Model optimizer not available (store not configured)",
             )
         try:
-            body = await request.json()
+            body = await _read_request_json_object(request)
         except Exception:
             body = {}
-        target_bpw = float(body.get("target_bpw", 4.5))
-        candidate_bits = body.get("candidate_bits", [4, 8])
+        target_bpw = _coerce_float(body.get("target_bpw", 4.5), default=4.5)
+        candidate_bits = _coerce_candidate_bits(
+            body.get("candidate_bits", _DEFAULT_OPTIMIZER_CANDIDATE_BITS)
+        )
         try:
             await self._model_optimizer.optimize(
                 model_id=model_id,

@@ -174,6 +174,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
               supportsImageInput: m.resolved_capabilities.supports_image_input ?? false,
               supportsAudioInput: m.resolved_capabilities.supports_audio_input ?? false,
               supportsToolCalling: m.resolved_capabilities.supports_tool_calling ?? false,
+              builtinTools: m.resolved_capabilities.builtin_tools ?? [],
               thinkingFormat: m.resolved_capabilities.thinking_format ?? 'none',
               promptRenderer: m.resolved_capabilities.prompt_renderer ?? 'tokenizer',
               outputParser: m.resolved_capabilities.output_parser ?? 'generic',

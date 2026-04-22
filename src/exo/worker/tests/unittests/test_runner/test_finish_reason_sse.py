@@ -1,7 +1,14 @@
 from collections.abc import Generator
-from typing import Any
+from typing import Any, cast
 
-from exo.shared.models.model_cards import ModelCard, ModelTask
+from mlx_lm.tokenizer_utils import TokenizerWrapper
+
+from exo.shared.models.model_cards import (
+    ModelCard,
+    ModelTask,
+    ReasoningCardConfig,
+    ReasoningFormat,
+)
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import Model
@@ -249,11 +256,49 @@ class TestThinkingModelsFinishReason:
         )
         assert _got_finish(results)
 
+    def test_split_and_fused_thinking_markers_are_hidden(self):
+        tokens = [
+            _make_response("<th", 0),
+            _make_response("ink>\nWorking", 1),
+            _make_response(" through it</th", 2),
+            _make_response("ink>Answer", 3, finish_reason="stop"),
+        ]
+        results = _step_until_finish(
+            parse_thinking_models(
+                _queue_source(tokens),
+                think_start="<think>",
+                think_end="</think>",
+                starts_in_thinking=False,
+            )
+        )
+
+        all_text = "".join(r.text for r in results if isinstance(r, GenerationResponse))
+        thinking_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and r.is_thinking
+        )
+        visible_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and not r.is_thinking
+        )
+
+        assert "<think>" not in all_text
+        assert "</think>" not in all_text
+        assert thinking_text == "\nWorking through it"
+        assert visible_text == "Answer"
+        assert _got_finish(results)
+
 
 class _NoThinkingTokenizer:
     has_thinking = False
     think_start = None
     think_end = None
+
+
+def _no_thinking_tokenizer() -> TokenizerWrapper:
+    return cast(TokenizerWrapper, cast(object, _NoThinkingTokenizer()))
 
 
 class TestGemma4ThinkingChannels:
@@ -358,7 +403,7 @@ class TestGemma4ThinkingChannels:
                 _queue_source(tokens),
                 prompt="<bos><|turn>user\nDescribe this.<turn|>\n<|turn>model\n",
                 tool_parser=None,
-                tokenizer=_NoThinkingTokenizer(),
+                tokenizer=_no_thinking_tokenizer(),
                 model_type=Model,
                 model_id=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"),
                 tools=None,
@@ -399,7 +444,7 @@ class TestGemma4ThinkingChannels:
                 _queue_source(tokens),
                 prompt="",
                 tool_parser=None,
-                tokenizer=_NoThinkingTokenizer(),
+                tokenizer=_no_thinking_tokenizer(),
                 model_type=Model,
                 model_id=ModelId("custom/deepseek-compatible"),
                 tools=None,
@@ -419,6 +464,56 @@ class TestGemma4ThinkingChannels:
         tool_results = [r for r in results if isinstance(r, ToolCallResponse)]
         assert len(tool_results) == 1
         assert tool_results[0].tool_calls[0].name == "get_weather"
+
+    def test_apply_all_parsers_uses_token_delimited_fallback_without_tokenizer_metadata(
+        self,
+    ):
+        tokens = [
+            _make_response("<think>", 100),
+            _make_response("Reason silently.", 101),
+            _make_response("</think>", 102),
+            _make_response("Final answer.", 103, finish_reason="stop"),
+        ]
+
+        results = _step_until_finish(
+            apply_all_parsers(
+                _queue_source(tokens),
+                prompt="<SPECIAL_10>System\n/no_think\n<SPECIAL_11>User\nHello\n<SPECIAL_11>Assistant\n",
+                tool_parser=None,
+                tokenizer=_no_thinking_tokenizer(),
+                model_type=Model,
+                model_id=ModelId("mlx-community/NVIDIA-Nemotron-Nano-9B-v2-4bits"),
+                tools=None,
+                model_card=ModelCard(
+                    model_id=ModelId("mlx-community/NVIDIA-Nemotron-Nano-9B-v2-4bits"),
+                    storage_size=Memory.from_bytes(1024),
+                    n_layers=1,
+                    hidden_size=1,
+                    supports_tensor=False,
+                    tasks=[ModelTask.TextGeneration],
+                    family="nemotron",
+                    capabilities=["text", "thinking", "thinking_toggle"],
+                    reasoning=ReasoningCardConfig(
+                        supports_toggle=True,
+                        format=ReasoningFormat.TokenDelimited,
+                    ),
+                ),
+            )
+        )
+
+        thinking_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and r.is_thinking
+        )
+        visible_text = "".join(
+            r.text
+            for r in results
+            if isinstance(r, GenerationResponse) and not r.is_thinking
+        )
+
+        assert thinking_text == "Reason silently."
+        assert visible_text == "Final answer."
 
 
 # ── parse_tool_calls (generic) ──────────────────────────────────

@@ -132,3 +132,34 @@ async def test_non_toggleable_model_ignores_explicit_disable() -> None:
 
     assert params.enable_thinking is None
     assert params.reasoning_effort is None
+
+
+@pytest.mark.anyio
+async def test_non_toggleable_model_preserves_explicit_reasoning_effort() -> None:
+    model_id = ModelId("mlx-community/gpt-oss-20b-MXFP4-Q8")
+    card = ModelCard(
+        model_id=model_id,
+        storage_size=Memory.from_mb(100),
+        n_layers=10,
+        hidden_size=1024,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        family="gpt-oss",
+        capabilities=["text", "thinking"],
+        reasoning=ReasoningCardConfig(
+            supports_toggle=False,
+            default_effort="medium",
+            disabled_effort="none",
+        ),
+    )
+    request = ChatCompletionRequest(
+        model=model_id,
+        messages=[ChatCompletionMessage(role="user", content="Hello")],
+        enable_thinking=False,
+        reasoning_effort="low",
+    )
+
+    params = await chat_request_to_text_generation(request, model_card=card)
+
+    assert params.enable_thinking is None
+    assert params.reasoning_effort == "low"

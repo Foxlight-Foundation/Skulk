@@ -25,6 +25,8 @@ from .api import EmbeddingResponse as EmbeddingResponse
 from .api import EmbeddingUsage as EmbeddingUsage
 from .api import ErrorInfo as ErrorInfo
 from .api import ErrorResponse as ErrorResponse
+from .api import ExtractPageToolRequest as ExtractPageToolRequest
+from .api import ExtractPageToolResponse as ExtractPageToolResponse
 from .api import FinishReason as FinishReason
 from .api import GenerationStats as GenerationStats
 from .api import HuggingFaceSearchResult as HuggingFaceSearchResult
@@ -42,6 +44,8 @@ from .api import ModalitiesCapabilitySection as ModalitiesCapabilitySection
 from .api import ModelList as ModelList
 from .api import ModelListModel as ModelListModel
 from .api import NodePowerStats as NodePowerStats
+from .api import OpenUrlToolRequest as OpenUrlToolRequest
+from .api import OpenUrlToolResponse as OpenUrlToolResponse
 from .api import PlaceInstanceParams as PlaceInstanceParams
 from .api import PlacementPreview as PlacementPreview
 from .api import PlacementPreviewResponse as PlacementPreviewResponse
@@ -67,4 +71,7 @@ from .api import TraceRankStats as TraceRankStats
 from .api import TraceResponse as TraceResponse
 from .api import TraceStatsResponse as TraceStatsResponse
 from .api import Usage as Usage
+from .api import WebSearchResult as WebSearchResult
+from .api import WebSearchToolRequest as WebSearchToolRequest
+from .api import WebSearchToolResponse as WebSearchToolResponse
 from .api import normalize_image_size as normalize_image_size

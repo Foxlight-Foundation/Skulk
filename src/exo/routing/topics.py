@@ -8,6 +8,7 @@ from exo.shared.types.events import (
     GlobalForwarderEvent,
     LocalForwarderEvent,
 )
+from exo.shared.types.state_sync import StateSyncMessage
 from exo.utils.pydantic_ext import CamelCaseModel
 
 
@@ -48,4 +49,7 @@ CONNECTION_MESSAGES = TypedTopic(
 )
 DOWNLOAD_COMMANDS = TypedTopic(
     "download_commands", PublishPolicy.Always, ForwarderDownloadCommand
+)
+STATE_SYNC_MESSAGES = TypedTopic(
+    "state_sync_messages", PublishPolicy.Always, StateSyncMessage
 )

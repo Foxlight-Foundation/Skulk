@@ -87,10 +87,6 @@ def _is_image_card(card: "ModelCard") -> bool:
     return any(t in (ModelTask.TextToImage, ModelTask.ImageToImage) for t in card.tasks)
 
 
-def _is_embedding_card(card: "ModelCard") -> bool:
-    return ModelTask.TextEmbedding in card.tasks
-
-
 def get_card(model_id: ModelId) -> "ModelCard | None":
     """Look up a single model card from the cache by ID."""
     return _card_cache.get(model_id)
@@ -169,6 +165,14 @@ class ToolCallFormat(str, Enum):
     Dsml = "dsml"
 
 
+class BuiltinToolType(str, Enum):
+    """Builtin tool contracts that Skulk can advertise to model families."""
+
+    WebSearch = "web_search"
+    OpenUrl = "open_url"
+    ExtractPage = "extract_page"
+
+
 class ReasoningCardConfig(CamelCaseModel):
     """Optional advanced reasoning capability declarations for a model card."""
 
@@ -200,6 +204,7 @@ class ToolingCardConfig(CamelCaseModel):
 
     supports_tool_calling: bool | None = None
     tool_call_format: ToolCallFormat | None = None
+    builtin_tools: list[BuiltinToolType] | None = None
 
     @field_validator("tool_call_format", mode="before")
     @classmethod
@@ -209,6 +214,19 @@ class ToolingCardConfig(CamelCaseModel):
         if value is None or isinstance(value, ToolCallFormat):
             return value
         return ToolCallFormat(value)
+
+    @field_validator("builtin_tools", mode="before")
+    @classmethod
+    def _validate_builtin_tools(
+        cls,
+        value: list[str | BuiltinToolType] | None,
+    ) -> list[BuiltinToolType] | None:
+        if value is None:
+            return value
+        return [
+            item if isinstance(item, BuiltinToolType) else BuiltinToolType(item)
+            for item in value
+        ]
 
 
 class RuntimeCapabilityCardConfig(CamelCaseModel):

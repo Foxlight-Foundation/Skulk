@@ -3,7 +3,7 @@
 import pytest
 
 from exo.api.adapters.responses import responses_request_to_text_generation
-from exo.api.types.openai_responses import ResponsesRequest
+from exo.api.types.openai_responses import Reasoning, ResponsesRequest
 from exo.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -71,3 +71,34 @@ async def test_responses_adapter_non_toggleable_model_ignores_disable_inputs() -
 
     assert params.enable_thinking is None
     assert params.reasoning_effort is None
+
+
+@pytest.mark.anyio
+async def test_responses_adapter_non_toggleable_model_preserves_reasoning_effort() -> None:
+    model_id = ModelId("mlx-community/gpt-oss-20b-MXFP4-Q8")
+    card = ModelCard(
+        model_id=model_id,
+        storage_size=Memory.from_mb(100),
+        n_layers=10,
+        hidden_size=1024,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        family="gpt-oss",
+        capabilities=["text", "thinking"],
+        reasoning=ReasoningCardConfig(
+            supports_toggle=False,
+            default_effort="medium",
+            disabled_effort="none",
+        ),
+    )
+    request = ResponsesRequest(
+        model=model_id,
+        input="Hello",
+        reasoning=Reasoning(effort="high"),
+        enable_thinking=False,
+    )
+
+    params = await responses_request_to_text_generation(request, model_card=card)
+
+    assert params.enable_thinking is None
+    assert params.reasoning_effort == "high"

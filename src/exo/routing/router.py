@@ -45,6 +45,7 @@ class TopicRouter[T: CamelCaseModel]:
     ):
         self.topic: TypedTopic[T] = topic
         self.senders: set[Sender[T]] = set()
+        self.origin_senders: set[Sender[tuple[str | None, T]]] = set()
         send, recv = channel[T]()
         self.receiver: Receiver[T] = recv
         self._sender: Sender[T] = send
@@ -57,6 +58,7 @@ class TopicRouter[T: CamelCaseModel]:
                 # Check if we should send to network
                 if (
                     len(self.senders) == 0
+                    and len(self.origin_senders) == 0
                     and self.topic.publish_policy is PublishPolicy.Minimal
                 ):
                     await self._send_out(item)
@@ -64,17 +66,19 @@ class TopicRouter[T: CamelCaseModel]:
                 if self.topic.publish_policy is PublishPolicy.Always:
                     await self._send_out(item)
                 # Then publish to all senders
-                await self.publish(item)
+                await self.publish(item, origin=None)
 
     async def shutdown(self):
         logger.debug(f"Shutting down Topic Router {self.topic}")
         # Close all the things!
         for sender in self.senders:
             sender.close()
+        for sender in self.origin_senders:
+            sender.close()
         self._sender.close()
         self.receiver.close()
 
-    async def publish(self, item: T):
+    async def publish(self, item: T, origin: str | None = None):
         """
         Publish item T on this topic to all senders.
         NB: this sends to ALL receivers, potentially including receivers held by the object doing the sending.
@@ -88,8 +92,16 @@ class TopicRouter[T: CamelCaseModel]:
                 to_clear.add(sender)
         self.senders -= to_clear
 
-    async def publish_bytes(self, data: bytes):
-        await self.publish(self.topic.deserialize(data))
+        origin_to_clear: set[Sender[tuple[str | None, T]]] = set()
+        for sender in copy(self.origin_senders):
+            try:
+                await sender.send((origin, item))
+            except (ClosedResourceError, BrokenResourceError):
+                origin_to_clear.add(sender)
+        self.origin_senders -= origin_to_clear
+
+    async def publish_bytes(self, data: bytes, origin: str | None):
+        await self.publish(self.topic.deserialize(data), origin=origin)
 
     def new_sender(self) -> Sender[T]:
         return self._sender.clone()
@@ -154,6 +166,20 @@ class Router:
 
         return recv
 
+    def receiver_with_origin[T: CamelCaseModel](
+        self, topic: TypedTopic[T]
+    ) -> Receiver[tuple[str | None, T]]:
+        router = self.topic_routers.get(topic.topic, None)
+        assert router is not None
+        assert router.topic == topic
+        assert router.topic.model_type == topic.model_type
+
+        send, recv = channel[tuple[str | None, T]]()
+        router.origin_senders.add(
+            cast(Sender[tuple[str | None, CamelCaseModel]], send)
+        )
+        return recv
+
     async def run(self):
         logger.debug("Starting Router")
         try:
@@ -201,7 +227,7 @@ class Router:
                             )
                             continue
                         router = self.topic_routers[topic]
-                        await router.publish_bytes(data)
+                        await router.publish_bytes(data, origin)
                     case PyFromSwarm.Connection():
                         message = ConnectionMessage.from_update(from_swarm)
                         logger.trace(

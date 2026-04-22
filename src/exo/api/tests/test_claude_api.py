@@ -15,6 +15,7 @@ from exo.api.types.claude_api import (
     ClaudeMessage,
     ClaudeMessagesRequest,
     ClaudeTextBlock,
+    ClaudeThinkingConfig,
     ClaudeToolResultBlock,
 )
 from exo.shared.models.model_cards import ModelCard, ModelTask, ReasoningCardConfig
@@ -184,7 +185,7 @@ class TestClaudeRequestToInternal:
         request = ClaudeMessagesRequest(
             model=model_id,
             max_tokens=100,
-            thinking={"type": "enabled"},
+            thinking=ClaudeThinkingConfig(type="enabled"),
             messages=[ClaudeMessage(role="user", content="Hello")],
         )
 
@@ -214,7 +215,7 @@ class TestClaudeRequestToInternal:
         request = ClaudeMessagesRequest(
             model=model_id,
             max_tokens=100,
-            thinking={"type": "disabled"},
+            thinking=ClaudeThinkingConfig(type="disabled"),
             messages=[ClaudeMessage(role="user", content="Hello")],
         )
 

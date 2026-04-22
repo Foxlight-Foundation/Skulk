@@ -153,3 +153,66 @@ def test_rotation_keeps_at_most_5_archives(log_dir: Path):
         assert not old.exists()
     for recent in all_archives[2:]:
         assert recent.exists()
+
+
+def test_compact_keeps_tail_and_absolute_indices(log_dir: Path):
+    log = DiskEventLog(log_dir)
+    events = [TestEvent() for _ in range(6)]
+    for event in events:
+        log.append(event)
+
+    log.compact(4)
+
+    assert log.start_idx == 4
+    assert len(log) == 6
+    assert list(log.read_range(0, 6)) == events[4:]
+    assert list(log.read_range(4, 6)) == events[4:]
+    assert list(log.read_range(5, 6)) == events[5:]
+
+    log.close()
+
+
+def test_read_range_does_not_cache_stale_offsets_after_compaction(log_dir: Path):
+    log = DiskEventLog(log_dir)
+    events = [TestEvent() for _ in range(6)]
+    for event in events:
+        log.append(event)
+
+    in_flight = log.read_range(1, 5)
+    first = next(in_flight)
+    assert first.event_id == events[1].event_id
+
+    log.compact(4)
+    assert [event.event_id for event in in_flight] == [events[2].event_id, events[3].event_id, events[4].event_id]
+
+    reread = list(log.read_range(5, 6))
+    assert len(reread) == 1
+    assert reread[0].event_id == events[5].event_id
+
+    log.close()
+
+
+def test_compact_aborts_when_retained_tail_is_incomplete(
+    log_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    log = DiskEventLog(log_dir)
+    events = [TestEvent() for _ in range(6)]
+    for event in events:
+        log.append(event)
+
+    def fake_read_range(start: int, end: int):
+        assert start == 4
+        assert end == 6
+        return iter(events[4:5])
+
+    monkeypatch.setattr(log, "read_range", fake_read_range)
+
+    log.compact(4)
+
+    assert log.start_idx == 0
+    assert len(log) == 6
+    assert [event.event_id for event in log.read_all()] == [
+        event.event_id for event in events
+    ]
+
+    log.close()

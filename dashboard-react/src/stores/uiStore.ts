@@ -33,6 +33,7 @@ function persistTheme(name: ThemeName): void {
 
 export interface UIState {
   activeRoute: NavRoute;
+  selectedTraceTaskId: string | null;
   panelOpen: boolean;
   historyPanelOpen: boolean;
   chatScrollTop: number;
@@ -42,6 +43,7 @@ export interface UIState {
   theme: ThemeName;
 
   setActiveRoute: (route: NavRoute) => void;
+  setSelectedTraceTaskId: (taskId: string | null) => void;
   setPanelOpen: (open: boolean) => void;
   togglePanel: () => void;
   toggleHistoryPanel: () => void;
@@ -56,6 +58,7 @@ export const useUIStore = create<UIState>()(
   persist(
     (set) => ({
       activeRoute: 'cluster',
+      selectedTraceTaskId: null,
       panelOpen: true,
       historyPanelOpen: true,
       chatScrollTop: 0,
@@ -63,6 +66,7 @@ export const useUIStore = create<UIState>()(
       theme: loadInitialTheme(),
 
       setActiveRoute: (route) => set({ activeRoute: route }),
+      setSelectedTraceTaskId: (taskId) => set({ selectedTraceTaskId: taskId }),
       setPanelOpen: (open) => set({ panelOpen: open }),
       togglePanel: () => set((s) => ({ panelOpen: !s.panelOpen })),
       toggleHistoryPanel: () => set((s) => ({ historyPanelOpen: !s.historyPanelOpen })),
@@ -89,6 +93,7 @@ export const useUIStore = create<UIState>()(
       // the sessionStorage-backed persist block.
       partialize: (state) => ({
         activeRoute: state.activeRoute,
+        selectedTraceTaskId: state.selectedTraceTaskId,
         panelOpen: state.panelOpen,
         historyPanelOpen: state.historyPanelOpen,
         chatScrollTop: state.chatScrollTop,

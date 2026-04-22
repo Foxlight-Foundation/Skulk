@@ -57,6 +57,16 @@ interface RawThunderboltBridge {
   serviceName?: string | null;
 }
 
+interface RawThunderboltInterface {
+  rdmaInterface: string;
+  domainUuid: string;
+  linkSpeed: string;
+}
+
+interface RawThunderboltInfo {
+  interfaces: RawThunderboltInterface[];
+}
+
 interface RawRdmaCtl {
   enabled: boolean;
   interfacesPresent?: boolean;
@@ -72,8 +82,16 @@ interface RawStateResponse {
   nodeSystem?: Record<string, RawSystemPerformanceProfile>;
   nodeNetwork?: Record<string, RawNodeNetworkInfo>;
   nodeDisk?: Record<string, { total: { inBytes: number }; available: { inBytes: number } }>;
+  nodeThunderbolt?: Record<string, RawThunderboltInfo>;
   nodeThunderboltBridge?: Record<string, RawThunderboltBridge>;
   nodeRdmaCtl?: Record<string, RawRdmaCtl>;
+  thunderboltBridgeCycles?: string[][];
+}
+
+interface RawLocalNodeIdentityResponse {
+  nodeId?: string;
+  hostname?: string;
+  ipAddress?: string;
 }
 
 /* ================================================================
@@ -98,6 +116,14 @@ function extractIpFromMultiaddr(addr?: string): string | undefined {
   if (!addr) return undefined;
   const match = addr.match(/\/ip[46]\/([\d.]+|[a-fA-F0-9:]+)/);
   return match?.[1];
+}
+
+function normalizeNodeLabel(value?: string): string {
+  return (value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\.local$/, '')
+    .replace(/[\s._-]+/g, '');
 }
 
 function transformTopology(
@@ -203,6 +229,74 @@ function transformTopology(
   return { nodes, edges };
 }
 
+function ensureLocalNodePresent(
+  topology: TopologyData,
+  localNodeId: string | null,
+  localNodeIdentity: RawLocalNodeIdentityResponse | null,
+  identities: Record<string, RawNodeIdentity>,
+): TopologyData {
+  if (!localNodeId) {
+    return topology;
+  }
+
+  if (topology.nodes[localNodeId]) {
+    return topology;
+  }
+
+  const normalizedLocalHostname = normalizeNodeLabel(localNodeIdentity?.hostname);
+  const localIpAddress = localNodeIdentity?.ipAddress?.trim();
+  const matchedRealLocalNode = Object.values(topology.nodes).some((node) => {
+    const normalizedFriendlyName = normalizeNodeLabel(node.friendly_name);
+    if (
+      normalizedLocalHostname.length > 0 &&
+      normalizedFriendlyName.length > 0 &&
+      normalizedFriendlyName === normalizedLocalHostname
+    ) {
+      return true;
+    }
+
+    if (!localIpAddress || localIpAddress.length === 0) {
+      return false;
+    }
+
+    return (node.network_interfaces ?? []).some((iface) =>
+      (iface.addresses ?? []).includes(localIpAddress),
+    );
+  });
+
+  if (matchedRealLocalNode) {
+    return topology;
+  }
+
+  const localIdentity = identities[localNodeId];
+
+  return {
+    nodes: {
+      ...topology.nodes,
+      [localNodeId]: {
+        system_info: {
+          model_id: localIdentity?.modelId ?? 'Unknown',
+          chip: localIdentity?.chipId,
+          memory: 0,
+        },
+        network_interfaces: [],
+        ip_to_interface: {},
+        macmon_info: {
+          memory: { ram_usage: 0, ram_total: 0 },
+        },
+        last_macmon_update: Date.now() / 1000,
+        friendly_name: localIdentity?.friendlyName ?? 'Local node (syncing)',
+        os_version: localIdentity?.osVersion,
+        os_build_version: localIdentity?.osBuildVersion,
+        exo_version: localIdentity?.exoVersion,
+        exo_commit: localIdentity?.exoCommit,
+        syncing: true,
+      },
+    },
+    edges: topology.edges,
+  };
+}
+
 /* ================================================================
    Hook
    ================================================================ */
@@ -244,6 +338,10 @@ export interface ClusterState {
   nodeDisk: NodeDiskInfo;
   instances: RawInstances;
   runners: RawRunners;
+  nodeThunderbolt: Record<string, RawThunderboltInfo>;
+  nodeThunderboltBridge: Record<string, RawThunderboltBridge>;
+  nodeRdmaCtl: Record<string, RawRdmaCtl>;
+  thunderboltBridgeCycles: string[][];
 }
 
 /** Poll the Skulk `/state` endpoint and normalize it into dashboard-friendly topology and status data. */
@@ -255,23 +353,62 @@ export function useClusterState(): ClusterState {
   const [nodeDisk, setNodeDisk] = useState<NodeDiskInfo>({});
   const [instances, setInstances] = useState<RawInstances>({});
   const [runners, setRunners] = useState<RawRunners>({});
+  const [nodeThunderbolt, setNodeThunderbolt] = useState<Record<string, RawThunderboltInfo>>({});
+  const [nodeThunderboltBridge, setNodeThunderboltBridge] = useState<Record<string, RawThunderboltBridge>>({});
+  const [nodeRdmaCtl, setNodeRdmaCtl] = useState<Record<string, RawRdmaCtl>>({});
+  const [thunderboltBridgeCycles, setThunderboltBridgeCycles] = useState<string[][]>([]);
+  const [localNodeId, setLocalNodeId] = useState<string | null>(null);
+  const [localNodeIdentity, setLocalNodeIdentity] = useState<RawLocalNodeIdentityResponse | null>(null);
   const failuresRef = useRef(0);
 
   const fetchState = useCallback(async () => {
     try {
-      const res = await fetch('/state');
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data: RawStateResponse = await res.json();
+      const stateResponse = await fetch('/state');
+      if (!stateResponse.ok) throw new Error(`HTTP ${stateResponse.status}`);
+      const data: RawStateResponse = await stateResponse.json();
+
+      const topologyNodeIds = new Set(data.topology?.nodes ?? []);
+      const shouldRefreshLocalNodeId =
+        localNodeId == null || (topologyNodeIds.size > 0 && !topologyNodeIds.has(localNodeId));
+      const shouldRefreshLocalIdentity =
+        localNodeIdentity == null || shouldRefreshLocalNodeId;
+
+      const [nodeIdResponse, nodeIdentityResponse] = await Promise.all([
+        shouldRefreshLocalNodeId ? fetch('/node_id') : Promise.resolve(null),
+        shouldRefreshLocalIdentity ? fetch('/node/identity') : Promise.resolve(null),
+      ]);
+
+      let resolvedLocalNodeId = localNodeId;
+      if (nodeIdResponse && nodeIdResponse.ok) {
+        const nodeId = (await nodeIdResponse.json()) as string;
+        setLocalNodeId(nodeId);
+        resolvedLocalNodeId = nodeId;
+      }
+      let resolvedLocalNodeIdentity = localNodeIdentity;
+      if (nodeIdentityResponse && nodeIdentityResponse.ok) {
+        const identity = (await nodeIdentityResponse.json()) as RawLocalNodeIdentityResponse;
+        setLocalNodeIdentity(identity);
+        resolvedLocalNodeIdentity = identity;
+        if (identity.nodeId) {
+          setLocalNodeId(identity.nodeId);
+          resolvedLocalNodeId = identity.nodeId;
+        }
+      }
 
       if (data.topology) {
-        const topo = transformTopology(
-          data.topology,
+        const topo = ensureLocalNodePresent(
+          transformTopology(
+            data.topology,
+            data.nodeIdentities ?? {},
+            data.nodeMemory ?? {},
+            data.nodeSystem ?? {},
+            data.nodeNetwork ?? {},
+            data.nodeThunderboltBridge ?? {},
+            data.nodeRdmaCtl ?? {},
+          ),
+          resolvedLocalNodeId,
+          resolvedLocalNodeIdentity,
           data.nodeIdentities ?? {},
-          data.nodeMemory ?? {},
-          data.nodeSystem ?? {},
-          data.nodeNetwork ?? {},
-          data.nodeThunderboltBridge ?? {},
-          data.nodeRdmaCtl ?? {},
         );
         setTopology(topo);
       }
@@ -280,6 +417,10 @@ export function useClusterState(): ClusterState {
       setNodeDisk(data.nodeDisk ?? {});
       setInstances((data.instances ?? {}) as RawInstances);
       setRunners((data.runners ?? {}) as RawRunners);
+      setNodeThunderbolt(data.nodeThunderbolt ?? {});
+      setNodeThunderboltBridge(data.nodeThunderboltBridge ?? {});
+      setNodeRdmaCtl(data.nodeRdmaCtl ?? {});
+      setThunderboltBridgeCycles(data.thunderboltBridgeCycles ?? []);
       setLastUpdate(Date.now());
       failuresRef.current = 0;
       setConnected(true);
@@ -289,7 +430,7 @@ export function useClusterState(): ClusterState {
         setConnected(false);
       }
     }
-  }, []);
+  }, [localNodeIdentity, localNodeId]);
 
   useEffect(() => {
     fetchState();
@@ -297,5 +438,17 @@ export function useClusterState(): ClusterState {
     return () => clearInterval(id);
   }, [fetchState]);
 
-  return { topology, connected, lastUpdate, downloads, nodeDisk, instances, runners };
+  return {
+    topology,
+    connected,
+    lastUpdate,
+    downloads,
+    nodeDisk,
+    instances,
+    runners,
+    nodeThunderbolt,
+    nodeThunderboltBridge,
+    nodeRdmaCtl,
+    thunderboltBridgeCycles,
+  };
 }

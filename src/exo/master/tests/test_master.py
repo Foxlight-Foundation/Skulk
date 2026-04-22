@@ -1,11 +1,12 @@
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Sequence
 
 import anyio
 import pytest
 from loguru import logger
 
-from exo.master.main import Master
+from exo.master.main import REPLAY_TAIL_RETENTION_EVENTS, Master
 from exo.routing.router import get_node_id_keypair
 from exo.shared.models.model_cards import ModelCard, ModelTask
 from exo.shared.types.commands import (
@@ -29,6 +30,7 @@ from exo.shared.types.memory import Memory
 from exo.shared.types.profiling import (
     MemoryUsage,
 )
+from exo.shared.types.state_sync import StateSyncMessage
 from exo.shared.types.tasks import TaskStatus
 from exo.shared.types.tasks import TextGeneration as TextGenerationTask
 from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
@@ -50,6 +52,7 @@ async def test_master():
     ge_sender, global_event_receiver = channel[GlobalForwarderEvent]()
     command_sender, co_receiver = channel[ForwarderCommand]()
     local_event_sender, le_receiver = channel[LocalForwarderEvent]()
+    state_sync_sender, state_sync_receiver = channel[StateSyncMessage]()
     fcds, _fcdr = channel[ForwarderDownloadCommand]()
     ev_send, ev_recv = channel[Event]()
 
@@ -88,6 +91,8 @@ async def test_master():
         global_event_sender=ge_sender,
         local_event_receiver=le_receiver,
         command_receiver=co_receiver,
+        state_sync_receiver=state_sync_receiver,
+        state_sync_sender=state_sync_sender,
         download_command_sender=fcds,
     )
     logger.info("run the master")
@@ -218,3 +223,167 @@ async def test_master():
 
         ev_send.close()
         await master.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_state_sync_response_includes_config_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keypair = get_node_id_keypair()
+    node_id = NodeId(keypair.to_node_id())
+    session_id = SessionId(master_node_id=node_id, election_clock=0)
+
+    config_path = tmp_path / "skulk.yaml"
+    config_yaml = (
+        "model_store:\n"
+        "  enabled: true\n"
+        "  store_host: kite3.local\n"
+        "  store_path: /Volumes/models\n"
+        "hf_token: super-secret-token\n"
+    )
+    config_path.write_text(config_yaml)
+    monkeypatch.setattr("exo.master.main.resolve_config_path", lambda: config_path)
+
+    global_sender, _global_receiver = channel[GlobalForwarderEvent]()
+    _command_sender, command_receiver = channel[ForwarderCommand]()
+    _local_event_sender, local_event_receiver = channel[LocalForwarderEvent]()
+    request_sender, state_sync_receiver = channel[StateSyncMessage]()
+    state_sync_sender, response_receiver = channel[StateSyncMessage]()
+    download_sender, _download_receiver = channel[ForwarderDownloadCommand]()
+    event_sender, _event_receiver = channel[Event]()
+
+    master = Master(
+        node_id,
+        session_id,
+        event_sender=event_sender,
+        global_event_sender=global_sender,
+        local_event_receiver=local_event_receiver,
+        command_receiver=command_receiver,
+        state_sync_receiver=state_sync_receiver,
+        state_sync_sender=state_sync_sender,
+        download_command_sender=download_sender,
+    )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(master.run)
+        await request_sender.send(
+            StateSyncMessage(
+                kind="request",
+                requester=SystemId("requester"),
+                session_id=session_id,
+            )
+        )
+
+        response: StateSyncMessage | None = None
+        while response is None:
+            candidate = await response_receiver.receive()
+            if candidate.kind == "response":
+                response = candidate
+
+        assert response.config_yaml is not None
+        assert "super-secret-token" not in response.config_yaml
+        assert "hf_token" not in response.config_yaml
+        assert "store_host: kite3.local" in response.config_yaml
+        assert response.snapshot is not None
+        assert response.snapshot.session_id == session_id
+
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.asyncio
+async def test_state_sync_response_survives_invalid_config_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keypair = get_node_id_keypair()
+    node_id = NodeId(keypair.to_node_id())
+    session_id = SessionId(master_node_id=node_id, election_clock=0)
+
+    config_path = tmp_path / "skulk.yaml"
+    config_path.write_text("model_store: [")
+    monkeypatch.setattr("exo.master.main.resolve_config_path", lambda: config_path)
+
+    global_sender, _global_receiver = channel[GlobalForwarderEvent]()
+    _command_sender, command_receiver = channel[ForwarderCommand]()
+    _local_event_sender, local_event_receiver = channel[LocalForwarderEvent]()
+    request_sender, state_sync_receiver = channel[StateSyncMessage]()
+    state_sync_sender, response_receiver = channel[StateSyncMessage]()
+    download_sender, _download_receiver = channel[ForwarderDownloadCommand]()
+    event_sender, _event_receiver = channel[Event]()
+
+    master = Master(
+        node_id,
+        session_id,
+        event_sender=event_sender,
+        global_event_sender=global_sender,
+        local_event_receiver=local_event_receiver,
+        command_receiver=command_receiver,
+        state_sync_receiver=state_sync_receiver,
+        state_sync_sender=state_sync_sender,
+        download_command_sender=download_sender,
+    )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(master.run)
+        await request_sender.send(
+            StateSyncMessage(
+                kind="request",
+                requester=SystemId("requester"),
+                session_id=session_id,
+            )
+        )
+
+        response: StateSyncMessage | None = None
+        while response is None:
+            candidate = await response_receiver.receive()
+            if candidate.kind == "response":
+                response = candidate
+
+        assert response.snapshot is not None
+        assert response.config_yaml is None
+
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.asyncio
+async def test_persist_snapshot_keeps_bounded_replay_tail() -> None:
+    keypair = get_node_id_keypair()
+    node_id = NodeId(keypair.to_node_id())
+    session_id = SessionId(master_node_id=node_id, election_clock=0)
+
+    global_sender, _global_receiver = channel[GlobalForwarderEvent]()
+    _command_sender, command_receiver = channel[ForwarderCommand]()
+    _local_event_sender, local_event_receiver = channel[LocalForwarderEvent]()
+    _request_sender, state_sync_receiver = channel[StateSyncMessage]()
+    state_sync_sender, _response_receiver = channel[StateSyncMessage]()
+    download_sender, _download_receiver = channel[ForwarderDownloadCommand]()
+    event_sender, _event_receiver = channel[Event]()
+
+    master = Master(
+        node_id,
+        session_id,
+        event_sender=event_sender,
+        global_event_sender=global_sender,
+        local_event_receiver=local_event_receiver,
+        command_receiver=command_receiver,
+        state_sync_receiver=state_sync_receiver,
+        state_sync_sender=state_sync_sender,
+        download_command_sender=download_sender,
+    )
+
+    compact_calls: list[int] = []
+
+    class _FakeEventLog:
+        def compact(self, keep_from_idx: int) -> None:
+            compact_calls.append(keep_from_idx)
+
+    class _FakeSnapshotStore:
+        def write(self, _snapshot: object) -> None:
+            return None
+
+    master._event_log = _FakeEventLog()  # pyright: ignore[reportAttributeAccessIssue,reportPrivateUsage]
+    master._snapshot_store = _FakeSnapshotStore()  # pyright: ignore[reportAttributeAccessIssue,reportPrivateUsage]
+    master.state = master.state.model_copy(update={"last_event_applied_idx": 25})
+
+    await master._persist_snapshot(force=True)  # pyright: ignore[reportPrivateUsage]
+
+    assert compact_calls == [max(26 - REPLAY_TAIL_RETENTION_EVENTS, 0)]

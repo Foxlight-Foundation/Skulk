@@ -26,6 +26,7 @@ from exo.shared.types.thunderbolt import (
     ThunderboltConnectivity,
     ThunderboltIdentifier,
 )
+from exo.shared.version import get_skulk_version
 from exo.utils.channels import Sender
 from exo.utils.pydantic_ext import TaggedModel
 from exo.utils.task_group import TaskGroup
@@ -202,13 +203,8 @@ class StaticNodeInformation(TaggedModel):
 
 
 def _get_exo_version() -> str:
-    """Get exo version from package metadata."""
-    try:
-        from importlib.metadata import version
-
-        return version("exo")
-    except Exception:
-        return "unknown"
+    """Get the Skulk app version from shared package metadata."""
+    return get_skulk_version()
 
 
 def _get_git_commit() -> str:

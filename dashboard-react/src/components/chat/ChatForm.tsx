@@ -305,7 +305,7 @@ export function ChatForm({
     });
   }, []);
 
-  const showHeader = modelLabel || modelSelector || showThinkingToggle || ttftMs != null || tps != null;
+  const showHeader = modelLabel || modelSelector || showThinkingToggle || ttftMs != null || tps != null || contextLength > 0;
 
   return (
     <Form

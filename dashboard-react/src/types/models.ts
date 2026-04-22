@@ -16,6 +16,7 @@ export interface ModalitiesCapabilityInfo {
 /** Optional declarative tool-calling metadata copied from a model card. */
 export interface ToolingCapabilityInfo {
   supports_tool_calling?: boolean;
+  builtin_tools?: string[];
   tool_call_format?: string;
 }
 
@@ -37,6 +38,7 @@ export interface ResolvedModelCapabilities {
   supports_image_input: boolean;
   supports_audio_input: boolean;
   supports_tool_calling: boolean;
+  builtin_tools: string[];
   tool_call_format: string;
   prompt_renderer: string;
   output_parser: string;

@@ -2,11 +2,13 @@ import json
 import multiprocessing as mp
 import os
 import tempfile
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 
 import mlx.core as mx
 import mlx.nn as mlx_nn
 import pytest
+from mlx_lm.models.cache import ArraysCache
 
 from exo.worker.engines.mlx.auto_parallel import (
     CustomMlxLayer,
@@ -20,6 +22,13 @@ from exo.worker.tests.unittests.test_mlx.conftest import MockLayer
 class _FakeCacheEntry:
     def __init__(self) -> None:
         self.keys = mx.array([1.0])
+
+
+def test_arrays_cache_make_mask_accepts_attention_kwargs() -> None:
+    cache = ArraysCache(1)
+    make_mask = cast(Callable[..., object], cache.make_mask)
+
+    assert make_mask(1, return_array=False, window_size=None) is None
 
 
 def run_pipeline_device(
@@ -151,7 +160,9 @@ def test_composed_call_works() -> None:
         os.unlink(hostfile_path)
 
 
-def test_patch_pipeline_model_patches_nested_language_model(monkeypatch) -> None:
+def test_patch_pipeline_model_patches_nested_language_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FakeLanguageModel(mlx_nn.Module):
         def __call__(self, x: mx.array, cache: list[object] | None = None) -> mx.array:
             return x * 2

@@ -113,6 +113,9 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 ### Skulk Control APIs
 
 - `GET /v1/models`
+- `POST /v1/tools/web_search`
+- `POST /v1/tools/open_url`
+- `POST /v1/tools/extract_page`
 - `GET /models/search`
 - `POST /models/add`
 - `DELETE /models/custom/{model_id}`
@@ -330,7 +333,107 @@ Notes:
 - Phase 2 semantics are model-aware:
   - if `supports_thinking_toggle` is `true`, send `enable_thinking=true` or `false` explicitly
   - `reasoning_effort="none"` disables thinking for toggleable models
-  - if a model does not support toggleable thinking, Skulk ignores explicit toggle overrides and falls back to the model's default supported behavior
+  - if a model does not support toggleable thinking, Skulk ignores explicit toggle overrides but still preserves explicit non-disabled reasoning-effort hints when the model family supports them
+
+## Builtin Browser Tools
+
+**POST** `/v1/tools/web_search`
+
+Execute Skulk's generic `web_search` tool and return structured search results.
+
+```bash
+curl -X POST http://localhost:52415/v1/tools/web_search \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query": "foxlight skulk distributed inference",
+    "top_k": 5
+  }'
+```
+
+Request fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `query` | string | Required search query. |
+| `top_k` | integer | Optional max results, `1` to `10`, default `5`. |
+
+Response fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `query` | string | Original search query. |
+| `provider` | string | Search backend identifier. |
+| `results` | array | Ordered search results with `title`, `url`, and `snippet`. |
+
+This endpoint is designed for client-executed tool loops. GPT-OSS can request
+`web_search`, the client can call this endpoint, then send the JSON result back
+as a `tool` message.
+
+**POST** `/v1/tools/open_url`
+
+Fetch one HTTP or HTTPS URL, follow redirects, and return structured metadata.
+
+```bash
+curl -X POST http://localhost:52415/v1/tools/open_url \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "url": "https://example.com/article"
+  }'
+```
+
+Request fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `url` | string | Required absolute `http://` or `https://` URL. |
+
+Response fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `url` | string | Original requested URL. |
+| `final_url` | string | Final URL after redirects. |
+| `title` | string or null | Best-effort page title. |
+| `status_code` | integer | Final HTTP status code. |
+| `content_type` | string or null | Normalized response content type. |
+| `provider` | string | Backend provider identifier. |
+
+**POST** `/v1/tools/extract_page`
+
+Fetch one HTTP or HTTPS URL and return bounded readable text extracted from the
+response body.
+
+```bash
+curl -X POST http://localhost:52415/v1/tools/extract_page \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "url": "https://example.com/article",
+    "max_chars": 12000
+  }'
+```
+
+Request fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `url` | string | Required absolute `http://` or `https://` URL. |
+| `max_chars` | integer | Optional maximum characters, `500` to `50000`, default `12000`. |
+
+Response fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `url` | string | Original requested URL. |
+| `final_url` | string | Final URL after redirects. |
+| `title` | string or null | Best-effort page title. |
+| `text` | string | Readable extracted text. |
+| `truncated` | boolean | Whether the text was clipped to `max_chars`. |
+| `provider` | string | Backend provider identifier. |
+
+These browser-tool endpoints are designed for client-executed tool loops. In
+dashboard chat, GPT-OSS can request `web_search`, `open_url`, or
+`extract_page`; the dashboard executes the endpoint call, then sends the JSON
+result back as a `tool` message.
 
 ## Structured Output
 
@@ -639,6 +742,16 @@ If a local restart is already scheduled, returns HTTP 409 with `{"status": "rest
 **GET** `/state`
 
 Returns the cluster state as Skulk currently sees it.
+
+Operational note:
+
+- a follower may briefly report a local view that is behind the elected master
+  while it is catching up
+- on newer builds, catch-up can start from a snapshot plus retained replay tail
+  instead of always rebuilding from event `0`
+- if your cluster is mixed-version during rollout, upgrade all nodes before you
+  rely on bounded replay retention on the master; an older restarted node may
+  not be able to fully resync after old history has been compacted away
 
 ### Event log
 
