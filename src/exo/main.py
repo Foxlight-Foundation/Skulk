@@ -151,7 +151,9 @@ class Node:
             session_id,
             command_sender=router.sender(topics.COMMANDS),
             state_sync_sender=router.sender(topics.STATE_SYNC_MESSAGES),
-            state_sync_receiver=router.receiver(topics.STATE_SYNC_MESSAGES),
+            state_sync_receiver=router.receiver_with_origin(
+                topics.STATE_SYNC_MESSAGES
+            ),
             external_outbound=router.sender(topics.LOCAL_EVENTS),
             external_inbound=router.receiver(topics.GLOBAL_EVENTS),
         )
@@ -357,7 +359,9 @@ class Node:
 
         requester = SystemId()
         state_sync_sender = self.router.sender(topics.STATE_SYNC_MESSAGES)
-        state_sync_receiver = self.router.receiver(topics.STATE_SYNC_MESSAGES)
+        state_sync_receiver = self.router.receiver_with_origin(
+            topics.STATE_SYNC_MESSAGES
+        )
         with state_sync_receiver as messages:
             for attempt in range(3):
                 await state_sync_sender.send(
@@ -368,12 +372,14 @@ class Node:
                     )
                 )
                 with anyio.move_on_after(1.0):
-                    async for message in messages:
+                    async for origin, message in messages:
                         if message.kind != "response":
                             continue
                         if message.requester != requester:
                             continue
                         if message.session_id != session_id:
+                            continue
+                        if origin != str(session_id.master_node_id):
                             continue
                         return message.config_yaml
                 if attempt < 2:
@@ -474,7 +480,7 @@ class Node:
                         result.session_id,
                         command_sender=self.router.sender(topics.COMMANDS),
                         state_sync_sender=self.router.sender(topics.STATE_SYNC_MESSAGES),
-                        state_sync_receiver=self.router.receiver(
+                        state_sync_receiver=self.router.receiver_with_origin(
                             topics.STATE_SYNC_MESSAGES
                         ),
                         external_inbound=self.router.receiver(topics.GLOBAL_EVENTS),

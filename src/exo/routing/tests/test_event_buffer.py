@@ -1,7 +1,9 @@
+from datetime import datetime, timezone
+
 import pytest
 
 from exo.shared.types.events import Event, TestEvent
-from exo.utils.event_buffer import OrderedBuffer
+from exo.utils.event_buffer import ConflictingDuplicateIndexError, OrderedBuffer
 
 
 def make_indexed_event(idx: int) -> tuple[int, Event]:
@@ -96,7 +98,7 @@ async def test_ingest_drops_duplicate_indices(buffer: OrderedBuffer[Event]):
     buffer.ingest(*make_indexed_event(0))
     buffer.ingest(*event2_first)
 
-    with pytest.raises(AssertionError):
+    with pytest.raises(ConflictingDuplicateIndexError):
         buffer.ingest(*event2_second)  # This duplicate should be ignored
 
     drained = buffer.drain_indexed()
@@ -141,3 +143,19 @@ async def test_drain_and_ingest_with_new_sequence(buffer: OrderedBuffer[Event]):
     assert [e[0] for e in drained] == [2]
     assert buffer.next_idx_to_release == 3
     assert 4 in buffer.store
+
+
+@pytest.mark.asyncio
+async def test_ingest_accepts_duplicates_that_only_differ_by_private_fields(
+    buffer: OrderedBuffer[Event],
+):
+    """Treat duplicate wire-identical events as equal even if debug-only fields differ."""
+    event = TestEvent()
+    duplicate = TestEvent.model_validate_json(event.model_dump_json())
+    event._master_time_stamp = datetime.now(timezone.utc)  # pyright: ignore[reportPrivateUsage]
+
+    buffer.ingest(0, event)
+    buffer.ingest(0, duplicate)
+
+    drained = buffer.drain_indexed()
+    assert drained == [(0, event)]

@@ -18,7 +18,7 @@ from exo.shared.types.events import (
 )
 from exo.shared.types.state_sync import StateSnapshot, StateSyncMessage
 from exo.utils.channels import Receiver, Sender, channel
-from exo.utils.event_buffer import OrderedBuffer
+from exo.utils.event_buffer import ConflictingDuplicateIndexError, OrderedBuffer
 from exo.utils.task_group import TaskGroup
 
 
@@ -27,7 +27,7 @@ class EventRouter:
     session_id: SessionId
     command_sender: Sender[ForwarderCommand]
     state_sync_sender: Sender[StateSyncMessage]
-    state_sync_receiver: Receiver[StateSyncMessage]
+    state_sync_receiver: Receiver[tuple[str | None, StateSyncMessage]]
     external_inbound: Receiver[GlobalForwarderEvent]
     external_outbound: Sender[LocalForwarderEvent]
     _system_id: SystemId = field(init=False, default_factory=SystemId)
@@ -111,7 +111,19 @@ class EventRouter:
                 if event.origin != self.session_id.master_node_id:
                     continue
 
-                self.event_buffer.ingest(event.origin_idx, event.event)
+                try:
+                    self.event_buffer.ingest(event.origin_idx, event.event)
+                except ConflictingDuplicateIndexError as exc:
+                    logger.warning(
+                        "Conflicting duplicate global event index detected; "
+                        "dropping buffered tail and requesting replay "
+                        f"(idx={exc.idx}, session_id={self.session_id}, "
+                        f"origin={event.origin}, existing_event_id="
+                        f"{getattr(exc.existing, 'event_id', 'unknown')}, "
+                        f"incoming_event_id={getattr(exc.incoming, 'event_id', 'unknown')})"
+                    )
+                    self._recover_from_conflicting_event(exc.idx)
+                    continue
                 event_id = event.event.event_id
                 if event_id in self.out_for_delivery:
                     self.out_for_delivery.pop(event_id)
@@ -120,6 +132,16 @@ class EventRouter:
                     continue
 
                 await self._release_ready_events()
+
+    def _recover_from_conflicting_event(self, idx: int) -> None:
+        """Discard the conflicting buffered tail and request authoritative replay."""
+        self.event_buffer.truncate_from(idx)
+        self._nack_attempts = 0
+        if self._nack_cancel_scope is not None:
+            self._nack_cancel_scope.cancel()
+
+        if self._bootstrap_complete.is_set():
+            self._tg.start_soon(self._nack_request, idx)
 
     async def _bootstrap(self) -> None:
         replay_start_idx = 0
@@ -149,7 +171,7 @@ class EventRouter:
                     )
                 )
                 with anyio.move_on_after(self.snapshot_request_timeout_seconds):
-                    async for message in messages:
+                    async for origin, message in messages:
                         if message.kind != "response":
                             continue
                         if message.requester != self._system_id:
@@ -157,6 +179,11 @@ class EventRouter:
                         if message.session_id != self.session_id:
                             logger.warning(
                                 "Ignoring state snapshot response for mismatched session"
+                            )
+                            continue
+                        if origin != str(self.session_id.master_node_id):
+                            logger.warning(
+                                "Ignoring state snapshot response from non-master origin"
                             )
                             continue
                         assert message.snapshot is not None

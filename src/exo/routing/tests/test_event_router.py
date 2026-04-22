@@ -28,12 +28,14 @@ def _make_router(
     EventRouter,
     Receiver[ForwarderCommand],
     Receiver[StateSyncMessage],
-    Sender[StateSyncMessage],
+    Sender[tuple[str | None, StateSyncMessage]],
     Sender[GlobalForwarderEvent],
 ]:
     command_sender, command_receiver = channel[ForwarderCommand]()
     state_sync_sender, state_sync_requests = channel[StateSyncMessage]()
-    state_sync_responses, state_sync_receiver = channel[StateSyncMessage]()
+    state_sync_responses, state_sync_receiver = channel[
+        tuple[str | None, StateSyncMessage]
+    ]()
     external_sender, external_receiver = channel[GlobalForwarderEvent]()
     external_outbound, _unused_external_outbound = channel[LocalForwarderEvent]()
 
@@ -93,14 +95,17 @@ async def test_snapshot_supported_bootstrap_replays_only_tail() -> None:
 
         snapshot_state = State(last_event_applied_idx=4)
         await state_sync_responses.send(
-            StateSyncMessage(
-                kind="response",
-                requester=request.requester,
-                session_id=session_id,
-                snapshot=StateSnapshot(
+            (
+                str(session_id.master_node_id),
+                StateSyncMessage(
+                    kind="response",
+                    requester=request.requester,
                     session_id=session_id,
-                    last_event_applied_idx=4,
-                    state=snapshot_state,
+                    snapshot=StateSnapshot(
+                        session_id=session_id,
+                        last_event_applied_idx=4,
+                        state=snapshot_state,
+                    ),
                 ),
             )
         )
@@ -180,20 +185,23 @@ async def test_snapshot_session_mismatch_falls_back_to_full_replay() -> None:
 
         request = await state_sync_requests.receive()
         await state_sync_responses.send(
-            StateSyncMessage(
-                kind="response",
-                requester=request.requester,
-                session_id=SessionId(
-                    master_node_id=session_id.master_node_id,
-                    election_clock=session_id.election_clock + 1,
-                ),
-                snapshot=StateSnapshot(
+            (
+                str(session_id.master_node_id),
+                StateSyncMessage(
+                    kind="response",
+                    requester=request.requester,
                     session_id=SessionId(
                         master_node_id=session_id.master_node_id,
                         election_clock=session_id.election_clock + 1,
                     ),
-                    last_event_applied_idx=2,
-                    state=State(last_event_applied_idx=2),
+                    snapshot=StateSnapshot(
+                        session_id=SessionId(
+                            master_node_id=session_id.master_node_id,
+                            election_clock=session_id.election_clock + 1,
+                        ),
+                        last_event_applied_idx=2,
+                        state=State(last_event_applied_idx=2),
+                    ),
                 ),
             )
         )
@@ -220,14 +228,17 @@ async def test_snapshot_gap_triggers_nack_recovery() -> None:
 
         request = await state_sync_requests.receive()
         await state_sync_responses.send(
-            StateSyncMessage(
-                kind="response",
-                requester=request.requester,
-                session_id=session_id,
-                snapshot=StateSnapshot(
+            (
+                str(session_id.master_node_id),
+                StateSyncMessage(
+                    kind="response",
+                    requester=request.requester,
                     session_id=session_id,
-                    last_event_applied_idx=4,
-                    state=State(last_event_applied_idx=4),
+                    snapshot=StateSnapshot(
+                        session_id=session_id,
+                        last_event_applied_idx=4,
+                        state=State(last_event_applied_idx=4),
+                    ),
                 ),
             )
         )
@@ -298,14 +309,17 @@ async def test_snapshot_bootstrap_retries_before_full_replay_fallback() -> None:
 
         snapshot_state = State(last_event_applied_idx=7)
         await state_sync_responses.send(
-            StateSyncMessage(
-                kind="response",
-                requester=second_request.requester,
-                session_id=session_id,
-                snapshot=StateSnapshot(
+            (
+                str(session_id.master_node_id),
+                StateSyncMessage(
+                    kind="response",
+                    requester=second_request.requester,
                     session_id=session_id,
-                    last_event_applied_idx=7,
-                    state=snapshot_state,
+                    snapshot=StateSnapshot(
+                        session_id=session_id,
+                        last_event_applied_idx=7,
+                        state=snapshot_state,
+                    ),
                 ),
             )
         )
@@ -319,6 +333,41 @@ async def test_snapshot_bootstrap_retries_before_full_replay_fallback() -> None:
 
 
 @pytest.mark.asyncio
+async def test_snapshot_bootstrap_ignores_non_master_origin() -> None:
+    session_id = SessionId(master_node_id=NodeId("master"), election_clock=12)
+    router, command_receiver, state_sync_requests, state_sync_responses, _event_sender = (
+        _make_router(session_id)
+    )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(router.run)
+
+        request = await state_sync_requests.receive()
+        await state_sync_responses.send(
+            (
+                "not-the-master",
+                StateSyncMessage(
+                    kind="response",
+                    requester=request.requester,
+                    session_id=session_id,
+                    snapshot=StateSnapshot(
+                        session_id=session_id,
+                        last_event_applied_idx=2,
+                        state=State(last_event_applied_idx=2),
+                    ),
+                ),
+            )
+        )
+
+        replay_request = await command_receiver.receive()
+        assert isinstance(replay_request.command, RequestEventLog)
+        assert replay_request.command.since_idx == 0
+
+        router.shutdown()
+        tg.cancel_scope.cancel()
+
+
+@pytest.mark.asyncio
 async def test_release_ready_events_preserves_order_during_concurrent_drains() -> None:
     session_id = SessionId(master_node_id=NodeId("master"), election_clock=13)
     router, _command_receiver, _state_sync_requests, _state_sync_responses, _sender = cast(
@@ -326,7 +375,7 @@ async def test_release_ready_events_preserves_order_during_concurrent_drains() -
             _ControlledSendEventRouter,
             Receiver[ForwarderCommand],
             Receiver[StateSyncMessage],
-            Sender[StateSyncMessage],
+            Sender[tuple[str | None, StateSyncMessage]],
             Sender[GlobalForwarderEvent],
         ],
         _make_router(session_id, router_cls=_ControlledSendEventRouter),
@@ -347,3 +396,77 @@ async def test_release_ready_events_preserves_order_during_concurrent_drains() -
         router.allow_first_send_finish.set()
 
     assert router.delivered_indices == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_conflicting_duplicate_index_requests_replay_instead_of_crashing() -> None:
+    session_id = SessionId(master_node_id=NodeId("master"), election_clock=14)
+    router, command_receiver, state_sync_requests, state_sync_responses, event_sender = (
+        _make_router(session_id)
+    )
+    internal_receiver = router.receiver()
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(router.run)
+
+        request = await state_sync_requests.receive()
+
+        first_event = TestEvent()
+        conflicting_event = TestEvent()
+        await event_sender.send(
+            GlobalForwarderEvent(
+                origin=session_id.master_node_id,
+                origin_idx=0,
+                session=session_id,
+                event=first_event,
+            )
+        )
+        await event_sender.send(
+            GlobalForwarderEvent(
+                origin=session_id.master_node_id,
+                origin_idx=0,
+                session=session_id,
+                event=conflicting_event,
+            )
+        )
+
+        await state_sync_responses.send(
+            (
+                str(session_id.master_node_id),
+                StateSyncMessage(
+                    kind="response",
+                    requester=request.requester,
+                    session_id=session_id,
+                    snapshot=StateSnapshot(
+                        session_id=session_id,
+                        last_event_applied_idx=-1,
+                        state=State(last_event_applied_idx=-1),
+                    ),
+                ),
+            )
+        )
+
+        initial_replay = await command_receiver.receive()
+        assert isinstance(initial_replay.command, RequestEventLog)
+        assert initial_replay.command.since_idx == 0
+
+        recovery_replay = await command_receiver.receive()
+        assert isinstance(recovery_replay.command, RequestEventLog)
+        assert recovery_replay.command.since_idx == 0
+
+        authoritative_event = TestEvent()
+        await event_sender.send(
+            GlobalForwarderEvent(
+                origin=session_id.master_node_id,
+                origin_idx=0,
+                session=session_id,
+                event=authoritative_event,
+            )
+        )
+
+        delivered = await internal_receiver.receive()
+        assert delivered.idx == 0
+        assert delivered.event == authoritative_event
+
+        router.shutdown()
+        tg.cancel_scope.cancel()

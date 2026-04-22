@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 from typing import Any, cast
 
+import anyio
 import pytest
 
 from exo.api.main import API
@@ -13,6 +14,8 @@ from exo.routing.event_router import EventRouter
 from exo.routing.router import Router
 from exo.shared.election import Election, ElectionResult
 from exo.shared.types.common import NodeId, SessionId
+from exo.shared.types.state import State
+from exo.shared.types.state_sync import StateSnapshot, StateSyncMessage
 from exo.utils.channels import channel
 from exo.worker.main import Worker
 
@@ -33,6 +36,9 @@ class _FakeRouter:
         return object()
 
     def receiver(self, _topic: object) -> object:
+        return object()
+
+    def receiver_with_origin(self, _topic: object) -> object:
         return object()
 
 
@@ -216,3 +222,86 @@ async def test_new_master_does_not_wait_on_unavailable_state_sync_config(
     await node._elect_loop()
 
     assert "new_master.created" in order_events
+
+
+class _StateSyncOnlyRouter:
+    def __init__(self) -> None:
+        self.request_sender, self.request_receiver = channel[StateSyncMessage]()
+        self.response_sender, self.response_receiver = channel[
+            tuple[str | None, StateSyncMessage]
+        ]()
+
+    def sender(self, _topic: object) -> object:
+        return self.request_sender.clone()
+
+    def receiver_with_origin(self, _topic: object) -> object:
+        return self.response_receiver
+
+
+@pytest.mark.asyncio
+async def test_request_cluster_config_ignores_non_master_origin() -> None:
+    router = _StateSyncOnlyRouter()
+    _election_sender, election_receiver = channel[ElectionResult]()
+    node = Node(
+        router=cast(Router, cast(object, router)),
+        event_router=cast(EventRouter, object()),
+        download_coordinator=None,
+        worker=None,
+        election=cast(Election, object()),
+        election_result_receiver=election_receiver,
+        master=None,
+        api=None,
+        node_id=NodeId("self"),
+        offline=False,
+        exo_config=None,
+        store_client=None,
+        store_server=None,
+    )
+
+    session_id = SessionId(master_node_id=NodeId("master"), election_clock=9)
+    empty_snapshot = StateSnapshot(
+        session_id=session_id,
+        last_event_applied_idx=-1,
+        state=State(last_event_applied_idx=-1),
+    )
+    result: dict[str, str | None] = {}
+    request_finished = anyio.Event()
+
+    async def _request() -> None:
+        result["config"] = await node._request_cluster_config(session_id)
+        request_finished.set()
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_request)
+
+        request = await router.request_receiver.receive()
+        assert request.kind == "request"
+        assert request.session_id == session_id
+
+        await router.response_sender.send(
+            (
+                "not-the-master",
+                StateSyncMessage(
+                    kind="response",
+                    requester=request.requester,
+                    session_id=session_id,
+                    snapshot=empty_snapshot,
+                    config_yaml="bad: true\n",
+                ),
+            )
+        )
+        await router.response_sender.send(
+            (
+                str(session_id.master_node_id),
+                StateSyncMessage(
+                    kind="response",
+                    requester=request.requester,
+                    session_id=session_id,
+                    snapshot=empty_snapshot,
+                    config_yaml="good: true\n",
+                ),
+            )
+        )
+
+        await request_finished.wait()
+        assert result["config"] == "good: true\n"
