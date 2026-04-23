@@ -294,7 +294,20 @@ def _format_vlm_messages(
     messages: list[JsonDict],
     model_type: str,
 ) -> list[JsonDict]:
+    def _count_image_parts(message: JsonDict) -> int:
+        content = message.get("content")
+        if not isinstance(content, list):
+            return 0
+        return sum(
+            1
+            for raw_part in cast(list[object], content)
+            if str(_object_dict(raw_part).get("type", "")) in {"image", "image_url"}
+        )
+
     formatted: list[JsonDict] = []
+    image_count = sum(_count_image_parts(msg) for msg in messages)
+    label_images = model_type in {"gemma3n", "gemma4"} and image_count > 1
+    image_number = 1
     for msg in messages:
         role = str(msg.get("role", "user"))
         content = msg.get("content")
@@ -318,7 +331,16 @@ def _format_vlm_messages(
                         {"type": "text", "text": str(part.get("text", ""))}
                     )
                 elif part_type in {"image", "image_url"}:
-                    normalized_parts.append({"type": "image"})
+                    image_part: JsonDict = {"type": "image"}
+                    if label_images:
+                        # Gemma 4 has been observed to answer from an earlier
+                        # image when multiple bare image placeholders are present
+                        # in chat history. Stable chronological labels make
+                        # "the latest image" unambiguous without changing the
+                        # image tensor order.
+                        image_part["label"] = f"Image {image_number}"
+                    image_number += 1
+                    normalized_parts.append(image_part)
             formatted.append({"role": role, "content": normalized_parts})
             continue
 

@@ -720,7 +720,7 @@ class TestGemma4DynamicVisionPooling:
 class TestFormatVlmMessages:
     """Gemma prompts should preserve multimodal ordering instead of flattening."""
 
-    def test_gemma4_preserves_interleaving(self):
+    def test_gemma4_preserves_interleaving_and_labels_multiple_images(self):
         messages = [
             {
                 "role": "user",
@@ -740,9 +740,32 @@ class TestFormatVlmMessages:
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "first"},
-                    {"type": "image"},
+                    {"type": "image", "label": "Image 1"},
                     {"type": "text", "text": "second"},
+                    {"type": "image", "label": "Image 2"},
+                ],
+            }
+        ]
+
+    def test_gemma4_does_not_label_single_image(self):
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url"},
+                    {"type": "text", "text": "what do you see?"},
+                ],
+            }
+        ]
+
+        formatted = _format_vlm_messages(messages, "gemma4")
+
+        assert formatted == [
+            {
+                "role": "user",
+                "content": [
                     {"type": "image"},
+                    {"type": "text", "text": "what do you see?"},
                 ],
             }
         ]

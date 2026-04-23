@@ -49,7 +49,9 @@ def _render_gemma4_content(content: object, role: str) -> str:
             text = str(part.get("text", ""))
             parts.append(strip_gemma4_thinking(text) if role == "model" else text.strip())
         elif item_type == "image":
-            parts.append("\n\n<|image|>\n\n")
+            label = str(part.get("label", "")).strip()
+            label_prefix = f"\n\n{label}:\n" if label else "\n\n"
+            parts.append(f"{label_prefix}<|image|>\n\n")
         elif item_type == "audio":
             parts.append("<|audio|>")
         elif item_type == "video":
