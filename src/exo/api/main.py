@@ -501,6 +501,7 @@ class API:
         self._embedding_queues: dict[
             CommandId, Sender[EmbeddingChunk | ErrorChunk]
         ] = {}
+        self._cancelled_command_ids: set[CommandId] = set()
         self._image_store = ImageStore(EXO_IMAGE_CACHE_DIR)
         self._tg: TaskGroup = TaskGroup()
 
@@ -527,6 +528,7 @@ class API:
         self._text_generation_queues = {}
         self._image_generation_queues = {}
         self._embedding_queues = {}
+        self._cancelled_command_ids = set()
         self.unpause(result_clock, master_node_id=master_node_id)
         self.event_receiver.close()
         self.event_receiver = event_receiver
@@ -1279,12 +1281,34 @@ class API:
             )
 
         await self._send(TaskCancelled(cancelled_command_id=command_id))
+        # Suppress the final TaskFinished emitted by local stream cleanup so the
+        # worker can observe the Cancelled task and deliver runner-local cancel
+        # before event-sourced task deletion happens.
+        self._cancelled_command_ids.add(command_id)
         sender.close()
 
         return CancelCommandResponse(
             message="Command cancelled.",
             command_id=command_id,
         )
+
+    async def _finalize_command_stream(
+        self,
+        command_id: CommandId,
+        queue_map: dict[CommandId, Sender[object]],
+    ) -> None:
+        """Clean up a local command stream and report natural completion.
+
+        Local cancellations intentionally suppress TaskFinished. Otherwise the
+        master can delete the task before workers synthesize CancelTask for the
+        runner that is still executing it.
+        """
+
+        should_send_finished = command_id not in self._cancelled_command_ids
+        self._cancelled_command_ids.discard(command_id)
+        if should_send_finished:
+            await self._send(TaskFinished(finished_command_id=command_id))
+        queue_map.pop(command_id, None)
 
     async def _token_chunk_stream(
         self, command_id: CommandId
@@ -1310,15 +1334,20 @@ class API:
 
         except anyio.get_cancelled_exc_class():
             command = TaskCancelled(cancelled_command_id=command_id)
+            self._cancelled_command_ids.add(command_id)
             with anyio.CancelScope(shield=True):
                 await self.command_sender.send(
                     ForwarderCommand(origin=self._system_id, command=command)
                 )
             raise
         finally:
-            await self._send(TaskFinished(finished_command_id=command_id))
-            if command_id in self._text_generation_queues:
-                del self._text_generation_queues[command_id]
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._text_generation_queues,
+                ),
+            )
 
     async def _collect_text_generation_with_stats(
         self, command_id: CommandId
@@ -1802,15 +1831,20 @@ class API:
 
         except anyio.get_cancelled_exc_class():
             command = TaskCancelled(cancelled_command_id=command_id)
+            self._cancelled_command_ids.add(command_id)
             with anyio.CancelScope(shield=True):
                 await self.command_sender.send(
                     ForwarderCommand(origin=self._system_id, command=command)
                 )
             raise
         finally:
-            await self._send(TaskFinished(finished_command_id=command_id))
-            if command_id in self._image_generation_queues:
-                del self._image_generation_queues[command_id]
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._image_generation_queues,
+                ),
+            )
 
     async def _collect_image_chunks(
         self,
@@ -1888,15 +1922,20 @@ class API:
             return (images, stats if capture_stats else None)
         except anyio.get_cancelled_exc_class():
             command = TaskCancelled(cancelled_command_id=command_id)
+            self._cancelled_command_ids.add(command_id)
             with anyio.CancelScope(shield=True):
                 await self.command_sender.send(
                     ForwarderCommand(origin=self._system_id, command=command)
                 )
             raise
         finally:
-            await self._send(TaskFinished(finished_command_id=command_id))
-            if command_id in self._image_generation_queues:
-                del self._image_generation_queues[command_id]
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._image_generation_queues,
+                ),
+            )
 
     async def _collect_image_generation(
         self,
@@ -3043,6 +3082,94 @@ class API:
 
         return placements
 
+    @staticmethod
+    def _short_diagnostics_id(value: str) -> str:
+        """Return a compact identifier for human-facing diagnostics warnings."""
+
+        return f"{value[:8]}…{value[-4:]}" if len(value) > 12 else value
+
+    def _augment_runner_divergence_warnings(
+        self,
+        placements: Sequence[InstancePlacementDiagnostics],
+        supervisor_runners: Sequence[RunnerSupervisorDiagnostics],
+    ) -> list[str]:
+        """Add warnings when live supervisor state diverges from cluster state."""
+
+        task_by_id = {str(task_id): task for task_id, task in self.state.tasks.items()}
+        placement_by_instance = {
+            placement.instance_id: placement for placement in placements
+        }
+        top_level_warnings: set[str] = set()
+        placement_warnings_by_instance: dict[str, set[str]] = {
+            placement.instance_id: set() for placement in placements
+        }
+
+        for runner in supervisor_runners:
+            placement = placement_by_instance.get(runner.instance_id)
+            placement_task_ids: set[str] = set()
+            instance_task_ids: set[str] = set()
+            if placement is not None:
+                instance_task_ids = {
+                    task.task_id for placement_runner in placement.runners for task in placement_runner.tasks
+                }
+                for placement_runner in placement.runners:
+                    if placement_runner.runner_id == runner.runner_id:
+                        placement_task_ids = {
+                            task.task_id for task in placement_runner.tasks
+                        }
+                        break
+
+            if runner.process_alive and runner.in_progress_tasks and not instance_task_ids:
+                message = (
+                    "Runner "
+                    f"{self._short_diagnostics_id(runner.runner_id)} is still alive with "
+                    f"{len(runner.in_progress_tasks)} in-progress task(s), but event-sourced "
+                    f"state shows no active tasks for instance "
+                    f"{self._short_diagnostics_id(runner.instance_id)}."
+                )
+                top_level_warnings.add(message)
+                placement_warnings_by_instance.setdefault(runner.instance_id, set()).add(
+                    message
+                )
+
+            for task in runner.in_progress_tasks:
+                matching_state_task = task_by_id.get(task.task_id)
+                if matching_state_task is None:
+                    message = (
+                        "Runner "
+                        f"{self._short_diagnostics_id(runner.runner_id)} still reports "
+                        f"{task.task_kind}:{self._short_diagnostics_id(task.task_id)} in progress, "
+                        "but cluster state no longer tracks that task."
+                    )
+                elif matching_state_task.task_status.value not in {"Pending", "Running"}:
+                    message = (
+                        "Runner "
+                        f"{self._short_diagnostics_id(runner.runner_id)} still reports "
+                        f"{task.task_kind}:{self._short_diagnostics_id(task.task_id)} in progress "
+                        f"while cluster state says {matching_state_task.task_status.value}."
+                    )
+                elif placement is not None and task.task_id not in placement_task_ids:
+                    message = (
+                        "Runner "
+                        f"{self._short_diagnostics_id(runner.runner_id)} still reports "
+                        f"{task.task_kind}:{self._short_diagnostics_id(task.task_id)} in progress, "
+                        "but placement diagnostics show no active task on this runner."
+                    )
+                else:
+                    continue
+
+                top_level_warnings.add(message)
+                placement_warnings_by_instance.setdefault(runner.instance_id, set()).add(
+                    message
+                )
+
+        for placement in placements:
+            extra_warnings = placement_warnings_by_instance.get(placement.instance_id, set())
+            if extra_warnings:
+                placement.warnings = sorted(set(placement.warnings) | extra_warnings)
+
+        return sorted(top_level_warnings)
+
     def _collect_runner_supervisor_diagnostics(
         self,
     ) -> list[RunnerSupervisorDiagnostics]:
@@ -3246,12 +3373,11 @@ class API:
 
         supervisor_runners = self._collect_runner_supervisor_diagnostics()
         placements = self._placement_diagnostics()
-        warnings = sorted(
-            {
-                warning
-                for placement in placements
-                for warning in placement.warnings
-            }
+        warnings = {
+            warning for placement in placements for warning in placement.warnings
+        }
+        warnings.update(
+            self._augment_runner_divergence_warnings(placements, supervisor_runners)
         )
         return NodeDiagnostics(
             generated_at=datetime.now(tz=timezone.utc).isoformat(),
@@ -3261,7 +3387,7 @@ class API:
             processes=self._collect_process_diagnostics(supervisor_runners),
             supervisor_runners=supervisor_runners,
             placements=placements,
-            warnings=warnings,
+            warnings=sorted(warnings),
         )
 
     async def get_cluster_diagnostics(self) -> ClusterDiagnostics:
@@ -3913,15 +4039,20 @@ class API:
 
         except anyio.get_cancelled_exc_class():
             cancel_command = TaskCancelled(cancelled_command_id=command_id)
+            self._cancelled_command_ids.add(command_id)
             with anyio.CancelScope(shield=True):
                 await self.command_sender.send(
                     ForwarderCommand(origin=self._system_id, command=cancel_command)
                 )
             raise
         finally:
-            await self._send(TaskFinished(finished_command_id=command_id))
-            if command_id in self._embedding_queues:
-                del self._embedding_queues[command_id]
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._embedding_queues,
+                ),
+            )
 
     async def restart_node(self, node_id: NodeId | None = None) -> JSONResponse:
         """Restart the exo process on this or a remote node.

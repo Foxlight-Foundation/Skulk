@@ -136,6 +136,34 @@ const Monospace = styled.code`
   text-overflow: ellipsis;
 `;
 
+const RunnerCard = styled.div`
+  border-top: 1px solid ${({ theme }) => theme.colors.borderLight};
+  padding-top: 10px;
+  margin-top: 10px;
+
+  &:first-child {
+    border-top: none;
+    padding-top: 0;
+    margin-top: 0;
+  }
+`;
+
+const MilestoneList = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+`;
+
+const MilestoneItem = styled.div`
+  border: 1px solid ${({ theme }) => theme.colors.borderLight};
+  border-radius: ${({ theme }) => theme.radii.md};
+  padding: 8px 10px;
+  background: ${({ theme }) => theme.colors.surface};
+  font-family: ${({ theme }) => theme.fonts.mono};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textSecondary};
+`;
+
 function memoryUsage(bytes?: number | null): string {
   if (bytes == null) return 'unknown';
   return formatBytes(bytes);
@@ -267,18 +295,52 @@ export function DiagnosticsDrawer({ nodeId, onClose }: DiagnosticsDrawerProps) {
               ))}
             </Section>
 
-            <Section>
-              <SectionTitle>Live Runners</SectionTitle>
+              <Section>
+                <SectionTitle>Live Runners</SectionTitle>
               {diagnostics.supervisorRunners.length === 0 ? (
                 <Value>No local runner supervisors reported by this node.</Value>
               ) : diagnostics.supervisorRunners.map((runner) => (
-                <div key={runner.runnerId}>
+                <RunnerCard key={runner.runnerId}>
                   <Row><Key>Runner</Key><Value>{shortId(runner.runnerId)} · pid {runner.pid ?? 'unknown'}</Value></Row>
-                  <Row><Key>Status</Key><Value>{runner.statusKind} for {Math.round(runner.secondsInStatus)}s</Value></Row>
+                  <Row>
+                    <Key>Status</Key>
+                    <Value>
+                      {runner.statusKind} for {Math.round(runner.secondsInStatus)}s{' '}
+                      {runner.processAlive ? <Pill $tone="good">alive</Pill> : <Pill $tone="warn">exited</Pill>}
+                      {!runner.processAlive && runner.exitCode != null ? ` exit ${runner.exitCode}` : ''}
+                    </Value>
+                  </Row>
                   <Row><Key>Shard</Key><Value>rank {runner.deviceRank}/{runner.worldSize} · layers {runner.startLayer}:{runner.endLayer}</Value></Row>
+                  <Row><Key>Instance</Key><Value>{shortId(runner.instanceId)} · {runner.modelId}</Value></Row>
+                  <Row><Key>Last task sent</Key><Value>{runner.lastTaskSentAt ?? 'none'}</Value></Row>
                   <Row><Key>Last event</Key><Value>{runner.lastEventType ?? 'none'} {runner.lastEventReceivedAt ? `at ${runner.lastEventReceivedAt}` : ''}</Value></Row>
-                  <Row><Key>In progress</Key><Value>{runner.inProgressTasks.map((task) => `${task.taskKind}:${shortId(task.taskId)}`).join(', ') || 'none'}</Value></Row>
-                </div>
+                  <Row>
+                    <Key>Pending</Key>
+                    <Value>{runner.pendingTaskIds.map((taskId) => shortId(taskId)).join(', ') || 'none'}</Value>
+                  </Row>
+                  <Row>
+                    <Key>In progress</Key>
+                    <Value>
+                      {runner.inProgressTasks.map((task) => `${task.taskKind}:${shortId(task.taskId)} (${task.taskStatus})`).join(', ') || 'none'}
+                    </Value>
+                  </Row>
+                  <Row>
+                    <Key>Cancelled</Key>
+                    <Value>{runner.cancelledTaskIds.map((taskId) => shortId(taskId)).join(', ') || 'none'}</Value>
+                  </Row>
+                  <Row><Key>Completed</Key><Value>{runner.completedTaskCount}</Value></Row>
+                  <Row><Key>Milestones</Key><Value>{runner.milestones.length === 0 ? 'none' : `${runner.milestones.length} recorded`}</Value></Row>
+                  {runner.milestones.length > 0 && (
+                    <MilestoneList>
+                      {runner.milestones.slice().reverse().map((milestone, index) => (
+                        <MilestoneItem key={`${milestone.at}-${milestone.name}-${index}`}>
+                          {milestone.at} · {milestone.name}
+                          {milestone.detail ? ` · ${milestone.detail}` : ''}
+                        </MilestoneItem>
+                      ))}
+                    </MilestoneList>
+                  )}
+                </RunnerCard>
               ))}
             </Section>
 

@@ -526,6 +526,11 @@ class Master:
                         await self._handle_traces_collected(event)
                         continue
 
+                    if isinstance(event, TaskDeleted):
+                        for command_id, task_id in list(self.command_task_mapping.items()):
+                            if task_id == event.task_id:
+                                self.command_task_mapping.pop(command_id, None)
+
                     logger.debug(f"Master indexing event: {str(event)[:100]}")
                     indexed = IndexedEvent(event=event, idx=len(self._event_log))
                     self.state = apply(self.state, indexed)

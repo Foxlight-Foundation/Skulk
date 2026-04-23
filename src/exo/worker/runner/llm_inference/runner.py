@@ -442,6 +442,7 @@ class Runner:
                             record_trace_marker(
                                 "cancel", self.device_rank, task_id=task_id
                             )
+                        self.send_task_status(task_id, TaskStatus.Cancelled)
                         finished.append(task_id)
                     case Finished():
                         task = self.active_tasks.get(task_id)

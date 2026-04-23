@@ -25,13 +25,14 @@ from exo.shared.types.events import (
     LocalForwarderEvent,
     NodeGatheredInfo,
     TaskCreated,
+    TaskDeleted,
 )
 from exo.shared.types.memory import Memory
 from exo.shared.types.profiling import (
     MemoryUsage,
 )
 from exo.shared.types.state_sync import StateSyncMessage
-from exo.shared.types.tasks import TaskStatus
+from exo.shared.types.tasks import TaskId, TaskStatus
 from exo.shared.types.tasks import TextGeneration as TextGenerationTask
 from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from exo.shared.types.worker.instances import (
@@ -387,3 +388,51 @@ async def test_persist_snapshot_keeps_bounded_replay_tail() -> None:
     await master._persist_snapshot(force=True)  # pyright: ignore[reportPrivateUsage]
 
     assert compact_calls == [max(26 - REPLAY_TAIL_RETENTION_EVENTS, 0)]
+
+
+@pytest.mark.asyncio
+async def test_task_deleted_event_clears_command_mapping() -> None:
+    keypair = get_node_id_keypair()
+    node_id = NodeId(keypair.to_node_id())
+    session_id = SessionId(master_node_id=node_id, election_clock=0)
+
+    global_sender, _global_receiver = channel[GlobalForwarderEvent]()
+    _command_sender, command_receiver = channel[ForwarderCommand]()
+    local_event_sender, local_event_receiver = channel[LocalForwarderEvent]()
+    _request_sender, state_sync_receiver = channel[StateSyncMessage]()
+    state_sync_sender, _response_receiver = channel[StateSyncMessage]()
+    download_sender, _download_receiver = channel[ForwarderDownloadCommand]()
+    event_sender, _event_receiver = channel[Event]()
+
+    master = Master(
+        node_id,
+        session_id,
+        event_sender=event_sender,
+        global_event_sender=global_sender,
+        local_event_receiver=local_event_receiver,
+        command_receiver=command_receiver,
+        state_sync_receiver=state_sync_receiver,
+        state_sync_sender=state_sync_sender,
+        download_command_sender=download_sender,
+    )
+
+    command_id = CommandId("cmd-a")
+    task_id = TaskId("task-a")
+    master.command_task_mapping[command_id] = task_id
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(master._event_processor)  # pyright: ignore[reportPrivateUsage]
+        await local_event_sender.send(
+            LocalForwarderEvent(
+                origin=SystemId("Worker"),
+                origin_idx=0,
+                session=session_id,
+                event=TaskDeleted(task_id=task_id),
+            )
+        )
+        with anyio.fail_after(2):
+            while command_id in master.command_task_mapping:
+                await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+
+    assert command_id not in master.command_task_mapping

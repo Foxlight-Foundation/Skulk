@@ -26,6 +26,7 @@ from exo.shared.types.events import (
     Event,
     RunnerStatusUpdated,
     TaskAcknowledged,
+    TaskDeleted,
     TaskStatusUpdated,
 )
 from exo.shared.types.tasks import (
@@ -56,6 +57,12 @@ from exo.worker.runner.bootstrap import entrypoint
 
 PREFILL_TIMEOUT_SECONDS = 60
 DECODE_TIMEOUT_SECONDS = 5
+_TERMINAL_TASK_STATUSES = {
+    TaskStatus.Cancelled,
+    TaskStatus.Complete,
+    TaskStatus.Failed,
+    TaskStatus.TimedOut,
+}
 
 
 def _now_utc_iso() -> str:
@@ -270,12 +277,14 @@ class RunnerSupervisor:
                             event.runner_status.__class__.__name__,
                         )
                     if isinstance(event, TaskAcknowledged):
-                        self.pending.pop(event.task_id).set()
+                        pending = self.pending.pop(event.task_id, None)
+                        if pending is not None:
+                            pending.set()
                         self._record_milestone("task_acknowledged", str(event.task_id))
                         continue
                     if (
                         isinstance(event, TaskStatusUpdated)
-                        and event.task_status == TaskStatus.Complete
+                        and event.task_status in _TERMINAL_TASK_STATUSES
                     ):
                         # If a task has just been completed, we should be working on it.
                         assert isinstance(
@@ -289,8 +298,27 @@ class RunnerSupervisor:
                             ),
                         )
                         self.in_progress.pop(event.task_id, None)
-                        self.completed.add(event.task_id)
-                        self._record_milestone("task_completed", str(event.task_id))
+                        if event.task_status == TaskStatus.Complete:
+                            self.completed.add(event.task_id)
+                            self._record_milestone("task_completed", str(event.task_id))
+                        elif event.task_status == TaskStatus.Cancelled:
+                            self.cancelled.add(event.task_id)
+                            self._record_milestone("task_cancelled", str(event.task_id))
+                        else:
+                            self._record_milestone(
+                                "task_terminal",
+                                f"{event.task_status.value}:{event.task_id}",
+                            )
+                        await self._event_sender.send(event)
+                        if event.task_status == TaskStatus.Cancelled:
+                            # Cancelled tasks need an explicit event-sourced delete
+                            # because local API cleanup suppresses TaskFinished
+                            # until the runner has acknowledged cancellation.
+                            self._record_milestone("task_deleted", str(event.task_id))
+                            await self._event_sender.send(
+                                TaskDeleted(task_id=event.task_id)
+                            )
+                        continue
                     await self._event_sender.send(event)
         except (ClosedResourceError, BrokenResourceError) as e:
             await self._check_runner(e)

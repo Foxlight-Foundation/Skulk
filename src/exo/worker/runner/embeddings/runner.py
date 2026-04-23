@@ -163,7 +163,9 @@ class Runner:
                 was_cancelled = (task.task_id in self.cancelled_tasks) or (
                     CANCEL_ALL_TASKS in self.cancelled_tasks
                 )
-                if not was_cancelled:
+                if was_cancelled:
+                    self.send_task_status(task, TaskStatus.Cancelled)
+                else:
                     self.send_task_status(task, TaskStatus.Complete)
                 self.update_status(self.current_status)
 
