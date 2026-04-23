@@ -9,7 +9,19 @@ from exo.shared.constants import preferred_env_value
 KV_GROUP_SIZE: int | None = 32
 KV_BITS: int | None = None
 ATTENTION_KV_BITS: int | None = 4
-MAX_TOKENS: int = 32168
+# Default generated-token budget when an API client omits max_tokens. This must
+# be an output cap, not a proxy for model context length: very large defaults can
+# push distributed decode into long-running native MLX/Metal waits before the
+# user has asked for that much output.
+DEFAULT_MAX_OUTPUT_TOKENS: int = 2048
+_max_tokens_value = preferred_env_value(
+    "SKULK_MAX_OUTPUT_TOKENS",
+    "EXO_MAX_TOKENS",
+    str(DEFAULT_MAX_OUTPUT_TOKENS),
+)
+MAX_TOKENS: int = int(_max_tokens_value) if _max_tokens_value else DEFAULT_MAX_OUTPUT_TOKENS
+if MAX_TOKENS < 1:
+    raise ValueError("SKULK_MAX_OUTPUT_TOKENS must be greater than 0")
 MAX_KV_SIZE: int | None = 3200
 KEEP_KV_SIZE: int | None = 1600
 QUANTIZE_MODEL_MODE: str | None = "affine"

@@ -222,7 +222,7 @@ for chunk in stream:
 | `top_p` | number | Nucleus sampling. |
 | `top_k` | integer | Top-k sampling. |
 | `min_p` | number | Minimum-probability threshold. |
-| `max_tokens` | integer | Max generated tokens. |
+| `max_tokens` | integer | Max generated tokens. When omitted, Skulk uses a conservative backend default of 2048 generated tokens; operators can override that default with `SKULK_MAX_OUTPUT_TOKENS`. |
 | `stop` | string or array | Stop sequences. |
 | `seed` | integer | Reproducibility helper. |
 | `frequency_penalty` | number | Frequency penalty. |
