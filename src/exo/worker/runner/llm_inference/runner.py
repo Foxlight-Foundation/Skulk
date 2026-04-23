@@ -82,13 +82,25 @@ from .batch_generator import Cancelled, Finished
 from .tool_parsers import make_mlx_parser
 
 
-def _should_skip_llm_warmup(group_size: int) -> bool:
+def _should_skip_llm_warmup(
+    group_size: int,
+    model_id: ModelId,
+    model_card: ModelCard | None,
+) -> bool:
     """Return whether the synthetic warmup request should be bypassed.
 
-    Distributed warmup uses barriers and collectives, so skipping it on only
-    one rank can strand peers inside warmup coordination. The debug bypass is
-    therefore limited to single-node groups.
+    Gemma 4 distributed warmup has proven less reliable than the actual request
+    path in MLX/VLM pipeline mode. Bypass only that known-problem family by
+    default; the env escape hatch remains constrained to single-node runs so a
+    partially configured cluster cannot strand peers in warmup collectives.
     """
+    if group_size > 1 and _is_gemma4_model(model_id, model_card):
+        logger.warning(
+            "Skipping distributed Gemma 4 synthetic warmup; marking runner ready "
+            f"(model_id={model_id}, group_size={group_size})"
+        )
+        return True
+
     # Temporary escape hatch for debug sessions where we want runners to reach
     # Ready without issuing the synthetic warmup request. Normal behavior keeps
     # warmup enabled unless SKULK_SKIP_LLM_WARMUP=1 is set explicitly.
@@ -316,7 +328,11 @@ class Runner:
                 group_size = (
                     warmup_generator.group.size() if warmup_generator.group else 1
                 )
-                if _should_skip_llm_warmup(group_size):
+                if _should_skip_llm_warmup(
+                    group_size,
+                    self.model_id,
+                    self.shard_metadata.model_card,
+                ):
                     logger.warning(
                         "Skipping LLM warmup and marking runner ready "
                         "(temporary debug bypass; unset SKULK_SKIP_LLM_WARMUP "
