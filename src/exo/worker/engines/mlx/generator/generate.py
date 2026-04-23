@@ -1,5 +1,6 @@
 import contextlib
 import functools
+import itertools
 import math
 import os
 import sys
@@ -259,6 +260,69 @@ def _should_use_native_vision_reference_path() -> bool:
 
     return not (
         mlx_version >= Version("0.31.1") and mlx_vlm_version >= Version("0.4.4")
+    )
+
+
+def _native_pixel_values_debug_state(
+    pixel_values: mx.array | list[mx.array] | None,
+) -> str:
+    """Return a compact string describing native-vision pixel injection state."""
+    if pixel_values is None:
+        return "fully_cached"
+    if isinstance(pixel_values, list):
+        return f"list[{len(pixel_values)}]"
+    return f"array{tuple(pixel_values.shape)}"
+
+
+def _decode_debug_context(
+    *,
+    task: TextGenerationTaskParams,
+    group: mx.distributed.Group | None,
+    trace_task_id: str | None,
+    total_prompt_tokens: int,
+    uncached_prompt_tokens: int,
+    prefix_hit_length: int,
+    media_region_count: int,
+    is_native_vision: bool,
+    native_pixel_values: mx.array | list[mx.array] | None,
+) -> str:
+    """Summarize the request shape around the decode handoff for hang debugging."""
+    rank = group.rank() if group is not None else 0
+    group_size = group.size() if group is not None else 1
+    return (
+        f"task_id={trace_task_id or '<unknown>'}, "
+        f"model={task.model}, "
+        f"rank={rank}, "
+        f"group_size={group_size}, "
+        f"total_prompt_tokens={total_prompt_tokens}, "
+        f"uncached_prompt_tokens={uncached_prompt_tokens}, "
+        f"prefix_hit_length={prefix_hit_length}, "
+        f"media_regions={media_region_count}, "
+        f"native_vision={is_native_vision}, "
+        f"native_pixel_values={_native_pixel_values_debug_state(native_pixel_values)}"
+    )
+
+
+def _should_force_native_vision_reference_path_for_request(
+    *,
+    group: mx.distributed.Group | None,
+    is_native_vision: bool,
+    prefix_hit_length: int,
+    native_pixel_values: mx.array | list[mx.array] | None,
+) -> bool:
+    """Return whether a request should avoid the fast native-vision decode path.
+
+    Distributed Gemma 4 follow-up turns with a full image-prefix cache hit can
+    wedge right after the decode handoff. In that case we prefer the slower
+    MLX-VLM reference path over a cluster-wide runner hang that requires node
+    restarts to recover.
+    """
+    return (
+        is_native_vision
+        and group is not None
+        and group.size() > 1
+        and prefix_hit_length > 0
+        and native_pixel_values is None
     )
 
 
@@ -873,6 +937,7 @@ def _mlx_generate_native_vision(
     on_prefill_progress: Callable[[int, int], None] | None,
     on_generation_token: Callable[[], None] | None,
     group: mx.distributed.Group | None,
+    trace_task_id: str | None = None,
 ) -> Generator[GenerationResponse]:
     """Generate for native-vision models via MLX-VLM's multimodal path.
 
@@ -917,11 +982,24 @@ def _mlx_generate_native_vision(
     final_finish_reason: FinishReason = "length"
     final_usage: Usage | None = None
     final_stats: GenerationStats | None = None
+    decode_context = _decode_debug_context(
+        task=task,
+        group=group,
+        trace_task_id=trace_task_id,
+        total_prompt_tokens=prompt_token_count,
+        uncached_prompt_tokens=prompt_token_count,
+        prefix_hit_length=0,
+        media_region_count=len(vision.media_regions),
+        is_native_vision=True,
+        native_pixel_values=vision.pixel_values,
+    )
 
+    logger.info(f"Native decode context: {decode_context}")
     logger.info("Starting native mlx-vlm multimodal decode")
-    mx_barrier(group)
+    with _hang_debug_watch(f"native decode barrier ({decode_context})"):
+        mx_barrier(group)
 
-    for token, logprobs in vlm_generate_step(
+    token_generator = vlm_generate_step(
         input_ids=all_prompt_tokens[None],
         model=model,
         pixel_values=vision.pixel_values,
@@ -932,6 +1010,26 @@ def _mlx_generate_native_vision(
         prefill_step_size=4096,
         kv_group_size=KV_GROUP_SIZE or 32,
         kv_bits=KV_BITS,
+    )
+
+    first_token_wait_started = time.perf_counter()
+    with _hang_debug_watch(f"native decode first token ({decode_context})"):
+        try:
+            first_token, first_logprobs = next(token_generator)
+        except StopIteration:
+            logger.warning(
+                "Native decode generator ended before yielding a response "
+                f"({decode_context})"
+            )
+            return
+    logger.info(
+        "Native decode produced the first response after "
+        f"{time.perf_counter() - first_token_wait_started:.2f}s ({decode_context})"
+    )
+
+    for token, logprobs in itertools.chain(
+        [(first_token, first_logprobs)],
+        token_generator,
     ):
         token_id = int(token)
 
@@ -1039,6 +1137,9 @@ def _mlx_generate_native_vision(
         stats=final_stats,
         usage=final_usage,
     )
+
+    with _hang_debug_watch(f"native decode final barrier ({decode_context})"):
+        mx_barrier(group)
 
 
 def mlx_generate(
@@ -1179,6 +1280,44 @@ def mlx_generate(
             media_regions,
             prefix_hit_length,
         )
+    decode_context = _decode_debug_context(
+        task=task,
+        group=group,
+        trace_task_id=trace_task_id,
+        total_prompt_tokens=len(all_prompt_tokens),
+        uncached_prompt_tokens=len(prompt_tokens),
+        prefix_hit_length=prefix_hit_length,
+        media_region_count=len(media_regions),
+        is_native_vision=is_native_vision,
+        native_pixel_values=native_pixel_values,
+    )
+
+    if _should_force_native_vision_reference_path_for_request(
+        group=group,
+        is_native_vision=is_native_vision,
+        prefix_hit_length=prefix_hit_length,
+        native_pixel_values=native_pixel_values,
+    ):
+        logger.warning(
+            "Falling back to native mlx-vlm reference decode for a distributed "
+            "native-vision request with a full image-prefix cache hit to avoid "
+            f"a known post-prefill wedge ({decode_context})"
+        )
+        assert vision is not None
+        yield from _mlx_generate_native_vision(
+            model=model,
+            tokenizer=tokenizer,
+            task=task,
+            all_prompt_tokens=all_prompt_tokens,
+            vision=vision,
+            sampler=sampler,
+            logits_processors=logits_processors,
+            on_prefill_progress=on_prefill_progress,
+            on_generation_token=on_generation_token,
+            group=group,
+            trace_task_id=trace_task_id,
+        )
+        return
 
     if native_pixel_values is not None:
         if hasattr(model, "set_pixel_values"):
@@ -1235,22 +1374,40 @@ def mlx_generate(
     think_start = tokenizer.think_start
     think_end = tokenizer.think_end
 
+    logger.info(f"Decode context: {decode_context}")
     logger.info("Starting decode")
-    mx_barrier(group)
+    with _hang_debug_watch(f"decode barrier ({decode_context})"):
+        mx_barrier(group)
+
+    token_generator = stream_generate(
+        model=model,
+        tokenizer=tokenizer,
+        prompt=last_token,
+        max_tokens=max_tokens,
+        sampler=sampler,
+        logits_processors=logits_processors,
+        prompt_cache=caches,
+        prefill_step_size=1,
+        kv_group_size=KV_GROUP_SIZE,
+        kv_bits=KV_BITS,
+    )
+    first_token_wait_started = time.perf_counter()
+    with _hang_debug_watch(f"decode first token ({decode_context})"):
+        try:
+            first_out = next(token_generator)
+        except StopIteration:
+            logger.warning(
+                "Decode generator ended before yielding a response "
+                f"({decode_context})"
+            )
+            return
+    logger.info(
+        "Decode produced the first response after "
+        f"{time.perf_counter() - first_token_wait_started:.2f}s ({decode_context})"
+    )
 
     for completion_tokens, out in enumerate(
-        stream_generate(
-            model=model,
-            tokenizer=tokenizer,
-            prompt=last_token,
-            max_tokens=max_tokens,
-            sampler=sampler,
-            logits_processors=logits_processors,
-            prompt_cache=caches,
-            prefill_step_size=1,
-            kv_group_size=KV_GROUP_SIZE,
-            kv_bits=KV_BITS,
-        ),
+        itertools.chain([first_out], token_generator),
         start=1,
     ):
         generated_text_parts.append(out.text)
@@ -1383,7 +1540,8 @@ def mlx_generate(
         )
 
         if is_done:
-            mx_barrier(group)
+            with _hang_debug_watch(f"decode final barrier ({decode_context})"):
+                mx_barrier(group)
             break
 
         # Limit accumulated_text to what's needed for stop sequence detection

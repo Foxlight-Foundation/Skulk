@@ -104,6 +104,26 @@ def _identity_sampler(logits: mx.array) -> mx.array:
     return logits
 
 
+class _FakeGroup:
+    def __init__(self, rank: int = 0, size: int = 3) -> None:
+        self._rank = rank
+        self._size = size
+
+    def rank(self) -> int:
+        return self._rank
+
+    def size(self) -> int:
+        return self._size
+
+
+def _fake_group() -> mx.distributed.Group:
+    return cast(mx.distributed.Group, cast(object, _FakeGroup()))
+
+
+def _noop_barrier(_group: object) -> None:
+    return None
+
+
 def _empty_cache_list(**_kwargs: object) -> list[object]:
     return []
 
@@ -649,3 +669,105 @@ def test_mlx_generate_skips_embedding_patch_when_native_images_are_fully_cached(
 
     assert [response.text for response in responses] == ["ok"]
     assert model.seen_pixel_values is None
+
+
+def test_mlx_generate_uses_reference_path_for_distributed_fully_cached_native_images(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Distributed fully cached native-image follow-ups should avoid the fast path."""
+
+    class _FakePrefixCache:
+        def get_kv_cache(
+            self,
+            _model: object,
+            _prompt_tokens: object,
+            media_regions: list[MediaRegion] | None = None,
+        ) -> tuple[KVCacheType, mx.array, int]:
+            assert media_regions is not None
+            return cast(KVCacheType, []), mx.array([7, 8]), 0
+
+        def add_kv_cache(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def update_kv_cache(self, *args: object, **kwargs: object) -> None:
+            return None
+
+    vision = VisionResult(
+        prompt="ignored",
+        prompt_tokens=mx.array([1, 2, 3, 4, 5, 6, 7, 8]),
+        embeddings=mx.zeros((1, 0, 1)),
+        media_regions=[
+            MediaRegion("first", 1, 4),
+            MediaRegion("second", 5, 6),
+        ],
+        pixel_values=[mx.array([10.0]), mx.array([20.0])],
+    )
+
+    def _fake_prepare_vision(**_kwargs: object) -> VisionResult:
+        return vision
+
+    def _fake_native_generate(**_kwargs: object):
+        yield GenerationResponse(text="native", token=101, usage=None)
+
+    def _fail_stream_generate(*_args: object, **_kwargs: object):
+        raise AssertionError("distributed fully-cached follow-ups should use the reference path")
+
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.generator.generate.prepare_vision",
+        _fake_prepare_vision,
+    )
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.generator.generate._should_use_native_vision_reference_path",
+        cast(Callable[[], bool], lambda: False),
+    )
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.generator.generate._mlx_generate_native_vision",
+        _fake_native_generate,
+    )
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.generator.generate.stream_generate",
+        _fail_stream_generate,
+    )
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.generator.generate.mx_barrier",
+        _noop_barrier,
+    )
+
+    task = TextGenerationTaskParams(
+        model=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"),
+        input=[InputMessage(role="user", content="what is this?")],
+        chat_template_messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "first"},
+                ],
+            },
+            {"role": "assistant", "content": "ok"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "second"},
+                ],
+            },
+        ],
+        images=["ignored-a", "ignored-b"],
+        max_output_tokens=8,
+        temperature=0.0,
+    )
+
+    responses = list(
+        mlx_generate(
+            model=_fake_model(),
+            tokenizer=_fake_tokenizer(),
+            task=task,
+            prompt="<bos>",
+            kv_prefix_cache=cast(KVPrefixCache, cast(object, _FakePrefixCache())),
+            group=_fake_group(),
+            vision_processor=_fake_vision_processor(),
+        )
+    )
+
+    assert [response.text for response in responses] == ["native"]
