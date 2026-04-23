@@ -264,6 +264,15 @@ serve = cast(_HypercornServe, hypercorn_asyncio.serve)
 _API_EVENT_LOG_DIR = EXO_EVENT_LOG_DIR / "api"
 ONBOARDING_COMPLETE_FILE = EXO_CACHE_HOME / "onboarding_complete"
 
+
+def _text_image_hash_cache_enabled() -> bool:
+    value = preferred_env_value(
+        "SKULK_TEXT_IMAGE_HASH_CACHE",
+        "EXO_TEXT_IMAGE_HASH_CACHE",
+        "false",
+    )
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
 API_TAGS_METADATA = [
     {
         "name": "Compatibility APIs",
@@ -446,6 +455,7 @@ class API:
         self._runner_diagnostics_provider: Callable[
             [], Sequence[RunnerSupervisorDiagnostics]
         ] | None = None
+        self._sent_image_hashes: set[str] = set()
         # Initialize optimizer if store path is available
         if exo_config and exo_config.model_store and exo_config.model_store.enabled:
             from exo.store.model_optimizer import ModelOptimizer
@@ -1384,8 +1394,6 @@ class API:
             "TODO: we should send a notification to the user to download the model"
         )
 
-    _sent_image_hashes: set[str] = set()
-
     async def _send_text_generation_with_images(
         self, task_params: TextGenerationTaskParams
     ) -> TextGeneration:
@@ -1399,16 +1407,24 @@ class API:
 
         cached_hashes: dict[int, str] = {}
         new_images: list[tuple[int, str]] = []
-        for idx, (img, h) in enumerate(zip(images, hashes, strict=True)):
-            if h in self._sent_image_hashes:
-                cached_hashes[idx] = h
-            else:
-                self._sent_image_hashes.add(h)
-                new_images.append((idx, img))
+        cache_enabled = _text_image_hash_cache_enabled()
+        if cache_enabled:
+            for idx, (img, h) in enumerate(zip(images, hashes, strict=True)):
+                if h in self._sent_image_hashes:
+                    cached_hashes[idx] = h
+                else:
+                    self._sent_image_hashes.add(h)
+                    new_images.append((idx, img))
+        else:
+            # The worker cache is local, in-memory, and not placement-aware. Sending
+            # hash-only references by default can crash or wedge nodes after restarts
+            # or placement changes, so keep the optimization behind an explicit flag.
+            new_images = list(enumerate(images))
 
         _log_image_transport(
             f"TextGeneration image transport: total={len(images)} "
-            f"new={len(new_images)} cached={len(cached_hashes)}"
+            f"new={len(new_images)} cached={len(cached_hashes)} "
+            f"hash_cache_enabled={cache_enabled}"
         )
         for idx, img in new_images:
             _log_image_transport(

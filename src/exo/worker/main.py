@@ -189,6 +189,28 @@ def _log_image_payload_debug(
     _log_image_transport(message)
 
 
+def resolve_cached_vlm_images(
+    image_cache: dict[str, str],
+    image_hashes: dict[int, str],
+) -> tuple[dict[int, str], list[tuple[int, str]]]:
+    """Resolve cached VLM image hashes without treating cache misses as fatal."""
+    by_index: dict[int, str] = {}
+    missing: list[tuple[int, str]] = []
+    for image_index, image_hash in image_hashes.items():
+        cached_image = image_cache.get(image_hash)
+        if cached_image is None:
+            missing.append((image_index, image_hash))
+            continue
+        by_index[image_index] = cached_image
+        _log_image_payload_debug(
+            "Worker resolved cached VLM",
+            image_index,
+            cached_image,
+            expected_b64_sha256=image_hash,
+        )
+    return by_index, missing
+
+
 class Worker:
     def __init__(
         self,
@@ -469,17 +491,30 @@ class Worker:
                     or task.task_params.total_input_chunks > 0
                 ):
                     cmd_id = task.command_id
-                    by_index: dict[int, str] = {}
-
-                    for idx, h in task.task_params.image_hashes.items():
-                        assert h in self.image_cache
-                        by_index[idx] = self.image_cache[h]
-                        _log_image_payload_debug(
-                            "Worker resolved cached VLM",
-                            idx,
-                            by_index[idx],
-                            expected_b64_sha256=h,
+                    by_index, missing_cached_images = resolve_cached_vlm_images(
+                        self.image_cache,
+                        task.task_params.image_hashes,
+                    )
+                    if missing_cached_images:
+                        missing = ", ".join(
+                            f"{idx}:{image_hash[:12]}"
+                            for idx, image_hash in missing_cached_images
                         )
+                        logger.error(
+                            "TextGeneration VLM task references missing cached "
+                            f"image(s); failing task instead of crashing worker "
+                            f"(task_id={task.task_id}, command_id={cmd_id}, "
+                            f"model={task.task_params.model}, missing={missing})"
+                        )
+                        self.input_chunk_buffer.pop(cmd_id, None)
+                        self.input_chunk_counts.pop(cmd_id, None)
+                        await self.event_sender.send(
+                            TaskStatusUpdated(
+                                task_id=task.task_id,
+                                task_status=TaskStatus.Failed,
+                            )
+                        )
+                        continue
 
                     if task.task_params.total_input_chunks > 0:
                         chunk_buffer = self.input_chunk_buffer.get(cmd_id, {})
