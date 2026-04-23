@@ -159,7 +159,16 @@ class DiskEventLog:
         # length fall behind the in-memory state index and break future event
         # application on the master.
         self._offset_cache.clear()
-        retained_events = list(self.read_range(keep_from_idx, absolute_end))
+        try:
+            retained_events = list(self.read_range(keep_from_idx, absolute_end))
+        except Exception as exc:
+            self._offset_cache.clear()
+            logger.opt(exception=exc).error(
+                "Refusing to compact event log because the retained tail could "
+                f"not be read (keep_from_idx={keep_from_idx}, "
+                f"absolute_end={absolute_end}); active log left intact"
+            )
+            return
         if len(retained_events) != expected_retained_count:
             logger.error(
                 "Refusing to compact event log because the retained tail was read "
@@ -199,8 +208,16 @@ class DiskEventLog:
         self._file.flush()
         with open(self._active_path, "rb") as f:
             self._seek_to(f, start)
-            for _ in range(end - start):
-                event = _read_record(f)
+            for idx in range(start, end):
+                try:
+                    event = _read_record(f)
+                except Exception as exc:
+                    self._offset_cache.clear()
+                    logger.opt(exception=exc).error(
+                        "Stopping event log read because a record could not be "
+                        f"decoded (idx={idx}, start={start}, end={end})"
+                    )
+                    break
                 if event is None:
                     break
                 yield event

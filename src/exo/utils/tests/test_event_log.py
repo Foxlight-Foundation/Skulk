@@ -216,3 +216,61 @@ def test_compact_aborts_when_retained_tail_is_incomplete(
     ]
 
     log.close()
+
+
+def _record_offset(path: Path, idx: int) -> int:
+    offset = 0
+    with open(path, "rb") as f:
+        for _ in range(idx):
+            f.seek(offset)
+            header = f.read(4)
+            assert len(header) == 4
+            length = int.from_bytes(header, byteorder="big")
+            offset += 4 + length
+    return offset
+
+
+def test_read_range_stops_on_corrupt_record(log_dir: Path):
+    log = DiskEventLog(log_dir)
+    events = [TestEvent() for _ in range(6)]
+    for event in events:
+        log.append(event)
+
+    assert len(list(log.read_all())) == len(events)
+    active_path = log_dir / "events.bin"
+    corrupt_offset = _record_offset(active_path, 3)
+    with open(active_path, "r+b") as f:
+        f.seek(corrupt_offset + 4)
+        f.write(b"e")
+
+    result = list(log.read_range(1, 5))
+
+    assert [event.event_id for event in result] == [
+        events[1].event_id,
+        events[2].event_id,
+    ]
+
+    log.close()
+
+
+def test_compact_keeps_active_log_when_retained_tail_is_corrupt(log_dir: Path):
+    log = DiskEventLog(log_dir)
+    events = [TestEvent() for _ in range(6)]
+    for event in events:
+        log.append(event)
+
+    assert len(list(log.read_all())) == len(events)
+    active_path = log_dir / "events.bin"
+    corrupt_offset = _record_offset(active_path, 4)
+    with open(active_path, "r+b") as f:
+        f.seek(corrupt_offset + 4)
+        f.write(b"e")
+    corrupt_bytes = active_path.read_bytes()
+
+    log.compact(4)
+
+    assert log.start_idx == 0
+    assert len(log) == 6
+    assert active_path.read_bytes() == corrupt_bytes
+
+    log.close()
