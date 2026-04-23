@@ -308,21 +308,23 @@ def _should_force_native_vision_reference_path_for_request(
     group: mx.distributed.Group | None,
     is_native_vision: bool,
     prefix_hit_length: int,
+    media_region_count: int,
     native_pixel_values: mx.array | list[mx.array] | None,
 ) -> bool:
     """Return whether a request should avoid the fast native-vision decode path.
 
-    Distributed Gemma 4 follow-up turns with a full image-prefix cache hit can
-    wedge right after the decode handoff. In that case we prefer the slower
-    MLX-VLM reference path over a cluster-wide runner hang that requires node
-    restarts to recover.
+    Distributed Gemma 4 follow-up turns with cached image prefixes can wedge
+    during decode after the pipeline-aware path trims native pixel values to the
+    uncached suffix. In that case we prefer the slower MLX-VLM reference path
+    over a cluster-wide runner hang that requires node restarts to recover.
     """
+    has_cached_multimodal_prefix = prefix_hit_length > 0 and media_region_count > 1
+    has_fully_cached_native_images = prefix_hit_length > 0 and native_pixel_values is None
     return (
         is_native_vision
         and group is not None
         and group.size() > 1
-        and prefix_hit_length > 0
-        and native_pixel_values is None
+        and (has_cached_multimodal_prefix or has_fully_cached_native_images)
     )
 
 
@@ -1296,12 +1298,13 @@ def mlx_generate(
         group=group,
         is_native_vision=is_native_vision,
         prefix_hit_length=prefix_hit_length,
+        media_region_count=len(media_regions),
         native_pixel_values=native_pixel_values,
     ):
         logger.warning(
             "Falling back to native mlx-vlm reference decode for a distributed "
-            "native-vision request with a full image-prefix cache hit to avoid "
-            f"a known post-prefill wedge ({decode_context})"
+            "native-vision follow-up request with cached image regions to avoid "
+            f"a known decode wedge ({decode_context})"
         )
         assert vision is not None
         yield from _mlx_generate_native_vision(
