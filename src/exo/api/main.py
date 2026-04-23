@@ -208,6 +208,8 @@ from exo.shared.types.diagnostics import (
     PlacementRunnerDiagnostics,
     ProcessRole,
     RunnerSupervisorDiagnostics,
+    RunnerTaskCancelRequest,
+    RunnerTaskCancelResponse,
     RunnerTaskDiagnostics,
 )
 from exo.shared.types.events import (
@@ -223,6 +225,7 @@ from exo.shared.types.state import State
 from exo.shared.types.text_generation import TextGenerationTaskParams
 from exo.shared.types.worker.downloads import DownloadCompleted
 from exo.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
+from exo.shared.types.worker.runners import RunnerId
 from exo.shared.types.worker.shards import Sharding
 from exo.shared.version import get_skulk_version, get_skulk_version_label
 from exo.store.config import resolve_config_path
@@ -455,6 +458,9 @@ class API:
         self._runner_diagnostics_provider: Callable[
             [], Sequence[RunnerSupervisorDiagnostics]
         ] | None = None
+        self._runner_cancel_provider: Callable[
+            [RunnerId, task_types.TaskId], Awaitable[RunnerTaskCancelResponse]
+        ] | None = None
         self._sent_image_hashes: set[str] = set()
         # Initialize optimizer if store path is available
         if exo_config and exo_config.model_store and exo_config.model_store.enabled:
@@ -512,6 +518,17 @@ class API:
         """Attach a local worker diagnostics provider to this API instance."""
 
         self._runner_diagnostics_provider = provider
+
+    def set_runner_cancel_provider(
+        self,
+        provider: Callable[
+            [RunnerId, task_types.TaskId], Awaitable[RunnerTaskCancelResponse]
+        ]
+        | None,
+    ) -> None:
+        """Attach a local worker control provider for direct runner cancellation."""
+
+        self._runner_cancel_provider = provider
 
     def reset(
         self,
@@ -899,6 +916,16 @@ class API:
                 "state, local resources, and relevant OS processes."
             ),
         )(self.get_node_diagnostics)
+        self.app.post(
+            "/v1/diagnostics/node/runners/{runner_id}/cancel",
+            tags=["Diagnostics"],
+            summary="Request direct local runner cancellation",
+            description=(
+                "Request cooperative cancellation for one live task on one local "
+                "runner supervisor. This is a best-effort control path intended "
+                "for diagnostics and may not stop a runner wedged in native code."
+            ),
+        )(self.cancel_local_runner_task)
         self.app.get(
             "/v1/diagnostics/cluster",
             tags=["Diagnostics"],
@@ -918,6 +945,16 @@ class API:
                 "proxying to a reachable peer API."
             ),
         )(self.get_cluster_node_diagnostics)
+        self.app.post(
+            "/v1/diagnostics/cluster/{node_id}/runners/{runner_id}/cancel",
+            tags=["Diagnostics"],
+            summary="Request direct runner cancellation on one cluster node",
+            description=(
+                "Proxy a cooperative live-task cancellation request to the "
+                "requested node's local diagnostics control endpoint. This is "
+                "best-effort and may not stop a runner wedged in native code."
+            ),
+        )(self.cancel_cluster_runner_task)
         self.app.get(
             "/v1/traces/{task_id}",
             tags=["State & Tracing"],
@@ -3389,6 +3426,80 @@ class API:
             placements=placements,
             warnings=sorted(warnings),
         )
+
+    @staticmethod
+    def _proxy_error_detail(response: httpx.Response) -> str:
+        """Extract one user-facing error message from a proxied API response."""
+
+        with contextlib.suppress(ValueError):
+            payload = _coerce_json_object(cast(object, response.json()))
+            detail = payload.get("detail")
+            if isinstance(detail, str):
+                return detail
+            error = _coerce_json_object(payload.get("error"))
+            message = error.get("message")
+            if isinstance(message, str):
+                return message
+        return f"Peer request failed with status {response.status_code}"
+
+    async def cancel_local_runner_task(
+        self,
+        runner_id: RunnerId,
+        request: RunnerTaskCancelRequest,
+    ) -> RunnerTaskCancelResponse:
+        """Request cooperative cancellation for one live task on this node."""
+
+        if self._runner_cancel_provider is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Local worker runner controls are not available on this node.",
+            )
+
+        try:
+            return await self._runner_cancel_provider(runner_id, request.task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    async def cancel_cluster_runner_task(
+        self,
+        node_id: str,
+        runner_id: RunnerId,
+        request: RunnerTaskCancelRequest,
+    ) -> RunnerTaskCancelResponse:
+        """Proxy one direct runner cancellation request to the requested node."""
+
+        if node_id == str(self.node_id):
+            return await self.cancel_local_runner_task(runner_id, request)
+
+        peer_urls = await self._reachable_peer_api_urls()
+        base_url = peer_urls.get(node_id)
+        if base_url is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Node diagnostics endpoint not reachable: {node_id}",
+            )
+
+        timeout = httpx.Timeout(timeout=10.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            try:
+                response = await client.post(
+                    f"{base_url}/v1/diagnostics/node/runners/{runner_id}/cancel",
+                    json=request.model_dump(mode="json", by_alias=True),
+                )
+            except httpx.HTTPError as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Failed to proxy runner cancellation to {node_id}: {exc}",
+                ) from exc
+
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=self._proxy_error_detail(response),
+            )
+        return RunnerTaskCancelResponse.model_validate(response.json())
 
     async def get_cluster_diagnostics(self) -> ClusterDiagnostics:
         """Return read-only diagnostics for local and reachable peer nodes."""

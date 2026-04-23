@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from exo.shared.types.common import NodeId
 from exo.shared.types.memory import Memory
 from exo.shared.types.profiling import (
     DiskUsage,
@@ -12,9 +13,16 @@ from exo.shared.types.profiling import (
     NodeNetworkInfo,
     SystemPerformanceProfile,
 )
+from exo.shared.types.tasks import TaskId
+from exo.shared.types.worker.runners import RunnerId
 from exo.utils.pydantic_ext import CamelCaseModel
 
 ProcessRole = Literal["skulk", "runner", "vector", "python", "other"]
+RunnerTaskCancelStatus = Literal[
+    "cancel_requested",
+    "already_cancelled",
+    "already_completed",
+]
 
 
 class DiagnosticsProcess(CamelCaseModel):
@@ -143,6 +151,28 @@ class RunnerSupervisorDiagnostics(CamelCaseModel):
     milestones: list[RunnerLifecycleMilestone] = Field(
         default_factory=list,
         description="Recent lifecycle milestones retained by the supervisor.",
+    )
+
+
+class RunnerTaskCancelRequest(CamelCaseModel):
+    """Payload for a direct live-runner task cancellation request."""
+
+    task_id: TaskId = Field(description="Live task ID to request cancellation for.")
+
+
+class RunnerTaskCancelResponse(CamelCaseModel):
+    """Result of a direct live-runner task cancellation request."""
+
+    node_id: NodeId = Field(description="Node that accepted the cancellation request.")
+    runner_id: RunnerId = Field(
+        description="Runner supervisor that handled the request."
+    )
+    task_id: TaskId = Field(description="Task ID the request targeted.")
+    status: RunnerTaskCancelStatus = Field(
+        description="Cancellation outcome as observed by the local runner supervisor."
+    )
+    message: str = Field(
+        description="Human-readable description of what the node did."
     )
 
 

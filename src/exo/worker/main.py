@@ -22,7 +22,10 @@ from exo.shared.types.commands import (
     StartDownload,
 )
 from exo.shared.types.common import CommandId, NodeId, SystemId
-from exo.shared.types.diagnostics import RunnerSupervisorDiagnostics
+from exo.shared.types.diagnostics import (
+    RunnerSupervisorDiagnostics,
+    RunnerTaskCancelResponse,
+)
 from exo.shared.types.events import (
     CustomModelCardAdded,
     CustomModelCardDeleted,
@@ -47,6 +50,7 @@ from exo.shared.types.tasks import (
     Shutdown,
     StartWarmup,
     Task,
+    TaskId,
     TaskStatus,
     TextGeneration,
 )
@@ -599,6 +603,50 @@ class Worker:
         """Return live read-only diagnostics for local runner supervisors."""
 
         return [runner.diagnostics() for runner in self.runners.values()]
+
+    async def cancel_runner_task(
+        self,
+        runner_id: RunnerId,
+        task_id: TaskId,
+    ) -> RunnerTaskCancelResponse:
+        """Request cooperative cancellation for one live task on one runner."""
+
+        runner = self.runners.get(runner_id)
+        if runner is None:
+            raise KeyError(f"Runner not found on this node: {runner_id}")
+
+        if task_id in runner.completed:
+            return RunnerTaskCancelResponse(
+                node_id=self.node_id,
+                runner_id=runner_id,
+                task_id=task_id,
+                status="already_completed",
+                message="Task already completed; no cancellation was sent.",
+            )
+        if task_id in runner.cancelled:
+            return RunnerTaskCancelResponse(
+                node_id=self.node_id,
+                runner_id=runner_id,
+                task_id=task_id,
+                status="already_cancelled",
+                message="Task was already marked cancelled on this runner.",
+            )
+        if task_id not in runner.in_progress and task_id not in runner.pending:
+            raise KeyError(
+                f"Task {task_id} is not pending or in progress on runner {runner_id}"
+            )
+
+        await runner.cancel_task(task_id)
+        return RunnerTaskCancelResponse(
+            node_id=self.node_id,
+            runner_id=runner_id,
+            task_id=task_id,
+            status="cancel_requested",
+            message=(
+                "Cooperative cancellation requested on the live runner. "
+                "Native or wedged work may continue until the runner observes it."
+            ),
+        )
 
     async def _maybe_evict_shard(self, shard: ShardMetadata | None) -> None:
         """Evict staged shard files after runner teardown if configured."""

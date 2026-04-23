@@ -80,6 +80,9 @@ class _FakeApi:
     def set_runner_diagnostics_provider(self, _provider: object) -> None:
         self._events.append("api.runner_diagnostics_provider")
 
+    def set_runner_cancel_provider(self, _provider: object) -> None:
+        self._events.append("api.runner_cancel_provider")
+
 
 @pytest.mark.asyncio
 async def test_election_restarts_event_router_after_receivers_are_rewired(
@@ -111,6 +114,9 @@ async def test_election_restarts_event_router_after_receivers_are_rewired(
 
         def collect_runner_diagnostics(self) -> list[object]:
             return []
+
+        async def cancel_runner_task(self, *_args: Any, **_kwargs: Any) -> object:
+            return object()
 
     monkeypatch.setattr("exo.main.EventRouter", NewEventRouter)
     monkeypatch.setattr("exo.main.Worker", NewWorker)
@@ -196,6 +202,9 @@ async def test_new_master_does_not_wait_on_unavailable_state_sync_config(
 
         def collect_runner_diagnostics(self) -> list[object]:
             return []
+
+        async def cancel_runner_task(self, *_args: Any, **_kwargs: Any) -> object:
+            return object()
 
     monkeypatch.setattr("exo.main.EventRouter", NewEventRouter)
     monkeypatch.setattr("exo.main.Master", NewMaster)

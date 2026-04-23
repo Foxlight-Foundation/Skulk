@@ -16,12 +16,13 @@ from exo.shared.types.diagnostics import (
     NodeDiagnostics,
     RunnerLifecycleMilestone,
     RunnerSupervisorDiagnostics,
+    RunnerTaskCancelResponse,
     RunnerTaskDiagnostics,
 )
 from exo.shared.types.events import IndexedEvent
 from exo.shared.types.memory import Memory
 from exo.shared.types.state import State
-from exo.shared.types.tasks import StartWarmup, TaskStatus
+from exo.shared.types.tasks import StartWarmup, TaskId, TaskStatus
 from exo.shared.types.worker.instances import InstanceId, MlxRingInstance
 from exo.shared.types.worker.runners import RunnerId, RunnerWarmingUp, ShardAssignments
 from exo.shared.types.worker.shards import PipelineShardMetadata
@@ -290,3 +291,97 @@ def test_cluster_diagnostics_returns_local_and_peer_results(
     ]
     assert {node["nodeId"] for node in nodes} == {"local-node", "peer-node"}
     assert all(node["ok"] is True for node in nodes)
+
+
+def test_cancel_local_runner_task_calls_worker_provider() -> None:
+    """Local runner control should call the attached worker provider."""
+
+    api = _build_api("local-node")
+    captured: list[tuple[str, str]] = []
+    expected_task_id = TaskId("task-1")
+
+    async def _cancel_provider(runner_id: object, task_id: object) -> RunnerTaskCancelResponse:
+        captured.append((str(runner_id), str(task_id)))
+        return RunnerTaskCancelResponse(
+            node_id=NodeId("local-node"),
+            runner_id=RunnerId(str(runner_id)),
+            task_id=expected_task_id,
+            status="cancel_requested",
+            message="cancelled",
+        )
+
+    api.set_runner_cancel_provider(_cancel_provider)
+    client = TestClient(api.app)
+
+    response = client.post(
+        "/v1/diagnostics/node/runners/runner-1/cancel",
+        json={"taskId": "task-1"},
+    )
+
+    assert response.status_code == 200
+    assert captured == [("runner-1", "task-1")]
+    body = _json_object(response)
+    assert body["status"] == "cancel_requested"
+    assert body["runnerId"] == "runner-1"
+    assert body["taskId"] == "task-1"
+
+
+def test_cancel_cluster_runner_task_proxies_to_peer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cluster runner control should proxy to a reachable peer node."""
+
+    api = _build_api("local-node")
+    client = TestClient(api.app)
+
+    async def _reachable_peer_api_urls() -> dict[str, str]:
+        return {"peer-node": "http://peer-node:52415"}
+
+    class _FakeAsyncClient:
+        async def __aenter__(self) -> "_FakeAsyncClient":
+            return self
+
+        async def __aexit__(
+            self,
+            _exc_type: object,
+            _exc: object,
+            _tb: object,
+        ) -> None:
+            return None
+
+        async def post(self, url: str, json: object) -> httpx.Response:
+            assert (
+                url
+                == "http://peer-node:52415/v1/diagnostics/node/runners/runner-1/cancel"
+            )
+            assert json == {"taskId": "task-1"}
+            return httpx.Response(
+                200,
+                json=RunnerTaskCancelResponse(
+                    node_id=NodeId("peer-node"),
+                    runner_id=RunnerId("runner-1"),
+                    task_id=TaskId("task-1"),
+                    status="cancel_requested",
+                    message="proxied",
+                ).model_dump(mode="json", by_alias=True),
+                request=httpx.Request("POST", url),
+            )
+
+    def _build_async_client(
+        *_args: object,
+        **_kwargs: object,
+    ) -> _FakeAsyncClient:
+        return _FakeAsyncClient()
+
+    monkeypatch.setattr(api, "_reachable_peer_api_urls", _reachable_peer_api_urls)
+    monkeypatch.setattr(api_main.httpx, "AsyncClient", _build_async_client)
+
+    response = client.post(
+        "/v1/diagnostics/cluster/peer-node/runners/runner-1/cancel",
+        json={"taskId": "task-1"},
+    )
+
+    assert response.status_code == 200
+    body = _json_object(response)
+    assert body["nodeId"] == "peer-node"
+    assert body["status"] == "cancel_requested"

@@ -164,6 +164,30 @@ const MilestoneItem = styled.div`
   color: ${({ theme }) => theme.colors.textSecondary};
 `;
 
+const TaskActionList = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+`;
+
+const TaskActionItem = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid ${({ theme }) => theme.colors.borderLight};
+  border-radius: ${({ theme }) => theme.radii.md};
+  padding: 8px 10px;
+  background: ${({ theme }) => theme.colors.surface};
+`;
+
+const TaskActionMeta = styled.div`
+  min-width: 0;
+  font-family: ${({ theme }) => theme.fonts.mono};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textSecondary};
+`;
+
 function memoryUsage(bytes?: number | null): string {
   if (bytes == null) return 'unknown';
   return formatBytes(bytes);
@@ -181,12 +205,19 @@ export function DiagnosticsDrawer({ nodeId, onClose }: DiagnosticsDrawerProps) {
   const [diagnostics, setDiagnostics] = useState<NodeDiagnostics | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
+  const [cancelMessage, setCancelMessage] = useState<string | null>(null);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const [cancelActionKey, setCancelActionKey] = useState<string | null>(null);
 
   useEffect(() => {
     if (!nodeId) {
       setDiagnostics(null);
       setError(null);
       setLoading(false);
+      setCancelMessage(null);
+      setCancelError(null);
+      setCancelActionKey(null);
       return;
     }
 
@@ -212,13 +243,41 @@ export function DiagnosticsDrawer({ nodeId, onClose }: DiagnosticsDrawerProps) {
       });
 
     return () => controller.abort();
-  }, [nodeId]);
+  }, [nodeId, reloadToken]);
 
   if (!nodeId) return null;
 
   const runtime = diagnostics?.runtime;
   const currentMemory = diagnostics?.resources.currentMemory;
   const system = diagnostics?.resources.system;
+
+  async function requestRunnerCancel(runnerId: string, taskId: string) {
+    const actionKey = `${runnerId}:${taskId}`;
+    setCancelActionKey(actionKey);
+    setCancelError(null);
+    setCancelMessage(null);
+
+    try {
+      const response = await fetch(
+        `/v1/diagnostics/cluster/${encodeURIComponent(nodeId)}/runners/${encodeURIComponent(runnerId)}/cancel`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ taskId }),
+        },
+      );
+      const payload = await response.json().catch(() => null) as { message?: string; detail?: string } | null;
+      if (!response.ok) {
+        throw new Error(payload?.detail ?? `Cancellation request failed: ${response.status}`);
+      }
+      setCancelMessage(payload?.message ?? 'Cancellation requested.');
+      setReloadToken((value) => value + 1);
+    } catch (err: unknown) {
+      setCancelError(err instanceof Error ? err.message : 'Cancellation request failed');
+    } finally {
+      setCancelActionKey(null);
+    }
+  }
 
   return (
     <Overlay onClick={onClose}>
@@ -297,6 +356,11 @@ export function DiagnosticsDrawer({ nodeId, onClose }: DiagnosticsDrawerProps) {
 
               <Section>
                 <SectionTitle>Live Runners</SectionTitle>
+              <Warning>
+                Cancel task sends a cooperative runner-local cancellation request. A runner wedged in native MLX work may ignore it and still require stronger intervention.
+              </Warning>
+              {cancelMessage && <Warning>{cancelMessage}</Warning>}
+              {cancelError && <Warning>{cancelError}</Warning>}
               {diagnostics.supervisorRunners.length === 0 ? (
                 <Value>No local runner supervisors reported by this node.</Value>
               ) : diagnostics.supervisorRunners.map((runner) => (
@@ -324,6 +388,29 @@ export function DiagnosticsDrawer({ nodeId, onClose }: DiagnosticsDrawerProps) {
                       {runner.inProgressTasks.map((task) => `${task.taskKind}:${shortId(task.taskId)} (${task.taskStatus})`).join(', ') || 'none'}
                     </Value>
                   </Row>
+                  {runner.inProgressTasks.length > 0 && (
+                    <TaskActionList>
+                      {runner.inProgressTasks.map((task) => {
+                        const actionKey = `${runner.runnerId}:${task.taskId}`;
+                        return (
+                          <TaskActionItem key={actionKey}>
+                            <TaskActionMeta title={`${task.taskKind}:${task.taskId}`}>
+                              {task.taskKind}:{shortId(task.taskId)} · {task.taskStatus}
+                              {task.commandId ? ` · cmd ${shortId(task.commandId)}` : ''}
+                            </TaskActionMeta>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              loading={cancelActionKey === actionKey}
+                              onClick={() => { void requestRunnerCancel(runner.runnerId, task.taskId); }}
+                            >
+                              Cancel task
+                            </Button>
+                          </TaskActionItem>
+                        );
+                      })}
+                    </TaskActionList>
+                  )}
                   <Row>
                     <Key>Cancelled</Key>
                     <Value>{runner.cancelledTaskIds.map((taskId) => shortId(taskId)).join(', ') || 'none'}</Value>

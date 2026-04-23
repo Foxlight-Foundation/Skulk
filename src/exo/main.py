@@ -284,6 +284,7 @@ class Node:
             )
             if api is not None:
                 api.set_runner_diagnostics_provider(worker.collect_runner_diagnostics)
+                api.set_runner_cancel_provider(worker.cancel_runner_task)
         else:
             worker = None
 
@@ -629,6 +630,9 @@ class Node:
                         if self.api is not None:
                             self.api.set_runner_diagnostics_provider(
                                 self.worker.collect_runner_diagnostics
+                            )
+                            self.api.set_runner_cancel_provider(
+                                self.worker.cancel_runner_task
                             )
                     if self.api:
                         self.api.reset(
