@@ -671,10 +671,10 @@ def test_mlx_generate_skips_embedding_patch_when_native_images_are_fully_cached(
     assert model.seen_pixel_values is None
 
 
-def test_mlx_generate_uses_reference_path_for_distributed_fully_cached_native_images(
+def test_mlx_generate_full_prefills_distributed_fully_cached_native_images(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Distributed fully cached native-image follow-ups should avoid the fast path."""
+    """Distributed fully cached native-image follow-ups should skip prefix cache."""
 
     class _FakePrefixCache:
         def get_kv_cache(
@@ -706,11 +706,42 @@ def test_mlx_generate_uses_reference_path_for_distributed_fully_cached_native_im
     def _fake_prepare_vision(**_kwargs: object) -> VisionResult:
         return vision
 
-    def _fake_native_generate(**_kwargs: object):
-        yield GenerationResponse(text="native", token=101, usage=None)
+    class _FakeModel:
+        def __init__(self) -> None:
+            self.pixel_values: list[mx.array] | mx.array | None = None
+            self.seen_pixel_values: list[mx.array] | mx.array | None = None
 
-    def _fail_stream_generate(*_args: object, **_kwargs: object):
-        raise AssertionError("distributed fully-cached follow-ups should use the reference path")
+        def set_pixel_values(self, pixel_values: list[mx.array] | mx.array | None) -> None:
+            self.pixel_values = pixel_values
+            if pixel_values is not None:
+                self.seen_pixel_values = pixel_values
+
+    def _fake_make_kv_cache(**_kwargs: object) -> KVCacheType:
+        return cast(KVCacheType, [])
+
+    def _fake_prefill(
+        model: _FakeModel,
+        _tokenizer: object,
+        _sampler: object,
+        prompt_tokens: mx.array,
+        *_args: object,
+        **_kwargs: object,
+    ) -> tuple[float, int, list[CacheSnapshot]]:
+        assert isinstance(model.pixel_values, list)
+        assert [pixel_value.tolist() for pixel_value in model.pixel_values] == [
+            [10.0],
+            [20.0],
+        ]
+        assert prompt_tokens.tolist() == [1, 2, 3, 4, 5, 6, 7]
+        return 0.0, len(prompt_tokens), []
+
+    def _fake_stream_generate(*_args: object, **_kwargs: object):
+        yield GenerationResponse(text="ok", token=101, usage=None)
+
+    def _fail_native_generate(**_kwargs: object):
+        raise AssertionError(
+            "distributed fully-cached follow-ups should stay on the pipeline path"
+        )
 
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate.prepare_vision",
@@ -722,11 +753,19 @@ def test_mlx_generate_uses_reference_path_for_distributed_fully_cached_native_im
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate._mlx_generate_native_vision",
-        _fake_native_generate,
+        _fail_native_generate,
+    )
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.generator.generate.make_kv_cache",
+        _fake_make_kv_cache,
+    )
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.generator.generate.prefill",
+        _fake_prefill,
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate.stream_generate",
-        _fail_stream_generate,
+        _fake_stream_generate,
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate.mx_barrier",
@@ -758,9 +797,10 @@ def test_mlx_generate_uses_reference_path_for_distributed_fully_cached_native_im
         temperature=0.0,
     )
 
+    model = _FakeModel()
     responses = list(
         mlx_generate(
-            model=_fake_model(),
+            model=cast(Model, cast(object, model)),
             tokenizer=_fake_tokenizer(),
             task=task,
             prompt="<bos>",
@@ -770,13 +810,15 @@ def test_mlx_generate_uses_reference_path_for_distributed_fully_cached_native_im
         )
     )
 
-    assert [response.text for response in responses] == ["native"]
+    assert [response.text for response in responses] == ["ok"]
+    assert model.seen_pixel_values is not None
+    assert model.pixel_values is None
 
 
-def test_mlx_generate_uses_reference_path_for_distributed_cached_native_image_prefix(
+def test_mlx_generate_full_prefills_distributed_cached_native_image_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Distributed native-image follow-ups with new images should avoid the fast path."""
+    """Distributed native-image follow-ups with cached prefixes should re-prefill."""
 
     class _FakePrefixCache:
         def get_kv_cache(
@@ -808,17 +850,41 @@ def test_mlx_generate_uses_reference_path_for_distributed_cached_native_image_pr
     def _fake_prepare_vision(**_kwargs: object) -> VisionResult:
         return vision
 
-    def _fake_native_generate(**_kwargs: object):
-        yield GenerationResponse(text="native", token=101, usage=None)
+    class _FakeModel:
+        def __init__(self) -> None:
+            self.pixel_values: list[mx.array] | mx.array | None = None
+            self.seen_pixel_values: list[mx.array] | mx.array | None = None
 
-    def _fail_prefill(*_args: object, **_kwargs: object):
-        raise AssertionError(
-            "distributed cached-image follow-ups should use the reference path"
-        )
+        def set_pixel_values(self, pixel_values: list[mx.array] | mx.array | None) -> None:
+            self.pixel_values = pixel_values
+            if pixel_values is not None:
+                self.seen_pixel_values = pixel_values
 
-    def _fail_stream_generate(*_args: object, **_kwargs: object):
+    def _fake_make_kv_cache(**_kwargs: object) -> KVCacheType:
+        return cast(KVCacheType, [])
+
+    def _fake_prefill(
+        model: _FakeModel,
+        _tokenizer: object,
+        _sampler: object,
+        prompt_tokens: mx.array,
+        *_args: object,
+        **_kwargs: object,
+    ) -> tuple[float, int, list[CacheSnapshot]]:
+        assert isinstance(model.pixel_values, list)
+        assert [pixel_value.tolist() for pixel_value in model.pixel_values] == [
+            [10.0],
+            [20.0],
+        ]
+        assert prompt_tokens.tolist() == [1, 2, 3, 4, 5, 6, 7]
+        return 0.0, len(prompt_tokens), []
+
+    def _fake_stream_generate(*_args: object, **_kwargs: object):
+        yield GenerationResponse(text="ok", token=101, usage=None)
+
+    def _fail_native_generate(**_kwargs: object):
         raise AssertionError(
-            "distributed cached-image follow-ups should use the reference path"
+            "distributed cached-image follow-ups should stay on the pipeline path"
         )
 
     monkeypatch.setattr(
@@ -831,15 +897,19 @@ def test_mlx_generate_uses_reference_path_for_distributed_cached_native_image_pr
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate._mlx_generate_native_vision",
-        _fake_native_generate,
+        _fail_native_generate,
+    )
+    monkeypatch.setattr(
+        "exo.worker.engines.mlx.generator.generate.make_kv_cache",
+        _fake_make_kv_cache,
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate.prefill",
-        _fail_prefill,
+        _fake_prefill,
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate.stream_generate",
-        _fail_stream_generate,
+        _fake_stream_generate,
     )
     monkeypatch.setattr(
         "exo.worker.engines.mlx.generator.generate.mx_barrier",
@@ -871,9 +941,10 @@ def test_mlx_generate_uses_reference_path_for_distributed_cached_native_image_pr
         temperature=0.0,
     )
 
+    model = _FakeModel()
     responses = list(
         mlx_generate(
-            model=_fake_model(),
+            model=cast(Model, cast(object, model)),
             tokenizer=_fake_tokenizer(),
             task=task,
             prompt="<bos>",
@@ -883,4 +954,6 @@ def test_mlx_generate_uses_reference_path_for_distributed_cached_native_image_pr
         )
     )
 
-    assert [response.text for response in responses] == ["native"]
+    assert [response.text for response in responses] == ["ok"]
+    assert model.seen_pixel_values is not None
+    assert model.pixel_values is None

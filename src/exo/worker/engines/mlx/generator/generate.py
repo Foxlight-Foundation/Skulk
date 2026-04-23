@@ -303,7 +303,7 @@ def _decode_debug_context(
     )
 
 
-def _should_force_native_vision_reference_path_for_request(
+def _should_force_native_vision_full_prefill_for_request(
     *,
     group: mx.distributed.Group | None,
     is_native_vision: bool,
@@ -311,12 +311,14 @@ def _should_force_native_vision_reference_path_for_request(
     media_region_count: int,
     native_pixel_values: mx.array | list[mx.array] | None,
 ) -> bool:
-    """Return whether a request should avoid the fast native-vision decode path.
+    """Return whether a distributed native-vision request should skip prefix cache.
 
     Distributed Gemma 4 follow-up turns with cached image prefixes can wedge
     during decode after the pipeline-aware path trims native pixel values to the
-    uncached suffix. In that case we prefer the slower MLX-VLM reference path
-    over a cluster-wide runner hang that requires node restarts to recover.
+    uncached suffix. The upstream MLX-VLM reference path also crashes for this
+    shape because its prompt cache contains uninitialized entries, so the stable
+    fallback is to keep Skulk's distributed path but re-prefill the full prompt
+    with every image tensor.
     """
     has_cached_multimodal_prefix = prefix_hit_length > 0 and media_region_count > 1
     has_fully_cached_native_images = prefix_hit_length > 0 and native_pixel_values is None
@@ -1294,7 +1296,7 @@ def mlx_generate(
         native_pixel_values=native_pixel_values,
     )
 
-    if _should_force_native_vision_reference_path_for_request(
+    if _should_force_native_vision_full_prefill_for_request(
         group=group,
         is_native_vision=is_native_vision,
         prefix_hit_length=prefix_hit_length,
@@ -1302,25 +1304,27 @@ def mlx_generate(
         native_pixel_values=native_pixel_values,
     ):
         logger.warning(
-            "Falling back to native mlx-vlm reference decode for a distributed "
-            "native-vision follow-up request with cached image regions to avoid "
-            f"a known decode wedge ({decode_context})"
+            "Disabling KV prefix cache for a distributed native-vision follow-up "
+            "request with cached image regions to avoid known Gemma 4 decode "
+            f"wedge/reference-cache crashes ({decode_context})"
         )
         assert vision is not None
-        yield from _mlx_generate_native_vision(
-            model=model,
-            tokenizer=tokenizer,
+        caches = make_kv_cache(model=model)
+        prompt_tokens = all_prompt_tokens
+        prefix_hit_length = 0
+        matched_index = None
+        native_pixel_values = vision.pixel_values
+        decode_context = _decode_debug_context(
             task=task,
-            all_prompt_tokens=all_prompt_tokens,
-            vision=vision,
-            sampler=sampler,
-            logits_processors=logits_processors,
-            on_prefill_progress=on_prefill_progress,
-            on_generation_token=on_generation_token,
             group=group,
             trace_task_id=trace_task_id,
+            total_prompt_tokens=len(all_prompt_tokens),
+            uncached_prompt_tokens=len(prompt_tokens),
+            prefix_hit_length=prefix_hit_length,
+            media_region_count=len(media_regions),
+            is_native_vision=is_native_vision,
+            native_pixel_values=native_pixel_values,
         )
-        return
 
     if native_pixel_values is not None:
         if hasattr(model, "set_pixel_values"):
