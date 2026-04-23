@@ -235,6 +235,8 @@ The model store is one of Skulk's biggest additions over upstream EXO.
 
 Without it, each node may download model data independently.
 With it, one node acts as the store host and the rest of the cluster stages from that machine over the LAN.
+Staged files are kept on worker nodes by default so repeated placements can
+reuse the local cache instead of re-copying large models every time.
 
 Use the model store when:
 

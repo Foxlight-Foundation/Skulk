@@ -37,6 +37,14 @@ def test_node_matches_store_host_keeps_node_id_matching_exact() -> None:
     )
 
 
+def test_staging_cleanup_defaults_to_warm_cache() -> None:
+    config = StagingNodeConfig()
+
+    assert config.enabled
+    assert config.node_cache_path == "~/.exo/staging"
+    assert not config.cleanup_on_deactivate
+
+
 def test_resolve_node_staging_matches_local_hostname_alias(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("exo.store.config.socket.gethostname", lambda: "kite3")
     config = ModelStoreConfig(
