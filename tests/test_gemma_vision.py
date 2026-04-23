@@ -224,7 +224,7 @@ class TestGemma4ReferencePromptRenderer:
 
         assert (
             prompt
-            == "<bos><|turn>user\n\n\n<|image|>\n\nwhat do you see?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+            == "<bos><|turn>user\n<|image|>what do you see?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
         )
 
     def test_thinking_requires_explicit_enable(self):
@@ -238,7 +238,7 @@ class TestGemma4ReferencePromptRenderer:
 
         assert (
             prompt
-            == "<bos><|turn>system\n<|think|><turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n"
+            == "<bos><|turn>system\n<|think|>\n<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n"
         )
 
     def test_apply_chat_template_uses_reference_renderer_for_plain_gemma4(self):
@@ -351,7 +351,7 @@ class TestGemma4ReferencePromptRenderer:
 
         assert (
             prompt
-            == "<bos><|turn>user\n\n\n<|image><|image|><|image|><|image|><image|>\n\nwhat do you see?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+            == "<bos><|turn>user\n<|image><|image|><|image|><|image|><image|>what do you see?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
         )
 
     def test_process_native_forwards_gemma4_model_type_to_prompt_builder(

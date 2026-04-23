@@ -50,8 +50,11 @@ def _render_gemma4_content(content: object, role: str) -> str:
             parts.append(strip_gemma4_thinking(text) if role == "model" else text.strip())
         elif item_type == "image":
             label = str(part.get("label", "")).strip()
-            label_prefix = f"\n\n{label}:\n" if label else "\n\n"
-            parts.append(f"{label_prefix}<|image|>\n\n")
+            if label:
+                if parts and not parts[-1].endswith((" ", "\n", "\t")):
+                    parts.append("\n")
+                parts.append(f"{label}:\n")
+            parts.append("<|image|>")
         elif item_type == "audio":
             parts.append("<|audio|>")
         elif item_type == "video":
@@ -83,7 +86,7 @@ def render_gemma4_prompt(
     if has_system_message or enable_thinking:
         prompt_parts.append("<|turn>system\n")
         if enable_thinking:
-            prompt_parts.append("<|think|>")
+            prompt_parts.append("<|think|>\n")
         if has_system_message:
             prompt_parts.append(_render_gemma4_content(messages[0].get("content", ""), "system"))
             loop_messages = messages[1:]

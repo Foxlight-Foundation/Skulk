@@ -45,7 +45,7 @@ def test_render_gemma4_prompt_keeps_think_marker_when_thinking_enabled():
         enable_thinking=True,
     )
 
-    assert prompt.startswith("<bos><|turn>system\n<|think|><turn|>\n")
+    assert prompt.startswith("<bos><|turn>system\n<|think|>\n<turn|>\n")
     assert prompt.endswith("<|turn>model\n")
 
 
@@ -63,4 +63,4 @@ def test_render_gemma4_prompt_includes_optional_image_labels():
         add_generation_prompt=False,
     )
 
-    assert "compare\n\nImage 1:\n<|image|>\n\n" in prompt
+    assert "compare\nImage 1:\n<|image|>" in prompt
