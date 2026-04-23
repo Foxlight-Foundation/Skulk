@@ -282,6 +282,8 @@ class Node:
                 store_client=worker_store_client,
                 staging_config=worker_staging_cfg,
             )
+            if api is not None:
+                api.set_runner_diagnostics_provider(worker.collect_runner_diagnostics)
         else:
             worker = None
 
@@ -624,15 +626,26 @@ class Node:
                             staging_config=elect_staging2,
                         )
                         self._tg.start_soon(self.worker.run)
+                        if self.api is not None:
+                            self.api.set_runner_diagnostics_provider(
+                                self.worker.collect_runner_diagnostics
+                            )
                     if self.api:
-                        self.api.reset(result.won_clock, self.event_router.receiver())
+                        self.api.reset(
+                            result.won_clock,
+                            self.event_router.receiver(),
+                            result.session_id.master_node_id,
+                        )
                     if start_replacement_event_router:
                         self._tg.start_soon(self.event_router.run)
                     # Broadcast config to cluster so worker nodes get the right store address
                     await self._broadcast_config_if_store_host()
                 else:
                     if self.api:
-                        self.api.unpause(result.won_clock)
+                        self.api.unpause(
+                            result.won_clock,
+                            master_node_id=result.session_id.master_node_id,
+                        )
 
 
 def main():

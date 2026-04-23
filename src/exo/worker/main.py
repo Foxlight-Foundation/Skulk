@@ -22,6 +22,7 @@ from exo.shared.types.commands import (
     StartDownload,
 )
 from exo.shared.types.common import CommandId, NodeId, SystemId
+from exo.shared.types.diagnostics import RunnerSupervisorDiagnostics
 from exo.shared.types.events import (
     CustomModelCardAdded,
     CustomModelCardDeleted,
@@ -558,6 +559,11 @@ class Worker:
         self.runners[task.bound_instance.bound_runner_id] = runner
         self._tg.start_soon(runner.run)
         return runner
+
+    def collect_runner_diagnostics(self) -> list[RunnerSupervisorDiagnostics]:
+        """Return live read-only diagnostics for local runner supervisors."""
+
+        return [runner.diagnostics() for runner in self.runners.values()]
 
     async def _maybe_evict_shard(self, shard: ShardMetadata | None) -> None:
         """Evict staged shard files after runner teardown if configured."""

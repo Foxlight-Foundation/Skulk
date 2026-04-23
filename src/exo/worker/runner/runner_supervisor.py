@@ -1,7 +1,10 @@
 import contextlib
 import multiprocessing as mp
 import signal
+import time
+from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Self
 
 import anyio
@@ -13,6 +16,11 @@ from anyio import (
 from loguru import logger
 
 from exo.shared.types.chunks import ErrorChunk
+from exo.shared.types.diagnostics import (
+    RunnerLifecycleMilestone,
+    RunnerSupervisorDiagnostics,
+    RunnerTaskDiagnostics,
+)
 from exo.shared.types.events import (
     ChunkGenerated,
     Event,
@@ -27,6 +35,7 @@ from exo.shared.types.tasks import (
     Task,
     TaskId,
     TaskStatus,
+    TextEmbedding,
     TextGeneration,
 )
 from exo.shared.types.worker.instances import BoundInstance
@@ -47,6 +56,12 @@ from exo.worker.runner.bootstrap import entrypoint
 
 PREFILL_TIMEOUT_SECONDS = 60
 DECODE_TIMEOUT_SECONDS = 5
+
+
+def _now_utc_iso() -> str:
+    """Return a compact UTC timestamp for live runner diagnostics."""
+
+    return datetime.now(tz=timezone.utc).isoformat()
 
 
 def _summarize_task(task: Task) -> str:
@@ -87,6 +102,19 @@ class RunnerSupervisor:
     _cancel_watch_runner: anyio.CancelScope = field(
         default_factory=anyio.CancelScope, init=False
     )
+    _status_since: str = field(default_factory=_now_utc_iso, init=False)
+    _status_since_monotonic: float = field(default_factory=time.monotonic, init=False)
+    _last_task_sent_at: str | None = field(default=None, init=False)
+    _last_event_received_at: str | None = field(default=None, init=False)
+    _last_event_type: str | None = field(default=None, init=False)
+    _milestones: deque[RunnerLifecycleMilestone] = field(
+        default_factory=lambda: deque(maxlen=32), init=False
+    )
+
+    def __post_init__(self) -> None:
+        """Seed the lifecycle buffer with runner-supervisor construction."""
+
+        self._record_milestone("supervisor_created", self.status.__class__.__name__)
 
     @classmethod
     def create(
@@ -128,7 +156,12 @@ class RunnerSupervisor:
         return self
 
     async def run(self):
+        self._record_milestone("process_start_requested")
         self.runner_process.start()
+        self._record_milestone(
+            "process_started",
+            f"pid={self.runner_process.pid}",
+        )
         try:
             async with self._tg as tg:
                 tg.start_soon(self._watch_runner)
@@ -167,6 +200,7 @@ class RunnerSupervisor:
             self.runner_process.close()
 
     def shutdown(self):
+        self._record_milestone("shutdown_requested")
         self._tg.cancel_tasks()
 
     async def start_task(self, task: Task):
@@ -184,11 +218,20 @@ class RunnerSupervisor:
         event = anyio.Event()
         self.pending[task.task_id] = event
         self.in_progress[task.task_id] = task
+        self._last_task_sent_at = _now_utc_iso()
+        self._record_milestone(
+            "task_sent",
+            f"{task.__class__.__name__}:{task.task_id}",
+        )
         try:
             await self._task_sender.send_async(task)
         except ClosedResourceError:
             self.in_progress.pop(task.task_id, None)
             logger.warning(f"Task {task} dropped, runner closed communication.")
+            self._record_milestone(
+                "task_send_failed",
+                f"{task.__class__.__name__}:{task.task_id}",
+            )
             return
         await event.wait()
 
@@ -198,6 +241,7 @@ class RunnerSupervisor:
             self.cancelled.add(task_id)
             return
         self.cancelled.add(task_id)
+        self._record_milestone("cancel_requested", str(task_id))
         with anyio.move_on_after(0.5) as scope:
             try:
                 await self._cancel_sender.send_async(task_id)
@@ -214,10 +258,20 @@ class RunnerSupervisor:
         try:
             with self._ev_recv as events:
                 async for event in events:
+                    self._last_event_received_at = _now_utc_iso()
+                    self._last_event_type = event.__class__.__name__
+                    self._record_milestone("event_received", self._last_event_type)
                     if isinstance(event, RunnerStatusUpdated):
                         self.status = event.runner_status
+                        self._status_since = _now_utc_iso()
+                        self._status_since_monotonic = time.monotonic()
+                        self._record_milestone(
+                            "status_changed",
+                            event.runner_status.__class__.__name__,
+                        )
                     if isinstance(event, TaskAcknowledged):
                         self.pending.pop(event.task_id).set()
+                        self._record_milestone("task_acknowledged", str(event.task_id))
                         continue
                     if (
                         isinstance(event, TaskStatusUpdated)
@@ -236,6 +290,7 @@ class RunnerSupervisor:
                         )
                         self.in_progress.pop(event.task_id, None)
                         self.completed.add(event.task_id)
+                        self._record_milestone("task_completed", str(event.task_id))
                     await self._event_sender.send(event)
         except (ClosedResourceError, BrokenResourceError) as e:
             await self._check_runner(e)
@@ -251,6 +306,7 @@ class RunnerSupervisor:
                     await self._check_runner(RuntimeError("Runner found to be dead"))
 
     async def _check_runner(self, e: Exception) -> None:
+        self._record_milestone("runner_check", e.__class__.__name__)
         if not self._cancel_watch_runner.cancel_called:
             self._cancel_watch_runner.cancel()
         logger.info("Checking runner's status")
@@ -305,3 +361,62 @@ class RunnerSupervisor:
                 "Event sender already closed, unable to report runner failure"
             )
         self.shutdown()
+
+    def _record_milestone(self, name: str, detail: str | None = None) -> None:
+        """Append a bounded live milestone for diagnostics."""
+
+        self._milestones.append(
+            RunnerLifecycleMilestone(at=_now_utc_iso(), name=name, detail=detail)
+        )
+
+    def _task_diagnostics(self, task: Task) -> RunnerTaskDiagnostics:
+        """Return a compact diagnostics view for a runner task."""
+
+        command_id: str | None = None
+        model_id = str(self.shard_metadata.model_card.model_id)
+        if isinstance(
+            task,
+            (TextGeneration, ImageGeneration, ImageEdits, TextEmbedding),
+        ):
+            command_id = str(task.command_id)
+            model_id = str(task.task_params.model)
+        return RunnerTaskDiagnostics(
+            task_id=str(task.task_id),
+            task_kind=task.__class__.__name__,
+            task_status=str(task.task_status.value),
+            instance_id=str(task.instance_id),
+            command_id=command_id,
+            runner_id=str(self.bound_instance.bound_runner_id),
+            model_id=model_id,
+        )
+
+    def diagnostics(self) -> RunnerSupervisorDiagnostics:
+        """Return live read-only diagnostics for this runner supervisor."""
+
+        return RunnerSupervisorDiagnostics(
+            runner_id=str(self.bound_instance.bound_runner_id),
+            instance_id=str(self.bound_instance.instance.instance_id),
+            node_id=str(self.bound_instance.bound_node_id),
+            model_id=str(self.shard_metadata.model_card.model_id),
+            device_rank=self.shard_metadata.device_rank,
+            world_size=self.shard_metadata.world_size,
+            start_layer=self.shard_metadata.start_layer,
+            end_layer=self.shard_metadata.end_layer,
+            n_layers=self.shard_metadata.n_layers,
+            pid=self.runner_process.pid,
+            process_alive=self.runner_process.is_alive(),
+            exit_code=self.runner_process.exitcode,
+            status_kind=self.status.__class__.__name__,
+            status_since=self._status_since,
+            seconds_in_status=time.monotonic() - self._status_since_monotonic,
+            pending_task_ids=[str(task_id) for task_id in self.pending],
+            in_progress_tasks=[
+                self._task_diagnostics(task) for task in self.in_progress.values()
+            ],
+            completed_task_count=len(self.completed),
+            cancelled_task_ids=[str(task_id) for task_id in self.cancelled],
+            last_task_sent_at=self._last_task_sent_at,
+            last_event_received_at=self._last_event_received_at,
+            last_event_type=self._last_event_type,
+            milestones=list(self._milestones),
+        )

@@ -6,7 +6,7 @@ import os
 import random
 import socket
 import time
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Sequence
 from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
@@ -16,6 +16,7 @@ from uuid import uuid4
 import anyio
 import httpx
 import hypercorn.asyncio as hypercorn_asyncio
+import psutil
 import yaml
 from anyio import BrokenResourceError
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -26,6 +27,7 @@ from hypercorn.config import Config
 from hypercorn.typing import ASGIFramework
 from loguru import logger
 
+import exo.shared.types.tasks as task_types
 from exo.api.adapters.chat_completions import (
     chat_request_to_text_generation,
     collect_chat_response,
@@ -195,6 +197,19 @@ from exo.shared.types.commands import (
     TextGeneration,
 )
 from exo.shared.types.common import CommandId, Id, NodeId, SystemId
+from exo.shared.types.diagnostics import (
+    ClusterDiagnostics,
+    ClusterNodeDiagnostics,
+    DiagnosticsProcess,
+    InstancePlacementDiagnostics,
+    NodeDiagnostics,
+    NodeResourceDiagnostics,
+    NodeRuntimeDiagnostics,
+    PlacementRunnerDiagnostics,
+    ProcessRole,
+    RunnerSupervisorDiagnostics,
+    RunnerTaskDiagnostics,
+)
 from exo.shared.types.events import (
     ChunkGenerated,
     Event,
@@ -203,6 +218,7 @@ from exo.shared.types.events import (
     TracesMerged,
 )
 from exo.shared.types.memory import Memory
+from exo.shared.types.profiling import MemoryUsage
 from exo.shared.types.state import State
 from exo.shared.types.text_generation import TextGenerationTaskParams
 from exo.shared.types.worker.downloads import DownloadCompleted
@@ -280,6 +296,10 @@ API_TAGS_METADATA = [
     {
         "name": "State & Tracing",
         "description": "Cluster state, event log access, trace inspection/export, and onboarding helpers.",
+    },
+    {
+        "name": "Diagnostics",
+        "description": "Read-only local and cluster diagnostics for stuck runner, placement, resource, and process inspection.",
     },
     {
         "name": "Images",
@@ -416,12 +436,16 @@ class API:
         self.event_receiver = event_receiver
         self.election_receiver = election_receiver
         self.node_id: NodeId = node_id
+        self._master_node_id: NodeId = node_id
         self.last_completed_election: int = 0
         self.port = port
         self._exo_config = exo_config
         self._store_client = store_client
         self._config_path = resolve_config_path()
         self._model_optimizer: "ModelOptimizer | None" = None
+        self._runner_diagnostics_provider: Callable[
+            [], Sequence[RunnerSupervisorDiagnostics]
+        ] | None = None
         # Initialize optimizer if store path is available
         if exo_config and exo_config.model_store and exo_config.model_store.enabled:
             from exo.store.model_optimizer import ModelOptimizer
@@ -470,7 +494,20 @@ class API:
         self._image_store = ImageStore(EXO_IMAGE_CACHE_DIR)
         self._tg: TaskGroup = TaskGroup()
 
-    def reset(self, result_clock: int, event_receiver: Receiver[IndexedEvent]):
+    def set_runner_diagnostics_provider(
+        self,
+        provider: Callable[[], Sequence[RunnerSupervisorDiagnostics]] | None,
+    ) -> None:
+        """Attach a local worker diagnostics provider to this API instance."""
+
+        self._runner_diagnostics_provider = provider
+
+    def reset(
+        self,
+        result_clock: int,
+        event_receiver: Receiver[IndexedEvent],
+        master_node_id: NodeId,
+    ):
         logger.info("Resetting API State")
         if self._event_log is not None:
             self._event_log.close()
@@ -480,14 +517,16 @@ class API:
         self._text_generation_queues = {}
         self._image_generation_queues = {}
         self._embedding_queues = {}
-        self.unpause(result_clock)
+        self.unpause(result_clock, master_node_id=master_node_id)
         self.event_receiver.close()
         self.event_receiver = event_receiver
         self._tg.start_soon(self._apply_state)
 
-    def unpause(self, result_clock: int):
+    def unpause(self, result_clock: int, master_node_id: NodeId | None = None):
         logger.info("Unpausing API")
         self.last_completed_election = result_clock
+        if master_node_id is not None:
+            self._master_node_id = master_node_id
         self.paused = False
         self.paused_ev.set()
         self.paused_ev = anyio.Event()
@@ -838,6 +877,35 @@ class API:
             description="Download a raw Chrome trace artifact from local storage or a reachable peer node.",
             response_model=None,
         )(self.get_cluster_trace_raw)
+        self.app.get(
+            "/v1/diagnostics/node",
+            tags=["Diagnostics"],
+            summary="Get local node diagnostics",
+            description=(
+                "Return a read-only diagnostic bundle for this API node, including "
+                "runtime identity, placement analysis, live runner-supervisor "
+                "state, local resources, and relevant OS processes."
+            ),
+        )(self.get_node_diagnostics)
+        self.app.get(
+            "/v1/diagnostics/cluster",
+            tags=["Diagnostics"],
+            summary="Get cluster diagnostics",
+            description=(
+                "Fan out to reachable peer APIs and return read-only diagnostic "
+                "bundles for the local node and peers. Unreachable peers are "
+                "reported as partial failures instead of failing the whole request."
+            ),
+        )(self.get_cluster_diagnostics)
+        self.app.get(
+            "/v1/diagnostics/cluster/{node_id}",
+            tags=["Diagnostics"],
+            summary="Get one cluster node diagnostic bundle",
+            description=(
+                "Return diagnostics for the requested node from local state or by "
+                "proxying to a reachable peer API."
+            ),
+        )(self.get_cluster_node_diagnostics)
         self.app.get(
             "/v1/traces/{task_id}",
             tags=["State & Tracing"],
@@ -2787,7 +2855,9 @@ class API:
             }
         )
 
-    async def _reachable_peer_trace_urls(self) -> list[str]:
+    async def _reachable_peer_api_urls(self) -> dict[str, str]:
+        """Return reachable peer API base URLs keyed by node ID."""
+
         reachable_by_node: dict[str, str] = {}
         async for ip_address, node_id in check_reachable(
             self.state.topology,
@@ -2799,7 +2869,455 @@ class API:
                 continue
             host = f"[{ip_address}]" if ":" in ip_address else ip_address
             reachable_by_node[normalized_node_id] = f"http://{host}:52415"
-        return list(reachable_by_node.values())
+        return reachable_by_node
+
+    async def _reachable_peer_trace_urls(self) -> list[str]:
+        """Return reachable peer API base URLs for trace proxying."""
+
+        return list((await self._reachable_peer_api_urls()).values())
+
+    @staticmethod
+    def _status_kind(status: object | None) -> str | None:
+        """Return the concrete status model name for diagnostics."""
+
+        if status is None:
+            return None
+        return status.__class__.__name__
+
+    def _friendly_name_for_node(self, node_id: NodeId) -> str | None:
+        """Return a known friendly node name for diagnostics."""
+
+        identity = self.state.node_identities.get(node_id)
+        if identity is None:
+            return None
+        if identity.friendly_name and identity.friendly_name != "Unknown":
+            return identity.friendly_name
+        return None
+
+    @staticmethod
+    def _task_kind(task: task_types.Task) -> str:
+        """Return a stable task kind name from a tagged task model."""
+
+        return task.__class__.__name__
+
+    @staticmethod
+    def _task_command_id(task: task_types.Task) -> str | None:
+        """Return a user command ID for task types that carry one."""
+
+        if isinstance(
+            task,
+            (
+                task_types.TextGeneration,
+                task_types.ImageGeneration,
+                task_types.ImageEdits,
+                task_types.TextEmbedding,
+            ),
+        ):
+            return str(task.command_id)
+        return None
+
+    @staticmethod
+    def _task_model_id(task: task_types.Task, default_model_id: str | None) -> str | None:
+        """Return the model associated with a task when available."""
+
+        if isinstance(
+            task,
+            (
+                task_types.TextGeneration,
+                task_types.ImageGeneration,
+                task_types.ImageEdits,
+                task_types.TextEmbedding,
+            ),
+        ):
+            return str(task.task_params.model)
+        if isinstance(task, task_types.DownloadModel):
+            return str(task.shard_metadata.model_card.model_id)
+        if isinstance(task, task_types.CreateRunner):
+            return str(task.bound_instance.bound_shard.model_card.model_id)
+        return default_model_id
+
+    def _task_diagnostics(
+        self,
+        task: task_types.Task,
+        *,
+        runner_id: str | None,
+        default_model_id: str | None,
+    ) -> RunnerTaskDiagnostics:
+        """Build a compact event-sourced task diagnostics record."""
+
+        return RunnerTaskDiagnostics(
+            task_id=str(task.task_id),
+            task_kind=self._task_kind(task),
+            task_status=str(task.task_status.value),
+            instance_id=str(task.instance_id),
+            command_id=self._task_command_id(task),
+            runner_id=runner_id,
+            model_id=self._task_model_id(task, default_model_id),
+        )
+
+    def _placement_diagnostics(self) -> list[InstancePlacementDiagnostics]:
+        """Build placement diagnostics from event-sourced state."""
+
+        master_node_id = self._master_node_id
+        placements: list[InstancePlacementDiagnostics] = []
+
+        for instance_id, instance in self.state.instances.items():
+            shard_assignments = instance.shard_assignments
+            placement_node_ids = list(shard_assignments.node_to_runner.keys())
+            placement_node_id_strings = [str(node_id) for node_id in placement_node_ids]
+            master_is_placement_node = master_node_id in shard_assignments.node_to_runner
+            local_node_is_placement_node = self.node_id in shard_assignments.node_to_runner
+            warnings: list[str] = []
+
+            if not master_is_placement_node:
+                warnings.append(
+                    "Current master is not a placement node for this instance."
+                )
+
+            runners: list[PlacementRunnerDiagnostics] = []
+            for node_id, runner_id in shard_assignments.node_to_runner.items():
+                shard = shard_assignments.runner_to_shard[runner_id]
+                status = self.state.runners.get(runner_id)
+                task_records = [
+                    self._task_diagnostics(
+                        task,
+                        runner_id=str(runner_id),
+                        default_model_id=str(shard_assignments.model_id),
+                    )
+                    for task in self.state.tasks.values()
+                    if task.instance_id == instance_id
+                ]
+                if (
+                    status is not None
+                    and status.__class__.__name__ == "RunnerWarmingUp"
+                    and not master_is_placement_node
+                ):
+                    warnings.append(
+                        f"Runner {runner_id} is warming up while master is outside the placement."
+                    )
+                runners.append(
+                    PlacementRunnerDiagnostics(
+                        runner_id=str(runner_id),
+                        node_id=str(node_id),
+                        friendly_name=self._friendly_name_for_node(node_id),
+                        status_kind=self._status_kind(status),
+                        device_rank=shard.device_rank,
+                        world_size=shard.world_size,
+                        start_layer=shard.start_layer,
+                        end_layer=shard.end_layer,
+                        n_layers=shard.n_layers,
+                        is_local=node_id == self.node_id,
+                        is_master=node_id == master_node_id,
+                        tasks=task_records,
+                    )
+                )
+
+            placements.append(
+                InstancePlacementDiagnostics(
+                    instance_id=str(instance_id),
+                    model_id=str(shard_assignments.model_id),
+                    master_node_id=str(master_node_id),
+                    master_is_placement_node=master_is_placement_node,
+                    local_node_is_placement_node=local_node_is_placement_node,
+                    placement_node_ids=placement_node_id_strings,
+                    runners=sorted(runners, key=lambda runner: runner.device_rank),
+                    warnings=sorted(set(warnings)),
+                )
+            )
+
+        return placements
+
+    def _collect_runner_supervisor_diagnostics(
+        self,
+    ) -> list[RunnerSupervisorDiagnostics]:
+        """Collect live runner-supervisor diagnostics if the worker provided them."""
+
+        if self._runner_diagnostics_provider is None:
+            return []
+        try:
+            return list(self._runner_diagnostics_provider())
+        except Exception as exc:
+            logger.opt(exception=exc).warning(
+                "Failed to collect runner supervisor diagnostics"
+            )
+            return []
+
+    @staticmethod
+    def _process_role(
+        process: psutil.Process,
+        command: str,
+        *,
+        current_pid: int,
+        runner_pids: set[int],
+    ) -> ProcessRole:
+        """Infer a Skulk-specific role for a process."""
+
+        executable = ""
+        with contextlib.suppress(psutil.Error, OSError):
+            cmdline = process.cmdline()
+            if cmdline:
+                executable = Path(cmdline[0]).name.lower()
+
+        command_lower = command.lower()
+        if process.pid == current_pid:
+            return "skulk"
+        if process.pid in runner_pids:
+            return "runner"
+        if executable == "vector" or " vector --config " in f" {command_lower} ":
+            return "vector"
+        if "resource_tracker" in command_lower:
+            return "python"
+        if "skulk" in command_lower:
+            return "skulk"
+        if "spawn_main" in command_lower:
+            return "runner"
+        if "python" in executable:
+            return "python"
+        return "other"
+
+    @staticmethod
+    def _process_command(process: psutil.Process) -> str:
+        """Return a safe joined process command line."""
+
+        try:
+            command = process.cmdline()
+        except (psutil.Error, OSError):
+            return ""
+        return " ".join(command)
+
+    def _process_diagnostics(
+        self,
+        process: psutil.Process,
+        *,
+        child_pids: set[int],
+        runner_pids: set[int],
+    ) -> DiagnosticsProcess | None:
+        """Build diagnostics for one OS process, skipping vanished processes."""
+
+        try:
+            command = self._process_command(process)
+            rss = None
+            with contextlib.suppress(psutil.Error, OSError):
+                rss = Memory.from_bytes(process.memory_info().rss)
+            elapsed_seconds = None
+            with contextlib.suppress(psutil.Error, OSError):
+                elapsed_seconds = max(0.0, time.time() - process.create_time())
+            status = None
+            with contextlib.suppress(psutil.Error, OSError):
+                status = process.status()
+            cpu_percent = None
+            with contextlib.suppress(psutil.Error, OSError):
+                cpu_percent = process.cpu_percent(interval=None)
+            memory_percent = None
+            with contextlib.suppress(psutil.Error, OSError):
+                memory_percent = process.memory_percent()
+            parent_pid = None
+            with contextlib.suppress(psutil.Error, OSError):
+                parent_pid = process.ppid()
+
+            return DiagnosticsProcess(
+                pid=process.pid,
+                parent_pid=parent_pid,
+                role=self._process_role(
+                    process,
+                    command,
+                    current_pid=os.getpid(),
+                    runner_pids=runner_pids,
+                ),
+                command=command,
+                status=status,
+                cpu_percent=cpu_percent,
+                memory_percent=memory_percent,
+                rss=rss,
+                elapsed_seconds=elapsed_seconds,
+                is_child_of_skulk=process.pid in child_pids,
+            )
+        except psutil.NoSuchProcess:
+            return None
+
+    def _collect_process_diagnostics(
+        self,
+        supervisor_runners: Sequence[RunnerSupervisorDiagnostics],
+    ) -> list[DiagnosticsProcess]:
+        """Collect relevant Skulk, runner, and Vector process diagnostics."""
+
+        current = psutil.Process(os.getpid())
+        try:
+            children = current.children(recursive=True)
+        except (psutil.Error, OSError):
+            children = []
+
+        runner_pids = {
+            runner.pid
+            for runner in supervisor_runners
+            if runner.pid is not None
+        }
+        child_pids = {current.pid, *(child.pid for child in children)}
+        process_by_pid: dict[int, psutil.Process] = {
+            current.pid: current,
+            **{child.pid: child for child in children},
+        }
+
+        for process in psutil.process_iter():
+            if process.pid in process_by_pid:
+                continue
+            command = self._process_command(process)
+            if "vector" not in command.lower():
+                continue
+            process_by_pid[process.pid] = process
+
+        diagnostics: list[DiagnosticsProcess] = []
+        for process in sorted(process_by_pid.values(), key=lambda proc: proc.pid):
+            process_diagnostics = self._process_diagnostics(
+                process,
+                child_pids=child_pids,
+                runner_pids=runner_pids,
+            )
+            if process_diagnostics is not None:
+                diagnostics.append(process_diagnostics)
+        return diagnostics
+
+    def _runtime_diagnostics(self) -> NodeRuntimeDiagnostics:
+        """Build local runtime diagnostics from API process and state."""
+
+        identity = self.state.node_identities.get(self.node_id)
+        logging_config = self._exo_config.logging if self._exo_config is not None else None
+        master_node_id = self._master_node_id
+        return NodeRuntimeDiagnostics(
+            node_id=str(self.node_id),
+            hostname=socket.gethostname(),
+            friendly_name=self._friendly_name_for_node(self.node_id),
+            is_master=master_node_id == self.node_id,
+            master_node_id=str(master_node_id),
+            cwd=str(Path.cwd()),
+            config_path=str(self._config_path),
+            config_file_exists=self._config_path.exists(),
+            skulk_version=get_skulk_version(),
+            skulk_commit=identity.exo_commit if identity is not None else "Unknown",
+            libp2p_namespace=preferred_env_value(
+                "SKULK_LIBP2P_NAMESPACE",
+                "EXO_LIBP2P_NAMESPACE",
+            ),
+            python_unbuffered=os.environ.get("PYTHONUNBUFFERED") in {"1", "true", "True"},
+            tracing_enabled=self.state.tracing_enabled,
+            structured_logging_configured=bool(
+                logging_config is not None
+                and logging_config.enabled
+                and logging_config.ingest_url
+            ),
+            logging_ingest_url=logging_config.ingest_url
+            if logging_config is not None and logging_config.ingest_url
+            else None,
+        )
+
+    def _resource_diagnostics(self) -> NodeResourceDiagnostics:
+        """Build local resource diagnostics from gathered state and psutil."""
+
+        current_memory = None
+        with contextlib.suppress(Exception):
+            current_memory = MemoryUsage.from_psutil(override_memory=None)
+
+        return NodeResourceDiagnostics(
+            gathered_memory=self.state.node_memory.get(self.node_id),
+            current_memory=current_memory,
+            disk=self.state.node_disk.get(self.node_id),
+            system=self.state.node_system.get(self.node_id),
+            network=self.state.node_network.get(self.node_id),
+        )
+
+    async def get_node_diagnostics(self) -> NodeDiagnostics:
+        """Return local read-only diagnostics for this Skulk node."""
+
+        supervisor_runners = self._collect_runner_supervisor_diagnostics()
+        placements = self._placement_diagnostics()
+        warnings = sorted(
+            {
+                warning
+                for placement in placements
+                for warning in placement.warnings
+            }
+        )
+        return NodeDiagnostics(
+            generated_at=datetime.now(tz=timezone.utc).isoformat(),
+            runtime=self._runtime_diagnostics(),
+            identity=self.state.node_identities.get(self.node_id),
+            resources=self._resource_diagnostics(),
+            processes=self._collect_process_diagnostics(supervisor_runners),
+            supervisor_runners=supervisor_runners,
+            placements=placements,
+            warnings=warnings,
+        )
+
+    async def get_cluster_diagnostics(self) -> ClusterDiagnostics:
+        """Return read-only diagnostics for local and reachable peer nodes."""
+
+        local_diagnostics = await self.get_node_diagnostics()
+        nodes = [
+            ClusterNodeDiagnostics(
+                node_id=str(self.node_id),
+                url=None,
+                ok=True,
+                diagnostics=local_diagnostics,
+            )
+        ]
+
+        peer_urls = await self._reachable_peer_api_urls()
+        timeout = httpx.Timeout(timeout=10.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            for node_id, base_url in peer_urls.items():
+                try:
+                    response = await client.get(f"{base_url}/v1/diagnostics/node")
+                    response.raise_for_status()
+                    diagnostics = NodeDiagnostics.model_validate(response.json())
+                    nodes.append(
+                        ClusterNodeDiagnostics(
+                            node_id=node_id,
+                            url=base_url,
+                            ok=True,
+                            diagnostics=diagnostics,
+                        )
+                    )
+                except (httpx.HTTPError, ValueError) as exc:
+                    nodes.append(
+                        ClusterNodeDiagnostics(
+                            node_id=node_id,
+                            url=base_url,
+                            ok=False,
+                            error=f"{exc.__class__.__name__}: {exc}",
+                        )
+                    )
+
+        return ClusterDiagnostics(
+            generated_at=datetime.now(tz=timezone.utc).isoformat(),
+            local_node_id=str(self.node_id),
+            master_node_id=str(self._master_node_id),
+            nodes=nodes,
+        )
+
+    async def get_cluster_node_diagnostics(self, node_id: str) -> NodeDiagnostics:
+        """Return diagnostics for one local or reachable peer node."""
+
+        if node_id == str(self.node_id):
+            return await self.get_node_diagnostics()
+
+        peer_urls = await self._reachable_peer_api_urls()
+        base_url = peer_urls.get(node_id)
+        if base_url is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Node diagnostics endpoint not reachable: {node_id}",
+            )
+
+        timeout = httpx.Timeout(timeout=10.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            response = await client.get(f"{base_url}/v1/diagnostics/node")
+            if response.status_code == 404:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Node diagnostics not found: {node_id}",
+                )
+            response.raise_for_status()
+            return NodeDiagnostics.model_validate(response.json())
 
     async def get_tracing_state(self) -> TracingStateResponse:
         return TracingStateResponse(enabled=self.state.tracing_enabled)
