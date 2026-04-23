@@ -5,11 +5,16 @@ import signal
 
 import loguru
 
+from exo.shared.types.diagnostics import RunnerDiagnosticContext, RunnerDiagnosticUpdate
 from exo.shared.types.events import Event, RunnerStatusUpdated
 from exo.shared.types.tasks import Task, TaskId
 from exo.shared.types.worker.instances import BoundInstance
 from exo.shared.types.worker.runners import RunnerFailed
 from exo.utils.channels import ClosedResourceError, MpReceiver, MpSender
+from exo.worker.runner.diagnostics import (
+    configure_runner_diagnostics,
+    record_runner_phase,
+)
 
 logger: "loguru.Logger" = loguru.logger
 
@@ -57,6 +62,7 @@ def _metal_cleanup_signal_handler(signum: int, _frame: object) -> None:
 def entrypoint(
     bound_instance: BoundInstance,
     event_sender: MpSender[Event],
+    diagnostic_sender: MpSender[RunnerDiagnosticUpdate],
     task_receiver: MpReceiver[Task],
     cancel_receiver: MpReceiver[TaskId],
     _logger: "loguru.Logger",
@@ -79,6 +85,23 @@ def entrypoint(
         os.environ["MLX_METAL_FAST_SYNCH"] = "0"
 
     logger.info(f"Fast synch flag: {os.environ['MLX_METAL_FAST_SYNCH']}")
+    shard = bound_instance.bound_shard
+    configure_runner_diagnostics(
+        diagnostic_sender,
+        RunnerDiagnosticContext(
+            node_id=str(bound_instance.bound_node_id),
+            runner_id=str(bound_instance.bound_runner_id),
+            pid=os.getpid(),
+            instance_id=str(bound_instance.instance.instance_id),
+            model_id=str(shard.model_card.model_id),
+            rank=shard.device_rank,
+            world_size=shard.world_size,
+            start_layer=shard.start_layer,
+            end_layer=shard.end_layer,
+            n_layers=shard.n_layers,
+        ),
+    )
+    record_runner_phase("created", event="process_started", include_memory=True)
 
     # Import main after setting global logger - this lets us just import logger from this module
     try:
@@ -110,6 +133,12 @@ def entrypoint(
     except ClosedResourceError:
         logger.warning("Runner communication closed unexpectedly")
     except Exception as e:
+        record_runner_phase(
+            "error",
+            event="runner_crashed",
+            detail=f"{type(e).__name__}: {e}",
+            include_memory=True,
+        )
         logger.opt(exception=e).warning(
             f"Runner {bound_instance.bound_runner_id} crashed with critical exception {e}"
         )
@@ -123,11 +152,24 @@ def entrypoint(
         # Safety net: release Metal resources on any exit path, even if the
         # signal handler didn't fire (e.g. parent was SIGKILL'd and we got
         # a broken pipe, or an unexpected exception during load).
+        record_runner_phase(
+            "shutdown_cleanup",
+            event="metal_cleanup_begin",
+            include_memory=True,
+        )
         _release_metal_resources()
+        record_runner_phase(
+            "shutdown_cleanup",
+            event="metal_cleanup_complete",
+            include_memory=True,
+        )
         try:
             event_sender.close()
             task_receiver.close()
+            diagnostic_sender.close()
         finally:
             event_sender.join()
             task_receiver.join()
+            # Diagnostics are best-effort and must never delay Metal cleanup.
+            # Closing is enough; do not wait for a full diagnostic queue to drain.
             logger.info("bye from the runner")

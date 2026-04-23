@@ -3,7 +3,9 @@ import contextlib
 import hashlib
 import json
 import os
+import platform
 import random
+import shutil
 import socket
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Sequence
@@ -200,8 +202,12 @@ from exo.shared.types.common import CommandId, Id, NodeId, SystemId
 from exo.shared.types.diagnostics import (
     ClusterDiagnostics,
     ClusterNodeDiagnostics,
+    DiagnosticCaptureRequest,
+    DiagnosticCaptureResponse,
+    DiagnosticProcessSample,
     DiagnosticsProcess,
     InstancePlacementDiagnostics,
+    MlxMemorySnapshot,
     NodeDiagnostics,
     NodeResourceDiagnostics,
     NodeRuntimeDiagnostics,
@@ -926,6 +932,17 @@ class API:
                 "for diagnostics and may not stop a runner wedged in native code."
             ),
         )(self.cancel_local_runner_task)
+        self.app.post(
+            "/v1/diagnostics/node/capture",
+            tags=["Diagnostics"],
+            summary="Capture local node diagnostic bundle",
+            description=(
+                "Collect an on-demand diagnostic bundle for this node, optionally "
+                "focused on one live runner or task. The bundle includes current "
+                "node diagnostics, runner flight-recorder entries, the latest MLX "
+                "memory snapshot, and best-effort macOS process samples."
+            ),
+        )(self.capture_local_node_diagnostics)
         self.app.get(
             "/v1/diagnostics/cluster",
             tags=["Diagnostics"],
@@ -945,6 +962,15 @@ class API:
                 "proxying to a reachable peer API."
             ),
         )(self.get_cluster_node_diagnostics)
+        self.app.post(
+            "/v1/diagnostics/cluster/{node_id}/capture",
+            tags=["Diagnostics"],
+            summary="Capture one cluster node diagnostic bundle",
+            description=(
+                "Return an on-demand diagnostic capture bundle for the requested "
+                "node, proxying to a reachable peer API when the target is remote."
+            ),
+        )(self.capture_cluster_node_diagnostics)
         self.app.post(
             "/v1/diagnostics/cluster/{node_id}/runners/{runner_id}/cancel",
             tags=["Diagnostics"],
@@ -3500,6 +3526,227 @@ class API:
                 detail=self._proxy_error_detail(response),
             )
         return RunnerTaskCancelResponse.model_validate(response.json())
+
+    @staticmethod
+    def _truncate_capture_output(value: bytes | str | None) -> str | None:
+        """Decode and cap heavyweight diagnostic command output."""
+
+        if value is None:
+            return None
+        text = value.decode(errors="replace") if isinstance(value, bytes) else value
+        max_chars = 64_000
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars] + "\n... <truncated>"
+
+    async def _run_process_sample_command(
+        self,
+        *,
+        name: str,
+        command: list[str],
+        timeout_seconds: float,
+    ) -> DiagnosticProcessSample:
+        """Run one local process-sampling command with a strict timeout."""
+
+        started = time.monotonic()
+        try:
+            completed = None
+            with anyio.move_on_after(timeout_seconds) as scope:
+                completed = await anyio.run_process(command, check=False)
+            duration = time.monotonic() - started
+            if scope.cancel_called or completed is None:
+                return DiagnosticProcessSample(
+                    name=name,
+                    command=command,
+                    ok=False,
+                    duration_seconds=duration,
+                    error=f"Timed out after {timeout_seconds:.1f}s",
+                )
+            return DiagnosticProcessSample(
+                name=name,
+                command=command,
+                ok=completed.returncode == 0,
+                exit_code=completed.returncode,
+                duration_seconds=duration,
+                stdout=self._truncate_capture_output(completed.stdout),
+                stderr=self._truncate_capture_output(completed.stderr),
+                error=None if completed.returncode == 0 else "Command exited non-zero",
+            )
+        except FileNotFoundError as exc:
+            missing_file = str(cast(object, exc.filename))
+            return DiagnosticProcessSample(
+                name=name,
+                command=command,
+                ok=False,
+                duration_seconds=time.monotonic() - started,
+                error=f"Command not found: {missing_file}",
+            )
+        except Exception as exc:
+            return DiagnosticProcessSample(
+                name=name,
+                command=command,
+                ok=False,
+                duration_seconds=time.monotonic() - started,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
+    async def _collect_process_samples(
+        self,
+        pid: int,
+        sample_duration_seconds: float,
+    ) -> list[DiagnosticProcessSample]:
+        """Collect best-effort heavyweight process samples for one PID."""
+
+        if platform.system() != "Darwin":
+            return [
+                DiagnosticProcessSample(
+                    name="process_samples",
+                    command=[],
+                    ok=False,
+                    duration_seconds=0.0,
+                    error="Process sampling is currently implemented for macOS only.",
+                )
+            ]
+
+        requested_duration = max(1, int(round(sample_duration_seconds)))
+        commands = [
+            (
+                "sample",
+                ["sample", str(pid), str(requested_duration)],
+                float(requested_duration + 5),
+            ),
+            ("vmmap", ["vmmap", "-summary", str(pid)], 8.0),
+            ("footprint", ["footprint", "-p", str(pid)], 8.0),
+        ]
+        samples: list[DiagnosticProcessSample] = []
+        for name, command, timeout in commands:
+            executable = command[0]
+            if shutil.which(executable) is None:
+                samples.append(
+                    DiagnosticProcessSample(
+                        name=name,
+                        command=command,
+                        ok=False,
+                        duration_seconds=0.0,
+                        error=f"{executable} not found on PATH",
+                    )
+                )
+                continue
+            samples.append(
+                await self._run_process_sample_command(
+                    name=name,
+                    command=command,
+                    timeout_seconds=timeout,
+                )
+            )
+        return samples
+
+    @staticmethod
+    def _match_capture_runner(
+        diagnostics: NodeDiagnostics,
+        request: DiagnosticCaptureRequest,
+    ) -> RunnerSupervisorDiagnostics | None:
+        """Find the requested runner or task inside one node diagnostics bundle."""
+
+        runner_id = str(request.runner_id) if request.runner_id is not None else None
+        task_id = str(request.task_id) if request.task_id is not None else None
+        if runner_id is None and task_id is None:
+            return None
+
+        for runner in diagnostics.supervisor_runners:
+            if runner_id is not None and runner.runner_id != runner_id:
+                continue
+            if task_id is not None:
+                task_ids = {task.task_id for task in runner.in_progress_tasks}
+                task_ids.update(runner.pending_task_ids)
+                task_ids.update(runner.cancelled_task_ids)
+                if task_id not in task_ids and runner.active_task_id != task_id:
+                    continue
+            return runner
+        return None
+
+    async def capture_local_node_diagnostics(
+        self,
+        request: DiagnosticCaptureRequest,
+    ) -> DiagnosticCaptureResponse:
+        """Collect an on-demand local diagnostics bundle for stuck-runner triage."""
+
+        diagnostics = await self.get_node_diagnostics()
+        runner = self._match_capture_runner(diagnostics, request)
+        if (request.runner_id is not None or request.task_id is not None) and runner is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No local runner matched the requested runnerId/taskId.",
+            )
+
+        warnings: list[str] = []
+        process_samples: list[DiagnosticProcessSample] = []
+        mlx_memory: MlxMemorySnapshot | None = None
+        if runner is not None:
+            mlx_memory = runner.last_mlx_memory
+            if request.include_process_samples:
+                if runner.pid is None:
+                    warnings.append("Matched runner has no known subprocess PID.")
+                elif not runner.process_alive:
+                    warnings.append("Matched runner process is no longer alive.")
+                else:
+                    process_samples = await self._collect_process_samples(
+                        runner.pid,
+                        request.sample_duration_seconds,
+                    )
+            if mlx_memory is None:
+                warnings.append(
+                    "Matched runner has not reported an MLX memory snapshot yet."
+                )
+
+        return DiagnosticCaptureResponse(
+            generated_at=datetime.now(tz=timezone.utc).isoformat(),
+            node_id=self.node_id,
+            node_diagnostics=diagnostics,
+            runner=runner,
+            flight_recorder=list(runner.flight_recorder) if runner is not None else [],
+            mlx_memory=mlx_memory,
+            process_samples=process_samples,
+            warnings=warnings,
+        )
+
+    async def capture_cluster_node_diagnostics(
+        self,
+        node_id: str,
+        request: DiagnosticCaptureRequest,
+    ) -> DiagnosticCaptureResponse:
+        """Return an on-demand diagnostics capture for one local or peer node."""
+
+        if node_id == str(self.node_id):
+            return await self.capture_local_node_diagnostics(request)
+
+        peer_urls = await self._reachable_peer_api_urls()
+        base_url = peer_urls.get(node_id)
+        if base_url is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Node diagnostics endpoint not reachable: {node_id}",
+            )
+
+        timeout = httpx.Timeout(timeout=30.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            try:
+                response = await client.post(
+                    f"{base_url}/v1/diagnostics/node/capture",
+                    json=request.model_dump(mode="json", by_alias=True),
+                )
+            except httpx.HTTPError as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Failed to proxy diagnostics capture to {node_id}: {exc}",
+                ) from exc
+
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=self._proxy_error_detail(response),
+            )
+        return DiagnosticCaptureResponse.model_validate(response.json())
 
     async def get_cluster_diagnostics(self) -> ClusterDiagnostics:
         """Return read-only diagnostics for local and reachable peer nodes."""

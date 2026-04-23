@@ -77,6 +77,7 @@ from exo.worker.engines.mlx.auto_parallel import (
 )
 from exo.worker.engines.mlx.gemma4_prompt import render_gemma4_prompt
 from exo.worker.runner.bootstrap import logger
+from exo.worker.runner.diagnostics import remember_wired_limit_bytes
 
 Group = mx.distributed.Group
 
@@ -1221,6 +1222,7 @@ def set_wired_limit_for_model(model_size: Memory):
             "https://github.com/ml-explore/mlx-lm/tree/main#large-models"
         )
     mx.set_wired_limit(max_rec_size.in_bytes)
+    remember_wired_limit_bytes(max_rec_size.in_bytes)
     logger.info(f"Wired limit set to {max_rec_size}.")
 
 

@@ -18,11 +18,143 @@ from exo.shared.types.worker.runners import RunnerId
 from exo.utils.pydantic_ext import CamelCaseModel
 
 ProcessRole = Literal["skulk", "runner", "vector", "python", "other"]
+RunnerPhaseName = Literal[
+    "created",
+    "idle",
+    "connect_group",
+    "load_model",
+    "warmup",
+    "task_submission",
+    "task_agreement",
+    "prompt_build",
+    "vision_preprocess",
+    "kv_cache_lookup",
+    "prefill_barrier",
+    "prefill_pipeline",
+    "prefill_stream",
+    "decode_barrier",
+    "decode_wait_first_token",
+    "decode_stream",
+    "parser",
+    "cancel_requested",
+    "cancel_observed",
+    "completion",
+    "error",
+    "shutdown_cleanup",
+]
 RunnerTaskCancelStatus = Literal[
     "cancel_requested",
     "already_cancelled",
     "already_completed",
 ]
+
+
+class MlxMemorySnapshot(CamelCaseModel):
+    """Best-effort snapshot of memory reported by MLX/Metal."""
+
+    generated_at: str = Field(description="UTC timestamp when the snapshot was taken.")
+    active: Memory | None = Field(
+        default=None,
+        description="Currently active MLX memory, when the runtime exposes it.",
+    )
+    cache: Memory | None = Field(
+        default=None,
+        description="MLX cache memory, when the runtime exposes it.",
+    )
+    peak: Memory | None = Field(
+        default=None,
+        description="Peak MLX memory since the last reset, when available.",
+    )
+    wired_limit: Memory | None = Field(
+        default=None,
+        description=(
+            "Configured MLX wired memory limit when known. Current MLX releases "
+            "do not expose a getter on all platforms, so this may be null."
+        ),
+    )
+    source: str = Field(
+        description="Runtime module that supplied the measurement, such as mlx.core."
+    )
+
+
+RunnerDiagnosticValue = str | int | float | bool | list[str]
+
+
+class RunnerDiagnosticContext(CamelCaseModel):
+    """Stable runner identity included with each flight-recorder update."""
+
+    node_id: str = Field(description="Node ID that owns this runner.")
+    runner_id: str = Field(description="Runner ID.")
+    pid: int | None = Field(default=None, description="Runner subprocess PID.")
+    instance_id: str = Field(description="Instance ID.")
+    model_id: str = Field(description="Model assigned to this runner.")
+    rank: int = Field(description="Distributed rank for this runner.")
+    world_size: int = Field(description="Distributed world size.")
+    start_layer: int = Field(description="Inclusive first layer on this shard.")
+    end_layer: int = Field(description="Exclusive final layer on this shard.")
+    n_layers: int = Field(description="Total model layers.")
+
+
+class RunnerDiagnosticUpdate(CamelCaseModel):
+    """One non-blocking runner-to-supervisor diagnostic update."""
+
+    at: str = Field(description="UTC timestamp when the runner emitted the update.")
+    phase: RunnerPhaseName = Field(description="Current runner phase.")
+    event: str = Field(description="Short event name within the phase.")
+    detail: str | None = Field(
+        default=None,
+        description="Compact human-readable detail for diagnostics.",
+    )
+    attrs: dict[str, RunnerDiagnosticValue] = Field(
+        default_factory=dict,
+        description="Structured low-cardinality diagnostic attributes.",
+    )
+    context: RunnerDiagnosticContext = Field(
+        description="Stable runner identity fields for this update."
+    )
+    task_id: str | None = Field(
+        default=None,
+        description="Active task ID associated with the update, when known.",
+    )
+    command_id: str | None = Field(
+        default=None,
+        description="External command ID associated with the update, when known.",
+    )
+    mlx_memory: MlxMemorySnapshot | None = Field(
+        default=None,
+        description="MLX memory snapshot captured with this update, when requested.",
+    )
+
+
+class RunnerFlightRecorderEntry(CamelCaseModel):
+    """One retained runner flight-recorder entry."""
+
+    at: str = Field(description="UTC timestamp when the runner emitted the update.")
+    phase: RunnerPhaseName = Field(description="Runner phase at this entry.")
+    event: str = Field(description="Short event name within the phase.")
+    detail: str | None = Field(
+        default=None,
+        description="Compact human-readable detail for diagnostics.",
+    )
+    attrs: dict[str, RunnerDiagnosticValue] = Field(
+        default_factory=dict,
+        description="Structured low-cardinality diagnostic attributes.",
+    )
+    context: RunnerDiagnosticContext = Field(
+        description="Stable runner identity fields for this entry."
+    )
+    task_id: str | None = Field(
+        default=None,
+        description="Task ID associated with the entry, when known.",
+    )
+    command_id: str | None = Field(
+        default=None,
+        description="Command ID associated with the entry, when known.",
+    )
+    mlx_memory: MlxMemorySnapshot | None = Field(
+        default=None,
+        description="MLX memory snapshot captured with this entry, when present.",
+    )
 
 
 class DiagnosticsProcess(CamelCaseModel):
@@ -121,6 +253,37 @@ class RunnerSupervisorDiagnostics(CamelCaseModel):
     seconds_in_status: float = Field(
         description="Wall-clock seconds spent in the current runner status."
     )
+    phase: RunnerPhaseName = Field(description="Last runner phase reported.")
+    phase_started_at: str = Field(
+        description="UTC timestamp when the current phase started."
+    )
+    seconds_in_phase: float = Field(
+        description="Wall-clock seconds spent in the current phase."
+    )
+    last_progress_at: str | None = Field(
+        default=None,
+        description="UTC timestamp for the last flight-recorder update.",
+    )
+    active_task_id: str | None = Field(
+        default=None,
+        description="Task ID associated with the current phase, when known.",
+    )
+    active_command_id: str | None = Field(
+        default=None,
+        description="Command ID associated with the current phase, when known.",
+    )
+    phase_detail: str | None = Field(
+        default=None,
+        description="Compact human-readable detail for the current phase.",
+    )
+    last_mlx_memory: MlxMemorySnapshot | None = Field(
+        default=None,
+        description="Most recent MLX memory snapshot reported by the runner.",
+    )
+    flight_recorder: list[RunnerFlightRecorderEntry] = Field(
+        default_factory=list,
+        description="Last 128 local-only runner diagnostic events.",
+    )
     pending_task_ids: list[str] = Field(
         default_factory=list,
         description="Tasks sent to the supervisor but not acknowledged by the runner.",
@@ -173,6 +336,86 @@ class RunnerTaskCancelResponse(CamelCaseModel):
     )
     message: str = Field(
         description="Human-readable description of what the node did."
+    )
+
+
+class DiagnosticProcessSample(CamelCaseModel):
+    """One macOS process-sampling command result in a diagnostic capture bundle."""
+
+    name: str = Field(description="Sampling command name.")
+    command: list[str] = Field(description="Command argv that was attempted.")
+    ok: bool = Field(description="Whether the sampling command completed cleanly.")
+    exit_code: int | None = Field(
+        default=None,
+        description="Process exit code, when a command was launched.",
+    )
+    duration_seconds: float = Field(
+        description="Wall-clock duration spent waiting for the command."
+    )
+    stdout: str | None = Field(
+        default=None,
+        description="Truncated standard output from the sampling command.",
+    )
+    stderr: str | None = Field(
+        default=None,
+        description="Truncated standard error from the sampling command.",
+    )
+    error: str | None = Field(
+        default=None,
+        description="Structured failure reason when the command could not run.",
+    )
+
+
+class DiagnosticCaptureRequest(CamelCaseModel):
+    """Request payload for on-demand local or proxied node diagnostics capture."""
+
+    runner_id: RunnerId | None = Field(
+        default=None,
+        description="Optional runner ID to focus the capture bundle.",
+    )
+    task_id: TaskId | None = Field(
+        default=None,
+        description="Optional task ID to find the relevant runner for capture.",
+    )
+    include_process_samples: bool = Field(
+        default=True,
+        description="Whether to run heavyweight local process sampling commands.",
+    )
+    sample_duration_seconds: float = Field(
+        default=3.0,
+        ge=1.0,
+        le=10.0,
+        description="Requested duration for macOS sample collection.",
+    )
+
+
+class DiagnosticCaptureResponse(CamelCaseModel):
+    """On-demand diagnostics capture bundle for a local or proxied node."""
+
+    generated_at: str = Field(description="UTC timestamp when capture completed.")
+    node_id: NodeId = Field(description="Node that produced the capture bundle.")
+    node_diagnostics: "NodeDiagnostics" = Field(
+        description="Full live node diagnostics at capture time."
+    )
+    runner: RunnerSupervisorDiagnostics | None = Field(
+        default=None,
+        description="Matched runner diagnostics, when a runner or task filter matched.",
+    )
+    flight_recorder: list[RunnerFlightRecorderEntry] = Field(
+        default_factory=list,
+        description="Flight-recorder entries retained for the matched runner.",
+    )
+    mlx_memory: MlxMemorySnapshot | None = Field(
+        default=None,
+        description="Most recent MLX memory snapshot reported by the matched runner.",
+    )
+    process_samples: list[DiagnosticProcessSample] = Field(
+        default_factory=list,
+        description="Heavyweight process sampling results, when requested.",
+    )
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Capture warnings and partial-failure notes.",
     )
 
 

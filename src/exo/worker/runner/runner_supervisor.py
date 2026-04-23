@@ -17,7 +17,12 @@ from loguru import logger
 
 from exo.shared.types.chunks import ErrorChunk
 from exo.shared.types.diagnostics import (
+    MlxMemorySnapshot,
+    RunnerDiagnosticContext,
+    RunnerDiagnosticUpdate,
+    RunnerFlightRecorderEntry,
     RunnerLifecycleMilestone,
+    RunnerPhaseName,
     RunnerSupervisorDiagnostics,
     RunnerTaskDiagnostics,
 )
@@ -97,6 +102,7 @@ class RunnerSupervisor:
     runner_process: mp.Process
     initialize_timeout: float
     _ev_recv: MpReceiver[Event]
+    _diag_recv: MpReceiver[RunnerDiagnosticUpdate]
     _task_sender: MpSender[Task]
     _event_sender: Sender[Event]
     _cancel_sender: MpSender[TaskId]
@@ -117,6 +123,17 @@ class RunnerSupervisor:
     _milestones: deque[RunnerLifecycleMilestone] = field(
         default_factory=lambda: deque(maxlen=32), init=False
     )
+    _phase: RunnerPhaseName = field(default="created", init=False)
+    _phase_started_at: str = field(default_factory=_now_utc_iso, init=False)
+    _phase_started_monotonic: float = field(default_factory=time.monotonic, init=False)
+    _last_progress_at: str | None = field(default=None, init=False)
+    _active_task_id: str | None = field(default=None, init=False)
+    _active_command_id: str | None = field(default=None, init=False)
+    _phase_detail: str | None = field(default=None, init=False)
+    _last_mlx_memory: MlxMemorySnapshot | None = field(default=None, init=False)
+    _flight_recorder: deque[RunnerFlightRecorderEntry] = field(
+        default_factory=lambda: deque(maxlen=128), init=False
+    )
 
     def __post_init__(self) -> None:
         """Seed the lifecycle buffer with runner-supervisor construction."""
@@ -132,6 +149,7 @@ class RunnerSupervisor:
         initialize_timeout: float = 400,
     ) -> Self:
         ev_send, ev_recv = mp_channel[Event]()
+        diag_send, diag_recv = mp_channel[RunnerDiagnosticUpdate](max_buffer_size=256)
         task_sender, task_recv = mp_channel[Task]()
         cancel_sender, cancel_recv = mp_channel[TaskId]()
 
@@ -140,6 +158,7 @@ class RunnerSupervisor:
             args=(
                 bound_instance,
                 ev_send,
+                diag_send,
                 task_recv,
                 cancel_recv,
                 logger,
@@ -155,6 +174,7 @@ class RunnerSupervisor:
             runner_process=runner_process,
             initialize_timeout=initialize_timeout,
             _ev_recv=ev_recv,
+            _diag_recv=diag_recv,
             _task_sender=task_sender,
             _cancel_sender=cancel_sender,
             _event_sender=event_sender,
@@ -173,12 +193,15 @@ class RunnerSupervisor:
             async with self._tg as tg:
                 tg.start_soon(self._watch_runner)
                 tg.start_soon(self._forward_events)
+                tg.start_soon(self._forward_diagnostics)
         finally:
             logger.info("Runner supervisor shutting down")
             if not self._cancel_watch_runner.cancel_called:
                 self._cancel_watch_runner.cancel()
             with contextlib.suppress(ClosedResourceError):
                 self._ev_recv.close()
+            with contextlib.suppress(ClosedResourceError):
+                self._diag_recv.close()
             with contextlib.suppress(ClosedResourceError):
                 self._task_sender.close()
             with contextlib.suppress(ClosedResourceError):
@@ -249,6 +272,12 @@ class RunnerSupervisor:
             return
         self.cancelled.add(task_id)
         self._record_milestone("cancel_requested", str(task_id))
+        self._record_supervisor_phase(
+            "cancel_requested",
+            event="supervisor_cancel_requested",
+            detail=str(task_id),
+            task_id=str(task_id),
+        )
         with anyio.move_on_after(0.5) as scope:
             try:
                 await self._cancel_sender.send_async(task_id)
@@ -326,6 +355,16 @@ class RunnerSupervisor:
             for tid in self.pending:
                 self.pending[tid].set()
 
+    async def _forward_diagnostics(self) -> None:
+        """Consume local-only runner diagnostic updates without forwarding them."""
+
+        try:
+            with self._diag_recv as diagnostics:
+                async for update in diagnostics:
+                    self._apply_diagnostic_update(update)
+        except (ClosedResourceError, BrokenResourceError):
+            return
+
     async def _watch_runner(self) -> None:
         with self._cancel_watch_runner:
             while True:
@@ -397,6 +436,77 @@ class RunnerSupervisor:
             RunnerLifecycleMilestone(at=_now_utc_iso(), name=name, detail=detail)
         )
 
+    def _diagnostic_context(self) -> RunnerDiagnosticContext:
+        """Build the stable runner context used by supervisor-authored entries."""
+
+        return RunnerDiagnosticContext(
+            node_id=str(self.bound_instance.bound_node_id),
+            runner_id=str(self.bound_instance.bound_runner_id),
+            pid=self.runner_process.pid,
+            instance_id=str(self.bound_instance.instance.instance_id),
+            model_id=str(self.shard_metadata.model_card.model_id),
+            rank=self.shard_metadata.device_rank,
+            world_size=self.shard_metadata.world_size,
+            start_layer=self.shard_metadata.start_layer,
+            end_layer=self.shard_metadata.end_layer,
+            n_layers=self.shard_metadata.n_layers,
+        )
+
+    def _record_supervisor_phase(
+        self,
+        phase: RunnerPhaseName,
+        *,
+        event: str,
+        detail: str | None = None,
+        task_id: str | None = None,
+        command_id: str | None = None,
+    ) -> None:
+        """Record a supervisor-authored phase entry when runner IPC cannot help."""
+
+        update = RunnerDiagnosticUpdate(
+            at=_now_utc_iso(),
+            phase=phase,
+            event=event,
+            detail=detail,
+            context=self._diagnostic_context(),
+            task_id=task_id,
+            command_id=command_id,
+        )
+        self._apply_diagnostic_update(update)
+
+    def _apply_diagnostic_update(self, update: RunnerDiagnosticUpdate) -> None:
+        """Update live supervisor diagnostics from one runner diagnostic event."""
+
+        if update.phase != self._phase:
+            self._phase = update.phase
+            self._phase_started_at = update.at
+            self._phase_started_monotonic = time.monotonic()
+        self._last_progress_at = update.at
+        if update.task_id is not None:
+            self._active_task_id = update.task_id
+        if update.command_id is not None:
+            self._active_command_id = update.command_id
+        self._phase_detail = update.detail
+        if update.mlx_memory is not None:
+            self._last_mlx_memory = update.mlx_memory
+        self._flight_recorder.append(
+            RunnerFlightRecorderEntry(
+                at=update.at,
+                phase=update.phase,
+                event=update.event,
+                detail=update.detail,
+                attrs=update.attrs,
+                context=update.context,
+                task_id=update.task_id,
+                command_id=update.command_id,
+                mlx_memory=update.mlx_memory,
+            )
+        )
+        self._record_milestone(
+            f"phase:{update.phase}",
+            update.detail or update.event,
+        )
+
     def _task_diagnostics(self, task: Task) -> RunnerTaskDiagnostics:
         """Return a compact diagnostics view for a runner task."""
 
@@ -437,6 +547,15 @@ class RunnerSupervisor:
             status_kind=self.status.__class__.__name__,
             status_since=self._status_since,
             seconds_in_status=time.monotonic() - self._status_since_monotonic,
+            phase=self._phase,
+            phase_started_at=self._phase_started_at,
+            seconds_in_phase=time.monotonic() - self._phase_started_monotonic,
+            last_progress_at=self._last_progress_at,
+            active_task_id=self._active_task_id,
+            active_command_id=self._active_command_id,
+            phase_detail=self._phase_detail,
+            last_mlx_memory=self._last_mlx_memory,
+            flight_recorder=list(self._flight_recorder),
             pending_task_ids=[str(task_id) for task_id in self.pending],
             in_progress_tasks=[
                 self._task_diagnostics(task) for task in self.in_progress.values()

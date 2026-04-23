@@ -65,6 +65,7 @@ from mlx_lm.models.step3p5 import Step3p5Model as Step35InnerModel
 from exo.shared.constants import preferred_env_value
 from exo.shared.types.worker.shards import PipelineShardMetadata
 from exo.worker.runner.bootstrap import logger
+from exo.worker.runner.diagnostics import runner_phase
 
 if TYPE_CHECKING:
     from mlx_lm.models.cache import Cache
@@ -180,9 +181,17 @@ def _hang_debug_watch(label: str) -> Generator[None]:
 
 def flush_prefill_sends() -> None:
     for output, dst, group in _pending_prefill_sends:
-        with _hang_debug_watch(f"flush_prefill_sends send dst={dst}"):
+        with runner_phase(
+            "prefill_pipeline",
+            detail="flush_prefill_send",
+            attrs={"dst": dst, "shape": str(tuple(output.shape))},
+        ), _hang_debug_watch(f"flush_prefill_sends send dst={dst}"):
             sent = mx.distributed.send(output, dst, group=group)
-        with _hang_debug_watch(f"flush_prefill_sends async_eval dst={dst}"):
+        with runner_phase(
+            "prefill_pipeline",
+            detail="flush_prefill_async_eval",
+            attrs={"dst": dst},
+        ), _hang_debug_watch(f"flush_prefill_sends async_eval dst={dst}"):
             mx.async_eval(sent)
     _pending_prefill_sends.clear()
 
@@ -273,19 +282,35 @@ class PipelineFirstLayer(CustomMlxLayer):
         if self.r != 0:
             # We want to avoid GPU timeout errors by evalling the distributed operation
             # so that it stays on CPU, which does not have a timeout.
-            with _hang_debug_watch(
+            with runner_phase(
+                "prefill_pipeline" if self.is_prefill else "decode_stream",
+                detail="pipeline_first_eval_input",
+                attrs={"rank": self.r, "src": self.r - 1},
+            ), _hang_debug_watch(
                 f"pipeline_first eval_input rank={self.r} src={self.r - 1}"
             ):
                 mx.eval(x)
-            with _hang_debug_watch(
+            with runner_phase(
+                "prefill_pipeline" if self.is_prefill else "decode_stream",
+                detail="pipeline_first_recv_like",
+                attrs={"rank": self.r, "src": self.r - 1},
+            ), _hang_debug_watch(
                 f"pipeline_first recv_like rank={self.r} src={self.r - 1}"
             ):
                 x = mx.distributed.recv_like(x, (self.r - 1), group=self.group)
-            with _hang_debug_watch(
+            with runner_phase(
+                "prefill_pipeline" if self.is_prefill else "decode_stream",
+                detail="pipeline_first_eval_recv",
+                attrs={"rank": self.r, "src": self.r - 1},
+            ), _hang_debug_watch(
                 f"pipeline_first eval_recv rank={self.r} src={self.r - 1}"
             ):
                 mx.eval(x)
-        with _hang_debug_watch(f"pipeline_first original_layer rank={self.r}"):
+        with runner_phase(
+            "prefill_pipeline" if self.is_prefill else "decode_stream",
+            detail="pipeline_first_original_layer",
+            attrs={"rank": self.r},
+        ), _hang_debug_watch(f"pipeline_first original_layer rank={self.r}"):
             return self.original_layer(x, *args, **kwargs)
 
 
@@ -310,14 +335,22 @@ class PipelineLastLayer(CustomMlxLayer):
             x, *args, **kwargs
         ).arguments.get("cache", None)
 
-        with _hang_debug_watch(
+        with runner_phase(
+            "prefill_pipeline" if self.is_prefill else "decode_stream",
+            detail="pipeline_last_original_layer",
+            attrs={"rank": self.r, "world_size": self.s, "prefill": self.is_prefill},
+        ), _hang_debug_watch(
             f"pipeline_last original_layer rank={self.r} world={self.s} prefill={self.is_prefill}"
         ):
             output: mx.array = self.original_layer(x, *args, **kwargs)
 
         # Eval layer output to materialize it before send — this splits the graph
         # so the send is isolated and the receiving rank's recv can complete.
-        with _hang_debug_watch(
+        with runner_phase(
+            "prefill_pipeline" if self.is_prefill else "decode_stream",
+            detail="pipeline_last_eval_output",
+            attrs={"rank": self.r, "world_size": self.s, "prefill": self.is_prefill},
+        ), _hang_debug_watch(
             f"pipeline_last eval_output rank={self.r} world={self.s} prefill={self.is_prefill}"
         ):
             mx.eval(output)
@@ -328,7 +361,15 @@ class PipelineLastLayer(CustomMlxLayer):
                     (output, (self.r + 1) % self.s, self.group)
                 )
             else:
-                with _hang_debug_watch(
+                with runner_phase(
+                    "prefill_pipeline" if self.is_prefill else "decode_stream",
+                    detail="pipeline_last_send",
+                    attrs={
+                        "rank": self.r,
+                        "dst": (self.r + 1) % self.s,
+                        "prefill": self.is_prefill,
+                    },
+                ), _hang_debug_watch(
                     f"pipeline_last send rank={self.r} dst={(self.r + 1) % self.s} prefill={self.is_prefill}"
                 ):
                     output = mx.distributed.send(

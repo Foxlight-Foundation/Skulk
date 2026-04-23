@@ -2,7 +2,14 @@ import { useEffect, useState } from 'react';
 import styled from 'styled-components';
 import { Button } from '../common/Button';
 import { formatBytes } from '../../utils/format';
-import type { NodeDiagnostics, DiagnosticsProcess } from '../../types/diagnostics';
+import type {
+  DiagnosticCaptureResponse,
+  DiagnosticsProcess,
+  MlxMemorySnapshot,
+  NodeDiagnostics,
+  RunnerFlightRecorderEntry,
+  RunnerSupervisorDiagnostics,
+} from '../../types/diagnostics';
 
 /** Props for the read-only node diagnostics drawer. */
 export interface DiagnosticsDrawerProps {
@@ -188,6 +195,42 @@ const TaskActionMeta = styled.div`
   color: ${({ theme }) => theme.colors.textSecondary};
 `;
 
+const TaskActionButtons = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+`;
+
+const CapturePanel = styled.div`
+  border: 1px solid ${({ theme }) => theme.colors.borderLight};
+  border-radius: ${({ theme }) => theme.radii.md};
+  padding: 10px;
+  margin: 10px 0;
+  background: ${({ theme }) => theme.colors.surface};
+`;
+
+const CaptureActions = styled.div`
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+`;
+
+const JsonPreview = styled.pre`
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 8px 0 0;
+  padding: 8px;
+  border-radius: ${({ theme }) => theme.radii.md};
+  background: ${({ theme }) => theme.colors.surfaceSunken};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  font-family: ${({ theme }) => theme.fonts.mono};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+`;
+
 function memoryUsage(bytes?: number | null): string {
   if (bytes == null) return 'unknown';
   return formatBytes(bytes);
@@ -201,6 +244,39 @@ function shortId(id: string): string {
   return id.length > 12 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
 }
 
+function mlxMemorySummary(snapshot?: MlxMemorySnapshot | null): string {
+  if (!snapshot) return 'none reported';
+  return [
+    `active ${memoryUsage(snapshot.active?.inBytes)}`,
+    `cache ${memoryUsage(snapshot.cache?.inBytes)}`,
+    `peak ${memoryUsage(snapshot.peak?.inBytes)}`,
+    `wired ${memoryUsage(snapshot.wiredLimit?.inBytes)}`,
+  ].join(' · ');
+}
+
+function phaseTone(runner: RunnerSupervisorDiagnostics): 'good' | 'warn' | 'neutral' {
+  if (!runner.processAlive) return 'warn';
+  if (runner.secondsInPhase >= 120 && runner.inProgressTasks.length > 0) return 'warn';
+  if (runner.secondsInPhase >= 30 && runner.inProgressTasks.length > 0) return 'warn';
+  if (runner.statusKind === 'RunnerRunning' || runner.statusKind === 'RunnerReady') return 'good';
+  return 'neutral';
+}
+
+function recorderLine(entry: RunnerFlightRecorderEntry): string {
+  const attrs = Object.entries(entry.attrs ?? {})
+    .slice(0, 4)
+    .map(([key, value]) => `${key}=${Array.isArray(value) ? value.join('|') : value}`)
+    .join(' ');
+  return [
+    entry.at,
+    entry.phase,
+    entry.event,
+    entry.detail,
+    entry.taskId ? `task=${shortId(entry.taskId)}` : null,
+    attrs || null,
+  ].filter(Boolean).join(' · ');
+}
+
 export function DiagnosticsDrawer({ nodeId, onClose }: DiagnosticsDrawerProps) {
   const [diagnostics, setDiagnostics] = useState<NodeDiagnostics | null>(null);
   const [loading, setLoading] = useState(false);
@@ -209,6 +285,9 @@ export function DiagnosticsDrawer({ nodeId, onClose }: DiagnosticsDrawerProps) {
   const [cancelMessage, setCancelMessage] = useState<string | null>(null);
   const [cancelError, setCancelError] = useState<string | null>(null);
   const [cancelActionKey, setCancelActionKey] = useState<string | null>(null);
+  const [captureBundle, setCaptureBundle] = useState<DiagnosticCaptureResponse | null>(null);
+  const [captureError, setCaptureError] = useState<string | null>(null);
+  const [captureActionKey, setCaptureActionKey] = useState<string | null>(null);
 
   useEffect(() => {
     if (!nodeId) {
@@ -218,6 +297,9 @@ export function DiagnosticsDrawer({ nodeId, onClose }: DiagnosticsDrawerProps) {
       setCancelMessage(null);
       setCancelError(null);
       setCancelActionKey(null);
+      setCaptureBundle(null);
+      setCaptureError(null);
+      setCaptureActionKey(null);
       return;
     }
 
@@ -277,6 +359,55 @@ export function DiagnosticsDrawer({ nodeId, onClose }: DiagnosticsDrawerProps) {
     } finally {
       setCancelActionKey(null);
     }
+  }
+
+  async function requestCaptureBundle(runnerId: string, taskId?: string | null) {
+    const actionKey = `${runnerId}:${taskId ?? 'runner'}`;
+    setCaptureActionKey(actionKey);
+    setCaptureError(null);
+    setCaptureBundle(null);
+
+    try {
+      const response = await fetch(
+        `/v1/diagnostics/cluster/${encodeURIComponent(nodeId)}/capture`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            runnerId,
+            taskId: taskId ?? undefined,
+            includeProcessSamples: true,
+            sampleDurationSeconds: 3,
+          }),
+        },
+      );
+      const payload = await response.json().catch(() => null) as DiagnosticCaptureResponse | { detail?: string } | null;
+      if (!response.ok) {
+        throw new Error((payload as { detail?: string } | null)?.detail ?? `Capture request failed: ${response.status}`);
+      }
+      setCaptureBundle(payload as DiagnosticCaptureResponse);
+      setReloadToken((value) => value + 1);
+    } catch (err: unknown) {
+      setCaptureError(err instanceof Error ? err.message : 'Capture request failed');
+    } finally {
+      setCaptureActionKey(null);
+    }
+  }
+
+  async function copyCaptureBundle() {
+    if (!captureBundle) return;
+    await navigator.clipboard.writeText(JSON.stringify(captureBundle, null, 2));
+  }
+
+  function downloadCaptureBundle() {
+    if (!captureBundle) return;
+    const blob = new Blob([JSON.stringify(captureBundle, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `skulk-diagnostics-${captureBundle.nodeId}-${Date.now()}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
   }
 
   return (
@@ -361,6 +492,21 @@ export function DiagnosticsDrawer({ nodeId, onClose }: DiagnosticsDrawerProps) {
               </Warning>
               {cancelMessage && <Warning>{cancelMessage}</Warning>}
               {cancelError && <Warning>{cancelError}</Warning>}
+              {captureError && <Warning>{captureError}</Warning>}
+              {captureBundle && (
+                <CapturePanel>
+                  <Row><Key>Captured</Key><Value>{captureBundle.generatedAt}</Value></Row>
+                  <Row><Key>Runner</Key><Value>{captureBundle.runner ? shortId(captureBundle.runner.runnerId) : 'none'}</Value></Row>
+                  <Row><Key>MLX memory</Key><Value>{mlxMemorySummary(captureBundle.mlxMemory)}</Value></Row>
+                  <Row><Key>Samples</Key><Value>{captureBundle.processSamples.map((sample) => `${sample.name}:${sample.ok ? 'ok' : sample.error ?? 'failed'}`).join(', ') || 'none'}</Value></Row>
+                  {captureBundle.warnings.map((warning) => <Warning key={warning}>{warning}</Warning>)}
+                  <CaptureActions>
+                    <Button variant="outline" size="sm" onClick={() => void copyCaptureBundle()}>Copy JSON</Button>
+                    <Button variant="outline" size="sm" onClick={downloadCaptureBundle}>Download JSON</Button>
+                  </CaptureActions>
+                  <JsonPreview>{JSON.stringify(captureBundle, null, 2)}</JsonPreview>
+                </CapturePanel>
+              )}
               {diagnostics.supervisorRunners.length === 0 ? (
                 <Value>No local runner supervisors reported by this node.</Value>
               ) : diagnostics.supervisorRunners.map((runner) => (
@@ -376,6 +522,17 @@ export function DiagnosticsDrawer({ nodeId, onClose }: DiagnosticsDrawerProps) {
                   </Row>
                   <Row><Key>Shard</Key><Value>rank {runner.deviceRank}/{runner.worldSize} · layers {runner.startLayer}:{runner.endLayer}</Value></Row>
                   <Row><Key>Instance</Key><Value>{shortId(runner.instanceId)} · {runner.modelId}</Value></Row>
+                  <Row>
+                    <Key>Phase</Key>
+                    <Value $warn={phaseTone(runner) === 'warn'}>
+                      <Pill $tone={phaseTone(runner)}>{runner.phase}</Pill>{' '}
+                      {Math.round(runner.secondsInPhase)}s
+                      {runner.phaseDetail ? ` · ${runner.phaseDetail}` : ''}
+                    </Value>
+                  </Row>
+                  <Row><Key>Last progress</Key><Value>{runner.lastProgressAt ?? 'none'}</Value></Row>
+                  <Row><Key>Active task</Key><Value>{runner.activeTaskId ? shortId(runner.activeTaskId) : 'none'}</Value></Row>
+                  <Row><Key>MLX memory</Key><Value>{mlxMemorySummary(runner.lastMlxMemory)}</Value></Row>
                   <Row><Key>Last task sent</Key><Value>{runner.lastTaskSentAt ?? 'none'}</Value></Row>
                   <Row><Key>Last event</Key><Value>{runner.lastEventType ?? 'none'} {runner.lastEventReceivedAt ? `at ${runner.lastEventReceivedAt}` : ''}</Value></Row>
                   <Row>
@@ -398,18 +555,40 @@ export function DiagnosticsDrawer({ nodeId, onClose }: DiagnosticsDrawerProps) {
                               {task.taskKind}:{shortId(task.taskId)} · {task.taskStatus}
                               {task.commandId ? ` · cmd ${shortId(task.commandId)}` : ''}
                             </TaskActionMeta>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              loading={cancelActionKey === actionKey}
-                              onClick={() => { void requestRunnerCancel(runner.runnerId, task.taskId); }}
-                            >
-                              Cancel task
-                            </Button>
+                            <TaskActionButtons>
+                              <Button
+                                size="sm"
+                                variant="primary"
+                                loading={captureActionKey === actionKey}
+                                onClick={() => { void requestCaptureBundle(runner.runnerId, task.taskId); }}
+                              >
+                                Capture bundle
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                loading={cancelActionKey === actionKey}
+                                onClick={() => { void requestRunnerCancel(runner.runnerId, task.taskId); }}
+                              >
+                                Cancel task
+                              </Button>
+                            </TaskActionButtons>
                           </TaskActionItem>
                         );
                       })}
                     </TaskActionList>
+                  )}
+                  {runner.inProgressTasks.length === 0 && (
+                    <CaptureActions>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        loading={captureActionKey === `${runner.runnerId}:runner`}
+                        onClick={() => { void requestCaptureBundle(runner.runnerId); }}
+                      >
+                        Capture runner bundle
+                      </Button>
+                    </CaptureActions>
                   )}
                   <Row>
                     <Key>Cancelled</Key>
@@ -426,6 +605,18 @@ export function DiagnosticsDrawer({ nodeId, onClose }: DiagnosticsDrawerProps) {
                         </MilestoneItem>
                       ))}
                     </MilestoneList>
+                  )}
+                  {runner.flightRecorder.length > 0 && (
+                    <>
+                      <Row><Key>Flight recorder</Key><Value>{runner.flightRecorder.length} entries</Value></Row>
+                      <MilestoneList>
+                        {runner.flightRecorder.slice(-8).reverse().map((entry, index) => (
+                          <MilestoneItem key={`${entry.at}-${entry.event}-${index}`}>
+                            {recorderLine(entry)}
+                          </MilestoneItem>
+                        ))}
+                      </MilestoneList>
+                    </>
                   )}
                 </RunnerCard>
               ))}

@@ -13,7 +13,12 @@ from exo.shared.models.model_cards import ModelCard, ModelTask
 from exo.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
 from exo.shared.types.common import ModelId, NodeId
 from exo.shared.types.diagnostics import (
+    DiagnosticCaptureResponse,
+    DiagnosticProcessSample,
+    MlxMemorySnapshot,
     NodeDiagnostics,
+    RunnerDiagnosticContext,
+    RunnerFlightRecorderEntry,
     RunnerLifecycleMilestone,
     RunnerSupervisorDiagnostics,
     RunnerTaskCancelResponse,
@@ -169,6 +174,44 @@ def test_node_diagnostics_flags_orphaned_live_runner_tasks() -> None:
                 status_kind="RunnerRunning",
                 status_since="2026-04-23T00:00:00+00:00",
                 seconds_in_status=42.0,
+                phase="decode_wait_first_token",
+                phase_started_at="2026-04-23T00:00:02+00:00",
+                seconds_in_phase=40.0,
+                last_progress_at="2026-04-23T00:00:02+00:00",
+                active_task_id="orphan-task",
+                active_command_id="command-1",
+                phase_detail="stream_generate_first_token",
+                last_mlx_memory=MlxMemorySnapshot(
+                    generated_at="2026-04-23T00:00:02+00:00",
+                    active=Memory.from_mb(1024),
+                    cache=Memory.from_mb(128),
+                    peak=Memory.from_mb(2048),
+                    wired_limit=None,
+                    source="mlx.core",
+                ),
+                flight_recorder=[
+                    RunnerFlightRecorderEntry(
+                        at="2026-04-23T00:00:02+00:00",
+                        phase="decode_wait_first_token",
+                        event="enter",
+                        detail="stream_generate_first_token",
+                        attrs={"prompt_tokens": 123},
+                        context=RunnerDiagnosticContext(
+                            node_id="local-node",
+                            runner_id="runner-1",
+                            pid=1234,
+                            instance_id="instance-1",
+                            model_id="mlx-community/gemma-4-26b-a4b-it-4bit",
+                            rank=0,
+                            world_size=2,
+                            start_layer=0,
+                            end_layer=15,
+                            n_layers=30,
+                        ),
+                        task_id="orphan-task",
+                        command_id="command-1",
+                    )
+                ],
                 pending_task_ids=[],
                 in_progress_tasks=[
                     RunnerTaskDiagnostics(
@@ -226,6 +269,132 @@ def test_node_diagnostics_flags_orphaned_live_runner_tasks() -> None:
         "cluster state no longer tracks that task" in cast(str, warning)
         for warning in placement_warnings
     )
+
+
+def test_capture_local_node_diagnostics_returns_runner_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local capture should include flight recorder and partial process samples."""
+
+    api = _build_api("local-node")
+    runner = RunnerSupervisorDiagnostics(
+        runner_id="runner-1",
+        instance_id="instance-1",
+        node_id="local-node",
+        model_id="mlx-community/gemma-4-26b-a4b-it-4bit",
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=30,
+        n_layers=30,
+        pid=1234,
+        process_alive=True,
+        exit_code=None,
+        status_kind="RunnerRunning",
+        status_since="2026-04-23T00:00:00+00:00",
+        seconds_in_status=12.0,
+        phase="decode_wait_first_token",
+        phase_started_at="2026-04-23T00:00:01+00:00",
+        seconds_in_phase=11.0,
+        last_progress_at="2026-04-23T00:00:01+00:00",
+        active_task_id="task-1",
+        active_command_id="command-1",
+        phase_detail="stream_generate_first_token",
+        last_mlx_memory=MlxMemorySnapshot(
+            generated_at="2026-04-23T00:00:01+00:00",
+            active=Memory.from_mb(512),
+            cache=Memory.from_mb(64),
+            peak=Memory.from_mb(1024),
+            wired_limit=None,
+            source="mlx.core",
+        ),
+        flight_recorder=[
+            RunnerFlightRecorderEntry(
+                at="2026-04-23T00:00:01+00:00",
+                phase="decode_wait_first_token",
+                event="enter",
+                detail="stream_generate_first_token",
+                attrs={"prompt_tokens": 42},
+                context=RunnerDiagnosticContext(
+                    node_id="local-node",
+                    runner_id="runner-1",
+                    pid=1234,
+                    instance_id="instance-1",
+                    model_id="mlx-community/gemma-4-26b-a4b-it-4bit",
+                    rank=0,
+                    world_size=1,
+                    start_layer=0,
+                    end_layer=30,
+                    n_layers=30,
+                ),
+                task_id="task-1",
+                command_id="command-1",
+            )
+        ],
+        pending_task_ids=[],
+        in_progress_tasks=[
+            RunnerTaskDiagnostics(
+                task_id="task-1",
+                task_kind="TextGeneration",
+                task_status="Running",
+                instance_id="instance-1",
+                command_id="command-1",
+                runner_id="runner-1",
+                model_id="mlx-community/gemma-4-26b-a4b-it-4bit",
+            )
+        ],
+        completed_task_count=0,
+        cancelled_task_ids=[],
+        last_task_sent_at="2026-04-23T00:00:00+00:00",
+        last_event_received_at="2026-04-23T00:00:01+00:00",
+        last_event_type="ChunkGenerated",
+        milestones=[],
+    )
+    api.set_runner_diagnostics_provider(lambda: [runner])
+
+    async def _sample_runner(_pid: int, _duration: float) -> list[DiagnosticProcessSample]:
+        return [
+            DiagnosticProcessSample(
+                name="sample",
+                command=["sample", "1234", "3"],
+                ok=False,
+                exit_code=1,
+                duration_seconds=0.1,
+                stderr="permission denied",
+                error="Command exited non-zero",
+            )
+        ]
+
+    monkeypatch.setattr(api, "_collect_process_samples", _sample_runner)
+    client = TestClient(api.app)
+
+    response = client.post(
+        "/v1/diagnostics/node/capture",
+        json={"runnerId": "runner-1", "taskId": "task-1"},
+    )
+
+    assert response.status_code == 200
+    body = _json_object(response)
+    assert _json_mapping(body["runner"])["phase"] == "decode_wait_first_token"
+    assert _json_mapping(body["mlxMemory"])["source"] == "mlx.core"
+    assert len(_json_list(body["flightRecorder"])) == 1
+    samples = _json_list(body["processSamples"])
+    assert _json_mapping(samples[0])["ok"] is False
+
+
+def test_capture_local_node_diagnostics_rejects_unknown_runner() -> None:
+    """Capture should return a clear 404 for unknown focused runner IDs."""
+
+    api = _build_api("local-node")
+    client = TestClient(api.app)
+
+    response = client.post(
+        "/v1/diagnostics/node/capture",
+        json={"runnerId": "runner-missing"},
+    )
+
+    assert response.status_code == 404
+    assert "No local runner matched" in response.text
 
 
 def test_cluster_diagnostics_returns_local_and_peer_results(
@@ -385,3 +554,74 @@ def test_cancel_cluster_runner_task_proxies_to_peer(
     body = _json_object(response)
     assert body["nodeId"] == "peer-node"
     assert body["status"] == "cancel_requested"
+
+
+def test_capture_cluster_node_diagnostics_proxies_to_peer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cluster capture should proxy the request body to a reachable peer."""
+
+    api = _build_api("local-node")
+    client = TestClient(api.app)
+
+    async def _reachable_peer_api_urls() -> dict[str, str]:
+        return {"peer-node": "http://peer-node:52415"}
+
+    capture = DiagnosticCaptureResponse(
+        generated_at="2026-04-23T00:00:00+00:00",
+        node_id=NodeId("peer-node"),
+        node_diagnostics=NodeDiagnostics(
+            generated_at="2026-04-23T00:00:00+00:00",
+            runtime=api._runtime_diagnostics().model_copy(  # pyright: ignore[reportPrivateUsage]
+                update={"node_id": "peer-node", "hostname": "peer-node.local"}
+            ),
+            resources=api._resource_diagnostics(),  # pyright: ignore[reportPrivateUsage]
+        ),
+        flight_recorder=[],
+        process_samples=[],
+        warnings=[],
+    )
+
+    class _FakeAsyncClient:
+        async def __aenter__(self) -> "_FakeAsyncClient":
+            return self
+
+        async def __aexit__(
+            self,
+            _exc_type: object,
+            _exc: object,
+            _tb: object,
+        ) -> None:
+            return None
+
+        async def post(self, url: str, json: object) -> httpx.Response:
+            assert url == "http://peer-node:52415/v1/diagnostics/node/capture"
+            assert json == {
+                "runnerId": "runner-1",
+                "taskId": "task-1",
+                "includeProcessSamples": True,
+                "sampleDurationSeconds": 3.0,
+            }
+            return httpx.Response(
+                200,
+                json=capture.model_dump(mode="json", by_alias=True),
+                request=httpx.Request("POST", url),
+            )
+
+    def _build_async_client(
+        *_args: object,
+        **_kwargs: object,
+    ) -> _FakeAsyncClient:
+        return _FakeAsyncClient()
+
+    monkeypatch.setattr(api, "_reachable_peer_api_urls", _reachable_peer_api_urls)
+    monkeypatch.setattr(api_main.httpx, "AsyncClient", _build_async_client)
+
+    response = client.post(
+        "/v1/diagnostics/cluster/peer-node/capture",
+        json={"runnerId": "runner-1", "taskId": "task-1"},
+    )
+
+    assert response.status_code == 200
+    body = _json_object(response)
+    assert body["nodeId"] == "peer-node"

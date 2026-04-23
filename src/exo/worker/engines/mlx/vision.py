@@ -46,6 +46,7 @@ from exo.worker.engines.mlx.cache import encode_prompt
 from exo.worker.engines.mlx.gemma4_prompt import render_gemma4_prompt
 from exo.worker.engines.mlx.utils_mlx import fix_unmatched_think_end_tokens
 from exo.worker.runner.bootstrap import logger
+from exo.worker.runner.diagnostics import record_runner_phase, runner_phase
 
 JsonDict = dict[str, object]
 MxArrayInput = (
@@ -307,6 +308,16 @@ def _format_vlm_messages(
     formatted: list[JsonDict] = []
     image_count = sum(_count_image_parts(msg) for msg in messages)
     label_images = model_type in {"gemma3n", "gemma4"} and image_count > 1
+    record_runner_phase(
+        "vision_preprocess",
+        event="format_vlm_messages",
+        attrs={
+            "model_type": model_type,
+            "message_count": len(messages),
+            "image_count": image_count,
+            "gemma_image_label_count": image_count if label_images else 0,
+        },
+    )
     image_number = 1
     for msg in messages:
         role = str(msg.get("role", "user"))
@@ -419,6 +430,14 @@ def build_vision_prompt(
             i += 1
 
     return "".join(result)
+
+
+def _pixel_value_shapes(pixel_values: mx.array | list[mx.array]) -> list[str]:
+    """Return compact tensor shape strings for diagnostics."""
+
+    if isinstance(pixel_values, list):
+        return [str(tuple(value.shape)) for value in pixel_values]
+    return [str(tuple(pixel_values.shape))]
 
 
 @dataclass
@@ -839,7 +858,16 @@ class VisionEncoder:
     ) -> tuple[mx.array | list[mx.array], mx.array | None, list[int]]:
         """Public interface to image preprocessing (pixel_values + token counts)."""
         self.ensure_processor_loaded()
-        return self._preprocess_images(pil_images, processor_kwargs=processor_kwargs)
+        with runner_phase(
+            "vision_preprocess",
+            detail="preprocess_images",
+            attrs={
+                "image_count": len(pil_images),
+                "processor_kwargs": list((processor_kwargs or {}).keys()),
+            },
+            include_memory=True,
+        ):
+            return self._preprocess_images(pil_images, processor_kwargs=processor_kwargs)
 
     def encode_images(self, images: list[str]) -> tuple[mx.array, list[int]]:
         """Encode base64 images into feature tensors and per-image token counts."""
@@ -847,12 +875,32 @@ class VisionEncoder:
         assert self._vision_tower is not None
         assert self._processor is not None
 
-        pil_images = [decode_base64_image(b64) for b64 in images]
+        with runner_phase(
+            "vision_preprocess",
+            detail="base64_decode",
+            attrs={"image_count": len(images)},
+        ):
+            pil_images = [decode_base64_image(b64) for b64 in images]
         for idx, img in enumerate(pil_images):
             logger.info(f"Image {idx}: {img.width}x{img.height} mode={img.mode}")
+            record_runner_phase(
+                "vision_preprocess",
+                event="image_decoded",
+                attrs={"image_index": idx, "width": img.width, "height": img.height},
+            )
 
         pixel_values, grid_thw, n_tokens_per_image = self._preprocess_images(
             pil_images
+        )
+        record_runner_phase(
+            "vision_preprocess",
+            event="image_preprocessed",
+            attrs={
+                "image_count": len(pil_images),
+                "pixel_value_shapes": _pixel_value_shapes(pixel_values),
+                "tokens_per_image": [str(token_count) for token_count in n_tokens_per_image],
+            },
+            include_memory=True,
         )
         hidden_states = self._run_vision_tower(pixel_values, grid_thw)
 
@@ -1170,6 +1218,12 @@ class VisionProcessor:
         model: Model,
     ) -> VisionResult:
         logger.info(f"Vision pipeline: {len(images)} image(s)")
+        record_runner_phase(
+            "vision_preprocess",
+            event="vision_process_start",
+            attrs={"image_count": len(images)},
+            include_memory=True,
+        )
 
         native = has_native_vision(model)
         if native:
@@ -1217,6 +1271,15 @@ class VisionProcessor:
         n_image_tokens = int(
             mx.sum(mx.equal(prompt_tokens, self.vision_config.image_token_id)).item()
         )
+        record_runner_phase(
+            "vision_preprocess",
+            event="image_token_expansion",
+            attrs={
+                "prompt_tokens": len(prompt_tokens),
+                "image_token_count": n_image_tokens,
+                "image_count": len(images),
+            },
+        )
         logger.info(
             f"Encoded prompt: {len(prompt_tokens)} tokens, {n_image_tokens} image pad tokens"
         )
@@ -1235,6 +1298,17 @@ class VisionProcessor:
             self.vision_config.image_token_id,
             boi_token_id=self.vision_config.boi_token_id,
             eoi_token_id=self.vision_config.eoi_token_id,
+        )
+        record_runner_phase(
+            "vision_preprocess",
+            event="media_regions_ready",
+            attrs={
+                "media_region_count": len(media_regions),
+                "media_region_lengths": [
+                    str(region.end_pos - region.start_pos)
+                    for region in media_regions
+                ],
+            },
         )
 
         return VisionResult(
@@ -1275,10 +1349,32 @@ class VisionProcessor:
                     f"rgb_sha256={debug.rgb_sha256[:12]}..."
                 )
                 _maybe_dump_debug_image(img, debug, idx)
+                record_runner_phase(
+                    "vision_preprocess",
+                    event="native_image_decoded",
+                    attrs={
+                        "image_index": idx,
+                        "width": img.width,
+                        "height": img.height,
+                        "raw_bytes": debug.raw_bytes,
+                        "raw_sha256": debug.raw_sha256[:12],
+                        "rgb_sha256": debug.rgb_sha256[:12],
+                    },
+                )
         else:
-            pil_images = [decode_base64_image(b64) for b64 in images]
+            with runner_phase(
+                "vision_preprocess",
+                detail="native_base64_decode",
+                attrs={"image_count": len(images)},
+            ):
+                pil_images = [decode_base64_image(b64) for b64 in images]
             for idx, img in enumerate(pil_images):
                 logger.debug(f"Image {idx}: {img.width}x{img.height} mode={img.mode}")
+                record_runner_phase(
+                    "vision_preprocess",
+                    event="native_image_decoded",
+                    attrs={"image_index": idx, "width": img.width, "height": img.height},
+                )
 
         processor_kwargs = (
             _gemma4_native_processor_kwargs(chat_template_messages, processor)
@@ -1289,6 +1385,17 @@ class VisionProcessor:
         pixel_values, _grid_thw, n_tokens_per_image = self._encoder.preprocess_images(
             pil_images,
             processor_kwargs=processor_kwargs,
+        )
+        record_runner_phase(
+            "vision_preprocess",
+            event="native_image_preprocessed",
+            attrs={
+                "image_count": len(images),
+                "processor_kwargs": list(processor_kwargs.keys()),
+                "pixel_value_shapes": _pixel_value_shapes(pixel_values),
+                "tokens_per_image": [str(token_count) for token_count in n_tokens_per_image],
+            },
+            include_memory=True,
         )
         logger.info(
             f"Native vision: preprocessed {len(images)} image(s), "
@@ -1317,6 +1424,17 @@ class VisionProcessor:
         n_image_tokens = int(
             mx.sum(mx.equal(prompt_tokens, self.vision_config.image_token_id)).item()
         )
+        record_runner_phase(
+            "vision_preprocess",
+            event="native_image_token_expansion",
+            attrs={
+                "prompt_tokens": len(prompt_tokens),
+                "image_token_count": n_image_tokens,
+                "gemma_image_label_count": len(images)
+                if self.vision_config.model_type == "gemma4" and len(images) > 1
+                else 0,
+            },
+        )
         logger.info(
             f"Encoded prompt: {len(prompt_tokens)} tokens, {n_image_tokens} image pad tokens"
         )
@@ -1327,6 +1445,17 @@ class VisionProcessor:
             self.vision_config.image_token_id,
             boi_token_id=self.vision_config.boi_token_id,
             eoi_token_id=self.vision_config.eoi_token_id,
+        )
+        record_runner_phase(
+            "vision_preprocess",
+            event="native_media_regions_ready",
+            attrs={
+                "media_region_count": len(media_regions),
+                "media_region_lengths": [
+                    str(region.end_pos - region.start_pos)
+                    for region in media_regions
+                ],
+            },
         )
 
         # Native vision models fuse image features inside __call__ during prefill,

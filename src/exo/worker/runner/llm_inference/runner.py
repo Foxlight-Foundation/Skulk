@@ -72,6 +72,7 @@ from exo.worker.engines.mlx.utils_mlx import (
 )
 from exo.worker.engines.mlx.vision import VisionProcessor
 from exo.worker.runner.bootstrap import logger
+from exo.worker.runner.diagnostics import record_runner_phase, runner_phase
 from exo.worker.runner.llm_inference.batch_generator import (
     BatchGenerator,
     InferenceGenerator,
@@ -184,6 +185,7 @@ class Runner:
             TaskId,
             TextGeneration,
         ] = {}
+        self._generator_step_count = 0
 
         logger.info("runner created")
         self.update_status(RunnerIdle())
@@ -233,6 +235,14 @@ class Runner:
         )
 
     def acknowledge_task(self, task: Task):
+        command_id = str(task.command_id) if isinstance(task, TextGeneration) else None
+        record_runner_phase(
+            "task_submission",
+            event="task_acknowledged",
+            detail=task.__class__.__name__,
+            task_id=task.task_id,
+            command_id=command_id,
+        )
         self.event_sender.send(TaskAcknowledged(task_id=task.task_id))
 
     def main(self):
@@ -258,7 +268,13 @@ class Runner:
                 self.update_status(RunnerConnecting())
                 self.acknowledge_task(task)
 
-                self.generator.group = initialize_mlx(self.bound_instance)
+                with runner_phase(
+                    "connect_group",
+                    detail="initialize_mlx",
+                    task_id=task.task_id,
+                    include_memory=True,
+                ):
+                    self.generator.group = initialize_mlx(self.bound_instance)
 
                 self.send_task_status(task.task_id, TaskStatus.Complete)
                 self.update_status(RunnerConnected())
@@ -299,18 +315,31 @@ class Runner:
                 assert (
                     ModelTask.TextGeneration in self.shard_metadata.model_card.tasks
                 ), f"Incorrect model task(s): {self.shard_metadata.model_card.tasks}"
-                (
-                    self.generator.inference_model,
-                    self.generator.tokenizer,
-                    self.generator.vision_processor,
-                ) = load_mlx_items(
-                    self.bound_instance,
-                    self.generator.group,
-                    on_timeout=on_model_load_timeout,
-                    on_layer_loaded=on_layer_loaded,
-                )
+                with runner_phase(
+                    "load_model",
+                    detail="load_mlx_items",
+                    task_id=task.task_id,
+                    include_memory=True,
+                ):
+                    (
+                        self.generator.inference_model,
+                        self.generator.tokenizer,
+                        self.generator.vision_processor,
+                    ) = load_mlx_items(
+                        self.bound_instance,
+                        self.generator.group,
+                        on_timeout=on_model_load_timeout,
+                        on_layer_loaded=on_layer_loaded,
+                    )
 
-                self.generator = self.generator.build()
+                    self.generator = self.generator.build()
+                record_runner_phase(
+                    "load_model",
+                    event="loaded",
+                    detail="builder_complete",
+                    task_id=task.task_id,
+                    include_memory=True,
+                )
 
                 self.send_task_status(task.task_id, TaskStatus.Complete)
                 self.update_status(RunnerLoaded())
@@ -339,7 +368,14 @@ class Runner:
                         "or set it to 0 to restore synthetic warmup)"
                     )
                 else:
-                    warmup_generator.warmup()
+                    with runner_phase(
+                        "warmup",
+                        detail="warmup_generator",
+                        task_id=task.task_id,
+                        attrs={"group_size": group_size},
+                        include_memory=True,
+                    ):
+                        warmup_generator.warmup()
 
                 logger.info(
                     f"runner initialized in {time.time() - self.setup_start_time} seconds"
@@ -347,6 +383,12 @@ class Runner:
 
                 self.send_task_status(task.task_id, TaskStatus.Complete)
                 self.update_status(RunnerReady())
+                record_runner_phase(
+                    "idle",
+                    event="runner_ready",
+                    task_id=task.task_id,
+                    include_memory=True,
+                )
                 logger.info(f"runner ready ({self._lifecycle_context()})")
 
             case TextGeneration() if isinstance(self.current_status, RunnerReady):
@@ -365,19 +407,48 @@ class Runner:
 
     def shutdown(self, task: Task):
         logger.info("runner shutting down")
+        record_runner_phase(
+            "shutdown_cleanup",
+            event="runner_shutdown_requested",
+            task_id=task.task_id,
+            include_memory=True,
+        )
         self.update_status(RunnerShuttingDown())
         self.acknowledge_task(task)
         if isinstance(self.generator, InferenceGenerator):
             self.generator.close()
+        record_runner_phase(
+            "shutdown_cleanup",
+            event="clear_cache_begin",
+            task_id=task.task_id,
+            include_memory=True,
+        )
         mx.clear_cache()
         import gc
 
         gc.collect()
+        record_runner_phase(
+            "shutdown_cleanup",
+            event="clear_cache_complete",
+            task_id=task.task_id,
+            include_memory=True,
+        )
         self.send_task_status(task.task_id, TaskStatus.Complete)
         self.update_status(RunnerShutdown())
 
     def submit_text_generation(self, task: TextGeneration):
         assert isinstance(self.generator, InferenceGenerator)
+        record_runner_phase(
+            "task_submission",
+            event="submit_text_generation",
+            detail=self._summarize_text_generation_task(task),
+            task_id=task.task_id,
+            command_id=str(task.command_id),
+            attrs={
+                "images": len(task.task_params.images),
+                "cached_image_indices": sorted(task.task_params.image_hashes.keys()),
+            },
+        )
         if task.trace_enabled:
             begin_trace_session(
                 task.task_id,
@@ -431,7 +502,29 @@ class Runner:
         self.submit_text_generation(starting_task)
 
         while self.active_tasks:
+            self._generator_step_count += 1
+            active_ids = [str(task_id) for task_id in self.active_tasks]
+            if self._generator_step_count == 1 or self._generator_step_count % 25 == 0:
+                record_runner_phase(
+                    "decode_stream",
+                    event="generator_step_enter",
+                    attrs={
+                        "active_task_ids": active_ids,
+                        "active_task_count": len(active_ids),
+                        "step_count": self._generator_step_count,
+                    },
+                )
             results = self.generator.step()
+            if self._generator_step_count == 1 or self._generator_step_count % 25 == 0:
+                record_runner_phase(
+                    "decode_stream",
+                    event="generator_step_exit",
+                    attrs={
+                        "active_task_ids": active_ids,
+                        "active_task_count": len(active_ids),
+                        "step_count": self._generator_step_count,
+                    },
+                )
 
             finished: list[TaskId] = []
             for task_id, result in results:
@@ -442,6 +535,13 @@ class Runner:
                             record_trace_marker(
                                 "cancel", self.device_rank, task_id=task_id
                             )
+                        record_runner_phase(
+                            "cancel_observed",
+                            event="cancelled_result",
+                            task_id=task_id,
+                            command_id=str(task.command_id) if task is not None else None,
+                            include_memory=True,
+                        )
                         self.send_task_status(task_id, TaskStatus.Cancelled)
                         finished.append(task_id)
                     case Finished():
@@ -450,6 +550,13 @@ class Runner:
                             record_trace_marker(
                                 "finish", self.device_rank, task_id=task_id
                             )
+                        record_runner_phase(
+                            "completion",
+                            event="finished_result",
+                            task_id=task_id,
+                            command_id=str(task.command_id) if task is not None else None,
+                            include_memory=True,
+                        )
                         self.send_task_status(task_id, TaskStatus.Complete)
                         finished.append(task_id)
                     case _:
@@ -487,6 +594,7 @@ class Runner:
                 pass
 
         self.update_status(RunnerReady())
+        record_runner_phase("idle", event="runner_ready", include_memory=True)
         logger.info("runner ready")
 
         return ExitCode.AllTasksComplete

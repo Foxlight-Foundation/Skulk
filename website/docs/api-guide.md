@@ -154,9 +154,11 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `GET /v1/traces/cluster/{task_id}/stats`
 - `GET /v1/traces/cluster/{task_id}/raw`
 - `GET /v1/diagnostics/node`
+- `POST /v1/diagnostics/node/capture`
 - `POST /v1/diagnostics/node/runners/{runner_id}/cancel`
 - `GET /v1/diagnostics/cluster`
 - `GET /v1/diagnostics/cluster/{node_id}`
+- `POST /v1/diagnostics/cluster/{node_id}/capture`
 - `POST /v1/diagnostics/cluster/{node_id}/runners/{runner_id}/cancel`
 
 For the full interactive reference with request/response schemas, see the [API Reference](/api/skulk-api).
@@ -773,9 +775,11 @@ Returns stored events from the API-side event log.
 ### Diagnostics
 
 - `GET /v1/diagnostics/node`
+- `POST /v1/diagnostics/node/capture`
 - `POST /v1/diagnostics/node/runners/{runner_id}/cancel`
 - `GET /v1/diagnostics/cluster`
 - `GET /v1/diagnostics/cluster/{node_id}`
+- `POST /v1/diagnostics/cluster/{node_id}/capture`
 - `POST /v1/diagnostics/cluster/{node_id}/runners/{runner_id}/cancel`
 
 Use these endpoints when a node appears stuck loading, warming up, decoding, or
@@ -784,13 +788,23 @@ shutting down and you need a read-only snapshot without SSHing into every node.
 Behavior notes:
 
 - `GET /v1/diagnostics/node` returns the local node's runtime/config facts,
-  resources, process tree, live runner-supervisor state, and placement analysis.
+  resources, process tree, live runner-supervisor state, flight-recorder phase
+  state, and placement analysis.
+- `POST /v1/diagnostics/node/capture` collects an on-demand local diagnostic
+  bundle. Body fields are `runnerId`, `taskId`, `includeProcessSamples`, and
+  `sampleDurationSeconds`; all are optional. When a runner/task is provided,
+  the response includes that runner's bounded flight recorder, latest MLX
+  memory snapshot, and best-effort macOS `sample`, `vmmap -summary`, and
+  `footprint -p` output. Sampling failures are returned as structured partial
+  failures instead of failing the bundle.
 - `POST /v1/diagnostics/node/runners/{runner_id}/cancel` requests cooperative
   cancellation for one task that the local runner supervisor still knows about.
 - `GET /v1/diagnostics/cluster` fans out to reachable peer APIs and returns
   partial results when some peers are unavailable.
 - `GET /v1/diagnostics/cluster/{node_id}` proxies one reachable peer bundle or
   returns the local bundle if `node_id` is the current API node.
+- `POST /v1/diagnostics/cluster/{node_id}/capture` proxies the same on-demand
+  capture request to a reachable peer node.
 - `POST /v1/diagnostics/cluster/{node_id}/runners/{runner_id}/cancel` proxies
   the same cooperative live-runner cancellation request to a reachable peer.
 - Placement diagnostics explicitly include whether the current master is part of
@@ -798,10 +812,14 @@ Behavior notes:
   one of the inference ranks.
 - The dashboard node-card bug icon uses these endpoints to open a live
   diagnostics drawer for any reachable node.
+- The diagnostics drawer prefers `Capture bundle` before cancellation so
+  operators can collect phase, MLX memory, and process samples before changing
+  the runner state.
 - Runner cancellation is best-effort only. A wedged native/MLX runner may
   ignore the request and still require stronger intervention.
-- Diagnostics endpoints do not currently kill or restart runners; the only
-  mutating diagnostics action is the cooperative task-cancel request above.
+- Diagnostics endpoints do not currently kill or restart runners. Capture is
+  read-only; the only mutating diagnostics action is the cooperative task-cancel
+  request above.
 
 Example:
 
@@ -809,6 +827,12 @@ Example:
 curl http://localhost:52415/v1/diagnostics/node
 curl http://localhost:52415/v1/diagnostics/cluster
 curl http://localhost:52415/v1/diagnostics/cluster/<node_id>
+curl -X POST http://localhost:52415/v1/diagnostics/node/capture \
+  -H 'content-type: application/json' \
+  -d '{"runnerId":"<runner_id>","taskId":"<task_id>"}'
+curl -X POST http://localhost:52415/v1/diagnostics/cluster/<node_id>/capture \
+  -H 'content-type: application/json' \
+  -d '{"runnerId":"<runner_id>","includeProcessSamples":true}'
 curl -X POST http://localhost:52415/v1/diagnostics/node/runners/<runner_id>/cancel \
   -H 'content-type: application/json' \
   -d '{"taskId":"<task_id>"}'

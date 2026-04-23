@@ -34,6 +34,7 @@ from exo.worker.engines.mlx.utils_mlx import (
 )
 from exo.worker.engines.mlx.vision import VisionProcessor
 from exo.worker.runner.bootstrap import logger
+from exo.worker.runner.diagnostics import record_runner_phase, runner_phase
 
 from .model_output_parsers import apply_all_parsers
 from .tool_parsers import ToolParser
@@ -172,9 +173,23 @@ class SequentialGenerator(InferenceGenerator):
 
     def agree_on_tasks(self) -> None:
         """Agree between all ranks about the task ordering (some may have received in different order or not at all)."""
-        agreed, different = mx_all_gather_tasks(self._maybe_queue, self.group)
+        with runner_phase(
+            "task_agreement",
+            detail="mx_all_gather_tasks",
+            attrs={"candidate_count": len(self._maybe_queue)},
+        ):
+            agreed, different = mx_all_gather_tasks(self._maybe_queue, self.group)
         self._queue.extend(task for task in self._maybe_queue if task in agreed)
         self._maybe_queue = [task for task in self._maybe_queue if task in different]
+        record_runner_phase(
+            "task_agreement",
+            event="tasks_agreed",
+            attrs={
+                "agreed_count": len(agreed),
+                "different_count": len(different),
+                "queued_count": len(self._queue),
+            },
+        )
 
     def agree_on_cancellations(self) -> None:
         """Agree between all ranks about which tasks to cancel."""
@@ -185,6 +200,11 @@ class SequentialGenerator(InferenceGenerator):
                 continue
             if task_id in self._all_tasks:
                 self._maybe_cancel.append(self._all_tasks[task_id])
+                record_runner_phase(
+                    "cancel_requested",
+                    event="cancel_pipe_observed",
+                    task_id=task_id,
+                )
 
         if mx_any(has_cancel_all, self.group):
             self._cancelled_tasks.add(CANCEL_ALL_TASKS)
@@ -192,6 +212,12 @@ class SequentialGenerator(InferenceGenerator):
         agreed, different = mx_all_gather_tasks(self._maybe_cancel, self.group)
         self._cancelled_tasks.update(task.task_id for task in agreed)
         self._maybe_cancel = list(different)
+        if agreed:
+            record_runner_phase(
+                "cancel_observed",
+                event="cancellations_agreed",
+                attrs={"task_ids": [str(task.task_id) for task in agreed]},
+            )
 
     def step(
         self,
@@ -222,6 +248,13 @@ class SequentialGenerator(InferenceGenerator):
             if task.task_id not in self._first_token_seen:
                 self._first_token_seen.add(task.task_id)
                 self._decode_started_us[task.task_id] = now_us()
+                record_runner_phase(
+                    "decode_stream",
+                    event="first_token",
+                    task_id=task.task_id,
+                    command_id=str(task.command_id),
+                    include_memory=True,
+                )
                 record_trace_marker(
                     "first_token",
                     self.device_rank,
@@ -231,6 +264,13 @@ class SequentialGenerator(InferenceGenerator):
 
         except (StopIteration, PrefillCancelled):
             self._record_decode_span(task.task_id)
+            record_runner_phase(
+                "completion",
+                event="decode_complete",
+                task_id=task.task_id,
+                command_id=str(task.command_id),
+                include_memory=True,
+            )
             output.append((task.task_id, Finished()))
             self._active = None
             if self._queue:
@@ -249,6 +289,13 @@ class SequentialGenerator(InferenceGenerator):
 
     def _start_next(self) -> None:
         task = self._queue.popleft()
+        record_runner_phase(
+            "task_submission",
+            event="queue_admitted",
+            task_id=task.task_id,
+            command_id=str(task.command_id),
+            attrs={"queue_depth": len(self._queue), "batch_size": 1},
+        )
         record_trace_marker(
             "admitted_to_batch",
             self.device_rank,
@@ -266,20 +313,26 @@ class SequentialGenerator(InferenceGenerator):
         if task.task_params.bench:
             output_generator = queue.gen()
         else:
-            output_generator = apply_all_parsers(
-                queue.gen(),
-                apply_chat_template(
-                    self.tokenizer, task.task_params, model_card=self.model_card
-                ),
-                self.tool_parser,
-                self.tokenizer,
-                type(self.model),
-                self.model_id,
-                task.task_params.tools,
-                self.model_card,
-                trace_task_id=task.task_id,
-                trace_rank=self.device_rank,
-            )
+            with runner_phase(
+                "parser",
+                detail="apply_all_parsers",
+                task_id=task.task_id,
+                command_id=str(task.command_id),
+            ):
+                output_generator = apply_all_parsers(
+                    queue.gen(),
+                    apply_chat_template(
+                        self.tokenizer, task.task_params, model_card=self.model_card
+                    ),
+                    self.tool_parser,
+                    self.tokenizer,
+                    type(self.model),
+                    self.model_id,
+                    task.task_params.tools,
+                    self.model_card,
+                    trace_task_id=task.task_id,
+                    trace_rank=self.device_rank,
+                )
         self._active = _ActiveSequentialTask(
             task=task,
             mlx_generator=mlx_gen,
@@ -309,7 +362,16 @@ class SequentialGenerator(InferenceGenerator):
 
     def _build_generator(self, task: TextGeneration) -> Generator[GenerationResponse]:
         _check_for_debug_prompts(task.task_params)
-        with trace(
+        with runner_phase(
+            "prompt_build",
+            detail="apply_chat_template",
+            task_id=task.task_id,
+            command_id=str(task.command_id),
+            attrs={
+                "image_count": task.task_params.image_count,
+                "input_messages": len(task.task_params.input),
+            },
+        ), trace(
             "prompt_build",
             self.device_rank,
             "prompt",
@@ -452,9 +514,23 @@ class BatchGenerator(InferenceGenerator):
 
     def agree_on_tasks(self) -> None:
         """Agree between all ranks about the task ordering (some may have received in different order or not at all)."""
-        agreed, different = mx_all_gather_tasks(self._maybe_queue, self.group)
+        with runner_phase(
+            "task_agreement",
+            detail="batch_mx_all_gather_tasks",
+            attrs={"candidate_count": len(self._maybe_queue)},
+        ):
+            agreed, different = mx_all_gather_tasks(self._maybe_queue, self.group)
         self._queue.extend(task for task in self._maybe_queue if task in agreed)
         self._maybe_queue = [task for task in self._maybe_queue if task in different]
+        record_runner_phase(
+            "task_agreement",
+            event="batch_tasks_agreed",
+            attrs={
+                "agreed_count": len(agreed),
+                "different_count": len(different),
+                "queued_count": len(self._queue),
+            },
+        )
 
     def agree_on_cancellations(self) -> None:
         """Agree between all ranks about which tasks to cancel."""
@@ -465,6 +541,11 @@ class BatchGenerator(InferenceGenerator):
                 continue
             if task_id in self._all_tasks:
                 self._maybe_cancel.append(self._all_tasks[task_id])
+                record_runner_phase(
+                    "cancel_requested",
+                    event="batch_cancel_pipe_observed",
+                    task_id=task_id,
+                )
 
         if mx_any(has_cancel_all, self.group):
             self._cancelled_tasks.add(CANCEL_ALL_TASKS)
@@ -472,6 +553,12 @@ class BatchGenerator(InferenceGenerator):
         agreed, different = mx_all_gather_tasks(self._maybe_cancel, self.group)
         self._cancelled_tasks.update(task.task_id for task in agreed)
         self._maybe_cancel = list(different)
+        if agreed:
+            record_runner_phase(
+                "cancel_observed",
+                event="batch_cancellations_agreed",
+                attrs={"task_ids": [str(task.task_id) for task in agreed]},
+            )
 
     def step(
         self,
@@ -484,6 +571,16 @@ class BatchGenerator(InferenceGenerator):
         # Submit any queued tasks to the engine
         while self._queue and len(self._active_tasks) < EXO_MAX_CONCURRENT_REQUESTS:
             task = self._queue.popleft()
+            record_runner_phase(
+                "task_submission",
+                event="batch_queue_admitted",
+                task_id=task.task_id,
+                command_id=str(task.command_id),
+                attrs={
+                    "queue_depth": len(self._queue),
+                    "batch_size": len(self._active_tasks) + 1,
+                },
+            )
             record_trace_marker(
                 "admitted_to_batch",
                 self.device_rank,
@@ -564,6 +661,13 @@ class BatchGenerator(InferenceGenerator):
             if task.task_id not in self._first_token_seen:
                 self._first_token_seen.add(task.task_id)
                 self._decode_started_us[task.task_id] = now_us()
+                record_runner_phase(
+                    "decode_stream",
+                    event="batch_first_token",
+                    task_id=task.task_id,
+                    command_id=str(task.command_id),
+                    include_memory=True,
+                )
                 record_trace_marker(
                     "first_token",
                     self.device_rank,
@@ -574,6 +678,13 @@ class BatchGenerator(InferenceGenerator):
             # check if original response was terminal and append a Finished()
             if response.finish_reason is not None:
                 self._record_decode_span(task.task_id)
+                record_runner_phase(
+                    "completion",
+                    event="batch_decode_complete",
+                    task_id=task.task_id,
+                    command_id=str(task.command_id),
+                    include_memory=True,
+                )
                 output.append((task.task_id, Finished()))
                 del self._active_tasks[uid]
 
@@ -595,6 +706,13 @@ class BatchGenerator(InferenceGenerator):
             if task.task_id in self._cancelled_tasks or cancel_all:
                 uids_to_cancel.append(uid)
                 results.append((task.task_id, Cancelled()))
+                record_runner_phase(
+                    "cancel_observed",
+                    event="batch_cancel_applied",
+                    task_id=task.task_id,
+                    command_id=str(task.command_id),
+                    include_memory=True,
+                )
                 self._record_decode_span(task.task_id)
                 del self._active_tasks[uid]
 
@@ -631,7 +749,16 @@ class BatchGenerator(InferenceGenerator):
 
     def _start_task(self, task: TextGeneration) -> int:
         _check_for_debug_prompts(task.task_params)
-        with trace(
+        with runner_phase(
+            "prompt_build",
+            detail="batch_apply_chat_template",
+            task_id=task.task_id,
+            command_id=str(task.command_id),
+            attrs={
+                "image_count": task.task_params.image_count,
+                "input_messages": len(task.task_params.input),
+            },
+        ), trace(
             "prompt_build",
             self.device_rank,
             "prompt",
