@@ -32,7 +32,7 @@ from exo.api.types import (
 )
 from exo.shared.constants import preferred_env_value
 from exo.shared.models.model_cards import ModelCard
-from exo.shared.tracing import trace
+from exo.shared.tracing import TraceAttrValue, record_trace_marker, trace
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import KVCacheType, Model
@@ -307,6 +307,23 @@ def _media_region_attrs(media_regions: list[MediaRegion]) -> dict[str, object]:
             region.content_hash[:12] for region in media_regions
         ],
     }
+
+
+def _vision_trace_attrs(vision: VisionResult | None) -> dict[str, TraceAttrValue]:
+    """Return compact trace attrs for a prepared multimodal request."""
+    if vision is None or vision.debug_info is None:
+        return {"vision_used": vision is not None}
+    return {
+        "vision_used": True,
+        **vision.debug_info.attrs(),
+    }
+
+
+def _native_pixel_values_trace_attrs(
+    pixel_values: mx.array | list[mx.array] | None,
+) -> dict[str, TraceAttrValue]:
+    """Return native pixel-value attrs typed for saved trace markers."""
+    return cast(dict[str, TraceAttrValue], _native_pixel_values_attrs(pixel_values))
 
 
 def _decode_debug_context(
@@ -1376,6 +1393,7 @@ def mlx_generate(
                     vision_processor=vision_processor,
                     tokenizer=tokenizer,
                     model=model,
+                    task_id=trace_task_id,
                 )
         except Exception:
             logger.opt(exception=True).warning(
@@ -1398,9 +1416,20 @@ def mlx_generate(
             "prompt_tokens": len(all_prompt_tokens),
             **_media_region_attrs(media_regions),
             **_native_pixel_values_attrs(vision.pixel_values if vision else None),
+            **_vision_trace_attrs(vision),
         },
         task_id=trace_task_id,
         include_memory=True,
+    )
+    record_trace_marker(
+        "vision_ready" if vision is not None else "vision_not_used",
+        trace_rank,
+        "vision",
+        task_id=trace_task_id,
+        attrs={
+            "prompt_tokens": len(all_prompt_tokens),
+            **_vision_trace_attrs(vision),
+        },
     )
 
     # Do not use the prefix cache if we are trying to do benchmarks.
@@ -1450,6 +1479,19 @@ def mlx_generate(
         },
         task_id=trace_task_id,
     )
+    record_trace_marker(
+        "kv_cache_result",
+        trace_rank,
+        "kv_cache",
+        task_id=trace_task_id,
+        attrs={
+            "prefix_hit_length": prefix_hit_length,
+            "uncached_prompt_tokens": len(prompt_tokens),
+            "total_prompt_tokens": len(all_prompt_tokens),
+            "matched_index": matched_index if matched_index is not None else -1,
+            "media_region_count": len(media_regions),
+        },
+    )
 
     logits_processors: list[Callable[[mx.array, mx.array], mx.array]] = (
         make_logits_processors(
@@ -1494,6 +1536,16 @@ def mlx_generate(
                 task_id=trace_task_id,
                 include_memory=True,
             )
+            record_trace_marker(
+                "native_reference_path_selected",
+                trace_rank,
+                "vision",
+                task_id=trace_task_id,
+                attrs={
+                    **_vision_trace_attrs(vision),
+                    "media_region_count": len(media_regions),
+                },
+            )
             yield from _mlx_generate_native_vision(
                 model=model,
                 tokenizer=tokenizer,
@@ -1521,6 +1573,16 @@ def mlx_generate(
                 **_native_pixel_values_attrs(vision.pixel_values),
             },
             task_id=trace_task_id,
+        )
+        record_trace_marker(
+            "pipeline_native_vision_path_selected",
+            trace_rank,
+            "vision",
+            task_id=trace_task_id,
+            attrs={
+                **_vision_trace_attrs(vision),
+                "media_region_count": len(media_regions),
+            },
         )
 
     is_native_vision = vision is not None and vision.pixel_values is not None
@@ -1569,6 +1631,17 @@ def mlx_generate(
             },
             task_id=trace_task_id,
             include_memory=True,
+        )
+        record_trace_marker(
+            "forced_full_prefill_fallback",
+            trace_rank,
+            "kv_cache",
+            task_id=trace_task_id,
+            attrs={
+                "prefix_hit_length": prefix_hit_length,
+                "media_region_count": len(media_regions),
+                **_native_pixel_values_trace_attrs(native_pixel_values),
+            },
         )
         assert vision is not None
         caches = make_kv_cache(model=model)

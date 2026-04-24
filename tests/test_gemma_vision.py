@@ -26,6 +26,7 @@ from exo.shared.models.model_cards import (
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
 from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
+from exo.worker.engines.mlx import vision as vision_module
 from exo.worker.engines.mlx.gemma4_prompt import render_gemma4_prompt
 from exo.worker.engines.mlx.utils_mlx import apply_chat_template
 from exo.worker.engines.mlx.vision import _find_media_regions, _format_vlm_messages
@@ -392,12 +393,22 @@ class TestGemma4ReferencePromptRenderer:
             model_type=None,
             boi_token_id=None,
             eoi_token_id=None,
-        ) -> str:
+        ):
             captured["model_type"] = model_type
-            return "<|image|>"
+            return vision_module._VisionPromptBuild(  # pyright: ignore[reportPrivateUsage]
+                prompt="<|image|>",
+                raw_prompt="<|image|>",
+                debug=vision_module._VisionPromptDebug(  # pyright: ignore[reportPrivateUsage]
+                    raw_prompt_chars=len("<|image|>"),
+                    raw_image_placeholder_positions=[0],
+                    expanded_prompt_chars=len("<|image|>"),
+                    tokens_per_image=list(n_tokens_per_image),
+                    image_token=image_token,
+                ),
+            )
 
         monkeypatch.setattr(
-            "exo.worker.engines.mlx.vision.build_vision_prompt",
+            "exo.worker.engines.mlx.vision._build_vision_prompt_with_debug",
             _fake_build_vision_prompt,
         )
         monkeypatch.setattr(

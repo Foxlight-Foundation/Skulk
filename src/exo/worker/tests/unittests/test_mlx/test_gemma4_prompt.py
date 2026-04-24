@@ -1,3 +1,8 @@
+from typing import cast
+
+from mlx_lm.tokenizer_utils import TokenizerWrapper
+
+from exo.worker.engines.mlx import vision as vision_module
 from exo.worker.engines.mlx.gemma4_prompt import render_gemma4_prompt
 
 
@@ -64,3 +69,36 @@ def test_render_gemma4_prompt_includes_optional_image_labels():
     )
 
     assert "compare\nImage 1:\n<|image|>" in prompt
+
+
+class _GemmaPromptTokenizer:
+    def decode(self, _token_ids: list[int]) -> str:
+        raise AssertionError("Gemma 4 prompt debug test should not decode BOI/EOI")
+
+
+def test_build_vision_prompt_debug_records_raw_placeholder_offsets():
+    built = vision_module._build_vision_prompt_with_debug(  # pyright: ignore[reportPrivateUsage]
+        cast(TokenizerWrapper, cast(object, _GemmaPromptTokenizer())),
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "before"},
+                    {"type": "image"},
+                    {"type": "text", "text": "after"},
+                ],
+            }
+        ],
+        [3],
+        "<|image|>",
+        model_type="gemma4",
+    )
+
+    raw_placeholder = built.raw_prompt.index("<|image|>")
+    assert built.raw_prompt.count("<|image|>") == 1
+    assert built.prompt.count("<|image|>") == 3
+    assert built.debug.raw_image_placeholder_positions == [raw_placeholder]
+    assert built.debug.tokens_per_image == [3]
+    assert built.debug.attrs()["raw_image_placeholder_offsets"] == [
+        str(raw_placeholder)
+    ]
