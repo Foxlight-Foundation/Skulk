@@ -247,13 +247,13 @@ function buildApiMessages(messages: ChatMessage[]): ApiMessagePayload[] {
   return messages.map((message) => {
     if (message.attachments?.some((attachment) => attachment.type.startsWith('image/') && attachment.preview)) {
       const parts: Array<{ type: string; text?: string; image_url?: { url: string } }> = [];
+      if (message.content) {
+        parts.push({ type: 'text', text: message.content });
+      }
       for (const attachment of message.attachments) {
         if (attachment.type.startsWith('image/') && attachment.preview) {
           parts.push({ type: 'image_url', image_url: { url: attachment.preview } });
         }
-      }
-      if (message.content) {
-        parts.push({ type: 'text', text: message.content });
       }
       return { role: message.role, content: parts };
     }
