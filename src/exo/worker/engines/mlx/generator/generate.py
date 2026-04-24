@@ -1951,6 +1951,14 @@ def mlx_generate(
         )
     else:
         maybe_vision_ctx = contextlib.nullcontext()
+    uses_pipeline_decode = group is not None and _has_pipeline_communication_layer(model)
+    if uses_pipeline_decode:
+        prefill_prompt_tokens = (
+            prompt_tokens if len(prompt_tokens) > 1 else prompt_tokens[:0]
+        )
+    else:
+        prefill_prompt_tokens = prompt_tokens[:-1]
+
     try:
         with maybe_vision_ctx, trace(
             "prefill",
@@ -1962,7 +1970,7 @@ def mlx_generate(
                 model,
                 tokenizer,
                 sampler,
-                prompt_tokens[:-1],
+                prefill_prompt_tokens,
                 caches,
                 group,
                 on_prefill_progress,
@@ -1995,8 +2003,11 @@ def mlx_generate(
             mx.clear_cache()
     cache_snapshots: list[CacheSnapshot] | None = ssm_snapshots_list or None
 
-    # stream_generate starts from the last token
-    last_token = prompt_tokens[-2:]
+    # Pipeline prefill now advances the cache through the penultimate prompt
+    # token, so pipeline decode can begin with a single token and avoid an
+    # extra decode-mode prompt bridge collective before the first generated
+    # token.
+    last_token = prompt_tokens[-1:] if uses_pipeline_decode else prompt_tokens[-2:]
 
     max_tokens = task.max_output_tokens or MAX_TOKENS
     accumulated_text = ""
