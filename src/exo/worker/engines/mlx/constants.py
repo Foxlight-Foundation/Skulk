@@ -13,7 +13,7 @@ ATTENTION_KV_BITS: int | None = 4
 # be an output cap, not a proxy for model context length: very large defaults can
 # push distributed decode into long-running native MLX/Metal waits before the
 # user has asked for that much output.
-DEFAULT_MAX_OUTPUT_TOKENS: int = 2048
+DEFAULT_MAX_OUTPUT_TOKENS: int = 4096
 _max_tokens_value = preferred_env_value(
     "SKULK_MAX_OUTPUT_TOKENS",
     "EXO_MAX_TOKENS",

@@ -1988,6 +1988,13 @@ def mlx_generate(
             task_id=trace_task_id,
             include_memory=True,
         )
+        with runner_phase(
+            "decode_stream",
+            detail="clear_prefill_mlx_cache",
+            task_id=trace_task_id,
+            include_memory=True,
+        ):
+            mx.clear_cache()
     cache_snapshots: list[CacheSnapshot] | None = ssm_snapshots_list or None
 
     # stream_generate starts from the last token
