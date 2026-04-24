@@ -218,15 +218,15 @@ def test_prefill_uses_pipeline_parallel_path_for_long_pipeline_prompts(
     assert prefill_mode_calls == [True, False]
 
 
-def test_prefill_uses_pipeline_parallel_path_for_short_pipeline_prompts(
+def test_prefill_uses_stream_generate_path_for_short_pipeline_prompts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Short pipeline prompts must avoid upstream stream_generate prefill.
+    """Short pipeline prompts use the PR90-era stream_generate prefill path.
 
-    ``mlx_lm.generate_step`` prefetches a decode step before yielding even with
-    ``max_tokens=1``. In pipeline mode that hidden prefetch can leave sends/recvs
-    in flight, so short prompts use Skulk's explicit pipeline prefill path while
-    suppressing distributed progress callbacks.
+    Single-chunk prompts do not benefit from the explicit pipeline prefill
+    scheduler, and this shape has repeatedly surfaced Gemma 4 cluster wedges.
+    Keep those prompts on the older stream_generate path while preserving
+    pipeline-prefill mode on the wrappers.
     """
     calls: list[str] = []
     fake_cache = _FakeCache()
@@ -279,8 +279,8 @@ def test_prefill_uses_pipeline_parallel_path_for_short_pipeline_prompts(
         distributed_prompt_progress_callback=_fail_distributed_callback,
     )
 
-    assert calls == ["pipeline_parallel_prefill"]
-    assert "stream_generate" not in calls
+    assert calls == ["stream_generate"]
+    assert "pipeline_parallel_prefill" not in calls
     assert prefill_tokens == 23
     assert snapshots == []
     assert prefill_tps >= 0.0
@@ -357,10 +357,10 @@ def test_pipeline_decode_without_lookahead_yields_before_second_decode_step() ->
     assert model.calls == [1, 2]
 
 
-def test_prefill_uses_pipeline_parallel_path_at_single_chunk_boundary(
+def test_prefill_uses_stream_generate_path_at_single_chunk_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Prompts with one real pipeline chunk still use explicit pipeline prefill."""
+    """Prompts with one real pipeline chunk still avoid explicit pipeline prefill."""
     calls: list[str] = []
     fake_cache = _FakeCache()
     prefill_mode_calls: list[bool] = []
@@ -399,7 +399,7 @@ def test_prefill_uses_pipeline_parallel_path_at_single_chunk_boundary(
         distributed_prompt_progress_callback=None,
     )
 
-    assert calls == ["pipeline_parallel_prefill"]
+    assert calls == ["stream_generate"]
     assert prefill_tokens == 1366
     assert snapshots == []
     assert prefill_tps >= 0.0

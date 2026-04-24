@@ -868,10 +868,11 @@ def prefill(
 
     # Mirror pipeline_parallel_prefill's chunking math here by reserving the
     # final token for the post-loop pass before computing the real chunk count.
-    # This value is primarily diagnostic now: all pipeline prompts use the
-    # explicit pipeline prefill path, but short one-chunk prompts intentionally
-    # suppress the distributed progress callback because there is no useful
-    # cancellation window inside a millisecond-scale prefill.
+    # The explicit pipeline prefill path only buys us overlap once there are at
+    # least two real chunks. Single-chunk prompts keep the PR90-era
+    # stream_generate path because they do not benefit from the custom pipeline
+    # scheduler and have repeatedly been the sharpest wedge shape in Gemma 4
+    # cluster testing.
     pipeline_chunk_sizes = (
         _vision_safe_prefill_chunk_sizes(
             num_tokens,
@@ -883,14 +884,14 @@ def prefill(
         else []
     )
     pipeline_chunks = len(pipeline_chunk_sizes)
-    use_pipeline_prefill = is_pipeline
+    use_pipeline_prefill = is_pipeline and pipeline_chunks >= 2
     logger.info(
         "Prefill path selected: "
         f"{'pipeline_parallel_prefill' if use_pipeline_prefill else 'stream_generate'} "
         f"(rank={rank}, prompt_tokens={num_tokens}, is_pipeline={is_pipeline}, "
         f"prefill_step_size_input={prefill_step_size}, "
         f"prefill_step_size_effective={effective_prefill_step_size}, "
-        f"pipeline_chunks={pipeline_chunks})"
+        f"pipeline_chunks={pipeline_chunks}, pipeline_min_chunks=2)"
     )
     # Pipeline models must run in prefill mode during any prefill forward
     # pass. With is_prefill=False, pipeline wrappers can queue collectives
