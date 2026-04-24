@@ -14,6 +14,9 @@ from typing import Callable, Generator, Protocol, cast, get_args
 
 import mlx.core as mx
 from mlx_lm.generate import (
+    GenerationResponse as MlxGenerationResponse,
+)
+from mlx_lm.generate import (
     maybe_quantize_kv_cache,
     stream_generate,
 )
@@ -614,8 +617,9 @@ def _noop_quantize_cache(_cache: KVCacheType) -> None:
     return None
 
 
-def _has_pipeline_communication_layer(model: Model):
-    for layer in model.layers:
+def _has_pipeline_communication_layer(model: Model) -> bool:
+    layers = cast(list[object], getattr(model, "layers", []))
+    for layer in layers:
         if isinstance(layer, (PipelineFirstLayer, PipelineLastLayer)):
             return True
     return False
@@ -1003,6 +1007,120 @@ def prefill(
     )
     # Exclude the last snapshot
     return tokens_per_sec, num_tokens, snapshots[:-1] if snapshots else []
+
+
+def _stream_generate_without_lookahead(
+    *,
+    model: Model,
+    tokenizer: TokenizerWrapper,
+    prompt: mx.array,
+    max_tokens: int,
+    sampler: Callable[[mx.array], mx.array],
+    logits_processors: list[Callable[[mx.array, mx.array], mx.array]],
+    prompt_cache: KVCacheType,
+    kv_group_size: int | None,
+    kv_bits: int | None,
+) -> Generator[MlxGenerationResponse, None, None]:
+    """Generate tokens sequentially without scheduling a decode lookahead.
+
+    ``mlx_lm.stream_generate`` evaluates the next token before yielding the
+    current one. That is fine for local models, but the extra in-flight decode
+    forward can leave Skulk's pipeline send/recv wrappers waiting on different
+    collectives across ranks. Pipeline decode favors boring one-step-at-a-time
+    execution over speculative throughput.
+    """
+    if len(prompt) == 0:
+        raise ValueError("Decode requires at least one prompt token")
+
+    detokenizer = cast(_DetokenizerProtocol, cast(object, tokenizer.detokenizer))
+    detokenizer.reset()
+
+    quantize_cache_fn = functools.partial(
+        maybe_quantize_kv_cache,
+        quantized_kv_start=0,
+        kv_group_size=kv_group_size,
+        kv_bits=kv_bits,
+    )
+
+    token_history: mx.array | None = None
+    prompt_start = time.perf_counter()
+    if len(prompt) > 1:
+        with mx.stream(generation_stream):
+            model(prompt[:-1][None], cache=prompt_cache)
+            quantize_cache_fn(prompt_cache)
+            mx.eval([cache_entry.state for cache_entry in prompt_cache])  # type: ignore
+
+    prompt_tps = len(prompt) / max(time.perf_counter() - prompt_start, 1e-9)
+    generation_start = time.perf_counter()
+    input_tokens = prompt[-1:]
+    eos_token_ids = {int(token_id) for token_id in eos_ids_from_tokenizer(tokenizer)}
+
+    last_token = 0
+    last_logprobs = mx.zeros((1,), dtype=mx.float32)
+    finish_reason = "length"
+    generated_count = 0
+
+    for token_index in range(max_tokens):
+        with mx.stream(generation_stream):
+            logits = model(input_tokens[None], cache=prompt_cache)
+            logits = logits[:, -1, :]
+            if logits_processors:
+                token_history = (
+                    mx.concat([token_history, input_tokens])
+                    if token_history is not None
+                    else input_tokens
+                )
+                for processor in logits_processors:
+                    logits = processor(token_history, logits)
+            quantize_cache_fn(prompt_cache)
+            logprobs = logits.astype(mx.float32) - mx.logsumexp(
+                logits.astype(mx.float32), keepdims=True
+            )
+            sampled = sampler(logprobs)
+            mx.eval(sampled, logprobs)
+
+        last_token = int(sampled.item())
+        last_logprobs = logprobs.squeeze(0)
+        generated_count = token_index + 1
+
+        if last_token in eos_token_ids:
+            finish_reason = "stop"
+            break
+
+        detokenizer.add_token(last_token)
+        if generated_count == max_tokens:
+            finish_reason = "length"
+            break
+
+        yield MlxGenerationResponse(
+            text=detokenizer.last_segment,
+            token=last_token,
+            logprobs=last_logprobs,
+            from_draft=False,
+            prompt_tokens=prompt.size,
+            prompt_tps=prompt_tps,
+            generation_tokens=generated_count,
+            generation_tps=generated_count
+            / max(time.perf_counter() - generation_start, 1e-9),
+            peak_memory=mx.get_peak_memory() / 1e9,
+            finish_reason=None,
+        )
+        input_tokens = sampled
+
+    detokenizer.finalize()
+    yield MlxGenerationResponse(
+        text=detokenizer.last_segment,
+        token=last_token,
+        logprobs=last_logprobs,
+        from_draft=False,
+        prompt_tokens=prompt.size,
+        prompt_tps=prompt_tps,
+        generation_tokens=generated_count,
+        generation_tps=generated_count
+        / max(time.perf_counter() - generation_start, 1e-9),
+        peak_memory=mx.get_peak_memory() / 1e9,
+        finish_reason=finish_reason,
+    )
 
 
 def warmup_inference(
@@ -1909,18 +2027,34 @@ def mlx_generate(
         task_id=trace_task_id,
         include_memory=True,
     ):
-        token_generator = stream_generate(
-            model=model,
-            tokenizer=tokenizer,
-            prompt=last_token,
-            max_tokens=max_tokens,
-            sampler=sampler,
-            logits_processors=logits_processors,
-            prompt_cache=caches,
-            prefill_step_size=1,
-            kv_group_size=KV_GROUP_SIZE,
-            kv_bits=KV_BITS,
-        )
+        if group is not None and _has_pipeline_communication_layer(model):
+            logger.info(
+                "Using sequential pipeline decode without stream_generate lookahead"
+            )
+            token_generator = _stream_generate_without_lookahead(
+                model=model,
+                tokenizer=tokenizer,
+                prompt=last_token,
+                max_tokens=max_tokens,
+                sampler=sampler,
+                logits_processors=logits_processors,
+                prompt_cache=caches,
+                kv_group_size=KV_GROUP_SIZE,
+                kv_bits=KV_BITS,
+            )
+        else:
+            token_generator = stream_generate(
+                model=model,
+                tokenizer=tokenizer,
+                prompt=last_token,
+                max_tokens=max_tokens,
+                sampler=sampler,
+                logits_processors=logits_processors,
+                prompt_cache=caches,
+                prefill_step_size=1,
+                kv_group_size=KV_GROUP_SIZE,
+                kv_bits=KV_BITS,
+            )
     first_token_wait_started = time.perf_counter()
     with runner_phase(
         "decode_wait_first_token",

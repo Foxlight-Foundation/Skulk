@@ -68,6 +68,35 @@ class _VisionChunkModel:
         return mx.zeros((1, 1))
 
 
+class _DecodeStepModel:
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    def __call__(self, tokens: mx.array, *_args: object, **_kwargs: object) -> mx.array:
+        self.calls.append(int(mx.reshape(tokens, (-1,))[0].item()))
+        return mx.zeros((1, tokens.shape[-1], 32))
+
+
+class _FakeDetokenizer:
+    def __init__(self) -> None:
+        self.last_segment = ""
+
+    def reset(self) -> None:
+        self.last_segment = ""
+
+    def add_token(self, token: int) -> None:
+        self.last_segment = f"token-{token}"
+
+    def finalize(self) -> None:
+        self.last_segment = ""
+
+
+class _DecodeTokenizer:
+    def __init__(self) -> None:
+        self.detokenizer = _FakeDetokenizer()
+        self.eos_token_ids: set[int] = set()
+
+
 def _identity_sampler(logits: mx.array) -> mx.array:
     return logits
 
@@ -299,6 +328,33 @@ def test_pipeline_prefill_slices_native_pixel_values_per_chunk(
         [40.0],
     ]
     assert model.pixel_value_calls[-2:] == [[], []]
+
+
+def test_pipeline_decode_without_lookahead_yields_before_second_decode_step() -> None:
+    """Pipeline decode should not schedule token N+1 before yielding token N."""
+
+    model = _DecodeStepModel()
+    sampled_tokens = [mx.array([10]), mx.array([11])]
+
+    def _sampler(_logprobs: mx.array) -> mx.array:
+        return sampled_tokens.pop(0)
+
+    generator = generate_module._stream_generate_without_lookahead(  # pyright: ignore[reportPrivateUsage]
+        model=cast(Model, cast(object, model)),
+        tokenizer=cast(TokenizerWrapper, cast(object, _DecodeTokenizer())),
+        prompt=mx.array([1, 2]),
+        max_tokens=2,
+        sampler=_sampler,
+        logits_processors=[],
+        prompt_cache=cast(KVCacheType, [_FakeStateCache()]),
+        kv_group_size=None,
+        kv_bits=None,
+    )
+
+    first = next(generator)
+
+    assert first.token == 10
+    assert model.calls == [1, 2]
 
 
 def test_prefill_uses_pipeline_parallel_path_at_single_chunk_boundary(
