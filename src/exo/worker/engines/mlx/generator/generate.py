@@ -368,20 +368,18 @@ def _should_force_native_vision_full_prefill_for_request(
 ) -> bool:
     """Return whether a distributed native-vision request should skip prefix cache.
 
-    Distributed Gemma 4 follow-up turns with cached image prefixes can wedge
-    during decode after the pipeline-aware path trims native pixel values to the
-    uncached suffix. The upstream MLX-VLM reference path also crashes for this
-    shape because its prompt cache contains uninitialized entries, so the stable
-    fallback is to keep Skulk's distributed path but re-prefill the full prompt
-    with every image tensor.
+    Multi-image Gemma 4 follow-up turns with cached image prefixes can pair the
+    next uncached image span with stale pixel values. Keep those conservative.
+    Single-image fully cached follow-ups should reuse the prefix cache instead:
+    forcing a full native-vision re-prefill has reproduced first-decode stalls
+    even for modest prompts.
     """
-    has_cached_multimodal_prefix = prefix_hit_length > 0 and media_region_count > 1
-    has_fully_cached_native_images = prefix_hit_length > 0 and native_pixel_values is None
+    has_cached_multi_image_prefix = prefix_hit_length > 0 and media_region_count > 1
     return (
         is_native_vision
         and group is not None
         and group.size() > 1
-        and (has_cached_multimodal_prefix or has_fully_cached_native_images)
+        and has_cached_multi_image_prefix
     )
 
 
