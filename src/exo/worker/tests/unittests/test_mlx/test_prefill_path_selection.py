@@ -11,6 +11,7 @@ from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 from exo.shared.types.mlx import KVCacheType, Model
 from exo.worker.engines.mlx.generator import generate as generate_module
+from exo.worker.engines.mlx.vision import MediaRegion
 
 
 class _FakeCache:
@@ -38,6 +39,35 @@ class _FakeModel:
         self.layers: list[object] = []
 
 
+class _FakeStateCache:
+    @property
+    def state(self) -> mx.array:
+        return mx.array([0])
+
+
+class _VisionChunkModel:
+    def __init__(self) -> None:
+        self.pixel_values: list[mx.array] | mx.array | None = None
+        self.pixel_value_calls: list[list[float]] = []
+
+    def set_pixel_values(self, pixel_values: list[mx.array] | mx.array | None) -> None:
+        self.pixel_values = pixel_values
+
+    def __call__(self, *_args: object, **_kwargs: object) -> mx.array:
+        pixel_values = self.pixel_values
+        if pixel_values is None:
+            self.pixel_value_calls.append([])
+        elif isinstance(pixel_values, list):
+            self.pixel_value_calls.append(
+                [float(value.item()) for value in pixel_values]
+            )
+        else:
+            self.pixel_value_calls.append(
+                [float(value.item()) for value in pixel_values]
+            )
+        return mx.zeros((1, 1))
+
+
 def _identity_sampler(logits: mx.array) -> mx.array:
     return logits
 
@@ -59,6 +89,10 @@ def _fake_cache_list(cache: _FakeCache) -> KVCacheType:
 
 
 def _noop_barrier(_group: object) -> None:
+    return None
+
+
+def _noop_prefill_sends() -> None:
     return None
 
 
@@ -223,6 +257,48 @@ def test_prefill_uses_pipeline_parallel_path_for_short_pipeline_prompts(
     assert prefill_tps >= 0.0
     assert fake_cache.trim_calls == [2]
     assert prefill_mode_calls == [True, False]
+
+
+def test_pipeline_prefill_slices_native_pixel_values_per_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chunked native-vision prefill should align each image with its token span."""
+
+    monkeypatch.setattr(generate_module, "clear_prefill_sends", _noop_prefill_sends)
+    monkeypatch.setattr(generate_module, "flush_prefill_sends", _noop_prefill_sends)
+
+    model = _VisionChunkModel()
+    pixel_values = [
+        mx.array([10.0]),
+        mx.array([20.0]),
+        mx.array([30.0]),
+        mx.array([40.0]),
+    ]
+
+    generate_module.pipeline_parallel_prefill(
+        model=cast(Model, cast(object, model)),
+        prompt=mx.array(list(range(2190))),
+        prompt_cache=cast(KVCacheType, [_FakeStateCache()]),
+        prefill_step_size=4096,
+        kv_group_size=None,
+        kv_bits=None,
+        prompt_progress_callback=lambda _processed, _total: None,
+        distributed_prompt_progress_callback=None,
+        group=_fake_group(),
+        native_pixel_values=pixel_values,
+        native_media_regions=[
+            MediaRegion("first", 9, 281),
+            MediaRegion("second", 633, 907),
+            MediaRegion("third", 977, 1245),
+            MediaRegion("fourth", 1891, 2169),
+        ],
+    )
+
+    assert model.pixel_value_calls[:2] == [
+        [10.0, 20.0, 30.0],
+        [40.0],
+    ]
+    assert model.pixel_value_calls[-2:] == [[], []]
 
 
 def test_prefill_uses_pipeline_parallel_path_at_single_chunk_boundary(

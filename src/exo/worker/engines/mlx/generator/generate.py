@@ -438,6 +438,25 @@ def _slice_native_pixel_values_for_uncached_suffix(
     return mx.stack([pixel_values[idx] for idx in remaining_indices], axis=0)
 
 
+def _native_media_regions_for_uncached_suffix(
+    pixel_values: mx.array | list[mx.array],
+    media_regions: list[MediaRegion],
+    prefix_hit_length: int,
+) -> list[MediaRegion]:
+    """Return media regions aligned with cache-trimmed native pixel values."""
+    if prefix_hit_length <= 0 or not media_regions:
+        return media_regions
+
+    available_images = (
+        len(pixel_values) if isinstance(pixel_values, list) else int(pixel_values.shape[0])
+    )
+    return [
+        region
+        for idx, region in enumerate(media_regions)
+        if idx < available_images and region.end_pos > prefix_hit_length
+    ]
+
+
 def slice_native_pixel_values_for_uncached_suffix(
     pixel_values: mx.array | list[mx.array],
     media_regions: list[MediaRegion],
@@ -453,6 +472,99 @@ def slice_native_pixel_values_for_uncached_suffix(
         media_regions,
         prefix_hit_length,
     )
+
+
+def _slice_native_pixel_values_by_indices(
+    pixel_values: mx.array | list[mx.array],
+    indices: list[int],
+) -> mx.array | list[mx.array] | None:
+    """Select native pixel values by media-region order."""
+    if not indices:
+        return None
+
+    available_images = (
+        len(pixel_values) if isinstance(pixel_values, list) else int(pixel_values.shape[0])
+    )
+    valid_indices = [idx for idx in indices if idx < available_images]
+    if not valid_indices:
+        return None
+
+    if isinstance(pixel_values, list):
+        return [pixel_values[idx] for idx in valid_indices]
+
+    if valid_indices == list(range(valid_indices[0], valid_indices[-1] + 1)):
+        return pixel_values[valid_indices[0] : valid_indices[-1] + 1]
+
+    return mx.stack([pixel_values[idx] for idx in valid_indices], axis=0)
+
+
+def _native_pixel_values_for_media_range(
+    pixel_values: mx.array | list[mx.array],
+    media_regions: list[MediaRegion],
+    start_pos: int,
+    end_pos: int,
+) -> mx.array | list[mx.array] | None:
+    """Return pixel values whose media spans overlap a prompt token range."""
+    region_indices = [
+        idx
+        for idx, region in enumerate(media_regions)
+        if region.end_pos > start_pos and region.start_pos < end_pos
+    ]
+    return _slice_native_pixel_values_by_indices(pixel_values, region_indices)
+
+
+def _vision_safe_prefill_chunk_sizes(
+    total_tokens: int,
+    max_chunk_size: int,
+    media_regions: list[MediaRegion] | None = None,
+    prompt_token_offset: int = 0,
+) -> list[int]:
+    """Split prefill tokens without cutting through native image spans."""
+    real_prefill_tokens = max(total_tokens - 1, 0)
+    if real_prefill_tokens == 0:
+        return []
+
+    if max_chunk_size <= 0:
+        return [real_prefill_tokens]
+
+    sorted_regions = sorted(media_regions or [], key=lambda region: region.start_pos)
+    chunk_sizes: list[int] = []
+    start = 0
+    while start < real_prefill_tokens:
+        end = min(start + max_chunk_size, real_prefill_tokens)
+        full_start = prompt_token_offset + start
+        full_end = prompt_token_offset + end
+
+        for region in sorted_regions:
+            if region.end_pos <= full_start:
+                continue
+            if region.start_pos >= full_end:
+                break
+            if region.start_pos < full_end < region.end_pos:
+                end = min(region.end_pos - prompt_token_offset, real_prefill_tokens)
+                full_end = prompt_token_offset + end
+                break
+
+        if end <= start:
+            end = min(start + max_chunk_size, real_prefill_tokens)
+        chunk_sizes.append(end - start)
+        start = end
+
+    return chunk_sizes
+
+
+def _set_native_pixel_values(
+    model: Model,
+    pixel_values: mx.array | list[mx.array] | None,
+) -> None:
+    """Set native vision tensors on wrappers that inject them into prefill calls."""
+    if hasattr(model, "set_pixel_values"):
+        cast(
+            Callable[[mx.array | list[mx.array] | None], None],
+            object.__getattribute__(model, "set_pixel_values"),
+        )(pixel_values)
+    else:
+        object.__setattr__(model, "_pixel_values", pixel_values)
 
 
 @contextlib.contextmanager
@@ -519,6 +631,9 @@ def pipeline_parallel_prefill(
     prompt_progress_callback: Callable[[int, int], None],
     distributed_prompt_progress_callback: Callable[[], None] | None,
     group: mx.distributed.Group,
+    native_pixel_values: mx.array | list[mx.array] | None = None,
+    native_media_regions: list[MediaRegion] | None = None,
+    prompt_token_offset: int = 0,
 ) -> None:
     """Prefill the KV cache for pipeline parallel with overlapping stages.
 
@@ -560,14 +675,13 @@ def pipeline_parallel_prefill(
     rank = group.rank()
     world_size = group.size()
 
-    # Build list of real prompt chunk sizes
     total = len(prompt)
-    real_chunk_sizes: list[int] = []
-    remaining = total - 1
-    while remaining:
-        n = min(prefill_step_size, remaining)
-        real_chunk_sizes.append(n)
-        remaining -= n
+    real_chunk_sizes = _vision_safe_prefill_chunk_sizes(
+        total,
+        prefill_step_size,
+        native_media_regions if native_pixel_values is not None else None,
+        prompt_token_offset,
+    )
     n_real = len(real_chunk_sizes)
 
     # Each rank does: [rank leading dummies] [N real chunks] [world_size-1-rank trailing dummies]
@@ -606,6 +720,8 @@ def pipeline_parallel_prefill(
 
             for i in range(n_real):
                 chunk_size = real_chunk_sizes[i]
+                chunk_start = processed
+                chunk_end = processed + chunk_size
                 if i == 0 or i == n_real - 1 or i % 4 == 0:
                     record_runner_phase(
                         "prefill_pipeline",
@@ -616,6 +732,29 @@ def pipeline_parallel_prefill(
                             "chunk_size": chunk_size,
                             "processed": processed,
                             "total": total,
+                        },
+                    )
+                if native_pixel_values is not None and native_media_regions is not None:
+                    # Gemma 4 scatters image features from the start of the
+                    # provided tensor on every forward call. Pipeline chunks
+                    # therefore need chunk-local pixel values, otherwise a
+                    # later image span can be paired with image 0 again.
+                    chunk_pixel_values = _native_pixel_values_for_media_range(
+                        native_pixel_values,
+                        native_media_regions,
+                        prompt_token_offset + chunk_start,
+                        prompt_token_offset + chunk_end,
+                    )
+                    _set_native_pixel_values(model, chunk_pixel_values)
+                    record_runner_phase(
+                        "prefill_pipeline",
+                        event="pipeline_prefill_native_pixel_values",
+                        attrs={
+                            "rank": rank,
+                            "chunk_index": i,
+                            "chunk_start": prompt_token_offset + chunk_start,
+                            "chunk_end": prompt_token_offset + chunk_end,
+                            **_native_pixel_values_attrs(chunk_pixel_values),
                         },
                     )
                 model(
@@ -640,6 +779,8 @@ def pipeline_parallel_prefill(
         clear_prefill_sends()
 
     # Post-loop: process remaining 1 token + add +1 entry to match stream_generate.
+    if native_pixel_values is not None:
+        _set_native_pixel_values(model, None)
     for _ in range(2):
         with mx.stream(generation_stream):
             model(prompt[-1:][None], cache=_prompt_cache)
@@ -679,6 +820,9 @@ def prefill(
     group: mx.distributed.Group | None,
     on_prefill_progress: Callable[[int, int], None] | None,
     distributed_prompt_progress_callback: Callable[[], None] | None,
+    native_pixel_values: mx.array | list[mx.array] | None = None,
+    native_media_regions: list[MediaRegion] | None = None,
+    prompt_token_offset: int = 0,
 ) -> tuple[float, int, list[CacheSnapshot]]:
     """Prefill the KV cache with prompt tokens.
 
@@ -726,13 +870,17 @@ def prefill(
     # explicit pipeline prefill path, but short one-chunk prompts intentionally
     # suppress the distributed progress callback because there is no useful
     # cancellation window inside a millisecond-scale prefill.
-    real_prefill_tokens = max(num_tokens - 1, 0)
-    pipeline_chunks = (
-        (real_prefill_tokens + effective_prefill_step_size - 1)
-        // effective_prefill_step_size
-        if effective_prefill_step_size > 0
-        else 0
+    pipeline_chunk_sizes = (
+        _vision_safe_prefill_chunk_sizes(
+            num_tokens,
+            effective_prefill_step_size,
+            native_media_regions if native_pixel_values is not None else None,
+            prompt_token_offset,
+        )
+        if is_pipeline
+        else []
     )
+    pipeline_chunks = len(pipeline_chunk_sizes)
     use_pipeline_prefill = is_pipeline
     logger.info(
         "Prefill path selected: "
@@ -788,6 +936,9 @@ def prefill(
                     prompt_progress_callback=progress_callback,
                     distributed_prompt_progress_callback=pipeline_distributed_callback,
                     group=group,
+                    native_pixel_values=native_pixel_values,
+                    native_media_regions=native_media_regions,
+                    prompt_token_offset=prompt_token_offset,
                 )
         else:
             # Non-pipeline models can safely use upstream stream_generate for
@@ -1587,11 +1738,17 @@ def mlx_generate(
 
     is_native_vision = vision is not None and vision.pixel_values is not None
     native_pixel_values: mx.array | list[mx.array] | None = None
+    native_media_regions: list[MediaRegion] | None = None
     if is_native_vision:
         assert vision is not None
         if vision.pixel_values is None:
             raise ValueError("Native vision generation requires pixel values")
         native_pixel_values = _slice_native_pixel_values_for_uncached_suffix(
+            vision.pixel_values,
+            media_regions,
+            prefix_hit_length,
+        )
+        native_media_regions = _native_media_regions_for_uncached_suffix(
             vision.pixel_values,
             media_regions,
             prefix_hit_length,
@@ -1649,6 +1806,7 @@ def mlx_generate(
         prefix_hit_length = 0
         matched_index = None
         native_pixel_values = vision.pixel_values
+        native_media_regions = media_regions
         decode_context = _decode_debug_context(
             task=task,
             group=group,
@@ -1669,13 +1827,7 @@ def mlx_generate(
             task_id=trace_task_id,
             include_memory=True,
         ):
-            if hasattr(model, "set_pixel_values"):
-                cast(
-                    Callable[[mx.array | list[mx.array] | None], None],
-                    object.__getattribute__(model, "set_pixel_values"),
-                )(native_pixel_values)
-            else:
-                object.__setattr__(model, "_pixel_values", native_pixel_values)
+            _set_native_pixel_values(model, native_pixel_values)
         maybe_vision_ctx = contextlib.nullcontext()
     elif vision is not None and not is_native_vision:
         maybe_vision_ctx = patch_embed_tokens(
@@ -1699,6 +1851,9 @@ def mlx_generate(
                 group,
                 on_prefill_progress,
                 distributed_prompt_progress_callback,
+                native_pixel_values=native_pixel_values,
+                native_media_regions=native_media_regions,
+                prompt_token_offset=prefix_hit_length,
             )
     finally:
         record_runner_phase(
@@ -1707,13 +1862,8 @@ def mlx_generate(
             task_id=trace_task_id,
             include_memory=True,
         )
-        if hasattr(model, "set_pixel_values"):
-            cast(
-                Callable[[mx.array | list[mx.array] | None], None],
-                object.__getattribute__(model, "set_pixel_values"),
-            )(None)
-        elif hasattr(model, "_pixel_values"):
-            object.__setattr__(model, "_pixel_values", None)
+        if hasattr(model, "set_pixel_values") or hasattr(model, "_pixel_values"):
+            _set_native_pixel_values(model, None)
         record_runner_phase(
             "vision_preprocess",
             event="clear_pixel_values_complete",
