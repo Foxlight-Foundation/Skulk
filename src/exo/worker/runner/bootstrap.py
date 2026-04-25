@@ -2,6 +2,8 @@ import gc
 import os
 import resource
 import signal
+import threading
+import time
 
 import loguru
 
@@ -36,6 +38,49 @@ def _release_metal_resources() -> None:
     except Exception:
         pass
     gc.collect()
+
+
+def _install_parent_death_watchdog(initial_ppid: int, poll_seconds: float = 1.0) -> None:
+    """Self-terminate the runner when the agent supervisor dies.
+
+    The runner is a ``mp.Process(daemon=True)`` child of the agent. ``daemon=True``
+    only kills the child on a *clean* Python interpreter exit in the parent;
+    when the agent receives SIGKILL the child is reparented to launchd (pid 1
+    on macOS) and continues holding 4-5 GB of unified GPU memory until killed
+    explicitly. Without this watchdog, killing the agent leaves wired Metal
+    memory allocated, which is the failure mode that today forces a node
+    restart.
+
+    A dedicated daemon thread polls ``os.getppid()`` once per second; if it
+    changes from the original supervisor pid we run a best-effort
+    ``mx.clear_cache()`` and ``os._exit(1)``. We use ``os._exit`` rather than
+    ``sys.exit`` so we bypass any Python-level finally/atexit hooks that could
+    block on broken multiprocessing pipes.
+    """
+
+    def watchdog() -> None:
+        while True:
+            time.sleep(poll_seconds)
+            try:
+                current_ppid = os.getppid()
+            except OSError:
+                continue
+            if current_ppid != initial_ppid:
+                logger.warning(
+                    f"Runner parent died (ppid {initial_ppid} -> {current_ppid}); "
+                    "self-terminating to release Metal/GPU memory."
+                )
+                _release_metal_resources()
+                # Bypass interpreter shutdown to avoid hanging on broken
+                # multiprocessing pipes back to the now-dead supervisor.
+                os._exit(1)
+
+    thread = threading.Thread(
+        target=watchdog,
+        name="runner-parent-death-watchdog",
+        daemon=True,
+    )
+    thread.start()
 
 
 def _metal_cleanup_signal_handler(signum: int, _frame: object) -> None:
@@ -74,6 +119,12 @@ def entrypoint(
     # triggers Metal cleanup instead of an abrupt death that leaks wired RAM.
     signal.signal(signal.SIGTERM, _metal_cleanup_signal_handler)
     signal.signal(signal.SIGINT, _metal_cleanup_signal_handler)
+
+    # Backstop for SIGKILL of the supervisor: signal handlers above only fire
+    # for graceful agent shutdown. If the agent is SIGKILLed we get reparented
+    # to launchd, never receive a signal, and orphan ~5 GB of wired Metal
+    # memory. The watchdog detects reparenting and self-exits cleanly.
+    _install_parent_death_watchdog(initial_ppid=os.getppid())
 
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(max(soft, 2048), hard), hard))

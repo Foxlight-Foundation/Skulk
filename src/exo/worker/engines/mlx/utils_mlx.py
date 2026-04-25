@@ -73,6 +73,8 @@ from exo.worker.engines.mlx.auto_parallel import (
     get_inner_model,
     get_layers,
     pipeline_auto_parallel,
+    pipeline_eval_timeout_seconds,
+    pipeline_timeout_callback,
     tensor_auto_parallel,
 )
 from exo.worker.engines.mlx.gemma4_prompt import render_gemma4_prompt
@@ -1249,10 +1251,19 @@ def mx_any(bool_: bool, group: Group | None) -> bool:
 def mx_barrier(group: Group | None):
     if group is None:
         return
-    mx.eval(
+    # Wrap the all_sum eval in eval_with_timeout so a desynced ring-collective
+    # state cannot wedge the runner indefinitely. Healthy barriers complete in
+    # milliseconds; the slowest legitimate observation is the post-prefill
+    # decode barrier at ~1s. Bound by SKULK_PIPELINE_EVAL_TIMEOUT_SECONDS so
+    # all distributed evals share the same recovery floor.
+    eval_with_timeout(
         mx.distributed.all_sum(
             mx.array(1.0), group=group, stream=mx.default_stream(mx.Device(mx.cpu))
-        )
+        ),
+        timeout_seconds=pipeline_eval_timeout_seconds(),
+        on_timeout=pipeline_timeout_callback(
+            "mx_barrier", {"group_size": group.size()}, is_prefill=False
+        ),
     )
 
 

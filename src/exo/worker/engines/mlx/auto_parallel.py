@@ -5,7 +5,7 @@ import threading
 import time
 import traceback
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from functools import partial
 from inspect import signature
 from types import FrameType
@@ -65,7 +65,7 @@ from mlx_lm.models.step3p5 import Step3p5Model as Step35InnerModel
 from exo.shared.constants import preferred_env_value
 from exo.shared.types.worker.shards import PipelineShardMetadata
 from exo.worker.runner.bootstrap import logger
-from exo.worker.runner.diagnostics import runner_phase
+from exo.worker.runner.diagnostics import record_runner_phase, runner_phase
 
 if TYPE_CHECKING:
     from mlx_lm.models.cache import Cache
@@ -233,6 +233,49 @@ def eval_with_timeout(
         completed.set()
 
 
+def pipeline_eval_timeout_seconds() -> float:
+    """Per-eval hard timeout for the pipeline-parallel forward pass.
+
+    Healthy ring-collective evals on a warm cluster are sub-millisecond; the
+    pre-decode barrier is the slowest legit collective at ~1s. 60s gives ~60×
+    headroom over the slowest legitimate value while still bounding the
+    "node bricked" failure mode caused by ring channel state desync.
+    """
+    raw = preferred_env_value(
+        "SKULK_PIPELINE_EVAL_TIMEOUT_SECONDS",
+        "EXO_PIPELINE_EVAL_TIMEOUT_SECONDS",
+    )
+    if raw is None:
+        return 60.0
+    with contextlib.suppress(ValueError):
+        return max(float(raw), 1.0)
+    return 60.0
+
+
+def pipeline_timeout_callback(
+    site: str, attrs: Mapping[str, object], is_prefill: bool
+) -> TimeoutCallback:
+    """Return an on_timeout callback that emits a flight-recorder breadcrumb.
+
+    Recorded under the same phase name as the surrounding `runner_phase`
+    block so post-mortem diagnostics tie the timeout event back to the
+    enter/exit pair already in the recorder.
+    """
+    phase = "prefill_pipeline" if is_prefill else "decode_stream"
+
+    def _on_timeout() -> None:
+        with contextlib.suppress(Exception):
+            record_runner_phase(
+                phase,
+                event="pipeline_eval_timeout",
+                detail=site,
+                attrs=dict(attrs),
+                include_memory=True,
+            )
+
+    return _on_timeout
+
+
 class _LayerCallable(Protocol):
     """Structural type that any compatible layer must satisfy.
 
@@ -282,18 +325,28 @@ class PipelineFirstLayer(CustomMlxLayer):
         if self.r != 0:
             # We want to avoid GPU timeout errors by evalling the distributed operation
             # so that it stays on CPU, which does not have a timeout.
+            _attrs_input: dict[str, object] = {
+                "rank": self.r,
+                "src": self.r - 1,
+            }
             with runner_phase(
                 "prefill_pipeline" if self.is_prefill else "decode_stream",
                 detail="pipeline_first_eval_input",
-                attrs={"rank": self.r, "src": self.r - 1},
+                attrs=_attrs_input,
             ), _hang_debug_watch(
                 f"pipeline_first eval_input rank={self.r} src={self.r - 1}"
             ):
-                mx.eval(x)
+                eval_with_timeout(
+                    x,
+                    timeout_seconds=pipeline_eval_timeout_seconds(),
+                    on_timeout=pipeline_timeout_callback(
+                        "pipeline_first_eval_input", _attrs_input, self.is_prefill
+                    ),
+                )
             with runner_phase(
                 "prefill_pipeline" if self.is_prefill else "decode_stream",
                 detail="pipeline_first_recv_like",
-                attrs={"rank": self.r, "src": self.r - 1},
+                attrs=_attrs_input,
             ), _hang_debug_watch(
                 f"pipeline_first recv_like rank={self.r} src={self.r - 1}"
             ):
@@ -301,11 +354,17 @@ class PipelineFirstLayer(CustomMlxLayer):
             with runner_phase(
                 "prefill_pipeline" if self.is_prefill else "decode_stream",
                 detail="pipeline_first_eval_recv",
-                attrs={"rank": self.r, "src": self.r - 1},
+                attrs=_attrs_input,
             ), _hang_debug_watch(
                 f"pipeline_first eval_recv rank={self.r} src={self.r - 1}"
             ):
-                mx.eval(x)
+                eval_with_timeout(
+                    x,
+                    timeout_seconds=pipeline_eval_timeout_seconds(),
+                    on_timeout=pipeline_timeout_callback(
+                        "pipeline_first_eval_recv", _attrs_input, self.is_prefill
+                    ),
+                )
         with runner_phase(
             "prefill_pipeline" if self.is_prefill else "decode_stream",
             detail="pipeline_first_original_layer",
@@ -346,35 +405,44 @@ class PipelineLastLayer(CustomMlxLayer):
 
         # Eval layer output to materialize it before send — this splits the graph
         # so the send is isolated and the receiving rank's recv can complete.
+        _attrs_eval: dict[str, object] = {
+            "rank": self.r,
+            "world_size": self.s,
+            "prefill": self.is_prefill,
+        }
         with runner_phase(
             "prefill_pipeline" if self.is_prefill else "decode_stream",
             detail="pipeline_last_eval_output",
-            attrs={"rank": self.r, "world_size": self.s, "prefill": self.is_prefill},
+            attrs=_attrs_eval,
         ), _hang_debug_watch(
             f"pipeline_last eval_output rank={self.r} world={self.s} prefill={self.is_prefill}"
         ):
-            mx.eval(output)
+            eval_with_timeout(
+                output,
+                timeout_seconds=pipeline_eval_timeout_seconds(),
+                on_timeout=pipeline_timeout_callback(
+                    "pipeline_last_eval_output", _attrs_eval, self.is_prefill
+                ),
+            )
 
         if self.r != self.s - 1:
+            _dst = (self.r + 1) % self.s
+            _attrs_send: dict[str, object] = {
+                "rank": self.r,
+                "dst": _dst,
+                "prefill": self.is_prefill,
+            }
             if self.queue_sends:
-                _pending_prefill_sends.append(
-                    (output, (self.r + 1) % self.s, self.group)
-                )
+                _pending_prefill_sends.append((output, _dst, self.group))
             else:
                 with runner_phase(
                     "prefill_pipeline" if self.is_prefill else "decode_stream",
                     detail="pipeline_last_send",
-                    attrs={
-                        "rank": self.r,
-                        "dst": (self.r + 1) % self.s,
-                        "prefill": self.is_prefill,
-                    },
+                    attrs=_attrs_send,
                 ), _hang_debug_watch(
-                    f"pipeline_last send rank={self.r} dst={(self.r + 1) % self.s} prefill={self.is_prefill}"
+                    f"pipeline_last send rank={self.r} dst={_dst} prefill={self.is_prefill}"
                 ):
-                    output = mx.distributed.send(
-                        output, (self.r + 1) % self.s, group=self.group
-                    )
+                    output = mx.distributed.send(output, _dst, group=self.group)
             if cache is not None:
                 # CacheList (used by MLA models like DeepSeekV32, GLM MoE DSA)
                 # doesn't have .keys directly; access via first sub-cache.
@@ -382,16 +450,34 @@ class PipelineLastLayer(CustomMlxLayer):
                 if hasattr(_cache, "keys"):  # pyright: ignore[reportAny]
                     _cache.keys = mx.depends(_cache.keys, output)  # type: ignore
             with _hang_debug_watch(
-                f"pipeline_last eval_send rank={self.r} dst={(self.r + 1) % self.s} prefill={self.is_prefill}"
+                f"pipeline_last eval_send rank={self.r} dst={_dst} prefill={self.is_prefill}"
             ):
-                mx.eval(output)
+                eval_with_timeout(
+                    output,
+                    timeout_seconds=pipeline_eval_timeout_seconds(),
+                    on_timeout=pipeline_timeout_callback(
+                        "pipeline_last_eval_send", _attrs_send, self.is_prefill
+                    ),
+                )
             if cache is not None and hasattr(_cache, "keys"):  # type: ignore
                 with _hang_debug_watch(
-                    f"pipeline_last eval_cache_dep rank={self.r} dst={(self.r + 1) % self.s} prefill={self.is_prefill}"
+                    f"pipeline_last eval_cache_dep rank={self.r} dst={_dst} prefill={self.is_prefill}"
                 ):
-                    mx.eval(_cache.keys)  # type: ignore
+                    eval_with_timeout(
+                        _cache.keys,  # type: ignore
+                        timeout_seconds=pipeline_eval_timeout_seconds(),
+                        on_timeout=pipeline_timeout_callback(
+                            "pipeline_last_eval_cache_dep",
+                            _attrs_send,
+                            self.is_prefill,
+                        ),
+                    )
 
         if not self.is_prefill:
+            _attrs_gather: dict[str, object] = {
+                "rank": self.r,
+                "world_size": self.s,
+            }
             with _hang_debug_watch(
                 f"pipeline_last all_gather rank={self.r} world={self.s}"
             ):
@@ -401,7 +487,15 @@ class PipelineLastLayer(CustomMlxLayer):
             with _hang_debug_watch(
                 f"pipeline_last eval_all_gather rank={self.r} world={self.s}"
             ):
-                mx.eval(output)
+                eval_with_timeout(
+                    output,
+                    timeout_seconds=pipeline_eval_timeout_seconds(),
+                    on_timeout=pipeline_timeout_callback(
+                        "pipeline_last_eval_all_gather",
+                        _attrs_gather,
+                        self.is_prefill,
+                    ),
+                )
 
         return output
 
