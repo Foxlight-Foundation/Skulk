@@ -599,3 +599,126 @@ class ClusterDiagnostics(CamelCaseModel):
         default_factory=list,
         description="Local and reachable peer diagnostic results.",
     )
+
+
+class ClusterTimelineRunner(CamelCaseModel):
+    """Compact current-state synopsis for one runner in the cluster timeline view.
+
+    Designed for at-a-glance debugging of distributed deadlocks: each runner's
+    rank, current phase, and time-stuck-in-phase make a rank-disagreement
+    pattern visible without having to cross-reference per-node payloads.
+    """
+
+    node_id: str = Field(description="Node owning this runner.")
+    runner_id: str = Field(description="Runner ID.")
+    instance_id: str = Field(description="Instance ID.")
+    model_id: str = Field(description="Model assigned to this runner.")
+    device_rank: int = Field(description="Distributed device rank.")
+    world_size: int = Field(description="Distributed world size.")
+    pid: int | None = Field(
+        default=None, description="Runner subprocess PID, when started."
+    )
+    process_alive: bool = Field(description="Whether the runner subprocess is alive.")
+    status_kind: str = Field(description="Current runner status variant.")
+    phase: RunnerPhaseName = Field(description="Last runner phase reported.")
+    phase_detail: str | None = Field(
+        default=None, description="Compact human-readable detail for the current phase."
+    )
+    seconds_in_phase: float = Field(
+        description="Wall-clock seconds spent in the current phase."
+    )
+    last_progress_at: str | None = Field(
+        default=None,
+        description="UTC timestamp for the last flight-recorder update.",
+    )
+    active_task_id: str | None = Field(
+        default=None,
+        description="Task ID associated with the current phase, when known.",
+    )
+    active_command_id: str | None = Field(
+        default=None,
+        description="Command ID associated with the current phase, when known.",
+    )
+    last_mlx_memory: MlxMemorySnapshot | None = Field(
+        default=None,
+        description="Most recent MLX memory snapshot reported by the runner.",
+    )
+
+
+class ClusterTimelineEntry(CamelCaseModel):
+    """One flight-recorder entry annotated with cluster identity for merge.
+
+    Identical in spirit to ``RunnerFlightRecorderEntry`` but with redundant
+    ``node_id`` / ``device_rank`` / ``world_size`` lifted onto the entry so
+    a chronologically merged list across all ranks reads top-to-bottom as a
+    single distributed timeline.
+    """
+
+    at: str = Field(description="UTC timestamp when the runner emitted the update.")
+    node_id: str = Field(description="Node owning the runner that emitted this entry.")
+    runner_id: str = Field(description="Runner ID that emitted this entry.")
+    device_rank: int = Field(description="Distributed device rank for this entry.")
+    world_size: int = Field(description="Distributed world size for this entry.")
+    phase: RunnerPhaseName = Field(description="Runner phase at this entry.")
+    event: str = Field(description="Short event name within the phase.")
+    detail: str | None = Field(
+        default=None,
+        description="Compact human-readable detail for diagnostics.",
+    )
+    attrs: dict[str, RunnerDiagnosticValue] = Field(
+        default_factory=dict,
+        description="Structured low-cardinality diagnostic attributes.",
+    )
+    task_id: str | None = Field(
+        default=None,
+        description="Task ID associated with the entry, when known.",
+    )
+    command_id: str | None = Field(
+        default=None,
+        description="Command ID associated with the entry, when known.",
+    )
+    mlx_memory: MlxMemorySnapshot | None = Field(
+        default=None,
+        description="MLX memory snapshot captured with this entry, when present.",
+    )
+
+
+class ClusterTimelineUnreachable(CamelCaseModel):
+    """One peer that could not be reached when building the cluster timeline."""
+
+    node_id: str = Field(description="Node ID for the unreachable peer.")
+    url: str | None = Field(
+        default=None, description="Peer API URL that was attempted, if known."
+    )
+    error: str = Field(description="Reason the peer was unreachable.")
+
+
+class ClusterTimeline(CamelCaseModel):
+    """Cross-rank chronological view of runner activity across the cluster.
+
+    Produced by stitching the per-node ``RunnerSupervisorDiagnostics`` from
+    every reachable node into one unified shape. The ``runners`` list gives
+    a per-rank "where is each rank right now" snapshot; the ``timeline``
+    list gives every flight-recorder entry across all ranks, merged and
+    sorted by ``at`` so a distributed deadlock's rank-disagreement signature
+    is visible at a glance.
+    """
+
+    generated_at: str = Field(description="UTC timestamp when the timeline was built.")
+    local_node_id: str = Field(description="Node ID of the API serving this response.")
+    master_node_id: str | None = Field(
+        default=None,
+        description="Current master node ID, when known.",
+    )
+    runners: list[ClusterTimelineRunner] = Field(
+        default_factory=list,
+        description="Current synopsis for each runner, sorted by (model_id, rank).",
+    )
+    timeline: list[ClusterTimelineEntry] = Field(
+        default_factory=list,
+        description="Flight-recorder entries from all runners, merged and sorted by `at` ascending.",
+    )
+    unreachable_nodes: list[ClusterTimelineUnreachable] = Field(
+        default_factory=list,
+        description="Peer nodes that could not be reached for this timeline.",
+    )

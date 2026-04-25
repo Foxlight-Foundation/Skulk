@@ -462,6 +462,237 @@ def test_cluster_diagnostics_returns_local_and_peer_results(
     assert all(node["ok"] is True for node in nodes)
 
 
+def _build_supervisor_runner(
+    *,
+    node_id: str,
+    rank: int,
+    runner_id: str,
+    flight_at: list[str],
+) -> RunnerSupervisorDiagnostics:
+    """Build a minimal supervisor diagnostics record for cluster-timeline tests."""
+
+    context = RunnerDiagnosticContext(
+        node_id=node_id,
+        runner_id=runner_id,
+        pid=1234 + rank,
+        instance_id="instance-1",
+        model_id="mlx-community/gemma-4-26b-a4b-it-4bit",
+        rank=rank,
+        world_size=2,
+        start_layer=0,
+        end_layer=15,
+        n_layers=30,
+    )
+    return RunnerSupervisorDiagnostics(
+        runner_id=runner_id,
+        instance_id="instance-1",
+        node_id=node_id,
+        model_id="mlx-community/gemma-4-26b-a4b-it-4bit",
+        device_rank=rank,
+        world_size=2,
+        start_layer=0,
+        end_layer=15,
+        n_layers=30,
+        pid=1234 + rank,
+        process_alive=True,
+        exit_code=None,
+        status_kind="RunnerRunning",
+        status_since="2026-04-23T00:00:00+00:00",
+        seconds_in_status=12.0,
+        phase="decode_stream",
+        phase_started_at="2026-04-23T00:00:01+00:00",
+        seconds_in_phase=11.0,
+        last_progress_at=flight_at[-1] if flight_at else None,
+        active_task_id="task-1",
+        active_command_id="command-1",
+        phase_detail="pipeline_last_eval_output",
+        last_mlx_memory=None,
+        flight_recorder=[
+            RunnerFlightRecorderEntry(
+                at=ts,
+                phase="decode_stream",
+                event="enter",
+                detail="pipeline_last_eval_output",
+                attrs={"rank": rank},
+                context=context,
+                task_id="task-1",
+                command_id="command-1",
+            )
+            for ts in flight_at
+        ],
+        pending_task_ids=[],
+        in_progress_tasks=[],
+        completed_task_count=0,
+        cancelled_task_ids=[],
+        last_task_sent_at=None,
+        last_event_received_at=None,
+        last_event_type=None,
+        milestones=[],
+    )
+
+
+def test_cluster_timeline_merges_flight_recorders_by_wall_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cluster timeline should merge per-rank flight recorders chronologically.
+
+    The intended consumer is a human staring at a distributed deadlock: they
+    need to see "rank 0 entered phase X at T while rank 1 was still in phase Y"
+    by reading top to bottom. Verify that ranks are stitched into one list
+    sorted by `at`, with `node_id` / `device_rank` lifted onto each entry.
+    """
+
+    api = _build_api("local-node")
+    client = TestClient(api.app)
+
+    # Local rank 0: two flight-recorder entries, the later one being the
+    # eval site that hangs in production.
+    local_runner = _build_supervisor_runner(
+        node_id="local-node",
+        rank=0,
+        runner_id="runner-0",
+        flight_at=[
+            "2026-04-24T22:03:50.000000+00:00",
+            "2026-04-24T22:03:51.508000+00:00",
+        ],
+    )
+    api.set_runner_diagnostics_provider(lambda: [local_runner])
+
+    # Peer rank 1: two entries that interleave with the local timeline so
+    # chronological merge is observable in the response order.
+    peer_runner = _build_supervisor_runner(
+        node_id="peer-node",
+        rank=1,
+        runner_id="runner-1",
+        flight_at=[
+            "2026-04-24T22:03:50.500000+00:00",
+            "2026-04-24T22:03:52.000000+00:00",
+        ],
+    )
+
+    runtime = api._runtime_diagnostics()  # pyright: ignore[reportPrivateUsage]
+    peer_diagnostics = NodeDiagnostics(
+        generated_at="2026-04-24T22:03:53+00:00",
+        runtime=runtime.model_copy(
+            update={"node_id": "peer-node", "hostname": "peer-node.local"}
+        ),
+        resources=api._resource_diagnostics(),  # pyright: ignore[reportPrivateUsage]
+        supervisor_runners=[peer_runner],
+    )
+
+    async def _reachable_peer_api_urls() -> dict[str, str]:
+        return {"peer-node": "http://peer-node:52415"}
+
+    class _FakeAsyncClient:
+        def __init__(self, responses: dict[str, httpx.Response]) -> None:
+            self._responses = responses
+
+        async def __aenter__(self) -> "_FakeAsyncClient":
+            return self
+
+        async def __aexit__(
+            self,
+            _exc_type: object,
+            _exc: object,
+            _tb: object,
+        ) -> None:
+            return None
+
+        async def get(self, url: str) -> httpx.Response:
+            return self._responses[url]
+
+    def _build_async_client(*_args: object, **_kwargs: object) -> _FakeAsyncClient:
+        return _FakeAsyncClient(
+            responses={
+                "http://peer-node:52415/v1/diagnostics/node": httpx.Response(
+                    200,
+                    json=peer_diagnostics.model_dump(mode="json", by_alias=True),
+                    request=httpx.Request(
+                        "GET",
+                        "http://peer-node:52415/v1/diagnostics/node",
+                    ),
+                )
+            }
+        )
+
+    monkeypatch.setattr(api, "_reachable_peer_api_urls", _reachable_peer_api_urls)
+    monkeypatch.setattr(api_main.httpx, "AsyncClient", _build_async_client)
+
+    response = client.get("/v1/diagnostics/cluster/timeline")
+
+    assert response.status_code == 200
+    body = _json_object(response)
+
+    runners = [_json_mapping(r) for r in _json_list(body["runners"])]
+    assert [r["deviceRank"] for r in runners] == [0, 1]
+    assert [r["nodeId"] for r in runners] == ["local-node", "peer-node"]
+
+    timeline = [_json_mapping(e) for e in _json_list(body["timeline"])]
+    assert [e["at"] for e in timeline] == [
+        "2026-04-24T22:03:50.000000+00:00",
+        "2026-04-24T22:03:50.500000+00:00",
+        "2026-04-24T22:03:51.508000+00:00",
+        "2026-04-24T22:03:52.000000+00:00",
+    ]
+    assert [e["deviceRank"] for e in timeline] == [0, 1, 0, 1]
+    assert [e["nodeId"] for e in timeline] == [
+        "local-node",
+        "peer-node",
+        "local-node",
+        "peer-node",
+    ]
+    # Every entry must carry world_size + runner identity for downstream tools.
+    assert all(e["worldSize"] == 2 for e in timeline)
+    assert {e["runnerId"] for e in timeline} == {"runner-0", "runner-1"}
+
+
+def test_cluster_timeline_records_unreachable_peers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unreachable peers should appear in unreachableNodes, not break the response."""
+
+    api = _build_api("local-node")
+    client = TestClient(api.app)
+
+    api.set_runner_diagnostics_provider(list)
+
+    async def _reachable_peer_api_urls() -> dict[str, str]:
+        return {"peer-node": "http://peer-node:52415"}
+
+    class _FakeAsyncClient:
+        async def __aenter__(self) -> "_FakeAsyncClient":
+            return self
+
+        async def __aexit__(
+            self,
+            _exc_type: object,
+            _exc: object,
+            _tb: object,
+        ) -> None:
+            return None
+
+        async def get(self, _url: str) -> httpx.Response:
+            raise httpx.ConnectError("connection refused")
+
+    def _build_async_client(*_args: object, **_kwargs: object) -> _FakeAsyncClient:
+        return _FakeAsyncClient()
+
+    monkeypatch.setattr(api, "_reachable_peer_api_urls", _reachable_peer_api_urls)
+    monkeypatch.setattr(api_main.httpx, "AsyncClient", _build_async_client)
+
+    response = client.get("/v1/diagnostics/cluster/timeline")
+
+    assert response.status_code == 200
+    body = _json_object(response)
+    unreachable = [_json_mapping(u) for u in _json_list(body["unreachableNodes"])]
+    assert len(unreachable) == 1
+    assert unreachable[0]["nodeId"] == "peer-node"
+    assert "connection refused" in str(unreachable[0]["error"])
+    # Local node has no runners — timeline is empty but well-formed.
+    assert _json_list(body["timeline"]) == []
+    assert _json_list(body["runners"]) == []
+
+
 def test_cancel_local_runner_task_calls_worker_provider() -> None:
     """Local runner control should call the attached worker provider."""
 

@@ -202,6 +202,10 @@ from exo.shared.types.common import CommandId, Id, NodeId, SystemId
 from exo.shared.types.diagnostics import (
     ClusterDiagnostics,
     ClusterNodeDiagnostics,
+    ClusterTimeline,
+    ClusterTimelineEntry,
+    ClusterTimelineRunner,
+    ClusterTimelineUnreachable,
     DiagnosticCaptureRequest,
     DiagnosticCaptureResponse,
     DiagnosticProcessSample,
@@ -953,6 +957,20 @@ class API:
                 "reported as partial failures instead of failing the whole request."
             ),
         )(self.get_cluster_diagnostics)
+        self.app.get(
+            "/v1/diagnostics/cluster/timeline",
+            tags=["Diagnostics"],
+            summary="Get cross-rank runner timeline",
+            description=(
+                "Stitch every reachable node's runner-supervisor diagnostics into "
+                "one cross-rank chronological view. Returns a per-runner synopsis "
+                "(rank, current phase, seconds-in-phase, MLX memory) and every "
+                "flight-recorder entry across all ranks merged and sorted by "
+                "wall-clock timestamp. The intended use is debugging distributed "
+                "deadlocks where the rank-disagreement signature is invisible from "
+                "any single node's local diagnostics."
+            ),
+        )(self.get_cluster_timeline)
         self.app.get(
             "/v1/diagnostics/cluster/{node_id}",
             tags=["Diagnostics"],
@@ -3792,6 +3810,92 @@ class API:
             local_node_id=str(self.node_id),
             master_node_id=str(self._master_node_id),
             nodes=nodes,
+        )
+
+    async def get_cluster_timeline(self) -> ClusterTimeline:
+        """Return a cross-rank chronological view of runner activity.
+
+        Stitches every reachable node's ``RunnerSupervisorDiagnostics`` into
+        one structure: a per-runner synopsis sorted by ``(model_id, rank)``,
+        and every flight-recorder entry across all ranks merged and sorted by
+        ``at`` so distributed-deadlock signatures (e.g. "rank 0 entered
+        pipeline_last_eval_output 27 minutes ago while rank 1 is still in
+        pipeline_first_recv_like") are visible at a glance.
+
+        Reuses ``get_cluster_diagnostics`` for fan-out so peer discovery,
+        timeouts, and unreachable-peer handling stay in one place.
+        """
+        cluster = await self.get_cluster_diagnostics()
+
+        runners: list[ClusterTimelineRunner] = []
+        timeline_entries: list[ClusterTimelineEntry] = []
+        unreachable: list[ClusterTimelineUnreachable] = []
+
+        for node in cluster.nodes:
+            if not node.ok or node.diagnostics is None:
+                unreachable.append(
+                    ClusterTimelineUnreachable(
+                        node_id=node.node_id,
+                        url=node.url,
+                        error=node.error
+                        or "Node diagnostics returned no payload.",
+                    )
+                )
+                continue
+            for runner in node.diagnostics.supervisor_runners:
+                runners.append(
+                    ClusterTimelineRunner(
+                        node_id=runner.node_id,
+                        runner_id=runner.runner_id,
+                        instance_id=runner.instance_id,
+                        model_id=runner.model_id,
+                        device_rank=runner.device_rank,
+                        world_size=runner.world_size,
+                        pid=runner.pid,
+                        process_alive=runner.process_alive,
+                        status_kind=runner.status_kind,
+                        phase=runner.phase,
+                        phase_detail=runner.phase_detail,
+                        seconds_in_phase=runner.seconds_in_phase,
+                        last_progress_at=runner.last_progress_at,
+                        active_task_id=runner.active_task_id,
+                        active_command_id=runner.active_command_id,
+                        last_mlx_memory=runner.last_mlx_memory,
+                    )
+                )
+                for entry in runner.flight_recorder:
+                    # Lift node/rank identity onto each entry so the merged
+                    # timeline reads top-to-bottom as a distributed log.
+                    timeline_entries.append(
+                        ClusterTimelineEntry(
+                            at=entry.at,
+                            node_id=runner.node_id,
+                            runner_id=runner.runner_id,
+                            device_rank=runner.device_rank,
+                            world_size=runner.world_size,
+                            phase=entry.phase,
+                            event=entry.event,
+                            detail=entry.detail,
+                            attrs=dict(entry.attrs),
+                            task_id=entry.task_id,
+                            command_id=entry.command_id,
+                            mlx_memory=entry.mlx_memory,
+                        )
+                    )
+
+        # Stable sort by (model_id, rank) — multi-model deployments stay grouped.
+        runners.sort(key=lambda r: (r.model_id, r.device_rank, r.runner_id))
+        # Chronological merge across ranks. Ties broken by (node_id, rank) so the
+        # ordering is deterministic when two ranks emit at the same `at` string.
+        timeline_entries.sort(key=lambda e: (e.at, e.node_id, e.device_rank))
+
+        return ClusterTimeline(
+            generated_at=datetime.now(tz=timezone.utc).isoformat(),
+            local_node_id=cluster.local_node_id,
+            master_node_id=cluster.master_node_id,
+            runners=runners,
+            timeline=timeline_entries,
+            unreachable_nodes=unreachable,
         )
 
     async def get_cluster_node_diagnostics(self, node_id: str) -> NodeDiagnostics:

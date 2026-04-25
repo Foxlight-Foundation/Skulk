@@ -157,6 +157,7 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `POST /v1/diagnostics/node/capture`
 - `POST /v1/diagnostics/node/runners/{runner_id}/cancel`
 - `GET /v1/diagnostics/cluster`
+- `GET /v1/diagnostics/cluster/timeline`
 - `GET /v1/diagnostics/cluster/{node_id}`
 - `POST /v1/diagnostics/cluster/{node_id}/capture`
 - `POST /v1/diagnostics/cluster/{node_id}/runners/{runner_id}/cancel`
@@ -778,6 +779,7 @@ Returns stored events from the API-side event log.
 - `POST /v1/diagnostics/node/capture`
 - `POST /v1/diagnostics/node/runners/{runner_id}/cancel`
 - `GET /v1/diagnostics/cluster`
+- `GET /v1/diagnostics/cluster/timeline`
 - `GET /v1/diagnostics/cluster/{node_id}`
 - `POST /v1/diagnostics/cluster/{node_id}/capture`
 - `POST /v1/diagnostics/cluster/{node_id}/runners/{runner_id}/cancel`
@@ -801,6 +803,16 @@ Behavior notes:
   cancellation for one task that the local runner supervisor still knows about.
 - `GET /v1/diagnostics/cluster` fans out to reachable peer APIs and returns
   partial results when some peers are unavailable.
+- `GET /v1/diagnostics/cluster/timeline` stitches every reachable node's
+  runner-supervisor diagnostics into one cross-rank chronological view. The
+  response carries a per-runner synopsis sorted by `(modelId, deviceRank)`
+  and every flight-recorder entry across all ranks merged and sorted by `at`.
+  Use this when debugging a distributed deadlock: the rank-disagreement
+  signature ("rank 0 entered `pipeline_last_eval_output` at T while rank 1
+  is still in `pipeline_first_recv_like`") is invisible from any single
+  node's local diagnostics but obvious top-to-bottom in the merged timeline.
+  Unreachable peers are returned in `unreachableNodes` instead of failing
+  the request.
 - `GET /v1/diagnostics/cluster/{node_id}` proxies one reachable peer bundle or
   returns the local bundle if `node_id` is the current API node.
 - `POST /v1/diagnostics/cluster/{node_id}/capture` proxies the same on-demand
@@ -826,6 +838,7 @@ Example:
 ```bash
 curl http://localhost:52415/v1/diagnostics/node
 curl http://localhost:52415/v1/diagnostics/cluster
+curl http://localhost:52415/v1/diagnostics/cluster/timeline
 curl http://localhost:52415/v1/diagnostics/cluster/<node_id>
 curl -X POST http://localhost:52415/v1/diagnostics/node/capture \
   -H 'content-type: application/json' \
