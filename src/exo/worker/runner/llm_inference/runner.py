@@ -8,12 +8,10 @@ import mlx.core as mx
 from anyio import WouldBlock
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
+from exo.shared.models.capabilities import is_gemma4_family
 from exo.shared.models.model_cards import (
     ModelCard,
     ModelTask,
-    OutputParserType,
-    PromptRendererType,
-    ToolCallFormat,
 )
 from exo.shared.tracing import (
     begin_trace_session,
@@ -96,7 +94,7 @@ def _should_skip_llm_warmup(
     default; the env escape hatch remains constrained to single-node runs so a
     partially configured cluster cannot strand peers in warmup collectives.
     """
-    if group_size > 1 and _is_gemma4_model(model_id, model_card):
+    if group_size > 1 and is_gemma4_family(model_card, model_id=model_id):
         logger.warning(
             "Skipping distributed Gemma 4 synthetic warmup; marking runner ready "
             f"(model_id={model_id}, group_size={group_size})"
@@ -116,28 +114,6 @@ def _should_skip_llm_warmup(
         )
         return False
     return True
-
-
-def _is_gemma4_model(model_id: ModelId, model_card: ModelCard | None) -> bool:
-    """Return whether a model should be treated as a Gemma 4 runtime."""
-    normalized_model_id = str(model_id).lower().replace("_", "-")
-    if "gemma-4" in normalized_model_id or "gemma4" in normalized_model_id:
-        return True
-    if model_card is None:
-        return False
-
-    if model_card.vision is not None and model_card.vision.model_type == "gemma4":
-        return True
-
-    runtime = model_card.runtime
-    if runtime is not None and (
-        runtime.prompt_renderer == PromptRendererType.Gemma4
-        or runtime.output_parser == OutputParserType.Gemma4
-    ):
-        return True
-
-    tooling = model_card.tooling
-    return tooling is not None and tooling.tool_call_format == ToolCallFormat.Gemma4
 
 
 class ExitCode(str, Enum):
@@ -759,8 +735,8 @@ class Builder:
             "turboquant_adaptive",
             "optiq",
         )
-        force_sequential_for_gemma4 = _is_gemma4_model(
-            self.model_id, self.model_card
+        force_sequential_for_gemma4 = is_gemma4_family(
+            self.model_card, model_id=self.model_id
         )
         no_batch_requested = os.environ.get("SKULK_NO_BATCH") or os.environ.get(
             "EXO_NO_BATCH"

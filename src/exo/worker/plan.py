@@ -2,11 +2,7 @@
 
 from collections.abc import Mapping, Sequence
 
-from exo.shared.models.model_cards import (
-    OutputParserType,
-    PromptRendererType,
-    ToolCallFormat,
-)
+from exo.shared.models.capabilities import is_gemma4_family
 from exo.shared.types.chunks import InputImageChunk
 from exo.shared.types.common import CommandId, NodeId
 from exo.shared.types.tasks import (
@@ -294,27 +290,16 @@ def _ready_to_warmup(
 
 
 def _uses_independent_distributed_warmup(shard: ShardMetadata) -> bool:
-    """Return whether distributed warmup is independently skippable per shard."""
+    """Return whether distributed warmup is independently skippable per shard.
+
+    Today the only family that opts out of synthetic distributed warmup is
+    Gemma 4 — see ``Runner._should_skip_distributed_warmup`` for the matching
+    runner-side bypass. Detection delegates to the consolidated
+    ``is_gemma4_family`` predicate so the planner and the runner cannot drift.
+    """
     if shard.world_size <= 1:
         return False
-
-    model_card = shard.model_card
-    normalized_model_id = str(model_card.model_id).lower().replace("_", "-")
-    if "gemma-4" in normalized_model_id or "gemma4" in normalized_model_id:
-        return True
-
-    if model_card.vision is not None and model_card.vision.model_type == "gemma4":
-        return True
-
-    runtime = model_card.runtime
-    if runtime is not None and (
-        runtime.prompt_renderer == PromptRendererType.Gemma4
-        or runtime.output_parser == OutputParserType.Gemma4
-    ):
-        return True
-
-    tooling = model_card.tooling
-    return tooling is not None and tooling.tool_call_format == ToolCallFormat.Gemma4
+    return is_gemma4_family(shard.model_card)
 
 
 def _pending_tasks(
