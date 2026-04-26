@@ -71,7 +71,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Role:** operator UI for the same Skulk runtime
 - **Lives in:** `dashboard-react/` (source); served by API at `/`
 - **Stack:** React + TypeScript + styled-components + Vite
-- **State:** Zustand (`src/stores/uiStore.ts`, `chatStore.ts`)
+- **State:** Zustand (`dashboard-react/src/stores/uiStore.ts`, `dashboard-react/src/stores/chatStore.ts`)
 - **Routing:** activity-style enum (`activeRoute` in `uiStore`); no react-router
 - **Persistence:** sessionStorage for in-session UI; localStorage for cross-session preferences (theme, panel widths)
 

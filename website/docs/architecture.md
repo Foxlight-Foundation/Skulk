@@ -281,10 +281,10 @@ The dashboard is the operator-facing UI for the same Skulk runtime. It's a React
 
 Architecture decisions:
 
-- **Zustand** for state (`src/stores/uiStore.ts`, `chatStore.ts`). No Redux, no Context for global state.
+- **Zustand** for state (`dashboard-react/src/stores/uiStore.ts`, `dashboard-react/src/stores/chatStore.ts`). No Redux, no Context for global state.
 - **Activity-style routing.** No react-router. Routes are managed via an `activeRoute` enum in the UI store. Each top-level page renders based on the current value.
 - **Hooks over services.** The cluster state subscription lives in `useClusterState`; topology rendering subscribes via the hook. No service singletons.
-- **Theme-token-driven styling.** `theme/theme.ts` exports `darkTheme` and `lightTheme`; styled-components reference tokens via `${({ theme }) => theme.colors.X}`.
+- **Theme-token-driven styling.** `dashboard-react/src/theme/theme.ts` exports `darkTheme` and `lightTheme`; styled-components reference tokens via `${({ theme }) => theme.colors.X}`.
 - **localStorage for cross-session preferences** (theme, observability panel width); sessionStorage for in-session UI state (which page, panel open/closed, scroll positions).
 
 The dashboard's main surfaces:
