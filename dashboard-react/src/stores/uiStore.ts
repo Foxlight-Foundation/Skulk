@@ -7,10 +7,17 @@ const THEME_STORAGE_KEY = 'skulk-theme';
 const OBSERVABILITY_WIDTH_KEY = 'skulk-observability-panel-width';
 /** Default width of the right-side observability panel, in pixels. */
 const OBSERVABILITY_WIDTH_DEFAULT = 560;
-/** Hard floor on the panel width — narrower than this and the content stops being legible. */
-const OBSERVABILITY_WIDTH_MIN = 360;
-/** Hard ceiling — any wider and the panel would consume the whole viewport on most screens. */
-const OBSERVABILITY_WIDTH_MAX = 1200;
+/**
+ * Hard floor on the panel width — narrower than this and the content stops being
+ * legible. Exported because the resize handler clamps during live drag preview, not
+ * just at commit time, so the live width and the persisted width share one range.
+ */
+export const OBSERVABILITY_WIDTH_MIN = 360;
+/**
+ * Hard ceiling — any wider and the panel would consume the whole viewport on most
+ * screens. Exported for the same reason as the min.
+ */
+export const OBSERVABILITY_WIDTH_MAX = 1200;
 
 /** Tabs available inside the observability panel. */
 export type ObservabilityTab = 'live' | 'node' | 'traces';

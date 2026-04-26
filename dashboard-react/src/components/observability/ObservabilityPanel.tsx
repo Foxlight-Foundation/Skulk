@@ -2,7 +2,12 @@ import { useCallback, useEffect, useRef } from 'react';
 import styled from 'styled-components';
 import { FiX } from 'react-icons/fi';
 import { Button } from '../common/Button';
-import { useUIStore, type ObservabilityTab } from '../../stores/uiStore';
+import {
+  useUIStore,
+  type ObservabilityTab,
+  OBSERVABILITY_WIDTH_MIN,
+  OBSERVABILITY_WIDTH_MAX,
+} from '../../stores/uiStore';
 import { LiveTab } from './LiveTab';
 import { NodeTab } from './NodeTab';
 import { TracesTab } from './TracesTab';
@@ -133,9 +138,11 @@ export function ObservabilityPanel() {
   const close = useUIStore((s) => s.closeObservability);
 
   // Drag-to-resize: capture pointer at the handle; resizing computes width from
-  // the cursor's distance from the right edge of the viewport. Using a ref for
-  // the live width during drag avoids re-rendering the entire panel on every
-  // pointermove event — we only commit to the store on pointerup.
+  // the cursor's distance from the right edge of the viewport. We hold an Aside
+  // ref instead of looking the element up via getElementById in the pointermove
+  // hot path, both to avoid the lookup cost and to keep the contract local
+  // (this component owns the element it mutates during drag).
+  const asideRef = useRef<HTMLElement | null>(null);
   const draggingRef = useRef(false);
   const dragWidthRef = useRef<number>(width);
 
@@ -157,15 +164,30 @@ export function ObservabilityPanel() {
     if (!open) return;
     const onMove = (event: PointerEvent) => {
       if (!draggingRef.current) return;
-      const next = window.innerWidth - event.clientX;
+      // Clamp during live preview, not just at commit time. Without this the
+      // pointer leaving the viewport would set the inline width to negative or
+      // wildly large values and the panel would visibly flicker off-screen
+      // even though the eventual store commit clamps. Using the same range
+      // here keeps the live preview and the persisted state visually identical.
+      const raw = window.innerWidth - event.clientX;
+      const next = Math.max(
+        OBSERVABILITY_WIDTH_MIN,
+        Math.min(OBSERVABILITY_WIDTH_MAX, raw),
+      );
       dragWidthRef.current = next;
       // Live preview via inline style on the panel; final commit lands on up.
-      const panel = document.getElementById('observability-panel');
-      if (panel) panel.style.width = `${next}px`;
+      if (asideRef.current) asideRef.current.style.width = `${next}px`;
     };
     const onUp = () => {
       if (!draggingRef.current) return;
       draggingRef.current = false;
+      // Clear the inline style BEFORE committing the store update. Inline
+      // styles beat styled-components' generated CSS rules on specificity, so
+      // leaving an inline width here would silently override every subsequent
+      // state-driven width change (including from `setObservabilityPanelWidth`
+      // and from any other component that touches the store). Clearing first
+      // hands width control back to the styled-component template literal.
+      if (asideRef.current) asideRef.current.style.width = '';
       setWidth(dragWidthRef.current);
     };
     window.addEventListener('pointermove', onMove);
@@ -191,7 +213,12 @@ export function ObservabilityPanel() {
   if (!open) return null;
 
   return (
-    <Aside $width={width} id="observability-panel" aria-label="Observability panel">
+    <Aside
+      $width={width}
+      ref={asideRef}
+      id="observability-panel"
+      aria-label="Observability panel"
+    >
       <ResizeHandle
         onPointerDown={onResizeStart}
         role="separator"
