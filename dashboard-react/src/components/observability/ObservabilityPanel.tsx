@@ -43,11 +43,22 @@ const Aside = styled.aside<{ $width: number }>`
   display: flex;
   flex-direction: column;
   /*
-   * Z-index sits above the topology + main content but below modal dialogs.
-   * The DiagnosticsDrawer it replaces used 70; we sit just below at 65 so future
-   * modal work can layer on top without arguing with the panel.
+   * Z-index sits above the topology + main content but BELOW any modal-style
+   * surface. SettingsPanel uses 40 (backdrop) and 50 (drawer); operators
+   * routinely open Settings while the observability panel is visible, and a
+   * panel that floats above the Settings drawer makes Settings appear broken
+   * (the higher-z panel covers part or all of the modal). 35 keeps the panel
+   * above topology content (which uses z-index in the 1-20 range) and below
+   * the modal stack, so the SettingsPanel backdrop dims-and-covers the panel
+   * the way a modal should.
+   *
+   * The toolbar's bug icon (HeaderNav body z=20) is covered by the panel
+   * while it's open, which mirrors the prior DiagnosticsDrawer (z=70)
+   * behavior. Operators close via Esc, the panel's X button, or via the
+   * topology bug icon — the toolbar icon is not the canonical close
+   * affordance.
    */
-  z-index: 65;
+  z-index: 35;
 `;
 
 /**
