@@ -93,7 +93,7 @@ Defined in `src/exo/routing/topics.py`.
 | `LOCAL_EVENTS` | `LocalForwarderEvent` | un-indexed `Event` | Workers, API | Master |
 | `COMMANDS` | `ForwarderCommand` | `Command` (`PlaceInstance`, `DeleteInstance`, `TaskFinished`, `SetTracingEnabled`, etc.) | Workers, API | Master |
 | `DOWNLOAD_COMMANDS` | `ForwarderDownloadCommand` | `DownloadCommand` (`SyncConfig`, model store ops) | Master, Workers | All nodes |
-| `STATE_SYNC_MESSAGES` | `StateSyncMessage` | snapshot bootstrap payloads (`StateSnapshotHydrated` etc.) | Master | Followers |
+| `STATE_SYNC_MESSAGES` | `StateSyncMessage` | bidirectional: followers publish `kind="request"` for snapshot/config bootstrap; master publishes `kind="response"` with the requested payload (`StateSnapshotHydrated` etc.) | All nodes (request: followers; response: master) | All nodes |
 | `ELECTION_MESSAGES` | `ElectionMessage` | bully election rounds | All nodes | All nodes |
 | `CONNECTION_MESSAGES` | libp2p connection updates | peer arrivals / departures | Router | All nodes |
 
@@ -267,12 +267,18 @@ Lives in `src/exo/api/main.py` (route registration in `API.__init__`).
 `src/exo/shared/types/state.py`. Frozen, applied by `apply()`:
 
 - `topology` — node-level info (memory, hostname, namespace)
-- `instances` — placed model instances
-- `runners` — per-runner status
-- `placements` — model→runner mappings
-- `tracing_enabled` — cluster-wide tracing flag
-- `master_node_id` — current master
-- `node_network`, `node_disk`, `node_memory`, `node_system` — per-node telemetry
+- `instances: Mapping[InstanceId, Instance]` — placed model instances (each carries shard assignments + per-runner state)
+- `runners: Mapping[RunnerId, RunnerStatus]` — per-runner status union
+- `downloads: Mapping[NodeId, Sequence[DownloadProgress]]` — in-flight model downloads per node
+- `tasks: Mapping[TaskId, Task]` — in-flight or recently-completed tasks
+- `last_seen: Mapping[NodeId, datetime]` — peer liveness timestamps
+- `topology: Topology` — cluster-wide node graph + capabilities
+- `tracing_enabled: bool` — cluster-wide tracing flag
+- `last_event_applied_idx: int` — water mark for the local apply
+- `node_identities`, `node_memory`, `node_disk`, `node_system`, `node_network`, `node_thunderbolt`, `node_thunderbolt_bridge`, `node_rdma_ctl: Mapping[NodeId, *]` — granular per-node telemetry that updates at independent frequencies
+- `thunderbolt_bridge_cycles: Sequence[Sequence[NodeId]]` — detected Thunderbolt-bridge cycles where every node has it enabled (>2 nodes)
+
+Note: there is no `master_node_id` field on `State`. Master identity lives outside the event-sourced state — each node tracks the current master independently via the election protocol (`src/exo/shared/election.py`). `placements` is also not a field; placement information is derived from `instances` (each `Instance` has its own shard assignments).
 
 ### Diagnostics
 
