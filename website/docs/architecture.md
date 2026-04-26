@@ -14,7 +14,7 @@ Skulk is a distributed inference system that connects multiple Apple Silicon (an
 
 The design choices that shape almost everything else:
 
-- **Event-sourced state.** All cluster-visible facts (instances, runners, downloads, tracing toggles) flow through an ordered event log. State is the result of `apply()`-ing events to a frozen Pydantic model.
+- **Event-sourced state.** All cluster-visible facts (instances, runners, downloads, tracing toggles) flow through an ordered event log. State is the result of `apply()`-ing events to a Pydantic model that is treated as immutable by convention (replaced wholesale by `apply()` rather than mutated in place).
 - **One master at a time.** A bully election picks the master; only the master indexes events. Failover is automatic.
 - **libp2p pub/sub for transport.** Topics carry commands, events, election messages, and connection updates between nodes.
 - **MLX as the inference backend.** Pipeline-parallel and tensor-parallel sharding strategies sit on top of `mlx.distributed`'s ring or jaccl/RDMA backends.
@@ -369,7 +369,7 @@ rust/                   # Rust crates: networking (libp2p), exo_pyo3_bindings, s
 
 **Runner** — A subprocess (`mp.Process` daemon) that owns one model and handles inference tasks for it. Exactly one runner per (instance, rank).
 
-**State** — The cluster's current shared view, derived from applying indexed events. A frozen Pydantic model.
+**State** — The cluster's current shared view, derived from applying indexed events. A Pydantic model treated as immutable by convention (`apply()` returns a new `State`; the model itself does not enforce `frozen=True`).
 
 **Worker** — The per-node process responsible for downloads, runner supervision, and task dispatch. Every node runs a worker.
 

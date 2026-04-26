@@ -90,7 +90,7 @@ Defined in `src/exo/routing/topics.py`.
 | Topic | Wire payload type | Inner payload | Publisher | Consumer |
 |---|---|---|---|---|
 | `GLOBAL_EVENTS` | `GlobalForwarderEvent` | indexed `Event` (post-master indexing) | Master | All nodes |
-| `LOCAL_EVENTS` | `LocalForwarderEvent` | un-indexed `Event` | Workers, API | Master |
+| `LOCAL_EVENTS` | `LocalForwarderEvent` | un-indexed `Event` | Workers (via `event_router.py`) | Master |
 | `COMMANDS` | `ForwarderCommand` | `Command` (`PlaceInstance`, `DeleteInstance`, `TaskFinished`, `SetTracingEnabled`, etc.) | Workers, API | Master |
 | `DOWNLOAD_COMMANDS` | `ForwarderDownloadCommand` | `DownloadCommand` (`StartDownload`, `DeleteDownload`, `CancelDownload`, `SyncConfig`, `PurgeStagingCache`, `RestartNode`) | API (download/restart/sync admin ops), Master, Workers | All nodes |
 | `STATE_SYNC_MESSAGES` | `StateSyncMessage` | bidirectional: followers publish `kind="request"` for snapshot/config bootstrap; master publishes `kind="response"` with the requested payload (`StateSnapshotHydrated` etc.) | All nodes (request: followers; response: master) | All nodes |
@@ -109,7 +109,6 @@ Discriminated union at `src/exo/shared/types/events.py`. Selected events:
 | `RunnerFailed` | Runner crashes or exits unexpectedly | All nodes |
 | `TaskAcknowledged` | Worker accepts a task | All nodes |
 | `TaskStatusUpdated` | Task transitions state (`Running`, `Failed`, `Cancelled`, `Complete`); natural completion is the `Complete` variant, driven by the `TaskFinished` command | All nodes |
-| `TaskFailed` | Command stream finalizes with error | All nodes |
 | `TaskDeleted` | Task is purged from cluster state | All nodes |
 | `ChunkGenerated` | Runner emits an output chunk (token, tool call, error) | API queue subscribers |
 | `TracesCollected` | Runner emits trace events for one rank | Master (merges across ranks) |
