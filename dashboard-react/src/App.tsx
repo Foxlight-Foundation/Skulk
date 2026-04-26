@@ -9,6 +9,7 @@ import { TopologyGraph } from './components/topology/TopologyGraph';
 import { ConnectionBanner } from './components/status/ConnectionBanner';
 import { ToastContainer } from './components/status/ToastContainer';
 import { NetworkMesh } from './components/common/NetworkMesh';
+import { DiagnosticsDrawer } from './components/layout/DiagnosticsDrawer';
 import { SettingsPanel } from './components/layout/SettingsPanel';
 import { ModelStorePage } from './components/pages/DownloadsPage';
 import { ChatView } from './components/pages/ChatView';
@@ -119,6 +120,7 @@ export function App() {
     thunderboltBridgeCycles,
   } = useClusterState();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [diagnosticsNodeId, setDiagnosticsNodeId] = useState<string | null>(null);
   const [storeDownloads, setStoreDownloads] = useState<StoreDownload[]>([]);
   const activeRoute = useUIStore((s) => s.activeRoute);
   const panelOpen = useUIStore((s) => s.panelOpen);
@@ -126,6 +128,7 @@ export function App() {
   const themeName = useUIStore((s) => s.theme);
   const activeTheme = themeName === 'light' ? lightTheme : darkTheme;
   const selectedTraceTaskId = useUIStore((s) => s.selectedTraceTaskId);
+  const [traceScope, setTraceScope] = useState<'cluster' | 'local'>('cluster');
 
   // Reflect theme on the html root so non-styled-components surfaces (highlight.js,
   // scrollbars, etc.) can react via `html[data-theme='light'] …` selectors.
@@ -399,10 +402,13 @@ export function App() {
               selectedTraceTaskId ? (
                 <TraceDetailPage
                   taskId={selectedTraceTaskId}
+                  scope={traceScope}
                   onBack={() => setSelectedTraceTaskId(null)}
                 />
               ) : (
                 <TracesPage
+                  scope={traceScope}
+                  onScopeChange={setTraceScope}
                   onOpenTrace={(taskId) => {
                     setSelectedTraceTaskId(taskId);
                     setActiveRoute('traces');
@@ -412,7 +418,10 @@ export function App() {
             ) : activeRoute === 'chat' ? (
               <ChatView readyInstances={instanceCards} />
             ) : topology ? (
-              <TopologyGraph data={topology} />
+              <TopologyGraph
+                data={topology}
+                onInspectNode={setDiagnosticsNodeId}
+              />
             ) : (
               <EmptyState>
                 {connected ? 'Loading cluster state…' : 'Connecting to backend…'}
@@ -428,6 +437,10 @@ export function App() {
           )}
         </ContentRow>
         <ToastContainer />
+        <DiagnosticsDrawer
+          nodeId={diagnosticsNodeId}
+          onClose={() => setDiagnosticsNodeId(null)}
+        />
         <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       </Shell>
     </ThemeProvider>

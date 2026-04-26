@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useTheme } from 'styled-components';
+import { VscBug } from 'react-icons/vsc';
 import { formatBytes } from '../../utils/format';
 import { InfoTooltip } from '../common/InfoTooltip';
 import type { Theme } from '../../theme';
@@ -20,6 +21,8 @@ export interface NodeLabelProps {
   debugContent?: React.ReactNode;
   /** When set, shows a restart icon before the name. */
   onRestart?: () => void;
+  /** When set, shows a diagnostics inspect icon before the name. */
+  onInspect?: () => void;
   /** Optional status line that replaces the memory summary. */
   statusText?: string;
 }
@@ -34,6 +37,7 @@ export function NodeLabel({
   memoryY = 20,
   debugContent,
   onRestart,
+  onInspect,
   statusText,
 }: NodeLabelProps) {
   const theme = useTheme() as Theme;
@@ -71,7 +75,7 @@ export function NodeLabel({
       {/* Restart icon — positioned left of the name text */}
       {onRestart && (
         <foreignObject
-          x={cx - nameWidth / 2 - 24}
+          x={cx - nameWidth / 2 - (onInspect ? 48 : 24)}
           y={nameY - 10}
           width={20}
           height={20}
@@ -97,6 +101,34 @@ export function NodeLabel({
                 fill={confirming ? theme.colors.warning : theme.colors.textMuted}
               />
             </svg>
+          </InfoTooltip>
+        </foreignObject>
+      )}
+      {onInspect && (
+        <foreignObject
+          x={cx - nameWidth / 2 - 24}
+          y={nameY - 10}
+          width={20}
+          height={20}
+          style={{ overflow: 'visible' }}
+        >
+          <InfoTooltip placement="left" content="Inspect live node diagnostics">
+            <button
+              type="button"
+              aria-label="Inspect live node diagnostics"
+              onClick={onInspect}
+              style={{
+                all: 'unset',
+                cursor: 'pointer',
+                color: theme.colors.textMuted,
+                display: 'flex',
+                opacity: 0.65,
+              }}
+              onMouseEnter={(event) => { event.currentTarget.style.opacity = '1'; }}
+              onMouseLeave={(event) => { event.currentTarget.style.opacity = '0.65'; }}
+            >
+              <VscBug size={15} />
+            </button>
           </InfoTooltip>
         </foreignObject>
       )}

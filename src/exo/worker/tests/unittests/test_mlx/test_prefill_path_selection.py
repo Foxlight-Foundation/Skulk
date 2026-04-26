@@ -11,6 +11,7 @@ from mlx_lm.tokenizer_utils import TokenizerWrapper
 
 from exo.shared.types.mlx import KVCacheType, Model
 from exo.worker.engines.mlx.generator import generate as generate_module
+from exo.worker.engines.mlx.vision import MediaRegion
 
 
 class _FakeCache:
@@ -38,6 +39,64 @@ class _FakeModel:
         self.layers: list[object] = []
 
 
+class _FakeStateCache:
+    @property
+    def state(self) -> mx.array:
+        return mx.array([0])
+
+
+class _VisionChunkModel:
+    def __init__(self) -> None:
+        self.pixel_values: list[mx.array] | mx.array | None = None
+        self.pixel_value_calls: list[list[float]] = []
+
+    def set_pixel_values(self, pixel_values: list[mx.array] | mx.array | None) -> None:
+        self.pixel_values = pixel_values
+
+    def __call__(self, *_args: object, **_kwargs: object) -> mx.array:
+        pixel_values = self.pixel_values
+        if pixel_values is None:
+            self.pixel_value_calls.append([])
+        elif isinstance(pixel_values, list):
+            self.pixel_value_calls.append(
+                [float(value.item()) for value in pixel_values]
+            )
+        else:
+            self.pixel_value_calls.append(
+                [float(value.item()) for value in pixel_values]
+            )
+        return mx.zeros((1, 1))
+
+
+class _DecodeStepModel:
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+    def __call__(self, tokens: mx.array, *_args: object, **_kwargs: object) -> mx.array:
+        self.calls.append(int(mx.reshape(tokens, (-1,))[0].item()))
+        return mx.zeros((1, tokens.shape[-1], 32))
+
+
+class _FakeDetokenizer:
+    def __init__(self) -> None:
+        self.last_segment = ""
+
+    def reset(self) -> None:
+        self.last_segment = ""
+
+    def add_token(self, token: int) -> None:
+        self.last_segment = f"token-{token}"
+
+    def finalize(self) -> None:
+        self.last_segment = ""
+
+
+class _DecodeTokenizer:
+    def __init__(self) -> None:
+        self.detokenizer = _FakeDetokenizer()
+        self.eos_token_ids: set[int] = set()
+
+
 def _identity_sampler(logits: mx.array) -> mx.array:
     return logits
 
@@ -59,6 +118,10 @@ def _fake_cache_list(cache: _FakeCache) -> KVCacheType:
 
 
 def _noop_barrier(_group: object) -> None:
+    return None
+
+
+def _noop_prefill_sends() -> None:
     return None
 
 
@@ -155,15 +218,15 @@ def test_prefill_uses_pipeline_parallel_path_for_long_pipeline_prompts(
     assert prefill_mode_calls == [True, False]
 
 
-def test_prefill_uses_pipeline_parallel_path_for_short_pipeline_prompts(
+def test_prefill_uses_stream_generate_path_for_short_pipeline_prompts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Short pipeline prompts must avoid upstream stream_generate prefill.
+    """Short pipeline prompts use the PR90-era stream_generate prefill path.
 
-    ``mlx_lm.generate_step`` prefetches a decode step before yielding even with
-    ``max_tokens=1``. In pipeline mode that hidden prefetch can leave sends/recvs
-    in flight, so short prompts use Skulk's explicit pipeline prefill path while
-    suppressing distributed progress callbacks.
+    Single-chunk prompts do not benefit from the explicit pipeline prefill
+    scheduler, and this shape has repeatedly surfaced Gemma 4 cluster wedges.
+    Keep those prompts on the older stream_generate path while preserving
+    pipeline-prefill mode on the wrappers.
     """
     calls: list[str] = []
     fake_cache = _FakeCache()
@@ -216,8 +279,8 @@ def test_prefill_uses_pipeline_parallel_path_for_short_pipeline_prompts(
         distributed_prompt_progress_callback=_fail_distributed_callback,
     )
 
-    assert calls == ["pipeline_parallel_prefill"]
-    assert "stream_generate" not in calls
+    assert calls == ["stream_generate"]
+    assert "pipeline_parallel_prefill" not in calls
     assert prefill_tokens == 23
     assert snapshots == []
     assert prefill_tps >= 0.0
@@ -225,10 +288,79 @@ def test_prefill_uses_pipeline_parallel_path_for_short_pipeline_prompts(
     assert prefill_mode_calls == [True, False]
 
 
-def test_prefill_uses_pipeline_parallel_path_at_single_chunk_boundary(
+def test_pipeline_prefill_slices_native_pixel_values_per_chunk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Prompts with one real pipeline chunk still use explicit pipeline prefill."""
+    """Chunked native-vision prefill should align each image with its token span."""
+
+    monkeypatch.setattr(generate_module, "clear_prefill_sends", _noop_prefill_sends)
+    monkeypatch.setattr(generate_module, "flush_prefill_sends", _noop_prefill_sends)
+
+    model = _VisionChunkModel()
+    pixel_values = [
+        mx.array([10.0]),
+        mx.array([20.0]),
+        mx.array([30.0]),
+        mx.array([40.0]),
+    ]
+
+    generate_module.pipeline_parallel_prefill(
+        model=cast(Model, cast(object, model)),
+        prompt=mx.array(list(range(2190))),
+        prompt_cache=cast(KVCacheType, [_FakeStateCache()]),
+        prefill_step_size=4096,
+        kv_group_size=None,
+        kv_bits=None,
+        prompt_progress_callback=lambda _processed, _total: None,
+        distributed_prompt_progress_callback=None,
+        group=_fake_group(),
+        native_pixel_values=pixel_values,
+        native_media_regions=[
+            MediaRegion("first", 9, 281),
+            MediaRegion("second", 633, 907),
+            MediaRegion("third", 977, 1245),
+            MediaRegion("fourth", 1891, 2169),
+        ],
+    )
+
+    assert model.pixel_value_calls[:2] == [
+        [10.0, 20.0, 30.0],
+        [40.0],
+    ]
+    assert model.pixel_value_calls[-2:] == [[], []]
+
+
+def test_pipeline_decode_without_lookahead_yields_before_second_decode_step() -> None:
+    """Pipeline decode should not schedule token N+1 before yielding token N."""
+
+    model = _DecodeStepModel()
+    sampled_tokens = [mx.array([10]), mx.array([11])]
+
+    def _sampler(_logprobs: mx.array) -> mx.array:
+        return sampled_tokens.pop(0)
+
+    generator = generate_module._stream_generate_without_lookahead(  # pyright: ignore[reportPrivateUsage]
+        model=cast(Model, cast(object, model)),
+        tokenizer=cast(TokenizerWrapper, cast(object, _DecodeTokenizer())),
+        prompt=mx.array([1, 2]),
+        max_tokens=2,
+        sampler=_sampler,
+        logits_processors=[],
+        prompt_cache=cast(KVCacheType, [_FakeStateCache()]),
+        kv_group_size=None,
+        kv_bits=None,
+    )
+
+    first = next(generator)
+
+    assert first.token == 10
+    assert model.calls == [1, 2]
+
+
+def test_prefill_uses_stream_generate_path_at_single_chunk_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prompts with one real pipeline chunk still avoid explicit pipeline prefill."""
     calls: list[str] = []
     fake_cache = _FakeCache()
     prefill_mode_calls: list[bool] = []
@@ -267,7 +399,7 @@ def test_prefill_uses_pipeline_parallel_path_at_single_chunk_boundary(
         distributed_prompt_progress_callback=None,
     )
 
-    assert calls == ["pipeline_parallel_prefill"]
+    assert calls == ["stream_generate"]
     assert prefill_tokens == 1366
     assert snapshots == []
     assert prefill_tps >= 0.0

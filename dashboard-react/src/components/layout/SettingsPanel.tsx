@@ -24,7 +24,7 @@ const defaultStoreConfig = (): StoreConfig => ({
   staging: {
     enabled: true,
     node_cache_path: '~/.exo/staging',
-    cleanup_on_deactivate: true,
+    cleanup_on_deactivate: false,
   },
 });
 
@@ -447,7 +447,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                       Cleanup on deactivate
                       <InfoTooltip
                         filled
-                        content="When enabled, on deactivate staged models will be removed from cluster nodes to prevent storage bloat on cluster nodes."
+                        content="When enabled, staged models are removed when instances stop. Leave this off for faster re-placement from the local staging cache; use the model-store purge action when you need disk space back."
                       />
                     </FieldLabel>
                     <Toggle

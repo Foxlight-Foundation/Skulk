@@ -5,6 +5,7 @@ import type { TraceCategoryStats, TraceStatsResponse } from '../../types/traces'
 
 export interface TraceDetailPageProps {
   taskId: string;
+  scope: 'cluster' | 'local';
   onBack: () => void;
 }
 
@@ -13,6 +14,10 @@ interface PhaseData {
   subcategories: { name: string; stats: TraceCategoryStats }[];
   totalUs: number;
   stepCount: number;
+}
+
+function traceBasePath(scope: 'cluster' | 'local'): string {
+  return scope === 'cluster' ? '/v1/traces/cluster' : '/v1/traces';
 }
 
 function formatDuration(microseconds: number): string {
@@ -56,8 +61,8 @@ function parsePhases(byCategory: Record<string, TraceCategoryStats>): PhaseData[
     .sort((left, right) => right.totalUs - left.totalUs);
 }
 
-async function downloadTrace(taskId: string): Promise<void> {
-  const response = await fetch(`/v1/traces/${encodeURIComponent(taskId)}/raw`);
+async function downloadTrace(scope: 'cluster' | 'local', taskId: string): Promise<void> {
+  const response = await fetch(`${traceBasePath(scope)}/${encodeURIComponent(taskId)}/raw`);
   if (!response.ok) {
     throw new Error(`Failed to download trace (${response.status})`);
   }
@@ -70,8 +75,8 @@ async function downloadTrace(taskId: string): Promise<void> {
   URL.revokeObjectURL(url);
 }
 
-async function openInPerfetto(taskId: string): Promise<void> {
-  const response = await fetch(`/v1/traces/${encodeURIComponent(taskId)}/raw`);
+async function openInPerfetto(scope: 'cluster' | 'local', taskId: string): Promise<void> {
+  const response = await fetch(`${traceBasePath(scope)}/${encodeURIComponent(taskId)}/raw`);
   if (!response.ok) {
     throw new Error(`Failed to open trace (${response.status})`);
   }
@@ -107,7 +112,7 @@ async function openInPerfetto(taskId: string): Promise<void> {
   }, 10000);
 }
 
-export function TraceDetailPage({ taskId, onBack }: TraceDetailPageProps) {
+export function TraceDetailPage({ taskId, scope, onBack }: TraceDetailPageProps) {
   const [stats, setStats] = useState<TraceStatsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -116,7 +121,7 @@ export function TraceDetailPage({ taskId, onBack }: TraceDetailPageProps) {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`/v1/traces/${encodeURIComponent(taskId)}/stats`);
+      const response = await fetch(`${traceBasePath(scope)}/${encodeURIComponent(taskId)}/stats`);
       if (!response.ok) {
         throw new Error(`Failed to load trace (${response.status})`);
       }
@@ -126,7 +131,7 @@ export function TraceDetailPage({ taskId, onBack }: TraceDetailPageProps) {
     } finally {
       setLoading(false);
     }
-  }, [taskId]);
+  }, [scope, taskId]);
 
   useEffect(() => {
     void refresh();
@@ -145,16 +150,17 @@ export function TraceDetailPage({ taskId, onBack }: TraceDetailPageProps) {
         <div>
           <Button variant="ghost" size="sm" onClick={onBack}>← All Traces</Button>
           <Title>Trace</Title>
-          <TaskId>{taskId}</TaskId>
+          <TaskIdLabel>{taskId}</TaskIdLabel>
+          <ScopeLabel>{scope === 'cluster' ? 'Cluster view' : 'Local view'}</ScopeLabel>
         </div>
         <HeaderActions>
           <Button variant="outline" size="sm" onClick={() => void refresh()} loading={loading}>
             Refresh
           </Button>
-          <Button variant="outline" size="sm" onClick={() => void downloadTrace(taskId)} disabled={loading || !!error}>
+          <Button variant="outline" size="sm" onClick={() => void downloadTrace(scope, taskId)} disabled={loading || !!error}>
             Download
           </Button>
-          <Button variant="primary" size="sm" onClick={() => void openInPerfetto(taskId)} disabled={loading || !!error}>
+          <Button variant="primary" size="sm" onClick={() => void openInPerfetto(scope, taskId)} disabled={loading || !!error}>
             Perfetto
           </Button>
         </HeaderActions>
@@ -170,12 +176,21 @@ export function TraceDetailPage({ taskId, onBack }: TraceDetailPageProps) {
             <SectionLabel>Summary</SectionLabel>
             <SummaryValue>{formatDuration(stats.totalWallTimeUs)}</SummaryValue>
             <SummaryHint>Total wall time</SummaryHint>
+            {stats.sourceNodes.length > 0 && (
+              <SourceNodes>
+                {stats.sourceNodes.map((sourceNode) => (
+                  <SourceNodeBadge key={sourceNode.nodeId}>
+                    {sourceNode.friendlyName || sourceNode.nodeId}
+                  </SourceNodeBadge>
+                ))}
+              </SourceNodes>
+            )}
           </SummaryCard>
 
           {phases.length > 0 && (
             <SectionCard>
               <SectionLabel>By Phase</SectionLabel>
-              <SectionHint>Average per node</SectionHint>
+              <SectionHint>Average per rank represented in the trace file.</SectionHint>
               <Stack>
                 {phases.map((phase) => {
                   const normalizedTotal = phase.totalUs / nodeCount;
@@ -274,12 +289,18 @@ const Title = styled.h1`
   color: ${({ theme }) => theme.colors.gold};
 `;
 
-const TaskId = styled.p`
+const TaskIdLabel = styled.p`
   margin: 6px 0 0;
   font-family: ${({ theme }) => theme.fonts.mono};
   font-size: ${({ theme }) => theme.fontSizes.sm};
   color: ${({ theme }) => theme.colors.textSecondary};
   word-break: break-all;
+`;
+
+const ScopeLabel = styled.p`
+  margin: 6px 0 0;
+  color: ${({ theme }) => theme.colors.textMuted};
+  font-size: ${({ theme }) => theme.fontSizes.sm};
 `;
 
 const SummaryCard = styled.div`
@@ -301,6 +322,23 @@ const SummaryHint = styled.div`
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.xs};
   color: ${({ theme }) => theme.colors.textMuted};
+`;
+
+const SourceNodes = styled.div`
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+`;
+
+const SourceNodeBadge = styled.span`
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  background: ${({ theme }) => theme.colors.surfaceElevated};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
 `;
 
 const SectionCard = styled.div`

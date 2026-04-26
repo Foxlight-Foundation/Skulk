@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import final
+from typing import Literal, final
 
 from pydantic import Field
 
@@ -129,6 +129,13 @@ class TraceEventData(FrozenModel):
     duration_us: int
     rank: int
     category: str
+    node_id: str | None = None
+    model_id: str | None = None
+    task_kind: Literal["image", "text", "embedding"] | None = None
+    tags: list[str] = Field(default_factory=list)
+    attrs: dict[str, str | int | float | bool | list[str]] = Field(
+        default_factory=dict
+    )
 
 
 @final
@@ -142,6 +149,13 @@ class TracesCollected(BaseEvent):
 class TracesMerged(BaseEvent):
     task_id: TaskId
     traces: list[TraceEventData]
+
+
+@final
+class TracingStateChanged(BaseEvent):
+    """Cluster-wide runtime tracing state change."""
+
+    enabled: bool
 
 
 Event = (
@@ -163,6 +177,7 @@ Event = (
     | TopologyEdgeDeleted
     | TracesCollected
     | TracesMerged
+    | TracingStateChanged
     | CustomModelCardAdded
     | CustomModelCardDeleted
     | StateSnapshotHydrated

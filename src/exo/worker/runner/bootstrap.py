@@ -2,19 +2,68 @@ import gc
 import os
 import resource
 import signal
+import threading
+import time
 
 import loguru
 
+from exo.shared.constants import preferred_env_value
+from exo.shared.models.model_cards import RuntimeCapabilityCardConfig
+from exo.shared.types.diagnostics import RunnerDiagnosticContext, RunnerDiagnosticUpdate
 from exo.shared.types.events import Event, RunnerStatusUpdated
 from exo.shared.types.tasks import Task, TaskId
 from exo.shared.types.worker.instances import BoundInstance
 from exo.shared.types.worker.runners import RunnerFailed
 from exo.utils.channels import ClosedResourceError, MpReceiver, MpSender
+from exo.worker.runner.diagnostics import (
+    configure_runner_diagnostics,
+    record_runner_phase,
+)
 
 logger: "loguru.Logger" = loguru.logger
 
 # Set by signal handler so the layer-by-layer loading loop can bail early.
 shutdown_requested: bool = False
+
+
+FAST_SYNCH_CLUSTER_DEFAULT: bool = True
+"""Cluster-wide default for ``MLX_METAL_FAST_SYNCH`` when neither the operator
+nor the model card has expressed a preference. Currently True for backwards
+compatibility with existing deployments. Flipping this default is tracked
+under the env-var → typed-config migration; do not flip without measuring
+the perf delta on a representative workload first."""
+
+
+def resolve_metal_fast_synch(card_runtime: RuntimeCapabilityCardConfig | None) -> bool:
+    """Resolve the effective ``MLX_METAL_FAST_SYNCH`` setting for this runner.
+
+    Priority order, highest to lowest:
+
+    1. **Operator override.** ``SKULK_FAST_SYNCH`` (or legacy ``EXO_FAST_SYNCH``)
+       set to ``"on"`` or ``"off"``. Set by the CLI ``--fast-synch`` /
+       ``--no-fast-synch`` flags or directly in the runner environment.
+       This is the escape hatch when a card preference is wrong in the field.
+    2. **Model card.** ``runtime.metal_fast_synch`` on the bound shard's model
+       card. Pinned per-model when the model is known to deadlock or
+       known to benefit measurably from FAST_SYNCH.
+    3. **Cluster default.** ``FAST_SYNCH_CLUSTER_DEFAULT`` (True today).
+
+    Returns ``True`` when ``MLX_METAL_FAST_SYNCH`` should be ``"1"``.
+    """
+    override = preferred_env_value("SKULK_FAST_SYNCH", "EXO_FAST_SYNCH")
+    if override is not None:
+        normalized = override.strip().lower()
+        if normalized == "on":
+            return True
+        if normalized == "off":
+            return False
+        # Anything else (empty string, "auto", garbage) falls through to the
+        # next layer rather than silently picking a value. The CLI surface
+        # only ever sets "on" or "off", so reaching this branch means
+        # someone set the env var by hand to an unknown value.
+    if card_runtime is not None and card_runtime.metal_fast_synch is not None:
+        return card_runtime.metal_fast_synch
+    return FAST_SYNCH_CLUSTER_DEFAULT
 
 
 def _release_metal_resources() -> None:
@@ -31,6 +80,49 @@ def _release_metal_resources() -> None:
     except Exception:
         pass
     gc.collect()
+
+
+def _install_parent_death_watchdog(initial_ppid: int, poll_seconds: float = 1.0) -> None:
+    """Self-terminate the runner when the agent supervisor dies.
+
+    The runner is a ``mp.Process(daemon=True)`` child of the agent. ``daemon=True``
+    only kills the child on a *clean* Python interpreter exit in the parent;
+    when the agent receives SIGKILL the child is reparented to launchd (pid 1
+    on macOS) and continues holding 4-5 GB of unified GPU memory until killed
+    explicitly. Without this watchdog, killing the agent leaves wired Metal
+    memory allocated, which is the failure mode that today forces a node
+    restart.
+
+    A dedicated daemon thread polls ``os.getppid()`` once per second; if it
+    changes from the original supervisor pid we run a best-effort
+    ``mx.clear_cache()`` and ``os._exit(1)``. We use ``os._exit`` rather than
+    ``sys.exit`` so we bypass any Python-level finally/atexit hooks that could
+    block on broken multiprocessing pipes.
+    """
+
+    def watchdog() -> None:
+        while True:
+            time.sleep(poll_seconds)
+            try:
+                current_ppid = os.getppid()
+            except OSError:
+                continue
+            if current_ppid != initial_ppid:
+                logger.warning(
+                    f"Runner parent died (ppid {initial_ppid} -> {current_ppid}); "
+                    "self-terminating to release Metal/GPU memory."
+                )
+                _release_metal_resources()
+                # Bypass interpreter shutdown to avoid hanging on broken
+                # multiprocessing pipes back to the now-dead supervisor.
+                os._exit(1)
+
+    thread = threading.Thread(
+        target=watchdog,
+        name="runner-parent-death-watchdog",
+        daemon=True,
+    )
+    thread.start()
 
 
 def _metal_cleanup_signal_handler(signum: int, _frame: object) -> None:
@@ -57,6 +149,7 @@ def _metal_cleanup_signal_handler(signum: int, _frame: object) -> None:
 def entrypoint(
     bound_instance: BoundInstance,
     event_sender: MpSender[Event],
+    diagnostic_sender: MpSender[RunnerDiagnosticUpdate],
     task_receiver: MpReceiver[Task],
     cancel_receiver: MpReceiver[TaskId],
     _logger: "loguru.Logger",
@@ -69,16 +162,38 @@ def entrypoint(
     signal.signal(signal.SIGTERM, _metal_cleanup_signal_handler)
     signal.signal(signal.SIGINT, _metal_cleanup_signal_handler)
 
+    # Backstop for SIGKILL of the supervisor: signal handlers above only fire
+    # for graceful agent shutdown. If the agent is SIGKILLed we get reparented
+    # to launchd, never receive a signal, and orphan ~5 GB of wired Metal
+    # memory. The watchdog detects reparenting and self-exits cleanly.
+    _install_parent_death_watchdog(initial_ppid=os.getppid())
+
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(max(soft, 2048), hard), hard))
 
-    fast_synch_override = os.environ.get("EXO_FAST_SYNCH")
-    if fast_synch_override != "off":
-        os.environ["MLX_METAL_FAST_SYNCH"] = "1"
-    else:
-        os.environ["MLX_METAL_FAST_SYNCH"] = "0"
-
-    logger.info(f"Fast synch flag: {os.environ['MLX_METAL_FAST_SYNCH']}")
+    shard = bound_instance.bound_shard
+    fast_synch_enabled = resolve_metal_fast_synch(shard.model_card.runtime)
+    os.environ["MLX_METAL_FAST_SYNCH"] = "1" if fast_synch_enabled else "0"
+    logger.info(
+        f"Fast synch flag: {os.environ['MLX_METAL_FAST_SYNCH']} "
+        f"(model={shard.model_card.model_id})"
+    )
+    configure_runner_diagnostics(
+        diagnostic_sender,
+        RunnerDiagnosticContext(
+            node_id=str(bound_instance.bound_node_id),
+            runner_id=str(bound_instance.bound_runner_id),
+            pid=os.getpid(),
+            instance_id=str(bound_instance.instance.instance_id),
+            model_id=str(shard.model_card.model_id),
+            rank=shard.device_rank,
+            world_size=shard.world_size,
+            start_layer=shard.start_layer,
+            end_layer=shard.end_layer,
+            n_layers=shard.n_layers,
+        ),
+    )
+    record_runner_phase("created", event="process_started", include_memory=True)
 
     # Import main after setting global logger - this lets us just import logger from this module
     try:
@@ -110,6 +225,12 @@ def entrypoint(
     except ClosedResourceError:
         logger.warning("Runner communication closed unexpectedly")
     except Exception as e:
+        record_runner_phase(
+            "error",
+            event="runner_crashed",
+            detail=f"{type(e).__name__}: {e}",
+            include_memory=True,
+        )
         logger.opt(exception=e).warning(
             f"Runner {bound_instance.bound_runner_id} crashed with critical exception {e}"
         )
@@ -123,11 +244,24 @@ def entrypoint(
         # Safety net: release Metal resources on any exit path, even if the
         # signal handler didn't fire (e.g. parent was SIGKILL'd and we got
         # a broken pipe, or an unexpected exception during load).
+        record_runner_phase(
+            "shutdown_cleanup",
+            event="metal_cleanup_begin",
+            include_memory=True,
+        )
         _release_metal_resources()
+        record_runner_phase(
+            "shutdown_cleanup",
+            event="metal_cleanup_complete",
+            include_memory=True,
+        )
         try:
             event_sender.close()
             task_receiver.close()
+            diagnostic_sender.close()
         finally:
             event_sender.join()
             task_receiver.join()
+            # Diagnostics are best-effort and must never delay Metal cleanup.
+            # Closing is enough; do not wait for a full diagnostic queue to drain.
             logger.info("bye from the runner")

@@ -8,11 +8,7 @@ from mflux.models.common.config.config import Config
 from mflux.utils.exceptions import StopImageGenerationException
 from tqdm import tqdm
 
-from exo.shared.constants import EXO_TRACING_ENABLED
-from exo.shared.tracing import (
-    clear_trace_buffer,
-    trace,
-)
+from exo.shared.tracing import trace, tracing_active
 from exo.shared.types.worker.shards import CfgShardMetadata, PipelineShardMetadata
 from exo.worker.engines.image.config import ImageModelConfig
 from exo.worker.engines.image.models.base import (
@@ -512,7 +508,6 @@ class DiffusionRunner:
             capture_steps = set()
 
         self._reset_all_caches()
-        clear_trace_buffer()
 
         time_steps = tqdm(range(runtime_config.num_inference_steps))
 
@@ -807,7 +802,7 @@ class DiffusionRunner:
                         rotary_embeddings=image_rotary_embeddings,
                     )
 
-                if EXO_TRACING_ENABLED:
+                if tracing_active():
                     mx.eval(encoder_hidden_states, hidden_states)
 
         if self.owns_concat_stage:
@@ -876,7 +871,7 @@ class DiffusionRunner:
                         rotary_embeddings=image_rotary_embeddings,
                     )
 
-                if EXO_TRACING_ENABLED:
+                if tracing_active():
                     mx.eval(hidden_states)
 
             if not self.is_last_stage:
@@ -1159,7 +1154,7 @@ class DiffusionRunner:
                         rotary_embeddings=image_rotary_embeddings,
                     )
 
-                if EXO_TRACING_ENABLED:
+                if tracing_active():
                     mx.eval(encoder_hidden_states, patch)
 
         if self.owns_concat_stage:
@@ -1235,7 +1230,7 @@ class DiffusionRunner:
                         rotary_embeddings=image_rotary_embeddings,
                     )
 
-                if EXO_TRACING_ENABLED:
+                if tracing_active():
                     mx.eval(patch)
 
             if not self.is_last_stage:

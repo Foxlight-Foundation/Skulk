@@ -26,6 +26,7 @@ from exo.shared.models.model_cards import (
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
 from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
+from exo.worker.engines.mlx import vision as vision_module
 from exo.worker.engines.mlx.gemma4_prompt import render_gemma4_prompt
 from exo.worker.engines.mlx.utils_mlx import apply_chat_template
 from exo.worker.engines.mlx.vision import _find_media_regions, _format_vlm_messages
@@ -224,7 +225,7 @@ class TestGemma4ReferencePromptRenderer:
 
         assert (
             prompt
-            == "<bos><|turn>user\n\n\n<|image|>\n\nwhat do you see?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+            == "<bos><|turn>user\n<|image|>what do you see?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
         )
 
     def test_thinking_requires_explicit_enable(self):
@@ -238,7 +239,7 @@ class TestGemma4ReferencePromptRenderer:
 
         assert (
             prompt
-            == "<bos><|turn>system\n<|think|><turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n"
+            == "<bos><|turn>system\n<|think|>\n<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n"
         )
 
     def test_apply_chat_template_uses_reference_renderer_for_plain_gemma4(self):
@@ -351,7 +352,7 @@ class TestGemma4ReferencePromptRenderer:
 
         assert (
             prompt
-            == "<bos><|turn>user\n\n\n<|image><|image|><|image|><|image|><image|>\n\nwhat do you see?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+            == "<bos><|turn>user\n<|image><|image|><|image|><|image|><image|>what do you see?<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
         )
 
     def test_process_native_forwards_gemma4_model_type_to_prompt_builder(
@@ -392,12 +393,22 @@ class TestGemma4ReferencePromptRenderer:
             model_type=None,
             boi_token_id=None,
             eoi_token_id=None,
-        ) -> str:
+        ):
             captured["model_type"] = model_type
-            return "<|image|>"
+            return vision_module._VisionPromptBuild(  # pyright: ignore[reportPrivateUsage]
+                prompt="<|image|>",
+                raw_prompt="<|image|>",
+                debug=vision_module._VisionPromptDebug(  # pyright: ignore[reportPrivateUsage]
+                    raw_prompt_chars=len("<|image|>"),
+                    raw_image_placeholder_positions=[0],
+                    expanded_prompt_chars=len("<|image|>"),
+                    tokens_per_image=list(n_tokens_per_image),
+                    image_token=image_token,
+                ),
+            )
 
         monkeypatch.setattr(
-            "exo.worker.engines.mlx.vision.build_vision_prompt",
+            "exo.worker.engines.mlx.vision._build_vision_prompt_with_debug",
             _fake_build_vision_prompt,
         )
         monkeypatch.setattr(
@@ -720,7 +731,7 @@ class TestGemma4DynamicVisionPooling:
 class TestFormatVlmMessages:
     """Gemma prompts should preserve multimodal ordering instead of flattening."""
 
-    def test_gemma4_preserves_interleaving(self):
+    def test_gemma4_preserves_interleaving_and_labels_multiple_images(self):
         messages = [
             {
                 "role": "user",
@@ -740,9 +751,32 @@ class TestFormatVlmMessages:
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "first"},
-                    {"type": "image"},
+                    {"type": "image", "label": "Image 1"},
                     {"type": "text", "text": "second"},
+                    {"type": "image", "label": "Image 2"},
+                ],
+            }
+        ]
+
+    def test_gemma4_does_not_label_single_image(self):
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url"},
+                    {"type": "text", "text": "what do you see?"},
+                ],
+            }
+        ]
+
+        formatted = _format_vlm_messages(messages, "gemma4")
+
+        assert formatted == [
+            {
+                "role": "user",
+                "content": [
                     {"type": "image"},
+                    {"type": "text", "text": "what do you see?"},
                 ],
             }
         ]

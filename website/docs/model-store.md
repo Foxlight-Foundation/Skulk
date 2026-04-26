@@ -100,7 +100,7 @@ model_store:
   staging:
     enabled: true
     node_cache_path: ~/.skulk/staging
-    cleanup_on_deactivate: true
+    cleanup_on_deactivate: false
 
   node_overrides:
     mac-studio-1:
@@ -159,7 +159,11 @@ Where a node stages files before loading them.
 
 ### `model_store.staging.cleanup_on_deactivate`
 
-If `true`, staged files are cleaned up when instances are shut down.
+If `true`, staged files are cleaned up when instances are shut down. The
+recommended default is `false`, which keeps the local staging cache warm so
+large models do not need to be copied from the store again on every placement.
+Use `POST /store/purge-staging` when you intentionally want to reclaim disk
+space.
 
 ## Typical Flow
 
@@ -255,9 +259,19 @@ Remember that store registration only tracks artifacts and metadata. Actual
 image understanding still depends on launching the model and sending a
 multimodal request through the chat APIs.
 
+### Placements are slow even though the model is already in the store
+
+Check whether `cleanup_on_deactivate` is enabled. If it is `true`, each model
+deactivation removes the local staged copy, so the next placement must copy the
+model from the store host again before MLX can load it. Set it to `false` for
+normal clusters and purge staging caches explicitly when disk pressure requires
+it.
+
 ### Staged files are not being cleaned up
 
-Check `cleanup_on_deactivate` and any `node_overrides` that may disable cleanup for a specific machine.
+This is usually expected. Skulk keeps staged files by default so repeated
+placements are warm. If you need disk space back, either enable
+`cleanup_on_deactivate` for that node or use the model-store purge action.
 
 ## Good Defaults for Most Clusters
 

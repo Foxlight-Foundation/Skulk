@@ -23,6 +23,7 @@ If you are getting oriented, start with these pages:
 - [API guide](api-guide) for the happy path: place a model, then call the API
 - [Model store guide](model-store) for shared model storage and download workflows
 - [KV cache backends](kv-cache-backends) for backend and runtime tuning
+- [Tracing and debugging](tracing) for runtime tracing, cluster browsing, and operator workflow
 - [Model cards](model-cards) for the metadata and capability declarations Skulk uses to describe models
 - [Model capabilities](model-capabilities) for how declarative card fields become runtime behavior
 - [Release notes 1.0.2](release-notes/1.0.2) for the latest branch stabilization and model-support work
@@ -33,6 +34,7 @@ If you are getting oriented, start with these pages:
 - I want to browse the backend API: [API Reference](/api/skulk-api)
 - I want frontend and TypeScript symbols: [TypeScript API](https://foxlight-foundation.github.io/Skulk/typedoc/)
 - I want implementation context before I integrate: [Architecture overview](architecture)
+- I want to debug live inference: [Tracing and debugging](tracing)
 
 ## What Lives Here
 

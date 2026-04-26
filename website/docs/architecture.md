@@ -204,10 +204,45 @@ The key pieces:
 
 This is opt-in. Without the logging config, skulk behaves identically to before.
 
+## Where Tracing Fits
+
+Skulk also has a separate tracing surface for debugging live inference work.
+
+The important user-facing model is:
+
+- tracing is off by default
+- you turn it on at runtime from the dashboard traces view
+- the toggle applies cluster-wide for new requests
+- traces can be browsed from any reachable node through cluster trace endpoints
+- local trace deletion remains local-only in v1
+
+Tracing is meant for targeted debugging sessions, not as a permanently enabled
+always-on telemetry pipeline. When you need it, use the dashboard bug icon or
+the `/v1/tracing` API to enable it, reproduce the workload, then inspect the
+result through the traces UI or the `/v1/traces*` endpoints.
+
+For operator workflow and endpoint details, read [Tracing and debugging](tracing)
+and the [API guide](api-guide).
+
 ## Debugging MLX Hangs
 
 When a model appears to stall during warmup, prefill, or distributed generation,
-Skulk can emit phase-specific hang diagnostics from the runner process.
+Skulk keeps an always-on, local-only runner flight recorder. Each runner
+supervisor retains the last 128 phase updates outside the event log, so these
+breadcrumbs remain available even when tracing is disabled or a task never
+finishes. The diagnostics drawer and `/v1/diagnostics/*` APIs expose the current
+phase, time in phase, active task/command, latest MLX memory snapshot, and recent
+flight-recorder entries.
+
+For deeper evidence collection before cancelling a stuck task, use
+`POST /v1/diagnostics/node/capture` or
+`POST /v1/diagnostics/cluster/{node_id}/capture`. Capture bundles include the
+live node diagnostics, matched runner flight recorder, current process tree, and
+best-effort macOS `sample`, `vmmap -summary`, and `footprint -p` output for the
+runner process. Sampling is on-demand only and failures are included as partial
+results.
+
+Skulk can also emit phase-specific stack diagnostics from the runner process.
 
 Set these environment variables before starting `skulk`:
 

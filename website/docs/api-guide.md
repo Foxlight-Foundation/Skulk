@@ -142,11 +142,25 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `GET /store/models/{model_id}/optimize/status`
 - `GET /filesystem/browse`
 - `GET /node/identity`
+- `GET /v1/tracing`
+- `PUT /v1/tracing`
 - `GET /v1/traces`
+- `GET /v1/traces/cluster`
 - `POST /v1/traces/delete`
 - `GET /v1/traces/{task_id}`
 - `GET /v1/traces/{task_id}/stats`
 - `GET /v1/traces/{task_id}/raw`
+- `GET /v1/traces/cluster/{task_id}`
+- `GET /v1/traces/cluster/{task_id}/stats`
+- `GET /v1/traces/cluster/{task_id}/raw`
+- `GET /v1/diagnostics/node`
+- `POST /v1/diagnostics/node/capture`
+- `POST /v1/diagnostics/node/runners/{runner_id}/cancel`
+- `GET /v1/diagnostics/cluster`
+- `GET /v1/diagnostics/cluster/timeline`
+- `GET /v1/diagnostics/cluster/{node_id}`
+- `POST /v1/diagnostics/cluster/{node_id}/capture`
+- `POST /v1/diagnostics/cluster/{node_id}/runners/{runner_id}/cancel`
 
 For the full interactive reference with request/response schemas, see the [API Reference](/api/skulk-api).
 
@@ -209,7 +223,7 @@ for chunk in stream:
 | `top_p` | number | Nucleus sampling. |
 | `top_k` | integer | Top-k sampling. |
 | `min_p` | number | Minimum-probability threshold. |
-| `max_tokens` | integer | Max generated tokens. |
+| `max_tokens` | integer | Max generated tokens. When omitted, Skulk uses a backend default of 4096 generated tokens (`DEFAULT_MAX_OUTPUT_TOKENS`); operators can override that default with `SKULK_MAX_OUTPUT_TOKENS` (or the legacy `EXO_MAX_TOKENS`). |
 | `stop` | string or array | Stop sequences. |
 | `seed` | integer | Reproducibility helper. |
 | `frequency_penalty` | number | Frequency penalty. |
@@ -759,19 +773,196 @@ Operational note:
 
 Returns stored events from the API-side event log.
 
+### Diagnostics
+
+- `GET /v1/diagnostics/node`
+- `POST /v1/diagnostics/node/capture`
+- `POST /v1/diagnostics/node/runners/{runner_id}/cancel`
+- `GET /v1/diagnostics/cluster`
+- `GET /v1/diagnostics/cluster/timeline`
+- `GET /v1/diagnostics/cluster/{node_id}`
+- `POST /v1/diagnostics/cluster/{node_id}/capture`
+- `POST /v1/diagnostics/cluster/{node_id}/runners/{runner_id}/cancel`
+
+Use these endpoints when a node appears stuck loading, warming up, decoding, or
+shutting down and you need a read-only snapshot without SSHing into every node.
+
+Behavior notes:
+
+- `GET /v1/diagnostics/node` returns the local node's runtime/config facts,
+  resources, process tree, live runner-supervisor state, flight-recorder phase
+  state, and placement analysis.
+- `POST /v1/diagnostics/node/capture` collects an on-demand local diagnostic
+  bundle. Body fields are `runnerId`, `taskId`, `includeProcessSamples`, and
+  `sampleDurationSeconds`; all are optional. When a runner/task is provided,
+  the response includes that runner's bounded flight recorder, latest MLX
+  memory snapshot, and best-effort macOS `sample`, `vmmap -summary`, and
+  `footprint -p` output. Sampling failures are returned as structured partial
+  failures instead of failing the bundle.
+- `POST /v1/diagnostics/node/runners/{runner_id}/cancel` requests cooperative
+  cancellation for one task that the local runner supervisor still knows about.
+- `GET /v1/diagnostics/cluster` fans out to reachable peer APIs and returns
+  partial results when some peers are unavailable.
+- `GET /v1/diagnostics/cluster/timeline` stitches every reachable node's
+  runner-supervisor diagnostics into one cross-rank chronological view. The
+  response carries a per-runner synopsis sorted by `(modelId, deviceRank)`
+  and every flight-recorder entry across all ranks merged and sorted by `at`.
+  Use this when debugging a distributed deadlock: the rank-disagreement
+  signature ("rank 0 entered `pipeline_last_eval_output` at T while rank 1
+  is still in `pipeline_first_recv_like`") is invisible from any single
+  node's local diagnostics but obvious top-to-bottom in the merged timeline.
+  Unreachable peers are returned in `unreachableNodes` instead of failing
+  the request.
+- `GET /v1/diagnostics/cluster/{node_id}` proxies one reachable peer bundle or
+  returns the local bundle if `node_id` is the current API node.
+- `POST /v1/diagnostics/cluster/{node_id}/capture` proxies the same on-demand
+  capture request to a reachable peer node.
+- `POST /v1/diagnostics/cluster/{node_id}/runners/{runner_id}/cancel` proxies
+  the same cooperative live-runner cancellation request to a reachable peer.
+- Placement diagnostics explicitly include whether the current master is part of
+  each model placement, which helps investigate hangs where the master is not
+  one of the inference ranks.
+- The dashboard node-card bug icon uses these endpoints to open a live
+  diagnostics drawer for any reachable node.
+- The diagnostics drawer prefers `Capture bundle` before cancellation so
+  operators can collect phase, MLX memory, and process samples before changing
+  the runner state.
+- Runner cancellation is best-effort only. A wedged native/MLX runner may
+  ignore the request and still require stronger intervention.
+- Diagnostics endpoints do not currently kill or restart runners. Capture is
+  read-only; the only mutating diagnostics action is the cooperative task-cancel
+  request above.
+
+Example:
+
+```bash
+curl http://localhost:52415/v1/diagnostics/node
+curl http://localhost:52415/v1/diagnostics/cluster
+curl http://localhost:52415/v1/diagnostics/cluster/timeline
+curl http://localhost:52415/v1/diagnostics/cluster/<node_id>
+curl -X POST http://localhost:52415/v1/diagnostics/node/capture \
+  -H 'content-type: application/json' \
+  -d '{"runnerId":"<runner_id>","taskId":"<task_id>"}'
+curl -X POST http://localhost:52415/v1/diagnostics/cluster/<node_id>/capture \
+  -H 'content-type: application/json' \
+  -d '{"runnerId":"<runner_id>","includeProcessSamples":true}'
+curl -X POST http://localhost:52415/v1/diagnostics/node/runners/<runner_id>/cancel \
+  -H 'content-type: application/json' \
+  -d '{"taskId":"<task_id>"}'
+curl -X POST http://localhost:52415/v1/diagnostics/cluster/<node_id>/runners/<runner_id>/cancel \
+  -H 'content-type: application/json' \
+  -d '{"taskId":"<task_id>"}'
+```
+
 ### Traces
 
+- `GET /v1/tracing`
+- `PUT /v1/tracing`
 - `GET /v1/traces`
+- `GET /v1/traces/cluster`
 - `POST /v1/traces/delete`
 - `GET /v1/traces/{task_id}`
 - `GET /v1/traces/{task_id}/stats`
 - `GET /v1/traces/{task_id}/raw`
+- `GET /v1/traces/cluster/{task_id}`
+- `GET /v1/traces/cluster/{task_id}/stats`
+- `GET /v1/traces/cluster/{task_id}/raw`
 
 Use these endpoints when you are debugging generation behavior, cluster execution, or performance.
+
+Behavior notes:
+
+- `GET /v1/tracing` returns whether runtime tracing is currently enabled for new
+  requests across the live cluster session.
+- `PUT /v1/tracing` toggles tracing cluster-wide for new requests only. It does
+  not retroactively trace in-flight work.
+- `GET /v1/traces*` reads local trace artifacts stored on the current node.
+- `GET /v1/traces/cluster*` fans out to reachable peer APIs, deduplicates by
+  `task_id`, and proxies read-only trace access from any reachable node.
+- `POST /v1/traces/delete` remains local-only in v1 even when cluster browsing
+  is enabled.
+
+### Runtime tracing control
+
+**GET** `/v1/tracing`
+
+Returns the current cluster tracing state:
+
+```json
+{"enabled": false}
+```
+
+**PUT** `/v1/tracing`
+
+Enable or disable tracing for new requests across the current cluster session.
+
+Request body:
+
+```json
+{"enabled": true}
+```
+
+Response body:
+
+```json
+{"enabled": true}
+```
+
+Operational notes:
+
+- this is a runtime toggle, not a restart-required config edit
+- it applies to new requests only
+- it does not retroactively trace work already in flight
+- the dashboard traces page uses this same API
+
+### Local trace endpoints
+
+These endpoints operate on trace artifacts stored on the current node:
+
+- `GET /v1/traces` lists local trace artifacts with metadata such as task kind,
+  model, source nodes, and tool-activity tags
+- `GET /v1/traces/{task_id}` returns structured trace events for one task
+- `GET /v1/traces/{task_id}/stats` returns aggregated timing summaries
+- `GET /v1/traces/{task_id}/raw` downloads Chrome-trace-compatible JSON
+- `POST /v1/traces/delete` deletes one or more local trace artifacts
+
+Example:
+
+```bash
+curl http://localhost:52415/v1/traces
+curl http://localhost:52415/v1/traces/<task_id>/stats
+curl -OJ http://localhost:52415/v1/traces/<task_id>/raw
+```
+
+### Cluster trace endpoints
+
+These endpoints let a dashboard or script on any reachable node browse traces
+across the cluster:
+
+- `GET /v1/traces/cluster`
+- `GET /v1/traces/cluster/{task_id}`
+- `GET /v1/traces/cluster/{task_id}/stats`
+- `GET /v1/traces/cluster/{task_id}/raw`
+
+Operational notes:
+
+- cluster browsing is read-only in v1
+- the API fans out to reachable peer APIs and deduplicates traces by `task_id`
+- if some peers are unreachable, cluster results may be partial
+- source node metadata in responses tells you which nodes contributed trace content
+
+Example:
+
+```bash
+curl http://localhost:52415/v1/traces/cluster
+curl http://localhost:52415/v1/traces/cluster/<task_id>/stats
+curl -OJ http://localhost:52415/v1/traces/cluster/<task_id>/raw
+```
 
 ## Helpful Next Docs
 
 - [README](https://github.com/Foxlight-Foundation/Skulk/blob/main/README.md)
+- [Tracing and debugging](tracing)
 - [Model store guide](model-store)
 - [Architecture overview](architecture)
 - [API Reference](/api/skulk-api)

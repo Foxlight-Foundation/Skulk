@@ -40,7 +40,9 @@ model_store:
     # Staging is where a node prepares model files before MLX loads them.
     enabled: true
     node_cache_path: ~/.skulk/staging
-    cleanup_on_deactivate: true
+    # Keep staged model files by default so repeated placements can reuse the
+    # local cache. Use /store/purge-staging when disk needs to be reclaimed.
+    cleanup_on_deactivate: false
 
   node_overrides:
     # Store-host example: load directly from the store path instead of
@@ -54,7 +56,7 @@ model_store:
     # mac-mini-2:
     #   staging:
     #     node_cache_path: /Volumes/FastNVMe/exo-staging
-    #     cleanup_on_deactivate: true
+    #     cleanup_on_deactivate: false
 
 inference:
   # Valid values:

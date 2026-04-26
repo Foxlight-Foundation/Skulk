@@ -21,6 +21,7 @@ from exo.shared.models.model_cards import (
     OutputParserType,
     ReasoningFormat,
 )
+from exo.shared.tracing import record_trace_marker
 from exo.shared.types.common import ModelId
 from exo.shared.types.mlx import Model
 from exo.shared.types.worker.runner_response import GenerationResponse, ToolCallResponse
@@ -95,6 +96,8 @@ def apply_all_parsers(
     model_id: ModelId,
     tools: list[dict[str, Any]] | None,
     model_card: ModelCard | None = None,
+    trace_task_id: str | None = None,
+    trace_rank: int = 0,
 ) -> Generator[ParserChunk]:
     mlx_generator = receiver
     mlx_generator = _trace_generation_stream("raw", model_id, mlx_generator)
@@ -129,7 +132,13 @@ def apply_all_parsers(
     ):
         mlx_generator = parse_deepseek_v32(mlx_generator)
     elif tool_parser:
-        mlx_generator = parse_tool_calls(mlx_generator, tool_parser, tools)
+        mlx_generator = parse_tool_calls(
+            mlx_generator,
+            tool_parser,
+            tools,
+            trace_task_id=trace_task_id,
+            trace_rank=trace_rank,
+        )
 
     mlx_generator = _trace_generation_stream("post-all-parsers", model_id, mlx_generator)
     return mlx_generator
@@ -665,6 +674,9 @@ def parse_tool_calls(
     responses: Generator[ParserChunk],
     tool_parser: ToolParser,
     tools: list[dict[str, Any]] | None,
+    *,
+    trace_task_id: str | None = None,
+    trace_rank: int = 0,
 ) -> Generator[ParserChunk]:
     in_tool_call = False
     tool_call_text_parts: list[str] = []
@@ -694,11 +706,29 @@ def parse_tool_calls(
 
             if parsed is None:
                 logger.warning(f"tool call parsing failed for text {combined}")
+                if trace_task_id is not None:
+                    record_trace_marker(
+                        "tool_call_parse_error",
+                        trace_rank,
+                        category="tooling",
+                        task_id=trace_task_id,
+                        tags=["tool_call", "error"],
+                        attrs={"raw_length": len(combined)},
+                    )
                 yield response.model_copy(
                     update={"text": combined, "token": 0, "finish_reason": "error"}
                 )
                 break
 
+            if trace_task_id is not None:
+                record_trace_marker(
+                    "tool_call_parsed",
+                    trace_rank,
+                    category="tooling",
+                    task_id=trace_task_id,
+                    tags=["tool_call"],
+                    attrs={"tool_call_count": len(parsed)},
+                )
             yield ToolCallResponse(
                 tool_calls=parsed, usage=response.usage, stats=response.stats
             )

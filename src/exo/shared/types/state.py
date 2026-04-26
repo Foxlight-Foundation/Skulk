@@ -46,6 +46,7 @@ class State(CamelCaseModel):
     tasks: Mapping[TaskId, Task] = {}
     last_seen: Mapping[NodeId, datetime] = {}
     topology: Topology = Field(default_factory=Topology)
+    tracing_enabled: bool = False
     last_event_applied_idx: int = Field(default=-1, ge=-1)
 
     # Granular node state mappings (update independently at different frequencies)

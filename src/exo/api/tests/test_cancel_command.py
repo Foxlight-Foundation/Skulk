@@ -1,12 +1,14 @@
 # pyright: reportUnusedFunction=false, reportAny=false
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from exo.api.main import API
 from exo.shared.types.common import CommandId
+from exo.utils.channels import Sender
 
 
 def _make_api() -> Any:
@@ -18,6 +20,7 @@ def _make_api() -> Any:
     api._text_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._image_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._embedding_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._cancelled_command_ids = set()  # pyright: ignore[reportPrivateUsage]
     api._send = AsyncMock()  # pyright: ignore[reportPrivateUsage]
     api._setup_exception_handlers()  # pyright: ignore[reportPrivateUsage]
     app.post("/v1/cancel/{command_id}")(api.cancel_command)
@@ -54,6 +57,7 @@ def test_cancel_active_text_generation() -> None:
     assert data["command_id"] == str(cid)
     sender.close.assert_called_once()
     api._send.assert_called_once()
+    assert cid in api._cancelled_command_ids
     task_cancelled = api._send.call_args[0][0]
     assert task_cancelled.cancelled_command_id == cid
 
@@ -74,5 +78,44 @@ def test_cancel_active_image_generation() -> None:
     assert data["command_id"] == str(cid)
     sender.close.assert_called_once()
     api._send.assert_called_once()
+    assert cid in api._cancelled_command_ids
     task_cancelled = api._send.call_args[0][0]
     assert task_cancelled.cancelled_command_id == cid
+
+
+@pytest.mark.asyncio
+async def test_finalize_command_stream_suppresses_task_finished_for_cancelled_command() -> None:
+    """Local cancellation should skip TaskFinished so workers can observe Cancelled."""
+
+    api = _make_api()
+    cid = CommandId("cancelled-cmd")
+    sender = MagicMock()
+    queue: dict[CommandId, Sender[object]] = {
+        cid: cast(Sender[object], cast(object, sender))
+    }
+    api._cancelled_command_ids.add(cid)
+
+    await api._finalize_command_stream(cid, queue)
+
+    api._send.assert_not_called()
+    assert cid not in queue
+    assert cid not in api._cancelled_command_ids
+
+
+@pytest.mark.asyncio
+async def test_finalize_command_stream_reports_natural_completion() -> None:
+    """Natural completion should still emit TaskFinished."""
+
+    api = _make_api()
+    cid = CommandId("finished-cmd")
+    sender = MagicMock()
+    queue: dict[CommandId, Sender[object]] = {
+        cid: cast(Sender[object], cast(object, sender))
+    }
+
+    await api._finalize_command_stream(cid, queue)
+
+    api._send.assert_called_once()
+    task_finished = api._send.call_args[0][0]
+    assert task_finished.finished_command_id == cid
+    assert cid not in queue

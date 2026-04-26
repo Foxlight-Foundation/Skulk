@@ -888,17 +888,33 @@ class PurgeStagingResponse(CamelCaseModel):
     message: str
 
 
+TraceTaskKind = Literal["image", "text", "embedding"]
+
+
+class TraceSourceNode(CamelCaseModel):
+    node_id: str
+    friendly_name: str | None = None
+
+
 class TraceEventResponse(CamelCaseModel):
     name: str
     start_us: int
     duration_us: int
     rank: int
     category: str
+    node_id: str | None = None
+    model_id: str | None = None
+    task_kind: TraceTaskKind | None = None
+    tags: list[str] = Field(default_factory=list)
+    attrs: dict[str, str | int | float | bool | list[str]] = Field(
+        default_factory=dict
+    )
 
 
 class TraceResponse(CamelCaseModel):
     task_id: str
     traces: list[TraceEventResponse]
+    source_nodes: list[TraceSourceNode] = Field(default_factory=list)
 
 
 class TraceCategoryStats(CamelCaseModel):
@@ -918,16 +934,31 @@ class TraceStatsResponse(CamelCaseModel):
     total_wall_time_us: int
     by_category: dict[str, TraceCategoryStats]
     by_rank: dict[int, TraceRankStats]
+    source_nodes: list[TraceSourceNode] = Field(default_factory=list)
 
 
 class TraceListItem(CamelCaseModel):
     task_id: str
     created_at: str
     file_size: int
+    model_id: str | None = None
+    task_kind: TraceTaskKind | None = None
+    categories: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    has_tool_activity: bool = False
+    source_nodes: list[TraceSourceNode] = Field(default_factory=list)
 
 
 class TraceListResponse(CamelCaseModel):
     traces: list[TraceListItem]
+
+
+class TracingStateResponse(CamelCaseModel):
+    enabled: bool
+
+
+class UpdateTracingStateRequest(CamelCaseModel):
+    enabled: bool
 
 
 class DeleteTracesRequest(CamelCaseModel):

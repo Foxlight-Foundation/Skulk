@@ -1,6 +1,7 @@
 import styled, { css, useTheme } from 'styled-components';
-import { FiSettings, FiMenu, FiX, FiSidebar, FiDatabase, FiMessageSquare, FiSun, FiMoon, FiActivity } from 'react-icons/fi';
+import { FiSettings, FiMenu, FiX, FiSidebar, FiDatabase, FiMessageSquare, FiSun, FiMoon } from 'react-icons/fi';
 import { MdHub } from 'react-icons/md';
+import { VscBug } from 'react-icons/vsc';
 import { Button } from '../common/Button';
 import SkulkIcon from '../icons/SkulkIcon';
 import type { Theme } from '../../theme';
@@ -230,7 +231,7 @@ const SidebarIcon = () => <FiSidebar size={18} />;
 const ClusterIcon = () => <MdHub size={16} />;
 const StoreIcon = () => <FiDatabase size={16} />;
 const ChatIcon = () => <FiMessageSquare size={16} />;
-const TraceIcon = () => <FiActivity size={16} />;
+const TraceIcon = () => <VscBug size={16} />;
 const SettingsIcon = () => <FiSettings size={16} />;
 
 function ProgressCircle({ count, percentage }: { count: number; percentage: number }) {
@@ -336,10 +337,6 @@ export function HeaderNav({
           <ChatIcon /> Chat
         </NavLink>
 
-        <NavLink $active={activeRoute === 'traces'} onClick={() => navigate('traces')}>
-          <TraceIcon /> Traces
-        </NavLink>
-
         {instanceCount > 0 && (
           <InstanceToggle
             $healthy={instancesHealthy}
@@ -381,6 +378,17 @@ export function HeaderNav({
           title={themeName === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
         >
           {themeName === 'dark' ? <FiSun size={16} /> : <FiMoon size={16} />}
+        </Button>
+
+        <Button
+          variant={activeRoute === 'traces' ? 'outline' : 'ghost'}
+          size="lg"
+          icon
+          onClick={() => navigate('traces')}
+          aria-label="Traces"
+          title="Traces"
+        >
+          <TraceIcon />
         </Button>
 
         <Button variant="ghost" size="lg" icon onClick={() => onOpenSettings?.()} aria-label="Settings">

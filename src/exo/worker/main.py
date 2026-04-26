@@ -22,6 +22,10 @@ from exo.shared.types.commands import (
     StartDownload,
 )
 from exo.shared.types.common import CommandId, NodeId, SystemId
+from exo.shared.types.diagnostics import (
+    RunnerSupervisorDiagnostics,
+    RunnerTaskCancelResponse,
+)
 from exo.shared.types.events import (
     CustomModelCardAdded,
     CustomModelCardDeleted,
@@ -46,6 +50,7 @@ from exo.shared.types.tasks import (
     Shutdown,
     StartWarmup,
     Task,
+    TaskId,
     TaskStatus,
     TextGeneration,
 )
@@ -186,6 +191,28 @@ def _log_image_payload_debug(
             message += f" decode_failed={type(exc).__name__}: {exc}"
 
     _log_image_transport(message)
+
+
+def resolve_cached_vlm_images(
+    image_cache: dict[str, str],
+    image_hashes: dict[int, str],
+) -> tuple[dict[int, str], list[tuple[int, str]]]:
+    """Resolve cached VLM image hashes without treating cache misses as fatal."""
+    by_index: dict[int, str] = {}
+    missing: list[tuple[int, str]] = []
+    for image_index, image_hash in image_hashes.items():
+        cached_image = image_cache.get(image_hash)
+        if cached_image is None:
+            missing.append((image_index, image_hash))
+            continue
+        by_index[image_index] = cached_image
+        _log_image_payload_debug(
+            "Worker resolved cached VLM",
+            image_index,
+            cached_image,
+            expected_b64_sha256=image_hash,
+        )
+    return by_index, missing
 
 
 class Worker:
@@ -468,17 +495,30 @@ class Worker:
                     or task.task_params.total_input_chunks > 0
                 ):
                     cmd_id = task.command_id
-                    by_index: dict[int, str] = {}
-
-                    for idx, h in task.task_params.image_hashes.items():
-                        assert h in self.image_cache
-                        by_index[idx] = self.image_cache[h]
-                        _log_image_payload_debug(
-                            "Worker resolved cached VLM",
-                            idx,
-                            by_index[idx],
-                            expected_b64_sha256=h,
+                    by_index, missing_cached_images = resolve_cached_vlm_images(
+                        self.image_cache,
+                        task.task_params.image_hashes,
+                    )
+                    if missing_cached_images:
+                        missing = ", ".join(
+                            f"{idx}:{image_hash[:12]}"
+                            for idx, image_hash in missing_cached_images
                         )
+                        logger.error(
+                            "TextGeneration VLM task references missing cached "
+                            f"image(s); failing task instead of crashing worker "
+                            f"(task_id={task.task_id}, command_id={cmd_id}, "
+                            f"model={task.task_params.model}, missing={missing})"
+                        )
+                        self.input_chunk_buffer.pop(cmd_id, None)
+                        self.input_chunk_counts.pop(cmd_id, None)
+                        await self.event_sender.send(
+                            TaskStatusUpdated(
+                                task_id=task.task_id,
+                                task_status=TaskStatus.Failed,
+                            )
+                        )
+                        continue
 
                     if task.task_params.total_input_chunks > 0:
                         chunk_buffer = self.input_chunk_buffer.get(cmd_id, {})
@@ -558,6 +598,55 @@ class Worker:
         self.runners[task.bound_instance.bound_runner_id] = runner
         self._tg.start_soon(runner.run)
         return runner
+
+    def collect_runner_diagnostics(self) -> list[RunnerSupervisorDiagnostics]:
+        """Return live read-only diagnostics for local runner supervisors."""
+
+        return [runner.diagnostics() for runner in self.runners.values()]
+
+    async def cancel_runner_task(
+        self,
+        runner_id: RunnerId,
+        task_id: TaskId,
+    ) -> RunnerTaskCancelResponse:
+        """Request cooperative cancellation for one live task on one runner."""
+
+        runner = self.runners.get(runner_id)
+        if runner is None:
+            raise KeyError(f"Runner not found on this node: {runner_id}")
+
+        if task_id in runner.completed:
+            return RunnerTaskCancelResponse(
+                node_id=self.node_id,
+                runner_id=runner_id,
+                task_id=task_id,
+                status="already_completed",
+                message="Task already completed; no cancellation was sent.",
+            )
+        if task_id in runner.cancelled:
+            return RunnerTaskCancelResponse(
+                node_id=self.node_id,
+                runner_id=runner_id,
+                task_id=task_id,
+                status="already_cancelled",
+                message="Task was already marked cancelled on this runner.",
+            )
+        if task_id not in runner.in_progress and task_id not in runner.pending:
+            raise KeyError(
+                f"Task {task_id} is not pending or in progress on runner {runner_id}"
+            )
+
+        await runner.cancel_task(task_id)
+        return RunnerTaskCancelResponse(
+            node_id=self.node_id,
+            runner_id=runner_id,
+            task_id=task_id,
+            status="cancel_requested",
+            message=(
+                "Cooperative cancellation requested on the live runner. "
+                "Native or wedged work may continue until the runner observes it."
+            ),
+        )
 
     async def _maybe_evict_shard(self, shard: ShardMetadata | None) -> None:
         """Evict staged shard files after runner teardown if configured."""

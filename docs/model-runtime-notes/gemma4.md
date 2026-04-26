@@ -105,7 +105,8 @@ For a healthy clustered Gemma 4 run, expect to see:
 
 - `using SequentialGenerator (model_family=gemma4)`
 - `Using default KV cache`
-- `Prefill path selected: pipeline_parallel_prefill`
+- `Prefill path selected: stream_generate` for short one-chunk turns, or
+  `Prefill path selected: pipeline_parallel_prefill` for multi-chunk turns
 
 These are useful smell tests before trusting the output.
 
@@ -152,4 +153,3 @@ Still open:
   https://huggingface.co/google/gemma-4-26B-A4B-it
 - Existing user-facing behavior note:
   `website/docs/model-behaviors/gemma4.md`
-

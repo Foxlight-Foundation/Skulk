@@ -3,10 +3,12 @@ import contextlib
 import hashlib
 import json
 import os
+import platform
 import random
+import shutil
 import socket
 import time
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Sequence
 from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
@@ -14,7 +16,9 @@ from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
 from uuid import uuid4
 
 import anyio
+import httpx
 import hypercorn.asyncio as hypercorn_asyncio
+import psutil
 import yaml
 from anyio import BrokenResourceError
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -25,6 +29,7 @@ from hypercorn.config import Config
 from hypercorn.typing import ASGIFramework
 from loguru import logger
 
+import exo.shared.types.tasks as task_types
 from exo.api.adapters.chat_completions import (
     chat_request_to_text_generation,
     collect_chat_response,
@@ -110,7 +115,11 @@ from exo.api.types import (
     TraceListResponse,
     TraceRankStats,
     TraceResponse,
+    TraceSourceNode,
     TraceStatsResponse,
+    TraceTaskKind,
+    TracingStateResponse,
+    UpdateTracingStateRequest,
     WebSearchToolRequest,
     WebSearchToolResponse,
     normalize_image_size,
@@ -182,6 +191,7 @@ from exo.shared.types.commands import (
     ImageGeneration,
     PlaceInstance,
     SendInputChunk,
+    SetTracingEnabled,
     StartDownload,
     TaskCancelled,
     TaskFinished,
@@ -189,6 +199,29 @@ from exo.shared.types.commands import (
     TextGeneration,
 )
 from exo.shared.types.common import CommandId, Id, NodeId, SystemId
+from exo.shared.types.diagnostics import (
+    ClusterDiagnostics,
+    ClusterNodeDiagnostics,
+    ClusterTimeline,
+    ClusterTimelineEntry,
+    ClusterTimelineRunner,
+    ClusterTimelineUnreachable,
+    DiagnosticCaptureRequest,
+    DiagnosticCaptureResponse,
+    DiagnosticProcessSample,
+    DiagnosticsProcess,
+    InstancePlacementDiagnostics,
+    MlxMemorySnapshot,
+    NodeDiagnostics,
+    NodeResourceDiagnostics,
+    NodeRuntimeDiagnostics,
+    PlacementRunnerDiagnostics,
+    ProcessRole,
+    RunnerSupervisorDiagnostics,
+    RunnerTaskCancelRequest,
+    RunnerTaskCancelResponse,
+    RunnerTaskDiagnostics,
+)
 from exo.shared.types.events import (
     ChunkGenerated,
     Event,
@@ -197,10 +230,12 @@ from exo.shared.types.events import (
     TracesMerged,
 )
 from exo.shared.types.memory import Memory
+from exo.shared.types.profiling import MemoryUsage
 from exo.shared.types.state import State
 from exo.shared.types.text_generation import TextGenerationTaskParams
 from exo.shared.types.worker.downloads import DownloadCompleted
 from exo.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
+from exo.shared.types.worker.runners import RunnerId
 from exo.shared.types.worker.shards import Sharding
 from exo.shared.version import get_skulk_version, get_skulk_version_label
 from exo.store.config import resolve_config_path
@@ -208,6 +243,7 @@ from exo.tools.web_search import default_browser_tool_provider
 from exo.utils.banner import print_startup_banner
 from exo.utils.channels import Receiver, Sender, channel
 from exo.utils.disk_event_log import DiskEventLog
+from exo.utils.info_gatherer.net_profile import check_reachable
 from exo.utils.power_sampler import PowerSampler
 from exo.utils.task_group import TaskGroup
 from exo.worker.engines.mlx.constants import (
@@ -241,6 +277,15 @@ serve = cast(_HypercornServe, hypercorn_asyncio.serve)
 _API_EVENT_LOG_DIR = EXO_EVENT_LOG_DIR / "api"
 ONBOARDING_COMPLETE_FILE = EXO_CACHE_HOME / "onboarding_complete"
 
+
+def _text_image_hash_cache_enabled() -> bool:
+    value = preferred_env_value(
+        "SKULK_TEXT_IMAGE_HASH_CACHE",
+        "EXO_TEXT_IMAGE_HASH_CACHE",
+        "false",
+    )
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
 API_TAGS_METADATA = [
     {
         "name": "Compatibility APIs",
@@ -273,6 +318,10 @@ API_TAGS_METADATA = [
     {
         "name": "State & Tracing",
         "description": "Cluster state, event log access, trace inspection/export, and onboarding helpers.",
+    },
+    {
+        "name": "Diagnostics",
+        "description": "Read-only local and cluster diagnostics for stuck runner, placement, resource, and process inspection.",
     },
     {
         "name": "Images",
@@ -409,12 +458,20 @@ class API:
         self.event_receiver = event_receiver
         self.election_receiver = election_receiver
         self.node_id: NodeId = node_id
+        self._master_node_id: NodeId = node_id
         self.last_completed_election: int = 0
         self.port = port
         self._exo_config = exo_config
         self._store_client = store_client
         self._config_path = resolve_config_path()
         self._model_optimizer: "ModelOptimizer | None" = None
+        self._runner_diagnostics_provider: Callable[
+            [], Sequence[RunnerSupervisorDiagnostics]
+        ] | None = None
+        self._runner_cancel_provider: Callable[
+            [RunnerId, task_types.TaskId], Awaitable[RunnerTaskCancelResponse]
+        ] | None = None
+        self._sent_image_hashes: set[str] = set()
         # Initialize optimizer if store path is available
         if exo_config and exo_config.model_store and exo_config.model_store.enabled:
             from exo.store.model_optimizer import ModelOptimizer
@@ -460,10 +517,35 @@ class API:
         self._embedding_queues: dict[
             CommandId, Sender[EmbeddingChunk | ErrorChunk]
         ] = {}
+        self._cancelled_command_ids: set[CommandId] = set()
         self._image_store = ImageStore(EXO_IMAGE_CACHE_DIR)
         self._tg: TaskGroup = TaskGroup()
 
-    def reset(self, result_clock: int, event_receiver: Receiver[IndexedEvent]):
+    def set_runner_diagnostics_provider(
+        self,
+        provider: Callable[[], Sequence[RunnerSupervisorDiagnostics]] | None,
+    ) -> None:
+        """Attach a local worker diagnostics provider to this API instance."""
+
+        self._runner_diagnostics_provider = provider
+
+    def set_runner_cancel_provider(
+        self,
+        provider: Callable[
+            [RunnerId, task_types.TaskId], Awaitable[RunnerTaskCancelResponse]
+        ]
+        | None,
+    ) -> None:
+        """Attach a local worker control provider for direct runner cancellation."""
+
+        self._runner_cancel_provider = provider
+
+    def reset(
+        self,
+        result_clock: int,
+        event_receiver: Receiver[IndexedEvent],
+        master_node_id: NodeId,
+    ):
         logger.info("Resetting API State")
         if self._event_log is not None:
             self._event_log.close()
@@ -473,14 +555,17 @@ class API:
         self._text_generation_queues = {}
         self._image_generation_queues = {}
         self._embedding_queues = {}
-        self.unpause(result_clock)
+        self._cancelled_command_ids = set()
+        self.unpause(result_clock, master_node_id=master_node_id)
         self.event_receiver.close()
         self.event_receiver = event_receiver
         self._tg.start_soon(self._apply_state)
 
-    def unpause(self, result_clock: int):
+    def unpause(self, result_clock: int, master_node_id: NodeId | None = None):
         logger.info("Unpausing API")
         self.last_completed_election = result_clock
+        if master_node_id is not None:
+            self._master_node_id = master_node_id
         self.paused = False
         self.paused_ev.set()
         self.paused_ev = anyio.Event()
@@ -783,17 +868,137 @@ class API:
             description="Delete or cancel a download associated with a given node and model.",
         )(self.delete_download)
         self.app.get(
+            "/v1/tracing",
+            tags=["State & Tracing"],
+            summary="Get cluster tracing state",
+            description="Return whether runtime tracing is currently enabled for new requests across the cluster session.",
+        )(self.get_tracing_state)
+        self.app.put(
+            "/v1/tracing",
+            tags=["State & Tracing"],
+            summary="Set cluster tracing state",
+            description="Enable or disable runtime tracing for new requests across the cluster session.",
+        )(self.update_tracing_state)
+        self.app.get(
             "/v1/traces",
             tags=["State & Tracing"],
             summary="List saved traces",
             description="List saved trace files that can be inspected for debugging and performance analysis.",
         )(self.list_traces)
+        self.app.get(
+            "/v1/traces/cluster",
+            tags=["State & Tracing"],
+            summary="List cluster traces",
+            description="List deduplicated traces discoverable from this node across reachable peer APIs.",
+        )(self.list_cluster_traces)
         self.app.post(
             "/v1/traces/delete",
             tags=["State & Tracing"],
             summary="Delete saved traces",
             description="Delete one or more saved trace artifacts by task ID.",
         )(self.delete_traces)
+        self.app.get(
+            "/v1/traces/cluster/{task_id}",
+            tags=["State & Tracing"],
+            summary="Get one cluster trace",
+            description="Return a trace from local storage or proxy it from a reachable peer node.",
+        )(self.get_cluster_trace)
+        self.app.get(
+            "/v1/traces/cluster/{task_id}/stats",
+            tags=["State & Tracing"],
+            summary="Get one cluster trace summary",
+            description="Return aggregated timing statistics for a trace available locally or on a reachable peer node.",
+        )(self.get_cluster_trace_stats)
+        self.app.get(
+            "/v1/traces/cluster/{task_id}/raw",
+            tags=["State & Tracing"],
+            summary="Download raw cluster trace JSON",
+            description="Download a raw Chrome trace artifact from local storage or a reachable peer node.",
+            response_model=None,
+        )(self.get_cluster_trace_raw)
+        self.app.get(
+            "/v1/diagnostics/node",
+            tags=["Diagnostics"],
+            summary="Get local node diagnostics",
+            description=(
+                "Return a read-only diagnostic bundle for this API node, including "
+                "runtime identity, placement analysis, live runner-supervisor "
+                "state, local resources, and relevant OS processes."
+            ),
+        )(self.get_node_diagnostics)
+        self.app.post(
+            "/v1/diagnostics/node/runners/{runner_id}/cancel",
+            tags=["Diagnostics"],
+            summary="Request direct local runner cancellation",
+            description=(
+                "Request cooperative cancellation for one live task on one local "
+                "runner supervisor. This is a best-effort control path intended "
+                "for diagnostics and may not stop a runner wedged in native code."
+            ),
+        )(self.cancel_local_runner_task)
+        self.app.post(
+            "/v1/diagnostics/node/capture",
+            tags=["Diagnostics"],
+            summary="Capture local node diagnostic bundle",
+            description=(
+                "Collect an on-demand diagnostic bundle for this node, optionally "
+                "focused on one live runner or task. The bundle includes current "
+                "node diagnostics, runner flight-recorder entries, the latest MLX "
+                "memory snapshot, and best-effort macOS process samples."
+            ),
+        )(self.capture_local_node_diagnostics)
+        self.app.get(
+            "/v1/diagnostics/cluster",
+            tags=["Diagnostics"],
+            summary="Get cluster diagnostics",
+            description=(
+                "Fan out to reachable peer APIs and return read-only diagnostic "
+                "bundles for the local node and peers. Unreachable peers are "
+                "reported as partial failures instead of failing the whole request."
+            ),
+        )(self.get_cluster_diagnostics)
+        self.app.get(
+            "/v1/diagnostics/cluster/timeline",
+            tags=["Diagnostics"],
+            summary="Get cross-rank runner timeline",
+            description=(
+                "Stitch every reachable node's runner-supervisor diagnostics into "
+                "one cross-rank chronological view. Returns a per-runner synopsis "
+                "(rank, current phase, seconds-in-phase, MLX memory) and every "
+                "flight-recorder entry across all ranks merged and sorted by "
+                "wall-clock timestamp. The intended use is debugging distributed "
+                "deadlocks where the rank-disagreement signature is invisible from "
+                "any single node's local diagnostics."
+            ),
+        )(self.get_cluster_timeline)
+        self.app.get(
+            "/v1/diagnostics/cluster/{node_id}",
+            tags=["Diagnostics"],
+            summary="Get one cluster node diagnostic bundle",
+            description=(
+                "Return diagnostics for the requested node from local state or by "
+                "proxying to a reachable peer API."
+            ),
+        )(self.get_cluster_node_diagnostics)
+        self.app.post(
+            "/v1/diagnostics/cluster/{node_id}/capture",
+            tags=["Diagnostics"],
+            summary="Capture one cluster node diagnostic bundle",
+            description=(
+                "Return an on-demand diagnostic capture bundle for the requested "
+                "node, proxying to a reachable peer API when the target is remote."
+            ),
+        )(self.capture_cluster_node_diagnostics)
+        self.app.post(
+            "/v1/diagnostics/cluster/{node_id}/runners/{runner_id}/cancel",
+            tags=["Diagnostics"],
+            summary="Request direct runner cancellation on one cluster node",
+            description=(
+                "Proxy a cooperative live-task cancellation request to the "
+                "requested node's local diagnostics control endpoint. This is "
+                "best-effort and may not stop a runner wedged in native code."
+            ),
+        )(self.cancel_cluster_runner_task)
         self.app.get(
             "/v1/traces/{task_id}",
             tags=["State & Tracing"],
@@ -811,6 +1016,7 @@ class API:
             tags=["State & Tracing"],
             summary="Download raw trace JSON",
             description="Download the raw Chrome trace JSON artifact for one task.",
+            response_model=None,
         )(self.get_trace_raw)
         self.app.get(
             "/onboarding",
@@ -1156,12 +1362,34 @@ class API:
             )
 
         await self._send(TaskCancelled(cancelled_command_id=command_id))
+        # Suppress the final TaskFinished emitted by local stream cleanup so the
+        # worker can observe the Cancelled task and deliver runner-local cancel
+        # before event-sourced task deletion happens.
+        self._cancelled_command_ids.add(command_id)
         sender.close()
 
         return CancelCommandResponse(
             message="Command cancelled.",
             command_id=command_id,
         )
+
+    async def _finalize_command_stream(
+        self,
+        command_id: CommandId,
+        queue_map: dict[CommandId, Sender[object]],
+    ) -> None:
+        """Clean up a local command stream and report natural completion.
+
+        Local cancellations intentionally suppress TaskFinished. Otherwise the
+        master can delete the task before workers synthesize CancelTask for the
+        runner that is still executing it.
+        """
+
+        should_send_finished = command_id not in self._cancelled_command_ids
+        self._cancelled_command_ids.discard(command_id)
+        if should_send_finished:
+            await self._send(TaskFinished(finished_command_id=command_id))
+        queue_map.pop(command_id, None)
 
     async def _token_chunk_stream(
         self, command_id: CommandId
@@ -1187,15 +1415,20 @@ class API:
 
         except anyio.get_cancelled_exc_class():
             command = TaskCancelled(cancelled_command_id=command_id)
+            self._cancelled_command_ids.add(command_id)
             with anyio.CancelScope(shield=True):
                 await self.command_sender.send(
                     ForwarderCommand(origin=self._system_id, command=command)
                 )
             raise
         finally:
-            await self._send(TaskFinished(finished_command_id=command_id))
-            if command_id in self._text_generation_queues:
-                del self._text_generation_queues[command_id]
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._text_generation_queues,
+                ),
+            )
 
     async def _collect_text_generation_with_stats(
         self, command_id: CommandId
@@ -1271,8 +1504,6 @@ class API:
             "TODO: we should send a notification to the user to download the model"
         )
 
-    _sent_image_hashes: set[str] = set()
-
     async def _send_text_generation_with_images(
         self, task_params: TextGenerationTaskParams
     ) -> TextGeneration:
@@ -1286,16 +1517,24 @@ class API:
 
         cached_hashes: dict[int, str] = {}
         new_images: list[tuple[int, str]] = []
-        for idx, (img, h) in enumerate(zip(images, hashes, strict=True)):
-            if h in self._sent_image_hashes:
-                cached_hashes[idx] = h
-            else:
-                self._sent_image_hashes.add(h)
-                new_images.append((idx, img))
+        cache_enabled = _text_image_hash_cache_enabled()
+        if cache_enabled:
+            for idx, (img, h) in enumerate(zip(images, hashes, strict=True)):
+                if h in self._sent_image_hashes:
+                    cached_hashes[idx] = h
+                else:
+                    self._sent_image_hashes.add(h)
+                    new_images.append((idx, img))
+        else:
+            # The worker cache is local, in-memory, and not placement-aware. Sending
+            # hash-only references by default can crash or wedge nodes after restarts
+            # or placement changes, so keep the optimization behind an explicit flag.
+            new_images = list(enumerate(images))
 
         _log_image_transport(
             f"TextGeneration image transport: total={len(images)} "
-            f"new={len(new_images)} cached={len(cached_hashes)}"
+            f"new={len(new_images)} cached={len(cached_hashes)} "
+            f"hash_cache_enabled={cache_enabled}"
         )
         for idx, img in new_images:
             _log_image_transport(
@@ -1673,15 +1912,20 @@ class API:
 
         except anyio.get_cancelled_exc_class():
             command = TaskCancelled(cancelled_command_id=command_id)
+            self._cancelled_command_ids.add(command_id)
             with anyio.CancelScope(shield=True):
                 await self.command_sender.send(
                     ForwarderCommand(origin=self._system_id, command=command)
                 )
             raise
         finally:
-            await self._send(TaskFinished(finished_command_id=command_id))
-            if command_id in self._image_generation_queues:
-                del self._image_generation_queues[command_id]
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._image_generation_queues,
+                ),
+            )
 
     async def _collect_image_chunks(
         self,
@@ -1759,15 +2003,20 @@ class API:
             return (images, stats if capture_stats else None)
         except anyio.get_cancelled_exc_class():
             command = TaskCancelled(cancelled_command_id=command_id)
+            self._cancelled_command_ids.add(command_id)
             with anyio.CancelScope(shield=True):
                 await self.command_sender.send(
                     ForwarderCommand(origin=self._system_id, command=command)
                 )
             raise
         finally:
-            await self._send(TaskFinished(finished_command_id=command_id))
-            if command_id in self._image_generation_queues:
-                del self._image_generation_queues[command_id]
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._image_generation_queues,
+                ),
+            )
 
     async def _collect_image_generation(
         self,
@@ -2531,6 +2780,11 @@ class API:
                 duration_us=t.duration_us,
                 rank=t.rank,
                 category=t.category,
+                node_id=t.node_id,
+                model_id=t.model_id,
+                task_kind=t.task_kind,
+                tags=tuple(t.tags),
+                attrs=t.attrs,
             )
             for t in event.traces
         ]
@@ -2607,38 +2861,37 @@ class API:
             raise HTTPException(status_code=400, detail=f"Invalid task ID: {task_id}")
         return trace_path
 
-    async def list_traces(self) -> TraceListResponse:
-        traces: list[TraceListItem] = []
+    def _friendly_name_for_trace_node(self, node_id: str) -> str | None:
+        for known_node_id, identity in self.state.node_identities.items():
+            if str(known_node_id) != node_id:
+                continue
+            if identity.friendly_name and identity.friendly_name != "Unknown":
+                return identity.friendly_name
+            return None
+        return None
 
-        for trace_file in sorted(
-            EXO_TRACING_CACHE_DIR.glob("trace_*.json"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        ):
-            # Extract task_id from filename (trace_{task_id}.json)
-            task_id = trace_file.stem.removeprefix("trace_")
-            stat = trace_file.stat()
-            created_at = datetime.fromtimestamp(
-                stat.st_mtime, tz=timezone.utc
-            ).isoformat()
-            traces.append(
-                TraceListItem(
-                    task_id=task_id,
-                    created_at=created_at,
-                    file_size=stat.st_size,
-                )
-            )
+    def _trace_source_node(self, node_id: str) -> TraceSourceNode:
+        return TraceSourceNode(
+            node_id=node_id,
+            friendly_name=self._friendly_name_for_trace_node(node_id),
+        )
 
-        return TraceListResponse(traces=traces)
+    def _trace_source_nodes(self, trace_events: list[TraceEvent]) -> list[TraceSourceNode]:
+        node_ids = [event.node_id for event in trace_events if event.node_id]
+        if not node_ids:
+            node_ids = [str(self.node_id)]
 
-    async def get_trace(self, task_id: str) -> TraceResponse:
-        trace_path = self._get_trace_path(task_id)
+        unique_node_ids: list[str] = []
+        for node_id in node_ids:
+            assert node_id is not None
+            if node_id not in unique_node_ids:
+                unique_node_ids.append(node_id)
 
-        if not trace_path.exists():
-            raise HTTPException(status_code=404, detail=f"Trace not found: {task_id}")
+        return [self._trace_source_node(node_id) for node_id in unique_node_ids]
 
-        trace_events = load_trace_file(trace_path)
-
+    def _build_trace_response(
+        self, task_id: str, trace_events: list[TraceEvent]
+    ) -> TraceResponse:
         return TraceResponse(
             task_id=task_id,
             traces=[
@@ -2648,20 +2901,21 @@ class API:
                     duration_us=event.duration_us,
                     rank=event.rank,
                     category=event.category,
+                    node_id=event.node_id,
+                    model_id=event.model_id,
+                    task_kind=event.task_kind,
+                    tags=list(event.tags),
+                    attrs=event.attrs,
                 )
                 for event in trace_events
             ],
+            source_nodes=self._trace_source_nodes(trace_events),
         )
 
-    async def get_trace_stats(self, task_id: str) -> TraceStatsResponse:
-        trace_path = self._get_trace_path(task_id)
-
-        if not trace_path.exists():
-            raise HTTPException(status_code=404, detail=f"Trace not found: {task_id}")
-
-        trace_events = load_trace_file(trace_path)
+    def _build_trace_stats_response(
+        self, task_id: str, trace_events: list[TraceEvent]
+    ) -> TraceStatsResponse:
         stats = compute_stats(trace_events)
-
         return TraceStatsResponse(
             task_id=task_id,
             total_wall_time_us=stats.total_wall_time_us,
@@ -2690,7 +2944,1078 @@ class API:
                 )
                 for rank, rank_stats in stats.by_rank.items()
             },
+            source_nodes=self._trace_source_nodes(trace_events),
         )
+
+    def _build_trace_list_item(self, task_id: str, trace_path: Path) -> TraceListItem:
+        stat = trace_path.stat()
+        created_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+        trace_events = load_trace_file(trace_path)
+
+        model_id = next((event.model_id for event in trace_events if event.model_id), None)
+        task_kind = cast(
+            TraceTaskKind | None,
+            next((event.task_kind for event in trace_events if event.task_kind), None),
+        )
+        categories = sorted({event.category for event in trace_events if event.category})
+        tags = sorted({tag for event in trace_events for tag in event.tags})
+        has_tool_activity = any("tool_call" in event.tags for event in trace_events)
+
+        return TraceListItem(
+            task_id=task_id,
+            created_at=created_at,
+            file_size=stat.st_size,
+            model_id=model_id,
+            task_kind=task_kind,
+            categories=categories,
+            tags=tags,
+            has_tool_activity=has_tool_activity,
+            source_nodes=self._trace_source_nodes(trace_events),
+        )
+
+    @staticmethod
+    def _merge_trace_list_item(existing: TraceListItem, incoming: TraceListItem) -> TraceListItem:
+        source_nodes_by_id = {
+            source.node_id: source for source in [*existing.source_nodes, *incoming.source_nodes]
+        }
+        return existing.model_copy(
+            update={
+                "created_at": max(existing.created_at, incoming.created_at),
+                "file_size": max(existing.file_size, incoming.file_size),
+                "model_id": existing.model_id or incoming.model_id,
+                "task_kind": existing.task_kind or incoming.task_kind,
+                "categories": sorted({*existing.categories, *incoming.categories}),
+                "tags": sorted({*existing.tags, *incoming.tags}),
+                "has_tool_activity": existing.has_tool_activity or incoming.has_tool_activity,
+                "source_nodes": list(source_nodes_by_id.values()),
+            }
+        )
+
+    async def _reachable_peer_api_urls(self) -> dict[str, str]:
+        """Return reachable peer API base URLs keyed by node ID."""
+
+        reachable_by_node: dict[str, str] = {}
+        async for ip_address, node_id in check_reachable(
+            self.state.topology,
+            self.node_id,
+            self.state.node_network,
+        ):
+            normalized_node_id = str(node_id)
+            if normalized_node_id in reachable_by_node:
+                continue
+            host = f"[{ip_address}]" if ":" in ip_address else ip_address
+            reachable_by_node[normalized_node_id] = f"http://{host}:52415"
+        return reachable_by_node
+
+    async def _reachable_peer_trace_urls(self) -> list[str]:
+        """Return reachable peer API base URLs for trace proxying."""
+
+        return list((await self._reachable_peer_api_urls()).values())
+
+    @staticmethod
+    def _status_kind(status: object | None) -> str | None:
+        """Return the concrete status model name for diagnostics."""
+
+        if status is None:
+            return None
+        return status.__class__.__name__
+
+    def _friendly_name_for_node(self, node_id: NodeId) -> str | None:
+        """Return a known friendly node name for diagnostics."""
+
+        identity = self.state.node_identities.get(node_id)
+        if identity is None:
+            return None
+        if identity.friendly_name and identity.friendly_name != "Unknown":
+            return identity.friendly_name
+        return None
+
+    @staticmethod
+    def _task_kind(task: task_types.Task) -> str:
+        """Return a stable task kind name from a tagged task model."""
+
+        return task.__class__.__name__
+
+    @staticmethod
+    def _task_command_id(task: task_types.Task) -> str | None:
+        """Return a user command ID for task types that carry one."""
+
+        if isinstance(
+            task,
+            (
+                task_types.TextGeneration,
+                task_types.ImageGeneration,
+                task_types.ImageEdits,
+                task_types.TextEmbedding,
+            ),
+        ):
+            return str(task.command_id)
+        return None
+
+    @staticmethod
+    def _task_model_id(task: task_types.Task, default_model_id: str | None) -> str | None:
+        """Return the model associated with a task when available."""
+
+        if isinstance(
+            task,
+            (
+                task_types.TextGeneration,
+                task_types.ImageGeneration,
+                task_types.ImageEdits,
+                task_types.TextEmbedding,
+            ),
+        ):
+            return str(task.task_params.model)
+        if isinstance(task, task_types.DownloadModel):
+            return str(task.shard_metadata.model_card.model_id)
+        if isinstance(task, task_types.CreateRunner):
+            return str(task.bound_instance.bound_shard.model_card.model_id)
+        return default_model_id
+
+    def _task_diagnostics(
+        self,
+        task: task_types.Task,
+        *,
+        runner_id: str | None,
+        default_model_id: str | None,
+    ) -> RunnerTaskDiagnostics:
+        """Build a compact event-sourced task diagnostics record."""
+
+        return RunnerTaskDiagnostics(
+            task_id=str(task.task_id),
+            task_kind=self._task_kind(task),
+            task_status=str(task.task_status.value),
+            instance_id=str(task.instance_id),
+            command_id=self._task_command_id(task),
+            runner_id=runner_id,
+            model_id=self._task_model_id(task, default_model_id),
+        )
+
+    def _placement_diagnostics(self) -> list[InstancePlacementDiagnostics]:
+        """Build placement diagnostics from event-sourced state."""
+
+        master_node_id = self._master_node_id
+        placements: list[InstancePlacementDiagnostics] = []
+
+        for instance_id, instance in self.state.instances.items():
+            shard_assignments = instance.shard_assignments
+            placement_node_ids = list(shard_assignments.node_to_runner.keys())
+            placement_node_id_strings = [str(node_id) for node_id in placement_node_ids]
+            master_is_placement_node = master_node_id in shard_assignments.node_to_runner
+            local_node_is_placement_node = self.node_id in shard_assignments.node_to_runner
+            warnings: list[str] = []
+
+            if not master_is_placement_node:
+                warnings.append(
+                    "Current master is not a placement node for this instance."
+                )
+
+            runners: list[PlacementRunnerDiagnostics] = []
+            for node_id, runner_id in shard_assignments.node_to_runner.items():
+                shard = shard_assignments.runner_to_shard[runner_id]
+                status = self.state.runners.get(runner_id)
+                task_records = [
+                    self._task_diagnostics(
+                        task,
+                        runner_id=str(runner_id),
+                        default_model_id=str(shard_assignments.model_id),
+                    )
+                    for task in self.state.tasks.values()
+                    if task.instance_id == instance_id
+                ]
+                if (
+                    status is not None
+                    and status.__class__.__name__ == "RunnerWarmingUp"
+                    and not master_is_placement_node
+                ):
+                    warnings.append(
+                        f"Runner {runner_id} is warming up while master is outside the placement."
+                    )
+                runners.append(
+                    PlacementRunnerDiagnostics(
+                        runner_id=str(runner_id),
+                        node_id=str(node_id),
+                        friendly_name=self._friendly_name_for_node(node_id),
+                        status_kind=self._status_kind(status),
+                        device_rank=shard.device_rank,
+                        world_size=shard.world_size,
+                        start_layer=shard.start_layer,
+                        end_layer=shard.end_layer,
+                        n_layers=shard.n_layers,
+                        is_local=node_id == self.node_id,
+                        is_master=node_id == master_node_id,
+                        tasks=task_records,
+                    )
+                )
+
+            placements.append(
+                InstancePlacementDiagnostics(
+                    instance_id=str(instance_id),
+                    model_id=str(shard_assignments.model_id),
+                    master_node_id=str(master_node_id),
+                    master_is_placement_node=master_is_placement_node,
+                    local_node_is_placement_node=local_node_is_placement_node,
+                    placement_node_ids=placement_node_id_strings,
+                    runners=sorted(runners, key=lambda runner: runner.device_rank),
+                    warnings=sorted(set(warnings)),
+                )
+            )
+
+        return placements
+
+    @staticmethod
+    def _short_diagnostics_id(value: str) -> str:
+        """Return a compact identifier for human-facing diagnostics warnings."""
+
+        return f"{value[:8]}…{value[-4:]}" if len(value) > 12 else value
+
+    def _augment_runner_divergence_warnings(
+        self,
+        placements: Sequence[InstancePlacementDiagnostics],
+        supervisor_runners: Sequence[RunnerSupervisorDiagnostics],
+    ) -> list[str]:
+        """Add warnings when live supervisor state diverges from cluster state."""
+
+        task_by_id = {str(task_id): task for task_id, task in self.state.tasks.items()}
+        placement_by_instance = {
+            placement.instance_id: placement for placement in placements
+        }
+        top_level_warnings: set[str] = set()
+        placement_warnings_by_instance: dict[str, set[str]] = {
+            placement.instance_id: set() for placement in placements
+        }
+
+        for runner in supervisor_runners:
+            placement = placement_by_instance.get(runner.instance_id)
+            placement_task_ids: set[str] = set()
+            instance_task_ids: set[str] = set()
+            if placement is not None:
+                instance_task_ids = {
+                    task.task_id for placement_runner in placement.runners for task in placement_runner.tasks
+                }
+                for placement_runner in placement.runners:
+                    if placement_runner.runner_id == runner.runner_id:
+                        placement_task_ids = {
+                            task.task_id for task in placement_runner.tasks
+                        }
+                        break
+
+            if runner.process_alive and runner.in_progress_tasks and not instance_task_ids:
+                message = (
+                    "Runner "
+                    f"{self._short_diagnostics_id(runner.runner_id)} is still alive with "
+                    f"{len(runner.in_progress_tasks)} in-progress task(s), but event-sourced "
+                    f"state shows no active tasks for instance "
+                    f"{self._short_diagnostics_id(runner.instance_id)}."
+                )
+                top_level_warnings.add(message)
+                placement_warnings_by_instance.setdefault(runner.instance_id, set()).add(
+                    message
+                )
+
+            for task in runner.in_progress_tasks:
+                matching_state_task = task_by_id.get(task.task_id)
+                if matching_state_task is None:
+                    message = (
+                        "Runner "
+                        f"{self._short_diagnostics_id(runner.runner_id)} still reports "
+                        f"{task.task_kind}:{self._short_diagnostics_id(task.task_id)} in progress, "
+                        "but cluster state no longer tracks that task."
+                    )
+                elif matching_state_task.task_status.value not in {"Pending", "Running"}:
+                    message = (
+                        "Runner "
+                        f"{self._short_diagnostics_id(runner.runner_id)} still reports "
+                        f"{task.task_kind}:{self._short_diagnostics_id(task.task_id)} in progress "
+                        f"while cluster state says {matching_state_task.task_status.value}."
+                    )
+                elif placement is not None and task.task_id not in placement_task_ids:
+                    message = (
+                        "Runner "
+                        f"{self._short_diagnostics_id(runner.runner_id)} still reports "
+                        f"{task.task_kind}:{self._short_diagnostics_id(task.task_id)} in progress, "
+                        "but placement diagnostics show no active task on this runner."
+                    )
+                else:
+                    continue
+
+                top_level_warnings.add(message)
+                placement_warnings_by_instance.setdefault(runner.instance_id, set()).add(
+                    message
+                )
+
+        for placement in placements:
+            extra_warnings = placement_warnings_by_instance.get(placement.instance_id, set())
+            if extra_warnings:
+                placement.warnings = sorted(set(placement.warnings) | extra_warnings)
+
+        return sorted(top_level_warnings)
+
+    def _collect_runner_supervisor_diagnostics(
+        self,
+    ) -> list[RunnerSupervisorDiagnostics]:
+        """Collect live runner-supervisor diagnostics if the worker provided them."""
+
+        if self._runner_diagnostics_provider is None:
+            return []
+        try:
+            return list(self._runner_diagnostics_provider())
+        except Exception as exc:
+            logger.opt(exception=exc).warning(
+                "Failed to collect runner supervisor diagnostics"
+            )
+            return []
+
+    @staticmethod
+    def _process_role(
+        process: psutil.Process,
+        command: str,
+        *,
+        current_pid: int,
+        runner_pids: set[int],
+    ) -> ProcessRole:
+        """Infer a Skulk-specific role for a process."""
+
+        executable = ""
+        with contextlib.suppress(psutil.Error, OSError):
+            cmdline = process.cmdline()
+            if cmdline:
+                executable = Path(cmdline[0]).name.lower()
+
+        command_lower = command.lower()
+        if process.pid == current_pid:
+            return "skulk"
+        if process.pid in runner_pids:
+            return "runner"
+        if executable == "vector" or " vector --config " in f" {command_lower} ":
+            return "vector"
+        if "resource_tracker" in command_lower:
+            return "python"
+        if "skulk" in command_lower:
+            return "skulk"
+        if "spawn_main" in command_lower:
+            return "runner"
+        if "python" in executable:
+            return "python"
+        return "other"
+
+    @staticmethod
+    def _process_command(process: psutil.Process) -> str:
+        """Return a safe joined process command line."""
+
+        try:
+            command = process.cmdline()
+        except (psutil.Error, OSError):
+            return ""
+        return " ".join(command)
+
+    def _process_diagnostics(
+        self,
+        process: psutil.Process,
+        *,
+        child_pids: set[int],
+        runner_pids: set[int],
+    ) -> DiagnosticsProcess | None:
+        """Build diagnostics for one OS process, skipping vanished processes."""
+
+        try:
+            command = self._process_command(process)
+            rss = None
+            with contextlib.suppress(psutil.Error, OSError):
+                rss = Memory.from_bytes(process.memory_info().rss)
+            elapsed_seconds = None
+            with contextlib.suppress(psutil.Error, OSError):
+                elapsed_seconds = max(0.0, time.time() - process.create_time())
+            status = None
+            with contextlib.suppress(psutil.Error, OSError):
+                status = process.status()
+            cpu_percent = None
+            with contextlib.suppress(psutil.Error, OSError):
+                cpu_percent = process.cpu_percent(interval=None)
+            memory_percent = None
+            with contextlib.suppress(psutil.Error, OSError):
+                memory_percent = process.memory_percent()
+            parent_pid = None
+            with contextlib.suppress(psutil.Error, OSError):
+                parent_pid = process.ppid()
+
+            return DiagnosticsProcess(
+                pid=process.pid,
+                parent_pid=parent_pid,
+                role=self._process_role(
+                    process,
+                    command,
+                    current_pid=os.getpid(),
+                    runner_pids=runner_pids,
+                ),
+                command=command,
+                status=status,
+                cpu_percent=cpu_percent,
+                memory_percent=memory_percent,
+                rss=rss,
+                elapsed_seconds=elapsed_seconds,
+                is_child_of_skulk=process.pid in child_pids,
+            )
+        except psutil.NoSuchProcess:
+            return None
+
+    def _collect_process_diagnostics(
+        self,
+        supervisor_runners: Sequence[RunnerSupervisorDiagnostics],
+    ) -> list[DiagnosticsProcess]:
+        """Collect relevant Skulk, runner, and Vector process diagnostics."""
+
+        current = psutil.Process(os.getpid())
+        try:
+            children = current.children(recursive=True)
+        except (psutil.Error, OSError):
+            children = []
+
+        runner_pids = {
+            runner.pid
+            for runner in supervisor_runners
+            if runner.pid is not None
+        }
+        child_pids = {current.pid, *(child.pid for child in children)}
+        process_by_pid: dict[int, psutil.Process] = {
+            current.pid: current,
+            **{child.pid: child for child in children},
+        }
+
+        for process in psutil.process_iter():
+            if process.pid in process_by_pid:
+                continue
+            command = self._process_command(process)
+            if "vector" not in command.lower():
+                continue
+            process_by_pid[process.pid] = process
+
+        diagnostics: list[DiagnosticsProcess] = []
+        for process in sorted(process_by_pid.values(), key=lambda proc: proc.pid):
+            process_diagnostics = self._process_diagnostics(
+                process,
+                child_pids=child_pids,
+                runner_pids=runner_pids,
+            )
+            if process_diagnostics is not None:
+                diagnostics.append(process_diagnostics)
+        return diagnostics
+
+    def _runtime_diagnostics(self) -> NodeRuntimeDiagnostics:
+        """Build local runtime diagnostics from API process and state."""
+
+        identity = self.state.node_identities.get(self.node_id)
+        logging_config = self._exo_config.logging if self._exo_config is not None else None
+        master_node_id = self._master_node_id
+        return NodeRuntimeDiagnostics(
+            node_id=str(self.node_id),
+            hostname=socket.gethostname(),
+            friendly_name=self._friendly_name_for_node(self.node_id),
+            is_master=master_node_id == self.node_id,
+            master_node_id=str(master_node_id),
+            cwd=str(Path.cwd()),
+            config_path=str(self._config_path),
+            config_file_exists=self._config_path.exists(),
+            skulk_version=get_skulk_version(),
+            skulk_commit=identity.exo_commit if identity is not None else "Unknown",
+            libp2p_namespace=preferred_env_value(
+                "SKULK_LIBP2P_NAMESPACE",
+                "EXO_LIBP2P_NAMESPACE",
+            ),
+            python_unbuffered=os.environ.get("PYTHONUNBUFFERED") in {"1", "true", "True"},
+            tracing_enabled=self.state.tracing_enabled,
+            structured_logging_configured=bool(
+                logging_config is not None
+                and logging_config.enabled
+                and logging_config.ingest_url
+            ),
+            logging_ingest_url=logging_config.ingest_url
+            if logging_config is not None and logging_config.ingest_url
+            else None,
+        )
+
+    def _resource_diagnostics(self) -> NodeResourceDiagnostics:
+        """Build local resource diagnostics from gathered state and psutil."""
+
+        current_memory = None
+        with contextlib.suppress(Exception):
+            current_memory = MemoryUsage.from_psutil(override_memory=None)
+
+        return NodeResourceDiagnostics(
+            gathered_memory=self.state.node_memory.get(self.node_id),
+            current_memory=current_memory,
+            disk=self.state.node_disk.get(self.node_id),
+            system=self.state.node_system.get(self.node_id),
+            network=self.state.node_network.get(self.node_id),
+        )
+
+    async def get_node_diagnostics(self) -> NodeDiagnostics:
+        """Return local read-only diagnostics for this Skulk node."""
+
+        supervisor_runners = self._collect_runner_supervisor_diagnostics()
+        placements = self._placement_diagnostics()
+        warnings = {
+            warning for placement in placements for warning in placement.warnings
+        }
+        warnings.update(
+            self._augment_runner_divergence_warnings(placements, supervisor_runners)
+        )
+        return NodeDiagnostics(
+            generated_at=datetime.now(tz=timezone.utc).isoformat(),
+            runtime=self._runtime_diagnostics(),
+            identity=self.state.node_identities.get(self.node_id),
+            resources=self._resource_diagnostics(),
+            processes=self._collect_process_diagnostics(supervisor_runners),
+            supervisor_runners=supervisor_runners,
+            placements=placements,
+            warnings=sorted(warnings),
+        )
+
+    @staticmethod
+    def _proxy_error_detail(response: httpx.Response) -> str:
+        """Extract one user-facing error message from a proxied API response."""
+
+        with contextlib.suppress(ValueError):
+            payload = _coerce_json_object(cast(object, response.json()))
+            detail = payload.get("detail")
+            if isinstance(detail, str):
+                return detail
+            error = _coerce_json_object(payload.get("error"))
+            message = error.get("message")
+            if isinstance(message, str):
+                return message
+        return f"Peer request failed with status {response.status_code}"
+
+    async def cancel_local_runner_task(
+        self,
+        runner_id: RunnerId,
+        request: RunnerTaskCancelRequest,
+    ) -> RunnerTaskCancelResponse:
+        """Request cooperative cancellation for one live task on this node."""
+
+        if self._runner_cancel_provider is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Local worker runner controls are not available on this node.",
+            )
+
+        try:
+            return await self._runner_cancel_provider(runner_id, request.task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    async def cancel_cluster_runner_task(
+        self,
+        node_id: str,
+        runner_id: RunnerId,
+        request: RunnerTaskCancelRequest,
+    ) -> RunnerTaskCancelResponse:
+        """Proxy one direct runner cancellation request to the requested node."""
+
+        if node_id == str(self.node_id):
+            return await self.cancel_local_runner_task(runner_id, request)
+
+        peer_urls = await self._reachable_peer_api_urls()
+        base_url = peer_urls.get(node_id)
+        if base_url is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Node diagnostics endpoint not reachable: {node_id}",
+            )
+
+        timeout = httpx.Timeout(timeout=10.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            try:
+                response = await client.post(
+                    f"{base_url}/v1/diagnostics/node/runners/{runner_id}/cancel",
+                    json=request.model_dump(mode="json", by_alias=True),
+                )
+            except httpx.HTTPError as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Failed to proxy runner cancellation to {node_id}: {exc}",
+                ) from exc
+
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=self._proxy_error_detail(response),
+            )
+        return RunnerTaskCancelResponse.model_validate(response.json())
+
+    @staticmethod
+    def _truncate_capture_output(value: bytes | str | None) -> str | None:
+        """Decode and cap heavyweight diagnostic command output."""
+
+        if value is None:
+            return None
+        text = value.decode(errors="replace") if isinstance(value, bytes) else value
+        max_chars = 64_000
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars] + "\n... <truncated>"
+
+    async def _run_process_sample_command(
+        self,
+        *,
+        name: str,
+        command: list[str],
+        timeout_seconds: float,
+    ) -> DiagnosticProcessSample:
+        """Run one local process-sampling command with a strict timeout."""
+
+        started = time.monotonic()
+        try:
+            completed = None
+            with anyio.move_on_after(timeout_seconds) as scope:
+                completed = await anyio.run_process(command, check=False)
+            duration = time.monotonic() - started
+            if scope.cancel_called or completed is None:
+                return DiagnosticProcessSample(
+                    name=name,
+                    command=command,
+                    ok=False,
+                    duration_seconds=duration,
+                    error=f"Timed out after {timeout_seconds:.1f}s",
+                )
+            return DiagnosticProcessSample(
+                name=name,
+                command=command,
+                ok=completed.returncode == 0,
+                exit_code=completed.returncode,
+                duration_seconds=duration,
+                stdout=self._truncate_capture_output(completed.stdout),
+                stderr=self._truncate_capture_output(completed.stderr),
+                error=None if completed.returncode == 0 else "Command exited non-zero",
+            )
+        except FileNotFoundError as exc:
+            missing_file = str(cast(object, exc.filename))
+            return DiagnosticProcessSample(
+                name=name,
+                command=command,
+                ok=False,
+                duration_seconds=time.monotonic() - started,
+                error=f"Command not found: {missing_file}",
+            )
+        except Exception as exc:
+            return DiagnosticProcessSample(
+                name=name,
+                command=command,
+                ok=False,
+                duration_seconds=time.monotonic() - started,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
+    async def _collect_process_samples(
+        self,
+        pid: int,
+        sample_duration_seconds: float,
+    ) -> list[DiagnosticProcessSample]:
+        """Collect best-effort heavyweight process samples for one PID."""
+
+        if platform.system() != "Darwin":
+            return [
+                DiagnosticProcessSample(
+                    name="process_samples",
+                    command=[],
+                    ok=False,
+                    duration_seconds=0.0,
+                    error="Process sampling is currently implemented for macOS only.",
+                )
+            ]
+
+        requested_duration = max(1, int(round(sample_duration_seconds)))
+        commands = [
+            (
+                "sample",
+                ["sample", str(pid), str(requested_duration)],
+                float(requested_duration + 5),
+            ),
+            ("vmmap", ["vmmap", "-summary", str(pid)], 8.0),
+            ("footprint", ["footprint", "-p", str(pid)], 8.0),
+        ]
+        samples: list[DiagnosticProcessSample] = []
+        for name, command, timeout in commands:
+            executable = command[0]
+            if shutil.which(executable) is None:
+                samples.append(
+                    DiagnosticProcessSample(
+                        name=name,
+                        command=command,
+                        ok=False,
+                        duration_seconds=0.0,
+                        error=f"{executable} not found on PATH",
+                    )
+                )
+                continue
+            samples.append(
+                await self._run_process_sample_command(
+                    name=name,
+                    command=command,
+                    timeout_seconds=timeout,
+                )
+            )
+        return samples
+
+    @staticmethod
+    def _match_capture_runner(
+        diagnostics: NodeDiagnostics,
+        request: DiagnosticCaptureRequest,
+    ) -> RunnerSupervisorDiagnostics | None:
+        """Find the requested runner or task inside one node diagnostics bundle."""
+
+        runner_id = str(request.runner_id) if request.runner_id is not None else None
+        task_id = str(request.task_id) if request.task_id is not None else None
+        if runner_id is None and task_id is None:
+            return None
+
+        for runner in diagnostics.supervisor_runners:
+            if runner_id is not None and runner.runner_id != runner_id:
+                continue
+            if task_id is not None:
+                task_ids = {task.task_id for task in runner.in_progress_tasks}
+                task_ids.update(runner.pending_task_ids)
+                task_ids.update(runner.cancelled_task_ids)
+                if task_id not in task_ids and runner.active_task_id != task_id:
+                    continue
+            return runner
+        return None
+
+    async def capture_local_node_diagnostics(
+        self,
+        request: DiagnosticCaptureRequest,
+    ) -> DiagnosticCaptureResponse:
+        """Collect an on-demand local diagnostics bundle for stuck-runner triage."""
+
+        diagnostics = await self.get_node_diagnostics()
+        runner = self._match_capture_runner(diagnostics, request)
+        if (request.runner_id is not None or request.task_id is not None) and runner is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No local runner matched the requested runnerId/taskId.",
+            )
+
+        warnings: list[str] = []
+        process_samples: list[DiagnosticProcessSample] = []
+        mlx_memory: MlxMemorySnapshot | None = None
+        if runner is not None:
+            mlx_memory = runner.last_mlx_memory
+            if request.include_process_samples:
+                if runner.pid is None:
+                    warnings.append("Matched runner has no known subprocess PID.")
+                elif not runner.process_alive:
+                    warnings.append("Matched runner process is no longer alive.")
+                else:
+                    process_samples = await self._collect_process_samples(
+                        runner.pid,
+                        request.sample_duration_seconds,
+                    )
+            if mlx_memory is None:
+                warnings.append(
+                    "Matched runner has not reported an MLX memory snapshot yet."
+                )
+
+        return DiagnosticCaptureResponse(
+            generated_at=datetime.now(tz=timezone.utc).isoformat(),
+            node_id=self.node_id,
+            node_diagnostics=diagnostics,
+            runner=runner,
+            flight_recorder=list(runner.flight_recorder) if runner is not None else [],
+            mlx_memory=mlx_memory,
+            process_samples=process_samples,
+            warnings=warnings,
+        )
+
+    async def capture_cluster_node_diagnostics(
+        self,
+        node_id: str,
+        request: DiagnosticCaptureRequest,
+    ) -> DiagnosticCaptureResponse:
+        """Return an on-demand diagnostics capture for one local or peer node."""
+
+        if node_id == str(self.node_id):
+            return await self.capture_local_node_diagnostics(request)
+
+        peer_urls = await self._reachable_peer_api_urls()
+        base_url = peer_urls.get(node_id)
+        if base_url is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Node diagnostics endpoint not reachable: {node_id}",
+            )
+
+        timeout = httpx.Timeout(timeout=30.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            try:
+                response = await client.post(
+                    f"{base_url}/v1/diagnostics/node/capture",
+                    json=request.model_dump(mode="json", by_alias=True),
+                )
+            except httpx.HTTPError as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Failed to proxy diagnostics capture to {node_id}: {exc}",
+                ) from exc
+
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=self._proxy_error_detail(response),
+            )
+        return DiagnosticCaptureResponse.model_validate(response.json())
+
+    async def get_cluster_diagnostics(self) -> ClusterDiagnostics:
+        """Return read-only diagnostics for local and reachable peer nodes."""
+
+        local_diagnostics = await self.get_node_diagnostics()
+        nodes = [
+            ClusterNodeDiagnostics(
+                node_id=str(self.node_id),
+                url=None,
+                ok=True,
+                diagnostics=local_diagnostics,
+            )
+        ]
+
+        peer_urls = await self._reachable_peer_api_urls()
+        timeout = httpx.Timeout(timeout=10.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            for node_id, base_url in peer_urls.items():
+                try:
+                    response = await client.get(f"{base_url}/v1/diagnostics/node")
+                    response.raise_for_status()
+                    diagnostics = NodeDiagnostics.model_validate(response.json())
+                    nodes.append(
+                        ClusterNodeDiagnostics(
+                            node_id=node_id,
+                            url=base_url,
+                            ok=True,
+                            diagnostics=diagnostics,
+                        )
+                    )
+                except (httpx.HTTPError, ValueError) as exc:
+                    nodes.append(
+                        ClusterNodeDiagnostics(
+                            node_id=node_id,
+                            url=base_url,
+                            ok=False,
+                            error=f"{exc.__class__.__name__}: {exc}",
+                        )
+                    )
+
+        return ClusterDiagnostics(
+            generated_at=datetime.now(tz=timezone.utc).isoformat(),
+            local_node_id=str(self.node_id),
+            master_node_id=str(self._master_node_id),
+            nodes=nodes,
+        )
+
+    async def get_cluster_timeline(self) -> ClusterTimeline:
+        """Return a cross-rank chronological view of runner activity.
+
+        Stitches every reachable node's ``RunnerSupervisorDiagnostics`` into
+        one structure: a per-runner synopsis sorted by ``(model_id, rank)``,
+        and every flight-recorder entry across all ranks merged and sorted by
+        ``at`` so distributed-deadlock signatures (e.g. "rank 0 entered
+        pipeline_last_eval_output 27 minutes ago while rank 1 is still in
+        pipeline_first_recv_like") are visible at a glance.
+
+        Reuses ``get_cluster_diagnostics`` for fan-out so peer discovery,
+        timeouts, and unreachable-peer handling stay in one place.
+        """
+        cluster = await self.get_cluster_diagnostics()
+
+        runners: list[ClusterTimelineRunner] = []
+        timeline_entries: list[ClusterTimelineEntry] = []
+        unreachable: list[ClusterTimelineUnreachable] = []
+
+        for node in cluster.nodes:
+            if not node.ok or node.diagnostics is None:
+                unreachable.append(
+                    ClusterTimelineUnreachable(
+                        node_id=node.node_id,
+                        url=node.url,
+                        error=node.error
+                        or "Node diagnostics returned no payload.",
+                    )
+                )
+                continue
+            for runner in node.diagnostics.supervisor_runners:
+                runners.append(
+                    ClusterTimelineRunner(
+                        node_id=runner.node_id,
+                        runner_id=runner.runner_id,
+                        instance_id=runner.instance_id,
+                        model_id=runner.model_id,
+                        device_rank=runner.device_rank,
+                        world_size=runner.world_size,
+                        pid=runner.pid,
+                        process_alive=runner.process_alive,
+                        status_kind=runner.status_kind,
+                        phase=runner.phase,
+                        phase_detail=runner.phase_detail,
+                        seconds_in_phase=runner.seconds_in_phase,
+                        last_progress_at=runner.last_progress_at,
+                        active_task_id=runner.active_task_id,
+                        active_command_id=runner.active_command_id,
+                        last_mlx_memory=runner.last_mlx_memory,
+                    )
+                )
+                for entry in runner.flight_recorder:
+                    # Lift node/rank identity onto each entry so the merged
+                    # timeline reads top-to-bottom as a distributed log.
+                    timeline_entries.append(
+                        ClusterTimelineEntry(
+                            at=entry.at,
+                            node_id=runner.node_id,
+                            runner_id=runner.runner_id,
+                            device_rank=runner.device_rank,
+                            world_size=runner.world_size,
+                            phase=entry.phase,
+                            event=entry.event,
+                            detail=entry.detail,
+                            attrs=dict(entry.attrs),
+                            task_id=entry.task_id,
+                            command_id=entry.command_id,
+                            mlx_memory=entry.mlx_memory,
+                        )
+                    )
+
+        # Stable sort by (model_id, rank) — multi-model deployments stay grouped.
+        runners.sort(key=lambda r: (r.model_id, r.device_rank, r.runner_id))
+        # Chronological merge across ranks. Ties broken by (node_id, rank) so the
+        # ordering is deterministic when two ranks emit at the same `at` string.
+        timeline_entries.sort(key=lambda e: (e.at, e.node_id, e.device_rank))
+
+        return ClusterTimeline(
+            generated_at=datetime.now(tz=timezone.utc).isoformat(),
+            local_node_id=cluster.local_node_id,
+            master_node_id=cluster.master_node_id,
+            runners=runners,
+            timeline=timeline_entries,
+            unreachable_nodes=unreachable,
+        )
+
+    async def get_cluster_node_diagnostics(self, node_id: str) -> NodeDiagnostics:
+        """Return diagnostics for one local or reachable peer node."""
+
+        if node_id == str(self.node_id):
+            return await self.get_node_diagnostics()
+
+        peer_urls = await self._reachable_peer_api_urls()
+        base_url = peer_urls.get(node_id)
+        if base_url is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Node diagnostics endpoint not reachable: {node_id}",
+            )
+
+        timeout = httpx.Timeout(timeout=10.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            response = await client.get(f"{base_url}/v1/diagnostics/node")
+            if response.status_code == 404:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Node diagnostics not found: {node_id}",
+                )
+            response.raise_for_status()
+            return NodeDiagnostics.model_validate(response.json())
+
+    async def get_tracing_state(self) -> TracingStateResponse:
+        return TracingStateResponse(enabled=self.state.tracing_enabled)
+
+    async def update_tracing_state(
+        self, payload: UpdateTracingStateRequest
+    ) -> TracingStateResponse:
+        await self._send(SetTracingEnabled(enabled=payload.enabled))
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if self.state.tracing_enabled == payload.enabled:
+                break
+            await anyio.sleep(0.05)
+        return TracingStateResponse(enabled=self.state.tracing_enabled)
+
+    async def list_traces(self) -> TraceListResponse:
+        traces: list[TraceListItem] = []
+
+        for trace_file in sorted(
+            EXO_TRACING_CACHE_DIR.glob("trace_*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ):
+            task_id = trace_file.stem.removeprefix("trace_")
+            try:
+                traces.append(self._build_trace_list_item(task_id, trace_file))
+            except OSError as exc:
+                logger.opt(exception=exc).warning(
+                    f"Failed to inspect trace file {trace_file}"
+                )
+
+        return TraceListResponse(traces=traces)
+
+    async def list_cluster_traces(self) -> TraceListResponse:
+        deduped: dict[str, TraceListItem] = {
+            trace.task_id: trace for trace in (await self.list_traces()).traces
+        }
+        peer_urls = await self._reachable_peer_trace_urls()
+        if not peer_urls:
+            return TraceListResponse(
+                traces=sorted(
+                    deduped.values(),
+                    key=lambda trace: trace.created_at,
+                    reverse=True,
+                )
+            )
+
+        timeout = httpx.Timeout(timeout=5.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            for base_url in peer_urls:
+                try:
+                    response = await client.get(f"{base_url}/v1/traces")
+                    if response.status_code != 200:
+                        continue
+                    peer_traces = TraceListResponse.model_validate(response.json())
+                except (httpx.HTTPError, ValueError) as exc:
+                    logger.opt(exception=exc).debug(
+                        f"Skipping peer trace index from {base_url}"
+                    )
+                    continue
+
+                for trace in peer_traces.traces:
+                    if trace.task_id in deduped:
+                        deduped[trace.task_id] = self._merge_trace_list_item(
+                            deduped[trace.task_id], trace
+                        )
+                    else:
+                        deduped[trace.task_id] = trace
+
+        return TraceListResponse(
+            traces=sorted(
+                deduped.values(),
+                key=lambda trace: trace.created_at,
+                reverse=True,
+            )
+        )
+
+    async def get_trace(self, task_id: str) -> TraceResponse:
+        trace_path = self._get_trace_path(task_id)
+
+        if not trace_path.exists():
+            raise HTTPException(status_code=404, detail=f"Trace not found: {task_id}")
+
+        trace_events = load_trace_file(trace_path)
+        return self._build_trace_response(task_id, trace_events)
+
+    async def get_trace_stats(self, task_id: str) -> TraceStatsResponse:
+        trace_path = self._get_trace_path(task_id)
+
+        if not trace_path.exists():
+            raise HTTPException(status_code=404, detail=f"Trace not found: {task_id}")
+
+        trace_events = load_trace_file(trace_path)
+        return self._build_trace_stats_response(task_id, trace_events)
 
     async def get_trace_raw(self, task_id: str) -> FileResponse:
         trace_path = self._get_trace_path(task_id)
@@ -2703,6 +4028,100 @@ class API:
             media_type="application/json",
             filename=f"trace_{task_id}.json",
         )
+
+    async def get_cluster_trace(self, task_id: str) -> TraceResponse:
+        try:
+            return await self.get_trace(task_id)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+
+        peer_urls = await self._reachable_peer_trace_urls()
+        timeout = httpx.Timeout(timeout=10.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            for base_url in peer_urls:
+                try:
+                    response = await client.get(f"{base_url}/v1/traces/{task_id}")
+                except httpx.HTTPError as exc:
+                    logger.opt(exception=exc).debug(
+                        f"Failed to proxy trace {task_id} from {base_url}"
+                    )
+                    continue
+                if response.status_code == 404:
+                    continue
+                response.raise_for_status()
+                return TraceResponse.model_validate(response.json())
+
+        raise HTTPException(status_code=404, detail=f"Trace not found: {task_id}")
+
+    async def get_cluster_trace_stats(self, task_id: str) -> TraceStatsResponse:
+        try:
+            return await self.get_trace_stats(task_id)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+
+        peer_urls = await self._reachable_peer_trace_urls()
+        timeout = httpx.Timeout(timeout=10.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            for base_url in peer_urls:
+                try:
+                    response = await client.get(
+                        f"{base_url}/v1/traces/{task_id}/stats"
+                    )
+                except httpx.HTTPError as exc:
+                    logger.opt(exception=exc).debug(
+                        f"Failed to proxy trace stats {task_id} from {base_url}"
+                    )
+                    continue
+                if response.status_code == 404:
+                    continue
+                response.raise_for_status()
+                return TraceStatsResponse.model_validate(response.json())
+
+        raise HTTPException(status_code=404, detail=f"Trace not found: {task_id}")
+
+    async def get_cluster_trace_raw(self, task_id: str) -> FileResponse | StreamingResponse:
+        try:
+            return await self.get_trace_raw(task_id)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+
+        peer_urls = await self._reachable_peer_trace_urls()
+        timeout = httpx.Timeout(timeout=30.0, connect=2.0)
+        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+            for base_url in peer_urls:
+                try:
+                    response = await client.get(
+                        f"{base_url}/v1/traces/{task_id}/raw"
+                    )
+                except httpx.HTTPError as exc:
+                    logger.opt(exception=exc).debug(
+                        f"Failed to proxy raw trace {task_id} from {base_url}"
+                    )
+                    continue
+                if response.status_code == 404:
+                    continue
+                response.raise_for_status()
+                content_type = cast(
+                    str,
+                    response.headers.get("content-type", "application/json"),
+                )
+                content_disposition = cast(
+                    str,
+                    response.headers.get(
+                        "content-disposition",
+                        f'attachment; filename="trace_{task_id}.json"',
+                    ),
+                )
+                return StreamingResponse(
+                    iter([response.content]),
+                    media_type=content_type,
+                    headers={"content-disposition": content_disposition},
+                )
+
+        raise HTTPException(status_code=404, detail=f"Trace not found: {task_id}")
 
     async def delete_traces(self, request: DeleteTracesRequest) -> DeleteTracesResponse:
         deleted: list[str] = []
@@ -3082,15 +4501,20 @@ class API:
 
         except anyio.get_cancelled_exc_class():
             cancel_command = TaskCancelled(cancelled_command_id=command_id)
+            self._cancelled_command_ids.add(command_id)
             with anyio.CancelScope(shield=True):
                 await self.command_sender.send(
                     ForwarderCommand(origin=self._system_id, command=cancel_command)
                 )
             raise
         finally:
-            await self._send(TaskFinished(finished_command_id=command_id))
-            if command_id in self._embedding_queues:
-                del self._embedding_queues[command_id]
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._embedding_queues,
+                ),
+            )
 
     async def restart_node(self, node_id: NodeId | None = None) -> JSONResponse:
         """Restart the exo process on this or a remote node.

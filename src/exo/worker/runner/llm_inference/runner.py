@@ -1,3 +1,4 @@
+import contextlib
 import os
 import time
 from dataclasses import dataclass
@@ -14,18 +15,25 @@ from exo.shared.models.model_cards import (
     PromptRendererType,
     ToolCallFormat,
 )
+from exo.shared.tracing import (
+    begin_trace_session,
+    pop_trace_session,
+    record_trace_marker,
+)
 from exo.shared.types.chunks import (
     ErrorChunk,
     TokenChunk,
     ToolCallChunk,
 )
-from exo.shared.types.common import CommandId, ModelId
+from exo.shared.types.common import ModelId
 from exo.shared.types.events import (
     ChunkGenerated,
     Event,
     RunnerStatusUpdated,
     TaskAcknowledged,
     TaskStatusUpdated,
+    TraceEventData,
+    TracesCollected,
 )
 from exo.shared.types.mlx import Model
 from exo.shared.types.tasks import (
@@ -65,6 +73,7 @@ from exo.worker.engines.mlx.utils_mlx import (
 )
 from exo.worker.engines.mlx.vision import VisionProcessor
 from exo.worker.runner.bootstrap import logger
+from exo.worker.runner.diagnostics import record_runner_phase, runner_phase
 from exo.worker.runner.llm_inference.batch_generator import (
     BatchGenerator,
     InferenceGenerator,
@@ -75,13 +84,25 @@ from .batch_generator import Cancelled, Finished
 from .tool_parsers import make_mlx_parser
 
 
-def _should_skip_llm_warmup(group_size: int) -> bool:
+def _should_skip_llm_warmup(
+    group_size: int,
+    model_id: ModelId,
+    model_card: ModelCard | None,
+) -> bool:
     """Return whether the synthetic warmup request should be bypassed.
 
-    Distributed warmup uses barriers and collectives, so skipping it on only
-    one rank can strand peers inside warmup coordination. The debug bypass is
-    therefore limited to single-node groups.
+    Gemma 4 distributed warmup has proven less reliable than the actual request
+    path in MLX/VLM pipeline mode. Bypass only that known-problem family by
+    default; the env escape hatch remains constrained to single-node runs so a
+    partially configured cluster cannot strand peers in warmup collectives.
     """
+    if group_size > 1 and _is_gemma4_model(model_id, model_card):
+        logger.warning(
+            "Skipping distributed Gemma 4 synthetic warmup; marking runner ready "
+            f"(model_id={model_id}, group_size={group_size})"
+        )
+        return True
+
     # Temporary escape hatch for debug sessions where we want runners to reach
     # Ready without issuing the synthetic warmup request. Normal behavior keeps
     # warmup enabled unless SKULK_SKIP_LLM_WARMUP=1 is set explicitly.
@@ -165,6 +186,7 @@ class Runner:
             TaskId,
             TextGeneration,
         ] = {}
+        self._generator_step_count = 0
 
         logger.info("runner created")
         self.update_status(RunnerIdle())
@@ -214,6 +236,14 @@ class Runner:
         )
 
     def acknowledge_task(self, task: Task):
+        command_id = str(task.command_id) if isinstance(task, TextGeneration) else None
+        record_runner_phase(
+            "task_submission",
+            event="task_acknowledged",
+            detail=task.__class__.__name__,
+            task_id=task.task_id,
+            command_id=command_id,
+        )
         self.event_sender.send(TaskAcknowledged(task_id=task.task_id))
 
     def main(self):
@@ -239,7 +269,13 @@ class Runner:
                 self.update_status(RunnerConnecting())
                 self.acknowledge_task(task)
 
-                self.generator.group = initialize_mlx(self.bound_instance)
+                with runner_phase(
+                    "connect_group",
+                    detail="initialize_mlx",
+                    task_id=task.task_id,
+                    include_memory=True,
+                ):
+                    self.generator.group = initialize_mlx(self.bound_instance)
 
                 self.send_task_status(task.task_id, TaskStatus.Complete)
                 self.update_status(RunnerConnected())
@@ -280,18 +316,31 @@ class Runner:
                 assert (
                     ModelTask.TextGeneration in self.shard_metadata.model_card.tasks
                 ), f"Incorrect model task(s): {self.shard_metadata.model_card.tasks}"
-                (
-                    self.generator.inference_model,
-                    self.generator.tokenizer,
-                    self.generator.vision_processor,
-                ) = load_mlx_items(
-                    self.bound_instance,
-                    self.generator.group,
-                    on_timeout=on_model_load_timeout,
-                    on_layer_loaded=on_layer_loaded,
-                )
+                with runner_phase(
+                    "load_model",
+                    detail="load_mlx_items",
+                    task_id=task.task_id,
+                    include_memory=True,
+                ):
+                    (
+                        self.generator.inference_model,
+                        self.generator.tokenizer,
+                        self.generator.vision_processor,
+                    ) = load_mlx_items(
+                        self.bound_instance,
+                        self.generator.group,
+                        on_timeout=on_model_load_timeout,
+                        on_layer_loaded=on_layer_loaded,
+                    )
 
-                self.generator = self.generator.build()
+                    self.generator = self.generator.build()
+                record_runner_phase(
+                    "load_model",
+                    event="loaded",
+                    detail="builder_complete",
+                    task_id=task.task_id,
+                    include_memory=True,
+                )
 
                 self.send_task_status(task.task_id, TaskStatus.Complete)
                 self.update_status(RunnerLoaded())
@@ -309,14 +358,25 @@ class Runner:
                 group_size = (
                     warmup_generator.group.size() if warmup_generator.group else 1
                 )
-                if _should_skip_llm_warmup(group_size):
+                if _should_skip_llm_warmup(
+                    group_size,
+                    self.model_id,
+                    self.shard_metadata.model_card,
+                ):
                     logger.warning(
                         "Skipping LLM warmup and marking runner ready "
                         "(temporary debug bypass; unset SKULK_SKIP_LLM_WARMUP "
                         "or set it to 0 to restore synthetic warmup)"
                     )
                 else:
-                    warmup_generator.warmup()
+                    with runner_phase(
+                        "warmup",
+                        detail="warmup_generator",
+                        task_id=task.task_id,
+                        attrs={"group_size": group_size},
+                        include_memory=True,
+                    ):
+                        warmup_generator.warmup()
 
                 logger.info(
                     f"runner initialized in {time.time() - self.setup_start_time} seconds"
@@ -324,6 +384,12 @@ class Runner:
 
                 self.send_task_status(task.task_id, TaskStatus.Complete)
                 self.update_status(RunnerReady())
+                record_runner_phase(
+                    "idle",
+                    event="runner_ready",
+                    task_id=task.task_id,
+                    include_memory=True,
+                )
                 logger.info(f"runner ready ({self._lifecycle_context()})")
 
             case TextGeneration() if isinstance(self.current_status, RunnerReady):
@@ -342,21 +408,108 @@ class Runner:
 
     def shutdown(self, task: Task):
         logger.info("runner shutting down")
+        record_runner_phase(
+            "shutdown_cleanup",
+            event="runner_shutdown_requested",
+            task_id=task.task_id,
+            include_memory=True,
+        )
         self.update_status(RunnerShuttingDown())
         self.acknowledge_task(task)
         if isinstance(self.generator, InferenceGenerator):
             self.generator.close()
+        record_runner_phase(
+            "shutdown_cleanup",
+            event="clear_cache_begin",
+            task_id=task.task_id,
+            include_memory=True,
+        )
         mx.clear_cache()
         import gc
 
         gc.collect()
+        record_runner_phase(
+            "shutdown_cleanup",
+            event="clear_cache_complete",
+            task_id=task.task_id,
+            include_memory=True,
+        )
         self.send_task_status(task.task_id, TaskStatus.Complete)
         self.update_status(RunnerShutdown())
 
     def submit_text_generation(self, task: TextGeneration):
         assert isinstance(self.generator, InferenceGenerator)
+        record_runner_phase(
+            "task_submission",
+            event="submit_text_generation",
+            detail=self._summarize_text_generation_task(task),
+            task_id=task.task_id,
+            command_id=str(task.command_id),
+            attrs={
+                "images": len(task.task_params.images),
+                "cached_image_indices": sorted(task.task_params.image_hashes.keys()),
+            },
+        )
+        if task.trace_enabled:
+            begin_trace_session(
+                task.task_id,
+                rank=self.device_rank,
+                node_id=str(self.bound_instance.bound_node_id),
+                model_id=str(self.model_id),
+                task_kind="text",
+                tags=["text_generation"],
+            )
+            record_trace_marker("queued", self.device_rank, task_id=task.task_id)
         self.active_tasks[task.task_id] = task
         self.generator.submit(task)
+
+    def _flush_trace_session(self, task_id: TaskId) -> None:
+        traces = pop_trace_session(task_id)
+        self.event_sender.send(
+            TracesCollected(
+                task_id=task_id,
+                rank=self.device_rank,
+                traces=[
+                    TraceEventData(
+                        name=trace_event.name,
+                        start_us=trace_event.start_us,
+                        duration_us=trace_event.duration_us,
+                        rank=trace_event.rank,
+                        category=trace_event.category,
+                        node_id=trace_event.node_id,
+                        model_id=trace_event.model_id,
+                        task_kind=trace_event.task_kind,
+                        tags=list(trace_event.tags),
+                        attrs=trace_event.attrs,
+                    )
+                    for trace_event in traces
+                ],
+            )
+        )
+
+    def _flush_unfinished_trace_sessions(self) -> None:
+        """Best-effort flush of any active traced tasks still in flight.
+
+        Runs on the exception/abort path of ``handle_generation_tasks``. Without
+        it, a raised ``generator.step()`` (parsing exception, model error,
+        Shutdown received mid-flight) would leave ``_trace_sessions`` entries
+        behind on the runner *and* cause the master to wait forever for
+        ``TracesCollected`` from this rank — leaking the cluster trace into
+        ``_pending_traces`` permanently. The aborted marker tells the
+        downstream merge that this rank's trace is not a clean completion.
+        """
+        for task_id, task in list(self.active_tasks.items()):
+            if not task.trace_enabled:
+                continue
+            with contextlib.suppress(Exception):
+                record_trace_marker(
+                    "aborted",
+                    self.device_rank,
+                    task_id=task_id,
+                    tags=["error", "trace_abort"],
+                )
+            with contextlib.suppress(Exception):
+                self._flush_trace_session(task_id)
 
     def handle_generation_tasks(self, starting_task: TextGeneration):
         assert isinstance(self.current_status, RunnerReady)
@@ -373,23 +526,87 @@ class Runner:
 
         self.submit_text_generation(starting_task)
 
+        try:
+            return self._run_generation_loop()
+        finally:
+            # Flush traces on every exit path including exceptions —
+            # without this the master's _pending_traces leaks forever for
+            # any task that was traced when step() raised.
+            self._flush_unfinished_trace_sessions()
+
+    def _run_generation_loop(self) -> "ExitCode":
+        # Re-assert here so type narrowing flows into the loop body — the
+        # caller already asserts these but pyright narrowing doesn't
+        # transit a method-call boundary.
+        assert isinstance(self.current_status, RunnerRunning)
+        assert isinstance(self.generator, InferenceGenerator)
         while self.active_tasks:
+            self._generator_step_count += 1
+            active_ids = [str(task_id) for task_id in self.active_tasks]
+            if self._generator_step_count == 1 or self._generator_step_count % 25 == 0:
+                record_runner_phase(
+                    "decode_stream",
+                    event="generator_step_enter",
+                    attrs={
+                        "active_task_ids": active_ids,
+                        "active_task_count": len(active_ids),
+                        "step_count": self._generator_step_count,
+                    },
+                )
             results = self.generator.step()
+            if self._generator_step_count == 1 or self._generator_step_count % 25 == 0:
+                record_runner_phase(
+                    "decode_stream",
+                    event="generator_step_exit",
+                    attrs={
+                        "active_task_ids": active_ids,
+                        "active_task_count": len(active_ids),
+                        "step_count": self._generator_step_count,
+                    },
+                )
 
             finished: list[TaskId] = []
             for task_id, result in results:
                 match result:
                     case Cancelled():
+                        task = self.active_tasks.get(task_id)
+                        if task is not None and task.trace_enabled:
+                            record_trace_marker(
+                                "cancel", self.device_rank, task_id=task_id
+                            )
+                        record_runner_phase(
+                            "cancel_observed",
+                            event="cancelled_result",
+                            task_id=task_id,
+                            command_id=str(task.command_id) if task is not None else None,
+                            include_memory=True,
+                        )
+                        self.send_task_status(task_id, TaskStatus.Cancelled)
                         finished.append(task_id)
                     case Finished():
+                        task = self.active_tasks.get(task_id)
+                        if task is not None and task.trace_enabled:
+                            record_trace_marker(
+                                "finish", self.device_rank, task_id=task_id
+                            )
+                        record_runner_phase(
+                            "completion",
+                            event="finished_result",
+                            task_id=task_id,
+                            command_id=str(task.command_id) if task is not None else None,
+                            include_memory=True,
+                        )
                         self.send_task_status(task_id, TaskStatus.Complete)
                         finished.append(task_id)
                     case _:
                         self.send_response(
-                            result, self.active_tasks[task_id].command_id
+                            result, self.active_tasks[task_id]
                         )
 
             for task_id in finished:
+                task = self.active_tasks.get(task_id)
+                if task is not None and task.trace_enabled:
+                    self._flush_trace_session(task_id)
                 self.active_tasks.pop(task_id, None)
 
             try:
@@ -416,6 +633,7 @@ class Runner:
                 pass
 
         self.update_status(RunnerReady())
+        record_runner_phase("idle", event="runner_ready", include_memory=True)
         logger.info("runner ready")
 
         return ExitCode.AllTasksComplete
@@ -423,14 +641,22 @@ class Runner:
     def send_response(
         self,
         response: GenerationResponse | ToolCallResponse,
-        command_id: CommandId,
+        task: TextGeneration,
     ):
         match response:
             case GenerationResponse():
+                if response.finish_reason == "error" and task.trace_enabled:
+                    record_trace_marker(
+                        "error",
+                        self.device_rank,
+                        task_id=task.task_id,
+                        tags=["error"],
+                        attrs={"message": response.text},
+                    )
                 if self.device_rank == 0 and response.finish_reason == "error":
                     self.event_sender.send(
                         ChunkGenerated(
-                            command_id=command_id,
+                            command_id=task.command_id,
                             chunk=ErrorChunk(
                                 error_message=response.text,
                                 model=self.model_id,
@@ -446,7 +672,7 @@ class Runner:
                     )
                     self.event_sender.send(
                         ChunkGenerated(
-                            command_id=command_id,
+                            command_id=task.command_id,
                             chunk=TokenChunk(
                                 model=self.model_id,
                                 text=response.text,
@@ -461,10 +687,19 @@ class Runner:
                         )
                     )
             case ToolCallResponse():
+                if task.trace_enabled:
+                    record_trace_marker(
+                        "tool_call_emitted",
+                        self.device_rank,
+                        task_id=task.task_id,
+                        category="tooling",
+                        tags=["tool_call"],
+                        attrs={"tool_call_count": len(response.tool_calls)},
+                    )
                 if self.device_rank == 0:
                     self.event_sender.send(
                         ChunkGenerated(
-                            command_id=command_id,
+                            command_id=task.command_id,
                             chunk=ToolCallChunk(
                                 tool_calls=response.tool_calls,
                                 model=self.model_id,

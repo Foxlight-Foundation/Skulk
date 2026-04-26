@@ -1,5 +1,6 @@
 import contextlib
 import functools
+import itertools
 import math
 import os
 import sys
@@ -12,6 +13,9 @@ from importlib import import_module, metadata
 from typing import Callable, Generator, Protocol, cast, get_args
 
 import mlx.core as mx
+from mlx_lm.generate import (
+    GenerationResponse as MlxGenerationResponse,
+)
 from mlx_lm.generate import (
     maybe_quantize_kv_cache,
     stream_generate,
@@ -31,6 +35,7 @@ from exo.api.types import (
 )
 from exo.shared.constants import preferred_env_value
 from exo.shared.models.model_cards import ModelCard
+from exo.shared.tracing import TraceAttrValue, record_trace_marker, trace
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import KVCacheType, Model
@@ -76,6 +81,7 @@ from exo.worker.engines.mlx.vision import (
     prepare_vision,
 )
 from exo.worker.runner.bootstrap import logger
+from exo.worker.runner.diagnostics import record_runner_phase, runner_phase
 
 generation_stream = mx.new_stream(mx.default_device())
 
@@ -261,6 +267,122 @@ def _should_use_native_vision_reference_path() -> bool:
     )
 
 
+def _native_pixel_values_debug_state(
+    pixel_values: mx.array | list[mx.array] | None,
+) -> str:
+    """Return a compact string describing native-vision pixel injection state."""
+    if pixel_values is None:
+        return "fully_cached"
+    if isinstance(pixel_values, list):
+        return f"list[{len(pixel_values)}]"
+    return f"array{tuple(pixel_values.shape)}"
+
+
+def _native_pixel_values_attrs(
+    pixel_values: mx.array | list[mx.array] | None,
+) -> dict[str, object]:
+    """Return bounded JSON-safe diagnostic attrs for native pixel tensors."""
+
+    if pixel_values is None:
+        return {"pixel_values": "none", "pixel_value_count": 0}
+    if isinstance(pixel_values, list):
+        return {
+            "pixel_values": "list",
+            "pixel_value_count": len(pixel_values),
+            "pixel_value_shapes": [str(tuple(value.shape)) for value in pixel_values],
+        }
+    return {
+        "pixel_values": "array",
+        "pixel_value_count": int(pixel_values.shape[0]) if pixel_values.ndim else 1,
+        "pixel_value_shapes": [str(tuple(pixel_values.shape))],
+    }
+
+
+def _media_region_attrs(media_regions: list[MediaRegion]) -> dict[str, object]:
+    """Return compact diagnostic attrs for prompt media regions."""
+
+    return {
+        "media_region_count": len(media_regions),
+        "media_region_lengths": [
+            str(region.end_pos - region.start_pos) for region in media_regions
+        ],
+        "media_region_hashes": [
+            region.content_hash[:12] for region in media_regions
+        ],
+    }
+
+
+def _vision_trace_attrs(vision: VisionResult | None) -> dict[str, TraceAttrValue]:
+    """Return compact trace attrs for a prepared multimodal request."""
+    if vision is None or vision.debug_info is None:
+        return {"vision_used": vision is not None}
+    return {
+        "vision_used": True,
+        **vision.debug_info.attrs(),
+    }
+
+
+def _native_pixel_values_trace_attrs(
+    pixel_values: mx.array | list[mx.array] | None,
+) -> dict[str, TraceAttrValue]:
+    """Return native pixel-value attrs typed for saved trace markers."""
+    return cast(dict[str, TraceAttrValue], _native_pixel_values_attrs(pixel_values))
+
+
+def _decode_debug_context(
+    *,
+    task: TextGenerationTaskParams,
+    group: mx.distributed.Group | None,
+    trace_task_id: str | None,
+    total_prompt_tokens: int,
+    uncached_prompt_tokens: int,
+    prefix_hit_length: int,
+    media_region_count: int,
+    is_native_vision: bool,
+    native_pixel_values: mx.array | list[mx.array] | None,
+) -> str:
+    """Summarize the request shape around the decode handoff for hang debugging."""
+    rank = group.rank() if group is not None else 0
+    group_size = group.size() if group is not None else 1
+    return (
+        f"task_id={trace_task_id or '<unknown>'}, "
+        f"model={task.model}, "
+        f"rank={rank}, "
+        f"group_size={group_size}, "
+        f"total_prompt_tokens={total_prompt_tokens}, "
+        f"uncached_prompt_tokens={uncached_prompt_tokens}, "
+        f"prefix_hit_length={prefix_hit_length}, "
+        f"media_regions={media_region_count}, "
+        f"native_vision={is_native_vision}, "
+        f"native_pixel_values={_native_pixel_values_debug_state(native_pixel_values)}"
+    )
+
+
+def _should_force_native_vision_full_prefill_for_request(
+    *,
+    group: mx.distributed.Group | None,
+    is_native_vision: bool,
+    prefix_hit_length: int,
+    media_region_count: int,
+    native_pixel_values: mx.array | list[mx.array] | None,
+) -> bool:
+    """Return whether a distributed native-vision request should skip prefix cache.
+
+    Multi-image Gemma 4 follow-up turns with cached image prefixes can pair the
+    next uncached image span with stale pixel values. Keep those conservative.
+    Single-image fully cached follow-ups should reuse the prefix cache instead:
+    forcing a full native-vision re-prefill has reproduced first-decode stalls
+    even for modest prompts.
+    """
+    has_cached_multi_image_prefix = prefix_hit_length > 0 and media_region_count > 1
+    return (
+        is_native_vision
+        and group is not None
+        and group.size() > 1
+        and has_cached_multi_image_prefix
+    )
+
+
 def _slice_native_pixel_values_for_uncached_suffix(
     pixel_values: mx.array | list[mx.array],
     media_regions: list[MediaRegion],
@@ -317,6 +439,25 @@ def _slice_native_pixel_values_for_uncached_suffix(
     return mx.stack([pixel_values[idx] for idx in remaining_indices], axis=0)
 
 
+def _native_media_regions_for_uncached_suffix(
+    pixel_values: mx.array | list[mx.array],
+    media_regions: list[MediaRegion],
+    prefix_hit_length: int,
+) -> list[MediaRegion]:
+    """Return media regions aligned with cache-trimmed native pixel values."""
+    if prefix_hit_length <= 0 or not media_regions:
+        return media_regions
+
+    available_images = (
+        len(pixel_values) if isinstance(pixel_values, list) else int(pixel_values.shape[0])
+    )
+    return [
+        region
+        for idx, region in enumerate(media_regions)
+        if idx < available_images and region.end_pos > prefix_hit_length
+    ]
+
+
 def slice_native_pixel_values_for_uncached_suffix(
     pixel_values: mx.array | list[mx.array],
     media_regions: list[MediaRegion],
@@ -332,6 +473,99 @@ def slice_native_pixel_values_for_uncached_suffix(
         media_regions,
         prefix_hit_length,
     )
+
+
+def _slice_native_pixel_values_by_indices(
+    pixel_values: mx.array | list[mx.array],
+    indices: list[int],
+) -> mx.array | list[mx.array] | None:
+    """Select native pixel values by media-region order."""
+    if not indices:
+        return None
+
+    available_images = (
+        len(pixel_values) if isinstance(pixel_values, list) else int(pixel_values.shape[0])
+    )
+    valid_indices = [idx for idx in indices if idx < available_images]
+    if not valid_indices:
+        return None
+
+    if isinstance(pixel_values, list):
+        return [pixel_values[idx] for idx in valid_indices]
+
+    if valid_indices == list(range(valid_indices[0], valid_indices[-1] + 1)):
+        return pixel_values[valid_indices[0] : valid_indices[-1] + 1]
+
+    return mx.stack([pixel_values[idx] for idx in valid_indices], axis=0)
+
+
+def _native_pixel_values_for_media_range(
+    pixel_values: mx.array | list[mx.array],
+    media_regions: list[MediaRegion],
+    start_pos: int,
+    end_pos: int,
+) -> mx.array | list[mx.array] | None:
+    """Return pixel values whose media spans overlap a prompt token range."""
+    region_indices = [
+        idx
+        for idx, region in enumerate(media_regions)
+        if region.end_pos > start_pos and region.start_pos < end_pos
+    ]
+    return _slice_native_pixel_values_by_indices(pixel_values, region_indices)
+
+
+def _vision_safe_prefill_chunk_sizes(
+    total_tokens: int,
+    max_chunk_size: int,
+    media_regions: list[MediaRegion] | None = None,
+    prompt_token_offset: int = 0,
+) -> list[int]:
+    """Split prefill tokens without cutting through native image spans."""
+    real_prefill_tokens = max(total_tokens - 1, 0)
+    if real_prefill_tokens == 0:
+        return []
+
+    if max_chunk_size <= 0:
+        return [real_prefill_tokens]
+
+    sorted_regions = sorted(media_regions or [], key=lambda region: region.start_pos)
+    chunk_sizes: list[int] = []
+    start = 0
+    while start < real_prefill_tokens:
+        end = min(start + max_chunk_size, real_prefill_tokens)
+        full_start = prompt_token_offset + start
+        full_end = prompt_token_offset + end
+
+        for region in sorted_regions:
+            if region.end_pos <= full_start:
+                continue
+            if region.start_pos >= full_end:
+                break
+            if region.start_pos < full_end < region.end_pos:
+                end = min(region.end_pos - prompt_token_offset, real_prefill_tokens)
+                full_end = prompt_token_offset + end
+                break
+
+        if end <= start:
+            end = min(start + max_chunk_size, real_prefill_tokens)
+        chunk_sizes.append(end - start)
+        start = end
+
+    return chunk_sizes
+
+
+def _set_native_pixel_values(
+    model: Model,
+    pixel_values: mx.array | list[mx.array] | None,
+) -> None:
+    """Set native vision tensors on wrappers that inject them into prefill calls."""
+    if hasattr(model, "set_pixel_values"):
+        cast(
+            Callable[[mx.array | list[mx.array] | None], None],
+            object.__getattribute__(model, "set_pixel_values"),
+        )(pixel_values)
+    else:
+        object.__setattr__(model, "_pixel_values", pixel_values)
 
 
 @contextlib.contextmanager
@@ -381,8 +615,9 @@ def _noop_quantize_cache(_cache: KVCacheType) -> None:
     return None
 
 
-def _has_pipeline_communication_layer(model: Model):
-    for layer in model.layers:
+def _has_pipeline_communication_layer(model: Model) -> bool:
+    layers = cast(list[object], getattr(model, "layers", []))
+    for layer in layers:
         if isinstance(layer, (PipelineFirstLayer, PipelineLastLayer)):
             return True
     return False
@@ -398,6 +633,9 @@ def pipeline_parallel_prefill(
     prompt_progress_callback: Callable[[int, int], None],
     distributed_prompt_progress_callback: Callable[[], None] | None,
     group: mx.distributed.Group,
+    native_pixel_values: mx.array | list[mx.array] | None = None,
+    native_media_regions: list[MediaRegion] | None = None,
+    prompt_token_offset: int = 0,
 ) -> None:
     """Prefill the KV cache for pipeline parallel with overlapping stages.
 
@@ -439,14 +677,13 @@ def pipeline_parallel_prefill(
     rank = group.rank()
     world_size = group.size()
 
-    # Build list of real prompt chunk sizes
     total = len(prompt)
-    real_chunk_sizes: list[int] = []
-    remaining = total - 1
-    while remaining:
-        n = min(prefill_step_size, remaining)
-        real_chunk_sizes.append(n)
-        remaining -= n
+    real_chunk_sizes = _vision_safe_prefill_chunk_sizes(
+        total,
+        prefill_step_size,
+        native_media_regions if native_pixel_values is not None else None,
+        prompt_token_offset,
+    )
     n_real = len(real_chunk_sizes)
 
     # Each rank does: [rank leading dummies] [N real chunks] [world_size-1-rank trailing dummies]
@@ -458,6 +695,19 @@ def pipeline_parallel_prefill(
     processed = 0
     logger.info(
         f"[R{rank}] Pipeline prefill: {n_real} real + {n_leading} leading + {n_trailing} trailing = {n_total} iterations"
+    )
+    record_runner_phase(
+        "prefill_pipeline",
+        event="pipeline_prefill_start",
+        attrs={
+            "rank": rank,
+            "world_size": world_size,
+            "real_chunks": n_real,
+            "leading_dummies": n_leading,
+            "trailing_dummies": n_trailing,
+            "prompt_tokens": total,
+        },
+        include_memory=True,
     )
     clear_prefill_sends()
 
@@ -472,6 +722,43 @@ def pipeline_parallel_prefill(
 
             for i in range(n_real):
                 chunk_size = real_chunk_sizes[i]
+                chunk_start = processed
+                chunk_end = processed + chunk_size
+                if i == 0 or i == n_real - 1 or i % 4 == 0:
+                    record_runner_phase(
+                        "prefill_pipeline",
+                        event="pipeline_prefill_chunk",
+                        attrs={
+                            "rank": rank,
+                            "chunk_index": i,
+                            "chunk_size": chunk_size,
+                            "processed": processed,
+                            "total": total,
+                        },
+                    )
+                if native_pixel_values is not None and native_media_regions is not None:
+                    # Gemma 4 scatters image features from the start of the
+                    # provided tensor on every forward call. Pipeline chunks
+                    # therefore need chunk-local pixel values, otherwise a
+                    # later image span can be paired with image 0 again.
+                    chunk_pixel_values = _native_pixel_values_for_media_range(
+                        native_pixel_values,
+                        native_media_regions,
+                        prompt_token_offset + chunk_start,
+                        prompt_token_offset + chunk_end,
+                    )
+                    _set_native_pixel_values(model, chunk_pixel_values)
+                    record_runner_phase(
+                        "prefill_pipeline",
+                        event="pipeline_prefill_native_pixel_values",
+                        attrs={
+                            "rank": rank,
+                            "chunk_index": i,
+                            "chunk_start": prompt_token_offset + chunk_start,
+                            "chunk_end": prompt_token_offset + chunk_end,
+                            **_native_pixel_values_attrs(chunk_pixel_values),
+                        },
+                    )
                 model(
                     prompt[processed : processed + chunk_size][None],
                     cache=_prompt_cache,
@@ -494,6 +781,8 @@ def pipeline_parallel_prefill(
         clear_prefill_sends()
 
     # Post-loop: process remaining 1 token + add +1 entry to match stream_generate.
+    if native_pixel_values is not None:
+        _set_native_pixel_values(model, None)
     for _ in range(2):
         with mx.stream(generation_stream):
             model(prompt[-1:][None], cache=_prompt_cache)
@@ -511,6 +800,17 @@ def pipeline_parallel_prefill(
         f"[R{rank}] Prefill: {n_real} real + {n_leading}+{n_trailing} dummy iterations, "
         f"Processed {processed} tokens in {(time.perf_counter() - t_start) * 1000:.1f}ms"
     )
+    record_runner_phase(
+        "prefill_pipeline",
+        event="pipeline_prefill_complete",
+        attrs={
+            "rank": rank,
+            "processed": processed,
+            "total": total,
+            "elapsed_ms": (time.perf_counter() - t_start) * 1000,
+        },
+        include_memory=True,
+    )
 
 
 def prefill(
@@ -522,6 +822,9 @@ def prefill(
     group: mx.distributed.Group | None,
     on_prefill_progress: Callable[[int, int], None] | None,
     distributed_prompt_progress_callback: Callable[[], None] | None,
+    native_pixel_values: mx.array | list[mx.array] | None = None,
+    native_media_regions: list[MediaRegion] | None = None,
+    prompt_token_offset: int = 0,
 ) -> tuple[float, int, list[CacheSnapshot]]:
     """Prefill the KV cache with prompt tokens.
 
@@ -565,32 +868,42 @@ def prefill(
 
     # Mirror pipeline_parallel_prefill's chunking math here by reserving the
     # final token for the post-loop pass before computing the real chunk count.
-    # This value is primarily diagnostic now: all pipeline prompts use the
-    # explicit pipeline prefill path, but short one-chunk prompts intentionally
-    # suppress the distributed progress callback because there is no useful
-    # cancellation window inside a millisecond-scale prefill.
-    real_prefill_tokens = max(num_tokens - 1, 0)
-    pipeline_chunks = (
-        (real_prefill_tokens + effective_prefill_step_size - 1)
-        // effective_prefill_step_size
-        if effective_prefill_step_size > 0
-        else 0
+    # The explicit pipeline prefill path only buys us overlap once there are at
+    # least two real chunks. Single-chunk prompts keep the PR90-era
+    # stream_generate path because they do not benefit from the custom pipeline
+    # scheduler and have repeatedly been the sharpest wedge shape in Gemma 4
+    # cluster testing.
+    pipeline_chunk_sizes = (
+        _vision_safe_prefill_chunk_sizes(
+            num_tokens,
+            effective_prefill_step_size,
+            native_media_regions if native_pixel_values is not None else None,
+            prompt_token_offset,
+        )
+        if is_pipeline
+        else []
     )
-    use_pipeline_prefill = is_pipeline
+    pipeline_chunks = len(pipeline_chunk_sizes)
+    use_pipeline_prefill = is_pipeline and pipeline_chunks >= 2
     logger.info(
         "Prefill path selected: "
         f"{'pipeline_parallel_prefill' if use_pipeline_prefill else 'stream_generate'} "
         f"(rank={rank}, prompt_tokens={num_tokens}, is_pipeline={is_pipeline}, "
         f"prefill_step_size_input={prefill_step_size}, "
         f"prefill_step_size_effective={effective_prefill_step_size}, "
-        f"pipeline_chunks={pipeline_chunks})"
+        f"pipeline_chunks={pipeline_chunks}, pipeline_min_chunks=2)"
     )
     # Pipeline models must run in prefill mode during any prefill forward
     # pass. With is_prefill=False, pipeline wrappers can queue collectives
     # that are never consumed during prefill and later deadlock the ranks.
     set_pipeline_prefill(model, is_prefill=is_pipeline)
 
-    with _hang_debug_watch(f"prefill barrier rank={rank} group_size={group_size}"):
+    with runner_phase(
+        "prefill_barrier",
+        detail="prefill_mx_barrier",
+        attrs={"rank": rank, "group_size": group_size, "prompt_tokens": num_tokens},
+        include_memory=True,
+    ), _hang_debug_watch(f"prefill barrier rank={rank} group_size={group_size}"):
         mx_barrier(group)
     logger.info(
         f"Starting prefill (rank={rank}, group_size={group_size}, prompt_tokens={num_tokens})"
@@ -603,7 +916,17 @@ def prefill(
             pipeline_distributed_callback = (
                 distributed_prompt_progress_callback if pipeline_chunks >= 2 else None
             )
-            with _hang_debug_watch(
+            with runner_phase(
+                "prefill_pipeline",
+                detail="pipeline_parallel_prefill",
+                attrs={
+                    "rank": rank,
+                    "group_size": group_size,
+                    "pipeline_chunks": pipeline_chunks,
+                    "prompt_tokens": num_tokens,
+                },
+                include_memory=True,
+            ), _hang_debug_watch(
                 f"pipeline_parallel_prefill rank={rank} group_size={group_size}"
             ):
                 pipeline_parallel_prefill(
@@ -616,6 +939,9 @@ def prefill(
                     prompt_progress_callback=progress_callback,
                     distributed_prompt_progress_callback=pipeline_distributed_callback,
                     group=group,
+                    native_pixel_values=native_pixel_values,
+                    native_media_regions=native_media_regions,
+                    prompt_token_offset=prompt_token_offset,
                 )
         else:
             # Non-pipeline models can safely use upstream stream_generate for
@@ -624,7 +950,16 @@ def prefill(
             # flight and wedging the next collective.
             # Use max_tokens=1 because max_tokens=0 does not work.
             # We just throw away the generated token - we only care about filling the cache
-            with _hang_debug_watch(
+            with runner_phase(
+                "prefill_stream",
+                detail="stream_generate_prefill",
+                attrs={
+                    "rank": rank,
+                    "group_size": group_size,
+                    "prompt_tokens": num_tokens,
+                },
+                include_memory=True,
+            ), _hang_debug_watch(
                 f"stream_generate prefill rank={rank} group_size={group_size}"
             ):
                 for _ in stream_generate(
@@ -673,6 +1008,120 @@ def prefill(
     return tokens_per_sec, num_tokens, snapshots[:-1] if snapshots else []
 
 
+def _stream_generate_without_lookahead(
+    *,
+    model: Model,
+    tokenizer: TokenizerWrapper,
+    prompt: mx.array,
+    max_tokens: int,
+    sampler: Callable[[mx.array], mx.array],
+    logits_processors: list[Callable[[mx.array, mx.array], mx.array]],
+    prompt_cache: KVCacheType,
+    kv_group_size: int | None,
+    kv_bits: int | None,
+) -> Generator[MlxGenerationResponse, None, None]:
+    """Generate tokens sequentially without scheduling a decode lookahead.
+
+    ``mlx_lm.stream_generate`` evaluates the next token before yielding the
+    current one. That is fine for local models, but the extra in-flight decode
+    forward can leave Skulk's pipeline send/recv wrappers waiting on different
+    collectives across ranks. Pipeline decode favors boring one-step-at-a-time
+    execution over speculative throughput.
+    """
+    if len(prompt) == 0:
+        raise ValueError("Decode requires at least one prompt token")
+
+    detokenizer = cast(_DetokenizerProtocol, cast(object, tokenizer.detokenizer))
+    detokenizer.reset()
+
+    quantize_cache_fn = functools.partial(
+        maybe_quantize_kv_cache,
+        quantized_kv_start=0,
+        kv_group_size=kv_group_size,
+        kv_bits=kv_bits,
+    )
+
+    token_history: mx.array | None = None
+    prompt_start = time.perf_counter()
+    if len(prompt) > 1:
+        with mx.stream(generation_stream):
+            model(prompt[:-1][None], cache=prompt_cache)
+            quantize_cache_fn(prompt_cache)
+            mx.eval([cache_entry.state for cache_entry in prompt_cache])  # type: ignore
+
+    prompt_tps = len(prompt) / max(time.perf_counter() - prompt_start, 1e-9)
+    generation_start = time.perf_counter()
+    input_tokens = prompt[-1:]
+    eos_token_ids = {int(token_id) for token_id in eos_ids_from_tokenizer(tokenizer)}
+
+    last_token = 0
+    last_logprobs = mx.zeros((1,), dtype=mx.float32)
+    finish_reason = "length"
+    generated_count = 0
+
+    for token_index in range(max_tokens):
+        with mx.stream(generation_stream):
+            logits = model(input_tokens[None], cache=prompt_cache)
+            logits = logits[:, -1, :]
+            if logits_processors:
+                token_history = (
+                    mx.concat([token_history, input_tokens])
+                    if token_history is not None
+                    else input_tokens
+                )
+                for processor in logits_processors:
+                    logits = processor(token_history, logits)
+            quantize_cache_fn(prompt_cache)
+            logprobs = logits.astype(mx.float32) - mx.logsumexp(
+                logits.astype(mx.float32), keepdims=True
+            )
+            sampled = sampler(logprobs)
+            mx.eval(sampled, logprobs)
+
+        last_token = int(sampled.item())
+        last_logprobs = logprobs.squeeze(0)
+        generated_count = token_index + 1
+
+        if last_token in eos_token_ids:
+            finish_reason = "stop"
+            break
+
+        detokenizer.add_token(last_token)
+        if generated_count == max_tokens:
+            finish_reason = "length"
+            break
+
+        yield MlxGenerationResponse(
+            text=detokenizer.last_segment,
+            token=last_token,
+            logprobs=last_logprobs,
+            from_draft=False,
+            prompt_tokens=prompt.size,
+            prompt_tps=prompt_tps,
+            generation_tokens=generated_count,
+            generation_tps=generated_count
+            / max(time.perf_counter() - generation_start, 1e-9),
+            peak_memory=mx.get_peak_memory() / 1e9,
+            finish_reason=None,
+        )
+        input_tokens = sampled
+
+    detokenizer.finalize()
+    yield MlxGenerationResponse(
+        text=detokenizer.last_segment,
+        token=last_token,
+        logprobs=last_logprobs,
+        from_draft=False,
+        prompt_tokens=prompt.size,
+        prompt_tps=prompt_tps,
+        generation_tokens=generated_count,
+        generation_tps=generated_count
+        / max(time.perf_counter() - generation_start, 1e-9),
+        peak_memory=mx.get_peak_memory() / 1e9,
+        finish_reason=finish_reason,
+    )
+
+
 def warmup_inference(
     model: Model,
     tokenizer: TokenizerWrapper,
@@ -688,6 +1137,15 @@ def warmup_inference(
     reserved for single-node investigation.
     """
     logger.info(f"warming up inference for instance: {model_id}")
+    record_runner_phase(
+        "warmup",
+        event="warmup_start",
+        attrs={
+            "model_id": str(model_id),
+            "group_size": group.size() if group is not None else 1,
+        },
+        include_memory=True,
+    )
 
     if _is_distributed_warmup(group) and (
         _warmup_repeat_count() != 1 or _warmup_instructions(None) is not None
@@ -739,14 +1197,24 @@ def warmup_inference(
 
     tokens_generated = 0
 
-    with _hang_debug_watch(f"warmup pre-generation barrier model={model_id}"):
+    with runner_phase(
+        "prefill_barrier",
+        detail="warmup_pre_generation_barrier",
+        attrs={"model_id": str(model_id)},
+        include_memory=True,
+    ), _hang_debug_watch(f"warmup pre-generation barrier model={model_id}"):
         mx_barrier(group)
 
     logger.info("Generating warmup tokens")
 
     t = time.monotonic()
 
-    with _hang_debug_watch(f"warmup mlx_generate model={model_id}"):
+    with runner_phase(
+        "warmup",
+        detail="warmup_mlx_generate",
+        attrs={"model_id": str(model_id)},
+        include_memory=True,
+    ), _hang_debug_watch(f"warmup mlx_generate model={model_id}"):
         for _r in mlx_generate(
             model=model,
             tokenizer=tokenizer,
@@ -770,7 +1238,12 @@ def warmup_inference(
             min(math.ceil(tokens_generated / max(time.monotonic() - t, 0.001)), 100),
         )
 
-    with _hang_debug_watch(
+    with runner_phase(
+        "decode_barrier",
+        detail="warmup_final_barrier",
+        attrs={"model_id": str(model_id), "tokens_generated": tokens_generated},
+        include_memory=True,
+    ), _hang_debug_watch(
         f"warmup final barrier model={model_id} tokens_generated={tokens_generated}"
     ):
         mx_barrier(group)
@@ -872,6 +1345,7 @@ def _mlx_generate_native_vision(
     on_prefill_progress: Callable[[int, int], None] | None,
     on_generation_token: Callable[[], None] | None,
     group: mx.distributed.Group | None,
+    trace_task_id: str | None = None,
 ) -> Generator[GenerationResponse]:
     """Generate for native-vision models via MLX-VLM's multimodal path.
 
@@ -916,21 +1390,88 @@ def _mlx_generate_native_vision(
     final_finish_reason: FinishReason = "length"
     final_usage: Usage | None = None
     final_stats: GenerationStats | None = None
+    decode_context = _decode_debug_context(
+        task=task,
+        group=group,
+        trace_task_id=trace_task_id,
+        total_prompt_tokens=prompt_token_count,
+        uncached_prompt_tokens=prompt_token_count,
+        prefix_hit_length=0,
+        media_region_count=len(vision.media_regions),
+        is_native_vision=True,
+        native_pixel_values=vision.pixel_values,
+    )
 
+    logger.info(f"Native decode context: {decode_context}")
     logger.info("Starting native mlx-vlm multimodal decode")
-    mx_barrier(group)
+    with runner_phase(
+        "decode_barrier",
+        detail="native_decode_barrier",
+        attrs={
+            "prompt_tokens": prompt_token_count,
+            "media_regions": len(vision.media_regions),
+            **_native_pixel_values_attrs(vision.pixel_values),
+        },
+        task_id=trace_task_id,
+        include_memory=True,
+    ), _hang_debug_watch(f"native decode barrier ({decode_context})"):
+        mx_barrier(group)
 
-    for token, logprobs in vlm_generate_step(
-        input_ids=all_prompt_tokens[None],
-        model=model,
-        pixel_values=vision.pixel_values,
-        mask=None,
-        max_tokens=max_tokens,
-        sampler=sampler,
-        logits_processors=logits_processors,
-        prefill_step_size=4096,
-        kv_group_size=KV_GROUP_SIZE or 32,
-        kv_bits=KV_BITS,
+    with runner_phase(
+        "prefill_pipeline",
+        detail="native_vlm_generate_step",
+        attrs={
+            "prompt_tokens": prompt_token_count,
+            "max_tokens": max_tokens,
+            **_native_pixel_values_attrs(vision.pixel_values),
+        },
+        task_id=trace_task_id,
+        include_memory=True,
+    ):
+        token_generator = vlm_generate_step(
+            input_ids=all_prompt_tokens[None],
+            model=model,
+            pixel_values=vision.pixel_values,
+            mask=None,
+            max_tokens=max_tokens,
+            sampler=sampler,
+            logits_processors=logits_processors,
+            prefill_step_size=4096,
+            kv_group_size=KV_GROUP_SIZE or 32,
+            kv_bits=KV_BITS,
+        )
+
+    first_token_wait_started = time.perf_counter()
+    with runner_phase(
+        "decode_wait_first_token",
+        detail="native_decode_first_token",
+        attrs={"prompt_tokens": prompt_token_count, "max_tokens": max_tokens},
+        task_id=trace_task_id,
+        include_memory=True,
+    ), _hang_debug_watch(f"native decode first token ({decode_context})"):
+        try:
+            first_token, first_logprobs = next(token_generator)
+        except StopIteration:
+            logger.warning(
+                "Native decode generator ended before yielding a response "
+                f"({decode_context})"
+            )
+            return
+    logger.info(
+        "Native decode produced the first response after "
+        f"{time.perf_counter() - first_token_wait_started:.2f}s ({decode_context})"
+    )
+    record_runner_phase(
+        "decode_stream",
+        event="native_first_token",
+        task_id=trace_task_id,
+        attrs={"wait_seconds": time.perf_counter() - first_token_wait_started},
+        include_memory=True,
+    )
+
+    for token, logprobs in itertools.chain(
+        [(first_token, first_logprobs)],
+        token_generator,
     ):
         token_id = int(token)
 
@@ -1039,6 +1580,14 @@ def _mlx_generate_native_vision(
         usage=final_usage,
     )
 
+    with runner_phase(
+        "decode_barrier",
+        detail="native_decode_final_barrier",
+        task_id=trace_task_id,
+        include_memory=True,
+    ), _hang_debug_watch(f"native decode final barrier ({decode_context})"):
+        mx_barrier(group)
+
 
 def mlx_generate(
     model: Model,
@@ -1051,35 +1600,105 @@ def mlx_generate(
     distributed_prompt_progress_callback: Callable[[], None] | None = None,
     on_generation_token: Callable[[], None] | None = None,
     vision_processor: VisionProcessor | None = None,
+    trace_task_id: str | None = None,
+    trace_rank: int = 0,
 ) -> Generator[GenerationResponse]:
     # Ensure that generation stats only contains peak memory for this generation
     mx.reset_peak_memory()
+    record_runner_phase(
+        "prompt_build",
+        event="mlx_generate_start",
+        attrs={
+            "model": str(task.model),
+            "input_images": len(task.images),
+            "max_output_tokens": task.max_output_tokens or MAX_TOKENS,
+        },
+        task_id=trace_task_id,
+        include_memory=True,
+    )
     # TODO: Randomise task seed and set in taskparams, instead of hard coding as 42.
     seed = task.seed or 42
     mx.random.seed(seed)
 
     # Encode prompt once at the top and fix unmatched think tags
-    all_prompt_tokens = encode_prompt(tokenizer, prompt)
-    all_prompt_tokens = fix_unmatched_think_end_tokens(all_prompt_tokens, tokenizer)
+    with runner_phase(
+        "prompt_build",
+        detail="prompt_tokenization",
+        attrs={"prompt_chars": len(prompt), "seed": seed},
+        task_id=trace_task_id,
+    ):
+        all_prompt_tokens = encode_prompt(tokenizer, prompt)
+        all_prompt_tokens = fix_unmatched_think_end_tokens(all_prompt_tokens, tokenizer)
+    record_runner_phase(
+        "prompt_build",
+        event="prompt_tokenized",
+        attrs={"prompt_tokens": len(all_prompt_tokens)},
+        task_id=trace_task_id,
+    )
     min_prefix_hit_length = max(1000, system_prompt_token_count(task, tokenizer))
 
     vision: VisionResult | None = None
     if vision_processor is not None:
         try:
-            vision = prepare_vision(
-                images=task.images,
-                chat_template_messages=task.chat_template_messages,
-                vision_processor=vision_processor,
-                tokenizer=tokenizer,
-                model=model,
-            )
+            with runner_phase(
+                "vision_preprocess",
+                detail="prepare_vision",
+                attrs={
+                    "image_count": len(task.images),
+                    "chat_template_messages": len(task.chat_template_messages or []),
+                },
+                task_id=trace_task_id,
+                include_memory=True,
+            ), trace(
+                "native_vision_preprocess",
+                trace_rank,
+                "vision",
+                task_id=trace_task_id,
+            ):
+                vision = prepare_vision(
+                    images=task.images,
+                    chat_template_messages=task.chat_template_messages,
+                    vision_processor=vision_processor,
+                    tokenizer=tokenizer,
+                    model=model,
+                    task_id=trace_task_id,
+                )
         except Exception:
             logger.opt(exception=True).warning(
                 "Vision processing failed, falling back to text-only"
             )
+            record_runner_phase(
+                "vision_preprocess",
+                event="prepare_vision_failed",
+                detail="falling back to text-only",
+                task_id=trace_task_id,
+                include_memory=True,
+            )
     if vision is not None:
         all_prompt_tokens = vision.prompt_tokens
     media_regions: list[MediaRegion] = vision.media_regions if vision else []
+    record_runner_phase(
+        "vision_preprocess",
+        event="vision_ready" if vision is not None else "vision_not_used",
+        attrs={
+            "prompt_tokens": len(all_prompt_tokens),
+            **_media_region_attrs(media_regions),
+            **_native_pixel_values_attrs(vision.pixel_values if vision else None),
+            **_vision_trace_attrs(vision),
+        },
+        task_id=trace_task_id,
+        include_memory=True,
+    )
+    record_trace_marker(
+        "vision_ready" if vision is not None else "vision_not_used",
+        trace_rank,
+        "vision",
+        task_id=trace_task_id,
+        attrs={
+            "prompt_tokens": len(all_prompt_tokens),
+            **_vision_trace_attrs(vision),
+        },
+    )
 
     # Do not use the prefix cache if we are trying to do benchmarks.
     is_bench = task.bench
@@ -1089,13 +1708,24 @@ def mlx_generate(
     # Use prefix cache if available, otherwise create fresh cache
     prefix_hit_length = 0
     matched_index: int | None = None
-    if kv_prefix_cache is None:
-        caches = make_kv_cache(model=model)
-        prompt_tokens = all_prompt_tokens
-    else:
-        caches, prompt_tokens, matched_index = kv_prefix_cache.get_kv_cache(
-            model, all_prompt_tokens, media_regions=media_regions
-        )
+    with runner_phase(
+        "kv_cache_lookup",
+        detail="prefix_cache_lookup",
+        attrs={
+            "cache_enabled": kv_prefix_cache is not None,
+            "prompt_tokens": len(all_prompt_tokens),
+            **_media_region_attrs(media_regions),
+        },
+        task_id=trace_task_id,
+        include_memory=True,
+    ):
+        if kv_prefix_cache is None:
+            caches = make_kv_cache(model=model)
+            prompt_tokens = all_prompt_tokens
+        else:
+            caches, prompt_tokens, matched_index = kv_prefix_cache.get_kv_cache(
+                model, all_prompt_tokens, media_regions=media_regions
+            )
         prefix_hit_length = len(all_prompt_tokens) - len(prompt_tokens)
         if prefix_hit_length > 0:
             logger.info(
@@ -1106,6 +1736,30 @@ def mlx_generate(
                 f"KV cache miss: 0/{len(all_prompt_tokens)} tokens cached "
                 f"(media_regions={len(media_regions)})"
             )
+    record_runner_phase(
+        "kv_cache_lookup",
+        event="kv_cache_result",
+        attrs={
+            "prefix_hit_length": prefix_hit_length,
+            "uncached_prompt_tokens": len(prompt_tokens),
+            "total_prompt_tokens": len(all_prompt_tokens),
+            "matched_index": matched_index if matched_index is not None else -1,
+        },
+        task_id=trace_task_id,
+    )
+    record_trace_marker(
+        "kv_cache_result",
+        trace_rank,
+        "kv_cache",
+        task_id=trace_task_id,
+        attrs={
+            "prefix_hit_length": prefix_hit_length,
+            "uncached_prompt_tokens": len(prompt_tokens),
+            "total_prompt_tokens": len(all_prompt_tokens),
+            "matched_index": matched_index if matched_index is not None else -1,
+            "media_region_count": len(media_regions),
+        },
+    )
 
     logits_processors: list[Callable[[mx.array, mx.array], mx.array]] = (
         make_logits_processors(
@@ -1140,6 +1794,26 @@ def mlx_generate(
                     "Disabling KV prefix cache for native vision generation to follow "
                     "the mlx-vlm reference execution path"
                 )
+            record_runner_phase(
+                "vision_preprocess",
+                event="native_reference_path_selected",
+                attrs={
+                    **_media_region_attrs(media_regions),
+                    **_native_pixel_values_attrs(vision.pixel_values),
+                },
+                task_id=trace_task_id,
+                include_memory=True,
+            )
+            record_trace_marker(
+                "native_reference_path_selected",
+                trace_rank,
+                "vision",
+                task_id=trace_task_id,
+                attrs={
+                    **_vision_trace_attrs(vision),
+                    "media_region_count": len(media_regions),
+                },
+            )
             yield from _mlx_generate_native_vision(
                 model=model,
                 tokenizer=tokenizer,
@@ -1151,6 +1825,7 @@ def mlx_generate(
                 on_prefill_progress=on_prefill_progress,
                 on_generation_token=on_generation_token,
                 group=group,
+                trace_task_id=trace_task_id,
             )
             return
 
@@ -1158,9 +1833,29 @@ def mlx_generate(
             "Using pipeline-aware native vision generation path on fixed "
             "mlx/mlx-vlm stack"
         )
+        record_runner_phase(
+            "vision_preprocess",
+            event="pipeline_native_vision_path_selected",
+            attrs={
+                **_media_region_attrs(media_regions),
+                **_native_pixel_values_attrs(vision.pixel_values),
+            },
+            task_id=trace_task_id,
+        )
+        record_trace_marker(
+            "pipeline_native_vision_path_selected",
+            trace_rank,
+            "vision",
+            task_id=trace_task_id,
+            attrs={
+                **_vision_trace_attrs(vision),
+                "media_region_count": len(media_regions),
+            },
+        )
 
     is_native_vision = vision is not None and vision.pixel_values is not None
     native_pixel_values: mx.array | list[mx.array] | None = None
+    native_media_regions: list[MediaRegion] | None = None
     if is_native_vision:
         assert vision is not None
         if vision.pixel_values is None:
@@ -1170,15 +1865,86 @@ def mlx_generate(
             media_regions,
             prefix_hit_length,
         )
+        native_media_regions = _native_media_regions_for_uncached_suffix(
+            vision.pixel_values,
+            media_regions,
+            prefix_hit_length,
+        )
+    decode_context = _decode_debug_context(
+        task=task,
+        group=group,
+        trace_task_id=trace_task_id,
+        total_prompt_tokens=len(all_prompt_tokens),
+        uncached_prompt_tokens=len(prompt_tokens),
+        prefix_hit_length=prefix_hit_length,
+        media_region_count=len(media_regions),
+        is_native_vision=is_native_vision,
+        native_pixel_values=native_pixel_values,
+    )
+
+    if _should_force_native_vision_full_prefill_for_request(
+        group=group,
+        is_native_vision=is_native_vision,
+        prefix_hit_length=prefix_hit_length,
+        media_region_count=len(media_regions),
+        native_pixel_values=native_pixel_values,
+    ):
+        logger.warning(
+            "Disabling KV prefix cache for a distributed native-vision follow-up "
+            "request with cached image regions to avoid known Gemma 4 decode "
+            f"wedge/reference-cache crashes ({decode_context})"
+        )
+        record_runner_phase(
+            "kv_cache_lookup",
+            event="forced_full_prefill_fallback",
+            detail="distributed native-vision follow-up",
+            attrs={
+                "prefix_hit_length": prefix_hit_length,
+                **_media_region_attrs(media_regions),
+                **_native_pixel_values_attrs(native_pixel_values),
+            },
+            task_id=trace_task_id,
+            include_memory=True,
+        )
+        record_trace_marker(
+            "forced_full_prefill_fallback",
+            trace_rank,
+            "kv_cache",
+            task_id=trace_task_id,
+            attrs={
+                "prefix_hit_length": prefix_hit_length,
+                "media_region_count": len(media_regions),
+                **_native_pixel_values_trace_attrs(native_pixel_values),
+            },
+        )
+        assert vision is not None
+        caches = make_kv_cache(model=model)
+        prompt_tokens = all_prompt_tokens
+        prefix_hit_length = 0
+        matched_index = None
+        native_pixel_values = vision.pixel_values
+        native_media_regions = media_regions
+        decode_context = _decode_debug_context(
+            task=task,
+            group=group,
+            trace_task_id=trace_task_id,
+            total_prompt_tokens=len(all_prompt_tokens),
+            uncached_prompt_tokens=len(prompt_tokens),
+            prefix_hit_length=prefix_hit_length,
+            media_region_count=len(media_regions),
+            is_native_vision=is_native_vision,
+            native_pixel_values=native_pixel_values,
+        )
 
     if native_pixel_values is not None:
-        if hasattr(model, "set_pixel_values"):
-            cast(
-                Callable[[mx.array | list[mx.array] | None], None],
-                object.__getattribute__(model, "set_pixel_values"),
-            )(native_pixel_values)
-        else:
-            object.__setattr__(model, "_pixel_values", native_pixel_values)
+        with runner_phase(
+            "vision_preprocess",
+            detail="set_pixel_values",
+            attrs=_native_pixel_values_attrs(native_pixel_values),
+            task_id=trace_task_id,
+            include_memory=True,
+        ):
+            _set_native_pixel_values(model, native_pixel_values)
         maybe_vision_ctx = contextlib.nullcontext()
     elif vision is not None and not is_native_vision:
         maybe_vision_ctx = patch_embed_tokens(
@@ -1186,30 +1952,63 @@ def mlx_generate(
         )
     else:
         maybe_vision_ctx = contextlib.nullcontext()
+    uses_pipeline_decode = group is not None and _has_pipeline_communication_layer(model)
+    if uses_pipeline_decode:
+        prefill_prompt_tokens = (
+            prompt_tokens if len(prompt_tokens) > 1 else prompt_tokens[:0]
+        )
+    else:
+        prefill_prompt_tokens = prompt_tokens[:-1]
+
     try:
-        with maybe_vision_ctx:
+        with maybe_vision_ctx, trace(
+            "prefill",
+            trace_rank,
+            "prefill",
+            task_id=trace_task_id,
+        ):
             prefill_tps, prefill_tokens, ssm_snapshots_list = prefill(
                 model,
                 tokenizer,
                 sampler,
-                prompt_tokens[:-1],
+                prefill_prompt_tokens,
                 caches,
                 group,
                 on_prefill_progress,
                 distributed_prompt_progress_callback,
+                native_pixel_values=native_pixel_values,
+                native_media_regions=native_media_regions,
+                prompt_token_offset=prefix_hit_length,
             )
     finally:
-        if hasattr(model, "set_pixel_values"):
-            cast(
-                Callable[[mx.array | list[mx.array] | None], None],
-                object.__getattribute__(model, "set_pixel_values"),
-            )(None)
-        elif hasattr(model, "_pixel_values"):
-            object.__setattr__(model, "_pixel_values", None)
+        record_runner_phase(
+            "vision_preprocess",
+            event="clear_pixel_values_begin",
+            task_id=trace_task_id,
+            include_memory=True,
+        )
+        if hasattr(model, "set_pixel_values") or hasattr(model, "_pixel_values"):
+            _set_native_pixel_values(model, None)
+        record_runner_phase(
+            "vision_preprocess",
+            event="clear_pixel_values_complete",
+            task_id=trace_task_id,
+            include_memory=True,
+        )
+        with runner_phase(
+            "decode_stream",
+            detail="clear_prefill_mlx_cache",
+            task_id=trace_task_id,
+            include_memory=True,
+        ):
+            mx.clear_cache()
     cache_snapshots: list[CacheSnapshot] | None = ssm_snapshots_list or None
 
-    # stream_generate starts from the last token
-    last_token = prompt_tokens[-2:]
+    # Pipeline prefill now advances the cache through the penultimate prompt
+    # token, so pipeline decode can begin with a single token and avoid an
+    # extra decode-mode prompt bridge collective before the first generated
+    # token.
+    last_token = prompt_tokens[-1:] if uses_pipeline_decode else prompt_tokens[-2:]
 
     max_tokens = task.max_output_tokens or MAX_TOKENS
     accumulated_text = ""
@@ -1221,24 +2020,98 @@ def mlx_generate(
     think_start = tokenizer.think_start
     think_end = tokenizer.think_end
 
+    logger.info(f"Decode context: {decode_context}")
     logger.info("Starting decode")
-    mx_barrier(group)
+    with runner_phase(
+        "decode_barrier",
+        detail="decode_mx_barrier",
+        attrs={
+            "total_prompt_tokens": len(all_prompt_tokens),
+            "uncached_prompt_tokens": len(prompt_tokens),
+            "prefix_hit_length": prefix_hit_length,
+            **_media_region_attrs(media_regions),
+            **_native_pixel_values_attrs(native_pixel_values),
+        },
+        task_id=trace_task_id,
+        include_memory=True,
+    ), _hang_debug_watch(f"decode barrier ({decode_context})"):
+        mx_barrier(group)
+
+    with runner_phase(
+        "decode_stream",
+        detail="stream_generate_setup",
+        attrs={"max_tokens": max_tokens, "last_token_count": len(last_token)},
+        task_id=trace_task_id,
+        include_memory=True,
+    ):
+        if group is not None and _has_pipeline_communication_layer(model):
+            logger.info(
+                "Using sequential pipeline decode without stream_generate lookahead"
+            )
+            token_generator = _stream_generate_without_lookahead(
+                model=model,
+                tokenizer=tokenizer,
+                prompt=last_token,
+                max_tokens=max_tokens,
+                sampler=sampler,
+                logits_processors=logits_processors,
+                prompt_cache=caches,
+                kv_group_size=KV_GROUP_SIZE,
+                kv_bits=KV_BITS,
+            )
+        else:
+            token_generator = stream_generate(
+                model=model,
+                tokenizer=tokenizer,
+                prompt=last_token,
+                max_tokens=max_tokens,
+                sampler=sampler,
+                logits_processors=logits_processors,
+                prompt_cache=caches,
+                prefill_step_size=1,
+                kv_group_size=KV_GROUP_SIZE,
+                kv_bits=KV_BITS,
+            )
+    first_token_wait_started = time.perf_counter()
+    with runner_phase(
+        "decode_wait_first_token",
+        detail="stream_generate_first_token",
+        attrs={"max_tokens": max_tokens},
+        task_id=trace_task_id,
+        include_memory=True,
+    ), _hang_debug_watch(f"decode first token ({decode_context})"):
+        try:
+            first_out = next(token_generator)
+        except StopIteration:
+            logger.warning(
+                "Decode generator ended before yielding a response "
+                f"({decode_context})"
+            )
+            return
+    logger.info(
+        "Decode produced the first response after "
+        f"{time.perf_counter() - first_token_wait_started:.2f}s ({decode_context})"
+    )
+    record_runner_phase(
+        "decode_stream",
+        event="first_token",
+        attrs={"wait_seconds": time.perf_counter() - first_token_wait_started},
+        task_id=trace_task_id,
+        include_memory=True,
+    )
 
     for completion_tokens, out in enumerate(
-        stream_generate(
-            model=model,
-            tokenizer=tokenizer,
-            prompt=last_token,
-            max_tokens=max_tokens,
-            sampler=sampler,
-            logits_processors=logits_processors,
-            prompt_cache=caches,
-            prefill_step_size=1,
-            kv_group_size=KV_GROUP_SIZE,
-            kv_bits=KV_BITS,
-        ),
+        itertools.chain([first_out], token_generator),
         start=1,
     ):
+        if completion_tokens == 1 or completion_tokens % 25 == 0:
+            record_runner_phase(
+                "decode_stream",
+                event="decode_token_progress",
+                attrs={"completion_tokens": completion_tokens},
+                task_id=trace_task_id,
+                include_memory=completion_tokens == 1,
+            )
         generated_text_parts.append(out.text)
         accumulated_text += out.text
 
@@ -1339,6 +2212,17 @@ def mlx_generate(
                     prefix_hit_length >= min_prefix_hit_length
                     and hit_ratio >= _MIN_PREFIX_HIT_RATIO_TO_UPDATE
                 ):
+                    record_runner_phase(
+                        "kv_cache_lookup",
+                        event="kv_cache_update",
+                        attrs={
+                            "matched_index": matched_index,
+                            "prefix_hit_length": prefix_hit_length,
+                            "hit_ratio": hit_ratio,
+                        },
+                        task_id=trace_task_id,
+                        include_memory=True,
+                    )
                     kv_prefix_cache.update_kv_cache(
                         matched_index,
                         full_prompt_tokens,
@@ -1348,6 +2232,16 @@ def mlx_generate(
                         media_regions=media_regions,
                     )
                 else:
+                    record_runner_phase(
+                        "kv_cache_lookup",
+                        event="kv_cache_add",
+                        attrs={
+                            "prefix_hit_length": prefix_hit_length,
+                            "hit_ratio": hit_ratio,
+                        },
+                        task_id=trace_task_id,
+                        include_memory=True,
+                    )
                     kv_prefix_cache.add_kv_cache(
                         full_prompt_tokens,
                         caches,
@@ -1369,7 +2263,23 @@ def mlx_generate(
         )
 
         if is_done:
-            mx_barrier(group)
+            record_runner_phase(
+                "completion",
+                event="generation_complete",
+                attrs={
+                    "completion_tokens": completion_tokens,
+                    "finish_reason": str(finish_reason),
+                },
+                task_id=trace_task_id,
+                include_memory=True,
+            )
+            with runner_phase(
+                "decode_barrier",
+                detail="decode_final_barrier",
+                task_id=trace_task_id,
+                include_memory=True,
+            ), _hang_debug_watch(f"decode final barrier ({decode_context})"):
+                mx_barrier(group)
             break
 
         # Limit accumulated_text to what's needed for stop sequence detection

@@ -16,6 +16,7 @@ If you are getting oriented, start with these pages:
 - [Model store guide](model-store.md) for shared model storage and download workflows
 - [KV cache backends](kv-cache-backends.md) for backend and runtime tuning
 - [Architecture overview](architecture.md) for how the node, cluster, and event model fit together
+- [Tracing system design](traces-system-design.md) for the preserved baseline tracing design that motivated the tracing revamp work
 
 ## Common Jobs
 
@@ -23,6 +24,7 @@ If you are getting oriented, start with these pages:
 - I want the raw machine-readable schema: [OpenAPI schema](reference/openapi.md)
 - I want frontend and TypeScript symbols: [TypeScript API](reference/typedoc/README.md)
 - I want implementation context before I integrate: [Architecture overview](architecture.md)
+- I want to understand tracing internals and the old durability model: [Tracing system design](traces-system-design.md)
 
 ## What Lives Here
 

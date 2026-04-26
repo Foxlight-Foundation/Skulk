@@ -40,12 +40,15 @@ from transformers import AutoImageProcessor
 from exo.download.download_utils import build_model_path
 from exo.shared.constants import EXO_IMAGE_TRANSPORT_DEBUG
 from exo.shared.models.model_cards import VisionCardConfig
+from exo.shared.tracing import TraceAttrValue
 from exo.shared.types.common import ModelId
 from exo.shared.types.mlx import Model
+from exo.shared.types.tasks import TaskId
 from exo.worker.engines.mlx.cache import encode_prompt
 from exo.worker.engines.mlx.gemma4_prompt import render_gemma4_prompt
 from exo.worker.engines.mlx.utils_mlx import fix_unmatched_think_end_tokens
 from exo.worker.runner.bootstrap import logger
+from exo.worker.runner.diagnostics import record_runner_phase, runner_phase
 
 JsonDict = dict[str, object]
 MxArrayInput = (
@@ -265,6 +268,15 @@ def _vision_transport_debug_enabled() -> bool:
     return EXO_IMAGE_TRANSPORT_DEBUG or bool(os.environ.get("EXO_VISION_DEBUG_SAVE_DIR"))
 
 
+def _vision_prompt_debug_enabled() -> bool:
+    """Return whether full prompt-shape logging is enabled for vision prompts."""
+    for env_var_name in ("SKULK_TRACE_REQUEST_SHAPES", "EXO_TRACE_REQUEST_SHAPES"):
+        value = os.environ.get(env_var_name)
+        if value is not None:
+            return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return False
+
+
 def _maybe_dump_debug_image(
     image: Image.Image,
     debug: _DecodedImageDebug,
@@ -293,8 +305,34 @@ def _maybe_dump_debug_image(
 def _format_vlm_messages(
     messages: list[JsonDict],
     model_type: str,
+    *,
+    task_id: TaskId | str | None = None,
 ) -> list[JsonDict]:
+    def _count_image_parts(message: JsonDict) -> int:
+        content = message.get("content")
+        if not isinstance(content, list):
+            return 0
+        return sum(
+            1
+            for raw_part in cast(list[object], content)
+            if str(_object_dict(raw_part).get("type", "")) in {"image", "image_url"}
+        )
+
     formatted: list[JsonDict] = []
+    image_count = sum(_count_image_parts(msg) for msg in messages)
+    label_images = model_type in {"gemma3n", "gemma4"} and image_count > 1
+    record_runner_phase(
+        "vision_preprocess",
+        event="format_vlm_messages",
+        attrs={
+            "model_type": model_type,
+            "message_count": len(messages),
+            "image_count": image_count,
+            "gemma_image_label_count": image_count if label_images else 0,
+        },
+        task_id=task_id,
+    )
+    image_number = 1
     for msg in messages:
         role = str(msg.get("role", "user"))
         content = msg.get("content")
@@ -318,7 +356,16 @@ def _format_vlm_messages(
                         {"type": "text", "text": str(part.get("text", ""))}
                     )
                 elif part_type in {"image", "image_url"}:
-                    normalized_parts.append({"type": "image"})
+                    image_part: JsonDict = {"type": "image"}
+                    if label_images:
+                        # Gemma 4 has been observed to answer from an earlier
+                        # image when multiple bare image placeholders are present
+                        # in chat history. Stable chronological labels make
+                        # "the latest image" unambiguous without changing the
+                        # image tensor order.
+                        image_part["label"] = f"Image {image_number}"
+                    image_number += 1
+                    normalized_parts.append(image_part)
             formatted.append({"role": role, "content": normalized_parts})
             continue
 
@@ -334,7 +381,80 @@ def _format_vlm_messages(
     return formatted
 
 
-def build_vision_prompt(
+@dataclass(frozen=True)
+class _VisionPromptDebug:
+    """Prompt rendering facts used to compare Skulk against processor templates."""
+
+    raw_prompt_chars: int
+    raw_image_placeholder_positions: list[int]
+    expanded_prompt_chars: int
+    tokens_per_image: list[int]
+    image_token: str
+
+    def attrs(self) -> dict[str, TraceAttrValue]:
+        """Return JSON-safe tracing attributes for the rendered vision prompt."""
+        return {
+            "raw_prompt_chars": self.raw_prompt_chars,
+            "raw_image_placeholder_count": len(self.raw_image_placeholder_positions),
+            "raw_image_placeholder_offsets": [
+                str(position) for position in self.raw_image_placeholder_positions
+            ],
+            "expanded_prompt_chars": self.expanded_prompt_chars,
+            "tokens_per_image": [
+                str(token_count) for token_count in self.tokens_per_image
+            ],
+            "image_token": self.image_token,
+        }
+
+
+@dataclass(frozen=True)
+class _VisionPromptBuild:
+    """Rendered prompt plus the unexpanded prompt facts that produced it."""
+
+    prompt: str
+    raw_prompt: str
+    debug: _VisionPromptDebug
+
+
+def _prompt_placeholder_positions(prompt: str, image_token: str) -> list[int]:
+    """Return character offsets for image placeholders in the unexpanded prompt."""
+    positions: list[int] = []
+    offset = 0
+    while True:
+        position = prompt.find(image_token, offset)
+        if position == -1:
+            return positions
+        positions.append(position)
+        offset = position + len(image_token)
+
+
+def _log_vision_prompt_shape(
+    label: str,
+    raw_prompt: str,
+    expanded_prompt: str,
+    attrs: dict[str, TraceAttrValue],
+) -> None:
+    """Log full raw and expanded vision prompts when request-shape tracing is on."""
+    if not _vision_prompt_debug_enabled():
+        return
+
+    payload: dict[str, TraceAttrValue] = {"label": label, **attrs}
+    logger.info(
+        "[request-shape] "
+        f"{json.dumps(payload, ensure_ascii=True, sort_keys=True)}"
+    )
+    logger.info(f"[request-shape] vision raw prompt label={label}\n{raw_prompt}")
+    logger.info(
+        f"[request-shape] vision expanded prompt label={label}\n{expanded_prompt}"
+    )
+
+
+def _diagnostic_attrs(attrs: dict[str, TraceAttrValue]) -> dict[str, object]:
+    """Adapt trace-safe attrs to the runner diagnostic helper's invariant dict."""
+    return cast(dict[str, object], attrs)
+
+
+def _build_vision_prompt_with_debug(
     tokenizer: TokenizerWrapper,
     chat_template_messages: list[JsonDict],
     n_tokens_per_image: list[int],
@@ -342,9 +462,8 @@ def build_vision_prompt(
     model_type: str | None = None,
     boi_token_id: int | None = None,
     eoi_token_id: int | None = None,
-) -> str:
-    """Build the full prompt string, expanding each image placeholder to the
-    correct number of image tokens based on the encoder's output size.
+) -> _VisionPromptBuild:
+    """Build the expanded prompt and retain the raw placeholder layout.
 
     For models that use BOI/EOI framing (Gemma 3n/4), each expanded image
     sequence is wrapped as ``BOI + (IMAGE × N) + EOI`` matching the format
@@ -369,6 +488,8 @@ def build_vision_prompt(
             tokenize=False,
             add_generation_prompt=True,
         )
+    raw_prompt = prompt
+    raw_placeholder_positions = _prompt_placeholder_positions(raw_prompt, image_token)
 
     # Decode BOI/EOI token IDs to their string form so we can insert them
     # into the prompt text before tokenization.
@@ -382,8 +503,8 @@ def build_vision_prompt(
     result: list[str] = []
     i = 0
     pad_len = len(image_token)
-    while i < len(prompt):
-        if prompt[i : i + pad_len] == image_token:
+    while i < len(raw_prompt):
+        if raw_prompt[i : i + pad_len] == image_token:
             n = (
                 n_tokens_per_image[image_idx]
                 if image_idx < len(n_tokens_per_image)
@@ -393,10 +514,68 @@ def build_vision_prompt(
             image_idx += 1
             i += pad_len
         else:
-            result.append(prompt[i])
+            result.append(raw_prompt[i])
             i += 1
 
-    return "".join(result)
+    expanded_prompt = "".join(result)
+    debug = _VisionPromptDebug(
+        raw_prompt_chars=len(raw_prompt),
+        raw_image_placeholder_positions=raw_placeholder_positions,
+        expanded_prompt_chars=len(expanded_prompt),
+        tokens_per_image=n_tokens_per_image,
+        image_token=image_token,
+    )
+    _log_vision_prompt_shape(
+        "vision",
+        raw_prompt,
+        expanded_prompt,
+        debug.attrs(),
+    )
+    return _VisionPromptBuild(prompt=expanded_prompt, raw_prompt=raw_prompt, debug=debug)
+
+
+def build_vision_prompt(
+    tokenizer: TokenizerWrapper,
+    chat_template_messages: list[JsonDict],
+    n_tokens_per_image: list[int],
+    image_token: str,
+    model_type: str | None = None,
+    boi_token_id: int | None = None,
+    eoi_token_id: int | None = None,
+) -> str:
+    """Build a full prompt string with image placeholders expanded to features."""
+    return _build_vision_prompt_with_debug(
+        tokenizer,
+        chat_template_messages,
+        n_tokens_per_image,
+        image_token,
+        model_type=model_type,
+        boi_token_id=boi_token_id,
+        eoi_token_id=eoi_token_id,
+    ).prompt
+
+
+def _pixel_value_shapes(pixel_values: mx.array | list[mx.array]) -> list[str]:
+    """Return compact tensor shape strings for diagnostics."""
+
+    if isinstance(pixel_values, list):
+        return [str(tuple(value.shape)) for value in pixel_values]
+    return [str(tuple(pixel_values.shape))]
+
+
+def _image_b64_hashes(images: list[str]) -> list[str]:
+    """Return stable hashes of the base64 image payloads in request order."""
+    return [hashlib.sha256(image.encode("ascii")).hexdigest() for image in images]
+
+
+def _media_region_ranges(media_regions: list["MediaRegion"]) -> list[str]:
+    """Return compact token ranges for prompt media regions."""
+    return [f"{region.start_pos}:{region.end_pos}" for region in media_regions]
+
+
+def _media_region_hashes(media_regions: list["MediaRegion"]) -> list[str]:
+    """Return compact content hashes for prompt media regions."""
+    return [region.content_hash[:12] for region in media_regions]
 
 
 @dataclass
@@ -419,6 +598,41 @@ class VisionResult:
     embeddings: mx.array
     media_regions: list[MediaRegion]
     pixel_values: mx.array | list[mx.array] | None = None
+    debug_info: "VisionDebugInfo | None" = None
+
+
+@dataclass(frozen=True)
+class VisionDebugInfo:
+    """Compact multimodal alignment facts for traces and runner diagnostics."""
+
+    model_type: str
+    native_vision: bool
+    image_b64_hashes: list[str]
+    prompt_debug: _VisionPromptDebug
+    prompt_tokens: int
+    image_token_count: int
+    media_region_ranges: list[str]
+    media_region_hashes: list[str]
+    pixel_value_shapes: list[str]
+    vision_feature_shape: str | None = None
+
+    def attrs(self) -> dict[str, TraceAttrValue]:
+        """Return bounded JSON-safe attributes for tracing and diagnostics."""
+        attrs: dict[str, TraceAttrValue] = {
+            "vision_model_type": self.model_type,
+            "native_vision": self.native_vision,
+            "image_count": len(self.image_b64_hashes),
+            "image_b64_hashes": [h[:12] for h in self.image_b64_hashes],
+            "prompt_tokens": self.prompt_tokens,
+            "image_token_count": self.image_token_count,
+            "media_region_ranges": self.media_region_ranges,
+            "media_region_hashes": self.media_region_hashes,
+            "pixel_value_shapes": self.pixel_value_shapes,
+            **self.prompt_debug.attrs(),
+        }
+        if self.vision_feature_shape is not None:
+            attrs["vision_feature_shape"] = self.vision_feature_shape
+        return attrs
 
 
 _QUANTIZATION_SUFFIXES = (".biases", ".scales")
@@ -817,7 +1031,16 @@ class VisionEncoder:
     ) -> tuple[mx.array | list[mx.array], mx.array | None, list[int]]:
         """Public interface to image preprocessing (pixel_values + token counts)."""
         self.ensure_processor_loaded()
-        return self._preprocess_images(pil_images, processor_kwargs=processor_kwargs)
+        with runner_phase(
+            "vision_preprocess",
+            detail="preprocess_images",
+            attrs={
+                "image_count": len(pil_images),
+                "processor_kwargs": list((processor_kwargs or {}).keys()),
+            },
+            include_memory=True,
+        ):
+            return self._preprocess_images(pil_images, processor_kwargs=processor_kwargs)
 
     def encode_images(self, images: list[str]) -> tuple[mx.array, list[int]]:
         """Encode base64 images into feature tensors and per-image token counts."""
@@ -825,12 +1048,32 @@ class VisionEncoder:
         assert self._vision_tower is not None
         assert self._processor is not None
 
-        pil_images = [decode_base64_image(b64) for b64 in images]
+        with runner_phase(
+            "vision_preprocess",
+            detail="base64_decode",
+            attrs={"image_count": len(images)},
+        ):
+            pil_images = [decode_base64_image(b64) for b64 in images]
         for idx, img in enumerate(pil_images):
             logger.info(f"Image {idx}: {img.width}x{img.height} mode={img.mode}")
+            record_runner_phase(
+                "vision_preprocess",
+                event="image_decoded",
+                attrs={"image_index": idx, "width": img.width, "height": img.height},
+            )
 
         pixel_values, grid_thw, n_tokens_per_image = self._preprocess_images(
             pil_images
+        )
+        record_runner_phase(
+            "vision_preprocess",
+            event="image_preprocessed",
+            attrs={
+                "image_count": len(pil_images),
+                "pixel_value_shapes": _pixel_value_shapes(pixel_values),
+                "tokens_per_image": [str(token_count) for token_count in n_tokens_per_image],
+            },
+            include_memory=True,
         )
         hidden_states = self._run_vision_tower(pixel_values, grid_thw)
 
@@ -1146,12 +1389,27 @@ class VisionProcessor:
         chat_template_messages: list[dict[str, Any]],
         tokenizer: TokenizerWrapper,
         model: Model,
+        *,
+        task_id: TaskId | str | None = None,
     ) -> VisionResult:
         logger.info(f"Vision pipeline: {len(images)} image(s)")
+        record_runner_phase(
+            "vision_preprocess",
+            event="vision_process_start",
+            attrs={"image_count": len(images)},
+            task_id=task_id,
+            include_memory=True,
+        )
 
         native = has_native_vision(model)
         if native:
-            return self._process_native(images, chat_template_messages, tokenizer, model)
+            return self._process_native(
+                images,
+                chat_template_messages,
+                tokenizer,
+                model,
+                task_id=task_id,
+            )
 
         cache_key = self._image_cache_key(images)
         cached = self._feature_cache.pop(cache_key, None)
@@ -1173,10 +1431,10 @@ class VisionProcessor:
             image_token = tokenizer.decode([self.vision_config.image_token_id])
 
         formatted_messages = _format_vlm_messages(
-            chat_template_messages, self.vision_config.model_type
+            chat_template_messages, self.vision_config.model_type, task_id=task_id
         )
 
-        prompt = build_vision_prompt(
+        prompt_build = _build_vision_prompt_with_debug(
             tokenizer,
             formatted_messages,
             n_tokens_per_image,
@@ -1184,6 +1442,13 @@ class VisionProcessor:
             model_type=self.vision_config.model_type,
             boi_token_id=self.vision_config.boi_token_id,
             eoi_token_id=self.vision_config.eoi_token_id,
+        )
+        prompt = prompt_build.prompt
+        record_runner_phase(
+            "vision_preprocess",
+            event="vision_prompt_rendered",
+            attrs=_diagnostic_attrs(prompt_build.debug.attrs()),
+            task_id=task_id,
         )
 
         logger.info(
@@ -1194,6 +1459,16 @@ class VisionProcessor:
         prompt_tokens = fix_unmatched_think_end_tokens(prompt_tokens, tokenizer)
         n_image_tokens = int(
             mx.sum(mx.equal(prompt_tokens, self.vision_config.image_token_id)).item()
+        )
+        record_runner_phase(
+            "vision_preprocess",
+            event="image_token_expansion",
+            attrs={
+                "prompt_tokens": len(prompt_tokens),
+                "image_token_count": n_image_tokens,
+                "image_count": len(images),
+            },
+            task_id=task_id,
         )
         logger.info(
             f"Encoded prompt: {len(prompt_tokens)} tokens, {n_image_tokens} image pad tokens"
@@ -1214,12 +1489,43 @@ class VisionProcessor:
             boi_token_id=self.vision_config.boi_token_id,
             eoi_token_id=self.vision_config.eoi_token_id,
         )
+        record_runner_phase(
+            "vision_preprocess",
+            event="media_regions_ready",
+            attrs={
+                "media_region_count": len(media_regions),
+                "media_region_lengths": [
+                    str(region.end_pos - region.start_pos)
+                    for region in media_regions
+                ],
+            },
+            task_id=task_id,
+        )
+        debug_info = VisionDebugInfo(
+            model_type=self.vision_config.model_type,
+            native_vision=False,
+            image_b64_hashes=_image_b64_hashes(images),
+            prompt_debug=prompt_build.debug,
+            prompt_tokens=len(prompt_tokens),
+            image_token_count=n_image_tokens,
+            media_region_ranges=_media_region_ranges(media_regions),
+            media_region_hashes=_media_region_hashes(media_regions),
+            pixel_value_shapes=[],
+            vision_feature_shape=str(tuple(image_features.shape)),
+        )
+        record_runner_phase(
+            "vision_preprocess",
+            event="vision_alignment_debug",
+            attrs=_diagnostic_attrs(debug_info.attrs()),
+            task_id=task_id,
+        )
 
         return VisionResult(
             prompt=prompt,
             prompt_tokens=prompt_tokens,
             embeddings=embeddings,
             media_regions=media_regions,
+            debug_info=debug_info,
         )
 
     def _process_native(
@@ -1228,6 +1534,8 @@ class VisionProcessor:
         chat_template_messages: list[dict[str, Any]],
         tokenizer: TokenizerWrapper,
         model: Model,
+        *,
+        task_id: TaskId | str | None = None,
     ) -> VisionResult:
         """Process images for models with native vision support (e.g. Gemma 4).
 
@@ -1253,10 +1561,35 @@ class VisionProcessor:
                     f"rgb_sha256={debug.rgb_sha256[:12]}..."
                 )
                 _maybe_dump_debug_image(img, debug, idx)
+                record_runner_phase(
+                    "vision_preprocess",
+                    event="native_image_decoded",
+                    attrs={
+                        "image_index": idx,
+                        "width": img.width,
+                        "height": img.height,
+                        "raw_bytes": debug.raw_bytes,
+                        "raw_sha256": debug.raw_sha256[:12],
+                        "rgb_sha256": debug.rgb_sha256[:12],
+                    },
+                    task_id=task_id,
+                )
         else:
-            pil_images = [decode_base64_image(b64) for b64 in images]
+            with runner_phase(
+                "vision_preprocess",
+                detail="native_base64_decode",
+                attrs={"image_count": len(images)},
+                task_id=task_id,
+            ):
+                pil_images = [decode_base64_image(b64) for b64 in images]
             for idx, img in enumerate(pil_images):
                 logger.debug(f"Image {idx}: {img.width}x{img.height} mode={img.mode}")
+                record_runner_phase(
+                    "vision_preprocess",
+                    event="native_image_decoded",
+                    attrs={"image_index": idx, "width": img.width, "height": img.height},
+                    task_id=task_id,
+                )
 
         processor_kwargs = (
             _gemma4_native_processor_kwargs(chat_template_messages, processor)
@@ -1268,6 +1601,18 @@ class VisionProcessor:
             pil_images,
             processor_kwargs=processor_kwargs,
         )
+        record_runner_phase(
+            "vision_preprocess",
+            event="native_image_preprocessed",
+            attrs={
+                "image_count": len(images),
+                "processor_kwargs": list(processor_kwargs.keys()),
+                "pixel_value_shapes": _pixel_value_shapes(pixel_values),
+                "tokens_per_image": [str(token_count) for token_count in n_tokens_per_image],
+            },
+            task_id=task_id,
+            include_memory=True,
+        )
         logger.info(
             f"Native vision: preprocessed {len(images)} image(s), "
             f"tokens per image: {n_tokens_per_image}"
@@ -1278,9 +1623,9 @@ class VisionProcessor:
             image_token = tokenizer.decode([self.vision_config.image_token_id])
 
         formatted_messages = _format_vlm_messages(
-            chat_template_messages, self.vision_config.model_type
+            chat_template_messages, self.vision_config.model_type, task_id=task_id
         )
-        prompt = build_vision_prompt(
+        prompt_build = _build_vision_prompt_with_debug(
             tokenizer,
             formatted_messages,
             n_tokens_per_image,
@@ -1289,11 +1634,30 @@ class VisionProcessor:
             boi_token_id=self.vision_config.boi_token_id,
             eoi_token_id=self.vision_config.eoi_token_id,
         )
+        prompt = prompt_build.prompt
+        record_runner_phase(
+            "vision_preprocess",
+            event="native_vision_prompt_rendered",
+            attrs=_diagnostic_attrs(prompt_build.debug.attrs()),
+            task_id=task_id,
+        )
 
         prompt_tokens: mx.array = encode_prompt(tokenizer, prompt)
         prompt_tokens = fix_unmatched_think_end_tokens(prompt_tokens, tokenizer)
         n_image_tokens = int(
             mx.sum(mx.equal(prompt_tokens, self.vision_config.image_token_id)).item()
+        )
+        record_runner_phase(
+            "vision_preprocess",
+            event="native_image_token_expansion",
+            attrs={
+                "prompt_tokens": len(prompt_tokens),
+                "image_token_count": n_image_tokens,
+                "gemma_image_label_count": len(images)
+                if self.vision_config.model_type == "gemma4" and len(images) > 1
+                else 0,
+            },
+            task_id=task_id,
         )
         logger.info(
             f"Encoded prompt: {len(prompt_tokens)} tokens, {n_image_tokens} image pad tokens"
@@ -1306,6 +1670,36 @@ class VisionProcessor:
             boi_token_id=self.vision_config.boi_token_id,
             eoi_token_id=self.vision_config.eoi_token_id,
         )
+        record_runner_phase(
+            "vision_preprocess",
+            event="native_media_regions_ready",
+            attrs={
+                "media_region_count": len(media_regions),
+                "media_region_lengths": [
+                    str(region.end_pos - region.start_pos)
+                    for region in media_regions
+                ],
+            },
+            task_id=task_id,
+        )
+        debug_info = VisionDebugInfo(
+            model_type=self.vision_config.model_type,
+            native_vision=True,
+            image_b64_hashes=_image_b64_hashes(images),
+            prompt_debug=prompt_build.debug,
+            prompt_tokens=len(prompt_tokens),
+            image_token_count=n_image_tokens,
+            media_region_ranges=_media_region_ranges(media_regions),
+            media_region_hashes=_media_region_hashes(media_regions),
+            pixel_value_shapes=_pixel_value_shapes(pixel_values),
+        )
+        record_runner_phase(
+            "vision_preprocess",
+            event="native_vision_alignment_debug",
+            attrs=_diagnostic_attrs(debug_info.attrs()),
+            task_id=task_id,
+            include_memory=True,
+        )
 
         # Native vision models fuse image features inside __call__ during prefill,
         # so there are no precomputed embeddings to splice.
@@ -1317,6 +1711,7 @@ class VisionProcessor:
             embeddings=empty_embeddings,
             media_regions=media_regions,
             pixel_values=pixel_values,
+            debug_info=debug_info,
         )
 
 
@@ -1326,6 +1721,8 @@ def prepare_vision(
     vision_processor: VisionProcessor,
     tokenizer: TokenizerWrapper,
     model: Model,
+    *,
+    task_id: TaskId | str | None = None,
 ) -> VisionResult | None:
     """Top-level entry point: encode images and build the vision-augmented prompt.
 
@@ -1343,4 +1740,5 @@ def prepare_vision(
         chat_template_messages=chat_template_messages,
         tokenizer=tokenizer,
         model=model,
+        task_id=task_id,
     )

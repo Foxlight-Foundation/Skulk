@@ -38,6 +38,12 @@ class TextEmbedding(BaseCommand):
     task_params: TextEmbeddingTaskParams
 
 
+class SetTracingEnabled(BaseCommand):
+    """Command to toggle runtime tracing for new requests cluster-wide."""
+
+    enabled: bool
+
+
 class PlaceInstance(BaseCommand):
     model_card: ModelCard
     sharding: Sharding
@@ -126,6 +132,7 @@ Command = (
     | ImageGeneration
     | ImageEdits
     | TextEmbedding
+    | SetTracingEnabled
     | PlaceInstance
     | CreateInstance
     | DeleteInstance

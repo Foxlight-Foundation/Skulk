@@ -22,8 +22,10 @@ from exo.api.types import (
     TopLogprobItem,
     Usage,
 )
+from exo.shared.tracing import trace
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import KVCacheType, Model
+from exo.shared.types.tasks import TaskId
 from exo.shared.types.text_generation import TextGenerationTaskParams
 from exo.shared.types.worker.runner_response import GenerationResponse
 from exo.worker.engines.mlx.cache import (
@@ -114,11 +116,13 @@ class ExoBatchGenerator:
 
     def submit(
         self,
+        task_id: TaskId,
         task_params: TextGenerationTaskParams,
         prompt: str,
         on_prefill_progress: Callable[[int, int], None] | None = None,
         distributed_prompt_progress_callback: Callable[[], None] | None = None,
         on_generation_token: Callable[[], None] | None = None,
+        trace_rank: int = 0,
     ) -> int:
         all_prompt_tokens = encode_prompt(self.tokenizer, prompt)
         all_prompt_tokens = fix_unmatched_think_end_tokens(
@@ -130,13 +134,20 @@ class ExoBatchGenerator:
 
         if self.vision_processor is not None:
             try:
-                vision = prepare_vision(
-                    images=task_params.images,
-                    chat_template_messages=task_params.chat_template_messages,
-                    vision_processor=self.vision_processor,
-                    tokenizer=self.tokenizer,
-                    model=self.model,
-                )
+                with trace(
+                    "native_vision_preprocess",
+                    trace_rank,
+                    "vision",
+                    task_id=task_id,
+                ):
+                    vision = prepare_vision(
+                        images=task_params.images,
+                        chat_template_messages=task_params.chat_template_messages,
+                        vision_processor=self.vision_processor,
+                        tokenizer=self.tokenizer,
+                        model=self.model,
+                        task_id=task_id,
+                    )
             except Exception:
                 logger.opt(exception=True).warning(
                     "Vision processing failed, falling back to text-only"
@@ -211,7 +222,12 @@ class ExoBatchGenerator:
         else:
             vision_ctx = contextlib.nullcontext()
         try:
-            with vision_ctx:
+            with vision_ctx, trace(
+                "prefill",
+                trace_rank,
+                "prefill",
+                task_id=task_id,
+            ):
                 _prefill_tps, _prefill_tokens, cache_snapshots = prefill(
                     self.model,
                     self.tokenizer,

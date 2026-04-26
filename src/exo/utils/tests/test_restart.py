@@ -17,6 +17,7 @@ def test_schedule_restart_calls_execv() -> None:
     _reset_restart_state()
 
     with (
+        patch.object(restart, "_mark_open_file_descriptors_close_on_exec") as mock_close,
         patch.object(restart.os, "execv") as mock_execv,
         patch.object(restart.threading, "Thread") as mock_thread_cls,
     ):
@@ -32,6 +33,7 @@ def test_schedule_restart_calls_execv() -> None:
         with patch("time.sleep"):
             target_fn()
 
+        mock_close.assert_called_once()
         mock_execv.assert_called_once()
 
 
@@ -97,3 +99,29 @@ def test_schedule_restart_recovers_on_execv_failure() -> None:
 
         # Guard should be reset so we can schedule again
         assert not restart._restart_scheduled
+
+
+def test_mark_open_file_descriptors_close_on_exec_skips_standard_fds() -> None:
+    """Restart preparation should leave stdio alone and clear inheritable fds."""
+    calls: list[tuple[int, bool]] = []
+
+    def _set_inheritable(fd: int, inheritable: bool) -> None:
+        calls.append((fd, inheritable))
+        if fd == 7:
+            raise OSError("fd closed")
+
+    with (
+        patch.object(
+            restart,
+            "_iter_open_file_descriptors",
+            return_value=iter([0, 1, 2, 3, 7]),
+        ),
+        patch.object(
+            restart.os,
+            "set_inheritable",
+            side_effect=_set_inheritable,
+        ),
+    ):
+        restart._mark_open_file_descriptors_close_on_exec()
+
+    assert calls == [(3, False), (7, False)]

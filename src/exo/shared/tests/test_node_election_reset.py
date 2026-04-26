@@ -62,11 +62,26 @@ class _FakeApi:
     def __init__(self, events: list[str]) -> None:
         self._events = events
 
-    def reset(self, _result_clock: int, _event_receiver: object) -> None:
+    def reset(
+        self,
+        _result_clock: int,
+        _event_receiver: object,
+        _master_node_id: NodeId,
+    ) -> None:
         self._events.append("api.reset")
 
-    def unpause(self, _result_clock: int) -> None:
+    def unpause(
+        self,
+        _result_clock: int,
+        master_node_id: NodeId | None = None,
+    ) -> None:
         self._events.append("api.unpause")
+
+    def set_runner_diagnostics_provider(self, _provider: object) -> None:
+        self._events.append("api.runner_diagnostics_provider")
+
+    def set_runner_cancel_provider(self, _provider: object) -> None:
+        self._events.append("api.runner_cancel_provider")
 
 
 @pytest.mark.asyncio
@@ -96,6 +111,12 @@ async def test_election_restarts_event_router_after_receivers_are_rewired(
 
         async def run(self) -> None:
             return
+
+        def collect_runner_diagnostics(self) -> list[object]:
+            return []
+
+        async def cancel_runner_task(self, *_args: Any, **_kwargs: Any) -> object:
+            return object()
 
     monkeypatch.setattr("exo.main.EventRouter", NewEventRouter)
     monkeypatch.setattr("exo.main.Worker", NewWorker)
@@ -178,6 +199,12 @@ async def test_new_master_does_not_wait_on_unavailable_state_sync_config(
 
         async def run(self) -> None:
             return
+
+        def collect_runner_diagnostics(self) -> list[object]:
+            return []
+
+        async def cancel_runner_task(self, *_args: Any, **_kwargs: Any) -> object:
+            return object()
 
     monkeypatch.setattr("exo.main.EventRouter", NewEventRouter)
     monkeypatch.setattr("exo.main.Master", NewMaster)

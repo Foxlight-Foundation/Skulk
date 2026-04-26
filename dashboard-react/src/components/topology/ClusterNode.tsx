@@ -22,6 +22,8 @@ export interface ClusterNodeProps {
   allNodes?: Record<string, NodeInfo>;
   /** Called when the user confirms a node restart. */
   onRestart?: () => void;
+  /** Called when the user opens live diagnostics for this node. */
+  onInspect?: () => void;
 }
 
 function buildDebugContent(
@@ -127,6 +129,7 @@ export function ClusterNode({
   edges = [],
   allNodes = {},
   onRestart,
+  onInspect,
 }: ClusterNodeProps) {
   const theme = useTheme() as Theme;
   const model = detectDeviceModel(nodeInfo.system_info?.model_id);
@@ -182,6 +185,7 @@ export function ClusterNode({
         memoryY={iconTop + iconH + memoryOffset}
         debugContent={debugContent}
         onRestart={onRestart}
+        onInspect={onInspect}
       />
 
       {/* Device icon — centered at origin */}

@@ -9,6 +9,7 @@ import pytest
 import exo.worker.runner.llm_inference.batch_generator as mlx_batch_generator
 import exo.worker.runner.llm_inference.model_output_parsers as mlx_model_output_parsers
 import exo.worker.runner.llm_inference.runner as mlx_runner
+from exo.shared.models.model_cards import ModelId
 from exo.shared.types.chunks import TokenChunk
 from exo.shared.types.events import (
     ChunkGenerated,
@@ -150,11 +151,14 @@ class FakeExoBatchGenerator:
 
     def submit(
         self,
+        task_id: object = None,
         task_params: object = None,
         prompt: object = None,
         on_prefill_progress: object = None,
         distributed_prompt_progress_callback: object = None,
         on_generation_token: object = None,
+        trace_rank: object = None,
+        **_kwargs: object,
     ) -> int:
         uid = self._uid_counter
         self._uid_counter += 1
@@ -232,10 +236,15 @@ class MockDistributedGroup:
         return 2
 
 
-def _run(tasks: Iterable[Task], send_after_ready: list[Task] | None = None):
+def _run(
+    tasks: Iterable[Task],
+    send_after_ready: list[Task] | None = None,
+    *,
+    model_id: ModelId = MODEL_A_ID,
+):
     bound_instance = get_bound_mlx_ring_instance(
         instance_id=INSTANCE_1_ID,
-        model_id=MODEL_A_ID,
+        model_id=model_id,
         runner_id=RUNNER_1_ID,
         node_id=NODE_A,
     )
@@ -400,6 +409,35 @@ def test_distributed_warmup_skip_env_is_ignored(
     events = _run([INIT_TASK, LOAD_TASK, WARMUP_TASK, SHUTDOWN_TASK])
 
     assert warmup_calls == 1
+    assert any(
+        isinstance(event, RunnerStatusUpdated)
+        and isinstance(event.runner_status, RunnerReady)
+        for event in events
+    )
+
+
+def test_distributed_gemma4_warmup_is_bypassed(
+    patch_out_mlx: pytest.MonkeyPatch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SKULK_SKIP_LLM_WARMUP", raising=False)
+    monkeypatch.setattr(mlx_runner, "initialize_mlx", make_nothin(MockDistributedGroup()))
+
+    warmup_calls = 0
+
+    def fake_warmup(self: object) -> None:
+        del self
+        nonlocal warmup_calls
+        warmup_calls += 1
+
+    monkeypatch.setattr(mlx_batch_generator.BatchGenerator, "warmup", fake_warmup)
+    monkeypatch.setattr(mlx_batch_generator.SequentialGenerator, "warmup", fake_warmup)
+
+    events = _run(
+        [INIT_TASK, LOAD_TASK, WARMUP_TASK, SHUTDOWN_TASK],
+        model_id=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"),
+    )
+
+    assert warmup_calls == 0
     assert any(
         isinstance(event, RunnerStatusUpdated)
         and isinstance(event.runner_status, RunnerReady)

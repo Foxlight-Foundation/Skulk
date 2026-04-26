@@ -27,6 +27,7 @@ from exo.shared.types.commands import (
     PlaceInstance,
     RequestEventLog,
     SendInputChunk,
+    SetTracingEnabled,
     TaskCancelled,
     TaskFinished,
     TestCommand,
@@ -51,6 +52,7 @@ from exo.shared.types.events import (
     TraceEventData,
     TracesCollected,
     TracesMerged,
+    TracingStateChanged,
 )
 from exo.shared.types.state import State
 from exo.shared.types.state_sync import StateSnapshot, StateSyncMessage
@@ -101,7 +103,7 @@ class Master:
     ):
         self.node_id = node_id
         self.session_id = session_id
-        self.state = State()
+        self.state = State(tracing_enabled=EXO_TRACING_ENABLED)
         self._tg: TaskGroup = TaskGroup()
         self.command_task_mapping: dict[CommandId, TaskId] = {}
         self.command_receiver = command_receiver
@@ -121,6 +123,26 @@ class Master:
         self._last_snapshot_idx = -1
         self._pending_traces: dict[TaskId, dict[int, list[TraceEventData]]] = {}
         self._expected_ranks: dict[TaskId, set[int]] = {}
+
+    def _configure_expected_trace_ranks(
+        self, task_id: TaskId, instance_id: InstanceId, *, trace_enabled: bool
+    ) -> None:
+        """Track which device ranks must report traces for a newly traced task."""
+
+        if not trace_enabled:
+            return
+
+        selected_instance = self.state.instances.get(instance_id)
+        if selected_instance is None:
+            logger.warning(
+                f"Unable to configure trace ranks for task {task_id}; instance {instance_id} not found"
+            )
+            return
+
+        self._expected_ranks[task_id] = {
+            shard.device_rank
+            for shard in selected_instance.shard_assignments.runner_to_shard.values()
+        }
 
     async def run(self):
         logger.info("Starting Master")
@@ -183,20 +205,28 @@ class Master:
                             )
 
                             task_id = TaskId()
+                            selected_instance_id = available_instance_ids[0]
+                            trace_enabled = self.state.tracing_enabled
                             generated_events.append(
                                 TaskCreated(
                                     task_id=task_id,
                                     task=TextGenerationTask(
                                         task_id=task_id,
                                         command_id=command.command_id,
-                                        instance_id=available_instance_ids[0],
+                                        instance_id=selected_instance_id,
                                         task_status=TaskStatus.Pending,
                                         task_params=command.task_params,
+                                        trace_enabled=trace_enabled,
                                     ),
                                 )
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
+                            self._configure_expected_trace_ranks(
+                                task_id,
+                                selected_instance_id,
+                                trace_enabled=trace_enabled,
+                            )
                         case ImageGeneration():
                             for instance in self.state.instances.values():
                                 if (
@@ -226,6 +256,7 @@ class Master:
 
                             task_id = TaskId()
                             selected_instance_id = available_instance_ids[0]
+                            trace_enabled = self.state.tracing_enabled
                             generated_events.append(
                                 TaskCreated(
                                     task_id=task_id,
@@ -235,22 +266,17 @@ class Master:
                                         instance_id=selected_instance_id,
                                         task_status=TaskStatus.Pending,
                                         task_params=command.task_params,
+                                        trace_enabled=trace_enabled,
                                     ),
                                 )
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
-
-                            if EXO_TRACING_ENABLED:
-                                selected_instance = self.state.instances.get(
-                                    selected_instance_id
-                                )
-                                if selected_instance:
-                                    ranks = set(
-                                        shard.device_rank
-                                        for shard in selected_instance.shard_assignments.runner_to_shard.values()
-                                    )
-                                    self._expected_ranks[task_id] = ranks
+                            self._configure_expected_trace_ranks(
+                                task_id,
+                                selected_instance_id,
+                                trace_enabled=trace_enabled,
+                            )
                         case ImageEdits():
                             for instance in self.state.instances.values():
                                 if (
@@ -280,6 +306,7 @@ class Master:
 
                             task_id = TaskId()
                             selected_instance_id = available_instance_ids[0]
+                            trace_enabled = self.state.tracing_enabled
                             generated_events.append(
                                 TaskCreated(
                                     task_id=task_id,
@@ -289,22 +316,17 @@ class Master:
                                         instance_id=selected_instance_id,
                                         task_status=TaskStatus.Pending,
                                         task_params=command.task_params,
+                                        trace_enabled=trace_enabled,
                                     ),
                                 )
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
-
-                            if EXO_TRACING_ENABLED:
-                                selected_instance = self.state.instances.get(
-                                    selected_instance_id
-                                )
-                                if selected_instance:
-                                    ranks = set(
-                                        shard.device_rank
-                                        for shard in selected_instance.shard_assignments.runner_to_shard.values()
-                                    )
-                                    self._expected_ranks[task_id] = ranks
+                            self._configure_expected_trace_ranks(
+                                task_id,
+                                selected_instance_id,
+                                trace_enabled=trace_enabled,
+                            )
                         case TextEmbedding():
                             for instance in self.state.instances.values():
                                 if (
@@ -333,20 +355,32 @@ class Master:
                             )
 
                             task_id = TaskId()
+                            selected_instance_id = available_instance_ids[0]
+                            trace_enabled = self.state.tracing_enabled
                             generated_events.append(
                                 TaskCreated(
                                     task_id=task_id,
                                     task=TextEmbeddingTask(
                                         task_id=task_id,
                                         command_id=command.command_id,
-                                        instance_id=available_instance_ids[0],
+                                        instance_id=selected_instance_id,
                                         task_status=TaskStatus.Pending,
                                         task_params=command.task_params,
+                                        trace_enabled=trace_enabled,
                                     ),
                                 )
                             )
 
                             self.command_task_mapping[command.command_id] = task_id
+                            self._configure_expected_trace_ranks(
+                                task_id,
+                                selected_instance_id,
+                                trace_enabled=trace_enabled,
+                            )
+                        case SetTracingEnabled():
+                            generated_events.append(
+                                TracingStateChanged(enabled=command.enabled)
+                            )
                         case DeleteInstance():
                             placement = delete_instance(command, self.state.instances)
                             transition_events = get_transition_events(
@@ -491,6 +525,11 @@ class Master:
                     if isinstance(event, TracesCollected):
                         await self._handle_traces_collected(event)
                         continue
+
+                    if isinstance(event, TaskDeleted):
+                        for command_id, task_id in list(self.command_task_mapping.items()):
+                            if task_id == event.task_id:
+                                self.command_task_mapping.pop(command_id, None)
 
                     logger.debug(f"Master indexing event: {str(event)[:100]}")
                     indexed = IndexedEvent(event=event, idx=len(self._event_log))

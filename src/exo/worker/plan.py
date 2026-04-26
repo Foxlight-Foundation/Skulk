@@ -2,6 +2,11 @@
 
 from collections.abc import Mapping, Sequence
 
+from exo.shared.models.model_cards import (
+    OutputParserType,
+    PromptRendererType,
+    ToolCallFormat,
+)
 from exo.shared.types.chunks import InputImageChunk
 from exo.shared.types.common import CommandId, NodeId
 from exo.shared.types.tasks import (
@@ -40,6 +45,7 @@ from exo.shared.types.worker.runners import (
     RunnerStatus,
     RunnerWarmingUp,
 )
+from exo.shared.types.worker.shards import ShardMetadata
 from exo.worker.runner.runner_supervisor import RunnerSupervisor
 
 
@@ -247,6 +253,17 @@ def _ready_to_warmup(
         world_size = shard.world_size
 
         is_runner_loaded = isinstance(runner.status, RunnerLoaded)
+        peer_warmup_statuses: tuple[type[RunnerStatus], ...]
+        rank_zero_peer_warmup_statuses: tuple[type[RunnerStatus], ...]
+        if _uses_independent_distributed_warmup(shard):
+            # Gemma 4 distributed synthetic warmup is intentionally skipped by
+            # the runner, so each shard can advance from Loaded to Ready without
+            # needing peers to remain parked in WarmingUp.
+            peer_warmup_statuses = (RunnerLoaded, RunnerWarmingUp, RunnerReady)
+            rank_zero_peer_warmup_statuses = (RunnerWarmingUp, RunnerReady)
+        else:
+            peer_warmup_statuses = (RunnerLoaded, RunnerWarmingUp)
+            rank_zero_peer_warmup_statuses = (RunnerWarmingUp,)
 
         assert device_rank < world_size
         assert device_rank >= 0
@@ -255,7 +272,7 @@ def _ready_to_warmup(
         accepting_ranks_ready = device_rank > 0 and all(
             isinstance(
                 all_runners.get(global_runner_id, None),
-                (RunnerLoaded, RunnerWarmingUp),
+                peer_warmup_statuses,
             )
             for global_runner_id in shard_assignments.runner_to_shard
         )
@@ -264,7 +281,7 @@ def _ready_to_warmup(
         connecting_rank_ready = device_rank == 0 and all(
             isinstance(
                 all_runners.get(global_runner_id, None),
-                RunnerWarmingUp,
+                rank_zero_peer_warmup_statuses,
             )
             for global_runner_id in shard_assignments.runner_to_shard
             if global_runner_id != runner_id
@@ -274,6 +291,30 @@ def _ready_to_warmup(
             return StartWarmup(instance_id=instance.instance_id)
 
     return None
+
+
+def _uses_independent_distributed_warmup(shard: ShardMetadata) -> bool:
+    """Return whether distributed warmup is independently skippable per shard."""
+    if shard.world_size <= 1:
+        return False
+
+    model_card = shard.model_card
+    normalized_model_id = str(model_card.model_id).lower().replace("_", "-")
+    if "gemma-4" in normalized_model_id or "gemma4" in normalized_model_id:
+        return True
+
+    if model_card.vision is not None and model_card.vision.model_type == "gemma4":
+        return True
+
+    runtime = model_card.runtime
+    if runtime is not None and (
+        runtime.prompt_renderer == PromptRendererType.Gemma4
+        or runtime.output_parser == OutputParserType.Gemma4
+    ):
+        return True
+
+    tooling = model_card.tooling
+    return tooling is not None and tooling.tool_call_format == ToolCallFormat.Gemma4
 
 
 def _pending_tasks(

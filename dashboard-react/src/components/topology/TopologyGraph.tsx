@@ -6,6 +6,8 @@ import { ClusterNode } from './ClusterNode';
 
 export interface TopologyGraphProps {
   data: TopologyData;
+  /** Called when a node diagnostics inspection is requested. */
+  onInspectNode?: (nodeId: string) => void;
 }
 
 interface NodePosition {
@@ -95,7 +97,7 @@ const Container = styled.div`
 
 /* ---- component ---- */
 
-export function TopologyGraph({ data }: TopologyGraphProps) {
+export function TopologyGraph({ data, onInspectNode }: TopologyGraphProps) {
   const [svgRef, { width, height }] = useResizeObserver<SVGSVGElement>();
 
   const handleRestart = useCallback((nodeId: string) => {
@@ -236,6 +238,7 @@ export function TopologyGraph({ data }: TopologyGraphProps) {
               edges={data.edges}
               allNodes={data.nodes}
               onRestart={() => handleRestart(pos.id)}
+              onInspect={() => onInspectNode?.(pos.id)}
             />
           ))}
         </g>

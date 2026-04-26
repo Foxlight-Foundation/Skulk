@@ -56,7 +56,7 @@ Example ``exo.yaml``::
       staging:
         enabled: true
         node_cache_path: ~/.exo/staging
-        cleanup_on_deactivate: true
+        cleanup_on_deactivate: false
 
       node_overrides:
         mac-studio-1:
@@ -144,14 +144,15 @@ class StagingNodeConfig(FrozenModel):
             subdirectory named ``<org>--<model>`` (e.g.
             ``mlx-community--Qwen3-30B-A3B-4bit``).
         cleanup_on_deactivate: When ``True``, staged files are deleted when
-            the model instance is shut down, freeing local disk space.
-            Set to ``False`` on the store host so the canonical copy is
-            never removed.
+            the model instance is shut down, freeing local disk space at the
+            cost of making later placements cold again. The default keeps the
+            staged files so large models can be reused from local storage;
+            use the explicit staging-cache purge endpoint for cleanup.
     """
 
     enabled: bool = True
     node_cache_path: str = "~/.exo/staging"
-    cleanup_on_deactivate: bool = True
+    cleanup_on_deactivate: bool = False
 
 
 @final

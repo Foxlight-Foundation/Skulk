@@ -182,6 +182,22 @@ The key pieces:
 
 This is opt-in. Without the logging config, skulk behaves identically to before.
 
+## Where Tracing Fits
+
+This branch contains a substantial tracing revamp, but it also preserves a
+baseline design note for the earlier tracing system because those earlier
+durability and locality constraints explain why the new control plane exists.
+
+That preserved tracing design note covers:
+
+- how the earlier image-centric tracing path collected per-rank spans
+- how the master merged traces back into the event stream
+- why trace content could be cross-node even while browsing remained local-file based
+- what operational limitations existed before the runtime cluster toggle and cluster browsing work
+
+Read the preserved [Traces system design](traces-system-design.md) when you need
+that historical or migration context.
+
 ## When to Read More
 
 If you are:
