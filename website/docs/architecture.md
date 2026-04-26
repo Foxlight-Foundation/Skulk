@@ -99,8 +99,10 @@ sequenceDiagram
     API->>API: normalize → internal Task
     API->>API: resolve ModelCard + capability profile
     API->>M: command: place / find runner
-    M->>W: GLOBAL_EVENTS: TaskAcknowledged
+    M->>W: GLOBAL_EVENTS: command-derived events (placement / task setup)
     W->>R: send Task on mp channel
+    R->>M: LOCAL_EVENTS: TaskAcknowledged
+    M->>W: GLOBAL_EVENTS: TaskAcknowledged (indexed)
     Note over R,Rn: distributed prefill via<br/>mlx.distributed (ring)
     R->>Rn: pipeline_parallel_prefill collectives
     Rn-->>R: returns through pipeline
@@ -120,7 +122,7 @@ The eleven steps in detail:
 2. **Normalization.** The adapter transforms the wire-format payload into an internal `Task` (`src/exo/shared/types/tasks.py`).
 3. **Capability resolution.** The API resolves the request against the bound `ModelCard` and computes a `ResolvedCapabilityProfile` (`src/exo/shared/models/capabilities.py`). This decides prompt rendering, output parsing, tool-call format, reasoning format, vision handling, and a few MLX runtime knobs.
 4. **Runner discovery.** The API resolves the request against running instances via `_resolve_and_validate_text_model`. If no instance is currently placed for the model, the API returns HTTP 404 — placement is **not** automatic on chat requests; operators must call `/instance` or `/place_instance` first to spin up the model. Once an instance exists, the API issues a command on the `COMMANDS` topic that the master indexes.
-5. **Worker acknowledges.** Each rank's worker sees a `TaskAcknowledged` event and forwards the task over a `mp.Queue` to its runner subprocess.
+5. **Worker dispatch and runner acknowledgement.** Each rank's worker forwards the `Task` over an `mp.Queue` to its runner subprocess. The runner emits `TaskAcknowledged` on its outgoing event channel (see `src/exo/worker/runner/llm_inference/runner.py:223`); the worker forwards that to `LOCAL_EVENTS`, the master indexes it, and it is republished on `GLOBAL_EVENTS` so every node observes the same acknowledged-state transition.
 6. **Prompt rendering.** The runner renders the chat history into tokens. Family-specific renderers (e.g., Gemma 4's `<|turn>` template, DeepSeek's DSML) handle the format. Vision preprocessing happens here for multimodal requests.
 7. **Distributed prefill.** Pipeline-parallel models split the layer stack across ranks. Each rank computes its slice's prefill, sends activations to the next rank via `mx.distributed.send`, and barriers synchronize phase transitions. Tensor-parallel models do per-layer collectives within a rank.
 8. **Decode loop.** Per token, the runner runs forward through its layer slice, exchanges activations with peers, samples (or accepts an injected token from speculative decoding), and emits the resulting chunk.
@@ -134,7 +136,7 @@ For non-streaming responses the same flow happens but the API accumulates chunks
 
 Skulk is event-sourced because distributed clusters need a clear notion of "what has the cluster agreed has happened." The mechanics:
 
-- **State** (`src/exo/shared/types/state.py`) is a frozen Pydantic model. It carries everything every node needs: topology, instances, runners, downloads, tracing flags, network stats, and so on.
+- **State** (`src/exo/shared/types/state.py`) is a Pydantic model treated as immutable by convention — `apply()` returns a new `State` rather than mutating in place, even though the model is not declared `frozen=True`. It carries everything every node needs: topology, instances, runners, downloads, tracing flags, network stats, and so on.
 - **`apply()`** (`src/exo/shared/apply.py`) is a pure function: `(State, IndexedEvent) -> State`. Given the same events in the same order, every node lands on byte-identical state.
 - **The master indexes events.** Every event arrives at the master via `LOCAL_EVENTS`, gets a monotonically increasing index, gets persisted to the disk event log, and gets republished on `GLOBAL_EVENTS`.
 - **Followers replay.** A new node bootstraps by requesting the current state snapshot, applying it, then replaying retained events at indices after the snapshot's high-water mark.
@@ -303,7 +305,7 @@ The shape of Skulk reflects deliberate trade-offs. Knowing which ones helps expl
 - **Event sourcing with disk persistence.** Cluster state is durable through restarts, but the event log grows with cluster activity. Snapshotting bounds the growth. The cost is that bootstrapping a fresh node is more elaborate than just "ask for current state."
 - **Ring transport by default.** `mlx.distributed`'s ring backend uses raw sockets; `jaccl` uses RDMA. Ring is simpler to set up but more sensitive to message-ordering bugs across consecutive jobs. RDMA needs hardware support and is more complex to configure.
 - **No central coordinator process.** The same binary is master / worker / API on every node; the master role is elected. There's no separate `skulk-master` daemon. The win is operational simplicity; the cost is that elections and master changeovers happen as ordinary events.
-- **Why `mp.Process` instead of `subprocess.Popen`.** `mp.Process` lets us pass typed channels (`mp.Queue`, `mp.Pipe`) between parent and child without serialization at the boundary, which is cheaper than pipe-based JSON and lets us share Pydantic models directly.
+- **Why `mp.Process` instead of `subprocess.Popen`.** `mp.Process` lets us pass typed channels (`mp.Queue`, `mp.Pipe`) between parent and child with native Python object transport (pickle under the hood). We avoid hand-written JSON serialization on this boundary and can share Pydantic models directly; pickle is still doing wire-format work, but it preserves Python types end-to-end.
 
 ## Where things live
 

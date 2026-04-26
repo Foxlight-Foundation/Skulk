@@ -16,7 +16,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 - **Role:** elects + acts as cluster coordinator; indexes events; plans instance placements; publishes snapshots
 - **Lives in:** `src/exo/master/main.py`
-- **Owns:** the authoritative event log (via `DiskEventLog`); the `_master_node_id` source of truth
+- **Owns:** the authoritative event log (via `DiskEventLog`); the indexer that assigns monotonic indices to events; the placement planner. Master identity itself lives outside the master process — each node tracks the current master independently via the election protocol (`src/exo/shared/election.py`); the `_master_node_id` cache is held on the API side at `src/exo/api/main.py:461`.
 - **Communicates via:** `LOCAL_EVENTS` (consumes), `GLOBAL_EVENTS` (publishes indexed events), `COMMANDS` (consumes), `STATE_SYNC_MESSAGES` (publishes snapshots)
 - **Election:** `src/exo/shared/election.py` — bully algorithm; a single master at a time
 - **Failover:** transparent via re-election; new master picks up from the disk event log
@@ -92,7 +92,7 @@ Defined in `src/exo/routing/topics.py`.
 | `GLOBAL_EVENTS` | `GlobalForwarderEvent` | indexed `Event` (post-master indexing) | Master | All nodes |
 | `LOCAL_EVENTS` | `LocalForwarderEvent` | un-indexed `Event` | Workers, API | Master |
 | `COMMANDS` | `ForwarderCommand` | `Command` (`PlaceInstance`, `DeleteInstance`, `TaskFinished`, `SetTracingEnabled`, etc.) | Workers, API | Master |
-| `DOWNLOAD_COMMANDS` | `ForwarderDownloadCommand` | `DownloadCommand` (`SyncConfig`, model store ops) | Master, Workers | All nodes |
+| `DOWNLOAD_COMMANDS` | `ForwarderDownloadCommand` | `DownloadCommand` (`StartDownload`, `DeleteDownload`, `CancelDownload`, `SyncConfig`, `PurgeStagingCache`, `RestartNode`) | API (download/restart/sync admin ops), Master, Workers | All nodes |
 | `STATE_SYNC_MESSAGES` | `StateSyncMessage` | bidirectional: followers publish `kind="request"` for snapshot/config bootstrap; master publishes `kind="response"` with the requested payload (`StateSnapshotHydrated` etc.) | All nodes (request: followers; response: master) | All nodes |
 | `ELECTION_MESSAGES` | `ElectionMessage` | bully election rounds | All nodes | All nodes |
 | `CONNECTION_MESSAGES` | libp2p connection updates | peer arrivals / departures | Router | All nodes |
@@ -130,8 +130,8 @@ Discriminated union at `src/exo/shared/types/commands.py`. Carried as `Forwarder
 |---|---|---|
 | `PlaceInstance` | Spin up a model on the cluster | Pick ranks based on memory + topology; emit `InstanceCreated` |
 | `DeleteInstance` | Tear down a placed model | Emit `InstanceDeleted`; workers tear down runners |
-| `TaskFinished` | Mark a streaming task complete | Emit `TaskStatusUpdated(Complete)` and `TaskDeleted` |
-| `TaskFailed` | Mark a streaming task failed | Emit `TaskStatusUpdated(Failed)` |
+| `TaskFinished` | Mark a streaming task complete (sent by API on stream end) | Emit `TaskDeleted` (`TaskStatusUpdated(Complete)` is emitted earlier on the chunk path, not from `TaskFinished` directly) |
+| `TaskCancelled` | Cancel an in-flight command (sent by API on `/v1/cancel`) | Emit `TaskStatusUpdated(Cancelled)` |
 | `SetTracingEnabled` | Cluster-wide tracing toggle | Emit `TracingStateChanged` |
 | `AddCustomModelCard` | User-added model card | Emit `CustomModelCardAdded`; nodes persist locally |
 | `DeleteCustomModelCard` | Remove user card | Emit `CustomModelCardDeleted` |
@@ -264,15 +264,14 @@ Lives in `src/exo/api/main.py` (route registration in `API.__init__`).
 
 ### State
 
-`src/exo/shared/types/state.py`. Frozen, applied by `apply()`:
+`src/exo/shared/types/state.py`. Treated as immutable by convention (replaced wholesale by `apply()` rather than mutated in place); the model itself is not declared `frozen=True` on `model_config`, so direct mutation is technically possible but considered a bug at every call site.
 
-- `topology` — node-level info (memory, hostname, namespace)
 - `instances: Mapping[InstanceId, Instance]` — placed model instances (each carries shard assignments + per-runner state)
 - `runners: Mapping[RunnerId, RunnerStatus]` — per-runner status union
 - `downloads: Mapping[NodeId, Sequence[DownloadProgress]]` — in-flight model downloads per node
 - `tasks: Mapping[TaskId, Task]` — in-flight or recently-completed tasks
 - `last_seen: Mapping[NodeId, datetime]` — peer liveness timestamps
-- `topology: Topology` — cluster-wide node graph + capabilities
+- `topology: Topology` — cluster-wide node graph + capabilities (encoded/decoded via `TopologySnapshot` for JSON round-tripping)
 - `tracing_enabled: bool` — cluster-wide tracing flag
 - `last_event_applied_idx: int` — water mark for the local apply
 - `node_identities`, `node_memory`, `node_disk`, `node_system`, `node_network`, `node_thunderbolt`, `node_thunderbolt_bridge`, `node_rdma_ctl: Mapping[NodeId, *]` — granular per-node telemetry that updates at independent frequencies
