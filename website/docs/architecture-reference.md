@@ -87,14 +87,15 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 Defined in `src/exo/routing/topics.py`.
 
-| Topic | Payload type | Publisher | Consumer |
-|---|---|---|---|
-| `GLOBAL_EVENTS` | `IndexedEvent` | Master | All nodes |
-| `LOCAL_EVENTS` | `Event` | Workers, API | Master |
-| `COMMANDS` | `Command` | Workers, API | Master |
-| `STATE_SYNC_MESSAGES` | `StateSnapshotHydrated` etc. | Master | Followers |
-| `ELECTION_MESSAGES` | `ElectionMessage` | All nodes | All nodes |
-| `CONNECTION_MESSAGES` | libp2p connection updates | Router | All nodes |
+| Topic | Wire payload type | Inner payload | Publisher | Consumer |
+|---|---|---|---|---|
+| `GLOBAL_EVENTS` | `GlobalForwarderEvent` | indexed `Event` (post-master indexing) | Master | All nodes |
+| `LOCAL_EVENTS` | `LocalForwarderEvent` | un-indexed `Event` | Workers, API | Master |
+| `COMMANDS` | `ForwarderCommand` | `Command` (`PlaceInstance`, `DeleteInstance`, `TaskFinished`, `SetTracingEnabled`, etc.) | Workers, API | Master |
+| `DOWNLOAD_COMMANDS` | `ForwarderDownloadCommand` | `DownloadCommand` (`SyncConfig`, model store ops) | Master, Workers | All nodes |
+| `STATE_SYNC_MESSAGES` | `StateSyncMessage` | snapshot bootstrap payloads (`StateSnapshotHydrated` etc.) | Master | Followers |
+| `ELECTION_MESSAGES` | `ElectionMessage` | bully election rounds | All nodes | All nodes |
+| `CONNECTION_MESSAGES` | libp2p connection updates | peer arrivals / departures | Router | All nodes |
 
 ## Events
 
@@ -107,8 +108,7 @@ Discriminated union at `src/exo/shared/types/events.py`. Selected events:
 | `RunnerStatusUpdated` | Runner subprocess transitions state | All nodes |
 | `RunnerFailed` | Runner crashes or exits unexpectedly | All nodes |
 | `TaskAcknowledged` | Worker accepts a task | All nodes |
-| `TaskStatusUpdated` | Task transitions state (Running, Failed, Cancelled, Complete) | All nodes |
-| `TaskFinished` | Command stream finalizes naturally | All nodes |
+| `TaskStatusUpdated` | Task transitions state (`Running`, `Failed`, `Cancelled`, `Complete`); natural completion is the `Complete` variant, driven by the `TaskFinished` command | All nodes |
 | `TaskFailed` | Command stream finalizes with error | All nodes |
 | `TaskDeleted` | Task is purged from cluster state | All nodes |
 | `ChunkGenerated` | Runner emits an output chunk (token, tool call, error) | API queue subscribers |
@@ -120,17 +120,34 @@ Apply function: `src/exo/shared/apply.py::apply` — pure `(State, IndexedEvent)
 
 ## Commands
 
-Discriminated union at `src/exo/shared/types/commands.py`. Selected commands:
+Two distinct command unions on two distinct topics:
+
+### COMMANDS topic — `Command` union
+
+Discriminated union at `src/exo/shared/types/commands.py`. Carried as `ForwarderCommand` over the `COMMANDS` pubsub topic.
 
 | Command | What it requests | Master action |
 |---|---|---|
 | `PlaceInstance` | Spin up a model on the cluster | Pick ranks based on memory + topology; emit `InstanceCreated` |
 | `DeleteInstance` | Tear down a placed model | Emit `InstanceDeleted`; workers tear down runners |
-| `CancelTask` | Cooperative task cancellation | Emit `TaskStatusUpdated(Cancelled)`; runners observe and terminate work |
+| `TaskFinished` | Mark a streaming task complete | Emit `TaskStatusUpdated(Complete)` and `TaskDeleted` |
+| `TaskFailed` | Mark a streaming task failed | Emit `TaskStatusUpdated(Failed)` |
 | `SetTracingEnabled` | Cluster-wide tracing toggle | Emit `TracingStateChanged` |
 | `AddCustomModelCard` | User-added model card | Emit `CustomModelCardAdded`; nodes persist locally |
 | `DeleteCustomModelCard` | Remove user card | Emit `CustomModelCardDeleted` |
-| `SyncConfig` | Broadcast cluster config | Master writes to its own `skulk.yaml`; followers observe via gossipsub |
+
+### DOWNLOAD_COMMANDS topic — `DownloadCommand` union
+
+Discriminated union at `src/exo/shared/types/commands.py`. Carried as `ForwarderDownloadCommand` over the `DOWNLOAD_COMMANDS` pubsub topic. Used for cluster-wide config sync and model-store coordination — separated from the main command channel because these are typically larger payloads and have different retry semantics.
+
+| Command | What it requests |
+|---|---|
+| `SyncConfig` | Broadcast cluster config (`auth.api_keys` and `hf_token` stripped); followers observe and persist locally |
+| Model store ops | Download / staging coordination commands (see `src/exo/store/`) |
+
+### Tasks (not commands)
+
+Note `CancelTask` is a **task** (`src/exo/shared/types/tasks.py`), not a command. Tasks are work units the runner executes; commands are imperative requests to the master. Cooperative task cancellation is implemented as a `CancelTask` task delivered to the runner over the `mp.Queue`.
 
 ## API endpoints
 
@@ -159,7 +176,7 @@ Lives in `src/exo/api/main.py` (route registration in `API.__init__`).
 | `/models/add` | POST | Register a custom model card |
 | `/models/custom/{model_id}` | DELETE | Remove a custom card |
 | `/instance` | POST | Place an instance |
-| `/place_instance` | POST | (alias for `/instance`) |
+| `/place_instance` | POST | Place a model: master picks ranks. Takes `PlaceInstanceParams` (model id + placement preferences); not interchangeable with `/instance`, which takes a fully-specified `CreateInstanceParams`. |
 | `/instance/{instance_id}` | GET / DELETE | Fetch / delete an instance |
 | `/instance/placement` | GET | Compute placement preview |
 | `/instance/previews` | GET | List candidate placements |
@@ -212,7 +229,7 @@ Lives in `src/exo/api/main.py` (route registration in `API.__init__`).
 | `/store/registry` | GET | Model store registry |
 | `/store/models/{model_id}/download` | POST | Request store download |
 | `/store/models/{model_id}` | DELETE | Delete store model |
-| `/admin/restart/node/{node_id}` | POST | Request node restart |
+| `/admin/restart` | POST | Request node restart. Optional `node_id` query param targets a specific peer; without it, restarts the local node. |
 
 ### Bench
 
@@ -341,7 +358,8 @@ Selectable per-cluster via `inference.kv_cache_backend` config or `SKULK_KV_CACH
 | `turboquant` | Random orthogonal rotation + scalar quant | Storage savings, no decode perf benefit |
 | `turboquant_adaptive` | TurboQuant with FP16 edges | Slightly better quality |
 | `optiq` | Rotated-space attention trick | Decode-time perf benefit; falls back to default for incompatible head dims |
-| `rotorquant` | Block rotations + deferred quant (research) | Unmerged; see PR #103 |
+
+RotorQuant (block rotations + deferred quant) is research and lives in PR #103; it is not yet in the merged backend set. Verify the current valid values against `src/exo/worker/engines/mlx/constants.py`.
 
 Selection logic: `src/exo/worker/engines/mlx/cache.py::make_kv_cache`. Some backends fall back to `default` for incompatible models (e.g., `optiq` for non-divisible head_dim).
 

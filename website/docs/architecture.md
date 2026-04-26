@@ -51,7 +51,7 @@ flowchart TB
 
 Each subsystem has its own concern:
 
-- **Router** wraps libp2p (via PyO3 Rust bindings) and exposes typed pub/sub topics: `GLOBAL_EVENTS`, `LOCAL_EVENTS`, `COMMANDS`, `STATE_SYNC_MESSAGES`, `ELECTION_MESSAGES`, `CONNECTION_MESSAGES`. Components subscribe by topic; payloads are validated Pydantic types.
+- **Router** wraps libp2p (via PyO3 Rust bindings) and exposes typed pub/sub topics: `GLOBAL_EVENTS`, `LOCAL_EVENTS`, `COMMANDS`, `DOWNLOAD_COMMANDS`, `STATE_SYNC_MESSAGES`, `ELECTION_MESSAGES`, `CONNECTION_MESSAGES`. Components subscribe by topic; payloads are validated Pydantic types.
 - **Election** runs the bully algorithm and broadcasts `ELECTION_MESSAGES`. The winner takes the master role.
 - **Master** indexes incoming events into the event log (writing them to disk via `DiskEventLog`), publishes indexed events on `GLOBAL_EVENTS` for followers, and decides instance placements when a model is launched.
 - **Worker** receives indexed events, applies them to its local view of `State`, downloads model weights to disk when assigned a placement, and spawns / supervises runner subprocesses.
@@ -147,8 +147,8 @@ Why event sourcing here:
 
 Operationally, the rule of thumb:
 
-- **Events are past tense** ("`TaskFinished`", "`InstanceCreated`", "`RunnerStatusUpdated`"). Once published, they're immutable history.
-- **Commands are imperative** ("`PlaceInstance`", "`DeleteInstance`", "`SetTracingEnabled`"). They request the system change state.
+- **Events are past tense** ("`TaskStatusUpdated`", "`InstanceCreated`", "`RunnerStatusUpdated`", "`TaskDeleted`"). Once published, they're immutable history.
+- **Commands are imperative** ("`PlaceInstance`", "`DeleteInstance`", "`TaskFinished`", "`SetTracingEnabled`"). They request the system change state.
 
 A snapshot-bootstrap rollout has one operational rule: once a master starts compacting old replay history after writing snapshots, older nodes that only know how to "replay from event 0" should be considered temporary guests during the rollout window. Upgrade all nodes before relying on bounded retention as the steady state.
 
@@ -187,7 +187,8 @@ Skulk supports multiple KV cache backends, selectable per-cluster via config:
 - `mlx_quantized` — upstream MLX quantized cache
 - `turboquant` / `turboquant_adaptive` — random-orthogonal-rotation + scalar quant
 - `optiq` — rotated-space attention trick, decode-time perf benefit
-- `rotorquant` — block rotations + deferred quantization (research, see PR #103)
+
+(RotorQuant is a research backend tracked under PR #103 and is not yet in the merged backend set; check `src/exo/worker/engines/mlx/constants.py` for the current valid values.)
 
 The choice affects memory footprint and decode throughput. See [KV Cache Backends](kv-cache-backends) for the operator-facing trade-offs.
 
