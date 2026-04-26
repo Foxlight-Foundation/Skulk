@@ -231,7 +231,7 @@ const SidebarIcon = () => <FiSidebar size={18} />;
 const ClusterIcon = () => <MdHub size={16} />;
 const StoreIcon = () => <FiDatabase size={16} />;
 const ChatIcon = () => <FiMessageSquare size={16} />;
-const TraceIcon = () => <VscBug size={16} />;
+const ObservabilityIcon = () => <VscBug size={16} />;
 const SettingsIcon = () => <FiSettings size={16} />;
 
 function ProgressCircle({ count, percentage }: { count: number; percentage: number }) {
@@ -286,6 +286,12 @@ export function HeaderNav({
   const theme = useTheme() as Theme;
   const themeName = useUIStore((s) => s.theme);
   const toggleTheme = useUIStore((s) => s.toggleTheme);
+  // Observability panel is global UI state — the button toggles it open/closed and
+  // visually reflects whether it's currently visible. Distinct from `activeRoute`
+  // because the panel overlays the current route rather than navigating away.
+  const observabilityPanelOpen = useUIStore((s) => s.observabilityPanelOpen);
+  const openObservability = useUIStore((s) => s.openObservability);
+  const closeObservability = useUIStore((s) => s.closeObservability);
   const navigate = (route: NavRoute) => {
     onNavigate?.(route);
     if (route === 'cluster') onHome?.();
@@ -381,14 +387,15 @@ export function HeaderNav({
         </Button>
 
         <Button
-          variant={activeRoute === 'traces' ? 'outline' : 'ghost'}
+          variant={observabilityPanelOpen ? 'outline' : 'ghost'}
           size="lg"
           icon
-          onClick={() => navigate('traces')}
-          aria-label="Traces"
-          title="Traces"
+          onClick={() => (observabilityPanelOpen ? closeObservability() : openObservability())}
+          aria-label="Observability"
+          aria-pressed={observabilityPanelOpen}
+          title="Observability"
         >
-          <TraceIcon />
+          <ObservabilityIcon />
         </Button>
 
         <Button variant="ghost" size="lg" icon onClick={() => onOpenSettings?.()} aria-label="Settings">
