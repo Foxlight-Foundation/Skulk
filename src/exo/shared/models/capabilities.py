@@ -52,11 +52,66 @@ def _infer_family(model_id: ModelId, model_card: ModelCard | None) -> str:
     return family or "generic"
 
 
+def _is_gemma4_id(model_id: object) -> bool:
+    """Return whether a model id string contains a Gemma 4 marker.
+
+    Underscore-tolerant so cards using ``gemma_4`` and ``gemma-4`` both match.
+    Single source of truth for id-string-based detection used by both the
+    capability resolver (which has only an id at resolution time) and the
+    full ``is_gemma4_family`` predicate (which composes id + card-declared
+    hints).
+    """
+    normalized = str(model_id).lower().replace("_", "-")
+    return "gemma-4" in normalized or "gemma4" in normalized
+
+
 def _is_gemma4_family(profile_family: str, normalized_model_id: str) -> bool:
+    """Limited Gemma 4 check used inside ``resolve_model_capability_profile``.
+
+    Cannot consult ``card.runtime`` / ``card.tooling`` / ``card.vision``
+    because those fields are being computed at this stage of resolution.
+    For post-resolution use cases (the runner and the planner), prefer the
+    public ``is_gemma4_family(card)`` which incorporates those signals.
+    """
+    return _is_gemma4_id(normalized_model_id) or profile_family in {
+        "gemma4",
+        "gemma-4",
+    }
+
+
+def is_gemma4_family(
+    card: ModelCard | None = None,
+    model_id: ModelId | None = None,
+) -> bool:
+    """Return whether the model is in the Gemma 4 family.
+
+    At least one of ``card`` or ``model_id`` should be provided. Cards carry
+    declarative hints (``vision.model_type``, ``runtime.prompt_renderer``,
+    ``runtime.output_parser``, ``tooling.tool_call_format``) that allow
+    detection even when the model id doesn't visibly contain ``gemma-4``,
+    so a card is preferred when available.
+
+    This is the post-resolution consolidation of detection logic that was
+    previously duplicated across ``runner.py`` and ``plan.py``. See
+    ``_is_gemma4_family`` for the resolver-time variant.
+    """
+    target_id = (card.model_id if card is not None else None) or model_id
+    if target_id is not None and _is_gemma4_id(target_id):
+        return True
+    if card is None:
+        return False
+    if card.family in {"gemma4", "gemma-4"}:
+        return True
+    if card.vision is not None and card.vision.model_type == "gemma4":
+        return True
+    if card.runtime is not None and (
+        card.runtime.prompt_renderer == PromptRendererType.Gemma4
+        or card.runtime.output_parser == OutputParserType.Gemma4
+    ):
+        return True
     return (
-        "gemma-4" in normalized_model_id
-        or "gemma4" in normalized_model_id
-        or profile_family in {"gemma4", "gemma-4"}
+        card.tooling is not None
+        and card.tooling.tool_call_format == ToolCallFormat.Gemma4
     )
 
 

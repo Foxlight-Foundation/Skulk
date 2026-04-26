@@ -405,3 +405,195 @@ def test_resolve_model_capability_profile_keeps_native_multimodal_conservative_b
 
     assert profile.supports_image_input is True
     assert profile.supports_native_multimodal is False
+
+
+# ---------------------------------------------------------------------------
+# is_gemma4_family — consolidated detection predicate
+# ---------------------------------------------------------------------------
+
+
+def _bare_card(model_id: str, *, family: str = "") -> ModelCard:
+    """Build a minimal card with no gemma4 hints declared."""
+    return ModelCard(
+        model_id=ModelId(model_id),
+        storage_size=Memory.from_mb(100),
+        n_layers=10,
+        hidden_size=1024,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        family=family,
+        capabilities=["text"],
+    )
+
+
+def test_is_gemma4_family_matches_card_with_gemma_4_in_id() -> None:
+    """Gemma 4 cards from resources/ have ``gemma-4`` in the id and must match."""
+    from exo.shared.models.capabilities import is_gemma4_family
+
+    card = _bare_card("mlx-community/gemma-4-26b-a4b-it-4bit", family="gemma")
+    assert is_gemma4_family(card) is True
+
+
+def test_is_gemma4_family_matches_id_with_underscore_normalization() -> None:
+    """``gemma_4`` and ``gemma-4`` are both valid Gemma 4 markers."""
+    from exo.shared.models.capabilities import is_gemma4_family
+
+    assert is_gemma4_family(_bare_card("mlx-community/gemma_4_e4b_it")) is True
+    assert is_gemma4_family(_bare_card("mlx-community/gemma4-26b")) is True
+
+
+def test_is_gemma4_family_matches_card_family_field_explicitly() -> None:
+    """If a card doesn't have ``gemma-4`` in the id, family field still detects."""
+    from exo.shared.models.capabilities import is_gemma4_family
+
+    card = _bare_card("mlx-community/some-model", family="gemma4")
+    assert is_gemma4_family(card) is True
+
+
+def test_is_gemma4_family_matches_via_vision_model_type() -> None:
+    """Vision-declared gemma4 model_type wins even without id/family hints."""
+    from exo.shared.models.capabilities import is_gemma4_family
+    from exo.shared.models.model_cards import VisionCardConfig
+
+    card = _bare_card("mlx-community/relabelled-model")
+    card = card.model_copy(
+        update={
+            "vision": VisionCardConfig(
+                image_token_id=258880,
+                model_type="gemma4",
+                boi_token_id=255999,
+                eoi_token_id=258882,
+            )
+        }
+    )
+    assert is_gemma4_family(card) is True
+
+
+def test_is_gemma4_family_matches_via_runtime_prompt_renderer() -> None:
+    """Cards declaring runtime.prompt_renderer = Gemma4 are gemma4."""
+    from exo.shared.models.capabilities import is_gemma4_family
+
+    card = _bare_card("mlx-community/relabelled-model")
+    card = card.model_copy(
+        update={
+            "runtime": RuntimeCapabilityCardConfig(prompt_renderer=PromptRendererType.Gemma4)
+        }
+    )
+    assert is_gemma4_family(card) is True
+
+
+def test_is_gemma4_family_matches_via_runtime_output_parser() -> None:
+    from exo.shared.models.capabilities import is_gemma4_family
+
+    card = _bare_card("mlx-community/relabelled-model")
+    card = card.model_copy(
+        update={
+            "runtime": RuntimeCapabilityCardConfig(output_parser=OutputParserType.Gemma4)
+        }
+    )
+    assert is_gemma4_family(card) is True
+
+
+def test_is_gemma4_family_matches_via_tooling_format() -> None:
+    """Cards declaring tooling.tool_call_format = Gemma4 are gemma4."""
+    from exo.shared.models.capabilities import is_gemma4_family
+
+    card = _bare_card("mlx-community/relabelled-model")
+    card = card.model_copy(
+        update={"tooling": ToolingCardConfig(tool_call_format=ToolCallFormat.Gemma4)}
+    )
+    assert is_gemma4_family(card) is True
+
+
+def test_is_gemma4_family_rejects_non_gemma_models() -> None:
+    """Plain non-Gemma cards must not match."""
+    from exo.shared.models.capabilities import is_gemma4_family
+
+    for model_id in (
+        "mlx-community/Qwen2.5-7B-Instruct",
+        "mlx-community/Llama-3.3-70B",
+        "mlx-community/DeepSeek-V3.2",
+        "mlx-community/Gemma-3n-E4B-it",
+        "mlx-community/Gemma-2-9b-it",
+    ):
+        card = _bare_card(model_id)
+        assert is_gemma4_family(card) is False, (
+            f"non-gemma4 card {model_id} should not be detected as gemma4"
+        )
+
+
+def test_is_gemma4_family_handles_none_card_with_id_fallback() -> None:
+    """Detection should still work via id alone when no card is supplied."""
+    from exo.shared.models.capabilities import is_gemma4_family
+
+    assert (
+        is_gemma4_family(model_id=ModelId("mlx-community/gemma-4-26b-a4b-it-4bit"))
+        is True
+    )
+    assert (
+        is_gemma4_family(model_id=ModelId("mlx-community/Llama-3.3-70B"))
+        is False
+    )
+
+
+def test_is_gemma4_family_handles_no_inputs_at_all() -> None:
+    """Defensive: both arguments None returns False without raising."""
+    from exo.shared.models.capabilities import is_gemma4_family
+
+    assert is_gemma4_family() is False
+    assert is_gemma4_family(card=None, model_id=None) is False
+
+
+def test_is_gemma4_family_resource_cards_all_match() -> None:
+    """Every Gemma 4 model card shipped under resources/ must be detected."""
+    import tomllib
+    from pathlib import Path
+
+    from exo.shared.models.capabilities import is_gemma4_family
+
+    cards_dir = (
+        Path(__file__).resolve().parents[4]
+        / "resources"
+        / "inference_model_cards"
+    )
+    gemma4_paths = list(cards_dir.glob("*gemma-4*.toml")) + list(
+        cards_dir.glob("*gemma_4*.toml")
+    )
+    assert gemma4_paths, (
+        "expected gemma-4 cards under resources/inference_model_cards/"
+    )
+    for path in gemma4_paths:
+        with path.open("rb") as fp:
+            data = tomllib.load(fp)
+        card = ModelCard.model_validate(data)
+        assert is_gemma4_family(card) is True, f"{path.name} should be gemma4"
+
+
+def test_is_gemma4_family_resource_cards_other_families_dont_match() -> None:
+    """Sanity: non-Gemma-4 cards under resources/ must not detect as gemma4."""
+    import tomllib
+    from pathlib import Path
+
+    from exo.shared.models.capabilities import is_gemma4_family
+
+    cards_dir = (
+        Path(__file__).resolve().parents[4]
+        / "resources"
+        / "inference_model_cards"
+    )
+    non_gemma4_paths = [
+        path
+        for path in cards_dir.glob("*.toml")
+        if "gemma-4" not in path.name and "gemma_4" not in path.name
+    ]
+    if not non_gemma4_paths:
+        return  # No control set; skip silently rather than fail
+    for path in non_gemma4_paths:
+        with path.open("rb") as fp:
+            data = tomllib.load(fp)
+        card = ModelCard.model_validate(data)
+        # Some non-gemma-4 cards may legitimately set tooling.tool_call_format
+        # to something other than Gemma4 — those must not be detected as gemma4.
+        assert is_gemma4_family(card) is False, (
+            f"{path.name} should not match the gemma4 predicate"
+        )
