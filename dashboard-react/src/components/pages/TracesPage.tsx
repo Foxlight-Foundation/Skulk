@@ -183,12 +183,26 @@ export function TracesPage({ scope, onScopeChange, onOpenTrace }: TracesPageProp
     });
   }, [categoryOrTagFilter, modelFilter, sourceNodeFilter, taskKindFilter, toolOnly, traces]);
 
-  const allSelected = scope === 'local' && filteredTraces.length > 0 && selectedIds.size === filteredTraces.length;
+  // Visible-only view of the selection. Without this, ``selectedIds`` can hold
+  // task IDs that the active filters have hidden from view, and the Delete
+  // button would silently target invisible items the operator never reviewed.
+  // Pruning to ``filteredTraces`` keeps the UX honest: the count always
+  // matches what the user sees, and Delete only operates on visible rows.
+  const visibleSelectedIds = useMemo(() => {
+    if (selectedIds.size === 0) return new Set<string>();
+    const visible = new Set<string>();
+    for (const trace of filteredTraces) {
+      if (selectedIds.has(trace.taskId)) visible.add(trace.taskId);
+    }
+    return visible;
+  }, [filteredTraces, selectedIds]);
+
+  const allSelected = scope === 'local' && filteredTraces.length > 0 && visibleSelectedIds.size === filteredTraces.length;
 
   const selectedCountLabel = useMemo(() => {
-    const count = selectedIds.size;
+    const count = visibleSelectedIds.size;
     return count === 1 ? '1 trace selected' : `${count} traces selected`;
-  }, [selectedIds]);
+  }, [visibleSelectedIds]);
 
   const toggleSelect = useCallback((taskId: string) => {
     if (scope !== 'local') return;
@@ -208,8 +222,11 @@ export function TracesPage({ scope, onScopeChange, onOpenTrace }: TracesPageProp
   }, [allSelected, filteredTraces]);
 
   const handleDelete = useCallback(async () => {
-    if (scope !== 'local' || selectedIds.size === 0) return;
-    const count = selectedIds.size;
+    // Operate on the visible-only selection. ``selectedIds`` may still
+    // contain hidden IDs from earlier filter states; deleting those would
+    // remove items the operator never confirmed they wanted gone.
+    if (scope !== 'local' || visibleSelectedIds.size === 0) return;
+    const count = visibleSelectedIds.size;
     const confirmed = window.confirm(
       `Delete ${count} trace${count === 1 ? '' : 's'}? This only removes local trace files on this node.`,
     );
@@ -221,7 +238,7 @@ export function TracesPage({ scope, onScopeChange, onOpenTrace }: TracesPageProp
       const response = await fetch('/v1/traces/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ taskIds: [...selectedIds] }),
+        body: JSON.stringify({ taskIds: [...visibleSelectedIds] }),
       });
       if (!response.ok) {
         throw new Error(`Failed to delete traces (${response.status})`);
@@ -233,7 +250,7 @@ export function TracesPage({ scope, onScopeChange, onOpenTrace }: TracesPageProp
     } finally {
       setDeleting(false);
     }
-  }, [refresh, scope, selectedIds]);
+  }, [refresh, scope, visibleSelectedIds]);
 
   return (
     <Page>
@@ -335,7 +352,7 @@ export function TracesPage({ scope, onScopeChange, onOpenTrace }: TracesPageProp
           <Button variant={toolOnly ? 'primary' : 'outline'} size="sm" onClick={() => setToolOnly((current) => !current)}>
             Tool activity only
           </Button>
-          {scope === 'local' && selectedIds.size > 0 && (
+          {scope === 'local' && visibleSelectedIds.size > 0 && (
             <>
               <SelectionLabel>{selectedCountLabel}</SelectionLabel>
               <Button variant="danger" size="sm" onClick={() => void handleDelete()} loading={deleting}>

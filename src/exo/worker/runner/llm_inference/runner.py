@@ -1,3 +1,4 @@
+import contextlib
 import os
 import time
 from dataclasses import dataclass
@@ -486,6 +487,30 @@ class Runner:
             )
         )
 
+    def _flush_unfinished_trace_sessions(self) -> None:
+        """Best-effort flush of any active traced tasks still in flight.
+
+        Runs on the exception/abort path of ``handle_generation_tasks``. Without
+        it, a raised ``generator.step()`` (parsing exception, model error,
+        Shutdown received mid-flight) would leave ``_trace_sessions`` entries
+        behind on the runner *and* cause the master to wait forever for
+        ``TracesCollected`` from this rank — leaking the cluster trace into
+        ``_pending_traces`` permanently. The aborted marker tells the
+        downstream merge that this rank's trace is not a clean completion.
+        """
+        for task_id, task in list(self.active_tasks.items()):
+            if not task.trace_enabled:
+                continue
+            with contextlib.suppress(Exception):
+                record_trace_marker(
+                    "aborted",
+                    self.device_rank,
+                    task_id=task_id,
+                    tags=["error", "trace_abort"],
+                )
+            with contextlib.suppress(Exception):
+                self._flush_trace_session(task_id)
+
     def handle_generation_tasks(self, starting_task: TextGeneration):
         assert isinstance(self.current_status, RunnerReady)
         assert isinstance(self.generator, InferenceGenerator)
@@ -501,6 +526,20 @@ class Runner:
 
         self.submit_text_generation(starting_task)
 
+        try:
+            return self._run_generation_loop()
+        finally:
+            # Flush traces on every exit path including exceptions —
+            # without this the master's _pending_traces leaks forever for
+            # any task that was traced when step() raised.
+            self._flush_unfinished_trace_sessions()
+
+    def _run_generation_loop(self) -> "ExitCode":
+        # Re-assert here so type narrowing flows into the loop body — the
+        # caller already asserts these but pyright narrowing doesn't
+        # transit a method-call boundary.
+        assert isinstance(self.current_status, RunnerRunning)
+        assert isinstance(self.generator, InferenceGenerator)
         while self.active_tasks:
             self._generator_step_count += 1
             active_ids = [str(task_id) for task_id in self.active_tasks]

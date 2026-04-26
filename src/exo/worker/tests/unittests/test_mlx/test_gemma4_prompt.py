@@ -71,6 +71,35 @@ def test_render_gemma4_prompt_includes_optional_image_labels():
     assert "compare\nImage 1:\n<|image|>" in prompt
 
 
+def test_render_gemma4_prompt_unlabeled_image_matches_reference_shape():
+    """Unlabeled images sit flush against adjacent text — that's the reference.
+
+    The Gemma 4 chat template is trained with no separator between ``<|image|>``
+    and the surrounding text in the unlabeled case (which is the common
+    single-image shape). Earlier review feedback suggested inserting a
+    newline boundary; doing so breaks ``test_multimodal_prompt_matches_reference_shape``
+    because the model was trained on the no-separator form. This test pins
+    that expectation so future "tidy up the rendering" attempts don't
+    silently regress multimodal instruction fidelity.
+    """
+    prompt = render_gemma4_prompt(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "before"},
+                    {"type": "image"},
+                    {"type": "text", "text": "after"},
+                ],
+            }
+        ],
+        add_generation_prompt=False,
+    )
+
+    # Reference shape: ``before<|image|>after`` with no inserted boundary.
+    assert "before<|image|>after" in prompt
+
+
 class _GemmaPromptTokenizer:
     def decode(self, _token_ids: list[int]) -> str:
         raise AssertionError("Gemma 4 prompt debug test should not decode BOI/EOI")
