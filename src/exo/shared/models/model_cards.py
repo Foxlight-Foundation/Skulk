@@ -234,6 +234,18 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
 
     prompt_renderer: PromptRendererType | None = None
     output_parser: OutputParserType | None = None
+    metal_fast_synch: bool | None = None
+    """Per-model override for the MLX ``MLX_METAL_FAST_SYNCH`` flag.
+
+    ``None`` means "no opinion" — fall through to the cluster default
+    selected by the runner. Set explicitly to ``False`` for models that
+    deadlock under FAST_SYNCH on the ring backend (e.g. gemma-4 with
+    multimodal load: the Metal command queue wedges in
+    ``pipeline_last_eval_output``, transitively starves WindowServer,
+    and trips the macOS kernel watchdog into a panic). Set explicitly
+    to ``True`` for models that have been measured to benefit and are
+    known to be safe under the deployment's collective backend.
+    """
 
     @field_validator("prompt_renderer", mode="before")
     @classmethod

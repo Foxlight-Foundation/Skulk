@@ -7,6 +7,8 @@ import time
 
 import loguru
 
+from exo.shared.constants import preferred_env_value
+from exo.shared.models.model_cards import RuntimeCapabilityCardConfig
 from exo.shared.types.diagnostics import RunnerDiagnosticContext, RunnerDiagnosticUpdate
 from exo.shared.types.events import Event, RunnerStatusUpdated
 from exo.shared.types.tasks import Task, TaskId
@@ -22,6 +24,46 @@ logger: "loguru.Logger" = loguru.logger
 
 # Set by signal handler so the layer-by-layer loading loop can bail early.
 shutdown_requested: bool = False
+
+
+FAST_SYNCH_CLUSTER_DEFAULT: bool = True
+"""Cluster-wide default for ``MLX_METAL_FAST_SYNCH`` when neither the operator
+nor the model card has expressed a preference. Currently True for backwards
+compatibility with existing deployments. Flipping this default is tracked
+under the env-var → typed-config migration; do not flip without measuring
+the perf delta on a representative workload first."""
+
+
+def resolve_metal_fast_synch(card_runtime: RuntimeCapabilityCardConfig | None) -> bool:
+    """Resolve the effective ``MLX_METAL_FAST_SYNCH`` setting for this runner.
+
+    Priority order, highest to lowest:
+
+    1. **Operator override.** ``SKULK_FAST_SYNCH`` (or legacy ``EXO_FAST_SYNCH``)
+       set to ``"on"`` or ``"off"``. Set by the CLI ``--fast-synch`` /
+       ``--no-fast-synch`` flags or directly in the runner environment.
+       This is the escape hatch when a card preference is wrong in the field.
+    2. **Model card.** ``runtime.metal_fast_synch`` on the bound shard's model
+       card. Pinned per-model when the model is known to deadlock or
+       known to benefit measurably from FAST_SYNCH.
+    3. **Cluster default.** ``FAST_SYNCH_CLUSTER_DEFAULT`` (True today).
+
+    Returns ``True`` when ``MLX_METAL_FAST_SYNCH`` should be ``"1"``.
+    """
+    override = preferred_env_value("SKULK_FAST_SYNCH", "EXO_FAST_SYNCH")
+    if override is not None:
+        normalized = override.strip().lower()
+        if normalized == "on":
+            return True
+        if normalized == "off":
+            return False
+        # Anything else (empty string, "auto", garbage) falls through to the
+        # next layer rather than silently picking a value. The CLI surface
+        # only ever sets "on" or "off", so reaching this branch means
+        # someone set the env var by hand to an unknown value.
+    if card_runtime is not None and card_runtime.metal_fast_synch is not None:
+        return card_runtime.metal_fast_synch
+    return FAST_SYNCH_CLUSTER_DEFAULT
 
 
 def _release_metal_resources() -> None:
@@ -129,14 +171,13 @@ def entrypoint(
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(max(soft, 2048), hard), hard))
 
-    fast_synch_override = os.environ.get("EXO_FAST_SYNCH")
-    if fast_synch_override != "off":
-        os.environ["MLX_METAL_FAST_SYNCH"] = "1"
-    else:
-        os.environ["MLX_METAL_FAST_SYNCH"] = "0"
-
-    logger.info(f"Fast synch flag: {os.environ['MLX_METAL_FAST_SYNCH']}")
     shard = bound_instance.bound_shard
+    fast_synch_enabled = resolve_metal_fast_synch(shard.model_card.runtime)
+    os.environ["MLX_METAL_FAST_SYNCH"] = "1" if fast_synch_enabled else "0"
+    logger.info(
+        f"Fast synch flag: {os.environ['MLX_METAL_FAST_SYNCH']} "
+        f"(model={shard.model_card.model_id})"
+    )
     configure_runner_diagnostics(
         diagnostic_sender,
         RunnerDiagnosticContext(

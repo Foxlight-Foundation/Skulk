@@ -25,6 +25,12 @@ tool_call_format = "gemma4"
 [runtime]
 prompt_renderer = "gemma4"
 output_parser = "gemma4"
+# MLX_METAL_FAST_SYNCH wedges the GPU command queue on this model under the
+# ring backend with multimodal load: the runner thread enters TH_UNINT in
+# the AGX driver at pipeline_last_eval_output, transitively starves
+# WindowServer, and trips the macOS userspace watchdog into a kernel panic.
+# Reproduced 2026-04 on M4 (Mac16,10) with multinode pipeline-parallel.
+metal_fast_synch = false
 
 [vision]
 image_token_id = 258880

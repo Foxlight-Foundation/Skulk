@@ -24,6 +24,11 @@ tool_call_format = "gemma4"
 [runtime]
 prompt_renderer = "gemma4"
 output_parser = "gemma4"
+# Same FAST_SYNCH wedge as the 26b card — GPU command queue stalls in the
+# pipeline-parallel inference path, kernel watchdog panics the box. Disable
+# until the upstream MLX issue is fixed or a cheap inference-side fence
+# (mx.synchronize between eval and distributed.send) is validated.
+metal_fast_synch = false
 
 [vision]
 image_token_id = 258880
