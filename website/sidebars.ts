@@ -42,6 +42,7 @@ const sidebars: SidebarsConfig = {
           items: ["release-notes/1.0.2"],
         },
         "architecture",
+        "architecture-reference",
       ],
     },
   ],

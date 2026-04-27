@@ -162,6 +162,7 @@ These rules apply to every change. No exceptions.
 - **All public Python functions, classes, and methods must have docstrings** that are clear enough for generative documentation tools (docusaurus, pdoc, sphinx) to produce useful output. Describe what it does, parameters, return value, and any side effects.
 - **All Pydantic models and their fields must have descriptions** via docstrings or `Field(description=...)` for anything non-obvious. These flow into the OpenAPI spec.
 - **TypeScript components and hooks must have JSDoc comments** on exported interfaces, props, and non-trivial functions.
+- **Architectural shape changes require updating both architecture docs in the same commit or PR.** Adding a new component (master/worker/runner subtype, etc.), pubsub topic, event/command type, state field, major API endpoint group, family adapter, KV cache backend, or environment variable means the human narrative at `website/docs/architecture.md` and the LLM-friendly fact-sheet at `website/docs/architecture-reference.md` get the corresponding entry. Drift here compounds — an out-of-date architecture doc is worse than no architecture doc.
 - **Update CLAUDE.md** if you change architecture, add new topics/channels, or modify the build/test workflow.
 - **Update CONTRIBUTING.md** if you change project structure, add new directories, or modify development setup.
 
