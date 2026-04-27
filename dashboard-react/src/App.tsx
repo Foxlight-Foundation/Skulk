@@ -9,7 +9,7 @@ import { TopologyGraph } from './components/topology/TopologyGraph';
 import { ConnectionBanner } from './components/status/ConnectionBanner';
 import { ToastContainer } from './components/status/ToastContainer';
 import { NetworkMesh } from './components/common/NetworkMesh';
-import { DiagnosticsDrawer } from './components/layout/DiagnosticsDrawer';
+import { ObservabilityPanel } from './components/observability/ObservabilityPanel';
 import { SettingsPanel } from './components/layout/SettingsPanel';
 import { ModelStorePage } from './components/pages/DownloadsPage';
 import { ChatView } from './components/pages/ChatView';
@@ -120,8 +120,10 @@ export function App() {
     thunderboltBridgeCycles,
   } = useClusterState();
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [diagnosticsNodeId, setDiagnosticsNodeId] = useState<string | null>(null);
   const [storeDownloads, setStoreDownloads] = useState<StoreDownload[]>([]);
+  // Observability panel state lives on the global UI store so any component (toolbar
+  // nav, per-node bug icons, future cross-links) can open the panel to a specific tab.
+  const openObservability = useUIStore((s) => s.openObservability);
   const activeRoute = useUIStore((s) => s.activeRoute);
   const panelOpen = useUIStore((s) => s.panelOpen);
   const historyPanelOpen = useUIStore((s) => s.historyPanelOpen);
@@ -420,7 +422,7 @@ export function App() {
             ) : topology ? (
               <TopologyGraph
                 data={topology}
-                onInspectNode={setDiagnosticsNodeId}
+                onInspectNode={(nodeId) => openObservability('node', nodeId)}
               />
             ) : (
               <EmptyState>
@@ -437,10 +439,7 @@ export function App() {
           )}
         </ContentRow>
         <ToastContainer />
-        <DiagnosticsDrawer
-          nodeId={diagnosticsNodeId}
-          onClose={() => setDiagnosticsNodeId(null)}
-        />
+        <ObservabilityPanel />
         <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       </Shell>
     </ThemeProvider>

@@ -11,54 +11,34 @@ import type {
   RunnerSupervisorDiagnostics,
 } from '../../types/diagnostics';
 
-/** Props for the read-only node diagnostics drawer. */
-export interface DiagnosticsDrawerProps {
-  /** Node ID to inspect. Pass null to close the drawer. */
+/**
+ * "Node" tab body for the observability panel — read-only diagnostics for one cluster
+ * node. Replaces the standalone DiagnosticsDrawer that used to render with its own
+ * overlay; the panel now provides the framing (resizable width, header, close button)
+ * and this component is just the data rendering.
+ *
+ * If `nodeId` is null the tab renders an empty-state hint pointing the operator at the
+ * topology view to pick a node. The data fetch only fires when a node is selected.
+ */
+export interface NodeTabProps {
+  /** Node ID to inspect. Null when the operator hasn't picked a node yet. */
   nodeId: string | null;
-  /** Called when the user closes the drawer. */
-  onClose: () => void;
 }
 
-const Overlay = styled.div`
-  position: fixed;
-  inset: 0;
-  z-index: 70;
-  background: ${({ theme }) => theme.colors.overlay};
-  display: flex;
-  justify-content: flex-end;
-`;
-
-const Drawer = styled.aside`
-  width: min(560px, 100vw);
-  height: 100%;
-  background: ${({ theme }) => theme.colors.surfaceElevated};
-  border-left: 1px solid ${({ theme }) => theme.colors.borderStrong};
-  box-shadow: -18px 0 48px ${({ theme }) => theme.colors.shadowStrong};
-  padding: 22px;
-  overflow: auto;
-`;
-
-const Header = styled.div`
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 18px;
-`;
-
-const Title = styled.h2`
-  margin: 0;
-  font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.xl};
-  color: ${({ theme }) => theme.colors.text};
-`;
-
 const Subtitle = styled.div`
-  margin-top: 4px;
+  margin: 0 0 14px;
   font-family: ${({ theme }) => theme.fonts.mono};
   font-size: ${({ theme }) => theme.fontSizes.xs};
   color: ${({ theme }) => theme.colors.textMuted};
   word-break: break-all;
+`;
+
+const EmptyHint = styled.div`
+  padding: 24px 12px;
+  font-family: ${({ theme }) => theme.fonts.body};
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  line-height: 1.55;
 `;
 
 const Section = styled.section`
@@ -277,7 +257,7 @@ function recorderLine(entry: RunnerFlightRecorderEntry): string {
   ].filter(Boolean).join(' · ');
 }
 
-export function DiagnosticsDrawer({ nodeId, onClose }: DiagnosticsDrawerProps) {
+export function NodeTab({ nodeId }: NodeTabProps) {
   const [diagnostics, setDiagnostics] = useState<NodeDiagnostics | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -327,7 +307,13 @@ export function DiagnosticsDrawer({ nodeId, onClose }: DiagnosticsDrawerProps) {
     return () => controller.abort();
   }, [nodeId, reloadToken]);
 
-  if (!nodeId) return null;
+  if (!nodeId) {
+    return (
+      <EmptyHint>
+        Click any node in the topology view to inspect its diagnostics here.
+      </EmptyHint>
+    );
+  }
 
   const runtime = diagnostics?.runtime;
   const currentMemory = diagnostics?.resources.currentMemory;
@@ -411,15 +397,8 @@ export function DiagnosticsDrawer({ nodeId, onClose }: DiagnosticsDrawerProps) {
   }
 
   return (
-    <Overlay onClick={onClose}>
-      <Drawer onClick={(event) => event.stopPropagation()}>
-        <Header>
-          <div>
-            <Title>Node Diagnostics</Title>
-            <Subtitle>{runtime?.friendlyName ?? runtime?.hostname ?? shortId(nodeId)} · {shortId(nodeId)}</Subtitle>
-          </div>
-          <Button variant="ghost" size="sm" onClick={onClose}>Close</Button>
-        </Header>
+    <>
+      <Subtitle>{runtime?.friendlyName ?? runtime?.hostname ?? shortId(nodeId)} · {shortId(nodeId)}</Subtitle>
 
         {loading && <Section><Value>Loading diagnostics…</Value></Section>}
         {error && <Section><Warning>{error}</Warning></Section>}
@@ -637,7 +616,6 @@ export function DiagnosticsDrawer({ nodeId, onClose }: DiagnosticsDrawerProps) {
             </Section>
           </>
         )}
-      </Drawer>
-    </Overlay>
+    </>
   );
 }
