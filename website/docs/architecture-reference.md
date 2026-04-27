@@ -77,9 +77,9 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ### Storage
 
-- **Event log:** `src/exo/utils/disk_event_log.py` — append-only zstd-compressed msgpack
-- **Model cache:** `~/.skulk/models/` (`SKULK_HOME` overrides)
-- **Custom cards:** `~/.skulk/custom_model_cards/` as TOML
+- **Event log:** `src/exo/utils/disk_event_log.py` — append-only length-prefixed msgpack records (`events.bin`, uncompressed live); rotated archives are zstd-compressed (`events.*.bin.zst`) on rotation/close
+- **Model cache:** `SKULK_MODELS_DIR` (default `SKULK_DATA_HOME/models`; on Linux that's `~/.local/share/skulk/models` via XDG, on macOS/Windows it's `~/.skulk/models`); `SKULK_HOME` and `SKULK_MODELS_DIR` env overrides apply
+- **Custom cards:** `SKULK_CUSTOM_MODEL_CARDS_DIR` (default `SKULK_DATA_HOME/custom_model_cards`) as TOML
 - **Built-in cards:** `resources/inference_model_cards/` as TOML
 - **Optional model store:** shared host with rsync-style staging — `src/exo/store/`
 
@@ -385,7 +385,7 @@ Selection logic: `src/exo/worker/engines/mlx/cache.py::make_kv_cache`. Some back
 
 | Var | What |
 |---|---|
-| `SKULK_HOME` / `EXO_HOME` | Override `~/.skulk/` for cache + custom cards |
+| `SKULK_HOME` / `EXO_HOME` | Override the base data directory used to derive `SKULK_DATA_HOME` (and from there `SKULK_MODELS_DIR`, `SKULK_CUSTOM_MODEL_CARDS_DIR`, `SKULK_EVENT_LOG_DIR`). Default base: XDG-derived `~/.local/share/skulk` on Linux; `~/.skulk` on non-Linux. See `src/exo/shared/constants.py:34-149`. |
 | `SKULK_FAST_SYNCH` / `EXO_FAST_SYNCH` | Force `MLX_METAL_FAST_SYNCH` on (`"on"`) or off (`"off"`); overrides per-model card |
 | `SKULK_PIPELINE_EVAL_TIMEOUT_SECONDS` | Per-eval timeout in pipeline collectives (default 60s) |
 | `SKULK_MLX_HANG_DEBUG` / `EXO_MLX_HANG_DEBUG` | Emit periodic stack traces from stuck phases |

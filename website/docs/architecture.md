@@ -245,11 +245,11 @@ Three on-disk responsibilities:
 
 ### Event log
 
-`src/exo/utils/disk_event_log.py` is an append-only log backed by zstd-compressed msgpack records. Every indexed event passes through here. Followers replay from this log on bootstrap. Snapshots can be written periodically; events older than a snapshot can be compacted (with a guarded rollout window, see "State and events" above).
+`src/exo/utils/disk_event_log.py` is an append-only log: the live file (`events.bin`) is uncompressed length-prefixed msgpack records (4-byte big-endian length + msgpack payload). When the log rotates or the master shuts down, the live file is zstd-compressed into a rotated archive (`events.*.bin.zst`); only the rotated archives are compressed, not the active write target. Every indexed event passes through here. Followers replay from this log on bootstrap. Snapshots can be written periodically; events older than a snapshot can be compacted (with a guarded rollout window, see "State and events" above).
 
 ### Model cache
 
-Models live under `~/.skulk/models/` (`SKULK_HOME` overrides). The cache stores tokenizers, weights, processor configs, and metadata. Multiple nodes on the same physical machine share a cache; nodes on different machines each maintain their own.
+Models live under `SKULK_MODELS_DIR` — by default that resolves to `SKULK_DATA_HOME/models`, which is XDG-based on Linux (`~/.local/share/skulk/models`) and `~/.skulk/models` on macOS/Windows. `SKULK_HOME` (or `EXO_HOME`) overrides the base; `SKULK_MODELS_DIR` overrides the models path directly. See `src/exo/shared/constants.py:78-82`. The cache stores tokenizers, weights, processor configs, and metadata. Multiple nodes on the same physical machine share a cache; nodes on different machines each maintain their own.
 
 ### Model store (optional)
 
@@ -257,7 +257,7 @@ For multi-node deployments with shared filesystems, a model store hosts canonica
 
 ### Custom model cards
 
-User-added model cards live under `~/.skulk/custom_model_cards/` as TOML files. Built-in cards live in `resources/inference_model_cards/`. The capability resolver reads both; custom cards override built-ins for the same `model_id`.
+User-added model cards live under `SKULK_CUSTOM_MODEL_CARDS_DIR` (default `SKULK_DATA_HOME/custom_model_cards`) as TOML files. On Linux that resolves to `~/.local/share/skulk/custom_model_cards`; on macOS/Windows to `~/.skulk/custom_model_cards`. Built-in cards live in `resources/inference_model_cards/`. The capability resolver reads both; custom cards override built-ins for the same `model_id`.
 
 ## API adapters
 
