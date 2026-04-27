@@ -19,14 +19,14 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Owns:** the authoritative event log (via `DiskEventLog`); the indexer that assigns monotonic indices to events; the placement planner. Master identity itself lives outside the master process — each node tracks the current master independently via the election protocol (`src/exo/shared/election.py`); the `_master_node_id` cache is held on the API side at `src/exo/api/main.py:461`.
 - **Communicates via:** `LOCAL_EVENTS` (consumes), `GLOBAL_EVENTS` (publishes indexed events), `COMMANDS` (consumes), `STATE_SYNC_MESSAGES` (publishes snapshots)
 - **Election:** `src/exo/shared/election.py` — bully algorithm; a single master at a time
-- **Failover:** transparent via re-election; new master picks up from the disk event log
+- **Failover:** re-election picks a new master; the new master initializes fresh state (`State(...)` at `master/main.py:106`) — `Master.__init__` does not rehydrate from the disk event log or snapshot store. Continuity comes from (a) followers retaining their own `State` (each node applies `GLOBAL_EVENTS` independently), and (b) the new master's event indexer continuing from the disk log's existing length so new event indices don't collide with the prior tail. Snapshot bootstrap for new followers is a separate path (`StateSnapshotStore` + `STATE_SYNC_MESSAGES`).
 
 ### Worker
 
 - **Role:** receives indexed events, applies them locally, downloads model weights, spawns + supervises runner subprocesses, dispatches tasks
 - **Lives in:** `src/exo/worker/main.py`; planning at `src/exo/worker/plan.py`
 - **Owns:** local view of `State` (derived); per-model `RunnerSupervisor` instances
-- **Communicates via:** `GLOBAL_EVENTS` (consumes), `LOCAL_EVENTS` (publishes), `COMMANDS` (publishes for placement requests)
+- **Communicates via:** `GLOBAL_EVENTS` (consumes), `LOCAL_EVENTS` (publishes via `event_router.py`), `DOWNLOAD_COMMANDS` (publishes; e.g. shard-download requests at `worker/main.py:392`)
 
 ### RunnerSupervisor
 
@@ -91,7 +91,7 @@ Defined in `src/exo/routing/topics.py`.
 |---|---|---|---|---|
 | `GLOBAL_EVENTS` | `GlobalForwarderEvent` | indexed `Event` (post-master indexing) | Master | All nodes |
 | `LOCAL_EVENTS` | `LocalForwarderEvent` | un-indexed `Event` | Workers (via `event_router.py`) | Master |
-| `COMMANDS` | `ForwarderCommand` | `Command` (`PlaceInstance`, `DeleteInstance`, `TaskFinished`, `SetTracingEnabled`, etc.) | Workers, API | Master |
+| `COMMANDS` | `ForwarderCommand` | `Command` (`PlaceInstance`, `DeleteInstance`, `TaskFinished`, `SetTracingEnabled`, etc.) | API | Master |
 | `DOWNLOAD_COMMANDS` | `ForwarderDownloadCommand` | `DownloadCommand` (`StartDownload`, `DeleteDownload`, `CancelDownload`, `SyncConfig`, `PurgeStagingCache`, `RestartNode`) | API (download/restart/sync admin ops), Master, Workers | All nodes |
 | `STATE_SYNC_MESSAGES` | `StateSyncMessage` | bidirectional: followers publish `kind="request"` for snapshot/config bootstrap; master publishes `kind="response"` with the requested payload (`StateSnapshotHydrated` etc.) | All nodes (request: followers; response: master) | All nodes |
 | `ELECTION_MESSAGES` | `ElectionMessage` | bully election rounds | All nodes | All nodes |
