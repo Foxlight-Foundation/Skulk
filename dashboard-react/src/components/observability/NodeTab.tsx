@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { Button } from '../common/Button';
 import { formatBytes } from '../../utils/format';
+import { useClusterState } from '../../hooks/useClusterState';
+import { useUIStore } from '../../stores/uiStore';
 import type {
   DiagnosticCaptureResponse,
   DiagnosticsProcess,
@@ -17,13 +19,54 @@ import type {
  * overlay; the panel now provides the framing (resizable width, header, close button)
  * and this component is just the data rendering.
  *
- * If `nodeId` is null the tab renders an empty-state hint pointing the operator at the
- * topology view to pick a node. The data fetch only fires when a node is selected.
+ * Hosts a node-selector dropdown at the top so the operator can switch nodes without
+ * leaving the panel. The previously-required topology-bug-icon entry path still works
+ * (sets the same store field), but is no longer the only way in.
+ *
+ * If no node is selected the tab renders an empty-state hint below the selector. The
+ * diagnostics fetch only fires when a node is selected.
  */
 export interface NodeTabProps {
   /** Node ID to inspect. Null when the operator hasn't picked a node yet. */
   nodeId: string | null;
 }
+
+const SelectorRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+`;
+
+const SelectorLabel = styled.label`
+  font-family: ${({ theme }) => theme.fonts.body};
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  flex-shrink: 0;
+`;
+
+const NodeSelect = styled.select`
+  flex: 1;
+  min-width: 0;
+  background: ${({ theme }) => theme.colors.bg};
+  color: ${({ theme }) => theme.colors.text};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  padding: 4px 8px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  font-family: ${({ theme }) => theme.fonts.body};
+  outline: none;
+  cursor: pointer;
+
+  &:focus {
+    border-color: ${({ theme }) => theme.colors.goldDim};
+  }
+
+  option {
+    background: ${({ theme }) => theme.colors.surface};
+    color: ${({ theme }) => theme.colors.text};
+  }
+`;
 
 const Subtitle = styled.div`
   margin: 0 0 14px;
@@ -258,6 +301,26 @@ function recorderLine(entry: RunnerFlightRecorderEntry): string {
 }
 
 export function NodeTab({ nodeId }: NodeTabProps) {
+  const cluster = useClusterState();
+  const setSelectedNodeId = useUIStore((s) => s.setObservabilitySelectedNodeId);
+
+  // Build a stable, sorted list of selectable nodes from the cluster topology.
+  // Friendly names take precedence; nodes without one are labelled by short id and
+  // float to the bottom so the most-recognizable entries surface first.
+  const nodeOptions = useMemo(() => {
+    const nodes = cluster.topology?.nodes ?? {};
+    return Object.entries(nodes)
+      .map(([id, info]) => ({
+        id,
+        label: info.friendly_name?.trim() || shortId(id),
+        hasFriendly: Boolean(info.friendly_name?.trim()),
+      }))
+      .sort((a, b) => {
+        if (a.hasFriendly !== b.hasFriendly) return a.hasFriendly ? -1 : 1;
+        return a.label.localeCompare(b.label, undefined, { sensitivity: 'base' });
+      });
+  }, [cluster.topology]);
+
   const [diagnostics, setDiagnostics] = useState<NodeDiagnostics | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -307,11 +370,34 @@ export function NodeTab({ nodeId }: NodeTabProps) {
     return () => controller.abort();
   }, [nodeId, reloadToken]);
 
+  const selector = (
+    <SelectorRow>
+      <SelectorLabel htmlFor="observability-node-select">Node</SelectorLabel>
+      <NodeSelect
+        id="observability-node-select"
+        value={nodeId ?? ''}
+        onChange={(event) => setSelectedNodeId(event.target.value || null)}
+      >
+        <option value="">Select node…</option>
+        {nodeOptions.map((option) => (
+          <option key={option.id} value={option.id}>
+            {option.label}
+          </option>
+        ))}
+      </NodeSelect>
+    </SelectorRow>
+  );
+
   if (!nodeId) {
     return (
-      <EmptyHint>
-        Click any node in the topology view to inspect its diagnostics here.
-      </EmptyHint>
+      <>
+        {selector}
+        <EmptyHint>
+          {nodeOptions.length === 0
+            ? 'No nodes reported by the cluster yet. Once a node connects, pick it here to inspect its diagnostics.'
+            : 'Pick a node above to inspect its diagnostics.'}
+        </EmptyHint>
+      </>
     );
   }
 
@@ -398,6 +484,7 @@ export function NodeTab({ nodeId }: NodeTabProps) {
 
   return (
     <>
+      {selector}
       <Subtitle>{runtime?.friendlyName ?? runtime?.hostname ?? shortId(nodeId)} · {shortId(nodeId)}</Subtitle>
 
         {loading && <Section><Value>Loading diagnostics…</Value></Section>}
