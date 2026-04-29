@@ -75,43 +75,6 @@ async function downloadTrace(scope: 'cluster' | 'local', taskId: string): Promis
   URL.revokeObjectURL(url);
 }
 
-async function openInPerfetto(scope: 'cluster' | 'local', taskId: string): Promise<void> {
-  const response = await fetch(`${traceBasePath(scope)}/${encodeURIComponent(taskId)}/raw`);
-  if (!response.ok) {
-    throw new Error(`Failed to open trace (${response.status})`);
-  }
-  const traceData = await response.arrayBuffer();
-  const perfettoWindow = window.open('https://ui.perfetto.dev');
-  if (!perfettoWindow) {
-    throw new Error('Failed to open Perfetto. Please allow popups.');
-  }
-
-  const onMessage = (event: MessageEvent) => {
-    if (event.data === 'PONG') {
-      window.removeEventListener('message', onMessage);
-      perfettoWindow.postMessage(
-        {
-          perfetto: {
-            buffer: traceData,
-            title: `Trace ${taskId}`,
-          },
-        },
-        'https://ui.perfetto.dev',
-      );
-    }
-  };
-
-  window.addEventListener('message', onMessage);
-  const pingInterval = window.setInterval(() => {
-    perfettoWindow.postMessage('PING', 'https://ui.perfetto.dev');
-  }, 50);
-
-  window.setTimeout(() => {
-    window.clearInterval(pingInterval);
-    window.removeEventListener('message', onMessage);
-  }, 10000);
-}
-
 export function TraceDetailPage({ taskId, scope, onBack }: TraceDetailPageProps) {
   const [stats, setStats] = useState<TraceStatsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -159,9 +122,6 @@ export function TraceDetailPage({ taskId, scope, onBack }: TraceDetailPageProps)
           </Button>
           <Button variant="outline" size="sm" onClick={() => void downloadTrace(scope, taskId)} disabled={loading || !!error}>
             Download
-          </Button>
-          <Button variant="primary" size="sm" onClick={() => void openInPerfetto(scope, taskId)} disabled={loading || !!error}>
-            Perfetto
           </Button>
         </HeaderActions>
       </Header>
