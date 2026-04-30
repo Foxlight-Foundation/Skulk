@@ -1,15 +1,19 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { Button } from '../common/Button';
 import { formatBytes } from '../../utils/format';
 import { useClusterState } from '../../hooks/useClusterState';
 import { useAppDispatch } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
+import {
+  useGetNodeDiagnosticsQuery,
+  useCancelRunnerTaskMutation,
+  useCaptureRunnerBundleMutation,
+} from '../../store/endpoints/observability';
 import type {
   DiagnosticCaptureResponse,
   DiagnosticsProcess,
   MlxMemorySnapshot,
-  NodeDiagnostics,
   RunnerFlightRecorderEntry,
   RunnerSupervisorDiagnostics,
 } from '../../types/diagnostics';
@@ -324,54 +328,33 @@ export function NodeTab({ nodeId }: NodeTabProps) {
       });
   }, [cluster.topology]);
 
-  const [diagnostics, setDiagnostics] = useState<NodeDiagnostics | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [reloadToken, setReloadToken] = useState(0);
+  // Diagnostics fetch — RTK Query keys by nodeId, dedups across components,
+  // and refetches automatically when a cancel/capture mutation invalidates
+  // the NodeDiagnostics cache tag for this node.
+  const diagnosticsQuery = useGetNodeDiagnosticsQuery(nodeId ?? '', { skip: !nodeId });
+  const diagnostics = diagnosticsQuery.data ?? null;
+  const loading = diagnosticsQuery.isLoading;
+  const error = diagnosticsQuery.isError
+    ? (diagnosticsQuery.error as { error?: string })?.error ?? 'Failed to load diagnostics'
+    : null;
+
+  const [cancelRunnerTask, cancelMutation] = useCancelRunnerTaskMutation();
+  const [captureRunnerBundle, captureMutation] = useCaptureRunnerBundleMutation();
   const [cancelMessage, setCancelMessage] = useState<string | null>(null);
-  const [cancelError, setCancelError] = useState<string | null>(null);
   const [cancelActionKey, setCancelActionKey] = useState<string | null>(null);
   const [captureBundle, setCaptureBundle] = useState<DiagnosticCaptureResponse | null>(null);
-  const [captureError, setCaptureError] = useState<string | null>(null);
   const [captureActionKey, setCaptureActionKey] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!nodeId) {
-      setDiagnostics(null);
-      setError(null);
-      setLoading(false);
-      setCancelMessage(null);
-      setCancelError(null);
-      setCancelActionKey(null);
-      setCaptureBundle(null);
-      setCaptureError(null);
-      setCaptureActionKey(null);
-      return;
-    }
-
-    const controller = new AbortController();
-    setLoading(true);
-    setError(null);
-    fetch(`/v1/diagnostics/cluster/${encodeURIComponent(nodeId)}`, {
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error(`Diagnostics request failed: ${response.status}`);
-        }
-        return response.json() as Promise<NodeDiagnostics>;
-      })
-      .then((payload) => setDiagnostics(payload))
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setError(err instanceof Error ? err.message : 'Failed to load diagnostics');
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-
-    return () => controller.abort();
-  }, [nodeId, reloadToken]);
+  const cancelError = cancelMutation.isError
+    ? (cancelMutation.error as { data?: { detail?: string }; error?: string })?.data?.detail
+      ?? (cancelMutation.error as { error?: string })?.error
+      ?? 'Cancellation request failed'
+    : null;
+  const captureError = captureMutation.isError
+    ? (captureMutation.error as { data?: { detail?: string }; error?: string })?.data?.detail
+      ?? (captureMutation.error as { error?: string })?.error
+      ?? 'Capture request failed'
+    : null;
 
   const selector = (
     <SelectorRow>
@@ -409,61 +392,32 @@ export function NodeTab({ nodeId }: NodeTabProps) {
   const system = diagnostics?.resources.system;
 
   async function requestRunnerCancel(runnerId: string, taskId: string) {
+    if (!nodeId) return;
     const actionKey = `${runnerId}:${taskId}`;
     setCancelActionKey(actionKey);
-    setCancelError(null);
     setCancelMessage(null);
-
     try {
-      const response = await fetch(
-        `/v1/diagnostics/cluster/${encodeURIComponent(nodeId)}/runners/${encodeURIComponent(runnerId)}/cancel`,
-        {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ taskId }),
-        },
-      );
-      const payload = await response.json().catch(() => null) as { message?: string; detail?: string } | null;
-      if (!response.ok) {
-        throw new Error(payload?.detail ?? `Cancellation request failed: ${response.status}`);
-      }
-      setCancelMessage(payload?.message ?? 'Cancellation requested.');
-      setReloadToken((value) => value + 1);
-    } catch (err: unknown) {
-      setCancelError(err instanceof Error ? err.message : 'Cancellation request failed');
+      const payload = await cancelRunnerTask({ nodeId, runnerId, taskId }).unwrap();
+      setCancelMessage(payload.message ?? 'Cancellation requested.');
+      // The mutation invalidates the NodeDiagnostics tag, so the query
+      // refetches automatically — no manual reload token needed.
+    } catch {
+      // Error surfaces via cancelMutation.isError.
     } finally {
       setCancelActionKey(null);
     }
   }
 
   async function requestCaptureBundle(runnerId: string, taskId?: string | null) {
+    if (!nodeId) return;
     const actionKey = `${runnerId}:${taskId ?? 'runner'}`;
     setCaptureActionKey(actionKey);
-    setCaptureError(null);
     setCaptureBundle(null);
-
     try {
-      const response = await fetch(
-        `/v1/diagnostics/cluster/${encodeURIComponent(nodeId)}/capture`,
-        {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            runnerId,
-            taskId: taskId ?? undefined,
-            includeProcessSamples: true,
-            sampleDurationSeconds: 3,
-          }),
-        },
-      );
-      const payload = await response.json().catch(() => null) as DiagnosticCaptureResponse | { detail?: string } | null;
-      if (!response.ok) {
-        throw new Error((payload as { detail?: string } | null)?.detail ?? `Capture request failed: ${response.status}`);
-      }
-      setCaptureBundle(payload as DiagnosticCaptureResponse);
-      setReloadToken((value) => value + 1);
-    } catch (err: unknown) {
-      setCaptureError(err instanceof Error ? err.message : 'Capture request failed');
+      const payload = await captureRunnerBundle({ nodeId, runnerId, taskId }).unwrap();
+      setCaptureBundle(payload);
+    } catch {
+      // Error surfaces via captureMutation.isError.
     } finally {
       setCaptureActionKey(null);
     }
