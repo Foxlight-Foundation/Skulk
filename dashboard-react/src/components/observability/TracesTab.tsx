@@ -1,18 +1,18 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { Button } from '../common/Button';
 import { useAppDispatch } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import {
+  useGetTracesListQuery,
+  useGetTraceQuery,
+  type TraceScope,
+} from '../../store/endpoints/observability';
+import {
   traceEventToWaterfall,
   type TraceEventLike,
 } from '../../types/observabilityEvents';
-import type {
-  TraceEventResponse,
-  TraceListItem,
-  TraceListResponse,
-  TraceResponse,
-} from '../../types/traces';
+import type { TraceEventResponse } from '../../types/traces';
 import { TraceWaterfall } from './TraceWaterfall';
 
 /**
@@ -192,7 +192,7 @@ const FooterLink = styled.button`
   }
 `;
 
-type Scope = 'cluster' | 'local';
+type Scope = TraceScope;
 
 function basePath(scope: Scope): string {
   return scope === 'cluster' ? '/v1/traces/cluster' : '/v1/traces';
@@ -244,74 +244,41 @@ export function TracesTab() {
   const dispatch = useAppDispatch();
 
   const [scope, setScope] = useState<Scope>('local');
-  const [traces, setTraces] = useState<TraceListItem[] | null>(null);
-  const [listError, setListError] = useState<string | null>(null);
-  const [listLoading, setListLoading] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const [traceData, setTraceData] = useState<TraceResponse | null>(null);
-  const [traceError, setTraceError] = useState<string | null>(null);
-  const [traceLoading, setTraceLoading] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<TraceEventLike | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
 
-  // Refresh the list whenever the scope toggle flips. The selection doesn't
-  // necessarily survive a scope change (a local trace may not exist under the
-  // cluster proxy or vice versa), so we clear the selection at the same time.
-  const refreshList = useCallback(async (currentScope: Scope) => {
-    setListLoading(true);
-    setListError(null);
-    try {
-      const response = await fetch(basePath(currentScope));
-      if (!response.ok) throw new Error(`Failed to load traces (${response.status})`);
-      const data = (await response.json()) as TraceListResponse;
-      setTraces(data.traces ?? []);
-    } catch (err) {
-      setListError(err instanceof Error ? err.message : 'Failed to load traces');
-      setTraces([]);
-    } finally {
-      setListLoading(false);
-    }
-  }, []);
+  // Cache key includes scope, so flipping the toggle yields a fresh fetch
+  // (RTK Query naturally treats the two scopes as separate entries).
+  const listQuery = useGetTracesListQuery(scope);
+  const traceQuery = useGetTraceQuery(
+    selectedTaskId ? { scope, taskId: selectedTaskId } : { scope, taskId: '' },
+    { skip: !selectedTaskId },
+  );
 
+  const traces = listQuery.data?.traces ?? null;
+  const listError = listQuery.isError
+    ? (listQuery.error as { error?: string })?.error ?? 'Failed to load traces'
+    : null;
+  const listLoading = listQuery.isLoading;
+
+  const traceData = traceQuery.data ?? null;
+  const traceError = traceQuery.isError
+    ? (traceQuery.error as { error?: string })?.error ?? 'Failed to load trace'
+    : null;
+  const traceLoading = traceQuery.isFetching;
+
+  // Selection doesn't necessarily survive a scope flip (a local trace may not
+  // exist under the cluster proxy or vice versa) — clear it explicitly when
+  // scope changes.
   useEffect(() => {
     setSelectedTaskId(null);
-    setTraceData(null);
     setSelectedEvent(null);
-    void refreshList(scope);
-  }, [scope, refreshList]);
+  }, [scope]);
 
-  // Load the full trace events whenever the user clicks a row. The list view
-  // intentionally does not preload per-trace bodies — saved traces can be
-  // multi-megabyte, and loading them all just to render a list of names is
-  // wasteful on a panel that may stay open for a long session.
   useEffect(() => {
-    if (!selectedTaskId) {
-      setTraceData(null);
-      setTraceError(null);
-      setSelectedEvent(null);
-      return;
-    }
-    const controller = new AbortController();
-    setTraceLoading(true);
-    setTraceError(null);
     setSelectedEvent(null);
-    fetch(`${basePath(scope)}/${encodeURIComponent(selectedTaskId)}`, {
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`Failed to load trace (${response.status})`);
-        return (await response.json()) as TraceResponse;
-      })
-      .then((data) => setTraceData(data))
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setTraceError(err instanceof Error ? err.message : 'Failed to load trace');
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setTraceLoading(false);
-      });
-    return () => controller.abort();
-  }, [selectedTaskId, scope]);
+  }, [selectedTaskId]);
 
   const waterfallEvents = useMemo<TraceEventLike[]>(() => {
     if (!traceData) return [];
