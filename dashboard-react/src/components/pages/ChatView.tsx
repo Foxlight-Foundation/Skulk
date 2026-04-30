@@ -7,7 +7,8 @@ import type { ChatUploadedFile } from '../../types/chat';
 import type { ModelInfo } from '../../types/models';
 import type { InstanceCardData } from '../layout/InstancePanel';
 import { useChatStore } from '../../stores/chatStore';
-import { useUIStore } from '../../stores/uiStore';
+import { useAppDispatch, useAppSelector } from '../../store/hooks';
+import { uiActions } from '../../store/slices/uiSlice';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -448,8 +449,9 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   const [modelContextLengths, setModelContextLengths] = useState<Record<string, number>>({});
 
   // Restore scroll position after store hydration + DOM render
-  const chatScrollTop = useUIStore((s) => s.chatScrollTop);
-  const setChatScrollTop = useUIStore((s) => s.setChatScrollTop);
+  const dispatch = useAppDispatch();
+  const chatScrollTop = useAppSelector((s) => s.ui.chatScrollTop);
+  const setChatScrollTop = (pos: number) => dispatch(uiActions.setChatScrollTop(pos));
   const scrollRestored = useRef(false);
   useEffect(() => {
     if (scrollRestored.current || chatScrollTop <= 0) return;
@@ -879,8 +881,9 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   }, [handleSend, removeLastAssistantMessages]);
 
   // Thinking expansion state — persisted per conversation in session store
-  const expandedThinkingMap = useUIStore((s) => s.expandedThinking);
-  const setExpandedThinking = useUIStore((s) => s.setExpandedThinking);
+  const expandedThinkingMap = useAppSelector((s) => s.ui.expandedThinking);
+  const setExpandedThinking = (conversationId: string, messageIds: string[]) =>
+    dispatch(uiActions.setExpandedThinking({ conversationId, messageIds }));
   const expandedThinkingIds = useMemo(
     () => new Set(activeConversationId ? expandedThinkingMap[activeConversationId] ?? [] : []),
     [expandedThinkingMap, activeConversationId],

@@ -20,7 +20,8 @@ import { ConversationPanel } from './components/layout/ConversationPanel';
 import { addToast } from './hooks/useToast';
 import type { InstanceStatus } from './components/cluster/RunningInstanceCard';
 import { useChatStore } from './stores/chatStore';
-import { useUIStore } from './stores/uiStore';
+import { useAppDispatch, useAppSelector } from './store/hooks';
+import { uiActions, type ObservabilityTab } from './store/slices/uiSlice';
 
 const Shell = styled.div`
   position: relative;
@@ -123,13 +124,15 @@ export function App() {
   const [storeDownloads, setStoreDownloads] = useState<StoreDownload[]>([]);
   // Observability panel state lives on the global UI store so any component (toolbar
   // nav, per-node bug icons, future cross-links) can open the panel to a specific tab.
-  const openObservability = useUIStore((s) => s.openObservability);
-  const activeRoute = useUIStore((s) => s.activeRoute);
-  const panelOpen = useUIStore((s) => s.panelOpen);
-  const historyPanelOpen = useUIStore((s) => s.historyPanelOpen);
-  const themeName = useUIStore((s) => s.theme);
+  const dispatch = useAppDispatch();
+  const openObservability = (tab?: ObservabilityTab, nodeId?: string) =>
+    dispatch(uiActions.openObservability({ tab, nodeId }));
+  const activeRoute = useAppSelector((s) => s.ui.activeRoute);
+  const panelOpen = useAppSelector((s) => s.ui.panelOpen);
+  const historyPanelOpen = useAppSelector((s) => s.ui.historyPanelOpen);
+  const themeName = useAppSelector((s) => s.ui.theme);
   const activeTheme = themeName === 'light' ? lightTheme : darkTheme;
-  const selectedTraceTaskId = useUIStore((s) => s.selectedTraceTaskId);
+  const selectedTraceTaskId = useAppSelector((s) => s.ui.selectedTraceTaskId);
   const [traceScope, setTraceScope] = useState<'cluster' | 'local'>('cluster');
 
   // Reflect theme on the html root so non-styled-components surfaces (highlight.js,
@@ -138,10 +141,12 @@ export function App() {
     if (typeof document === 'undefined') return;
     document.documentElement.setAttribute('data-theme', themeName);
   }, [themeName]);
-  const setActiveRoute = useUIStore((s) => s.setActiveRoute);
-  const setSelectedTraceTaskId = useUIStore((s) => s.setSelectedTraceTaskId);
-  const togglePanel = useUIStore((s) => s.togglePanel);
-  const toggleHistoryPanel = useUIStore((s) => s.toggleHistoryPanel);
+  const setActiveRoute = (route: typeof activeRoute) =>
+    dispatch(uiActions.setActiveRoute(route));
+  const setSelectedTraceTaskId = (taskId: string | null) =>
+    dispatch(uiActions.setSelectedTraceTaskId(taskId));
+  const togglePanel = () => dispatch(uiActions.togglePanel());
+  const toggleHistoryPanel = () => dispatch(uiActions.toggleHistoryPanel());
   const conversationsMap = useChatStore((s) => s.conversations);
   const allConversations = useMemo(
     () => Object.values(conversationsMap).sort((a, b) => b.updatedAt - a.updatedAt),

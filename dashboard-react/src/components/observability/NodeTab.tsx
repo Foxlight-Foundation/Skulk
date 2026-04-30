@@ -3,7 +3,8 @@ import styled from 'styled-components';
 import { Button } from '../common/Button';
 import { formatBytes } from '../../utils/format';
 import { useClusterState } from '../../hooks/useClusterState';
-import { useUIStore } from '../../stores/uiStore';
+import { useAppDispatch } from '../../store/hooks';
+import { uiActions } from '../../store/slices/uiSlice';
 import type {
   DiagnosticCaptureResponse,
   DiagnosticsProcess,
@@ -302,7 +303,9 @@ function recorderLine(entry: RunnerFlightRecorderEntry): string {
 
 export function NodeTab({ nodeId }: NodeTabProps) {
   const cluster = useClusterState();
-  const setSelectedNodeId = useUIStore((s) => s.setObservabilitySelectedNodeId);
+  const dispatch = useAppDispatch();
+  const setSelectedNodeId = (nodeId: string | null) =>
+    dispatch(uiActions.setObservabilitySelectedNodeId(nodeId));
 
   // Build a stable, sorted list of selectable nodes from the cluster topology.
   // Friendly names take precedence; nodes without one are labelled by short id and

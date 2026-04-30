@@ -1,6 +1,7 @@
 import { configureStore } from '@reduxjs/toolkit';
 import { setupListeners } from '@reduxjs/toolkit/query';
 import { apiSlice } from './api';
+import { uiSliceReducer, subscribeUIPersistence } from './slices/uiSlice';
 
 /**
  * Root Redux store for the Skulk dashboard.
@@ -18,6 +19,7 @@ import { apiSlice } from './api';
  */
 export const store = configureStore({
   reducer: {
+    ui: uiSliceReducer,
     [apiSlice.reducerPath]: apiSlice.reducer,
   },
   middleware: (getDefaultMiddleware) =>
@@ -25,6 +27,7 @@ export const store = configureStore({
 });
 
 setupListeners(store.dispatch);
+subscribeUIPersistence(store);
 
 export type RootState = ReturnType<typeof store.getState>;
 export type AppDispatch = typeof store.dispatch;

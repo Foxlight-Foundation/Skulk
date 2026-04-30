@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { Button } from '../common/Button';
-import { useUIStore } from '../../stores/uiStore';
+import { useAppDispatch } from '../../store/hooks';
+import { uiActions } from '../../store/slices/uiSlice';
 import {
   traceEventToWaterfall,
   type TraceEventLike,
@@ -240,8 +241,7 @@ async function downloadRawTrace(scope: Scope, taskId: string): Promise<void> {
 }
 
 export function TracesTab() {
-  const setActiveRoute = useUIStore((s) => s.setActiveRoute);
-  const closeObservability = useUIStore((s) => s.closeObservability);
+  const dispatch = useAppDispatch();
 
   const [scope, setScope] = useState<Scope>('local');
   const [traces, setTraces] = useState<TraceListItem[] | null>(null);
@@ -339,8 +339,8 @@ export function TracesTab() {
   }
 
   const openLegacyTraces = () => {
-    setActiveRoute('traces');
-    closeObservability();
+    dispatch(uiActions.setActiveRoute('traces'));
+    dispatch(uiActions.closeObservability());
   };
 
   return (

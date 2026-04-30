@@ -2,12 +2,13 @@ import { useCallback, useEffect, useRef } from 'react';
 import styled, { keyframes } from 'styled-components';
 import { FiX } from 'react-icons/fi';
 import { Button } from '../common/Button';
+import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import {
-  useUIStore,
+  uiActions,
   type ObservabilityTab,
   OBSERVABILITY_WIDTH_MIN,
   OBSERVABILITY_WIDTH_MAX,
-} from '../../stores/uiStore';
+} from '../../store/slices/uiSlice';
 import { LiveTab } from './LiveTab';
 import { NodeTab } from './NodeTab';
 import { TracesTab } from './TracesTab';
@@ -147,13 +148,14 @@ const TAB_ORDER: { key: ObservabilityTab; label: string }[] = [
 ];
 
 export function ObservabilityPanel() {
-  const open = useUIStore((s) => s.observabilityPanelOpen);
-  const activeTab = useUIStore((s) => s.observabilityActiveTab);
-  const width = useUIStore((s) => s.observabilityPanelWidth);
-  const selectedNodeId = useUIStore((s) => s.observabilitySelectedNodeId);
-  const setTab = useUIStore((s) => s.setObservabilityTab);
-  const setWidth = useUIStore((s) => s.setObservabilityPanelWidth);
-  const close = useUIStore((s) => s.closeObservability);
+  const dispatch = useAppDispatch();
+  const open = useAppSelector((s) => s.ui.observabilityPanelOpen);
+  const activeTab = useAppSelector((s) => s.ui.observabilityActiveTab);
+  const width = useAppSelector((s) => s.ui.observabilityPanelWidth);
+  const selectedNodeId = useAppSelector((s) => s.ui.observabilitySelectedNodeId);
+  const setTab = (tab: ObservabilityTab) => dispatch(uiActions.setObservabilityTab(tab));
+  const setWidth = (next: number) => dispatch(uiActions.setObservabilityPanelWidth(next));
+  const close = () => dispatch(uiActions.closeObservability());
 
   // Drag-to-resize: capture pointer at the handle; resizing computes width from
   // the cursor's distance from the right edge of the viewport. We hold an Aside
