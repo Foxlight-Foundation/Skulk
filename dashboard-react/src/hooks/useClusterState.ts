@@ -1,102 +1,23 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { TopologyData, NodeInfo, TopologyEdge } from '../types/topology';
+import {
+  useGetLocalNodeIdQuery,
+  useGetLocalNodeIdentityQuery,
+  useGetRawStateQuery,
+  type RawLocalNodeIdentityResponse,
+  type RawNetworkInterfaceInfo,
+  type RawNodeIdentity,
+  type RawNodeNetworkInfo,
+  type RawMemoryUsage,
+  type RawSystemPerformanceProfile,
+  type RawTopology,
+  type RawThunderboltBridge,
+  type RawThunderboltInfo,
+  type RawRdmaCtl,
+  type RawConnectionEdge,
+} from '../store/endpoints/cluster';
 
-/* ================================================================
-   Raw response types (camelCase from Python CamelCaseModel)
-   ================================================================ */
-
-interface RawNodeIdentity {
-  modelId?: string;
-  chipId?: string;
-  friendlyName?: string;
-  osVersion?: string;
-  osBuildVersion?: string;
-  exoVersion?: string;
-  exoCommit?: string;
-}
-
-interface RawMemoryUsage {
-  ramTotal?: { inBytes: number };
-  ramAvailable?: { inBytes: number };
-}
-
-interface RawSystemPerformanceProfile {
-  gpuUsage?: number;
-  temp?: number;
-  sysPower?: number;
-  pcpuUsage?: number;
-  ecpuUsage?: number;
-}
-
-interface RawNetworkInterfaceInfo {
-  name?: string;
-  ipAddress?: string;
-  addresses?: Array<{ address?: string } | string>;
-  ipAddresses?: string[];
-  ips?: string[];
-}
-
-interface RawNodeNetworkInfo {
-  interfaces?: RawNetworkInterfaceInfo[];
-}
-
-interface RawConnectionEdge {
-  sinkMultiaddr?: { address?: string; ipAddress?: string };
-  sourceRdmaIface?: string;
-  sinkRdmaIface?: string;
-}
-
-interface RawTopology {
-  nodes?: string[];
-  connections?: Record<string, Record<string, RawConnectionEdge[]>>;
-}
-
-interface RawThunderboltBridge {
-  enabled: boolean;
-  exists: boolean;
-  serviceName?: string | null;
-}
-
-interface RawThunderboltInterface {
-  rdmaInterface: string;
-  domainUuid: string;
-  linkSpeed: string;
-}
-
-interface RawThunderboltInfo {
-  interfaces: RawThunderboltInterface[];
-}
-
-interface RawRdmaCtl {
-  enabled: boolean;
-  interfacesPresent?: boolean;
-}
-
-interface RawStateResponse {
-  topology?: RawTopology;
-  instances?: Record<string, unknown>;
-  runners?: Record<string, unknown>;
-  downloads?: Record<string, unknown[]>;
-  nodeIdentities?: Record<string, RawNodeIdentity>;
-  nodeMemory?: Record<string, RawMemoryUsage>;
-  nodeSystem?: Record<string, RawSystemPerformanceProfile>;
-  nodeNetwork?: Record<string, RawNodeNetworkInfo>;
-  nodeDisk?: Record<string, { total: { inBytes: number }; available: { inBytes: number } }>;
-  nodeThunderbolt?: Record<string, RawThunderboltInfo>;
-  nodeThunderboltBridge?: Record<string, RawThunderboltBridge>;
-  nodeRdmaCtl?: Record<string, RawRdmaCtl>;
-  thunderboltBridgeCycles?: string[][];
-}
-
-interface RawLocalNodeIdentityResponse {
-  nodeId?: string;
-  hostname?: string;
-  ipAddress?: string;
-}
-
-/* ================================================================
-   Transformation
-   ================================================================ */
+/* ── Transforms ──────────────────────────────────────────── */
 
 function extractAddresses(iface: RawNetworkInterfaceInfo): string[] {
   const addrs: string[] = [];
@@ -189,7 +110,6 @@ function transformTopology(
     };
   }
 
-  // Build edges from nested connection map
   const connections = raw.connections;
   if (connections) {
     for (const [source, sinks] of Object.entries(connections)) {
@@ -212,7 +132,6 @@ function transformTopology(
           }
 
           if (nodes[source] && nodes[sink] && source !== sink) {
-            // Resolve interface name from IP
             let sendBackInterface: string | undefined;
             if (sendBackIp) {
               sendBackInterface =
@@ -235,13 +154,8 @@ function ensureLocalNodePresent(
   localNodeIdentity: RawLocalNodeIdentityResponse | null,
   identities: Record<string, RawNodeIdentity>,
 ): TopologyData {
-  if (!localNodeId) {
-    return topology;
-  }
-
-  if (topology.nodes[localNodeId]) {
-    return topology;
-  }
+  if (!localNodeId) return topology;
+  if (topology.nodes[localNodeId]) return topology;
 
   const normalizedLocalHostname = normalizeNodeLabel(localNodeIdentity?.hostname);
   const localIpAddress = localNodeIdentity?.ipAddress?.trim();
@@ -254,22 +168,15 @@ function ensureLocalNodePresent(
     ) {
       return true;
     }
-
-    if (!localIpAddress || localIpAddress.length === 0) {
-      return false;
-    }
-
+    if (!localIpAddress || localIpAddress.length === 0) return false;
     return (node.network_interfaces ?? []).some((iface) =>
       (iface.addresses ?? []).includes(localIpAddress),
     );
   });
 
-  if (matchedRealLocalNode) {
-    return topology;
-  }
+  if (matchedRealLocalNode) return topology;
 
   const localIdentity = identities[localNodeId];
-
   return {
     nodes: {
       ...topology.nodes,
@@ -297,39 +204,29 @@ function ensureLocalNodePresent(
   };
 }
 
-/* ================================================================
-   Hook
-   ================================================================ */
+/* ── Public types ────────────────────────────────────────── */
 
-const CONNECTION_LOST_THRESHOLD = 3;
-const POLL_INTERVAL = 1000;
-
-/** Raw downloads map as returned by `/state`. */
 export type RawDownloads = Record<string, unknown[]>;
-
-/** Disk-capacity information keyed by node id. */
 export type NodeDiskInfo = Record<string, { total: { inBytes: number }; available: { inBytes: number } }>;
 
-/** Raw shard-assignment payload returned by the Skulk state API. */
 export interface RawShardAssignments {
   modelId?: string;
   nodeToRunner?: Record<string, string>;
   runnerToShard?: Record<string, Record<string, unknown>>;
 }
 
-/** Raw inner instance shape returned by the Skulk state API. */
 export interface RawInstanceInner {
   instanceId?: string;
   shardAssignments?: RawShardAssignments;
 }
 
-/** Raw instances keyed by instance id with backend-specific tagged variants. */
-export type RawInstances = Record<string, { MlxRingInstance?: RawInstanceInner; MlxJacclInstance?: RawInstanceInner }>;
+export type RawInstances = Record<
+  string,
+  { MlxRingInstance?: RawInstanceInner; MlxJacclInstance?: RawInstanceInner }
+>;
 
-/** Runner status is a tagged union: e.g. { "RunnerReady": {} } or { "RunnerLoading": { layersLoaded: 5, totalLayers: 32 } } */
 export type RawRunners = Record<string, Record<string, unknown>>;
 
-/** Normalized cluster-state data exposed to the dashboard UI. */
 export interface ClusterState {
   topology: TopologyData | null;
   connected: boolean;
@@ -344,111 +241,86 @@ export interface ClusterState {
   thunderboltBridgeCycles: string[][];
 }
 
-/** Poll the Skulk `/state` endpoint and normalize it into dashboard-friendly topology and status data. */
+const CONNECTION_LOST_THRESHOLD = 3;
+const POLL_INTERVAL = 1000;
+
+/**
+ * Polls `/state` and exposes a normalized view of the cluster.
+ *
+ * Backed by RTK Query under the hood — components calling this share a single
+ * cache entry, so opening multiple topology surfaces doesn't fan out into
+ * multiple HTTP requests. Polling is driven by RTK Query's `pollingInterval`.
+ *
+ * `connected` flips false after `CONNECTION_LOST_THRESHOLD` consecutive
+ * failures so the dashboard's connection indicator doesn't oscillate on a
+ * single bad poll.
+ */
 export function useClusterState(): ClusterState {
-  const [topology, setTopology] = useState<TopologyData | null>(null);
+  const stateQuery = useGetRawStateQuery(undefined, { pollingInterval: POLL_INTERVAL });
+  const nodeIdQuery = useGetLocalNodeIdQuery();
+  const nodeIdentityQuery = useGetLocalNodeIdentityQuery();
+
+  // Failure counter rides on top of the query state so we can require a
+  // sustained outage before flipping `connected` to false.
+  const failuresRef = useRef(0);
   const [connected, setConnected] = useState(false);
   const [lastUpdate, setLastUpdate] = useState<number | null>(null);
-  const [downloads, setDownloads] = useState<RawDownloads>({});
-  const [nodeDisk, setNodeDisk] = useState<NodeDiskInfo>({});
-  const [instances, setInstances] = useState<RawInstances>({});
-  const [runners, setRunners] = useState<RawRunners>({});
-  const [nodeThunderbolt, setNodeThunderbolt] = useState<Record<string, RawThunderboltInfo>>({});
-  const [nodeThunderboltBridge, setNodeThunderboltBridge] = useState<Record<string, RawThunderboltBridge>>({});
-  const [nodeRdmaCtl, setNodeRdmaCtl] = useState<Record<string, RawRdmaCtl>>({});
-  const [thunderboltBridgeCycles, setThunderboltBridgeCycles] = useState<string[][]>([]);
-  const [localNodeId, setLocalNodeId] = useState<string | null>(null);
-  const [localNodeIdentity, setLocalNodeIdentity] = useState<RawLocalNodeIdentityResponse | null>(null);
-  const failuresRef = useRef(0);
 
-  const fetchState = useCallback(async () => {
-    try {
-      const stateResponse = await fetch('/state');
-      if (!stateResponse.ok) throw new Error(`HTTP ${stateResponse.status}`);
-      const data: RawStateResponse = await stateResponse.json();
-
-      const topologyNodeIds = new Set(data.topology?.nodes ?? []);
-      const shouldRefreshLocalNodeId =
-        localNodeId == null || (topologyNodeIds.size > 0 && !topologyNodeIds.has(localNodeId));
-      const shouldRefreshLocalIdentity =
-        localNodeIdentity == null || shouldRefreshLocalNodeId;
-
-      const [nodeIdResponse, nodeIdentityResponse] = await Promise.all([
-        shouldRefreshLocalNodeId ? fetch('/node_id') : Promise.resolve(null),
-        shouldRefreshLocalIdentity ? fetch('/node/identity') : Promise.resolve(null),
-      ]);
-
-      let resolvedLocalNodeId = localNodeId;
-      if (nodeIdResponse && nodeIdResponse.ok) {
-        const nodeId = (await nodeIdResponse.json()) as string;
-        setLocalNodeId(nodeId);
-        resolvedLocalNodeId = nodeId;
-      }
-      let resolvedLocalNodeIdentity = localNodeIdentity;
-      if (nodeIdentityResponse && nodeIdentityResponse.ok) {
-        const identity = (await nodeIdentityResponse.json()) as RawLocalNodeIdentityResponse;
-        setLocalNodeIdentity(identity);
-        resolvedLocalNodeIdentity = identity;
-        if (identity.nodeId) {
-          setLocalNodeId(identity.nodeId);
-          resolvedLocalNodeId = identity.nodeId;
-        }
-      }
-
-      if (data.topology) {
-        const topo = ensureLocalNodePresent(
-          transformTopology(
-            data.topology,
-            data.nodeIdentities ?? {},
-            data.nodeMemory ?? {},
-            data.nodeSystem ?? {},
-            data.nodeNetwork ?? {},
-            data.nodeThunderboltBridge ?? {},
-            data.nodeRdmaCtl ?? {},
-          ),
-          resolvedLocalNodeId,
-          resolvedLocalNodeIdentity,
-          data.nodeIdentities ?? {},
-        );
-        setTopology(topo);
-      }
-
-      setDownloads(data.downloads ?? {});
-      setNodeDisk(data.nodeDisk ?? {});
-      setInstances((data.instances ?? {}) as RawInstances);
-      setRunners((data.runners ?? {}) as RawRunners);
-      setNodeThunderbolt(data.nodeThunderbolt ?? {});
-      setNodeThunderboltBridge(data.nodeThunderboltBridge ?? {});
-      setNodeRdmaCtl(data.nodeRdmaCtl ?? {});
-      setThunderboltBridgeCycles(data.thunderboltBridgeCycles ?? []);
-      setLastUpdate(Date.now());
-      failuresRef.current = 0;
-      setConnected(true);
-    } catch {
-      failuresRef.current++;
+  useEffect(() => {
+    if (stateQuery.isError) {
+      failuresRef.current += 1;
       if (failuresRef.current >= CONNECTION_LOST_THRESHOLD) {
         setConnected(false);
       }
+    } else if (stateQuery.isSuccess && !stateQuery.isFetching) {
+      failuresRef.current = 0;
+      setConnected(true);
+      setLastUpdate(Date.now());
     }
-  }, [localNodeIdentity, localNodeId]);
+    // We only care about the transitions of the query; the query object
+    // itself is replaced each render but its boolean status fields are stable.
+  }, [stateQuery.isError, stateQuery.isSuccess, stateQuery.isFetching]);
 
-  useEffect(() => {
-    fetchState();
-    const id = setInterval(fetchState, POLL_INTERVAL);
-    return () => clearInterval(id);
-  }, [fetchState]);
+  // Resolved local node id: prefer the value from /node/identity (which
+  // includes hostname + ip + node id) over /node_id alone.
+  const resolvedLocalNodeId = useMemo(() => {
+    if (nodeIdentityQuery.data?.nodeId) return nodeIdentityQuery.data.nodeId;
+    if (nodeIdQuery.data) return nodeIdQuery.data;
+    return null;
+  }, [nodeIdentityQuery.data, nodeIdQuery.data]);
+
+  const data = stateQuery.data;
+
+  const topology = useMemo<TopologyData | null>(() => {
+    if (!data?.topology) return null;
+    const transformed = transformTopology(
+      data.topology,
+      data.nodeIdentities ?? {},
+      data.nodeMemory ?? {},
+      data.nodeSystem ?? {},
+      data.nodeNetwork ?? {},
+      data.nodeThunderboltBridge ?? {},
+      data.nodeRdmaCtl ?? {},
+    );
+    return ensureLocalNodePresent(
+      transformed,
+      resolvedLocalNodeId,
+      nodeIdentityQuery.data ?? null,
+      data.nodeIdentities ?? {},
+    );
+  }, [data, resolvedLocalNodeId, nodeIdentityQuery.data]);
 
   return {
     topology,
     connected,
     lastUpdate,
-    downloads,
-    nodeDisk,
-    instances,
-    runners,
-    nodeThunderbolt,
-    nodeThunderboltBridge,
-    nodeRdmaCtl,
-    thunderboltBridgeCycles,
+    downloads: (data?.downloads ?? {}) as RawDownloads,
+    nodeDisk: (data?.nodeDisk ?? {}) as NodeDiskInfo,
+    instances: (data?.instances ?? {}) as RawInstances,
+    runners: (data?.runners ?? {}) as RawRunners,
+    nodeThunderbolt: data?.nodeThunderbolt ?? {},
+    nodeThunderboltBridge: data?.nodeThunderboltBridge ?? {},
+    nodeRdmaCtl: data?.nodeRdmaCtl ?? {},
+    thunderboltBridgeCycles: data?.thunderboltBridgeCycles ?? [],
   };
 }
