@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { Button } from '../common/Button';
 import { useAppSelector } from '../../store/hooks';
@@ -218,7 +218,7 @@ const ErrorNotice = styled(Notice)`
   color: ${({ theme }) => theme.colors.errorText};
 `;
 
-const HeaderActions = styled.div`
+const RefreshRow = styled.div`
   display: flex;
   align-items: center;
   gap: 8px;
@@ -273,7 +273,21 @@ export function LiveTab() {
   // skeleton is therefore the only state that hides the data sections.
   const timeline = timelineQuery.data ?? null;
   const tracingEnabled = tracingQuery.data?.enabled ?? null;
-  const refreshing = timelineQuery.isFetching;
+
+  // Surface refresh status only for explicit user-initiated refetches, not
+  // for the background poll. RTK Query's `isFetching` flips true on every
+  // 4-second poll; if we wired the Refresh button's spinner directly to it
+  // the button would change width on every tick, reflowing the header strip.
+  const [userRefreshing, setUserRefreshing] = useState(false);
+  const handleManualRefresh = async () => {
+    setUserRefreshing(true);
+    try {
+      await timelineQuery.refetch();
+    } finally {
+      setUserRefreshing(false);
+    }
+  };
+
   const error = timelineQuery.isError
     ? (timelineQuery.error as { error?: string })?.error ?? 'Failed to load cluster timeline'
     : null;
@@ -346,17 +360,18 @@ export function LiveTab() {
             />
           )}
         </HeaderField>
-        <HeaderActions>
-          <Button
-            variant="outline"
-            size="sm"
-            loading={refreshing}
-            onClick={() => { void timelineQuery.refetch(); }}
-          >
-            Refresh
-          </Button>
-        </HeaderActions>
       </HeaderStrip>
+
+      <RefreshRow>
+        <Button
+          variant="outline"
+          size="sm"
+          loading={userRefreshing}
+          onClick={() => { void handleManualRefresh(); }}
+        >
+          Refresh
+        </Button>
+      </RefreshRow>
 
       {error && <ErrorNotice>{error}</ErrorNotice>}
       {tracingError && <ErrorNotice>{tracingError}</ErrorNotice>}
