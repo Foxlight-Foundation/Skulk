@@ -1,12 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo } from 'react';
 import styled from 'styled-components';
 import { Button } from '../common/Button';
+import { useAppSelector } from '../../store/hooks';
+import {
+  useGetClusterTimelineQuery,
+  useGetTracingStateQuery,
+  useSetTracingStateMutation,
+} from '../../store/endpoints/observability';
 import type {
-  ClusterTimeline,
   ClusterTimelineEntry,
   ClusterTimelineRunner,
 } from '../../types/diagnostics';
-import type { TracingStateResponse } from '../../types/traces';
 
 /**
  * "Live" tab body for the observability panel. Polls the cluster-timeline
@@ -252,75 +256,38 @@ function summarizeAttrs(attrs: Record<string, unknown>): string {
 }
 
 export function LiveTab() {
-  const [timeline, setTimeline] = useState<ClusterTimeline | null>(null);
-  const [tracingEnabled, setTracingEnabled] = useState<boolean | null>(null);
-  const [tracingToggling, setTracingToggling] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [tracingError, setTracingError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
+  // Pause polling whenever the panel is closed. RTK Query treats `skip: true`
+  // as "this consumer doesn't need data right now"; the cache entry is kept
+  // and polling resumes on the next render with `skip: false`.
+  const panelOpen = useAppSelector((s) => s.ui.observabilityPanelOpen);
 
-  // Track whether the component is still mounted so cleanup-time race conditions
-  // don't surface as console errors. The polling timer uses this to short-circuit
-  // before commits.
-  const mountedRef = useRef(true);
+  const timelineQuery = useGetClusterTimelineQuery(undefined, {
+    pollingInterval: REFRESH_MS,
+    skip: !panelOpen,
+  });
+  const tracingQuery = useGetTracingStateQuery(undefined, { skip: !panelOpen });
+  const [setTracingState, tracingMutation] = useSetTracingStateMutation();
 
-  const fetchAll = useCallback(async () => {
-    try {
-      setRefreshing(true);
-      const [timelineResponse, tracingResponse] = await Promise.all([
-        fetch('/v1/diagnostics/cluster/timeline'),
-        fetch('/v1/tracing'),
-      ]);
-      if (!mountedRef.current) return;
-      if (!timelineResponse.ok) {
-        throw new Error(`Timeline request failed: ${timelineResponse.status}`);
-      }
-      const timelineData = (await timelineResponse.json()) as ClusterTimeline;
-      if (!mountedRef.current) return;
-      setTimeline(timelineData);
-      setError(null);
-
-      if (tracingResponse.ok) {
-        const tracingData = (await tracingResponse.json()) as TracingStateResponse;
-        if (!mountedRef.current) return;
-        setTracingEnabled(tracingData.enabled);
-      }
-    } catch (err) {
-      if (!mountedRef.current) return;
-      setError(err instanceof Error ? err.message : 'Failed to load cluster timeline');
-    } finally {
-      if (mountedRef.current) setRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    void fetchAll();
-    const handle = window.setInterval(() => { void fetchAll(); }, REFRESH_MS);
-    return () => {
-      mountedRef.current = false;
-      window.clearInterval(handle);
-    };
-  }, [fetchAll]);
+  // Stale-while-revalidate: render whatever was last fetched while a refresh
+  // is in flight, never blowing away the rendered view. The first-load
+  // skeleton is therefore the only state that hides the data sections.
+  const timeline = timelineQuery.data ?? null;
+  const tracingEnabled = tracingQuery.data?.enabled ?? null;
+  const refreshing = timelineQuery.isFetching;
+  const error = timelineQuery.isError
+    ? (timelineQuery.error as { error?: string })?.error ?? 'Failed to load cluster timeline'
+    : null;
+  const tracingError = tracingMutation.isError
+    ? (tracingMutation.error as { error?: string })?.error ?? 'Tracing toggle failed'
+    : null;
+  const tracingToggling = tracingMutation.isLoading;
 
   async function toggleTracing() {
     if (tracingEnabled == null) return;
-    const next = !tracingEnabled;
-    setTracingToggling(true);
-    setTracingError(null);
     try {
-      const response = await fetch('/v1/tracing', {
-        method: 'PUT',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ enabled: next }),
-      });
-      if (!response.ok) throw new Error(`Tracing toggle failed: ${response.status}`);
-      const data = (await response.json()) as TracingStateResponse;
-      setTracingEnabled(data.enabled);
-    } catch (err) {
-      setTracingError(err instanceof Error ? err.message : 'Tracing toggle failed');
-    } finally {
-      setTracingToggling(false);
+      await setTracingState(!tracingEnabled).unwrap();
+    } catch {
+      // Error surfaces via tracingMutation.isError, picked up above.
     }
   }
 
@@ -384,7 +351,7 @@ export function LiveTab() {
             variant="outline"
             size="sm"
             loading={refreshing}
-            onClick={() => { void fetchAll(); }}
+            onClick={() => { void timelineQuery.refetch(); }}
           >
             Refresh
           </Button>
@@ -394,12 +361,17 @@ export function LiveTab() {
       {error && <ErrorNotice>{error}</ErrorNotice>}
       {tracingError && <ErrorNotice>{tracingError}</ErrorNotice>}
 
-      <Section>
+      {!timeline && timelineQuery.isLoading && (
+        <Notice>Loading cluster timeline…</Notice>
+      )}
+
+      {timeline && (
+        <Section>
         <SectionTitle>Runners</SectionTitle>
-        {timeline && timeline.runners.length === 0 && (
+        {timeline.runners.length === 0 && (
           <Notice>No runners reported across the cluster.</Notice>
         )}
-        {timeline && timeline.runners.length > 0 && (
+        {timeline.runners.length > 0 && (
           <RunnerGrid>
             {timeline.runners.map((runner) => {
               const hung = isHung(runner);
@@ -437,11 +409,13 @@ export function LiveTab() {
             })}
           </RunnerGrid>
         )}
-      </Section>
+        </Section>
+      )}
 
-      <Section>
+      {timeline && (
+        <Section>
         <SectionTitle>Cross-rank timeline (newest first)</SectionTitle>
-        {timeline && recentTimeline.length === 0 && (
+        {recentTimeline.length === 0 && (
           <Notice>No flight-recorder entries reported yet.</Notice>
         )}
         {recentTimeline.length > 0 && (
@@ -461,7 +435,8 @@ export function LiveTab() {
             })}
           </TimelineList>
         )}
-      </Section>
+        </Section>
+      )}
     </Wrap>
   );
 }
