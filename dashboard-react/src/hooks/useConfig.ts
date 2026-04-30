@@ -1,54 +1,20 @@
-import { useCallback, useState } from 'react';
+import { useCallback } from 'react';
+import {
+  useGetConfigQuery,
+  useUpdateConfigMutation,
+  type FullConfig,
+  type EffectiveConfig,
+  type StoreConfig,
+} from '../store/endpoints/config';
 
-/** Shared model-store configuration returned by the Skulk config API. */
-export interface StoreConfig {
-  enabled: boolean;
-  store_host: string;
-  store_http_host: string;
-  store_port: number;
-  store_path: string;
-  download: {
-    allow_hf_fallback: boolean;
-  };
-  staging: {
-    enabled: boolean;
-    node_cache_path: string;
-    cleanup_on_deactivate: boolean;
-  };
-}
-
-/** Inference-related config surfaced to the dashboard. */
-export interface InferenceConfig {
-  kv_cache_backend: string;
-}
-
-/** Logging / observability config synced across the cluster. */
-export interface LoggingConfig {
-  enabled: boolean;
-  ingest_url: string;
-}
-
-/** Full editable config document as read from or written to `/config`. */
-export interface FullConfig {
-  model_store?: StoreConfig;
-  inference?: InferenceConfig;
-  logging?: LoggingConfig;
-  hf_token?: string;
-}
-
-/** Effective runtime values derived from config and environment. */
-export interface EffectiveConfig {
-  kv_cache_backend: string;
-  has_hf_token?: boolean;
-}
-
-/** Response shape returned by the dashboard config endpoint. */
-export interface ConfigResponse {
-  config: FullConfig;
-  configPath: string;
-  fileExists: boolean;
-  effective?: EffectiveConfig;
-}
+export type {
+  StoreConfig,
+  InferenceConfig,
+  LoggingConfig,
+  FullConfig,
+  EffectiveConfig,
+  ConfigResponse,
+} from '../store/endpoints/config';
 
 /** State and actions exposed by {@link useConfig}. */
 export interface UseConfigReturn {
@@ -63,53 +29,57 @@ export interface UseConfigReturn {
   saveFullConfig: (config: FullConfig) => Promise<boolean>;
 }
 
-/** Load and save cluster config through the Skulk dashboard config API. */
+/**
+ * Thin compatibility wrapper around the RTK Query config endpoints.
+ *
+ * The previous hook owned its own loading/error state and a manual fetch
+ * function; the wrapper preserves that surface so existing consumers
+ * (SettingsPanel) port across without changes. Under the hood the GET is a
+ * cached query and the PUT is a mutation that invalidates the cache, so a
+ * successful save is followed by an automatic refetch.
+ */
 export function useConfig(): UseConfigReturn {
-  const [fullConfig, setFullConfig] = useState<FullConfig | null>(null);
-  const [effective, setEffective] = useState<EffectiveConfig | null>(null);
-  const [configPath, setConfigPath] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const query = useGetConfigQuery();
+  const [updateConfig, mutationState] = useUpdateConfigMutation();
 
   const fetchConfig = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch('/config');
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data: ConfigResponse = await res.json();
-      setFullConfig(data.config);
-      setEffective(data.effective ?? null);
-      setConfigPath(data.configPath);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to fetch config');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    await query.refetch();
+  }, [query]);
 
-  const saveFullConfig = useCallback(async (updated: FullConfig): Promise<boolean> => {
-    setSaving(true);
-    setError(null);
-    try {
-      const res = await fetch('/config', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ config: updated }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      setFullConfig(updated);
-      return true;
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to save config');
-      return false;
-    } finally {
-      setSaving(false);
-    }
-  }, []);
+  const saveFullConfig = useCallback(
+    async (config: FullConfig): Promise<boolean> => {
+      try {
+        await updateConfig(config).unwrap();
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [updateConfig],
+  );
 
+  const fullConfig = query.data?.config ?? null;
+  const effective = query.data?.effective ?? null;
+  const configPath = query.data?.configPath ?? null;
   const config = fullConfig?.model_store ?? null;
 
-  return { config, fullConfig, effective, configPath, loading, saving, error, fetchConfig, saveFullConfig };
+  // Surface query errors as readable strings; mutation errors flow through
+  // the saveFullConfig boolean return rather than the shared `error` field
+  // so the UI can keep showing the previously-loaded config while the user
+  // retries the save.
+  const error = query.isError
+    ? (query.error as { error?: string; status?: number })?.error ?? 'Failed to fetch config'
+    : null;
+
+  return {
+    config,
+    fullConfig,
+    effective,
+    configPath,
+    loading: query.isFetching,
+    saving: mutationState.isLoading,
+    error,
+    fetchConfig,
+    saveFullConfig,
+  };
 }
