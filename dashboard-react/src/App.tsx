@@ -19,7 +19,7 @@ import { InstancePanel, type InstanceCardData } from './components/layout/Instan
 import { ConversationPanel } from './components/layout/ConversationPanel';
 import { addToast } from './hooks/useToast';
 import type { InstanceStatus } from './components/cluster/RunningInstanceCard';
-import { useChatStore } from './stores/chatStore';
+import { chatActions } from './store/slices/chatSlice';
 import { useAppDispatch, useAppSelector } from './store/hooks';
 import { uiActions, type ObservabilityTab } from './store/slices/uiSlice';
 
@@ -147,16 +147,16 @@ export function App() {
     dispatch(uiActions.setSelectedTraceTaskId(taskId));
   const togglePanel = () => dispatch(uiActions.togglePanel());
   const toggleHistoryPanel = () => dispatch(uiActions.toggleHistoryPanel());
-  const conversationsMap = useChatStore((s) => s.conversations);
+  const conversationsMap = useAppSelector((s) => s.chat.conversations);
   const allConversations = useMemo(
     () => Object.values(conversationsMap).sort((a, b) => b.updatedAt - a.updatedAt),
     [conversationsMap],
   );
-  const activeConversationId = useChatStore((s) => s.activeConversationId);
-  const selectedModelId = useChatStore((s) => s.selectedModelId);
-  const selectConversation = useChatStore((s) => s.selectConversation);
-  const deleteConversation = useChatStore((s) => s.deleteConversation);
-  const newConversation = useChatStore((s) => s.newConversation);
+  const activeConversationId = useAppSelector((s) => s.chat.activeConversationId);
+  const selectedModelId = useAppSelector((s) => s.chat.selectedModelId);
+  const selectConversation = (id: string) => dispatch(chatActions.selectConversation(id));
+  const deleteConversation = (id: string) => dispatch(chatActions.deleteConversation(id));
+  const newConversation = (modelId: string) => dispatch(chatActions.newConversation(modelId));
 
   // Compute cluster warnings from topology
   const clusterWarnings = useMemo(() => {
@@ -403,7 +403,7 @@ export function App() {
                 nodeDisk={nodeDisk}
                 instances={instances}
                 runners={runners}
-                onChat={(modelId) => { useChatStore.getState().selectModel(modelId); setActiveRoute('chat'); }}
+                onChat={(modelId) => { dispatch(chatActions.selectModel(modelId)); setActiveRoute('chat'); }}
               />
             ) : activeRoute === 'traces' ? (
               selectedTraceTaskId ? (
@@ -439,7 +439,7 @@ export function App() {
             <InstancePanel
               instances={instanceCards}
               onDelete={handleDeleteInstance}
-              onChat={(modelId) => { useChatStore.getState().selectModel(modelId); setActiveRoute('chat'); }}
+              onChat={(modelId) => { dispatch(chatActions.selectModel(modelId)); setActiveRoute('chat'); }}
             />
           )}
         </ContentRow>

@@ -35,9 +35,11 @@ export {
   selectActiveMessages,
   selectAllConversationsSorted,
   selectConversationsForModel,
-  useChatStore,
-} from './stores/chatStore';
-export type { ChatState } from './stores/chatStore';
+  chatActions,
+} from './store/slices/chatSlice';
+export type { ChatState } from './store/slices/chatSlice';
+export { store } from './store';
+export { useAppDispatch, useAppSelector } from './store/hooks';
 export { useClusterState } from './hooks/useClusterState';
 export type {
   ConfigResponse,
