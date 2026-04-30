@@ -36,6 +36,20 @@ export interface NodeTabProps {
   nodeId: string | null;
 }
 
+/**
+ * Provides this tab's scroll surface. ObservabilityPanel.Body has
+ * `overflow: hidden` so each tab owns its own scroll behavior; the long
+ * runner / process / placement sections scroll inside this Wrap rather
+ * than the panel root.
+ */
+const Wrap = styled.div`
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+`;
+
 const SelectorRow = styled.div`
   display: flex;
   align-items: center;
@@ -376,14 +390,14 @@ export function NodeTab({ nodeId }: NodeTabProps) {
 
   if (!nodeId) {
     return (
-      <>
+      <Wrap>
         {selector}
         <EmptyHint>
           {nodeOptions.length === 0
             ? 'No nodes reported by the cluster yet. Once a node connects, pick it here to inspect its diagnostics.'
             : 'Pick a node above to inspect its diagnostics.'}
         </EmptyHint>
-      </>
+      </Wrap>
     );
   }
 
@@ -440,7 +454,7 @@ export function NodeTab({ nodeId }: NodeTabProps) {
   }
 
   return (
-    <>
+    <Wrap>
       {selector}
       <Subtitle>{runtime?.friendlyName ?? runtime?.hostname ?? shortId(nodeId)} · {shortId(nodeId)}</Subtitle>
 
@@ -660,6 +674,6 @@ export function NodeTab({ nodeId }: NodeTabProps) {
             </Section>
           </>
         )}
-    </>
+    </Wrap>
   );
 }

@@ -134,11 +134,20 @@ const TabButton = styled.button<{ $active: boolean }>`
   }
 `;
 
+/**
+ * Tab content host. Becomes a flex column with `overflow: hidden` so each
+ * tab can decide its own internal layout — LiveTab needs the timeline to
+ * fill remaining vertical space and scroll inside the panel, NodeTab needs
+ * the entire body to scroll. Each tab provides its own scroll surface so
+ * Body never owns one for everyone.
+ */
 const Body = styled.div`
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
 `;
 
 const TAB_ORDER: { key: ObservabilityTab; label: string }[] = [

@@ -46,6 +46,8 @@ const Wrap = styled.div`
   display: flex;
   flex-direction: column;
   gap: 12px;
+  flex: 1;
+  min-height: 0;
 `;
 
 const HeaderStrip = styled.div`
@@ -122,6 +124,19 @@ const Section = styled.section`
   gap: 8px;
 `;
 
+/**
+ * Same as Section but claims the remaining vertical space inside Wrap. Used
+ * for the cross-rank timeline so the entry list grows with the panel rather
+ * than capping at a hard pixel height and leaving empty space below.
+ */
+const FillSection = styled.section`
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+`;
+
 const SectionTitle = styled.h3`
   margin: 0;
   font-family: ${({ theme }) => theme.fonts.body};
@@ -180,7 +195,8 @@ const TimelineList = styled.div`
   display: flex;
   flex-direction: column;
   gap: 4px;
-  max-height: 360px;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   border: 1px solid ${({ theme }) => theme.colors.borderLight};
   border-radius: ${({ theme }) => theme.radii.md};
@@ -228,12 +244,29 @@ function shortId(id: string): string {
   return id.length > 12 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
 }
 
+/**
+ * Phases that explicitly aren't "doing work right now" — time spent in any of
+ * these is normal regardless of duration. A runner can sit idle for hours
+ * between requests and we shouldn't paint that as a hang; same for terminal
+ * states like `completion`, `error`, and `shutdown_cleanup` where the runner
+ * is past the work it could be stuck on.
+ */
+const NON_WORKING_PHASES: ReadonlySet<string> = new Set([
+  'idle',
+  'completion',
+  'error',
+  'shutdown_cleanup',
+  'cancel_observed',
+  'created',
+]);
+
 function isHung(runner: ClusterTimelineRunner): boolean {
-  return Boolean(
-    runner.processAlive &&
-    runner.activeTaskId &&
-    runner.secondsInPhase >= HANG_PHASE_SECONDS,
-  );
+  if (!runner.processAlive) return false;
+  if (NON_WORKING_PHASES.has(runner.phase)) return false;
+  // Active task association alone isn't enough — we also require a working
+  // phase, because `activeTaskId` can linger briefly after a task completes
+  // before the next phase transition clears it.
+  return Boolean(runner.activeTaskId && runner.secondsInPhase >= HANG_PHASE_SECONDS);
 }
 
 function formatLocalTime(at: string): string {
@@ -428,7 +461,7 @@ export function LiveTab() {
       )}
 
       {timeline && (
-        <Section>
+        <FillSection>
         <SectionTitle>Cross-rank timeline (newest first)</SectionTitle>
         {recentTimeline.length === 0 && (
           <Notice>No flight-recorder entries reported yet.</Notice>
@@ -450,7 +483,7 @@ export function LiveTab() {
             })}
           </TimelineList>
         )}
-        </Section>
+        </FillSection>
       )}
     </Wrap>
   );

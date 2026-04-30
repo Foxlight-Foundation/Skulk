@@ -29,10 +29,18 @@ import { TraceWaterfall } from './TraceWaterfall';
  * needed.
  */
 
+/**
+ * Provides this tab's scroll surface. ObservabilityPanel.Body has
+ * `overflow: hidden` so each tab owns its own scroll behavior; we route
+ * the user's scroll wheel through Wrap rather than the panel root.
+ */
 const Wrap = styled.div`
   display: flex;
   flex-direction: column;
   gap: 12px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 `;
 
 const ScopeToggle = styled.div`
