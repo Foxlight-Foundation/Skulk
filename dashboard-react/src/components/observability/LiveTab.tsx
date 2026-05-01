@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react';
-import styled, { css, keyframes } from 'styled-components';
-import { FiRefreshCw } from 'react-icons/fi';
+import styled from 'styled-components';
 import { Button } from '../common/Button';
 import { CenteredSpinner, Spinner } from '../common/Spinner';
 import { useAppSelector } from '../../store/hooks';
@@ -236,22 +235,6 @@ const ErrorNotice = styled(Notice)`
   color: ${({ theme }) => theme.colors.errorText};
 `;
 
-/**
- * Refresh icon that spins while the user-initiated refresh is in flight.
- * The button itself stays fixed-width — only the inner icon rotates — so
- * polling-driven state changes can never reflow the header strip.
- */
-const refreshSpin = keyframes`
-  to { transform: rotate(360deg); }
-`;
-
-const RefreshIcon = styled(FiRefreshCw)<{ $spinning: boolean }>`
-  ${({ $spinning }) =>
-    $spinning &&
-    css`
-      animation: ${refreshSpin} 0.7s linear infinite;
-    `}
-`;
 
 function shortId(id: string): string {
   return id.length > 12 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
@@ -381,7 +364,7 @@ export function LiveTab() {
           aria-label="Refresh cluster timeline"
           title="Refresh"
         >
-          <RefreshIcon $spinning={userRefreshing} size={14} />
+          <Spinner size={12} spinning={userRefreshing} />
         </Button>
         <HeaderField>
           <HeaderLabel>Master</HeaderLabel>
