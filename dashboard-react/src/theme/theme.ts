@@ -220,7 +220,10 @@ const lightColors: ColorTokens = {
   errorText: '#991b1b',
   warning: '#b45309',
   warningBg: 'rgba(180, 83, 9, 0.12)',
-  warningText: '#78350f',
+  // Was '#78350f' (amber-900) — read as muddy brown on the pale warningBg.
+  // amber-800 keeps the warning semantic while sitting better next to the
+  // blue brand color used elsewhere in the light theme.
+  warningText: '#92400e',
   info: '#1d4ed8',
   infoBg: 'rgba(29, 78, 216, 0.10)',
 
