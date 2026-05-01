@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
+import { FiChevronRight } from 'react-icons/fi';
 import { Button } from '../common/Button';
+import { CenteredSpinner, Spinner } from '../common/Spinner';
 import { useAppDispatch } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import {
@@ -69,32 +71,42 @@ const ScopeButton = styled.button<{ $active: boolean }>`
   }
 `;
 
+/**
+ * Scrollable list area that fills the panel's remaining vertical space.
+ * Each entry is a `RowGroup` containing the row affordance plus an inline
+ * expansion when that trace is the currently-expanded one.
+ */
 const ListWrap = styled.div`
   border: 1px solid ${({ theme }) => theme.colors.borderLight};
   border-radius: ${({ theme }) => theme.radii.md};
   background: ${({ theme }) => theme.colors.surfaceSunken};
-  max-height: 240px;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
+`;
+
+const RowGroup = styled.div`
+  border-bottom: 1px solid ${({ theme }) => theme.colors.borderLight};
+
+  &:last-child {
+    border-bottom: none;
+  }
 `;
 
 const ListRow = styled.button<{ $selected: boolean }>`
   all: unset;
   display: grid;
-  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) auto auto;
   gap: 10px;
+  align-items: center;
   width: 100%;
   box-sizing: border-box;
   padding: 8px 10px;
   cursor: pointer;
-  border-bottom: 1px solid ${({ theme }) => theme.colors.borderLight};
   font-family: ${({ theme }) => theme.fonts.mono};
   font-size: ${({ theme }) => theme.fontSizes.xs};
   color: ${({ theme }) => theme.colors.textSecondary};
   background: ${({ $selected, theme }) => ($selected ? theme.colors.goldBg : 'transparent')};
-
-  &:last-child {
-    border-bottom: none;
-  }
 
   &:hover {
     background: ${({ $selected, theme }) =>
@@ -106,6 +118,17 @@ const ListRow = styled.button<{ $selected: boolean }>`
     outline: 2px solid ${({ theme }) => theme.colors.goldDim};
     outline-offset: -2px;
   }
+`;
+
+/**
+ * Right-side expand indicator. Rotates from pointing-right (collapsed) to
+ * pointing-down (expanded) so the affordance reads as both an arrow and a
+ * disclosure widget without a separate icon swap.
+ */
+const Chevron = styled(FiChevronRight)<{ $expanded: boolean }>`
+  transition: transform 0.15s ease-out;
+  transform: rotate(${({ $expanded }) => ($expanded ? '90deg' : '0deg')});
+  color: ${({ theme }) => theme.colors.textMuted};
 `;
 
 const RowMain = styled.span`
@@ -137,14 +160,19 @@ const ErrorNotice = styled(Notice)`
   color: ${({ theme }) => theme.colors.errorText};
 `;
 
-const DetailWrap = styled.section`
+/**
+ * Inline expansion that drops below an expanded row in the list. Holds the
+ * trace metadata header, the download affordance, the waterfall renderer,
+ * and the per-event detail block — same content that previously lived in a
+ * separate panel under the list.
+ */
+const ExpandedContent = styled.div`
   display: flex;
   flex-direction: column;
   gap: 8px;
-  border: 1px solid ${({ theme }) => theme.colors.borderLight};
-  border-radius: ${({ theme }) => theme.radii.md};
   background: ${({ theme }) => theme.colors.surface};
   padding: 10px 12px;
+  border-top: 1px solid ${({ theme }) => theme.colors.borderLight};
 `;
 
 const DetailHeader = styled.div`
@@ -340,99 +368,112 @@ export function TracesTab() {
       </ScopeToggle>
 
       <ListWrap>
-        {listLoading && <Notice>Loading traces…</Notice>}
+        {listLoading && (
+          <CenteredSpinner>
+            <Spinner />
+          </CenteredSpinner>
+        )}
         {listError && <ErrorNotice>{listError}</ErrorNotice>}
         {!listLoading && !listError && traces && traces.length === 0 && (
           <Notice>
             No saved traces yet. Enable tracing for the cluster and re-run a request to record one.
           </Notice>
         )}
-        {!listLoading && traces && traces.map((trace) => (
-          <ListRow
-            key={trace.taskId}
-            $selected={selectedTaskId === trace.taskId}
-            onClick={() => setSelectedTaskId(trace.taskId)}
-            type="button"
-          >
-            <RowMain title={trace.taskId}>
-              {trace.modelId ?? trace.taskId}
-            </RowMain>
-            <RowSecondary>
-              {trace.taskKind ?? 'unknown'} · {formatBytes(trace.fileSize)}
-            </RowSecondary>
-            <RowTime>{formatTime(trace.createdAt)}</RowTime>
-          </ListRow>
-        ))}
-      </ListWrap>
-
-      {selectedTaskId && (
-        <DetailWrap>
-          <DetailHeader>
-            <DetailMeta>
-              {selectedTraceListItem?.modelId && <span>{selectedTraceListItem.modelId}</span>}
-              {selectedTraceListItem?.taskKind && <span>{selectedTraceListItem.taskKind}</span>}
-              {totalUs > 0 && <span>wall {formatDuration(totalUs)}</span>}
-              {traceData?.sourceNodes && traceData.sourceNodes.length > 0 && (
-                <span>{traceData.sourceNodes.length} source nodes</span>
-              )}
-            </DetailMeta>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => { void handleDownload(); }}
-            >
-              Download JSON
-            </Button>
-          </DetailHeader>
-          {downloadError && <ErrorNotice>{downloadError}</ErrorNotice>}
-          {traceLoading && <Notice>Loading trace…</Notice>}
-          {traceError && <ErrorNotice>{traceError}</ErrorNotice>}
-          {traceData && !traceLoading && !traceError && (
-            <>
-              <TraceWaterfall
-                events={waterfallEvents}
-                selectedId={selectedEvent?.id ?? null}
-                onSelect={setSelectedEvent}
-              />
-              {selectedEvent && (
-                <div>
-                  <SelectedRow>
-                    <SelectedKey>Event</SelectedKey>
-                    <SelectedValue>{selectedEvent.name}</SelectedValue>
-                  </SelectedRow>
-                  <SelectedRow>
-                    <SelectedKey>Lane</SelectedKey>
-                    <SelectedValue>{selectedEvent.laneLabel}</SelectedValue>
-                  </SelectedRow>
-                  <SelectedRow>
-                    <SelectedKey>Category</SelectedKey>
-                    <SelectedValue>{selectedEvent.category}</SelectedValue>
-                  </SelectedRow>
-                  <SelectedRow>
-                    <SelectedKey>Duration</SelectedKey>
-                    <SelectedValue>{formatDuration(selectedEvent.durationUs)}</SelectedValue>
-                  </SelectedRow>
-                  {selectedEvent.tags && selectedEvent.tags.length > 0 && (
-                    <SelectedRow>
-                      <SelectedKey>Tags</SelectedKey>
-                      <SelectedValue>{selectedEvent.tags.join(', ')}</SelectedValue>
-                    </SelectedRow>
+        {!listLoading && traces && traces.map((trace) => {
+          const isExpanded = selectedTaskId === trace.taskId;
+          return (
+            <RowGroup key={trace.taskId}>
+              <ListRow
+                $selected={isExpanded}
+                onClick={() => setSelectedTaskId(isExpanded ? null : trace.taskId)}
+                type="button"
+                aria-expanded={isExpanded}
+              >
+                <RowMain title={trace.taskId}>
+                  {trace.modelId ?? trace.taskId}
+                </RowMain>
+                <RowSecondary>
+                  {trace.taskKind ?? 'unknown'} · {formatBytes(trace.fileSize)}
+                </RowSecondary>
+                <RowTime>{formatTime(trace.createdAt)}</RowTime>
+                <Chevron $expanded={isExpanded} size={14} />
+              </ListRow>
+              {isExpanded && (
+                <ExpandedContent>
+                  <DetailHeader>
+                    <DetailMeta>
+                      {selectedTraceListItem?.modelId && <span>{selectedTraceListItem.modelId}</span>}
+                      {selectedTraceListItem?.taskKind && <span>{selectedTraceListItem.taskKind}</span>}
+                      {totalUs > 0 && <span>wall {formatDuration(totalUs)}</span>}
+                      {traceData?.sourceNodes && traceData.sourceNodes.length > 0 && (
+                        <span>{traceData.sourceNodes.length} source nodes</span>
+                      )}
+                    </DetailMeta>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => { void handleDownload(); }}
+                    >
+                      Download JSON
+                    </Button>
+                  </DetailHeader>
+                  {downloadError && <ErrorNotice>{downloadError}</ErrorNotice>}
+                  {traceLoading && (
+                    <CenteredSpinner>
+                      <Spinner />
+                    </CenteredSpinner>
                   )}
-                  {selectedEvent.attrs &&
-                    Object.entries(selectedEvent.attrs).map(([key, value]) => (
-                      <SelectedRow key={key}>
-                        <SelectedKey>{key}</SelectedKey>
-                        <SelectedValue>
-                          {Array.isArray(value) ? value.join(', ') : String(value)}
-                        </SelectedValue>
-                      </SelectedRow>
-                    ))}
-                </div>
+                  {traceError && <ErrorNotice>{traceError}</ErrorNotice>}
+                  {traceData && !traceLoading && !traceError && (
+                    <>
+                      <TraceWaterfall
+                        events={waterfallEvents}
+                        selectedId={selectedEvent?.id ?? null}
+                        onSelect={setSelectedEvent}
+                      />
+                      {selectedEvent && (
+                        <div>
+                          <SelectedRow>
+                            <SelectedKey>Event</SelectedKey>
+                            <SelectedValue>{selectedEvent.name}</SelectedValue>
+                          </SelectedRow>
+                          <SelectedRow>
+                            <SelectedKey>Lane</SelectedKey>
+                            <SelectedValue>{selectedEvent.laneLabel}</SelectedValue>
+                          </SelectedRow>
+                          <SelectedRow>
+                            <SelectedKey>Category</SelectedKey>
+                            <SelectedValue>{selectedEvent.category}</SelectedValue>
+                          </SelectedRow>
+                          <SelectedRow>
+                            <SelectedKey>Duration</SelectedKey>
+                            <SelectedValue>{formatDuration(selectedEvent.durationUs)}</SelectedValue>
+                          </SelectedRow>
+                          {selectedEvent.tags && selectedEvent.tags.length > 0 && (
+                            <SelectedRow>
+                              <SelectedKey>Tags</SelectedKey>
+                              <SelectedValue>{selectedEvent.tags.join(', ')}</SelectedValue>
+                            </SelectedRow>
+                          )}
+                          {selectedEvent.attrs &&
+                            Object.entries(selectedEvent.attrs).map(([key, value]) => (
+                              <SelectedRow key={key}>
+                                <SelectedKey>{key}</SelectedKey>
+                                <SelectedValue>
+                                  {Array.isArray(value) ? value.join(', ') : String(value)}
+                                </SelectedValue>
+                              </SelectedRow>
+                            ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </ExpandedContent>
               )}
-            </>
-          )}
-        </DetailWrap>
-      )}
+            </RowGroup>
+          );
+        })}
+      </ListWrap>
 
       <FooterLink type="button" onClick={openLegacyTraces}>
         Open legacy traces page (filters, multi-select, bulk delete)
