@@ -326,17 +326,30 @@ function TimeAxis({
   y: number;
   totalDurationUs: number;
 }) {
-  // Five evenly-spaced ticks across the lane area. The labels are rendered
-  // with `text-anchor="middle"` so they stay centered under the tick mark.
-  const tickCount = 5;
-  const ticks: { px: number; label: string }[] = [];
+  // Responsive tick density. Labels need roughly ~90px of horizontal room to
+  // avoid colliding with their neighbors at the worst-case width
+  // ("449.36ms"-class strings). Below that we drop ticks rather than letting
+  // them overlap. The axis always shows at least the start and end ticks so
+  // an operator can read the trace's total duration.
+  const PX_PER_TICK = 90;
+  const tickCount = Math.max(1, Math.floor(width / PX_PER_TICK));
+
+  type Tick = { px: number; label: string; anchor: 'start' | 'middle' | 'end' };
+  const ticks: Tick[] = [];
   for (let i = 0; i <= tickCount; i += 1) {
     const fraction = i / tickCount;
+    // Edge anchoring: the first tick aligns its text leftward, the last tick
+    // aligns rightward, and everything between stays centered. Without this
+    // the leftmost label gets center-aligned at x=0 and visually overflows
+    // into the lane-label gutter, which is what looked like an overlap.
+    const anchor: Tick['anchor'] = i === 0 ? 'start' : i === tickCount ? 'end' : 'middle';
     ticks.push({
       px: x + width * fraction,
       label: formatDuration(totalDurationUs * fraction),
+      anchor,
     });
   }
+
   return (
     <g>
       {ticks.map((tick) => (
@@ -352,7 +365,7 @@ function TimeAxis({
           <text
             x={tick.px}
             y={y + TIME_AXIS_HEIGHT - 6}
-            textAnchor="middle"
+            textAnchor={tick.anchor}
             fontSize={10}
             fill="currentColor"
             fillOpacity={0.7}
