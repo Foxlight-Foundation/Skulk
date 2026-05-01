@@ -350,20 +350,38 @@ export function NodeTab({ nodeId }: NodeTabProps) {
       });
   }, [cluster.topology]);
 
-  // Default the selection to the master when nothing is picked yet. Avoids
-  // the "Pick a node above" empty state on every visit — the master is the
-  // single most useful starting point. Topology may include nodes the
-  // master isn't aware of (rare, but possible during partition); guard the
-  // assignment so we don't pick a node that isn't actually selectable.
+  // The persisted `nodeId` may point at a node that no longer exists in this
+  // cluster — sessionStorage carries the prior session's selection across
+  // restarts, and operators sometimes hop between clusters. Compute an
+  // *effective* nodeId that's null whenever the persisted value doesn't
+  // match a known topology entry. The query downstream uses the effective
+  // id, so we never fire `/v1/diagnostics/cluster/<dead-node-id>` and watch
+  // it 404 into the error block.
+  const isStaleSelection =
+    nodeId != null &&
+    nodeOptions.length > 0 &&
+    !nodeOptions.some((option) => option.id === nodeId);
+  const effectiveNodeId = isStaleSelection ? null : nodeId;
+
+  // Auto-select rules:
+  //  1. If the persisted selection is stale, clear it. Lets the next branch
+  //     run on the next render with a clean slate.
+  //  2. Otherwise, default to the master when nothing is picked. Avoids the
+  //     "Pick a node above" empty state on every visit — the master is the
+  //     single most useful starting point.
   useEffect(() => {
-    if (nodeId) return;
+    if (isStaleSelection) {
+      setSelectedNodeId(null);
+      return;
+    }
+    if (effectiveNodeId) return;
     if (!masterNodeId) return;
     if (!nodeOptions.some((option) => option.id === masterNodeId)) return;
     setSelectedNodeId(masterNodeId);
     // setSelectedNodeId is stable (dispatch returns referentially-stable
     // action creators) so omitting it from deps is safe.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodeId, masterNodeId, nodeOptions]);
+  }, [effectiveNodeId, isStaleSelection, masterNodeId, nodeOptions]);
 
   // Diagnostics fetch — RTK Query keys by nodeId, dedups across components,
   // and refetches automatically when a cancel/capture mutation invalidates
@@ -373,7 +391,9 @@ export function NodeTab({ nodeId }: NodeTabProps) {
   // view immediately — `data` would leave the previous node's diagnostics on
   // screen until the next fetch lands, which mis-attributes that data to the
   // newly-picked node and is exactly what the user reported.
-  const diagnosticsQuery = useGetNodeDiagnosticsQuery(nodeId ?? '', { skip: !nodeId });
+  const diagnosticsQuery = useGetNodeDiagnosticsQuery(effectiveNodeId ?? '', {
+    skip: !effectiveNodeId,
+  });
   const diagnostics = diagnosticsQuery.currentData ?? null;
   const loading = diagnosticsQuery.isFetching;
   const error = diagnosticsQuery.isError
@@ -403,7 +423,7 @@ export function NodeTab({ nodeId }: NodeTabProps) {
       <SelectorLabel htmlFor="observability-node-select">Node</SelectorLabel>
       <NodeSelect
         id="observability-node-select"
-        value={nodeId ?? ''}
+        value={effectiveNodeId ?? ''}
         onChange={(event) => setSelectedNodeId(event.target.value || null)}
       >
         <option value="">Select node…</option>
@@ -416,7 +436,7 @@ export function NodeTab({ nodeId }: NodeTabProps) {
     </SelectorRow>
   );
 
-  if (!nodeId) {
+  if (!effectiveNodeId) {
     return (
       <Wrap>
         {selector}
@@ -442,12 +462,16 @@ export function NodeTab({ nodeId }: NodeTabProps) {
   const system = diagnostics?.resources.system;
 
   async function requestRunnerCancel(runnerId: string, taskId: string) {
-    if (!nodeId) return;
+    if (!effectiveNodeId) return;
     const actionKey = `${runnerId}:${taskId}`;
     setCancelActionKey(actionKey);
     setCancelMessage(null);
     try {
-      const payload = await cancelRunnerTask({ nodeId, runnerId, taskId }).unwrap();
+      const payload = await cancelRunnerTask({
+        nodeId: effectiveNodeId,
+        runnerId,
+        taskId,
+      }).unwrap();
       setCancelMessage(payload.message ?? 'Cancellation requested.');
       // The mutation invalidates the NodeDiagnostics tag, so the query
       // refetches automatically — no manual reload token needed.
@@ -459,12 +483,16 @@ export function NodeTab({ nodeId }: NodeTabProps) {
   }
 
   async function requestCaptureBundle(runnerId: string, taskId?: string | null) {
-    if (!nodeId) return;
+    if (!effectiveNodeId) return;
     const actionKey = `${runnerId}:${taskId ?? 'runner'}`;
     setCaptureActionKey(actionKey);
     setCaptureBundle(null);
     try {
-      const payload = await captureRunnerBundle({ nodeId, runnerId, taskId }).unwrap();
+      const payload = await captureRunnerBundle({
+        nodeId: effectiveNodeId,
+        runnerId,
+        taskId,
+      }).unwrap();
       setCaptureBundle(payload);
     } catch {
       // Error surfaces via captureMutation.isError.
@@ -509,7 +537,7 @@ export function NodeTab({ nodeId }: NodeTabProps) {
 
       {diagnostics && runtime && (
         <>
-          <Subtitle>{runtime.friendlyName ?? runtime.hostname ?? shortId(nodeId)} · {shortId(nodeId)}</Subtitle>
+          <Subtitle>{runtime.friendlyName ?? runtime.hostname ?? shortId(effectiveNodeId)} · {shortId(effectiveNodeId)}</Subtitle>
           {error && <Section><Warning>{error}</Warning></Section>}
           <>
             {diagnostics.warnings.length > 0 && (
