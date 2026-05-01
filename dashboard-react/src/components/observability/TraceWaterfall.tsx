@@ -77,6 +77,10 @@ const LANE_LABEL_WIDTH = 64;
 const BAR_VERTICAL_PADDING = 4;
 /** Pixel floor so even zero-duration events stay clickable. */
 const MIN_BAR_PX = 2;
+/** Events narrower than this become candidates for cluster merging. */
+const TINY_BAR_PX = 3;
+/** Two adjacent tiny events merge into one cluster when their gap ≤ this. */
+const CLUSTER_GAP_PX = 2;
 
 /**
  * Stable color-per-category map. Hand-tuned medium-sat / medium-light HSL hexes
@@ -104,6 +108,67 @@ function formatDuration(microseconds: number): string {
   if (microseconds < 1_000) return `${microseconds.toFixed(0)}us`;
   if (microseconds < 1_000_000) return `${(microseconds / 1_000).toFixed(2)}ms`;
   return `${(microseconds / 1_000_000).toFixed(2)}s`;
+}
+
+/**
+ * Per-lane render plan: each unit is either a single event (rendered as a
+ * normal bar) or a cluster of multiple short events that are too close
+ * together to draw individually. Clusters keep the waterfall readable when
+ * a lane has many sub-pixel events spanning a long total duration.
+ */
+type RenderUnit =
+  | { kind: 'event'; event: TraceEventLike; xPx: number; widthPx: number }
+  | { kind: 'cluster'; events: TraceEventLike[]; xPx: number; widthPx: number };
+
+function buildLaneUnits(
+  laneEvents: readonly TraceEventLike[],
+  t0: number,
+  pxPerUs: number,
+): RenderUnit[] {
+  if (laneEvents.length === 0) return [];
+
+  // Sort by start time so the merge-into-previous logic is well-defined; the
+  // input is in first-seen order which doesn't have to be chronological.
+  const sorted = [...laneEvents].sort((a, b) => a.startUs - b.startUs);
+  const units: RenderUnit[] = [];
+
+  for (const event of sorted) {
+    const rawWidthPx = Math.max(0, event.durationUs) * pxPerUs;
+    const xPx = (event.startUs - t0) * pxPerUs;
+    const widthPx = Math.max(MIN_BAR_PX, rawWidthPx);
+    const isTiny = rawWidthPx < TINY_BAR_PX;
+
+    const last = units[units.length - 1];
+    if (isTiny && last) {
+      const lastEnd = last.xPx + last.widthPx;
+      const gap = xPx - lastEnd;
+      if (gap <= CLUSTER_GAP_PX) {
+        if (last.kind === 'cluster') {
+          // Extend the existing cluster.
+          last.events.push(event);
+          last.widthPx = Math.max(last.widthPx, xPx + widthPx - last.xPx);
+          continue;
+        }
+        // Promote a tiny preceding event into a fresh two-event cluster so
+        // we don't keep two indistinguishable specks side-by-side.
+        const lastRawWidth =
+          Math.max(0, last.event.durationUs) * pxPerUs;
+        if (lastRawWidth < TINY_BAR_PX) {
+          units[units.length - 1] = {
+            kind: 'cluster',
+            events: [last.event, event],
+            xPx: last.xPx,
+            widthPx: Math.max(last.widthPx, xPx + widthPx - last.xPx),
+          };
+          continue;
+        }
+      }
+    }
+
+    units.push({ kind: 'event', event, xPx, widthPx });
+  }
+
+  return units;
 }
 
 interface ResolvedLane {
@@ -201,6 +266,9 @@ export function TraceWaterfall({ events, selectedId, onSelect }: TraceWaterfallP
         />
         {lanes.map((lane, laneIdx) => {
           const laneTop = TIME_AXIS_HEIGHT + laneIdx * LANE_HEIGHT;
+          const y = laneTop + BAR_VERTICAL_PADDING;
+          const h = LANE_HEIGHT - BAR_VERTICAL_PADDING * 2;
+          const units = buildLaneUnits(lane.events, t0, pxPerUs);
           return (
             <g key={lane.key}>
               <LaneRow
@@ -208,22 +276,31 @@ export function TraceWaterfall({ events, selectedId, onSelect }: TraceWaterfallP
                 top={laneTop}
                 label={lane.label}
               />
-              {lane.events.map((event) => {
-                const x = LANE_LABEL_WIDTH + (event.startUs - t0) * pxPerUs;
-                const w = Math.max(MIN_BAR_PX, event.durationUs * pxPerUs);
-                const y = laneTop + BAR_VERTICAL_PADDING;
-                const h = LANE_HEIGHT - BAR_VERTICAL_PADDING * 2;
-                const isSelected = selectedId != null && event.id === selectedId;
+              {units.map((unit, unitIdx) => {
+                const x = LANE_LABEL_WIDTH + unit.xPx;
+                if (unit.kind === 'cluster') {
+                  return (
+                    <ClusterBar
+                      key={`cluster-${lane.key}-${unitIdx}`}
+                      x={x}
+                      y={y}
+                      width={unit.widthPx}
+                      height={h}
+                      events={unit.events}
+                    />
+                  );
+                }
+                const isSelected = selectedId != null && unit.event.id === selectedId;
                 return (
                   <EventBar
-                    key={event.id}
+                    key={unit.event.id}
                     x={x}
                     y={y}
-                    width={w}
+                    width={unit.widthPx}
                     height={h}
-                    color={colorForCategory(event.category)}
+                    color={colorForCategory(unit.event.category)}
                     selected={isSelected}
-                    event={event}
+                    event={unit.event}
                     onSelect={onSelect}
                   />
                 );
@@ -362,6 +439,57 @@ function EventBar({
         ry={2}
       >
         <title>{`${event.name} · ${event.category} · ${formatDuration(event.durationUs)}`}</title>
+      </rect>
+    </g>
+  );
+}
+
+/**
+ * Visual placeholder for a cluster of tiny adjacent events. Drawn as a muted
+ * neutral block — the goal is to communicate "there are events here, just
+ * too small to draw individually" without misleading the eye into reading
+ * them as one long event of the dominant category.
+ *
+ * The hover title summarizes the cluster contents: count, total duration of
+ * contained events, and the categories present. Clicks are intentionally
+ * inert in v1; surfacing the cluster's events in the detail panel would need
+ * a richer selection model than the single-event one we have today.
+ */
+function ClusterBar({
+  x,
+  y,
+  width,
+  height,
+  events,
+}: {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  events: TraceEventLike[];
+}) {
+  const totalDurationUs = events.reduce((sum, e) => sum + Math.max(0, e.durationUs), 0);
+  const categoryCount = new Set(events.map((e) => e.category)).size;
+  const categories = [...new Set(events.map((e) => e.category))].join(', ');
+  return (
+    <g>
+      <rect
+        x={x}
+        y={y}
+        width={width}
+        height={height}
+        fill={FALLBACK_COLOR}
+        fillOpacity={0.45}
+        stroke="rgba(0, 0, 0, 0.35)"
+        strokeWidth={0.5}
+        rx={2}
+        ry={2}
+      >
+        <title>
+          {`${events.length} events · ${formatDuration(totalDurationUs)} total · ${
+            categoryCount === 1 ? categories : `${categoryCount} categories: ${categories}`
+          }`}
+        </title>
       </rect>
     </g>
   );
