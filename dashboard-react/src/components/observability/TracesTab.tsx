@@ -347,7 +347,11 @@ export function TracesTab() {
     : null;
   const listLoading = listQuery.isLoading;
 
-  const traceData = traceQuery.data ?? null;
+  // `currentData` (not `data`) so flipping rows clears the previous trace's
+  // events from the waterfall while the new fetch is in flight. `data` would
+  // leave the prior trace rendered with the new row's metadata header — same
+  // mis-attribution issue we fixed for NodeTab.
+  const traceData = traceQuery.currentData ?? null;
   const traceError = traceQuery.isError
     ? (traceQuery.error as { error?: string })?.error ?? 'Failed to load trace'
     : null;

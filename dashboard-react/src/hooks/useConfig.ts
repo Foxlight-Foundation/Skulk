@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 import {
   useGetConfigQuery,
   useUpdateConfigMutation,
@@ -42,9 +42,17 @@ export function useConfig(): UseConfigReturn {
   const query = useGetConfigQuery();
   const [updateConfig, mutationState] = useUpdateConfigMutation();
 
+  // The query result object is recreated on every render, so closing over
+  // `query` directly would give `fetchConfig` a fresh identity each render.
+  // Any consumer that puts `fetchConfig` in a useEffect dependency array
+  // (SettingsPanel does, gated on `open`) would then loop. Stash the latest
+  // query in a ref and read through it so `fetchConfig` keeps a single
+  // stable identity for the lifetime of the hook subscription.
+  const queryRef = useRef(query);
+  queryRef.current = query;
   const fetchConfig = useCallback(async () => {
-    await query.refetch();
-  }, [query]);
+    await queryRef.current.refetch();
+  }, []);
 
   const saveFullConfig = useCallback(
     async (config: FullConfig): Promise<boolean> => {

@@ -278,6 +278,45 @@ _API_EVENT_LOG_DIR = EXO_EVENT_LOG_DIR / "api"
 ONBOARDING_COMPLETE_FILE = EXO_CACHE_HOME / "onboarding_complete"
 
 
+def prune_old_trace_files(directory: Path, retention_days: int, now: float) -> int:
+    """Delete saved trace files in *directory* whose mtime is older than the
+    retention window.
+
+    Pure function — extracted from :meth:`API._prune_old_traces` so unit tests
+    can exercise the pruning logic without spinning up the API class. The
+    janitor task is responsible for scheduling and config plumbing; this
+    function only owns the "should this file go" decision.
+
+    Args:
+        directory: Path the janitor watches. Missing directories are treated
+            as empty (return 0) — no error.
+        retention_days: Files older than this many days are removed. Values
+            <= 0 disable pruning entirely (return 0).
+        now: Current Unix timestamp in seconds. Passed in so tests can pin the
+            clock instead of relying on real time.
+
+    Returns:
+        The number of files that were successfully removed. Files that fail
+        to delete (permission errors, races) are logged and counted out of
+        the total — they are not raised, so a single corrupted entry can't
+        crash the janitor loop.
+    """
+    if retention_days <= 0:
+        return 0
+    if not directory.exists():
+        return 0
+    cutoff = now - retention_days * 86400
+    removed = 0
+    for path in directory.glob("trace_*.json"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError as err:
+            logger.warning(f"Failed to prune trace {path}: {err}")
+    return removed
+
+
 def _text_image_hash_cache_enabled() -> bool:
     value = preferred_env_value(
         "SKULK_TEXT_IMAGE_HASH_CACHE",
@@ -2818,6 +2857,9 @@ class API:
 
         Setting ``tracing.retention_days`` to ``0`` (or any non-positive
         value) disables pruning.
+
+        Pruning logic itself lives in :func:`prune_old_trace_files` so it can
+        be unit-tested without instantiating the API class.
         """
         startup_delay_seconds = 60
         prune_interval_seconds = 3600
@@ -2829,21 +2871,13 @@ class API:
                     if self._exo_config is not None and self._exo_config.tracing is not None
                     else 3
                 )
-                if retention_days > 0:
-                    cutoff = time.time() - retention_days * 86400
-                    removed = 0
-                    if EXO_TRACING_CACHE_DIR.exists():
-                        for path in EXO_TRACING_CACHE_DIR.glob("trace_*.json"):
-                            try:
-                                if path.stat().st_mtime < cutoff:
-                                    path.unlink()
-                                    removed += 1
-                            except OSError as err:
-                                logger.warning(f"Failed to prune trace {path}: {err}")
-                    if removed > 0:
-                        logger.info(
-                            f"Trace janitor pruned {removed} trace(s) older than {retention_days} day(s)"
-                        )
+                removed = prune_old_trace_files(
+                    EXO_TRACING_CACHE_DIR, retention_days, time.time()
+                )
+                if removed > 0:
+                    logger.info(
+                        f"Trace janitor pruned {removed} trace(s) older than {retention_days} day(s)"
+                    )
             except Exception as err:
                 # Janitor failures must never crash the API loop; log and
                 # try again on the next tick.
