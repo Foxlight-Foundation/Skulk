@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { Button } from '../common/Button';
+import { CenteredSpinner, Spinner } from '../common/Spinner';
 import { formatBytes } from '../../utils/format';
 import { useClusterState } from '../../hooks/useClusterState';
 import { useAppDispatch } from '../../store/hooks';
@@ -345,9 +346,14 @@ export function NodeTab({ nodeId }: NodeTabProps) {
   // Diagnostics fetch — RTK Query keys by nodeId, dedups across components,
   // and refetches automatically when a cancel/capture mutation invalidates
   // the NodeDiagnostics cache tag for this node.
+  //
+  // Use `currentData` (not `data`) so flipping the node selector clears the
+  // view immediately — `data` would leave the previous node's diagnostics on
+  // screen until the next fetch lands, which mis-attributes that data to the
+  // newly-picked node and is exactly what the user reported.
   const diagnosticsQuery = useGetNodeDiagnosticsQuery(nodeId ?? '', { skip: !nodeId });
-  const diagnostics = diagnosticsQuery.data ?? null;
-  const loading = diagnosticsQuery.isLoading;
+  const diagnostics = diagnosticsQuery.currentData ?? null;
+  const loading = diagnosticsQuery.isFetching;
   const error = diagnosticsQuery.isError
     ? (diagnosticsQuery.error as { error?: string })?.error ?? 'Failed to load diagnostics'
     : null;
@@ -456,12 +462,25 @@ export function NodeTab({ nodeId }: NodeTabProps) {
   return (
     <Wrap>
       {selector}
-      <Subtitle>{runtime?.friendlyName ?? runtime?.hostname ?? shortId(nodeId)} · {shortId(nodeId)}</Subtitle>
 
-        {loading && <Section><Value>Loading diagnostics…</Value></Section>}
-        {error && <Section><Warning>{error}</Warning></Section>}
+      {/*
+        While the new node's diagnostics are in flight (or the request errored
+        without prior data), don't render the previous node's subtitle or
+        sections — that mis-attributes data to the wrong node. A single
+        centered spinner fills the remaining space; errors still surface as
+        a warning block so an operator can see why nothing loaded.
+      */}
+      {!diagnostics && !error && (
+        <CenteredSpinner>
+          <Spinner />
+        </CenteredSpinner>
+      )}
+      {!diagnostics && error && <Section><Warning>{error}</Warning></Section>}
 
-        {diagnostics && runtime && (
+      {diagnostics && runtime && (
+        <>
+          <Subtitle>{runtime.friendlyName ?? runtime.hostname ?? shortId(nodeId)} · {shortId(nodeId)}</Subtitle>
+          {error && <Section><Warning>{error}</Warning></Section>}
           <>
             {diagnostics.warnings.length > 0 && (
               <Section>
@@ -673,6 +692,7 @@ export function NodeTab({ nodeId }: NodeTabProps) {
                 ))}
             </Section>
           </>
+        </>
         )}
     </Wrap>
   );
