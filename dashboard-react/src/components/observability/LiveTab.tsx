@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
-import styled from 'styled-components';
+import styled, { css, keyframes } from 'styled-components';
+import { FiRefreshCw } from 'react-icons/fi';
 import { Button } from '../common/Button';
+import { CenteredSpinner, Spinner } from '../common/Spinner';
 import { useAppSelector } from '../../store/hooks';
 import {
   useGetClusterTimelineQuery,
@@ -234,10 +236,21 @@ const ErrorNotice = styled(Notice)`
   color: ${({ theme }) => theme.colors.errorText};
 `;
 
-const RefreshRow = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 8px;
+/**
+ * Refresh icon that spins while the user-initiated refresh is in flight.
+ * The button itself stays fixed-width — only the inner icon rotates — so
+ * polling-driven state changes can never reflow the header strip.
+ */
+const refreshSpin = keyframes`
+  to { transform: rotate(360deg); }
+`;
+
+const RefreshIcon = styled(FiRefreshCw)<{ $spinning: boolean }>`
+  ${({ $spinning }) =>
+    $spinning &&
+    css`
+      animation: ${refreshSpin} 0.7s linear infinite;
+    `}
 `;
 
 function shortId(id: string): string {
@@ -360,6 +373,16 @@ export function LiveTab() {
   return (
     <Wrap>
       <HeaderStrip>
+        <Button
+          variant="outline"
+          size="sm"
+          icon
+          onClick={() => { void handleManualRefresh(); }}
+          aria-label="Refresh cluster timeline"
+          title="Refresh"
+        >
+          <RefreshIcon $spinning={userRefreshing} size={14} />
+        </Button>
         <HeaderField>
           <HeaderLabel>Master</HeaderLabel>
           <HeaderValue>
@@ -395,22 +418,13 @@ export function LiveTab() {
         </HeaderField>
       </HeaderStrip>
 
-      <RefreshRow>
-        <Button
-          variant="outline"
-          size="sm"
-          loading={userRefreshing}
-          onClick={() => { void handleManualRefresh(); }}
-        >
-          Refresh
-        </Button>
-      </RefreshRow>
-
       {error && <ErrorNotice>{error}</ErrorNotice>}
       {tracingError && <ErrorNotice>{tracingError}</ErrorNotice>}
 
-      {!timeline && timelineQuery.isLoading && (
-        <Notice>Loading cluster timeline…</Notice>
+      {!timeline && !error && (
+        <CenteredSpinner>
+          <Spinner />
+        </CenteredSpinner>
       )}
 
       {timeline && (
