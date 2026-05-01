@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { Button } from '../common/Button';
 import { CenteredSpinner, Spinner } from '../common/Spinner';
@@ -7,6 +7,7 @@ import { useClusterState } from '../../hooks/useClusterState';
 import { useAppDispatch } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import {
+  useGetClusterTimelineQuery,
   useGetNodeDiagnosticsQuery,
   useCancelRunnerTaskMutation,
   useCaptureRunnerBundleMutation,
@@ -326,6 +327,12 @@ export function NodeTab({ nodeId }: NodeTabProps) {
   const setSelectedNodeId = (nodeId: string | null) =>
     dispatch(uiActions.setObservabilitySelectedNodeId(nodeId));
 
+  // The cluster timeline carries `masterNodeId`. RTK Query dedups, so when
+  // the Live tab is also mounted there's no extra request; when only Node is
+  // open this fires once to identify the master.
+  const timelineQuery = useGetClusterTimelineQuery();
+  const masterNodeId = timelineQuery.data?.masterNodeId ?? null;
+
   // Build a stable, sorted list of selectable nodes from the cluster topology.
   // Friendly names take precedence; nodes without one are labelled by short id and
   // float to the bottom so the most-recognizable entries surface first.
@@ -342,6 +349,21 @@ export function NodeTab({ nodeId }: NodeTabProps) {
         return a.label.localeCompare(b.label, undefined, { sensitivity: 'base' });
       });
   }, [cluster.topology]);
+
+  // Default the selection to the master when nothing is picked yet. Avoids
+  // the "Pick a node above" empty state on every visit — the master is the
+  // single most useful starting point. Topology may include nodes the
+  // master isn't aware of (rare, but possible during partition); guard the
+  // assignment so we don't pick a node that isn't actually selectable.
+  useEffect(() => {
+    if (nodeId) return;
+    if (!masterNodeId) return;
+    if (!nodeOptions.some((option) => option.id === masterNodeId)) return;
+    setSelectedNodeId(masterNodeId);
+    // setSelectedNodeId is stable (dispatch returns referentially-stable
+    // action creators) so omitting it from deps is safe.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodeId, masterNodeId, nodeOptions]);
 
   // Diagnostics fetch — RTK Query keys by nodeId, dedups across components,
   // and refetches automatically when a cancel/capture mutation invalidates
@@ -398,11 +420,19 @@ export function NodeTab({ nodeId }: NodeTabProps) {
     return (
       <Wrap>
         {selector}
-        <EmptyHint>
-          {nodeOptions.length === 0
-            ? 'No nodes reported by the cluster yet. Once a node connects, pick it here to inspect its diagnostics.'
-            : 'Pick a node above to inspect its diagnostics.'}
-        </EmptyHint>
+        {nodeOptions.length === 0 ? (
+          <EmptyHint>
+            No nodes reported by the cluster yet. Once a node connects, pick it here to inspect its diagnostics.
+          </EmptyHint>
+        ) : (
+          // The auto-select effect above will resolve to master once the
+          // timeline query lands. Render a spinner in the meantime rather
+          // than a stale "Pick a node above" hint that would flash for the
+          // first few hundred ms after entering the tab.
+          <CenteredSpinner>
+            <Spinner />
+          </CenteredSpinner>
+        )}
       </Wrap>
     );
   }
