@@ -29,7 +29,6 @@ const OBSERVABILITY_WIDTH_KEY = 'skulk-observability-panel-width';
 
 export interface UIState {
   activeRoute: NavRoute;
-  selectedTraceTaskId: string | null;
   panelOpen: boolean;
   historyPanelOpen: boolean;
   chatScrollTop: number;
@@ -98,7 +97,6 @@ function loadSessionState(): Partial<UIState> {
 function defaultState(): UIState {
   return {
     activeRoute: 'cluster',
-    selectedTraceTaskId: null,
     panelOpen: true,
     historyPanelOpen: true,
     chatScrollTop: 0,
@@ -123,9 +121,6 @@ const slice = createSlice({
   reducers: {
     setActiveRoute(state, action: PayloadAction<NavRoute>) {
       state.activeRoute = action.payload;
-    },
-    setSelectedTraceTaskId(state, action: PayloadAction<string | null>) {
-      state.selectedTraceTaskId = action.payload;
     },
     setPanelOpen(state, action: PayloadAction<boolean>) {
       state.panelOpen = action.payload;
@@ -225,7 +220,6 @@ export function subscribeUIPersistence(
     // Session subset — JSON-stringify the partialize set; only write on change.
     const sessionSubset = {
       activeRoute: ui.activeRoute,
-      selectedTraceTaskId: ui.selectedTraceTaskId,
       panelOpen: ui.panelOpen,
       historyPanelOpen: ui.historyPanelOpen,
       chatScrollTop: ui.chatScrollTop,

@@ -8,7 +8,7 @@ import type { Theme } from '../../theme';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 
-export type NavRoute = 'cluster' | 'model-store' | 'chat' | 'traces';
+export type NavRoute = 'cluster' | 'model-store' | 'chat';
 
 export interface HeaderNavProps {
   showHome?: boolean;

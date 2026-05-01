@@ -25,10 +25,8 @@ import { TraceWaterfall } from './TraceWaterfall';
  * scope toggle is local-vs-cluster; cluster mode hits `/v1/traces/cluster` to
  * fan out across reachable peers, local mode is just this node's saved traces.
  *
- * Filters, multi-select, and bulk-delete intentionally stay in `TracesPage` —
- * that is the heavyweight admin surface. This tab is the in-panel viewer; the
- * footer link below the list jumps to the legacy page when those features are
- * needed.
+ * Filters live inline in the FilterBar above the list. There is no longer a
+ * separate "legacy" traces page — the panel is the only trace surface.
  */
 
 /**
@@ -271,23 +269,6 @@ const SelectedValue = styled.span`
   word-break: break-word;
 `;
 
-const FooterLink = styled.button`
-  all: unset;
-  cursor: pointer;
-  font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.xs};
-  color: ${({ theme }) => theme.colors.textMuted};
-  text-decoration: underline dotted;
-
-  &:hover {
-    color: ${({ theme }) => theme.colors.text};
-  }
-
-  &:focus-visible {
-    outline: 2px solid ${({ theme }) => theme.colors.goldDim};
-    outline-offset: 2px;
-  }
-`;
 
 type Scope = TraceScope;
 
@@ -464,11 +445,6 @@ export function TracesTab() {
       setDownloadError(err instanceof Error ? err.message : 'Download failed');
     }
   }
-
-  const openLegacyTraces = () => {
-    dispatch(uiActions.setActiveRoute('traces'));
-    dispatch(uiActions.closeObservability());
-  };
 
   return (
     <Wrap>
@@ -651,10 +627,6 @@ export function TracesTab() {
           );
         })}
       </ListWrap>
-
-      <FooterLink type="button" onClick={openLegacyTraces}>
-        Open legacy traces page (filters, multi-select, bulk delete)
-      </FooterLink>
     </Wrap>
   );
 }

@@ -13,8 +13,6 @@ import { ObservabilityPanel } from './components/observability/ObservabilityPane
 import { SettingsPanel } from './components/layout/SettingsPanel';
 import { ModelStorePage } from './components/pages/DownloadsPage';
 import { ChatView } from './components/pages/ChatView';
-import { TracesPage } from './components/pages/TracesPage';
-import { TraceDetailPage } from './components/pages/TraceDetailPage';
 import { InstancePanel, type InstanceCardData } from './components/layout/InstancePanel';
 import { ConversationPanel } from './components/layout/ConversationPanel';
 import { addToast } from './hooks/useToast';
@@ -132,8 +130,6 @@ export function App() {
   const historyPanelOpen = useAppSelector((s) => s.ui.historyPanelOpen);
   const themeName = useAppSelector((s) => s.ui.theme);
   const activeTheme = themeName === 'light' ? lightTheme : darkTheme;
-  const selectedTraceTaskId = useAppSelector((s) => s.ui.selectedTraceTaskId);
-  const [traceScope, setTraceScope] = useState<'cluster' | 'local'>('cluster');
 
   // Reflect theme on the html root so non-styled-components surfaces (highlight.js,
   // scrollbars, etc.) can react via `html[data-theme='light'] …` selectors.
@@ -143,8 +139,6 @@ export function App() {
   }, [themeName]);
   const setActiveRoute = (route: typeof activeRoute) =>
     dispatch(uiActions.setActiveRoute(route));
-  const setSelectedTraceTaskId = (taskId: string | null) =>
-    dispatch(uiActions.setSelectedTraceTaskId(taskId));
   const togglePanel = () => dispatch(uiActions.togglePanel());
   const toggleHistoryPanel = () => dispatch(uiActions.toggleHistoryPanel());
   const conversationsMap = useAppSelector((s) => s.chat.conversations);
@@ -368,12 +362,7 @@ export function App() {
         <HeaderNav
           showHome
           activeRoute={activeRoute}
-          onNavigate={(route) => {
-            setActiveRoute(route);
-            if (route === 'traces') {
-              setSelectedTraceTaskId(null);
-            }
-          }}
+          onNavigate={(route) => setActiveRoute(route)}
           onOpenSettings={() => setSettingsOpen(true)}
           downloadProgress={downloadProgress}
           warnings={clusterWarnings}
@@ -405,23 +394,6 @@ export function App() {
                 runners={runners}
                 onChat={(modelId) => { dispatch(chatActions.selectModel(modelId)); setActiveRoute('chat'); }}
               />
-            ) : activeRoute === 'traces' ? (
-              selectedTraceTaskId ? (
-                <TraceDetailPage
-                  taskId={selectedTraceTaskId}
-                  scope={traceScope}
-                  onBack={() => setSelectedTraceTaskId(null)}
-                />
-              ) : (
-                <TracesPage
-                  scope={traceScope}
-                  onScopeChange={setTraceScope}
-                  onOpenTrace={(taskId) => {
-                    setSelectedTraceTaskId(taskId);
-                    setActiveRoute('traces');
-                  }}
-                />
-              )
             ) : activeRoute === 'chat' ? (
               <ChatView readyInstances={instanceCards} />
             ) : topology ? (
