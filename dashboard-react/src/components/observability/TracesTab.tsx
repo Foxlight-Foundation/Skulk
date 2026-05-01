@@ -52,6 +52,67 @@ const ScopeToggle = styled.div`
   overflow: hidden;
 `;
 
+/**
+ * Filter row above the trace list. All filters are client-side over the
+ * loaded list — no extra requests, no server-side filtering API to maintain.
+ * Keeps the row compact and wraps to multiple lines on narrow panels.
+ */
+const FilterBar = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  padding: 0 2px;
+`;
+
+const FilterSelect = styled.select`
+  background: ${({ theme }) => theme.colors.bg};
+  color: ${({ theme }) => theme.colors.text};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  padding: 3px 6px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-family: ${({ theme }) => theme.fonts.body};
+  outline: none;
+  cursor: pointer;
+  max-width: 180px;
+
+  &:focus {
+    border-color: ${({ theme }) => theme.colors.goldDim};
+  }
+`;
+
+const FilterInput = styled.input`
+  background: ${({ theme }) => theme.colors.bg};
+  color: ${({ theme }) => theme.colors.text};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  padding: 3px 6px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-family: ${({ theme }) => theme.fonts.body};
+  outline: none;
+  flex: 1;
+  min-width: 100px;
+
+  &:focus {
+    border-color: ${({ theme }) => theme.colors.goldDim};
+  }
+`;
+
+const FilterToggle = styled.label`
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  user-select: none;
+  cursor: pointer;
+
+  input {
+    cursor: pointer;
+  }
+`;
+
 const ScopeButton = styled.button<{ $active: boolean }>`
   all: unset;
   padding: 4px 12px;
@@ -284,6 +345,13 @@ export function TracesTab() {
   const [selectedEvent, setSelectedEvent] = useState<TraceEventLike | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
 
+  // Filter state — all client-side over the loaded list.
+  const [taskKindFilter, setTaskKindFilter] = useState<string>('all');
+  const [modelFilter, setModelFilter] = useState<string>('all');
+  const [sourceNodeFilter, setSourceNodeFilter] = useState<string>('all');
+  const [searchFilter, setSearchFilter] = useState<string>('');
+  const [toolOnly, setToolOnly] = useState<boolean>(false);
+
   // Cache key includes scope, so flipping the toggle yields a fresh fetch
   // (RTK Query naturally treats the two scopes as separate entries).
   const listQuery = useGetTracesListQuery(scope);
@@ -315,6 +383,62 @@ export function TracesTab() {
   useEffect(() => {
     setSelectedEvent(null);
   }, [selectedTaskId]);
+
+  // Models present in the current list — drives the model dropdown options.
+  // Kept stable across renders that don't change the trace list so the
+  // dropdown doesn't jitter.
+  const availableModels = useMemo(() => {
+    if (!traces) return [] as string[];
+    const set = new Set<string>();
+    for (const trace of traces) {
+      if (trace.modelId) set.add(trace.modelId);
+    }
+    return [...set].sort();
+  }, [traces]);
+
+  const availableSourceNodes = useMemo(() => {
+    if (!traces) return [] as { id: string; label: string }[];
+    const map = new Map<string, string>();
+    for (const trace of traces) {
+      for (const node of trace.sourceNodes) {
+        if (!map.has(node.nodeId)) {
+          map.set(node.nodeId, node.friendlyName?.trim() || node.nodeId);
+        }
+      }
+    }
+    return [...map.entries()]
+      .map(([id, label]) => ({ id, label }))
+      .sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));
+  }, [traces]);
+
+  // Apply filters in one pass per render. Search matches case-insensitively
+  // against the trace's task id, model id, categories, and tags.
+  const filteredTraces = useMemo(() => {
+    if (!traces) return null;
+    const search = searchFilter.trim().toLowerCase();
+    return traces.filter((trace) => {
+      if (taskKindFilter !== 'all' && (trace.taskKind ?? 'unknown') !== taskKindFilter) {
+        return false;
+      }
+      if (modelFilter !== 'all' && (trace.modelId ?? '') !== modelFilter) return false;
+      if (sourceNodeFilter !== 'all') {
+        if (!trace.sourceNodes.some((n) => n.nodeId === sourceNodeFilter)) return false;
+      }
+      if (toolOnly && !trace.hasToolActivity) return false;
+      if (search) {
+        const haystack = [
+          trace.taskId,
+          trace.modelId ?? '',
+          ...trace.categories,
+          ...trace.tags,
+        ]
+          .join(' ')
+          .toLowerCase();
+        if (!haystack.includes(search)) return false;
+      }
+      return true;
+    });
+  }, [traces, taskKindFilter, modelFilter, sourceNodeFilter, toolOnly, searchFilter]);
 
   const waterfallEvents = useMemo<TraceEventLike[]>(() => {
     if (!traceData) return [];
@@ -367,6 +491,56 @@ export function TracesTab() {
         </ScopeButton>
       </ScopeToggle>
 
+      <FilterBar>
+        <FilterSelect
+          value={taskKindFilter}
+          onChange={(e) => setTaskKindFilter(e.target.value)}
+          aria-label="Filter by task kind"
+        >
+          <option value="all">All kinds</option>
+          <option value="text">text</option>
+          <option value="embedding">embedding</option>
+          <option value="image">image</option>
+        </FilterSelect>
+        <FilterSelect
+          value={modelFilter}
+          onChange={(e) => setModelFilter(e.target.value)}
+          aria-label="Filter by model"
+          disabled={availableModels.length === 0}
+        >
+          <option value="all">All models</option>
+          {availableModels.map((m) => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+        </FilterSelect>
+        <FilterSelect
+          value={sourceNodeFilter}
+          onChange={(e) => setSourceNodeFilter(e.target.value)}
+          aria-label="Filter by source node"
+          disabled={availableSourceNodes.length === 0}
+        >
+          <option value="all">All nodes</option>
+          {availableSourceNodes.map((n) => (
+            <option key={n.id} value={n.id}>{n.label}</option>
+          ))}
+        </FilterSelect>
+        <FilterInput
+          type="text"
+          value={searchFilter}
+          onChange={(e) => setSearchFilter(e.target.value)}
+          placeholder="Search task id, model, categories, tags…"
+          aria-label="Search traces"
+        />
+        <FilterToggle>
+          <input
+            type="checkbox"
+            checked={toolOnly}
+            onChange={(e) => setToolOnly(e.target.checked)}
+          />
+          Tools only
+        </FilterToggle>
+      </FilterBar>
+
       <ListWrap>
         {listLoading && (
           <CenteredSpinner>
@@ -379,7 +553,10 @@ export function TracesTab() {
             No saved traces yet. Enable tracing for the cluster and re-run a request to record one.
           </Notice>
         )}
-        {!listLoading && traces && traces.map((trace) => {
+        {!listLoading && filteredTraces && filteredTraces.length === 0 && traces && traces.length > 0 && (
+          <Notice>No traces match the current filters.</Notice>
+        )}
+        {!listLoading && filteredTraces && filteredTraces.map((trace) => {
           const isExpanded = selectedTaskId === trace.taskId;
           return (
             <RowGroup key={trace.taskId}>
