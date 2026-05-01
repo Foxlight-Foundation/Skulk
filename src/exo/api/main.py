@@ -2708,6 +2708,7 @@ class API:
                 tg.start_soon(self._apply_state)
                 tg.start_soon(self._pause_on_new_election)
                 tg.start_soon(self._cleanup_expired_images)
+                tg.start_soon(self._prune_old_traces)
                 print_startup_banner(self.port)
                 tg.start_soon(self.run_api, shutdown_ev)
                 try:
@@ -2806,6 +2807,48 @@ class API:
             removed = self._image_store.cleanup_expired()
             if removed > 0:
                 logger.debug(f"Cleaned up {removed} expired images")
+
+    async def _prune_old_traces(self):
+        """Drop saved trace files older than the configured retention.
+
+        Saved Chrome-trace JSON files accumulate under
+        ``EXO_TRACING_CACHE_DIR`` indefinitely otherwise. The janitor runs
+        once shortly after startup and then hourly. Retention is read fresh
+        each tick so SyncConfig updates take effect without an API restart.
+
+        Setting ``tracing.retention_days`` to ``0`` (or any non-positive
+        value) disables pruning.
+        """
+        startup_delay_seconds = 60
+        prune_interval_seconds = 3600
+        await anyio.sleep(startup_delay_seconds)
+        while True:
+            try:
+                retention_days = (
+                    self._exo_config.tracing.retention_days
+                    if self._exo_config is not None and self._exo_config.tracing is not None
+                    else 3
+                )
+                if retention_days > 0:
+                    cutoff = time.time() - retention_days * 86400
+                    removed = 0
+                    if EXO_TRACING_CACHE_DIR.exists():
+                        for path in EXO_TRACING_CACHE_DIR.glob("trace_*.json"):
+                            try:
+                                if path.stat().st_mtime < cutoff:
+                                    path.unlink()
+                                    removed += 1
+                            except OSError as err:
+                                logger.warning(f"Failed to prune trace {path}: {err}")
+                    if removed > 0:
+                        logger.info(
+                            f"Trace janitor pruned {removed} trace(s) older than {retention_days} day(s)"
+                        )
+            except Exception as err:
+                # Janitor failures must never crash the API loop; log and
+                # try again on the next tick.
+                logger.warning(f"Trace janitor error: {err}")
+            await anyio.sleep(prune_interval_seconds)
 
     async def _send(self, command: Command):
         while self.paused:
