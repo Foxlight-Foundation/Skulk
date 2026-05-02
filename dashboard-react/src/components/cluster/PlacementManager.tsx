@@ -15,7 +15,13 @@ export interface PlacementManagerProps {
   topology: TopologyData;
   open: boolean;
   onClose: () => void;
-  onLaunch: (params: { modelId: string; sharding: string; instanceMeta: string; minNodes: number }) => void;
+  onLaunch: (params: {
+    modelId: string;
+    sharding: string;
+    instanceMeta: string;
+    minNodes: number;
+    excludedNodes: string[];
+  }) => void;
   /** Embedding models: hide sharding/networking selectors and node slider */
   isEmbedding?: boolean;
 }
@@ -136,6 +142,53 @@ const SliderRow = styled.div`
   gap: 12px;
 `;
 
+/**
+ * Pill row used to toggle per-placement node exclusions. Each pill is the
+ * click target the user asked for — single click flips inclusion. Excluded
+ * pills lose their fill and gain a strikethrough so the state reads at a
+ * glance without a separate legend.
+ */
+const NodePillRow = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+`;
+
+const NodePill = styled.button<{ $excluded: boolean }>`
+  all: unset;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-family: ${({ theme }) => theme.fonts.body};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  border: 1px solid
+    ${({ $excluded, theme }) => ($excluded ? theme.colors.borderLight : theme.colors.border)};
+  background: ${({ $excluded, theme }) =>
+    $excluded ? 'transparent' : theme.colors.goldBg};
+  color: ${({ $excluded, theme }) =>
+    $excluded ? theme.colors.textMuted : theme.colors.text};
+  text-decoration: ${({ $excluded }) => ($excluded ? 'line-through' : 'none')};
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+
+  &:hover {
+    background: ${({ $excluded, theme }) =>
+      $excluded ? theme.colors.surfaceHover : theme.colors.goldBg};
+    color: ${({ theme }) => theme.colors.text};
+  }
+
+  &:focus-visible {
+    outline: 2px solid ${({ theme }) => theme.colors.goldDim};
+    outline-offset: 2px;
+  }
+`;
+
+const NodePillHint = styled.div`
+  font-family: ${({ theme }) => theme.fonts.body};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textMuted};
+`;
+
 const Slider = styled.input`
   flex: 1;
   accent-color: ${({ theme }) => theme.colors.gold};
@@ -245,6 +298,11 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
   const [minNodes, setMinNodes] = useState(1);
   const [sharding, setSharding] = useState<'Pipeline' | 'Tensor'>('Pipeline');
   const [instanceMeta, setInstanceMeta] = useState<'MlxRing' | 'MlxJaccl'>('MlxRing');
+  // Per-placement node exclusions. Local state — never persisted; reset every
+  // time the modal opens. Click a node pill to toggle. The set is sent along
+  // with the PlaceInstance command so the master's planner treats those
+  // nodes as if they were absent for *this* placement only.
+  const [excludedNodes, setExcludedNodes] = useState<Set<string>>(new Set());
 
   const totalNodes = Object.keys(topology?.nodes ?? {}).length;
 
@@ -256,6 +314,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
     setMinNodes(1);
     setSharding('Pipeline');
     setInstanceMeta('MlxRing');
+    setExcludedNodes(new Set());
 
     const controller = new AbortController();
     (async () => {
@@ -353,13 +412,23 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
   }, [minNodes, currentOptions, currentKey]);
 
   const handleLaunch = useCallback(() => {
+    const excludedNodesArr = [...excludedNodes];
     if (isEmbedding) {
-      onLaunch({ modelId, sharding: 'Pipeline', instanceMeta: 'MlxRing', minNodes: 1 });
+      onLaunch({ modelId, sharding: 'Pipeline', instanceMeta: 'MlxRing', minNodes: 1, excludedNodes: excludedNodesArr });
     } else {
-      onLaunch({ modelId, sharding, instanceMeta, minNodes });
+      onLaunch({ modelId, sharding, instanceMeta, minNodes, excludedNodes: excludedNodesArr });
     }
     onClose();
-  }, [modelId, sharding, instanceMeta, minNodes, isEmbedding, onLaunch, onClose]);
+  }, [modelId, sharding, instanceMeta, minNodes, excludedNodes, isEmbedding, onLaunch, onClose]);
+
+  const toggleNodeExclusion = useCallback((nodeId: string) => {
+    setExcludedNodes((prev) => {
+      const next = new Set(prev);
+      if (next.has(nodeId)) next.delete(nodeId);
+      else next.add(nodeId);
+      return next;
+    });
+  }, []);
 
   if (!open) return null;
 
@@ -452,6 +521,43 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                   />
                 </CardWrapper>
               </Section>
+
+              {/* Per-placement node exclusion — click a pill to exclude that
+                  node from this placement only. Already-running instances on
+                  the node are unaffected. */}
+              {totalNodes > 0 && (
+                <Section>
+                  <SectionLabel>Available Nodes</SectionLabel>
+                  <NodePillRow>
+                    {Object.entries(topology?.nodes ?? {})
+                      .map(([nodeId, info]) => ({
+                        nodeId,
+                        label: info.friendly_name?.trim() || nodeId.slice(0, 8),
+                      }))
+                      .sort((a, b) =>
+                        a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }),
+                      )
+                      .map(({ nodeId, label }) => {
+                        const isExcluded = excludedNodes.has(nodeId);
+                        return (
+                          <NodePill
+                            key={nodeId}
+                            type="button"
+                            $excluded={isExcluded}
+                            onClick={() => toggleNodeExclusion(nodeId)}
+                            aria-pressed={!isExcluded}
+                            title={isExcluded ? 'Click to include this node' : 'Click to exclude this node from this placement'}
+                          >
+                            {label}
+                          </NodePill>
+                        );
+                      })}
+                  </NodePillRow>
+                  <NodePillHint>
+                    Click a node to exclude it from this placement. Excluded nodes are skipped only for this launch — already-running instances on them are unaffected.
+                  </NodePillHint>
+                </Section>
+              )}
 
               {/* Placement error — shown when nothing works at any node count */}
               {!anyPlacementPossible && placementError && (

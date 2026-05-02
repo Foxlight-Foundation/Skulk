@@ -574,7 +574,8 @@ curl -X POST http://localhost:52415/place_instance \
     "model_id": "mlx-community/Qwen3.5-9B-4bit",
     "sharding": "Pipeline",
     "instance_meta": "MlxRing",
-    "min_nodes": 1
+    "min_nodes": 1,
+    "excluded_nodes": []
   }'
 ```
 
@@ -584,6 +585,7 @@ curl -X POST http://localhost:52415/place_instance \
 | `sharding` | `Pipeline` or `Tensor` |
 | `instance_meta` | `MlxRing` or `MlxJaccl` |
 | `min_nodes` | Minimum nodes required for the placement |
+| `excluded_nodes` | Optional. Node IDs the master should treat as if absent when scoring this placement. Already-running instances on those nodes are unaffected — exclusion is per-placement, not cluster-wide. Default: `[]`. |
 
 ### Preview valid placements
 

@@ -406,7 +406,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
     return cards;
   }, [instances, runners, topology, storeEntries]);
 
-  const handleLaunchWithParams = useCallback(async (params: { modelId: string; sharding: string; instanceMeta: string; minNodes: number }) => {
+  const handleLaunchWithParams = useCallback(async (params: { modelId: string; sharding: string; instanceMeta: string; minNodes: number; excludedNodes?: string[] }) => {
     try {
       const res = await fetch('/place_instance', {
         method: 'POST',
@@ -416,6 +416,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
           sharding: params.sharding,
           instance_meta: params.instanceMeta,
           min_nodes: params.minNodes,
+          excluded_nodes: params.excludedNodes ?? [],
         }),
       });
       if (res.ok) {
@@ -430,7 +431,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
   }, []);
 
   const handleLaunch = useCallback((modelId: string) => {
-    handleLaunchWithParams({ modelId, sharding: 'Pipeline', instanceMeta: 'MlxRing', minNodes: 1 });
+    handleLaunchWithParams({ modelId, sharding: 'Pipeline', instanceMeta: 'MlxRing', minNodes: 1, excludedNodes: [] });
   }, [handleLaunchWithParams]);
 
   const handleStop = useCallback(async (modelId: string) => {

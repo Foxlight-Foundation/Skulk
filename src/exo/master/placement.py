@@ -110,9 +110,23 @@ def place_instance(
     node_network: Mapping[NodeId, NodeNetworkInfo],
     required_nodes: set[NodeId] | None = None,
     download_status: Mapping[NodeId, Sequence[DownloadProgress]] | None = None,
+    excluded_nodes: set[NodeId] | None = None,
 ) -> dict[InstanceId, Instance]:
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
+
+    # Drop any cycle that touches an operator-excluded node. Exclusion is the
+    # operator's "don't pick this node for new placements" signal — already
+    # placed instances on the excluded node remain unaffected (they live in
+    # current_instances, which this function never mutates), but the planner
+    # treats the excluded node as if it were absent from the topology when
+    # scoring fresh placements.
+    if excluded_nodes:
+        candidate_cycles = [
+            cycle
+            for cycle in candidate_cycles
+            if not (set(cycle.node_ids) & excluded_nodes)
+        ]
 
     # Filter to cycles containing all required nodes (subset matching)
     if required_nodes:

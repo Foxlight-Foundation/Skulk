@@ -7,6 +7,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- Per-placement node exclusion. `POST /place_instance` accepts an optional
+  `excluded_nodes` array; the master's planner treats those nodes as if
+  absent from the topology when scoring candidate cycles for that single
+  placement. Already-running instances on the listed nodes are unaffected.
+  The dashboard's placement modal exposes click-to-toggle pills under
+  "Available Nodes" so operators can mark exclusions before launch.
+
 ### Changed
 
 - Added snapshot bootstrap for follower recovery so newer nodes can hydrate

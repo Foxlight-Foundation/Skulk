@@ -403,6 +403,7 @@ class Master:
                                 self.state.node_memory,
                                 self.state.node_network,
                                 download_status=self.state.downloads,
+                                excluded_nodes=set(command.excluded_nodes),
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks

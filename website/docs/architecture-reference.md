@@ -128,7 +128,7 @@ Discriminated union at `src/exo/shared/types/commands.py`. Carried as `Forwarder
 
 | Command | What it requests | Master action |
 |---|---|---|
-| `PlaceInstance` | Spin up a model on the cluster | Pick ranks based on memory + topology; emit `InstanceCreated` |
+| `PlaceInstance` | Spin up a model on the cluster. Optional `excluded_nodes: list[NodeId]` — planner treats those nodes as if absent for *this placement only*; already-running instances on them are not affected. | Pick ranks based on memory + topology (filtered by `excluded_nodes`); emit `InstanceCreated` |
 | `DeleteInstance` | Tear down a placed model | Emit `InstanceDeleted`; workers tear down runners |
 | `TaskFinished` | Mark a streaming task complete (sent by API on stream end) | Emit `TaskDeleted` (`TaskStatusUpdated(Complete)` is emitted earlier on the chunk path, not from `TaskFinished` directly) |
 | `TaskCancelled` | Cancel an in-flight command (sent by API on `/v1/cancel`) | Emit `TaskStatusUpdated(Cancelled)` |
@@ -176,7 +176,7 @@ Lives in `src/exo/api/main.py` (route registration in `API.__init__`).
 | `/models/add` | POST | Register a custom model card |
 | `/models/custom/{model_id}` | DELETE | Remove a custom card |
 | `/instance` | POST | Place an instance |
-| `/place_instance` | POST | Place a model: master picks ranks. Takes `PlaceInstanceParams` (model id + placement preferences); not interchangeable with `/instance`, which takes a fully-specified `CreateInstanceParams`. |
+| `/place_instance` | POST | Place a model: master picks ranks. Takes `PlaceInstanceParams` (model id + placement preferences, optional `excluded_nodes: list[NodeId]` to exclude specific nodes from this placement); not interchangeable with `/instance`, which takes a fully-specified `CreateInstanceParams`. |
 | `/instance/{instance_id}` | GET / DELETE | Fetch / delete an instance |
 | `/instance/placement` | GET | Compute placement preview |
 | `/instance/previews` | GET | List candidate placements |

@@ -49,6 +49,12 @@ class PlaceInstance(BaseCommand):
     sharding: Sharding
     instance_meta: InstanceMeta
     min_nodes: int
+    # Per-placement node exclusions — the planner treats these nodes as if
+    # they were absent from the topology when scoring this placement only.
+    # Empty list (default) preserves the unfiltered behavior. Already-running
+    # instances on these nodes are not affected — exclusion is purely a hint
+    # to the candidate-cycle search for *this* placement.
+    excluded_nodes: list[NodeId] = Field(default_factory=list)
 
 
 class CreateInstance(BaseCommand):

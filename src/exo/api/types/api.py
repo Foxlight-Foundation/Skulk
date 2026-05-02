@@ -580,6 +580,7 @@ class PlaceInstanceParams(BaseModel):
                 "sharding": "Pipeline",
                 "instance_meta": "MlxRing",
                 "min_nodes": 1,
+                "excluded_nodes": [],
             }
         }
     )
@@ -588,6 +589,11 @@ class PlaceInstanceParams(BaseModel):
     sharding: Sharding = Sharding.Pipeline
     instance_meta: InstanceMeta = InstanceMeta.MlxRing
     min_nodes: int = 1
+    # Optional. Node IDs the master should treat as if absent when scoring
+    # candidate cycles for this placement. Empty list = consider all nodes.
+    # See `PlaceInstance.excluded_nodes` in shared/types/commands.py for the
+    # planner-side semantics.
+    excluded_nodes: list[NodeId] = Field(default_factory=list)
 
 
 class CreateInstanceParams(BaseModel):

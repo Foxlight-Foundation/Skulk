@@ -1173,6 +1173,7 @@ class API:
             sharding=payload.sharding,
             instance_meta=payload.instance_meta,
             min_nodes=payload.min_nodes,
+            excluded_nodes=list(payload.excluded_nodes),
         )
         await self._send(command)
 
