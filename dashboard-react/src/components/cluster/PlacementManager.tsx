@@ -304,7 +304,21 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
   // nodes as if they were absent for *this* placement only.
   const [excludedNodes, setExcludedNodes] = useState<Set<string>>(new Set());
 
-  const totalNodes = Object.keys(topology?.nodes ?? {}).length;
+  // The cluster preview, slider, and combo evaluation all run against the
+  // *effective* topology — the original minus excluded nodes. The master
+  // planner does the same filter when it picks ranks, so what the operator
+  // sees in this modal matches what will actually be placed.
+  const effectiveNodes = useMemo(() => {
+    const all = topology?.nodes ?? {};
+    if (excludedNodes.size === 0) return all;
+    const filtered: typeof all = {};
+    for (const [nodeId, info] of Object.entries(all)) {
+      if (!excludedNodes.has(nodeId)) filtered[nodeId] = info;
+    }
+    return filtered;
+  }, [topology?.nodes, excludedNodes]);
+
+  const totalNodes = Object.keys(effectiveNodes).length;
 
   // Fetch previews when modal opens
   useEffect(() => {
@@ -430,6 +444,16 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
     });
   }, []);
 
+  // Clamp the slider when an exclusion drops the effective node count below
+  // its current value — otherwise the operator can leave the modal pointed
+  // at a node count that exceeds what's actually available, and previewing
+  // for that count quietly stops working.
+  useEffect(() => {
+    if (totalNodes > 0 && minNodes > totalNodes) {
+      setMinNodes(totalNodes);
+    }
+  }, [totalNodes, minNodes]);
+
   if (!open) return null;
 
   const embeddingComboAvailable = isEmbedding
@@ -482,7 +506,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                 <CardWrapper>
                   <ModelCard
                     model={{ id: modelId, name: modelLabel(modelId), storage_size_megabytes: modelSizeMb }}
-                    nodes={topology?.nodes ?? {}}
+                    nodes={effectiveNodes}
                     sharding="Pipeline"
                     runtime="MlxRing"
                     apiPreview={currentPreview}
@@ -513,7 +537,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                 <CardWrapper>
                   <ModelCard
                     model={{ id: modelId, name: modelLabel(modelId), storage_size_megabytes: modelSizeMb }}
-                    nodes={topology?.nodes ?? {}}
+                    nodes={effectiveNodes}
                     sharding={sharding}
                     runtime={instanceMeta}
                     apiPreview={currentPreview}
