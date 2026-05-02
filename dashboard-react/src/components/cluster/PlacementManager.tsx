@@ -323,17 +323,33 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
   // Fetch previews when modal opens
   useEffect(() => {
     if (!open) return;
-    setLoading(true);
-    setPreviews([]);
+    // Modal-open transition: reset transient choices. The fetch lives in its
+    // own effect below so it can also react to exclusion-pill clicks without
+    // re-clobbering minNodes / sharding etc.
     setMinNodes(1);
     setSharding('Pipeline');
     setInstanceMeta('MlxRing');
     setExcludedNodes(new Set());
+  }, [open, modelId]);
+
+  // Re-fetch previews whenever the modal opens for a model, the model
+  // changes, or the operator's exclusion set changes. Sending `excluded_node_ids`
+  // makes the backend planner produce previews against the topology subset
+  // the operator actually wants — so the cluster preview's chosen nodes and
+  // memory deltas update on every pill click instead of going stale.
+  useEffect(() => {
+    if (!open) return;
+    setLoading(true);
+    setPreviews([]);
 
     const controller = new AbortController();
     (async () => {
       try {
-        const res = await fetch(`/instance/previews?model_id=${encodeURIComponent(modelId)}`, {
+        const params = new URLSearchParams({ model_id: modelId });
+        for (const nodeId of excludedNodes) {
+          params.append('excluded_node_ids', nodeId);
+        }
+        const res = await fetch(`/instance/previews?${params.toString()}`, {
           signal: controller.signal,
         });
         if (res.ok && !controller.signal.aborted) {
@@ -346,7 +362,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
       finally { if (!controller.signal.aborted) setLoading(false); }
     })();
     return () => controller.abort();
-  }, [open, modelId]);
+  }, [open, modelId, excludedNodes]);
 
   // Group previews by node count
   const optionsByNodeCount = useMemo(() => {

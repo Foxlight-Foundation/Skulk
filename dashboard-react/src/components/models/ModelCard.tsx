@@ -126,23 +126,12 @@ function computePlacement(
     const usedGB = Math.max(totalBytes - (totalBytes - usedBytes), 0) / GB;
     const deltaBytes = memDelta[id] ?? 0;
     const modelUsageGB = deltaBytes / GB;
-    // Exclusion handling: the cached `apiPreview` was fetched without
-    // knowledge of operator pill clicks, so its `memDelta` choice of which
-    // nodes to mark "used" is stale once any exclusion is set. As soon as
-    // there's at least one exclusion in flight, ignore the preview's used/
-    // unused split entirely — dim *only* the explicitly excluded nodes and
-    // assume every other node would participate. This matches the
-    // operator's mental model ("I excluded X, X dims, others are eligible")
-    // and avoids dimming the wrong node when the preview's chosen subset
-    // doesn't line up with the post-exclusion candidate set.
-    //
-    // When no exclusion is active, fall back to the preview-driven signal
-    // so the original "this min_nodes count picks N of M" UX is preserved.
-    const isUsed = excludedNodeIds.has(id)
-      ? false
-      : excludedNodeIds.size > 0
-        ? true
-        : deltaBytes > 0;
+    // The caller refetches `apiPreview` whenever exclusions change, so
+    // `memDelta` is authoritative for which nodes the master would actually
+    // place on. The exclusion check is belt-and-suspenders: if a stale
+    // preview still references an excluded node we override to dim it,
+    // matching the operator's intent until the fresh preview lands.
+    const isUsed = !excludedNodeIds.has(id) && deltaBytes > 0;
     const safeTotal = Math.max(totalGB, 0.001);
     const currentPercent = clamp((usedGB / safeTotal) * 100);
     const newPercent = clamp(((usedGB + modelUsageGB) / safeTotal) * 100);

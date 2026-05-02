@@ -1250,10 +1250,12 @@ class API:
         self,
         model_id: ModelId,
         node_ids: Annotated[list[NodeId] | None, Query()] = None,
+        excluded_node_ids: Annotated[list[NodeId] | None, Query()] = None,
     ) -> PlacementPreviewResponse:
         seen: set[tuple[ModelId, Sharding, InstanceMeta, int]] = set()
         previews: list[PlacementPreview] = []
         required_nodes = set(node_ids) if node_ids else None
+        excluded_nodes = set(excluded_node_ids) if excluded_node_ids else None
 
         if len(list(self.state.topology.list_nodes())) == 0:
             return PlacementPreviewResponse(previews=[])
@@ -1293,6 +1295,7 @@ class API:
                     current_instances=self.state.instances,
                     required_nodes=required_nodes,
                     download_status=self.state.downloads,
+                    excluded_nodes=excluded_nodes,
                 )
             except ValueError as exc:
                 if (model_card.model_id, sharding, instance_meta, 0) not in seen:
