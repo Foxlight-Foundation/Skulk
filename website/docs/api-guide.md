@@ -597,6 +597,17 @@ curl "http://localhost:52415/instance/previews?model_id=mlx-community/Qwen3.5-9B
 
 This is usually the best first Skulk-specific endpoint to call. It shows which combinations of sharding mode, networking mode, and node count are valid, and why invalid combinations fail.
 
+| Query parameter | Meaning |
+|-----------------|---------|
+| `model_id` | Required. Hugging Face-style model ID. |
+| `node_ids` | Optional, repeatable. Restricts previews to candidate cycles that contain *all* of these node IDs (subset matching). |
+| `excluded_node_ids` | Optional, repeatable. Excludes the listed node IDs from candidate cycles for every previewed combination — mirrors the `excluded_nodes` field on `POST /place_instance` so dashboards can render an accurate preview against the post-exclusion topology. |
+
+```bash
+# Preview with one node excluded:
+curl "http://localhost:52415/instance/previews?model_id=mlx-community/Qwen3.5-9B-4bit&excluded_node_ids=12D3KooWAbc..."
+```
+
 ### Build a placement manually
 
 **GET** `/instance/placement`

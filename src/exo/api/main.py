@@ -666,7 +666,9 @@ class API:
             summary="Preview valid placements for a model",
             description=(
                 "Return candidate placements for a model before launch. This is the best first "
-                "step when you want to see what Skulk can place on the current node or cluster."
+                "step when you want to see what Skulk can place on the current node or cluster. "
+                "Pass `excluded_node_ids` (repeatable) to mirror the `excluded_nodes` field on "
+                "POST /place_instance and preview against the post-exclusion topology."
             ),
         )(self.get_placement_previews)
         self.app.get(
