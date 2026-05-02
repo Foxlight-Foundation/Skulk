@@ -511,6 +511,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                     runtime="MlxRing"
                     apiPreview={currentPreview}
                     hideActions
+                    excludedNodeIds={excludedNodes}
                   />
                 </CardWrapper>
               </Section>
@@ -542,6 +543,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                     runtime={instanceMeta}
                     apiPreview={currentPreview}
                     hideActions
+                    excludedNodeIds={excludedNodes}
                   />
                 </CardWrapper>
               </Section>
