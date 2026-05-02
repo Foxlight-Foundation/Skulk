@@ -65,14 +65,15 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Lives in:** `src/exo/api/main.py`; adapters at `src/exo/api/adapters/`
 - **Default port:** 52415
 - **Mounts:** dashboard at `/`; OpenAPI at `/api/openapi.json`
+- **Background tasks:** `_apply_state` (consumes `GLOBAL_EVENTS` and persists merged traces), `_pause_on_new_election`, `_cleanup_expired_images` (image-store TTL), `_prune_old_traces` (hourly trace janitor backed by `prune_old_trace_files`; retention via `tracing.retention_days`)
 
 ### Dashboard
 
 - **Role:** operator UI for the same Skulk runtime
 - **Lives in:** `dashboard-react/` (source); served by API at `/`
 - **Stack:** React + TypeScript + styled-components + Vite
-- **State:** Zustand (`dashboard-react/src/stores/uiStore.ts`, `dashboard-react/src/stores/chatStore.ts`)
-- **Routing:** activity-style enum (`activeRoute` in `uiStore`); no react-router
+- **State:** Redux Toolkit + RTK Query (`dashboard-react/src/store/`). Slices at `store/slices/uiSlice.ts` and `store/slices/chatSlice.ts`; query endpoints injected from `store/endpoints/cluster.ts`, `store/endpoints/config.ts`, `store/endpoints/observability.ts` into a single `apiSlice` (`store/api.ts`).
+- **Routing:** activity-style enum (`activeRoute` in `uiSlice`); no react-router
 - **Persistence:** sessionStorage for in-session UI; localStorage for cross-session preferences (theme, panel widths)
 
 ### Storage
@@ -377,6 +378,7 @@ Selection logic: `src/exo/worker/engines/mlx/cache.py::make_kv_cache`. Some back
 | `model_store.staging` | `enabled`, `node_cache_path`, `cleanup_on_deactivate` | Staging behavior |
 | `inference` | `kv_cache_backend` | KV cache selection |
 | `logging` | `enabled`, `ingest_url` | Centralized logging opt-in |
+| `tracing` | `retention_days` | Saved-trace retention for the API janitor (default 3 days; 0 disables pruning) |
 | `hf_token` | (string) | Local-only Hugging Face token (stripped from cluster broadcast) |
 
 ### Environment variables
