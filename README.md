@@ -14,16 +14,63 @@ a more modern dashboard, richer API workflows, sophisticated cache quantization,
 
 **[Documentation](https://foxlight-foundation.github.io/Skulk/)** · **[Build And Runtime Paths](https://foxlight-foundation.github.io/Skulk/build-and-runtime/)** · **[Release Notes](https://foxlight-foundation.github.io/Skulk/release-notes/1.0.2/)** · **[Architecture](https://foxlight-foundation.github.io/Skulk/architecture/)**
 
-## What Skulk Is Good At
+## Why Skulk
 
-- Run a model on a single machine through the dashboard or API.
-- Form a small cluster of Macs and split larger models across them.
-- Use a central model store so the cluster downloads once and stages locally.
-- Talk to the cluster through OpenAI Chat Completions, OpenAI Responses, Claude Messages, or Ollama-compatible APIs.
-- Experiment with advanced placement modes, RDMA, and KV cache backends when you are ready.
-- Run non-chat workloads such as embeddings and other specialized model flows.
-- Build TTS-oriented and other API-driven workflows on top of the cluster.
-- Actually use your cluster for real inference workloads instead of treating it as a demo.
+What's been added on top of the distributed-MLX baseline, and what each of these gets you:
+
+### Reliability
+
+- **Hang detection.** Pipeline-collective evals carry per-eval timeouts (`SKULK_PIPELINE_EVAL_TIMEOUT_SECONDS`). Runner subprocesses watch their parent and exit if the agent dies. Always-on per-runner flight recorder retains the last 128 phase transitions. **Why it matters:** wedged Metal collectives produce a precise rank attribution in seconds instead of indefinite SSE silence; recovering disk + GPU memory after a SIGKILL is automatic.
+
+- **Snapshot bootstrap + bounded replay retention.** The master writes periodic state snapshots; followers hydrate from a snapshot and replay only the retained tail. The live `events.bin` no longer grows without limit. **Why it matters:** rejoin time on a long-lived cluster is bounded by the snapshot, not by the entire event history. Disk use stops being an SLO concern.
+
+- **Per-model runtime overrides.** Model cards carry `metal_fast_synch` and other Skulk-specific knobs the engine consults at runtime. Gemma 4 has FAST_SYNCH disabled by default after the kernel-panic incident in April. **Why it matters:** known-bad upstream defaults don't bite you the first time you try a new model.
+
+- **Trace janitor.** Hourly background task in the API drops saved trace files older than `tracing.retention_days` (default 3). **Why it matters:** debugging traces don't fill the disk during incident response.
+
+### Observability
+
+- **Cross-rank cluster timeline.** `/v1/diagnostics/cluster/timeline` stitches every node's flight recorder into one chronologically-ordered view. **Why it matters:** rank-disagreement signature of a distributed deadlock — the most common hang shape — is visible at a glance instead of requiring you to grep four logs simultaneously.
+
+- **On-demand capture bundles.** `POST /v1/diagnostics/node/capture` collects live diagnostics, the runner's flight recorder, the process tree, and best-effort `sample`, `vmmap -summary`, and `footprint -p` output for the runner process. Cluster proxy version fans out across all reachable peers. **Why it matters:** you get macOS-native process introspection per runner without SSHing into each box.
+
+- **Centralized logging stack.** Each node can emit structured JSON on stdout (configured via `skulk.yaml`, synced cluster-wide). `deployment/logging/` ships a Vector → VictoriaLogs → Grafana docker-compose. **Why it matters:** standard tooling — search across the whole cluster with LogsQL, build alerts in Grafana, no bespoke log viewer to maintain.
+
+- **Tracing surface.** Cluster-wide tracing toggle, per-task trace sessions on runners, master merges per-rank traces and the API persists them. Native waterfall in the dashboard renders inline (no popup blockers, trace data never leaves the cluster). Inline filter bar, per-row expansion, sub-pixel-event clustering for dense traces. **Why it matters:** turn on, reproduce, inspect, turn off — without a third-party hosted UI in the request path.
+
+### Operator UX
+
+- **Real React + TypeScript dashboard.** Topology view with per-node memory/GPU/temp/power, model picker + model store, placement manager with cluster preview, chat with conversation history, three-tab observability panel, settings panel that syncs across the cluster. Light + dark themes. **Why it matters:** you operate the cluster from a UI, not by curl-ing endpoints in a notebook.
+
+- **Per-placement node exclusion.** Exclude specific nodes from a single launch without taking them out of the cluster. Click-to-toggle pills in the placement modal; `excluded_nodes` on `POST /place_instance`; previews via `excluded_node_ids` on `GET /instance/previews`. Already-running instances on excluded nodes are unaffected. **Why it matters:** keep a node available to other workloads while routing one specific placement around it.
+
+- **Cluster-wide settings sync.** Toggling tracing, logging, KV-cache backend, or HF token in the dashboard propagates to every node via gossipsub. **Why it matters:** one knob to turn, every node honors it, no fleet-wide SSH loop.
+
+### Inference
+
+- **Continuous batching.** `BatchGenerator` queues incoming requests and decodes them together token-by-token. `SKULK_MAX_CONCURRENT_REQUESTS` (default 8) controls the per-runner ceiling. **Why it matters:** multiple concurrent users share one model's forward pass; throughput scales with concurrency instead of head-of-line blocking.
+
+- **KV cache backend choice.** Per-cluster selection between `default`, `mlx_quantized`, `turboquant`, `turboquant_adaptive`, and `optiq`. Configurable via `skulk.yaml` or `SKULK_KV_CACHE_BACKEND`. **Why it matters:** trade memory footprint against cache fidelity at the cluster level; pick what fits your hardware.
+
+- **Family-aware behavior.** Gemma 4 multimodal (audio + vision), DeepSeek V3.2, GPT-OSS / Nemotron / Qwen 3.5 / Llama Nemotron Nano thinking-and-reasoning separation, structured output / JSON mode, OpenAI-compatible tool calling. **Why it matters:** new model releases land with explicit per-family handling, not a generic "the abstraction will figure it out."
+
+### APIs
+
+- **Four wire formats, one pipeline.** OpenAI Chat Completions, OpenAI Responses, Claude Messages, and Ollama-compatible endpoints all converge on the same internal `Task`. Adapters live in `src/exo/api/adapters/`. **Why it matters:** clients pick the SDK they prefer; the cluster doesn't care.
+
+- **Auto-generated OpenAPI.** Routes carry `tags`, `summary`, and `description`; Pydantic field descriptions flow into the schema. The interactive API browser is built from the live spec. **Why it matters:** the API surface is programmable — generate clients, run contract tests, no doc drift.
+
+- **Per-task cancellation.** `POST /v1/cancel/{command_id}` and the cooperative runner-task cancel both work; the dashboard exposes "Cancel task" on each running task in the Node tab. **Why it matters:** stuck or runaway requests are recoverable without restarting the runner.
+
+### Storage
+
+- **Model store.** Optional cluster-shared host with rsync-style staging — download once, every node stages locally instead of independently fetching from Hugging Face. **Why it matters:** large-model cluster cold start is bandwidth-bounded by one node, not N.
+
+- **Custom model cards.** Operator-added `*.toml` files under `~/.local/share/skulk/custom_model_cards/` (XDG on Linux, `~/.skulk/...` on macOS). The capability resolver reads built-in + custom and prefers custom on `model_id` collision. **Why it matters:** ship your own quantized variant or override a built-in card without forking the repo.
+
+### Engineering discipline
+
+- **Strict typing, tests, docs.** `basedpyright` runs at `0 errors, 0 warnings, 0 notes` on the main branch. Placement, apply, and API paths have test coverage. Architecture docs (`architecture.md` for narrative, `architecture-reference.md` for the dense fact-sheet) are required to update on architectural shape changes. **Why it matters:** regressions surface in CI, the codebase stays legible to future contributors, and the docs reflect what the code actually does.
 
 ## Prerequisites
 

@@ -666,7 +666,9 @@ class API:
             summary="Preview valid placements for a model",
             description=(
                 "Return candidate placements for a model before launch. This is the best first "
-                "step when you want to see what Skulk can place on the current node or cluster."
+                "step when you want to see what Skulk can place on the current node or cluster. "
+                "Pass `excluded_node_ids` (repeatable) to mirror the `excluded_nodes` field on "
+                "POST /place_instance and preview against the post-exclusion topology."
             ),
         )(self.get_placement_previews)
         self.app.get(
@@ -1173,6 +1175,7 @@ class API:
             sharding=payload.sharding,
             instance_meta=payload.instance_meta,
             min_nodes=payload.min_nodes,
+            excluded_nodes=list(payload.excluded_nodes),
         )
         await self._send(command)
 
@@ -1249,10 +1252,12 @@ class API:
         self,
         model_id: ModelId,
         node_ids: Annotated[list[NodeId] | None, Query()] = None,
+        excluded_node_ids: Annotated[list[NodeId] | None, Query()] = None,
     ) -> PlacementPreviewResponse:
         seen: set[tuple[ModelId, Sharding, InstanceMeta, int]] = set()
         previews: list[PlacementPreview] = []
         required_nodes = set(node_ids) if node_ids else None
+        excluded_nodes = set(excluded_node_ids) if excluded_node_ids else None
 
         if len(list(self.state.topology.list_nodes())) == 0:
             return PlacementPreviewResponse(previews=[])
@@ -1292,6 +1297,7 @@ class API:
                     current_instances=self.state.instances,
                     required_nodes=required_nodes,
                     download_status=self.state.downloads,
+                    excluded_nodes=excluded_nodes,
                 )
             except ValueError as exc:
                 if (model_card.model_id, sharding, instance_meta, 0) not in seen:

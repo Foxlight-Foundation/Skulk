@@ -15,7 +15,13 @@ export interface PlacementManagerProps {
   topology: TopologyData;
   open: boolean;
   onClose: () => void;
-  onLaunch: (params: { modelId: string; sharding: string; instanceMeta: string; minNodes: number }) => void;
+  onLaunch: (params: {
+    modelId: string;
+    sharding: string;
+    instanceMeta: string;
+    minNodes: number;
+    excludedNodes: string[];
+  }) => void;
   /** Embedding models: hide sharding/networking selectors and node slider */
   isEmbedding?: boolean;
 }
@@ -136,6 +142,53 @@ const SliderRow = styled.div`
   gap: 12px;
 `;
 
+/**
+ * Pill row used to toggle per-placement node exclusions. Each pill is the
+ * click target the user asked for — single click flips inclusion. Excluded
+ * pills lose their fill and gain a strikethrough so the state reads at a
+ * glance without a separate legend.
+ */
+const NodePillRow = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+`;
+
+const NodePill = styled.button<{ $excluded: boolean }>`
+  all: unset;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-family: ${({ theme }) => theme.fonts.body};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  border: 1px solid
+    ${({ $excluded, theme }) => ($excluded ? theme.colors.borderLight : theme.colors.border)};
+  background: ${({ $excluded, theme }) =>
+    $excluded ? 'transparent' : theme.colors.goldBg};
+  color: ${({ $excluded, theme }) =>
+    $excluded ? theme.colors.textMuted : theme.colors.text};
+  text-decoration: ${({ $excluded }) => ($excluded ? 'line-through' : 'none')};
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+
+  &:hover {
+    background: ${({ $excluded, theme }) =>
+      $excluded ? theme.colors.surfaceHover : theme.colors.goldBg};
+    color: ${({ theme }) => theme.colors.text};
+  }
+
+  &:focus-visible {
+    outline: 2px solid ${({ theme }) => theme.colors.goldDim};
+    outline-offset: 2px;
+  }
+`;
+
+const NodePillHint = styled.div`
+  font-family: ${({ theme }) => theme.fonts.body};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textMuted};
+`;
+
 const Slider = styled.input`
   flex: 1;
   accent-color: ${({ theme }) => theme.colors.gold};
@@ -245,22 +298,58 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
   const [minNodes, setMinNodes] = useState(1);
   const [sharding, setSharding] = useState<'Pipeline' | 'Tensor'>('Pipeline');
   const [instanceMeta, setInstanceMeta] = useState<'MlxRing' | 'MlxJaccl'>('MlxRing');
+  // Per-placement node exclusions. Local state — never persisted; reset every
+  // time the modal opens. Click a node pill to toggle. The set is sent along
+  // with the PlaceInstance command so the master's planner treats those
+  // nodes as if they were absent for *this* placement only.
+  const [excludedNodes, setExcludedNodes] = useState<Set<string>>(new Set());
 
-  const totalNodes = Object.keys(topology?.nodes ?? {}).length;
+  // The cluster preview, slider, and combo evaluation all run against the
+  // *effective* topology — the original minus excluded nodes. The master
+  // planner does the same filter when it picks ranks, so what the operator
+  // sees in this modal matches what will actually be placed.
+  const effectiveNodes = useMemo(() => {
+    const all = topology?.nodes ?? {};
+    if (excludedNodes.size === 0) return all;
+    const filtered: typeof all = {};
+    for (const [nodeId, info] of Object.entries(all)) {
+      if (!excludedNodes.has(nodeId)) filtered[nodeId] = info;
+    }
+    return filtered;
+  }, [topology?.nodes, excludedNodes]);
+
+  const totalNodes = Object.keys(effectiveNodes).length;
 
   // Fetch previews when modal opens
   useEffect(() => {
     if (!open) return;
-    setLoading(true);
-    setPreviews([]);
+    // Modal-open transition: reset transient choices. The fetch lives in its
+    // own effect below so it can also react to exclusion-pill clicks without
+    // re-clobbering minNodes / sharding etc.
     setMinNodes(1);
     setSharding('Pipeline');
     setInstanceMeta('MlxRing');
+    setExcludedNodes(new Set());
+  }, [open, modelId]);
+
+  // Re-fetch previews whenever the modal opens for a model, the model
+  // changes, or the operator's exclusion set changes. Sending `excluded_node_ids`
+  // makes the backend planner produce previews against the topology subset
+  // the operator actually wants — so the cluster preview's chosen nodes and
+  // memory deltas update on every pill click instead of going stale.
+  useEffect(() => {
+    if (!open) return;
+    setLoading(true);
+    setPreviews([]);
 
     const controller = new AbortController();
     (async () => {
       try {
-        const res = await fetch(`/instance/previews?model_id=${encodeURIComponent(modelId)}`, {
+        const params = new URLSearchParams({ model_id: modelId });
+        for (const nodeId of excludedNodes) {
+          params.append('excluded_node_ids', nodeId);
+        }
+        const res = await fetch(`/instance/previews?${params.toString()}`, {
           signal: controller.signal,
         });
         if (res.ok && !controller.signal.aborted) {
@@ -273,7 +362,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
       finally { if (!controller.signal.aborted) setLoading(false); }
     })();
     return () => controller.abort();
-  }, [open, modelId]);
+  }, [open, modelId, excludedNodes]);
 
   // Group previews by node count
   const optionsByNodeCount = useMemo(() => {
@@ -353,13 +442,33 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
   }, [minNodes, currentOptions, currentKey]);
 
   const handleLaunch = useCallback(() => {
+    const excludedNodesArr = [...excludedNodes];
     if (isEmbedding) {
-      onLaunch({ modelId, sharding: 'Pipeline', instanceMeta: 'MlxRing', minNodes: 1 });
+      onLaunch({ modelId, sharding: 'Pipeline', instanceMeta: 'MlxRing', minNodes: 1, excludedNodes: excludedNodesArr });
     } else {
-      onLaunch({ modelId, sharding, instanceMeta, minNodes });
+      onLaunch({ modelId, sharding, instanceMeta, minNodes, excludedNodes: excludedNodesArr });
     }
     onClose();
-  }, [modelId, sharding, instanceMeta, minNodes, isEmbedding, onLaunch, onClose]);
+  }, [modelId, sharding, instanceMeta, minNodes, excludedNodes, isEmbedding, onLaunch, onClose]);
+
+  const toggleNodeExclusion = useCallback((nodeId: string) => {
+    setExcludedNodes((prev) => {
+      const next = new Set(prev);
+      if (next.has(nodeId)) next.delete(nodeId);
+      else next.add(nodeId);
+      return next;
+    });
+  }, []);
+
+  // Clamp the slider when an exclusion drops the effective node count below
+  // its current value — otherwise the operator can leave the modal pointed
+  // at a node count that exceeds what's actually available, and previewing
+  // for that count quietly stops working.
+  useEffect(() => {
+    if (totalNodes > 0 && minNodes > totalNodes) {
+      setMinNodes(totalNodes);
+    }
+  }, [totalNodes, minNodes]);
 
   if (!open) return null;
 
@@ -418,6 +527,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                     runtime="MlxRing"
                     apiPreview={currentPreview}
                     hideActions
+                    excludedNodeIds={excludedNodes}
                   />
                 </CardWrapper>
               </Section>
@@ -449,9 +559,47 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                     runtime={instanceMeta}
                     apiPreview={currentPreview}
                     hideActions
+                    excludedNodeIds={excludedNodes}
                   />
                 </CardWrapper>
               </Section>
+
+              {/* Per-placement node exclusion — click a pill to exclude that
+                  node from this placement only. Already-running instances on
+                  the node are unaffected. */}
+              {totalNodes > 0 && (
+                <Section>
+                  <SectionLabel>Available Nodes</SectionLabel>
+                  <NodePillRow>
+                    {Object.entries(topology?.nodes ?? {})
+                      .map(([nodeId, info]) => ({
+                        nodeId,
+                        label: info.friendly_name?.trim() || nodeId.slice(0, 8),
+                      }))
+                      .sort((a, b) =>
+                        a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }),
+                      )
+                      .map(({ nodeId, label }) => {
+                        const isExcluded = excludedNodes.has(nodeId);
+                        return (
+                          <NodePill
+                            key={nodeId}
+                            type="button"
+                            $excluded={isExcluded}
+                            onClick={() => toggleNodeExclusion(nodeId)}
+                            aria-pressed={!isExcluded}
+                            title={isExcluded ? 'Click to include this node' : 'Click to exclude this node from this placement'}
+                          >
+                            {label}
+                          </NodePill>
+                        );
+                      })}
+                  </NodePillRow>
+                  <NodePillHint>
+                    Click a node to exclude it from this placement. Excluded nodes are skipped only for this launch — already-running instances on them are unaffected.
+                  </NodePillHint>
+                </Section>
+              )}
 
               {/* Placement error — shown when nothing works at any node count */}
               {!anyPlacementPossible && placementError && (

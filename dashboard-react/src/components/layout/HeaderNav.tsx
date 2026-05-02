@@ -196,7 +196,14 @@ const WarningTooltipInner = styled.div`
 const WarningItem = styled.div<{ $level: 'error' | 'warning' }>`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ $level, theme}) => $level === 'error' ? theme.colors.errorText : theme.colors.warningText};
+  /*
+   * Text-only callout — palette-aware on-surface color so the message
+   * stays semantic (red text for errors, amber text for warnings) without
+   * the saturated solid-fill landing in your face. The header indicator
+   * still uses the solid fill because that's the bit meant to *grab*
+   * attention; the popover body just needs to be color-coded.
+   */
+  color: ${({ $level, theme}) => $level === 'error' ? theme.colors.errorOnSurface : theme.colors.warningOnSurface};
   line-height: 1.4;
   display: flex;
   align-items: flex-start;
@@ -204,7 +211,7 @@ const WarningItem = styled.div<{ $level: 'error' | 'warning' }>`
 
   &::before {
     content: '●';
-    color: ${({ $level, theme}) => $level === 'error' ? theme.colors.error : theme.colors.warning};
+    color: ${({ $level, theme}) => $level === 'error' ? theme.colors.errorOnSurface : theme.colors.warningOnSurface};
     flex-shrink: 0;
   }
 `;

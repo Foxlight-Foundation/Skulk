@@ -78,9 +78,32 @@ interface ColorTokens {
   error: string;
   errorBg: string;
   errorText: string;
+  // Error callout fill (saturated solid bg) + on-fill foreground. Use these
+  // when the message is meant to *grab* attention (cluster warnings, blocking
+  // toasts) rather than tint a surface. Identical in light and dark.
+  errorFill: string;
+  errorOnFill: string;
+  /**
+   * Body-text-on-a-regular-surface color for errors. Palette-aware so the
+   * text reads as "error" in both modes without needing a saturated fill.
+   * Distinct from `errorText` (used in section banners) — `errorOnSurface`
+   * is intended for callout lists like the cluster-warnings popover.
+   */
+  errorOnSurface: string;
   warning: string;
   warningBg: string;
   warningText: string;
+  // Warning callout fill + on-fill foreground. Same intent as errorFill but
+  // for non-blocking advisories. Identical in light and dark.
+  warningFill: string;
+  warningOnFill: string;
+  /**
+   * Body-text-on-a-regular-surface color for warnings. Stays semantically
+   * "amber" in both modes (unlike `warningText`, which is intentionally
+   * slate-grey in the light palette to avoid clashing with the blue brand
+   * inside section banners).
+   */
+  warningOnSurface: string;
   info: string;
   infoBg: string;
 
@@ -149,9 +172,15 @@ const darkColors: ColorTokens = {
   error: '#ef4444',
   errorBg: 'rgba(239, 68, 68, 0.12)',
   errorText: '#fca5a5',
+  errorFill: '#dc2626',
+  errorOnFill: '#ffffff',
+  errorOnSurface: '#fca5a5',                 // light red, readable on dark surface
   warning: '#f59e0b',
   warningBg: 'rgba(245, 158, 11, 0.12)',
   warningText: '#fcd34d',
+  warningFill: '#ffcc33',
+  warningOnFill: '#000000',
+  warningOnSurface: '#fcd34d',               // light amber, readable on dark surface
   info: '#3b82f6',
   infoBg: 'rgba(59, 130, 246, 0.12)',
 
@@ -218,6 +247,11 @@ const lightColors: ColorTokens = {
   error: '#dc2626',
   errorBg: 'rgba(220, 38, 38, 0.10)',
   errorText: '#991b1b',
+  // Same solid-callout pair as the dark palette — palette-independent so
+  // the on-fill contrast (white-on-red) is guaranteed regardless of mode.
+  errorFill: '#dc2626',
+  errorOnFill: '#ffffff',
+  errorOnSurface: '#b91c1c',                 // red-700, readable on white
   // Light-theme warnings stay greyscale rather than borrowing the amber
   // palette the dark theme uses — amber clashed with the cool blue accents
   // and read as a stain on the surface. The semantic ("this is a warning")
@@ -226,6 +260,12 @@ const lightColors: ColorTokens = {
   warning: '#475569',                       // slate-600 (border/accent)
   warningBg: 'rgba(71, 85, 105, 0.08)',     // slate-600 at 8%
   warningText: '#1e293b',                   // slate-800
+  // Solid-callout pair stays palette-independent — same yellow + black in
+  // both modes — because the intent is high-attention badging, not subtle
+  // tinting. Mirrors the dark-mode values verbatim.
+  warningFill: '#ffcc33',
+  warningOnFill: '#000000',
+  warningOnSurface: '#b45309',               // amber-700, readable on white
   info: '#1d4ed8',
   infoBg: 'rgba(29, 78, 216, 0.10)',
 

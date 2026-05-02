@@ -22,6 +22,7 @@ from exo_pyo3_bindings import (
 )
 from filelock import FileLock
 from loguru import logger
+from pydantic import ValidationError
 
 from exo.shared.constants import EXO_NODE_ID_KEYPAIR
 from exo.utils.channels import Receiver, Sender, channel
@@ -101,7 +102,20 @@ class TopicRouter[T: CamelCaseModel]:
         self.origin_senders -= origin_to_clear
 
     async def publish_bytes(self, data: bytes, origin: str | None):
-        await self.publish(self.topic.deserialize(data), origin=origin)
+        # Wire-format payloads are deserialized strictly (extra="forbid"). During
+        # rolling upgrades, an older node may receive a message containing fields
+        # it doesn't know about. Catch the validation failure so the gossipsub
+        # receive loop survives — dropping the message is recoverable; tearing
+        # down the loop is not.
+        try:
+            item = self.topic.deserialize(data)
+        except ValidationError as exception:
+            logger.opt(exception=exception).warning(
+                f"Dropping malformed or schema-incompatible message on topic "
+                f"{self.topic.topic} from {origin}"
+            )
+            return
+        await self.publish(item, origin=origin)
 
     def new_sender(self) -> Sender[T]:
         return self._sender.clone()

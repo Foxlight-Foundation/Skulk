@@ -35,6 +35,14 @@ export interface ModelCardProps {
   apiPreview?: PlacementPreview | null;
   modelIdOverride?: string | null;
   hideActions?: boolean;
+  /**
+   * Node IDs the caller has marked as excluded (e.g. via the placement
+   * modal's pill row). Excluded nodes render dimmed in the topology
+   * visualization so the operator's exclusion intent matches the picture,
+   * regardless of which nodes the cached `apiPreview` happened to pick.
+   * Empty / undefined = no exclusion overlay.
+   */
+  excludedNodeIds?: ReadonlySet<string>;
 }
 
 /* ================================================================
@@ -93,6 +101,7 @@ interface PlacementNode {
 function computePlacement(
   nodes: Record<string, NodeInfo>,
   apiPreview: PlacementPreview | null,
+  excludedNodeIds: ReadonlySet<string> = new Set(),
 ): { nodes: PlacementNode[]; canFit: boolean; topoWidth: number; topoHeight: number; error: string | null } {
   const ids = Object.keys(nodes);
   const n = ids.length;
@@ -117,7 +126,12 @@ function computePlacement(
     const usedGB = Math.max(totalBytes - (totalBytes - usedBytes), 0) / GB;
     const deltaBytes = memDelta[id] ?? 0;
     const modelUsageGB = deltaBytes / GB;
-    const isUsed = deltaBytes > 0;
+    // The caller refetches `apiPreview` whenever exclusions change, so
+    // `memDelta` is authoritative for which nodes the master would actually
+    // place on. The exclusion check is belt-and-suspenders: if a stale
+    // preview still references an excluded node we override to dim it,
+    // matching the operator's intent until the fresh preview lands.
+    const isUsed = !excludedNodeIds.has(id) && deltaBytes > 0;
     const safeTotal = Math.max(totalGB, 0.001);
     const currentPercent = clamp((usedGB / safeTotal) * 100);
     const newPercent = clamp(((usedGB + modelUsageGB) / safeTotal) * 100);
@@ -330,6 +344,7 @@ export function ModelCard({
   apiPreview = null,
   modelIdOverride = null,
   hideActions = false,
+  excludedNodeIds,
 }: ModelCardProps) {
   const estimatedMemory = model.storage_size_megabytes
     ? Math.round(model.storage_size_megabytes / 1024)
@@ -339,7 +354,7 @@ export function ModelCard({
   // Drop the SVG glow filter in light mode — looks like a hard drop-shadow against
   // the soft blue background.
   const useGlow = theme.colors.bg === '#000000';
-  const placement = computePlacement(nodes, apiPreview);
+  const placement = computePlacement(nodes, apiPreview, excludedNodeIds);
   const canFit = apiPreview ? apiPreview.error === null : placement.canFit;
   const perNode = downloadStatus?.perNode ?? [];
   const hfId = modelIdOverride ?? model.id;

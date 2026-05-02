@@ -244,6 +244,107 @@ def test_get_instance_placements_one_node_not_fit() -> None:
         place_instance(cic, topology, {}, node_memory, node_network)
 
 
+def _two_node_topology():
+    """Two-node topology where either node can host a placement on its own.
+
+    Used by the excluded-nodes tests to verify the planner picks the alternate
+    node when one is excluded, and refuses to place when *all* candidates are
+    excluded. Return type is left loose intentionally — the values match the
+    `place_instance` signature without us recomputing the helper return types.
+    """
+    topology = Topology()
+    node_a = NodeId()
+    node_b = NodeId()
+    topology.add_node(node_a)
+    topology.add_node(node_b)
+    # Each node has enough memory to host the small model on its own.
+    node_memory = {
+        node_a: create_node_memory(1000 * 1024),
+        node_b: create_node_memory(1000 * 1024),
+    }
+    node_network = {
+        node_a: create_node_network(),
+        node_b: create_node_network(),
+    }
+    return topology, node_a, node_b, node_memory, node_network
+
+
+def _small_model_card() -> ModelCard:
+    return ModelCard(
+        model_id=ModelId("test-model"),
+        storage_size=Memory.from_kb(500),
+        n_layers=10,
+        hidden_size=1000,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+    )
+
+
+def test_excluding_one_node_routes_placement_to_the_other() -> None:
+    """The planner must pick a candidate cycle that doesn't touch any excluded
+    node when an alternative exists."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        excluded_nodes={node_a},
+    )
+
+    assert len(placements) == 1
+    instance = next(iter(placements.values()))
+    assigned_nodes = set(instance.shard_assignments.node_to_runner.keys())
+    assert assigned_nodes == {node_b}
+
+
+def test_excluding_all_candidate_nodes_fails_to_place() -> None:
+    """If every cycle that would otherwise satisfy the placement is excluded,
+    the planner raises rather than picking an excluded node anyway."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    with pytest.raises(ValueError, match="No cycles found with sufficient memory"):
+        place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            excluded_nodes={node_a, node_b},
+        )
+
+
+def test_empty_exclusion_set_preserves_default_behavior() -> None:
+    """Defensive: passing an empty set must not change which placements are
+    legal — the filter should be a no-op."""
+    topology, _node_a, _node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    without_filter = place_instance(command, topology, {}, node_memory, node_network)
+    with_empty_filter = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        excluded_nodes=set(),
+    )
+
+    # Both calls must produce equivalent placement sets (same node count, same
+    # model). We don't assert exact node identity because the planner may pick
+    # either node when both qualify.
+    assert len(without_filter) == 1
+    assert len(with_empty_filter) == 1
+    assert (
+        next(iter(without_filter.values())).shard_assignments.model_id
+        == next(iter(with_empty_filter.values())).shard_assignments.model_id
+    )
+
+
 def test_get_transition_events_no_change(instance: Instance):
     # arrange
     instance_id = InstanceId()

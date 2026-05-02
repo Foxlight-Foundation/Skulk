@@ -39,7 +39,7 @@ const sidebars: SidebarsConfig = {
         {
           type: "category",
           label: "Release Notes",
-          items: ["release-notes/1.0.2"],
+          items: ["release-notes/1.0.3", "release-notes/1.0.2"],
         },
         "architecture",
         "architecture-reference",

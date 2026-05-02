@@ -580,6 +580,7 @@ class PlaceInstanceParams(BaseModel):
                 "sharding": "Pipeline",
                 "instance_meta": "MlxRing",
                 "min_nodes": 1,
+                "excluded_nodes": [],
             }
         }
     )
@@ -588,6 +589,16 @@ class PlaceInstanceParams(BaseModel):
     sharding: Sharding = Sharding.Pipeline
     instance_meta: InstanceMeta = InstanceMeta.MlxRing
     min_nodes: int = 1
+    excluded_nodes: list[NodeId] = Field(
+        default_factory=list,
+        description=(
+            "Optional. Node IDs the master should treat as if absent when "
+            "scoring candidate cycles for this placement. Empty list = "
+            "consider all nodes. Already-running instances on the listed "
+            "nodes are not affected — exclusion is per-placement, not "
+            "cluster-wide."
+        ),
+    )
 
 
 class CreateInstanceParams(BaseModel):
