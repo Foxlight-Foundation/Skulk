@@ -5,9 +5,10 @@ import { VscBug } from 'react-icons/vsc';
 import { Button } from '../common/Button';
 import SkulkIcon from '../icons/SkulkIcon';
 import type { Theme } from '../../theme';
-import { useUIStore } from '../../stores/uiStore';
+import { useAppDispatch, useAppSelector } from '../../store/hooks';
+import { uiActions } from '../../store/slices/uiSlice';
 
-export type NavRoute = 'cluster' | 'model-store' | 'chat' | 'traces';
+export type NavRoute = 'cluster' | 'model-store' | 'chat';
 
 export interface HeaderNavProps {
   showHome?: boolean;
@@ -284,14 +285,16 @@ export function HeaderNav({
   className,
 }: HeaderNavProps) {
   const theme = useTheme() as Theme;
-  const themeName = useUIStore((s) => s.theme);
-  const toggleTheme = useUIStore((s) => s.toggleTheme);
+  const dispatch = useAppDispatch();
+  const themeName = useAppSelector((s) => s.ui.theme);
+  const toggleTheme = () => dispatch(uiActions.toggleTheme());
   // Observability panel is global UI state — the button toggles it open/closed and
   // visually reflects whether it's currently visible. Distinct from `activeRoute`
   // because the panel overlays the current route rather than navigating away.
-  const observabilityPanelOpen = useUIStore((s) => s.observabilityPanelOpen);
-  const openObservability = useUIStore((s) => s.openObservability);
-  const closeObservability = useUIStore((s) => s.closeObservability);
+  const observabilityPanelOpen = useAppSelector((s) => s.ui.observabilityPanelOpen);
+  const openObservability = (tab?: 'live' | 'node' | 'traces', nodeId?: string) =>
+    dispatch(uiActions.openObservability({ tab, nodeId }));
+  const closeObservability = () => dispatch(uiActions.closeObservability());
   const navigate = (route: NavRoute) => {
     onNavigate?.(route);
     if (route === 'cluster') onHome?.();

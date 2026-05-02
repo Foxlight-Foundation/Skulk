@@ -218,9 +218,14 @@ const lightColors: ColorTokens = {
   error: '#dc2626',
   errorBg: 'rgba(220, 38, 38, 0.10)',
   errorText: '#991b1b',
-  warning: '#b45309',
-  warningBg: 'rgba(180, 83, 9, 0.12)',
-  warningText: '#78350f',
+  // Light-theme warnings stay greyscale rather than borrowing the amber
+  // palette the dark theme uses — amber clashed with the cool blue accents
+  // and read as a stain on the surface. The semantic ("this is a warning")
+  // is carried by the section heading and the surrounding context; the body
+  // just needs to be legible and not draw the eye away from the brand.
+  warning: '#475569',                       // slate-600 (border/accent)
+  warningBg: 'rgba(71, 85, 105, 0.08)',     // slate-600 at 8%
+  warningText: '#1e293b',                   // slate-800
   info: '#1d4ed8',
   infoBg: 'rgba(29, 78, 216, 0.10)',
 

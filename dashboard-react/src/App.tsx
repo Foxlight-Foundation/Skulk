@@ -13,14 +13,13 @@ import { ObservabilityPanel } from './components/observability/ObservabilityPane
 import { SettingsPanel } from './components/layout/SettingsPanel';
 import { ModelStorePage } from './components/pages/DownloadsPage';
 import { ChatView } from './components/pages/ChatView';
-import { TracesPage } from './components/pages/TracesPage';
-import { TraceDetailPage } from './components/pages/TraceDetailPage';
 import { InstancePanel, type InstanceCardData } from './components/layout/InstancePanel';
 import { ConversationPanel } from './components/layout/ConversationPanel';
 import { addToast } from './hooks/useToast';
 import type { InstanceStatus } from './components/cluster/RunningInstanceCard';
-import { useChatStore } from './stores/chatStore';
-import { useUIStore } from './stores/uiStore';
+import { chatActions } from './store/slices/chatSlice';
+import { useAppDispatch, useAppSelector } from './store/hooks';
+import { uiActions, type ObservabilityTab } from './store/slices/uiSlice';
 
 const Shell = styled.div`
   position: relative;
@@ -123,14 +122,14 @@ export function App() {
   const [storeDownloads, setStoreDownloads] = useState<StoreDownload[]>([]);
   // Observability panel state lives on the global UI store so any component (toolbar
   // nav, per-node bug icons, future cross-links) can open the panel to a specific tab.
-  const openObservability = useUIStore((s) => s.openObservability);
-  const activeRoute = useUIStore((s) => s.activeRoute);
-  const panelOpen = useUIStore((s) => s.panelOpen);
-  const historyPanelOpen = useUIStore((s) => s.historyPanelOpen);
-  const themeName = useUIStore((s) => s.theme);
+  const dispatch = useAppDispatch();
+  const openObservability = (tab?: ObservabilityTab, nodeId?: string) =>
+    dispatch(uiActions.openObservability({ tab, nodeId }));
+  const activeRoute = useAppSelector((s) => s.ui.activeRoute);
+  const panelOpen = useAppSelector((s) => s.ui.panelOpen);
+  const historyPanelOpen = useAppSelector((s) => s.ui.historyPanelOpen);
+  const themeName = useAppSelector((s) => s.ui.theme);
   const activeTheme = themeName === 'light' ? lightTheme : darkTheme;
-  const selectedTraceTaskId = useUIStore((s) => s.selectedTraceTaskId);
-  const [traceScope, setTraceScope] = useState<'cluster' | 'local'>('cluster');
 
   // Reflect theme on the html root so non-styled-components surfaces (highlight.js,
   // scrollbars, etc.) can react via `html[data-theme='light'] …` selectors.
@@ -138,20 +137,20 @@ export function App() {
     if (typeof document === 'undefined') return;
     document.documentElement.setAttribute('data-theme', themeName);
   }, [themeName]);
-  const setActiveRoute = useUIStore((s) => s.setActiveRoute);
-  const setSelectedTraceTaskId = useUIStore((s) => s.setSelectedTraceTaskId);
-  const togglePanel = useUIStore((s) => s.togglePanel);
-  const toggleHistoryPanel = useUIStore((s) => s.toggleHistoryPanel);
-  const conversationsMap = useChatStore((s) => s.conversations);
+  const setActiveRoute = (route: typeof activeRoute) =>
+    dispatch(uiActions.setActiveRoute(route));
+  const togglePanel = () => dispatch(uiActions.togglePanel());
+  const toggleHistoryPanel = () => dispatch(uiActions.toggleHistoryPanel());
+  const conversationsMap = useAppSelector((s) => s.chat.conversations);
   const allConversations = useMemo(
     () => Object.values(conversationsMap).sort((a, b) => b.updatedAt - a.updatedAt),
     [conversationsMap],
   );
-  const activeConversationId = useChatStore((s) => s.activeConversationId);
-  const selectedModelId = useChatStore((s) => s.selectedModelId);
-  const selectConversation = useChatStore((s) => s.selectConversation);
-  const deleteConversation = useChatStore((s) => s.deleteConversation);
-  const newConversation = useChatStore((s) => s.newConversation);
+  const activeConversationId = useAppSelector((s) => s.chat.activeConversationId);
+  const selectedModelId = useAppSelector((s) => s.chat.selectedModelId);
+  const selectConversation = (id: string) => dispatch(chatActions.selectConversation(id));
+  const deleteConversation = (id: string) => dispatch(chatActions.deleteConversation(id));
+  const newConversation = (modelId: string) => dispatch(chatActions.newConversation(modelId));
 
   // Compute cluster warnings from topology
   const clusterWarnings = useMemo(() => {
@@ -363,12 +362,7 @@ export function App() {
         <HeaderNav
           showHome
           activeRoute={activeRoute}
-          onNavigate={(route) => {
-            setActiveRoute(route);
-            if (route === 'traces') {
-              setSelectedTraceTaskId(null);
-            }
-          }}
+          onNavigate={(route) => setActiveRoute(route)}
           onOpenSettings={() => setSettingsOpen(true)}
           downloadProgress={downloadProgress}
           warnings={clusterWarnings}
@@ -398,25 +392,8 @@ export function App() {
                 nodeDisk={nodeDisk}
                 instances={instances}
                 runners={runners}
-                onChat={(modelId) => { useChatStore.getState().selectModel(modelId); setActiveRoute('chat'); }}
+                onChat={(modelId) => { dispatch(chatActions.selectModel(modelId)); setActiveRoute('chat'); }}
               />
-            ) : activeRoute === 'traces' ? (
-              selectedTraceTaskId ? (
-                <TraceDetailPage
-                  taskId={selectedTraceTaskId}
-                  scope={traceScope}
-                  onBack={() => setSelectedTraceTaskId(null)}
-                />
-              ) : (
-                <TracesPage
-                  scope={traceScope}
-                  onScopeChange={setTraceScope}
-                  onOpenTrace={(taskId) => {
-                    setSelectedTraceTaskId(taskId);
-                    setActiveRoute('traces');
-                  }}
-                />
-              )
             ) : activeRoute === 'chat' ? (
               <ChatView readyInstances={instanceCards} />
             ) : topology ? (
@@ -434,7 +411,7 @@ export function App() {
             <InstancePanel
               instances={instanceCards}
               onDelete={handleDeleteInstance}
-              onChat={(modelId) => { useChatStore.getState().selectModel(modelId); setActiveRoute('chat'); }}
+              onChat={(modelId) => { dispatch(chatActions.selectModel(modelId)); setActiveRoute('chat'); }}
             />
           )}
         </ContentRow>

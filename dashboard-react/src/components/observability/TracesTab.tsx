@@ -1,87 +1,636 @@
+import { useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
+import { FiChevronRight } from 'react-icons/fi';
 import { Button } from '../common/Button';
-import { useUIStore } from '../../stores/uiStore';
+import { CenteredSpinner, Spinner } from '../common/Spinner';
+import { useAppDispatch } from '../../store/hooks';
+import { uiActions } from '../../store/slices/uiSlice';
+import {
+  useGetTracesListQuery,
+  useGetTraceQuery,
+  type TraceScope,
+} from '../../store/endpoints/observability';
+import {
+  traceEventToWaterfall,
+  type TraceEventLike,
+} from '../../types/observabilityEvents';
+import type { TraceEventResponse } from '../../types/traces';
+import { TraceWaterfall } from './TraceWaterfall';
 
 /**
- * Traces tab placeholder. Phase 2 (#119) replaces this body with:
+ * "Traces" tab body for the observability panel.
  *
- * - The trace list (currently lives in `TracesPage`)
- * - A custom Skulk-native waterfall renderer for the selected trace, replacing
- *   today's "open in Perfetto" popup which sends trace data to Google's hosted
- *   web app and routinely fails to popup blockers.
+ * Shows the saved-trace list and, when a trace is selected, renders the trace
+ * inline as a Skulk-native waterfall (no popup, no third-party hosted UI). The
+ * scope toggle is local-vs-cluster; cluster mode hits `/v1/traces/cluster` to
+ * fan out across reachable peers, local mode is just this node's saved traces.
  *
- * For Phase 1 the tab keeps trace browsing reachable by sending the user back to
- * the existing `traces` route. The route itself is removed from the top nav (the
- * Observability button replaces the old `Traces` icon) but the route is still
- * registered, so the page renders normally when navigated to.
+ * Filters live inline in the FilterBar above the list. There is no longer a
+ * separate "legacy" traces page — the panel is the only trace surface.
  */
 
+/**
+ * Provides this tab's scroll surface. ObservabilityPanel.Body has
+ * `overflow: hidden` so each tab owns its own scroll behavior; we route
+ * the user's scroll wheel through Wrap rather than the panel root.
+ */
 const Wrap = styled.div`
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 24px 12px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 `;
 
-const Heading = styled.h3`
-  margin: 0;
-  font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.md};
-  color: ${({ theme }) => theme.colors.text};
+const ScopeToggle = styled.div`
+  display: inline-flex;
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  overflow: hidden;
 `;
 
-const Body = styled.p`
-  margin: 0;
-  font-family: ${({ theme }) => theme.fonts.body};
-  font-size: ${({ theme }) => theme.fontSizes.sm};
-  line-height: 1.55;
-  color: ${({ theme }) => theme.colors.textSecondary};
-`;
-
-const Actions = styled.div`
+/**
+ * Filter row above the trace list. All filters are client-side over the
+ * loaded list — no extra requests, no server-side filtering API to maintain.
+ * Keeps the row compact and wraps to multiple lines on narrow panels.
+ */
+const FilterBar = styled.div`
   display: flex;
-  gap: 8px;
-  margin-top: 4px;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  padding: 0 2px;
 `;
 
-const Coming = styled.div`
-  margin-top: 8px;
-  padding: 12px 14px;
-  border: 1px dashed ${({ theme }) => theme.colors.border};
+const FilterSelect = styled.select`
+  background: ${({ theme }) => theme.colors.bg};
+  color: ${({ theme }) => theme.colors.text};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  padding: 3px 6px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-family: ${({ theme }) => theme.fonts.body};
+  outline: none;
+  cursor: pointer;
+  max-width: 180px;
+
+  &:focus {
+    border-color: ${({ theme }) => theme.colors.goldDim};
+  }
+`;
+
+const FilterInput = styled.input`
+  background: ${({ theme }) => theme.colors.bg};
+  color: ${({ theme }) => theme.colors.text};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  padding: 3px 6px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-family: ${({ theme }) => theme.fonts.body};
+  outline: none;
+  flex: 1;
+  min-width: 100px;
+
+  &:focus {
+    border-color: ${({ theme }) => theme.colors.goldDim};
+  }
+`;
+
+const FilterToggle = styled.label`
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  user-select: none;
+  cursor: pointer;
+
+  input {
+    cursor: pointer;
+  }
+`;
+
+const ScopeButton = styled.button<{ $active: boolean }>`
+  all: unset;
+  padding: 4px 12px;
+  cursor: pointer;
+  font-family: ${({ theme }) => theme.fonts.body};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  background: ${({ $active, theme }) => ($active ? theme.colors.goldBg : 'transparent')};
+  color: ${({ $active, theme }) => ($active ? theme.colors.goldStrong : theme.colors.textSecondary)};
+
+  &:hover {
+    background: ${({ theme }) => theme.colors.surfaceHover};
+  }
+
+  &:focus-visible {
+    outline: 2px solid ${({ theme }) => theme.colors.goldDim};
+    outline-offset: -2px;
+  }
+`;
+
+/**
+ * Scrollable list area that fills the panel's remaining vertical space.
+ * Each entry is a `RowGroup` containing the row affordance plus an inline
+ * expansion when that trace is the currently-expanded one.
+ */
+const ListWrap = styled.div`
+  border: 1px solid ${({ theme }) => theme.colors.borderLight};
   border-radius: ${({ theme }) => theme.radii.md};
+  background: ${({ theme }) => theme.colors.surfaceSunken};
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+`;
+
+const RowGroup = styled.div`
+  border-bottom: 1px solid ${({ theme }) => theme.colors.borderLight};
+
+  &:last-child {
+    border-bottom: none;
+  }
+`;
+
+const ListRow = styled.button<{ $selected: boolean }>`
+  all: unset;
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  cursor: pointer;
   font-family: ${({ theme }) => theme.fonts.mono};
   font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  background: ${({ $selected, theme }) => ($selected ? theme.colors.goldBg : 'transparent')};
+
+  &:hover {
+    background: ${({ $selected, theme }) =>
+      $selected ? theme.colors.goldBg : theme.colors.surfaceHover};
+    color: ${({ theme }) => theme.colors.text};
+  }
+
+  &:focus-visible {
+    outline: 2px solid ${({ theme }) => theme.colors.goldDim};
+    outline-offset: -2px;
+  }
+`;
+
+/**
+ * Right-side expand indicator. Rotates from pointing-right (collapsed) to
+ * pointing-down (expanded) so the affordance reads as both an arrow and a
+ * disclosure widget without a separate icon swap.
+ */
+const Chevron = styled(FiChevronRight)<{ $expanded: boolean }>`
+  transition: transform 0.15s ease-out;
+  transform: rotate(${({ $expanded }) => ($expanded ? '90deg' : '0deg')});
   color: ${({ theme }) => theme.colors.textMuted};
 `;
 
-export function TracesTab() {
-  const setActiveRoute = useUIStore((s) => s.setActiveRoute);
-  const setSelectedTraceTaskId = useUIStore((s) => s.setSelectedTraceTaskId);
-  const closeObservability = useUIStore((s) => s.closeObservability);
+const RowMain = styled.span`
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+`;
 
-  const openLegacyTraces = () => {
-    setSelectedTraceTaskId(null);
-    setActiveRoute('traces');
-    closeObservability();
-  };
+const RowSecondary = styled.span`
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: ${({ theme }) => theme.colors.textMuted};
+`;
+
+const RowTime = styled.span`
+  color: ${({ theme }) => theme.colors.textMuted};
+  white-space: nowrap;
+`;
+
+const Notice = styled.div`
+  padding: 12px 10px;
+  font-family: ${({ theme }) => theme.fonts.body};
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  color: ${({ theme }) => theme.colors.textMuted};
+`;
+
+const ErrorNotice = styled(Notice)`
+  color: ${({ theme }) => theme.colors.errorText};
+`;
+
+/**
+ * Inline expansion that drops below an expanded row in the list. Holds the
+ * trace metadata header, the download affordance, the waterfall renderer,
+ * and the per-event detail block — same content that previously lived in a
+ * separate panel under the list.
+ */
+const ExpandedContent = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: ${({ theme }) => theme.colors.surface};
+  padding: 10px 12px;
+  border-top: 1px solid ${({ theme }) => theme.colors.borderLight};
+`;
+
+const DetailHeader = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+`;
+
+const DetailMeta = styled.div`
+  font-family: ${({ theme }) => theme.fonts.mono};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+`;
+
+const SelectedRow = styled.div`
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 8px;
+  font-family: ${({ theme }) => theme.fonts.mono};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  padding: 2px 0;
+`;
+
+const SelectedKey = styled.span`
+  color: ${({ theme }) => theme.colors.textMuted};
+`;
+
+const SelectedValue = styled.span`
+  word-break: break-word;
+`;
+
+
+type Scope = TraceScope;
+
+function basePath(scope: Scope): string {
+  return scope === 'cluster' ? '/v1/traces/cluster' : '/v1/traces';
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes <= 0) return '0B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const idx = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** idx;
+  return `${value.toFixed(value >= 10 ? 0 : 1)}${units[idx]}`;
+}
+
+function formatTime(iso: string): string {
+  return new Date(iso).toLocaleString();
+}
+
+function formatDuration(microseconds: number): string {
+  if (microseconds < 1_000) return `${microseconds.toFixed(0)}us`;
+  if (microseconds < 1_000_000) return `${(microseconds / 1_000).toFixed(2)}ms`;
+  return `${(microseconds / 1_000_000).toFixed(2)}s`;
+}
+
+function totalWallTimeUs(events: readonly TraceEventResponse[]): number {
+  if (events.length === 0) return 0;
+  let min = Infinity;
+  let max = -Infinity;
+  for (const event of events) {
+    if (event.startUs < min) min = event.startUs;
+    const end = event.startUs + event.durationUs;
+    if (end > max) max = end;
+  }
+  return max - min;
+}
+
+async function downloadRawTrace(scope: Scope, taskId: string): Promise<void> {
+  const response = await fetch(`${basePath(scope)}/${encodeURIComponent(taskId)}/raw`);
+  if (!response.ok) throw new Error(`Failed to download trace (${response.status})`);
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `trace_${taskId}.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+export function TracesTab() {
+  const dispatch = useAppDispatch();
+
+  const [scope, setScope] = useState<Scope>('local');
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedEvent, setSelectedEvent] = useState<TraceEventLike | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  // Filter state — all client-side over the loaded list.
+  const [taskKindFilter, setTaskKindFilter] = useState<string>('all');
+  const [modelFilter, setModelFilter] = useState<string>('all');
+  const [sourceNodeFilter, setSourceNodeFilter] = useState<string>('all');
+  const [searchFilter, setSearchFilter] = useState<string>('');
+  const [toolOnly, setToolOnly] = useState<boolean>(false);
+
+  // Cache key includes scope, so flipping the toggle yields a fresh fetch
+  // (RTK Query naturally treats the two scopes as separate entries).
+  const listQuery = useGetTracesListQuery(scope);
+  const traceQuery = useGetTraceQuery(
+    selectedTaskId ? { scope, taskId: selectedTaskId } : { scope, taskId: '' },
+    { skip: !selectedTaskId },
+  );
+
+  const traces = listQuery.data?.traces ?? null;
+  const listError = listQuery.isError
+    ? (listQuery.error as { error?: string })?.error ?? 'Failed to load traces'
+    : null;
+  const listLoading = listQuery.isLoading;
+
+  // `currentData` (not `data`) so flipping rows clears the previous trace's
+  // events from the waterfall while the new fetch is in flight. `data` would
+  // leave the prior trace rendered with the new row's metadata header — same
+  // mis-attribution issue we fixed for NodeTab.
+  const traceData = traceQuery.currentData ?? null;
+  const traceError = traceQuery.isError
+    ? (traceQuery.error as { error?: string })?.error ?? 'Failed to load trace'
+    : null;
+  const traceLoading = traceQuery.isFetching;
+
+  // Selection doesn't necessarily survive a scope flip (a local trace may not
+  // exist under the cluster proxy or vice versa) — clear it explicitly when
+  // scope changes.
+  useEffect(() => {
+    setSelectedTaskId(null);
+    setSelectedEvent(null);
+  }, [scope]);
+
+  useEffect(() => {
+    setSelectedEvent(null);
+  }, [selectedTaskId]);
+
+  // Models present in the current list — drives the model dropdown options.
+  // Kept stable across renders that don't change the trace list so the
+  // dropdown doesn't jitter.
+  const availableModels = useMemo(() => {
+    if (!traces) return [] as string[];
+    const set = new Set<string>();
+    for (const trace of traces) {
+      if (trace.modelId) set.add(trace.modelId);
+    }
+    return [...set].sort();
+  }, [traces]);
+
+  const availableSourceNodes = useMemo(() => {
+    if (!traces) return [] as { id: string; label: string }[];
+    const map = new Map<string, string>();
+    for (const trace of traces) {
+      for (const node of trace.sourceNodes) {
+        if (!map.has(node.nodeId)) {
+          map.set(node.nodeId, node.friendlyName?.trim() || node.nodeId);
+        }
+      }
+    }
+    return [...map.entries()]
+      .map(([id, label]) => ({ id, label }))
+      .sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }));
+  }, [traces]);
+
+  // Apply filters in one pass per render. Search matches case-insensitively
+  // against the trace's task id, model id, categories, and tags.
+  const filteredTraces = useMemo(() => {
+    if (!traces) return null;
+    const search = searchFilter.trim().toLowerCase();
+    return traces.filter((trace) => {
+      if (taskKindFilter !== 'all' && (trace.taskKind ?? 'unknown') !== taskKindFilter) {
+        return false;
+      }
+      if (modelFilter !== 'all' && (trace.modelId ?? '') !== modelFilter) return false;
+      if (sourceNodeFilter !== 'all') {
+        if (!trace.sourceNodes.some((n) => n.nodeId === sourceNodeFilter)) return false;
+      }
+      if (toolOnly && !trace.hasToolActivity) return false;
+      if (search) {
+        const haystack = [
+          trace.taskId,
+          trace.modelId ?? '',
+          ...trace.categories,
+          ...trace.tags,
+        ]
+          .join(' ')
+          .toLowerCase();
+        if (!haystack.includes(search)) return false;
+      }
+      return true;
+    });
+  }, [traces, taskKindFilter, modelFilter, sourceNodeFilter, toolOnly, searchFilter]);
+
+  const waterfallEvents = useMemo<TraceEventLike[]>(() => {
+    if (!traceData) return [];
+    return traceEventToWaterfall(traceData.traces);
+  }, [traceData]);
+
+  const totalUs = useMemo(
+    () => (traceData ? totalWallTimeUs(traceData.traces) : 0),
+    [traceData],
+  );
+
+  const selectedTraceListItem = useMemo(
+    () => (selectedTaskId && traces ? traces.find((trace) => trace.taskId === selectedTaskId) ?? null : null),
+    [selectedTaskId, traces],
+  );
+
+  async function handleDownload() {
+    if (!selectedTaskId) return;
+    setDownloadError(null);
+    try {
+      await downloadRawTrace(scope, selectedTaskId);
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : 'Download failed');
+    }
+  }
 
   return (
     <Wrap>
-      <Heading>Saved traces</Heading>
-      <Body>
-        Inline trace browsing is coming with a Skulk-native waterfall renderer in
-        Phase 2 — replacing the current Perfetto popup integration with something
-        that doesn't ship trace data to a third-party web app and isn't fragile to
-        popup blockers.
-      </Body>
-      <Actions>
-        <Button variant="outline" size="sm" onClick={openLegacyTraces}>
-          Open trace browser (legacy view)
-        </Button>
-      </Actions>
-      <Coming>
-        Coming in Phase 2 (issue #119).
-      </Coming>
+      <ScopeToggle role="tablist" aria-label="Trace scope">
+        <ScopeButton
+          role="tab"
+          aria-selected={scope === 'local'}
+          $active={scope === 'local'}
+          onClick={() => setScope('local')}
+        >
+          This node
+        </ScopeButton>
+        <ScopeButton
+          role="tab"
+          aria-selected={scope === 'cluster'}
+          $active={scope === 'cluster'}
+          onClick={() => setScope('cluster')}
+        >
+          Cluster
+        </ScopeButton>
+      </ScopeToggle>
+
+      <FilterBar>
+        <FilterSelect
+          value={taskKindFilter}
+          onChange={(e) => setTaskKindFilter(e.target.value)}
+          aria-label="Filter by task kind"
+        >
+          <option value="all">All kinds</option>
+          <option value="text">text</option>
+          <option value="embedding">embedding</option>
+          <option value="image">image</option>
+        </FilterSelect>
+        <FilterSelect
+          value={modelFilter}
+          onChange={(e) => setModelFilter(e.target.value)}
+          aria-label="Filter by model"
+          disabled={availableModels.length === 0}
+        >
+          <option value="all">All models</option>
+          {availableModels.map((m) => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+        </FilterSelect>
+        <FilterSelect
+          value={sourceNodeFilter}
+          onChange={(e) => setSourceNodeFilter(e.target.value)}
+          aria-label="Filter by source node"
+          disabled={availableSourceNodes.length === 0}
+        >
+          <option value="all">All nodes</option>
+          {availableSourceNodes.map((n) => (
+            <option key={n.id} value={n.id}>{n.label}</option>
+          ))}
+        </FilterSelect>
+        <FilterInput
+          type="text"
+          value={searchFilter}
+          onChange={(e) => setSearchFilter(e.target.value)}
+          placeholder="Search task id, model, categories, tags…"
+          aria-label="Search traces"
+        />
+        <FilterToggle>
+          <input
+            type="checkbox"
+            checked={toolOnly}
+            onChange={(e) => setToolOnly(e.target.checked)}
+          />
+          Tools only
+        </FilterToggle>
+      </FilterBar>
+
+      <ListWrap>
+        {listLoading && (
+          <CenteredSpinner>
+            <Spinner />
+          </CenteredSpinner>
+        )}
+        {listError && <ErrorNotice>{listError}</ErrorNotice>}
+        {!listLoading && !listError && traces && traces.length === 0 && (
+          <Notice>
+            No saved traces yet. Enable tracing for the cluster and re-run a request to record one.
+          </Notice>
+        )}
+        {!listLoading && filteredTraces && filteredTraces.length === 0 && traces && traces.length > 0 && (
+          <Notice>No traces match the current filters.</Notice>
+        )}
+        {!listLoading && filteredTraces && filteredTraces.map((trace) => {
+          const isExpanded = selectedTaskId === trace.taskId;
+          return (
+            <RowGroup key={trace.taskId}>
+              <ListRow
+                $selected={isExpanded}
+                onClick={() => setSelectedTaskId(isExpanded ? null : trace.taskId)}
+                type="button"
+                aria-expanded={isExpanded}
+              >
+                <RowMain title={trace.taskId}>
+                  {trace.modelId ?? trace.taskId}
+                </RowMain>
+                <RowSecondary>
+                  {trace.taskKind ?? 'unknown'} · {formatBytes(trace.fileSize)}
+                </RowSecondary>
+                <RowTime>{formatTime(trace.createdAt)}</RowTime>
+                <Chevron $expanded={isExpanded} size={14} />
+              </ListRow>
+              {isExpanded && (
+                <ExpandedContent>
+                  <DetailHeader>
+                    <DetailMeta>
+                      {selectedTraceListItem?.modelId && <span>{selectedTraceListItem.modelId}</span>}
+                      {selectedTraceListItem?.taskKind && <span>{selectedTraceListItem.taskKind}</span>}
+                      {totalUs > 0 && <span>wall {formatDuration(totalUs)}</span>}
+                      {traceData?.sourceNodes && traceData.sourceNodes.length > 0 && (
+                        <span>{traceData.sourceNodes.length} source nodes</span>
+                      )}
+                    </DetailMeta>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => { void handleDownload(); }}
+                    >
+                      Download JSON
+                    </Button>
+                  </DetailHeader>
+                  {downloadError && <ErrorNotice>{downloadError}</ErrorNotice>}
+                  {traceLoading && (
+                    <CenteredSpinner>
+                      <Spinner />
+                    </CenteredSpinner>
+                  )}
+                  {traceError && <ErrorNotice>{traceError}</ErrorNotice>}
+                  {traceData && !traceLoading && !traceError && (
+                    <>
+                      <TraceWaterfall
+                        events={waterfallEvents}
+                        selectedId={selectedEvent?.id ?? null}
+                        onSelect={setSelectedEvent}
+                      />
+                      {selectedEvent && (
+                        <div>
+                          <SelectedRow>
+                            <SelectedKey>Event</SelectedKey>
+                            <SelectedValue>{selectedEvent.name}</SelectedValue>
+                          </SelectedRow>
+                          <SelectedRow>
+                            <SelectedKey>Lane</SelectedKey>
+                            <SelectedValue>{selectedEvent.laneLabel}</SelectedValue>
+                          </SelectedRow>
+                          <SelectedRow>
+                            <SelectedKey>Category</SelectedKey>
+                            <SelectedValue>{selectedEvent.category}</SelectedValue>
+                          </SelectedRow>
+                          <SelectedRow>
+                            <SelectedKey>Duration</SelectedKey>
+                            <SelectedValue>{formatDuration(selectedEvent.durationUs)}</SelectedValue>
+                          </SelectedRow>
+                          {selectedEvent.tags && selectedEvent.tags.length > 0 && (
+                            <SelectedRow>
+                              <SelectedKey>Tags</SelectedKey>
+                              <SelectedValue>{selectedEvent.tags.join(', ')}</SelectedValue>
+                            </SelectedRow>
+                          )}
+                          {selectedEvent.attrs &&
+                            Object.entries(selectedEvent.attrs).map(([key, value]) => (
+                              <SelectedRow key={key}>
+                                <SelectedKey>{key}</SelectedKey>
+                                <SelectedValue>
+                                  {Array.isArray(value) ? value.join(', ') : String(value)}
+                                </SelectedValue>
+                              </SelectedRow>
+                            ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </ExpandedContent>
+              )}
+            </RowGroup>
+          );
+        })}
+      </ListWrap>
     </Wrap>
   );
 }

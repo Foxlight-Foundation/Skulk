@@ -5,7 +5,9 @@ import { Button } from '../common/Button';
 import { Field } from '../common/Field';
 import { InfoTooltip } from '../common/InfoTooltip';
 import { addToast } from '../../hooks/useToast';
-import { useUIStore } from '../../stores/uiStore';
+import { useAppDispatch, useAppSelector } from '../../store/hooks';
+import { uiActions } from '../../store/slices/uiSlice';
+import type { ThemeName } from '../../theme';
 
 export interface SettingsPanelProps {
   open: boolean;
@@ -230,8 +232,9 @@ const Spacer = styled.span`
 
 export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const { fullConfig, effective, configPath, loading, saving, error, fetchConfig, saveFullConfig } = useConfig();
-  const themeName = useUIStore((s) => s.theme);
-  const setTheme = useUIStore((s) => s.setTheme);
+  const themeName = useAppSelector((s) => s.ui.theme);
+  const dispatch = useAppDispatch();
+  const setTheme = (name: ThemeName) => dispatch(uiActions.setTheme(name));
   const [draft, setDraft] = useState<StoreConfig | null>(null);
   const [kvBackend, setKvBackend] = useState('default');
   const [hfToken, setHfToken] = useState('');

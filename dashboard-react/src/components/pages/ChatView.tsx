@@ -6,8 +6,10 @@ import type { ChatMessage } from '../../types/chat';
 import type { ChatUploadedFile } from '../../types/chat';
 import type { ModelInfo } from '../../types/models';
 import type { InstanceCardData } from '../layout/InstancePanel';
-import { useChatStore } from '../../stores/chatStore';
-import { useUIStore } from '../../stores/uiStore';
+import { useAppDispatch, useAppSelector } from '../../store/hooks';
+import { uiActions } from '../../store/slices/uiSlice';
+import { chatActions } from '../../store/slices/chatSlice';
+import { store } from '../../store';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -421,16 +423,19 @@ async function readUploadedImageAsDataUrl(file: ChatUploadedFile): Promise<strin
 
 export function ChatView({ readyInstances, className }: ChatViewProps) {
   // Store state
-  const selectedModelId = useChatStore((s) => s.selectedModelId);
-  const activeConversationId = useChatStore((s) => s.activeConversationId);
-  const messages = useChatStore((s) =>
-    s.activeConversationId ? s.conversations[s.activeConversationId]?.messages ?? EMPTY_MESSAGES : EMPTY_MESSAGES,
+  const selectedModelId = useAppSelector((s) => s.chat.selectedModelId);
+  const activeConversationId = useAppSelector((s) => s.chat.activeConversationId);
+  const messages = useAppSelector((s) =>
+    s.chat.activeConversationId
+      ? s.chat.conversations[s.chat.activeConversationId]?.messages ?? EMPTY_MESSAGES
+      : EMPTY_MESSAGES,
   );
-  const selectModel = useChatStore((s) => s.selectModel);
-  const addMessage = useChatStore((s) => s.addMessage);
-  const deleteMessageAction = useChatStore((s) => s.deleteMessage);
-  const editMessageAction = useChatStore((s) => s.editMessage);
-  const removeLastAssistantMessages = useChatStore((s) => s.removeLastAssistantMessages);
+  const selectModel = (modelId: string) => dispatch(chatActions.selectModel(modelId));
+  const addMessage = (msg: ChatMessage) => dispatch(chatActions.addMessage(msg));
+  const deleteMessageAction = (id: string) => dispatch(chatActions.deleteMessage(id));
+  const editMessageAction = (messageId: string, content: string) =>
+    dispatch(chatActions.editMessage({ messageId, content }));
+  const removeLastAssistantMessages = () => dispatch(chatActions.removeLastAssistantMessages());
 
   // Local transient state
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
@@ -448,8 +453,9 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   const [modelContextLengths, setModelContextLengths] = useState<Record<string, number>>({});
 
   // Restore scroll position after store hydration + DOM render
-  const chatScrollTop = useUIStore((s) => s.chatScrollTop);
-  const setChatScrollTop = useUIStore((s) => s.setChatScrollTop);
+  const dispatch = useAppDispatch();
+  const chatScrollTop = useAppSelector((s) => s.ui.chatScrollTop);
+  const setChatScrollTop = (pos: number) => dispatch(uiActions.setChatScrollTop(pos));
   const scrollRestored = useRef(false);
   useEffect(() => {
     if (scrollRestored.current || chatScrollTop <= 0) return;
@@ -584,9 +590,9 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     setTps(null);
 
     // Read messages from store (includes the user message we just added)
-    const storeState = useChatStore.getState();
-    const activeConvo = storeState.activeConversationId
-      ? storeState.conversations[storeState.activeConversationId]
+    const chatState = store.getState().chat;
+    const activeConvo = chatState.activeConversationId
+      ? chatState.conversations[chatState.activeConversationId]
       : undefined;
     if (!activeConvo) {
       setIsLoading(false);
@@ -866,9 +872,9 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     removeLastAssistantMessages();
     // Re-send last user message on next tick after store updates
     setTimeout(() => {
-      const state = useChatStore.getState();
-      const convo = state.activeConversationId
-        ? state.conversations[state.activeConversationId]
+      const chatState = store.getState().chat;
+      const convo = chatState.activeConversationId
+        ? chatState.conversations[chatState.activeConversationId]
         : undefined;
       if (!convo) return;
       const lastUser = convo.messages.filter((m) => m.role === 'user').pop();
@@ -879,8 +885,9 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   }, [handleSend, removeLastAssistantMessages]);
 
   // Thinking expansion state — persisted per conversation in session store
-  const expandedThinkingMap = useUIStore((s) => s.expandedThinking);
-  const setExpandedThinking = useUIStore((s) => s.setExpandedThinking);
+  const expandedThinkingMap = useAppSelector((s) => s.ui.expandedThinking);
+  const setExpandedThinking = (conversationId: string, messageIds: string[]) =>
+    dispatch(uiActions.setExpandedThinking({ conversationId, messageIds }));
   const expandedThinkingIds = useMemo(
     () => new Set(activeConversationId ? expandedThinkingMap[activeConversationId] ?? [] : []),
     [expandedThinkingMap, activeConversationId],

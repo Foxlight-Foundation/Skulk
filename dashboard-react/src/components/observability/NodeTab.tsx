@@ -1,12 +1,21 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { Button } from '../common/Button';
+import { CenteredSpinner, Spinner } from '../common/Spinner';
 import { formatBytes } from '../../utils/format';
+import { useClusterState } from '../../hooks/useClusterState';
+import { useAppDispatch } from '../../store/hooks';
+import { uiActions } from '../../store/slices/uiSlice';
+import {
+  useGetClusterTimelineQuery,
+  useGetNodeDiagnosticsQuery,
+  useCancelRunnerTaskMutation,
+  useCaptureRunnerBundleMutation,
+} from '../../store/endpoints/observability';
 import type {
   DiagnosticCaptureResponse,
   DiagnosticsProcess,
   MlxMemorySnapshot,
-  NodeDiagnostics,
   RunnerFlightRecorderEntry,
   RunnerSupervisorDiagnostics,
 } from '../../types/diagnostics';
@@ -17,13 +26,68 @@ import type {
  * overlay; the panel now provides the framing (resizable width, header, close button)
  * and this component is just the data rendering.
  *
- * If `nodeId` is null the tab renders an empty-state hint pointing the operator at the
- * topology view to pick a node. The data fetch only fires when a node is selected.
+ * Hosts a node-selector dropdown at the top so the operator can switch nodes without
+ * leaving the panel. The previously-required topology-bug-icon entry path still works
+ * (sets the same store field), but is no longer the only way in.
+ *
+ * If no node is selected the tab renders an empty-state hint below the selector. The
+ * diagnostics fetch only fires when a node is selected.
  */
 export interface NodeTabProps {
   /** Node ID to inspect. Null when the operator hasn't picked a node yet. */
   nodeId: string | null;
 }
+
+/**
+ * Provides this tab's scroll surface. ObservabilityPanel.Body has
+ * `overflow: hidden` so each tab owns its own scroll behavior; the long
+ * runner / process / placement sections scroll inside this Wrap rather
+ * than the panel root.
+ */
+const Wrap = styled.div`
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+`;
+
+const SelectorRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+`;
+
+const SelectorLabel = styled.label`
+  font-family: ${({ theme }) => theme.fonts.body};
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  flex-shrink: 0;
+`;
+
+const NodeSelect = styled.select`
+  flex: 1;
+  min-width: 0;
+  background: ${({ theme }) => theme.colors.bg};
+  color: ${({ theme }) => theme.colors.text};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  padding: 4px 8px;
+  font-size: ${({ theme }) => theme.fontSizes.sm};
+  font-family: ${({ theme }) => theme.fonts.body};
+  outline: none;
+  cursor: pointer;
+
+  &:focus {
+    border-color: ${({ theme }) => theme.colors.goldDim};
+  }
+
+  option {
+    background: ${({ theme }) => theme.colors.surface};
+    color: ${({ theme }) => theme.colors.text};
+  }
+`;
 
 const Subtitle = styled.div`
   margin: 0 0 14px;
@@ -258,60 +322,138 @@ function recorderLine(entry: RunnerFlightRecorderEntry): string {
 }
 
 export function NodeTab({ nodeId }: NodeTabProps) {
-  const [diagnostics, setDiagnostics] = useState<NodeDiagnostics | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [reloadToken, setReloadToken] = useState(0);
-  const [cancelMessage, setCancelMessage] = useState<string | null>(null);
-  const [cancelError, setCancelError] = useState<string | null>(null);
-  const [cancelActionKey, setCancelActionKey] = useState<string | null>(null);
-  const [captureBundle, setCaptureBundle] = useState<DiagnosticCaptureResponse | null>(null);
-  const [captureError, setCaptureError] = useState<string | null>(null);
-  const [captureActionKey, setCaptureActionKey] = useState<string | null>(null);
+  const cluster = useClusterState();
+  const dispatch = useAppDispatch();
+  const setSelectedNodeId = (nodeId: string | null) =>
+    dispatch(uiActions.setObservabilitySelectedNodeId(nodeId));
 
+  // The cluster timeline carries `masterNodeId`. RTK Query dedups, so when
+  // the Live tab is also mounted there's no extra request; when only Node is
+  // open this fires once to identify the master.
+  const timelineQuery = useGetClusterTimelineQuery();
+  const masterNodeId = timelineQuery.data?.masterNodeId ?? null;
+
+  // Build a stable, sorted list of selectable nodes from the cluster topology.
+  // Friendly names take precedence; nodes without one are labelled by short id and
+  // float to the bottom so the most-recognizable entries surface first.
+  const nodeOptions = useMemo(() => {
+    const nodes = cluster.topology?.nodes ?? {};
+    return Object.entries(nodes)
+      .map(([id, info]) => ({
+        id,
+        label: info.friendly_name?.trim() || shortId(id),
+        hasFriendly: Boolean(info.friendly_name?.trim()),
+      }))
+      .sort((a, b) => {
+        if (a.hasFriendly !== b.hasFriendly) return a.hasFriendly ? -1 : 1;
+        return a.label.localeCompare(b.label, undefined, { sensitivity: 'base' });
+      });
+  }, [cluster.topology]);
+
+  // The persisted `nodeId` may point at a node that no longer exists in this
+  // cluster — sessionStorage carries the prior session's selection across
+  // restarts, and operators sometimes hop between clusters. Compute an
+  // *effective* nodeId that's null whenever the persisted value doesn't
+  // match a known topology entry. The query downstream uses the effective
+  // id, so we never fire `/v1/diagnostics/cluster/<dead-node-id>` and watch
+  // it 404 into the error block.
+  const isStaleSelection =
+    nodeId != null &&
+    nodeOptions.length > 0 &&
+    !nodeOptions.some((option) => option.id === nodeId);
+  const effectiveNodeId = isStaleSelection ? null : nodeId;
+
+  // Auto-select rules:
+  //  1. If the persisted selection is stale, clear it. Lets the next branch
+  //     run on the next render with a clean slate.
+  //  2. Otherwise, default to the master when nothing is picked. Avoids the
+  //     "Pick a node above" empty state on every visit — the master is the
+  //     single most useful starting point.
   useEffect(() => {
-    if (!nodeId) {
-      setDiagnostics(null);
-      setError(null);
-      setLoading(false);
-      setCancelMessage(null);
-      setCancelError(null);
-      setCancelActionKey(null);
-      setCaptureBundle(null);
-      setCaptureError(null);
-      setCaptureActionKey(null);
+    if (isStaleSelection) {
+      setSelectedNodeId(null);
       return;
     }
+    if (effectiveNodeId) return;
+    if (!masterNodeId) return;
+    if (!nodeOptions.some((option) => option.id === masterNodeId)) return;
+    setSelectedNodeId(masterNodeId);
+    // setSelectedNodeId is stable (dispatch returns referentially-stable
+    // action creators) so omitting it from deps is safe.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveNodeId, isStaleSelection, masterNodeId, nodeOptions]);
 
-    const controller = new AbortController();
-    setLoading(true);
-    setError(null);
-    fetch(`/v1/diagnostics/cluster/${encodeURIComponent(nodeId)}`, {
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error(`Diagnostics request failed: ${response.status}`);
-        }
-        return response.json() as Promise<NodeDiagnostics>;
-      })
-      .then((payload) => setDiagnostics(payload))
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setError(err instanceof Error ? err.message : 'Failed to load diagnostics');
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
+  // Diagnostics fetch — RTK Query keys by nodeId, dedups across components,
+  // and refetches automatically when a cancel/capture mutation invalidates
+  // the NodeDiagnostics cache tag for this node.
+  //
+  // Use `currentData` (not `data`) so flipping the node selector clears the
+  // view immediately — `data` would leave the previous node's diagnostics on
+  // screen until the next fetch lands, which mis-attributes that data to the
+  // newly-picked node and is exactly what the user reported.
+  const diagnosticsQuery = useGetNodeDiagnosticsQuery(effectiveNodeId ?? '', {
+    skip: !effectiveNodeId,
+  });
+  const diagnostics = diagnosticsQuery.currentData ?? null;
+  const loading = diagnosticsQuery.isFetching;
+  const error = diagnosticsQuery.isError
+    ? (diagnosticsQuery.error as { error?: string })?.error ?? 'Failed to load diagnostics'
+    : null;
 
-    return () => controller.abort();
-  }, [nodeId, reloadToken]);
+  const [cancelRunnerTask, cancelMutation] = useCancelRunnerTaskMutation();
+  const [captureRunnerBundle, captureMutation] = useCaptureRunnerBundleMutation();
+  const [cancelMessage, setCancelMessage] = useState<string | null>(null);
+  const [cancelActionKey, setCancelActionKey] = useState<string | null>(null);
+  const [captureBundle, setCaptureBundle] = useState<DiagnosticCaptureResponse | null>(null);
+  const [captureActionKey, setCaptureActionKey] = useState<string | null>(null);
 
-  if (!nodeId) {
+  const cancelError = cancelMutation.isError
+    ? (cancelMutation.error as { data?: { detail?: string }; error?: string })?.data?.detail
+      ?? (cancelMutation.error as { error?: string })?.error
+      ?? 'Cancellation request failed'
+    : null;
+  const captureError = captureMutation.isError
+    ? (captureMutation.error as { data?: { detail?: string }; error?: string })?.data?.detail
+      ?? (captureMutation.error as { error?: string })?.error
+      ?? 'Capture request failed'
+    : null;
+
+  const selector = (
+    <SelectorRow>
+      <SelectorLabel htmlFor="observability-node-select">Node</SelectorLabel>
+      <NodeSelect
+        id="observability-node-select"
+        value={effectiveNodeId ?? ''}
+        onChange={(event) => setSelectedNodeId(event.target.value || null)}
+      >
+        <option value="">Select node…</option>
+        {nodeOptions.map((option) => (
+          <option key={option.id} value={option.id}>
+            {option.label}
+          </option>
+        ))}
+      </NodeSelect>
+    </SelectorRow>
+  );
+
+  if (!effectiveNodeId) {
     return (
-      <EmptyHint>
-        Click any node in the topology view to inspect its diagnostics here.
-      </EmptyHint>
+      <Wrap>
+        {selector}
+        {nodeOptions.length === 0 ? (
+          <EmptyHint>
+            No nodes reported by the cluster yet. Once a node connects, pick it here to inspect its diagnostics.
+          </EmptyHint>
+        ) : (
+          // The auto-select effect above will resolve to master once the
+          // timeline query lands. Render a spinner in the meantime rather
+          // than a stale "Pick a node above" hint that would flash for the
+          // first few hundred ms after entering the tab.
+          <CenteredSpinner>
+            <Spinner />
+          </CenteredSpinner>
+        )}
+      </Wrap>
     );
   }
 
@@ -320,61 +462,40 @@ export function NodeTab({ nodeId }: NodeTabProps) {
   const system = diagnostics?.resources.system;
 
   async function requestRunnerCancel(runnerId: string, taskId: string) {
+    if (!effectiveNodeId) return;
     const actionKey = `${runnerId}:${taskId}`;
     setCancelActionKey(actionKey);
-    setCancelError(null);
     setCancelMessage(null);
-
     try {
-      const response = await fetch(
-        `/v1/diagnostics/cluster/${encodeURIComponent(nodeId)}/runners/${encodeURIComponent(runnerId)}/cancel`,
-        {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ taskId }),
-        },
-      );
-      const payload = await response.json().catch(() => null) as { message?: string; detail?: string } | null;
-      if (!response.ok) {
-        throw new Error(payload?.detail ?? `Cancellation request failed: ${response.status}`);
-      }
-      setCancelMessage(payload?.message ?? 'Cancellation requested.');
-      setReloadToken((value) => value + 1);
-    } catch (err: unknown) {
-      setCancelError(err instanceof Error ? err.message : 'Cancellation request failed');
+      const payload = await cancelRunnerTask({
+        nodeId: effectiveNodeId,
+        runnerId,
+        taskId,
+      }).unwrap();
+      setCancelMessage(payload.message ?? 'Cancellation requested.');
+      // The mutation invalidates the NodeDiagnostics tag, so the query
+      // refetches automatically — no manual reload token needed.
+    } catch {
+      // Error surfaces via cancelMutation.isError.
     } finally {
       setCancelActionKey(null);
     }
   }
 
   async function requestCaptureBundle(runnerId: string, taskId?: string | null) {
+    if (!effectiveNodeId) return;
     const actionKey = `${runnerId}:${taskId ?? 'runner'}`;
     setCaptureActionKey(actionKey);
-    setCaptureError(null);
     setCaptureBundle(null);
-
     try {
-      const response = await fetch(
-        `/v1/diagnostics/cluster/${encodeURIComponent(nodeId)}/capture`,
-        {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            runnerId,
-            taskId: taskId ?? undefined,
-            includeProcessSamples: true,
-            sampleDurationSeconds: 3,
-          }),
-        },
-      );
-      const payload = await response.json().catch(() => null) as DiagnosticCaptureResponse | { detail?: string } | null;
-      if (!response.ok) {
-        throw new Error((payload as { detail?: string } | null)?.detail ?? `Capture request failed: ${response.status}`);
-      }
-      setCaptureBundle(payload as DiagnosticCaptureResponse);
-      setReloadToken((value) => value + 1);
-    } catch (err: unknown) {
-      setCaptureError(err instanceof Error ? err.message : 'Capture request failed');
+      const payload = await captureRunnerBundle({
+        nodeId: effectiveNodeId,
+        runnerId,
+        taskId,
+      }).unwrap();
+      setCaptureBundle(payload);
+    } catch {
+      // Error surfaces via captureMutation.isError.
     } finally {
       setCaptureActionKey(null);
     }
@@ -397,13 +518,27 @@ export function NodeTab({ nodeId }: NodeTabProps) {
   }
 
   return (
-    <>
-      <Subtitle>{runtime?.friendlyName ?? runtime?.hostname ?? shortId(nodeId)} · {shortId(nodeId)}</Subtitle>
+    <Wrap>
+      {selector}
 
-        {loading && <Section><Value>Loading diagnostics…</Value></Section>}
-        {error && <Section><Warning>{error}</Warning></Section>}
+      {/*
+        While the new node's diagnostics are in flight (or the request errored
+        without prior data), don't render the previous node's subtitle or
+        sections — that mis-attributes data to the wrong node. A single
+        centered spinner fills the remaining space; errors still surface as
+        a warning block so an operator can see why nothing loaded.
+      */}
+      {!diagnostics && !error && (
+        <CenteredSpinner>
+          <Spinner />
+        </CenteredSpinner>
+      )}
+      {!diagnostics && error && <Section><Warning>{error}</Warning></Section>}
 
-        {diagnostics && runtime && (
+      {diagnostics && runtime && (
+        <>
+          <Subtitle>{runtime.friendlyName ?? runtime.hostname ?? shortId(effectiveNodeId)} · {shortId(effectiveNodeId)}</Subtitle>
+          {error && <Section><Warning>{error}</Warning></Section>}
           <>
             {diagnostics.warnings.length > 0 && (
               <Section>
@@ -615,7 +750,8 @@ export function NodeTab({ nodeId }: NodeTabProps) {
                 ))}
             </Section>
           </>
+        </>
         )}
-    </>
+    </Wrap>
   );
 }

@@ -234,3 +234,60 @@ export interface DiagnosticCaptureResponse {
   processSamples: DiagnosticProcessSample[];
   warnings: string[];
 }
+
+/** Per-runner synopsis emitted as part of the cross-rank cluster timeline. */
+export interface ClusterTimelineRunner {
+  nodeId: string;
+  runnerId: string;
+  instanceId: string;
+  modelId: string;
+  deviceRank: number;
+  worldSize: number;
+  pid?: number | null;
+  processAlive: boolean;
+  statusKind: string;
+  phase: RunnerPhaseName;
+  phaseDetail?: string | null;
+  secondsInPhase: number;
+  lastProgressAt?: string | null;
+  activeTaskId?: string | null;
+  activeCommandId?: string | null;
+  lastMlxMemory?: MlxMemorySnapshot | null;
+}
+
+/**
+ * Single flight-recorder entry annotated with cluster identity. The cross-rank
+ * merged timeline is a list of these sorted by `at` ascending so a deadlock's
+ * rank-disagreement signature reads top-to-bottom.
+ */
+export interface ClusterTimelineEntry {
+  at: string;
+  nodeId: string;
+  runnerId: string;
+  deviceRank: number;
+  worldSize: number;
+  phase: RunnerPhaseName;
+  event: string;
+  detail?: string | null;
+  attrs: Record<string, RunnerDiagnosticValue>;
+  taskId?: string | null;
+  commandId?: string | null;
+  mlxMemory?: MlxMemorySnapshot | null;
+}
+
+/** One peer that the cluster timeline could not reach. */
+export interface ClusterTimelineUnreachable {
+  nodeId: string;
+  url?: string | null;
+  error: string;
+}
+
+/** Cross-rank chronological view of runner activity, served by the cluster API. */
+export interface ClusterTimeline {
+  generatedAt: string;
+  localNodeId: string;
+  masterNodeId?: string | null;
+  runners: ClusterTimelineRunner[];
+  timeline: ClusterTimelineEntry[];
+  unreachableNodes: ClusterTimelineUnreachable[];
+}

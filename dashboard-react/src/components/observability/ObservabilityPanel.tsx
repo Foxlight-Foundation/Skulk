@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef } from 'react';
-import styled from 'styled-components';
+import styled, { keyframes } from 'styled-components';
 import { FiX } from 'react-icons/fi';
 import { Button } from '../common/Button';
+import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import {
-  useUIStore,
+  uiActions,
   type ObservabilityTab,
   OBSERVABILITY_WIDTH_MIN,
   OBSERVABILITY_WIDTH_MAX,
-} from '../../stores/uiStore';
+} from '../../store/slices/uiSlice';
 import { LiveTab } from './LiveTab';
 import { NodeTab } from './NodeTab';
 import { TracesTab } from './TracesTab';
@@ -18,11 +19,9 @@ import { TracesTab } from './TracesTab';
  *
  * Architecture decisions worth knowing:
  *
- * - The panel **overlays** the current route's content rather than replacing it.
- *   Operators in chat / model store / topology can glance at observability without
- *   losing their place.
- * - The panel is **side-docked, no backdrop**. The topology view stays interactive so
- *   the panel and the spatial cluster picture are usable simultaneously.
+ * - The panel **overlays** the current route's content with a dimmed + blurred
+ *   backdrop, matching `SettingsPanel`'s modal-drawer pattern. Click the backdrop
+ *   or press Esc to close.
  * - Width is **operator-controlled** (drag the left edge) and **persisted to
  *   localStorage** outside the sessionStorage UI state — operators settle on a width
  *   and shouldn't redo it on every refresh.
@@ -30,6 +29,30 @@ import { TracesTab } from './TracesTab';
  *   panel to a specific tab/node. The toolbar nav button calls `openObservability()`
  *   without args; per-node bug icons call `openObservability('node', nodeId)`.
  */
+
+const fadeIn = keyframes`
+  from { opacity: 0; }
+  to   { opacity: 1; }
+`;
+
+const slideIn = keyframes`
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+`;
+
+/**
+ * Click-to-close dim + blur layer behind the drawer. Matches `SettingsPanel`
+ * (z=40 backdrop / z=50 drawer) so the visual treatment is consistent across
+ * modal-style panels in the dashboard.
+ */
+const Backdrop = styled.div`
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: ${({ theme }) => theme.colors.shadowStrong};
+  backdrop-filter: blur(2px);
+  animation: ${fadeIn} 0.2s ease-out;
+`;
 
 const Aside = styled.aside<{ $width: number }>`
   position: fixed;
@@ -42,23 +65,8 @@ const Aside = styled.aside<{ $width: number }>`
   box-shadow: -18px 0 48px ${({ theme }) => theme.colors.shadowStrong};
   display: flex;
   flex-direction: column;
-  /*
-   * Z-index sits above the topology + main content but BELOW any modal-style
-   * surface. SettingsPanel uses 40 (backdrop) and 50 (drawer); operators
-   * routinely open Settings while the observability panel is visible, and a
-   * panel that floats above the Settings drawer makes Settings appear broken
-   * (the higher-z panel covers part or all of the modal). 35 keeps the panel
-   * above topology content (which uses z-index in the 1-20 range) and below
-   * the modal stack, so the SettingsPanel backdrop dims-and-covers the panel
-   * the way a modal should.
-   *
-   * The toolbar's bug icon (HeaderNav body z=20) is covered by the panel
-   * while it's open, which mirrors the prior DiagnosticsDrawer (z=70)
-   * behavior. Operators close via Esc, the panel's X button, or via the
-   * topology bug icon — the toolbar icon is not the canonical close
-   * affordance.
-   */
-  z-index: 35;
+  z-index: 50;
+  animation: ${slideIn} 0.25s cubic-bezier(0.33, 1, 0.68, 1);
 `;
 
 /**
@@ -126,11 +134,20 @@ const TabButton = styled.button<{ $active: boolean }>`
   }
 `;
 
+/**
+ * Tab content host. Becomes a flex column with `overflow: hidden` so each
+ * tab can decide its own internal layout — LiveTab needs the timeline to
+ * fill remaining vertical space and scroll inside the panel, NodeTab needs
+ * the entire body to scroll. Each tab provides its own scroll surface so
+ * Body never owns one for everyone.
+ */
 const Body = styled.div`
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
 `;
 
 const TAB_ORDER: { key: ObservabilityTab; label: string }[] = [
@@ -140,13 +157,14 @@ const TAB_ORDER: { key: ObservabilityTab; label: string }[] = [
 ];
 
 export function ObservabilityPanel() {
-  const open = useUIStore((s) => s.observabilityPanelOpen);
-  const activeTab = useUIStore((s) => s.observabilityActiveTab);
-  const width = useUIStore((s) => s.observabilityPanelWidth);
-  const selectedNodeId = useUIStore((s) => s.observabilitySelectedNodeId);
-  const setTab = useUIStore((s) => s.setObservabilityTab);
-  const setWidth = useUIStore((s) => s.setObservabilityPanelWidth);
-  const close = useUIStore((s) => s.closeObservability);
+  const dispatch = useAppDispatch();
+  const open = useAppSelector((s) => s.ui.observabilityPanelOpen);
+  const activeTab = useAppSelector((s) => s.ui.observabilityActiveTab);
+  const width = useAppSelector((s) => s.ui.observabilityPanelWidth);
+  const selectedNodeId = useAppSelector((s) => s.ui.observabilitySelectedNodeId);
+  const setTab = (tab: ObservabilityTab) => dispatch(uiActions.setObservabilityTab(tab));
+  const setWidth = (next: number) => dispatch(uiActions.setObservabilityPanelWidth(next));
+  const close = () => dispatch(uiActions.closeObservability());
 
   // Drag-to-resize: capture pointer at the handle; resizing computes width from
   // the cursor's distance from the right edge of the viewport. We hold an Aside
@@ -224,48 +242,51 @@ export function ObservabilityPanel() {
   if (!open) return null;
 
   return (
-    <Aside
-      $width={width}
-      ref={asideRef}
-      id="observability-panel"
-      aria-label="Observability panel"
-    >
-      <ResizeHandle
-        onPointerDown={onResizeStart}
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize observability panel"
-      />
-      <Header>
-        <Title>Observability</Title>
-        <Button variant="ghost" size="sm" onClick={close} aria-label="Close observability panel">
-          <FiX size={16} />
-        </Button>
-      </Header>
-      <TabBar role="tablist" aria-label="Observability views">
-        {TAB_ORDER.map((tab) => (
-          <TabButton
-            key={tab.key}
-            $active={activeTab === tab.key}
-            role="tab"
-            aria-selected={activeTab === tab.key}
-            aria-controls={`observability-panel-${tab.key}`}
-            id={`observability-tab-${tab.key}`}
-            onClick={() => setTab(tab.key)}
-          >
-            {tab.label}
-          </TabButton>
-        ))}
-      </TabBar>
-      <Body
-        role="tabpanel"
-        id={`observability-panel-${activeTab}`}
-        aria-labelledby={`observability-tab-${activeTab}`}
+    <>
+      <Backdrop onClick={close} />
+      <Aside
+        $width={width}
+        ref={asideRef}
+        id="observability-panel"
+        aria-label="Observability panel"
       >
-        {activeTab === 'live' && <LiveTab />}
-        {activeTab === 'node' && <NodeTab nodeId={selectedNodeId} />}
-        {activeTab === 'traces' && <TracesTab />}
-      </Body>
-    </Aside>
+        <ResizeHandle
+          onPointerDown={onResizeStart}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize observability panel"
+        />
+        <Header>
+          <Title>Observability</Title>
+          <Button variant="ghost" size="sm" onClick={close} aria-label="Close observability panel">
+            <FiX size={16} />
+          </Button>
+        </Header>
+        <TabBar role="tablist" aria-label="Observability views">
+          {TAB_ORDER.map((tab) => (
+            <TabButton
+              key={tab.key}
+              $active={activeTab === tab.key}
+              role="tab"
+              aria-selected={activeTab === tab.key}
+              aria-controls={`observability-panel-${tab.key}`}
+              id={`observability-tab-${tab.key}`}
+              onClick={() => setTab(tab.key)}
+            >
+              {tab.label}
+            </TabButton>
+          ))}
+        </TabBar>
+        <Body
+          role="tabpanel"
+          id={`observability-panel-${activeTab}`}
+          aria-labelledby={`observability-tab-${activeTab}`}
+        >
+          {activeTab === 'live' && <LiveTab />}
+          {activeTab === 'node' && <NodeTab nodeId={selectedNodeId} />}
+          {activeTab === 'traces' && <TracesTab />}
+        </Body>
+      </Aside>
+    </>
   );
 }

@@ -252,6 +252,7 @@ class ExoConfig(FrozenModel):
     model_store: ModelStoreConfig | None = None
     inference: "InferenceConfig | None" = None
     logging: "LoggingConfig | None" = None
+    tracing: "TracingConfig | None" = None
     hf_token: str | None = None
 
 
@@ -276,6 +277,25 @@ class LoggingConfig(FrozenModel):
 
     enabled: bool = False
     ingest_url: str = ""
+
+
+@final
+class TracingConfig(FrozenModel):
+    """Runtime tracing configuration.
+
+    Saved Chrome-trace JSON files accumulate under
+    ``SKULK_TRACING_CACHE_DIR`` indefinitely otherwise; the janitor task
+    in the API process drops files older than ``retention_days``.
+
+    Attributes:
+        retention_days: Saved traces older than this number of days are
+            deleted by the API's hourly trace janitor. Defaults to 3 — short
+            enough to keep disk use bounded, long enough to cover a weekend
+            of "did this happen yesterday?" debugging. Set to 0 to disable
+            pruning entirely.
+    """
+
+    retention_days: int = 3
 
 
 @final
