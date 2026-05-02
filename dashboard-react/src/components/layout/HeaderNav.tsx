@@ -196,7 +196,16 @@ const WarningTooltipInner = styled.div`
 const WarningItem = styled.div<{ $level: 'error' | 'warning' }>`
   font-size: ${({ theme }) => theme.fontSizes.sm};
   font-family: ${({ theme }) => theme.fonts.body};
-  color: ${({ $level, theme}) => $level === 'error' ? theme.colors.errorText : theme.colors.warningText};
+  /*
+   * Solid-fill callout — saturated red bg + white text for errors, #ffcc33
+   * bg + black text for warnings. Palette-independent so the on-fill
+   * contrast is guaranteed regardless of light/dark theme. The bullet uses
+   * the same on-fill color so it doesn't pop against the body text.
+   */
+  background: ${({ $level, theme}) => $level === 'error' ? theme.colors.errorFill : theme.colors.warningFill};
+  color: ${({ $level, theme}) => $level === 'error' ? theme.colors.errorOnFill : theme.colors.warningOnFill};
+  padding: 8px 10px;
+  border-radius: ${({ theme }) => theme.radii.sm};
   line-height: 1.4;
   display: flex;
   align-items: flex-start;
@@ -204,7 +213,7 @@ const WarningItem = styled.div<{ $level: 'error' | 'warning' }>`
 
   &::before {
     content: '●';
-    color: ${({ $level, theme}) => $level === 'error' ? theme.colors.error : theme.colors.warning};
+    color: ${({ $level, theme}) => $level === 'error' ? theme.colors.errorOnFill : theme.colors.warningOnFill};
     flex-shrink: 0;
   }
 `;
