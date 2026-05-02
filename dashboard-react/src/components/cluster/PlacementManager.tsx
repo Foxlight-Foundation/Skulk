@@ -506,7 +506,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                 <CardWrapper>
                   <ModelCard
                     model={{ id: modelId, name: modelLabel(modelId), storage_size_megabytes: modelSizeMb }}
-                    nodes={effectiveNodes}
+                    nodes={topology?.nodes ?? {}}
                     sharding="Pipeline"
                     runtime="MlxRing"
                     apiPreview={currentPreview}
@@ -537,7 +537,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                 <CardWrapper>
                   <ModelCard
                     model={{ id: modelId, name: modelLabel(modelId), storage_size_megabytes: modelSizeMb }}
-                    nodes={effectiveNodes}
+                    nodes={topology?.nodes ?? {}}
                     sharding={sharding}
                     runtime={instanceMeta}
                     apiPreview={currentPreview}
