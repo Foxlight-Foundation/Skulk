@@ -7,6 +7,8 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-05-02
+
 ### Added
 
 - Per-placement node exclusion. `POST /place_instance` accepts an optional
@@ -15,17 +17,38 @@ This project records release notes here and mirrors public-facing notes in
   placement. Already-running instances on the listed nodes are unaffected.
   The dashboard's placement modal exposes click-to-toggle pills under
   "Available Nodes" so operators can mark exclusions before launch.
+- `excluded_node_ids` query parameter on `GET /instance/previews` so the
+  preview endpoint produces previews against the post-exclusion topology
+  and the dashboard's cluster preview reflects the operator's intent
+  pre-launch.
+- Observability surface consolidation under one panel: Live (cluster health
+  + cross-rank flight-recorder timeline + tracing toggle), Node (per-node
+  diagnostics with a node selector that defaults to the master), Traces
+  (saved-trace browser with inline filtering, expandable rows, native
+  waterfall renderer; legacy traces page deleted).
+- API trace janitor — hourly background task that drops saved trace files
+  older than `tracing.retention_days` (default 3 days; configurable via
+  `skulk.yaml`).
+- New theme tokens: `errorFill` / `errorOnFill` / `warningFill` /
+  `warningOnFill` (palette-independent solid-callout colors for
+  iconography) and `errorOnSurface` / `warningOnSurface` (palette-aware
+  text colors for callout body copy).
 
 ### Changed
 
-- Added snapshot bootstrap for follower recovery so newer nodes can hydrate
+- Snapshot bootstrap for follower recovery so newer nodes can hydrate
   cluster state from a master-published snapshot and replay only the retained
   tail instead of rebuilding from event `0`.
-- Added bounded live master replay retention so long-lived sessions no longer
+- Bounded live master replay retention so long-lived sessions no longer
   need to grow the active `events.bin` without limit.
+- Dashboard state migrated from Zustand to Redux Toolkit + RTK Query. Same
+  shapes, same persistence, native dedup / polling / cache invalidation.
 
 ### Docs
 
+- Architecture documentation overhauled: `architecture.md` (narrative)
+  and `architecture-reference.md` (dense fact-sheet) now both exist and
+  are kept in sync as architectural shape changes land.
 - Documented the rollout caveat for snapshot bootstrap plus bounded retention:
   mixed-version clusters are acceptable during upgrade, but all nodes should be
   upgraded before operators rely on compacted replay history as the steady
