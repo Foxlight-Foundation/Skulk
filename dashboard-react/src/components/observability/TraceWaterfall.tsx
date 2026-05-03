@@ -445,9 +445,9 @@ function EventBar({
         width={width}
         height={height}
         fill={color}
-        fillOpacity={selected ? 1 : 0.85}
-        stroke={selected ? 'currentColor' : 'rgba(0, 0, 0, 0.35)'}
-        strokeWidth={selected ? 1.5 : 0.5}
+        fillOpacity={0.85}
+        stroke="rgba(0, 0, 0, 0.35)"
+        strokeWidth={0.5}
         rx={2}
         ry={2}
       >
