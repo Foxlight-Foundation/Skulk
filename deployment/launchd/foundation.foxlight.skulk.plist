@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>foundation.foxlight.skulk</string>
+
+    <!-- A login shell finds `uv` regardless of how launchd was loaded
+         (e.g. brew install path on Apple Silicon). Skulk's CLI entry
+         point is `skulk = "exo.main:main"` per pyproject.toml. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>exec uv run skulk</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__SKULK_REPO__</string>
+
+    <!-- Run at user login (LaunchAgent) and keep alive on crash, but
+         not on clean exit. SuccessfulExit=false means launchd treats
+         exit 0 as "stay stopped" and any non-zero as "relaunch".
+         Crashed=true also relaunches on signal-induced termination. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <!-- Throttle relaunch to avoid a tight loop when the cause is a
+         config error. Matches the systemd unit's RestartSec=10. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Interactive ProcessType is the default for LaunchAgents and
+         ensures Metal / window-server access works the same way it
+         does for `uv run skulk` from Terminal.app. -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <!-- Logs land alongside the existing Skulk log directory so
+         operators have one place to look. The install script ensures
+         the directory exists before bootstrap. -->
+    <key>StandardOutPath</key>
+    <string>__SKULK_LOG_DIR__/skulk.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>__SKULK_LOG_DIR__/skulk.stderr.log</string>
+
+    <!-- Inherit the user's shell PATH so `uv` and any tool-version
+         shims resolve. EnvironmentVariables is the only PATH escape
+         hatch launchd offers without using launchctl setenv globally. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__USER_PATH__</string>
+    </dict>
+</dict>
+</plist>

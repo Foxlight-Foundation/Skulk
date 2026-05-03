@@ -14,6 +14,7 @@ from pydantic import PositiveInt
 
 import exo.routing.topics as topics
 from exo.api.main import API
+from exo.connectivity.tailscale import query_tailscale_status
 from exo.download.coordinator import DownloadCoordinator
 from exo.download.impl_shard_downloader import exo_shard_downloader
 from exo.master.main import Master
@@ -25,6 +26,7 @@ from exo.shared.logging import logger_cleanup, logger_setup
 from exo.shared.types.commands import ForwarderDownloadCommand, SyncConfig
 from exo.shared.types.common import NodeId, SessionId, SystemId
 from exo.shared.types.state_sync import StateSyncMessage
+from exo.startup_recovery import preflight_api_port
 from exo.store.config import (
     ExoConfig,
     load_exo_config,
@@ -666,6 +668,7 @@ def main():
     # fall back gracefully — logging will start without the JSON sink and
     # the validation error is logged once the logger is up.
     _log_cfg = None
+    _early_config: ExoConfig | None = None
     try:
         _early_config = load_exo_config()
         _log_cfg = _early_config.logging if _early_config else None
@@ -680,6 +683,37 @@ def main():
     )
     logger.info("Starting Skulk")
     logger.info(f"LIBP2P_NAMESPACE: {os.environ.get('SKULK_LIBP2P_NAMESPACE', os.getenv('EXO_LIBP2P_NAMESPACE'))}")
+
+    if args.spawn_api:
+        preflight_api_port(args.api_port)
+
+    # Tailscale: if configured, query tailscaled and merge bootstrap peers.
+    _ts_config = (
+        _early_config.connectivity.tailscale
+        if _early_config and _early_config.connectivity
+        else None
+    )
+    if _ts_config and _ts_config.enabled:
+        import asyncio as _asyncio
+        _ts_status = _asyncio.run(query_tailscale_status())
+        if _ts_status.running:
+            logger.info(
+                f"Tailscale: running | IP {_ts_status.self_ip} | {_ts_status.dns_name}"
+            )
+        else:
+            logger.warning(
+                "Tailscale connectivity configured but tailscaled is not running"
+            )
+        if _ts_config.bootstrap_peers:
+            _seen = set(args.bootstrap_peers)
+            _extra = [p for p in _ts_config.bootstrap_peers if p not in _seen]
+            if _extra:
+                args = args.model_copy(
+                    update={"bootstrap_peers": args.bootstrap_peers + _extra}
+                )
+                logger.info(
+                    f"Tailscale: added {len(_extra)} bootstrap peer(s) from config"
+                )
 
     if args.offline:
         logger.info("Running in OFFLINE mode — no internet checks, local models only")

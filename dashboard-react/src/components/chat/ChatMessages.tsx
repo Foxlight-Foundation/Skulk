@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { copyToClipboard } from '../../utils/clipboard';
 import styled, { css, keyframes, useTheme } from 'styled-components';
 import type { Theme } from '../../theme';
 import type { ChatMessage } from '../../types/chat';
@@ -412,7 +413,7 @@ export function ChatMessages({
   }, [getScrollParent, updateScrollState]);
 
   const copyMessage = useCallback((id: string, content: string) => {
-    navigator.clipboard.writeText(content);
+    void copyToClipboard(content);
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2000);
   }, []);

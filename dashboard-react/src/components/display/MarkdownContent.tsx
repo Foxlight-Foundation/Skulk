@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { copyToClipboard } from '../../utils/clipboard';
 import { Marked } from 'marked';
 import hljs from 'highlight.js';
 import katex from 'katex';
@@ -257,7 +258,7 @@ export function MarkdownContent({ content, className }: MarkdownContentProps) {
     const target = e.target as HTMLElement;
     if (target.classList.contains('mc-copy-btn')) {
       const code = decodeURIComponent(target.getAttribute('data-code') || '');
-      navigator.clipboard.writeText(code).then(() => {
+      void copyToClipboard(code).then(() => {
         const original = target.textContent;
         target.textContent = '✓ Copied';
         setTimeout(() => { target.textContent = original; }, 2000);

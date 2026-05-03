@@ -1,0 +1,54 @@
+[Unit]
+Description=Skulk distributed inference node
+Documentation=https://github.com/Foxlight-Foundation/Skulk
+# Network-online ensures DNS / outbound connectivity is available before
+# Skulk attempts libp2p bootstrap. local-fs ensures $HOME/.skulk and the
+# model store paths are mounted (matters on systems with delayed mounts).
+After=network-online.target local-fs.target
+Wants=network-online.target
+# StartLimitBurst/StartLimitIntervalSec are unit-level directives — they
+# must live in [Unit], not [Service], or systemd silently ignores them.
+# 5 crashes within 5 minutes trips the limit and stops restart attempts.
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+WorkingDirectory=__SKULK_REPO__
+
+# uv is the canonical runtime path per AGENTS.md. The wrapper invokes it
+# from a login shell so PATH and any user-shell setup (e.g. mise, asdf,
+# pyenv) are available regardless of how systemd was started.
+ExecStart=/bin/bash -lc 'exec uv run skulk'
+
+# SIGTERM is what `Skulk._signal` already handles via task-group cancel.
+# `mixed` sends SIGTERM to the main process and SIGKILL to remaining
+# children only if they outlive TimeoutStopSec — important because Skulk
+# spawns runner subprocesses that hold MLX state.
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=30
+
+# Crash recovery: only restart on abnormal exit. Planned shutdowns
+# (`systemctl --user stop skulk` → SIGTERM → exit 0) stay stopped.
+# `RestartSec` avoids a tight loop when the cause is a config error;
+# the [Unit] StartLimitBurst/StartLimitIntervalSec bail after repeated
+# failure so a broken config doesn't burn the node.
+Restart=on-failure
+RestartSec=10
+
+# MLX engines and the libp2p stack each open many file descriptors and
+# memory-map model shards. The defaults (1024 / system rlimit) are too
+# tight for a node hosting multi-GB models.
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+# Logging: stdout/stderr flow to the journal. The Vector sidecar
+# (deployment/logging/vector.yaml) is responsible for shipping the
+# JSON-on-stdout stream when centralized logging is enabled.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=skulk
+
+[Install]
+WantedBy=default.target

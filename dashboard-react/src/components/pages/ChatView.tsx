@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { v4 as uuidv4 } from 'uuid';
 import styled from 'styled-components';
 import { ChatMessages } from '../chat/ChatMessages';
 import { ChatForm } from '../chat/ChatForm';
@@ -567,7 +568,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     }
 
     const userMsg: ChatMessage = {
-      id: crypto.randomUUID(),
+      id: uuidv4(),
       role: 'user',
       content: text,
       timestamp: Date.now(),
@@ -762,7 +763,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
 
         for (const toolCall of iterationToolCalls) {
           const toolName = toolCall.function?.name ?? 'unknown';
-          const toolCallId = toolCall.id || crypto.randomUUID();
+          const toolCallId = toolCall.id || uuidv4();
           let toolOutput: string;
 
           try {
@@ -824,7 +825,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
 
     if (finalAssistantContent || fullThinking) {
       const assistantMsg: ChatMessage = {
-        id: crypto.randomUUID(),
+        id: uuidv4(),
         role: 'assistant',
         content: finalAssistantContent,
         timestamp: Date.now(),

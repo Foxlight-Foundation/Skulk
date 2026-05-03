@@ -8,7 +8,7 @@ import type { Theme } from '../../theme';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 
-export type NavRoute = 'cluster' | 'model-store' | 'chat';
+export type NavRoute = 'cluster' | 'model-store' | 'chat' | 'operator';
 
 export interface HeaderNavProps {
   showHome?: boolean;
@@ -157,15 +157,14 @@ const WarningCircle = styled.div<{ $level: 'error' | 'warning' }>`
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  background: ${({ $level, theme}) => $level === 'error' ? theme.colors.error : theme.colors.warning};
+  background: ${({ $level, theme}) => $level === 'error' ? theme.colors.errorFill : theme.colors.warningFill};
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 14px;
   font-weight: 700;
   font-family: ${({ theme }) => theme.fonts.body};
-  /* Always white — sits on a saturated red/amber circle in both palettes. */
-  color: #ffffff;
+  color: ${({ $level, theme}) => $level === 'error' ? theme.colors.errorOnFill : theme.colors.warningOnFill};
 `;
 
 const WarningTooltip = styled.div`
@@ -239,6 +238,7 @@ const SidebarIcon = () => <FiSidebar size={18} />;
 const ClusterIcon = () => <MdHub size={16} />;
 const StoreIcon = () => <FiDatabase size={16} />;
 const ChatIcon = () => <FiMessageSquare size={16} />;
+
 const ObservabilityIcon = () => <VscBug size={16} />;
 const SettingsIcon = () => <FiSettings size={16} />;
 
