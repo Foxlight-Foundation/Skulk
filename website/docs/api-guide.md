@@ -1010,7 +1010,7 @@ curl "http://localhost:52415/v1/connectivity/tailscale?node_id=<node-id>"
 GET /v1/connectivity/remote-access
 ```
 
-Returns aggregated remote access information for the local node: LAN address, Tailscale address, and a `preferredUrl` (Tailscale if running, otherwise LAN). `operatorUrl` appends `/operator` to `preferredUrl` — suitable for QR code generation so mobile users land directly on the operator panel.
+Returns aggregated remote access information for the local node: LAN address, Tailscale address, and a `preferredUrl` (Tailscale if running, otherwise LAN). When Tailscale is running, `preferredUrl` uses the node's MagicDNS name (`my-node.tailnet-abc.ts.net`) if available, falling back to the raw `100.x.x.x` IP. `operatorUrl` appends `/operator` to `preferredUrl` — suitable for QR code generation so mobile users land directly on the operator panel.
 
 **Response fields:**
 
@@ -1021,17 +1021,17 @@ Returns aggregated remote access information for the local node: LAN address, Ta
 | `local.url` | string \| null | `http://{ip}:{port}` |
 | `tailscale.running` | boolean | `true` when tailscaled is connected |
 | `tailscale.ip` | string \| null | Tailscale IPv4 address (100.x.x.x) |
-| `tailscale.dnsName` | string \| null | MagicDNS fully-qualified name |
+| `tailscale.dnsName` | string \| null | MagicDNS fully-qualified name, e.g. `my-node.tailnet-abc.ts.net` |
 | `tailscale.port` | integer | API/dashboard port |
-| `tailscale.url` | string \| null | `http://{ip}:{port}` if running |
-| `preferredUrl` | string \| null | Tailscale URL if running, else LAN URL |
+| `tailscale.url` | string \| null | `http://{dnsName or ip}:{port}` if running |
+| `preferredUrl` | string \| null | MagicDNS URL if available, else Tailscale IP URL, else LAN URL |
 | `operatorUrl` | string \| null | `preferredUrl + /operator` |
 
 ```bash
 curl http://localhost:52415/v1/connectivity/remote-access | python3 -m json.tool
 ```
 
-Example response when Tailscale is running:
+Example response when Tailscale is running with MagicDNS:
 
 ```json
 {
@@ -1041,10 +1041,10 @@ Example response when Tailscale is running:
     "ip": "100.101.102.103",
     "dnsName": "my-node.tailnet-abc.ts.net",
     "port": 52415,
-    "url": "http://100.101.102.103:52415"
+    "url": "http://my-node.tailnet-abc.ts.net:52415"
   },
-  "preferredUrl": "http://100.101.102.103:52415",
-  "operatorUrl": "http://100.101.102.103:52415/operator"
+  "preferredUrl": "http://my-node.tailnet-abc.ts.net:52415",
+  "operatorUrl": "http://my-node.tailnet-abc.ts.net:52415/operator"
 }
 ```
 

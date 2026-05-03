@@ -41,14 +41,15 @@ class TailscaleAccess(FrozenModel):
         ip: Tailscale IPv4 address (``100.x.x.x``), or ``None`` when not running.
         dns_name: Fully-qualified Tailscale MagicDNS name, or ``None``.
         port: API/dashboard port.
-        url: ``http://{ip}:{port}`` when running, otherwise ``None``.
+        url: ``http://{dns_name or ip}:{port}`` when running, otherwise ``None``.
+            MagicDNS name is preferred over the raw ``100.x.x.x`` address.
     """
 
     running: bool = Field(description="True when tailscaled is running and connected.")
     ip: str | None = Field(default=None, description="Tailscale IPv4 address (100.x.x.x).")
     dns_name: str | None = Field(default=None, description="Fully-qualified Tailscale MagicDNS name.")
     port: int = Field(description="API/dashboard port.")
-    url: str | None = Field(default=None, description="http://{ip}:{port} if running, else None.")
+    url: str | None = Field(default=None, description="http://{dns_name or ip}:{port} if running, else None. MagicDNS preferred.")
 
 
 @final
@@ -62,7 +63,9 @@ class RemoteAccessInfo(FrozenModel):
     Attributes:
         local: Direct LAN access details.
         tailscale: Tailscale overlay access details.
-        preferred_url: Best URL for this node: Tailscale if running, otherwise LAN.
+        preferred_url: Best URL for this node.  Uses the Tailscale MagicDNS name
+            when available (``my-node.tailnet-abc.ts.net``), falling back to the
+            raw ``100.x.x.x`` IP, then the LAN address.
         operator_url: ``preferred_url`` with ``/operator`` appended — suitable for
             QR code generation so mobile users land directly on the operator panel.
     """
@@ -70,7 +73,7 @@ class RemoteAccessInfo(FrozenModel):
     local: LocalAccess = Field(description="Direct LAN access details.")
     tailscale: TailscaleAccess = Field(description="Tailscale overlay access details.")
     preferred_url: str | None = Field(
-        description="Best URL: Tailscale URL if running, otherwise local LAN URL."
+        description="Best URL: Tailscale MagicDNS URL if available, else Tailscale IP URL, else local LAN URL."
     )
     operator_url: str | None = Field(
         description="preferred_url + /operator. Suitable for QR code generation."
