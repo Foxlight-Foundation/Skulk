@@ -23,7 +23,12 @@ const sidebars: SidebarsConfig = {
         "api-guide",
         "build-and-runtime",
         "run-skulk-as-a-service",
-        "tailscale",
+        {
+          type: "category",
+          label: "Tailscale",
+          collapsed: false,
+          items: ["tailscale", "tailscale-clustering"],
+        },
         "model-store",
         "kv-cache-backends",
         "tracing",

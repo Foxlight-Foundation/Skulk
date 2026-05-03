@@ -1,89 +1,121 @@
 ---
-title: Use Skulk over Tailscale
-description: Connect Skulk cluster nodes across the internet using Tailscale.
-sidebar_label: Tailscale
+title: Remote access via Tailscale
+description: Access your Skulk dashboard and operator panel from anywhere using Tailscale.
+sidebar_label: Remote access
 ---
 
-# Use Skulk over Tailscale
+# Remote access via Tailscale
 
-By default, Skulk discovers cluster peers using mDNS, which only works on the same local network. Tailscale gives every node a stable `100.x.x.x` address that works from anywhere — at home, at a cloud provider, or behind a NAT — so you can build a cluster that spans physical locations.
+Skulk's dashboard and API are served over plain HTTP on port 52415. On your local network that works fine — but when you want to check on your cluster from your phone, restart a node from a coffee shop, or run inference from another machine, you need a way to reach those nodes without opening ports to the internet.
 
-**What you get:**
-- Nodes on different networks join the same cluster
-- Encrypted peer-to-peer traffic between nodes (Tailscale handles it)
-- Works with [Headscale](https://headscale.net/) — same config, just join a different tailnet
+Tailscale solves this cleanly. It creates a private overlay network where every device gets a stable `100.x.x.x` address. Once your cluster node and your phone (or laptop) are both on the same tailnet, you can open `http://100.x.x.x:52415` exactly like you would at home — encrypted, no port forwarding, no VPN configuration.
 
-## Before you start
+## What you get
 
-On **every node** that will join the cluster:
+- **Dashboard from anywhere** — full cluster view, observability, traces, model placement
+- **Operator panel** — mobile-friendly cluster control from your phone: node health, memory, GPU, temperature, and tap-twice node restart
+- **API access** — run inference or call management endpoints from any device on your tailnet
+- **Works with [Headscale](https://headscale.net/)** — self-host the control plane if you prefer
 
-1. Install Tailscale: [tailscale.com/download](https://tailscale.com/download)
-2. Log in: `tailscale up`
-3. Confirm each machine has a `100.x.x.x` address: `tailscale ip -4`
+## Setup
 
-All nodes must be on the **same tailnet** (the same Tailscale account or Headscale server). Nodes on different tailnets cannot reach each other.
+### 1. Install Tailscale on your cluster node
 
-## Quick setup
+On the machine running Skulk:
 
-Skulk nodes discover each other via **bootstrap peers** — a list of libp2p multiaddrs that each node dials at startup. For Tailscale, those multiaddrs use the `100.x.x.x` addresses.
+```bash
+# macOS — install from tailscale.com/download or:
+brew install tailscale
 
-### 1. Find each node's Tailscale IP
+# Linux:
+curl -fsSL https://tailscale.com/install.sh | sh
+```
 
-On each machine:
+Then connect it to your tailnet:
+
+```bash
+tailscale up
+```
+
+Note the IP address:
 
 ```bash
 tailscale ip -4
+# e.g. 100.101.102.103
 ```
 
-Write down the IP for every node that should join the cluster.
+### 2. Install Tailscale on your remote device
 
-### 2. Edit `skulk.yaml`
+On your phone, tablet, or laptop — install the Tailscale app and log in to the **same Tailscale account**. That's it; both devices are now on the same tailnet.
 
-On **every node**, add a `connectivity` section listing the *other* nodes' Tailscale IPs. You only need to list peers — not yourself.
+- iOS / Android: search "Tailscale" in the App Store / Play Store
+- macOS / Windows / Linux: [tailscale.com/download](https://tailscale.com/download)
 
-```yaml
-connectivity:
-  tailscale:
-    enabled: true
-    bootstrap_peers:
-      - /ip4/100.101.102.103/tcp/52416   # Node B
-      - /ip4/100.101.102.104/tcp/52416   # Node C
+### 3. Open the dashboard
+
+In any browser on your remote device:
+
+```
+http://100.101.102.103:52415
 ```
 
-Port `52416` is Skulk's default libp2p port. If you changed it with `--libp2p-port`, use that port instead.
+Replace `100.101.102.103` with your node's Tailscale IP from step 1. You get the full Skulk dashboard — chat, cluster view, observability, everything.
 
-### 3. Restart Skulk
+:::tip Bookmark it
+Save the `http://100.x.x.x:52415` URL on your phone. iOS and Android both let you add it to your home screen as a web app shortcut.
+:::
+
+## Operator panel
+
+The dashboard includes a mobile-first operator view designed for exactly this scenario — checking on your cluster and restarting nodes from a small screen.
+
+To open it, navigate to the dashboard and open the browser console, then run:
+
+```js
+window.__skulkNavigate?.('operator')
+```
+
+Or bookmark `http://100.x.x.x:52415` and use the direct route:
+
+The operator panel shows:
+- **Cluster summary** — total nodes, aggregate memory usage, average GPU utilization, average temperature
+- **Per-node cards** — role (master/worker), memory bar, GPU usage, temperature, active placements
+- **Tap-twice restart** — tap "Restart" on any node card; a "Confirm?" prompt appears; tap again within 3 seconds to send the restart command. Accidental taps do nothing.
+
+Restarts are sent over the cluster's pub/sub channel, so you can restart any node — including remote ones — from any node's dashboard.
+
+## API access over Tailscale
+
+The full Skulk API is available at the same address:
 
 ```bash
-# If running manually:
-uv run skulk
+# From any device on your tailnet:
+curl http://100.101.102.103:52415/v1/models
 
-# If running as a service (macOS):
-launchctl kickstart -k gui/$(id -u)/foundation.foxlight.skulk
+# Run inference:
+curl http://100.101.102.103:52415/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "...", "messages": [{"role": "user", "content": "Hello"}]}'
 
-# If running as a service (Linux):
-systemctl --user restart skulk
+# Check Tailscale connectivity status:
+curl http://100.101.102.103:52415/v1/connectivity/tailscale
 ```
-
-That's it. Skulk reads the config, logs the Tailscale status, and dials the bootstrap peers over the Tailscale overlay.
 
 ## Verify it's working
 
-**Check the startup logs** — look for the Tailscale line:
+**Check the node's Tailscale status** in the startup logs:
 
 ```
 INFO  Tailscale: running | IP 100.101.102.103 | my-node.tailnet-abc.ts.net
 ```
 
-If you see `Tailscale connectivity configured but tailscaled is not running`, tailscaled isn't up yet — run `tailscale status` and fix that first.
+**Check in the dashboard** — Observability → Node tab → Runtime section shows the Tailscale row with the node's IP and DNS name.
 
 **Check via the API:**
 
 ```bash
-curl http://localhost:52415/v1/connectivity/tailscale | python3 -m json.tool
+curl http://100.101.102.103:52415/v1/connectivity/tailscale | python3 -m json.tool
 ```
-
-You should see something like:
 
 ```json
 {
@@ -96,48 +128,49 @@ You should see something like:
 }
 ```
 
-**Check the dashboard** — open the Observability panel, pick a node, and look in the Runtime section. The Tailscale row shows your Tailscale IP and DNS name, or "not running" if tailscaled is down.
-
-**Check that peers connected** — open the dashboard cluster view. Once libp2p has dialed the bootstrap peers and gossipsub has propagated state, both nodes should appear.
-
 ## Troubleshooting
 
-### `Tailscale: not running` in the logs
+### Can't reach `100.x.x.x:52415`
 
-tailscaled is installed but not running. Fix:
+First confirm Tailscale can reach the node at all:
 
 ```bash
-# macOS — start the Tailscale app or:
+ping 100.101.102.103
+```
+
+If ping fails, the devices aren't on the same tailnet — check that both are logged into the same Tailscale account (or Headscale server) and that Tailscale is running on both.
+
+If ping succeeds but port 52415 doesn't respond, Skulk may not be running. SSH in (also works over Tailscale) and check:
+
+```bash
+# macOS:
+launchctl print gui/$(id -u)/foundation.foxlight.skulk | grep "state ="
+
+# Linux:
+systemctl --user status skulk
+```
+
+### `Tailscale: not running` in the Skulk logs
+
+tailscaled is installed but not running on the cluster node:
+
+```bash
+# macOS — open the Tailscale app, or:
 sudo tailscaled &
+tailscale up
 
 # Linux:
 sudo systemctl start tailscaled
 tailscale up
 ```
 
-### Wrong IP — Tailscale IP doesn't appear in the multiaddr
+### Tailscale ACLs blocking the port
 
-Run `tailscale ip -4` on that machine and update `skulk.yaml`. Tailscale IPs don't change unless you reinstall, but verify if anything looks off.
+By default all devices on the same tailnet can reach each other. If you've customised your ACL policy, make sure TCP 52415 (API/dashboard) is allowed between your devices.
 
-### Nodes can't reach each other
+## Using Headscale
 
-Check that Tailscale can ping between the machines:
-
-```bash
-ping 100.101.102.103
-```
-
-If ping fails, check your tailnet ACLs (Tailscale admin console → Access Controls). By default all nodes on the same tailnet can reach each other, but a custom ACL might block port 52416. Allow TCP on that port between Skulk nodes.
-
-### Only some nodes are visible
-
-Skulk peer discovery fans out from bootstrap peers via gossipsub. If Node A only lists Node B as a bootstrap peer, Node A learns about Node C indirectly once Node B connects to both. Give it 10–15 seconds after the last node restarts.
-
-## Headscale
-
-[Headscale](https://headscale.net/) is a self-hosted Tailscale control server. Skulk works with it identically — `tailscale status --json` reports the same structure regardless of whether the control plane is Tailscale's servers or a Headscale instance. No config changes needed.
-
-Join each node to your Headscale server:
+[Headscale](https://headscale.net/) is a self-hosted Tailscale control server. Skulk treats it identically to Tailscale's own servers — no config changes needed. Join each device to your Headscale instance:
 
 ```bash
 tailscale up --login-server https://your-headscale-server.example.com
