@@ -972,6 +972,35 @@ curl http://localhost:52415/v1/traces/cluster/<task_id>/stats
 curl -OJ http://localhost:52415/v1/traces/cluster/<task_id>/raw
 ```
 
+## Connectivity Endpoints
+
+### Tailscale status
+
+```
+GET /v1/connectivity/tailscale
+```
+
+Returns whether tailscaled is running on the **local** node and, if so, the node's Tailscale IP, hostname, DNS name, and tailnet. All fields except `running` are `null` when tailscaled is not installed or not running.
+
+**Response fields:**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `running` | boolean | `true` when tailscaled reports `BackendState == "Running"` |
+| `selfIp` | string \| null | Node's Tailscale IPv4 address (100.x.x.x range) |
+| `hostname` | string \| null | Node hostname as registered in the tailnet |
+| `dnsName` | string \| null | Fully-qualified Tailscale MagicDNS name, e.g. `my-node.tailnet-abc.ts.net` |
+| `tailnet` | string \| null | Tailnet name derived from `dnsName` |
+| `version` | string \| null | Tailscale client version string |
+
+This endpoint always reflects the **node serving the request**, not a selected remote node. To check Tailscale status on a different cluster node, reach its API directly.
+
+Example:
+
+```bash
+curl http://localhost:52415/v1/connectivity/tailscale
+```
+
 ## Helpful Next Docs
 
 - [README](https://github.com/Foxlight-Foundation/Skulk/blob/main/README.md)

@@ -93,7 +93,7 @@ If it doesn't, jump to [Things that go wrong](#things-that-go-wrong).
 | What you want to do | macOS | Linux |
 | --- | --- | --- |
 | Check if it's running | `launchctl print gui/$(id -u)/foundation.foxlight.skulk \| grep "state ="` | `systemctl --user status skulk` |
-| Watch the logs live | `tail -f ~/.cache/skulk/logs/skulk.stderr.log` | `journalctl --user -u skulk -f` |
+| Watch the logs live | `tail -f ~/.skulk/logs/skulk.stderr.log` | `journalctl --user -u skulk -f` |
 | Restart it | `launchctl kickstart -k gui/$(id -u)/foundation.foxlight.skulk` | `systemctl --user restart skulk` |
 | Stop it (stays stopped) | `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/foundation.foxlight.skulk.plist` | `systemctl --user stop skulk` |
 | Start it back up | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/foundation.foxlight.skulk.plist` | `systemctl --user start skulk` |
