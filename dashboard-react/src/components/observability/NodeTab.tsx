@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { copyToClipboard } from '../../utils/clipboard';
 import styled from 'styled-components';
 import { Button } from '../common/Button';
 import { CenteredSpinner, Spinner } from '../common/Spinner';
@@ -503,7 +504,7 @@ export function NodeTab({ nodeId }: NodeTabProps) {
 
   async function copyCaptureBundle() {
     if (!captureBundle) return;
-    await navigator.clipboard.writeText(JSON.stringify(captureBundle, null, 2));
+    await copyToClipboard(JSON.stringify(captureBundle, null, 2));
   }
 
   function downloadCaptureBundle() {
