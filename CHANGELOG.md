@@ -7,6 +7,8 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-05-03
+
 ### Added
 
 - Headless-resilience deployment kit: a systemd user unit
@@ -21,11 +23,40 @@ This project records release notes here and mirrors public-facing notes in
   before component boot and exits with `EX_TEMPFAIL` (75) when the API
   port is held by a previous instance, so the service supervisor can
   retry with backoff instead of producing a confusing bind error mid-run.
+- Tailscale connectivity layer (`exo.connectivity.tailscale`): detection via
+  `tailscale status --json`, `TailscaleConnectivityConfig` in `skulk.yaml`,
+  `GET /v1/connectivity/tailscale` API endpoint, and a status row in the
+  dashboard's Node tab Runtime section. Cluster nodes can now span multiple
+  physical networks over Tailscale (or Headscale).
+- Operator panel — a mobile-first `/operator` route in the dashboard for
+  remote cluster control: cluster-wide memory/GPU/temperature summary, per-node
+  health cards, and a tap-twice-to-confirm node restart button that calls
+  `POST /admin/restart`.
+- `copyToClipboard()` helper (`dashboard-react/src/utils/clipboard.ts`) with
+  a `document.execCommand` fallback so copy affordances work over plain HTTP,
+  not just `localhost` or HTTPS.
 - Operator-facing "Run Skulk as a service" guide at
   `website/docs/run-skulk-as-a-service.md` — quickstart-first,
   copy-paste install per platform, day-to-day operations table, reboot
   verification, troubleshooting, uninstall, and an advanced
   system-level systemd variant for niche server setups.
+- Tailscale setup and troubleshooting guide at `website/docs/tailscale.md`.
+
+### Fixed
+
+- Dashboard `crypto.randomUUID()` replaced with the `uuid` npm package so chat
+  session IDs generate correctly over plain HTTP (secure-context restriction).
+- `StartLimitBurst` / `StartLimitIntervalSec` moved from `[Service]` to `[Unit]`
+  in `skulk.service` — these directives are silently ignored in `[Service]`.
+- API port preflight now gated behind `spawn_api` so `--no-api` worker nodes
+  don't fail a port check they'll never bind.
+- macOS log directory corrected to `~/.skulk/logs` in both the installer script
+  and the ops-table in the user guide (was incorrectly `~/.cache/skulk/logs`).
+- Tailscale status fields serialized as camelCase (`selfIp`, `dnsName`) to
+  match FastAPI's default `by_alias=True` encoding; dashboard hook updated to
+  match.
+- Removed the unwanted selected-bar highlight (blue stroke) from the trace
+  waterfall renderer.
 
 ## [1.0.3] - 2026-05-02
 
