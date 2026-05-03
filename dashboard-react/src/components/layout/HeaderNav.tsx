@@ -157,15 +157,14 @@ const WarningCircle = styled.div<{ $level: 'error' | 'warning' }>`
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  background: ${({ $level, theme}) => $level === 'error' ? theme.colors.error : theme.colors.warning};
+  background: ${({ $level, theme}) => $level === 'error' ? theme.colors.errorFill : theme.colors.warningFill};
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 14px;
   font-weight: 700;
   font-family: ${({ theme }) => theme.fonts.body};
-  /* Always white — sits on a saturated red/amber circle in both palettes. */
-  color: #ffffff;
+  color: ${({ $level, theme}) => $level === 'error' ? theme.colors.errorOnFill : theme.colors.warningOnFill};
 `;
 
 const WarningTooltip = styled.div`
