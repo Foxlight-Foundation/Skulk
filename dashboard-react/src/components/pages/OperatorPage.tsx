@@ -196,6 +196,7 @@ function NodeRestartCard({ node, localNodeId }: NodeCardProps) {
   const [restartNode, { isLoading }] = useRestartNodeMutation();
 
   const handlePress = useCallback(async () => {
+    if (isLoading) return;
     if (!confirming) {
       setConfirming(true);
       // Auto-cancel confirmation after 3 s if user doesn't tap again
@@ -209,7 +210,7 @@ function NodeRestartCard({ node, localNodeId }: NodeCardProps) {
     } catch {
       addToast({ type: 'error', message: `Failed to restart ${node.name}` });
     }
-  }, [confirming, node.nodeId, node.name, restartNode]);
+  }, [confirming, isLoading, node.nodeId, node.name, restartNode]);
 
   const memPct = node.memTotalBytes > 0
     ? Math.round((node.memUsedBytes / node.memTotalBytes) * 100)
@@ -224,6 +225,7 @@ function NodeRestartCard({ node, localNodeId }: NodeCardProps) {
         <RestartButton
           $confirming={confirming}
           $disabled={isLoading}
+          disabled={isLoading}
           onClick={handlePress}
           aria-label={confirming ? 'Tap again to confirm restart' : `Restart ${node.name}`}
           title={confirming ? 'Tap again to confirm' : 'Restart node'}

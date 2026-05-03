@@ -101,7 +101,7 @@ export interface RawLocalNodeIdentityResponse {
  */
 export interface RestartNodeResponse {
   status: 'restarting' | 'restart_sent' | 'restart_already_pending';
-  nodeId: string;
+  node_id: string;
 }
 
 export const clusterApi = apiSlice.injectEndpoints({
