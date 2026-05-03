@@ -22,6 +22,7 @@ const sidebars: SidebarsConfig = {
       items: [
         "api-guide",
         "build-and-runtime",
+        "run-skulk-as-a-service",
         "model-store",
         "kv-cache-backends",
         "tracing",

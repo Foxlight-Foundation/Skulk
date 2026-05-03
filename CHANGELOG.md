@@ -7,6 +7,26 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- Headless-resilience deployment kit: a systemd user unit
+  (`deployment/systemd/skulk.service`) with `Restart=on-failure` plus
+  start-limit backoff, a macOS LaunchAgent
+  (`deployment/launchd/foundation.foxlight.skulk.plist`) with conditional
+  `KeepAlive`, and one-shot installers for each
+  (`deployment/install/install-systemd.sh`, `install-launchd.sh`). The
+  Linux installer enables user lingering so headless boxes autostart Skulk
+  across reboots without an active login session.
+- Startup port preflight (`exo.startup_recovery.preflight_api_port`) runs
+  before component boot and exits with `EX_TEMPFAIL` (75) when the API
+  port is held by a previous instance, so the service supervisor can
+  retry with backoff instead of producing a confusing bind error mid-run.
+- Operator-facing "Run Skulk as a service" guide at
+  `website/docs/run-skulk-as-a-service.md` — quickstart-first,
+  copy-paste install per platform, day-to-day operations table, reboot
+  verification, troubleshooting, uninstall, and an advanced
+  system-level systemd variant for niche server setups.
+
 ## [1.0.3] - 2026-05-02
 
 ### Added

@@ -25,6 +25,7 @@ from exo.shared.logging import logger_cleanup, logger_setup
 from exo.shared.types.commands import ForwarderDownloadCommand, SyncConfig
 from exo.shared.types.common import NodeId, SessionId, SystemId
 from exo.shared.types.state_sync import StateSyncMessage
+from exo.startup_recovery import preflight_api_port
 from exo.store.config import (
     ExoConfig,
     load_exo_config,
@@ -680,6 +681,8 @@ def main():
     )
     logger.info("Starting Skulk")
     logger.info(f"LIBP2P_NAMESPACE: {os.environ.get('SKULK_LIBP2P_NAMESPACE', os.getenv('EXO_LIBP2P_NAMESPACE'))}")
+
+    preflight_api_port(args.api_port)
 
     if args.offline:
         logger.info("Running in OFFLINE mode — no internet checks, local models only")
