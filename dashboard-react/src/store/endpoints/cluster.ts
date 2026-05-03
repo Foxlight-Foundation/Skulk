@@ -99,6 +99,11 @@ export interface RawLocalNodeIdentityResponse {
  * polls always). The transform stays out of the cache so consumers can read
  * the raw shape and run their own derivations.
  */
+export interface RestartNodeResponse {
+  status: 'restarting' | 'restart_sent' | 'restart_already_pending';
+  nodeId: string;
+}
+
 export const clusterApi = apiSlice.injectEndpoints({
   endpoints: (build) => ({
     getRawState: build.query<RawStateResponse, void>({
@@ -114,6 +119,12 @@ export const clusterApi = apiSlice.injectEndpoints({
     getLocalNodeIdentity: build.query<RawLocalNodeIdentityResponse, void>({
       query: () => '/node/identity',
     }),
+    restartNode: build.mutation<RestartNodeResponse, { nodeId?: string }>({
+      query: ({ nodeId }) => ({
+        url: nodeId ? `/admin/restart?node_id=${encodeURIComponent(nodeId)}` : '/admin/restart',
+        method: 'POST',
+      }),
+    }),
   }),
 });
 
@@ -121,4 +132,5 @@ export const {
   useGetRawStateQuery,
   useGetLocalNodeIdQuery,
   useGetLocalNodeIdentityQuery,
+  useRestartNodeMutation,
 } = clusterApi;

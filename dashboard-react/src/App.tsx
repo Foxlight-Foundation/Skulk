@@ -13,6 +13,7 @@ import { ObservabilityPanel } from './components/observability/ObservabilityPane
 import { SettingsPanel } from './components/layout/SettingsPanel';
 import { ModelStorePage } from './components/pages/DownloadsPage';
 import { ChatView } from './components/pages/ChatView';
+import { OperatorPage } from './components/pages/OperatorPage';
 import { InstancePanel, type InstanceCardData } from './components/layout/InstancePanel';
 import { ConversationPanel } from './components/layout/ConversationPanel';
 import { addToast } from './hooks/useToast';
@@ -396,6 +397,8 @@ export function App() {
               />
             ) : activeRoute === 'chat' ? (
               <ChatView readyInstances={instanceCards} />
+            ) : activeRoute === 'operator' ? (
+              <OperatorPage />
             ) : topology ? (
               <TopologyGraph
                 data={topology}
