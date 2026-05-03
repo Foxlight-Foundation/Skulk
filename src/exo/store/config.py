@@ -72,6 +72,7 @@ from pathlib import Path
 from typing import Literal, final
 
 import yaml
+from pydantic import Field
 
 from exo.utils.pydantic_ext import FrozenModel
 
@@ -231,6 +232,43 @@ class ModelStoreConfig(FrozenModel):
 
 
 @final
+class TailscaleConnectivityConfig(FrozenModel):
+    """Tailscale connectivity settings.
+
+    When present and ``enabled`` is ``True``, Skulk queries tailscaled at
+    startup, logs the node's Tailscale IP and tailnet name, and merges
+    ``bootstrap_peers`` into the libp2p peer list so nodes can discover each
+    other across the Tailscale overlay network.
+
+    Attributes:
+        enabled: Master switch.  ``False`` disables all Tailscale-aware
+            behaviour while preserving the config section for reference.
+        bootstrap_peers: libp2p multiaddrs using Tailscale IPs, e.g.
+            ``/ip4/100.101.102.103/tcp/52416``.  These are merged with any
+            peers supplied via ``--bootstrap-peers`` or
+            ``EXO_BOOTSTRAP_PEERS``.
+    """
+
+    enabled: bool = Field(default=True, description="Master switch for Tailscale-aware behaviour.")
+    bootstrap_peers: list[str] = Field(
+        default_factory=list,
+        description="libp2p multiaddrs with Tailscale IPs, e.g. /ip4/100.x.x.x/tcp/52416.",
+    )
+
+
+@final
+class ConnectivityConfig(FrozenModel):
+    """Cluster connectivity settings.
+
+    Attributes:
+        tailscale: Tailscale overlay network settings.  ``None`` means the
+            Tailscale integration is disabled.
+    """
+
+    tailscale: TailscaleConnectivityConfig | None = None
+
+
+@final
 class ExoConfig(FrozenModel):
     """Root configuration model for ``exo.yaml``.
 
@@ -245,6 +283,9 @@ class ExoConfig(FrozenModel):
             defaults.
         logging: Centralized logging configuration (enabled toggle, ingest
             URL).  ``None`` disables remote log shipping.
+        connectivity: Cluster connectivity settings.  ``None`` means all
+            connectivity options use their defaults (mDNS + CLI bootstrap peers
+            only).
         hf_token: HuggingFace API token.  Stripped from ``GET /config``
             responses for security.
     """
@@ -253,6 +294,7 @@ class ExoConfig(FrozenModel):
     inference: "InferenceConfig | None" = None
     logging: "LoggingConfig | None" = None
     tracing: "TracingConfig | None" = None
+    connectivity: ConnectivityConfig | None = None
     hf_token: str | None = None
 
 

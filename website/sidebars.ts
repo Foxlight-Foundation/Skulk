@@ -23,6 +23,7 @@ const sidebars: SidebarsConfig = {
         "api-guide",
         "build-and-runtime",
         "run-skulk-as-a-service",
+        "tailscale",
         "model-store",
         "kv-cache-backends",
         "tracing",

@@ -145,6 +145,7 @@ from exo.api.types.openai_responses import (
     ResponsesRequest,
     ResponsesResponse,
 )
+from exo.connectivity.tailscale import TailscaleStatus, query_tailscale_status
 from exo.master.image_store import ImageStore
 from exo.master.placement import place_instance as get_instance_placements
 from exo.shared.apply import apply
@@ -1168,6 +1169,15 @@ class API:
             summary="Get node identity and preferred IP",
             description="Return the node ID, hostname, and preferred LAN IP address that the dashboard uses during setup.",
         )(self.get_node_identity)
+        self.app.get(
+            "/v1/connectivity/tailscale",
+            tags=["Connectivity"],
+            summary="Get Tailscale status",
+            description=(
+                "Return whether tailscaled is running on this node and, if so, the node's "
+                "Tailscale IP, hostname, DNS name, and tailnet."
+            ),
+        )(self.get_tailscale_status)
 
     async def place_instance(self, payload: PlaceInstanceParams):
         command = PlaceInstance(
@@ -4434,6 +4444,16 @@ class API:
                 "ipAddress": ip,
             }
         )
+
+    async def get_tailscale_status(self) -> TailscaleStatus:
+        """Return the local node's Tailscale connectivity state.
+
+        Queries tailscaled via ``tailscale status --json``.  Returns a
+        ``TailscaleStatus`` with ``running=False`` when tailscale is not
+        installed or tailscaled is not running.
+        """
+
+        return await query_tailscale_status()
 
     async def get_store_downloads(self) -> JSONResponse:
         if self._store_client is None:

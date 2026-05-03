@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { copyToClipboard } from '../../utils/clipboard';
+import { useTailscaleStatus } from '../../hooks/useTailscaleStatus';
 import styled from 'styled-components';
 import { Button } from '../common/Button';
 import { CenteredSpinner, Spinner } from '../common/Spinner';
@@ -324,6 +325,7 @@ function recorderLine(entry: RunnerFlightRecorderEntry): string {
 
 export function NodeTab({ nodeId }: NodeTabProps) {
   const cluster = useClusterState();
+  const tailscale = useTailscaleStatus();
   const dispatch = useAppDispatch();
   const setSelectedNodeId = (nodeId: string | null) =>
     dispatch(uiActions.setObservabilitySelectedNodeId(nodeId));
@@ -560,6 +562,16 @@ export function NodeTab({ nodeId }: NodeTabProps) {
               <Row><Key>CWD</Key><Value>{runtime.cwd}</Value></Row>
               <Row><Key>Config</Key><Value $warn={!runtime.configFileExists}>{runtime.configPath} {runtime.configFileExists ? '' : '(missing)'}</Value></Row>
               <Row><Key>Logging</Key><Value>{runtime.structuredLoggingConfigured ? 'centralized enabled' : 'not configured'}</Value></Row>
+              <Row>
+                <Key>Tailscale</Key>
+                <Value $warn={tailscale !== null && !tailscale.running}>
+                  {tailscale === null
+                    ? '…'
+                    : tailscale.running
+                      ? `${tailscale.self_ip ?? '?'} · ${tailscale.dns_name ?? tailscale.hostname ?? '?'}`
+                      : 'not running'}
+                </Value>
+              </Row>
             </Section>
 
             <Section>
