@@ -1,7 +1,9 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
+import QRCode from 'qrcode';
 import styled from 'styled-components';
 import { useGetRawStateQuery, useGetLocalNodeIdQuery, useRestartNodeMutation } from '../../store/endpoints/cluster';
 import { addToast } from '../../hooks/useToast';
+import { useRemoteAccess } from '../../hooks/useRemoteAccess';
 
 /* ── Types ─────────────────────────────────────────────────── */
 
@@ -177,11 +179,153 @@ const EmptyState = styled.div`
   letter-spacing: 2px;
 `;
 
+const AccessCard = styled.div`
+  background: ${({ theme }) => theme.colors.surface};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radii.lg};
+  overflow: hidden;
+`;
+
+const AccessCardBody = styled.div`
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+`;
+
+const AccessRow = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+`;
+
+const AccessLabel = styled.span`
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-family: ${({ theme }) => theme.fonts.mono};
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: ${({ theme }) => theme.colors.textMuted};
+  flex-shrink: 0;
+`;
+
+const AccessUrl = styled.a`
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-family: ${({ theme }) => theme.fonts.mono};
+  color: ${({ theme }) => theme.colors.text};
+  text-decoration: none;
+  word-break: break-all;
+  &:hover { text-decoration: underline; }
+`;
+
+const QRWrap = styled.div`
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+`;
+
+const QRLabel = styled.span`
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-family: ${({ theme }) => theme.fonts.mono};
+  color: ${({ theme }) => theme.colors.textMuted};
+  text-transform: uppercase;
+  letter-spacing: 1px;
+`;
+
+const CopyButton = styled.button`
+  all: unset;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: ${({ theme }) => theme.radii.sm};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  font-size: ${({ theme }) => theme.fontSizes.xs};
+  font-family: ${({ theme }) => theme.fonts.mono};
+  color: ${({ theme }) => theme.colors.textSecondary};
+  white-space: nowrap;
+  flex-shrink: 0;
+  &:hover { border-color: ${({ theme }) => theme.colors.textMuted}; }
+`;
+
 /* ── Helpers ───────────────────────────────────────────────── */
 
 function fmtBytes(bytes: number): string {
   const gb = bytes / (1024 ** 3);
   return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / (1024 ** 2)).toFixed(0)} MB`;
+}
+
+/* ── RemoteAccessCard component ───────────────────────────── */
+
+function RemoteAccessCard() {
+  const access = useRemoteAccess();
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const operatorUrl =
+    access.status === 'ok' ? access.data.operatorUrl : null;
+  const localUrl =
+    access.status === 'ok' ? access.data.local.url : null;
+  const tailscaleUrl =
+    access.status === 'ok' ? access.data.tailscale.url : null;
+  const tailscaleRunning =
+    access.status === 'ok' ? access.data.tailscale.running : false;
+
+  useEffect(() => {
+    if (!operatorUrl) { setQrDataUrl(null); return; }
+    QRCode.toDataURL(operatorUrl, { width: 180, margin: 1 })
+      .then(setQrDataUrl)
+      .catch(() => setQrDataUrl(null));
+  }, [operatorUrl]);
+
+  const handleCopy = useCallback(() => {
+    if (!operatorUrl) return;
+    navigator.clipboard.writeText(operatorUrl).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }, [operatorUrl]);
+
+  if (access.status === 'loading') return null;
+  if (access.status === 'error') return null;
+
+  return (
+    <AccessCard>
+      <AccessCardBody>
+        {tailscaleUrl && (
+          <AccessRow>
+            <AccessLabel>Tailscale</AccessLabel>
+            <AccessUrl href={tailscaleUrl} target="_blank" rel="noopener noreferrer">
+              {tailscaleUrl}
+            </AccessUrl>
+          </AccessRow>
+        )}
+        {localUrl && (
+          <AccessRow>
+            <AccessLabel>Local</AccessLabel>
+            <AccessUrl href={localUrl} target="_blank" rel="noopener noreferrer">
+              {localUrl}
+            </AccessUrl>
+          </AccessRow>
+        )}
+        {!tailscaleRunning && (
+          <AccessRow>
+            <AccessLabel>Tailscale</AccessLabel>
+            <MetricValue>not running</MetricValue>
+          </AccessRow>
+        )}
+        {operatorUrl && qrDataUrl && (
+          <QRWrap>
+            <img src={qrDataUrl} alt="Operator panel QR code" width={180} height={180} />
+            <QRLabel>Scan to open operator panel</QRLabel>
+            <CopyButton onClick={handleCopy}>
+              {copied ? 'Copied!' : 'Copy URL'}
+            </CopyButton>
+          </QRWrap>
+        )}
+      </AccessCardBody>
+    </AccessCard>
+  );
 }
 
 /* ── NodeCard component ────────────────────────────────────── */
@@ -331,6 +475,9 @@ export function OperatorPage() {
           <StatValue>{runnerCount}</StatValue>
         </Stat>
       </SummaryRow>
+
+      <SectionTitle>Remote Access</SectionTitle>
+      <RemoteAccessCard />
 
       <SectionTitle>Nodes</SectionTitle>
 

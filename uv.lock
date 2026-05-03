@@ -551,7 +551,7 @@ wheels = [
 
 [[package]]
 name = "exo"
-version = "1.0.3"
+version = "1.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
