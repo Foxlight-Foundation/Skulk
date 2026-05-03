@@ -27,10 +27,10 @@ fi
 # Capture the user's PATH from a login shell so the same `uv` resolution
 # Skulk uses interactively is what the agent gets.
 USER_PATH="$(/bin/bash -lc 'echo -n $PATH')"
-LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/skulk/logs"
-# Skulk uses ~/.skulk-prefixed XDG paths when SKULK_HOME is set; otherwise
-# $XDG_CACHE_HOME (or ~/.cache on macOS where XDG isn't conventional).
-# Match the SKULK_LOG_DIR resolution in src/exo/shared/constants.py.
+# On macOS, _get_xdg_dir() in src/exo/shared/constants.py returns ~/.skulk
+# for all XDG dirs (sys.platform != "linux" branch), so SKULK_LOG_DIR is
+# always ~/.skulk/logs on macOS regardless of XDG_CACHE_HOME.
+LOG_DIR="$HOME/.skulk/logs"
 mkdir -p "$LOG_DIR"
 mkdir -p "$TARGET_DIR"
 

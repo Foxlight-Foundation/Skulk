@@ -6,6 +6,11 @@ Documentation=https://github.com/Foxlight-Foundation/Skulk
 # model store paths are mounted (matters on systems with delayed mounts).
 After=network-online.target local-fs.target
 Wants=network-online.target
+# StartLimitBurst/StartLimitIntervalSec are unit-level directives — they
+# must live in [Unit], not [Service], or systemd silently ignores them.
+# 5 crashes within 5 minutes trips the limit and stops restart attempts.
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
@@ -27,12 +32,10 @@ TimeoutStopSec=30
 # Crash recovery: only restart on abnormal exit. Planned shutdowns
 # (`systemctl --user stop skulk` → SIGTERM → exit 0) stay stopped.
 # `RestartSec` avoids a tight loop when the cause is a config error;
-# `StartLimitBurst`/`StartLimitIntervalSec` then bail after repeated
+# the [Unit] StartLimitBurst/StartLimitIntervalSec bail after repeated
 # failure so a broken config doesn't burn the node.
 Restart=on-failure
 RestartSec=10
-StartLimitBurst=5
-StartLimitIntervalSec=300
 
 # MLX engines and the libp2p stack each open many file descriptors and
 # memory-map model shards. The defaults (1024 / system rlimit) are too

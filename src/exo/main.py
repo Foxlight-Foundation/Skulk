@@ -684,7 +684,8 @@ def main():
     logger.info("Starting Skulk")
     logger.info(f"LIBP2P_NAMESPACE: {os.environ.get('SKULK_LIBP2P_NAMESPACE', os.getenv('EXO_LIBP2P_NAMESPACE'))}")
 
-    preflight_api_port(args.api_port)
+    if args.spawn_api:
+        preflight_api_port(args.api_port)
 
     # Tailscale: if configured, query tailscaled and merge bootstrap peers.
     _ts_config = (
