@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react';
 
-/** Snapshot of the local node's Tailscale connectivity state as returned by GET /v1/connectivity/tailscale. */
+/** Snapshot of the local node's Tailscale connectivity state as returned by GET /v1/connectivity/tailscale.
+ *  FastAPI serializes FrozenModel fields via jsonable_encoder with by_alias=True,
+ *  so snake_case Python field names arrive as camelCase JSON keys.
+ */
 export interface TailscaleStatus {
   running: boolean;
-  self_ip: string | null;
+  selfIp: string | null;
   hostname: string | null;
-  dns_name: string | null;
+  dnsName: string | null;
   tailnet: string | null;
   version: string | null;
 }

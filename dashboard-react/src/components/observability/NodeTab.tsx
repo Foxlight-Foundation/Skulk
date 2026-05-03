@@ -568,7 +568,7 @@ export function NodeTab({ nodeId }: NodeTabProps) {
                   {tailscale === null
                     ? '…'
                     : tailscale.running
-                      ? `${tailscale.self_ip ?? '?'} · ${tailscale.dns_name ?? tailscale.hostname ?? '?'}`
+                      ? `${tailscale.selfIp ?? '?'} · ${tailscale.dnsName ?? tailscale.hostname ?? '?'}`
                       : 'not running'}
                 </Value>
               </Row>
