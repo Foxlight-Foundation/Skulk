@@ -17,6 +17,10 @@ Tailscale solves this cleanly. It creates a private overlay network where every 
 - **API access** — run inference or call management endpoints from any device on your tailnet
 - **Works with [Headscale](https://headscale.net/)** — self-host the control plane if you prefer
 
+:::info Only the cluster node needs Tailscale installed as a service
+Your phone or laptop just needs the **Tailscale app** — it doesn't run a Skulk node. Only the machines that actually run Skulk need `tailscaled` installed and configured. One node on Tailscale is enough to reach the whole cluster dashboard, because the dashboard already shows every node's state regardless of whether those nodes are on Tailscale.
+:::
+
 ## Setup
 
 ### 1. Install Tailscale on your cluster node
@@ -46,7 +50,7 @@ tailscale ip -4
 
 ### 2. Install Tailscale on your remote device
 
-On your phone, tablet, or laptop — install the Tailscale app and log in to the **same Tailscale account**. That's it; both devices are now on the same tailnet.
+On your phone, tablet, or laptop — install the Tailscale app and log in to the **same Tailscale account**. No configuration beyond logging in.
 
 - iOS / Android: search "Tailscale" in the App Store / Play Store
 - macOS / Windows / Linux: [tailscale.com/download](https://tailscale.com/download)
@@ -69,13 +73,13 @@ Save the `http://100.x.x.x:52415` URL on your phone. iOS and Android both let yo
 
 The dashboard includes a mobile-first operator view designed for exactly this scenario — checking on your cluster and restarting nodes from a small screen.
 
-To open it, navigate to the dashboard and open the browser console, then run:
+Navigate directly to:
 
-```js
-window.__skulkNavigate?.('operator')
+```
+http://100.101.102.103:52415/operator
 ```
 
-Or bookmark `http://100.x.x.x:52415` and use the direct route:
+Bookmark that URL on your phone — iOS and Android both let you add it to your home screen as a web app shortcut so it opens instantly.
 
 The operator panel shows:
 - **Cluster summary** — total nodes, aggregate memory usage, average GPU utilization, average temperature

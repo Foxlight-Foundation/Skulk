@@ -138,8 +138,22 @@ export function App() {
     if (typeof document === 'undefined') return;
     document.documentElement.setAttribute('data-theme', themeName);
   }, [themeName]);
-  const setActiveRoute = (route: typeof activeRoute) =>
+  const setActiveRoute = (route: typeof activeRoute) => {
     dispatch(uiActions.setActiveRoute(route));
+    const path = route === 'cluster' ? '/' : `/${route}`;
+    if (window.location.pathname !== path) history.pushState(null, '', path);
+  };
+
+  // On load, honour the URL path so /operator (and future deep-links) work.
+  useEffect(() => {
+    const path = window.location.pathname.replace(/^\//, '') || 'cluster';
+    const valid: typeof activeRoute[] = ['cluster', 'model-store', 'chat', 'operator'];
+    if (valid.includes(path as typeof activeRoute)) {
+      dispatch(uiActions.setActiveRoute(path as typeof activeRoute));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const togglePanel = () => dispatch(uiActions.togglePanel());
   const toggleHistoryPanel = () => dispatch(uiActions.toggleHistoryPanel());
   const conversationsMap = useAppSelector((s) => s.chat.conversations);
