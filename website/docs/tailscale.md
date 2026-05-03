@@ -88,9 +88,9 @@ You should see something like:
 ```json
 {
   "running": true,
-  "self_ip": "100.101.102.103",
+  "selfIp": "100.101.102.103",
   "hostname": "my-node",
-  "dns_name": "my-node.tailnet-abc.ts.net",
+  "dnsName": "my-node.tailnet-abc.ts.net",
   "tailnet": "tailnet-abc.ts.net",
   "version": "1.66.1"
 }
