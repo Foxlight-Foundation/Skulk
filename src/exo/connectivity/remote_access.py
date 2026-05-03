@@ -111,7 +111,8 @@ async def build_remote_access_info(
     local = LocalAccess(ip=local_ip, port=port, url=local_url)
 
     ts = await query_tailscale_status()
-    ts_url = f"http://{ts.self_ip}:{port}" if ts.running and ts.self_ip else None
+    ts_host = ts.dns_name or ts.self_ip
+    ts_url = f"http://{ts_host}:{port}" if ts.running and ts_host else None
     tailscale = TailscaleAccess(
         running=ts.running,
         ip=ts.self_ip,
