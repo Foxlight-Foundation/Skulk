@@ -4,6 +4,7 @@ import styled from 'styled-components';
 import { useGetRawStateQuery, useGetLocalNodeIdQuery, useRestartNodeMutation } from '../../store/endpoints/cluster';
 import { addToast } from '../../hooks/useToast';
 import { useRemoteAccess } from '../../hooks/useRemoteAccess';
+import { copyToClipboard } from '../../utils/clipboard';
 
 /* ── Types ─────────────────────────────────────────────────── */
 
@@ -280,9 +281,11 @@ function RemoteAccessCard() {
 
   const handleCopy = useCallback(() => {
     if (!operatorUrl) return;
-    navigator.clipboard.writeText(operatorUrl).then(() => {
+    copyToClipboard(operatorUrl).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
+    }).catch(() => {
+      addToast({ type: 'error', message: 'Failed to copy URL' });
     });
   }, [operatorUrl]);
 
