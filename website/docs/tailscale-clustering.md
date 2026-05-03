@@ -10,6 +10,12 @@ By default, Skulk discovers cluster peers using mDNS, which only works on the sa
 
 Tailscale solves this by giving every node a stable `100.x.x.x` address that works across any network. You configure Skulk to use those addresses as bootstrap peers, and the cluster forms over the Tailscale overlay.
 
+:::info Tailscale must be installed on every cluster node
+Unlike the [remote access](tailscale) scenario (where only the node you want to reach needs Tailscale), multi-network clustering requires **every node** to have Tailscale installed and running. This is because Skulk dials each peer directly by its `100.x.x.x` address — there's no gateway or proxy. If a node doesn't have a Tailscale IP, the other nodes have no address to dial it on.
+
+If all your nodes are on the same local network, you don't need Tailscale at all — mDNS handles discovery automatically. Tailscale is only needed when nodes are on physically separate networks.
+:::
+
 ## Prerequisites
 
 On **every node** that will join the cluster:
