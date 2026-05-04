@@ -23,6 +23,7 @@ const sidebars: SidebarsConfig = {
         "api-guide",
         "build-and-runtime",
         "run-skulk-as-a-service",
+        "external-logging",
         {
           type: "category",
           label: "Tailscale",

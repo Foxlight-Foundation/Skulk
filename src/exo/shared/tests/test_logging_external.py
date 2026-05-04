@@ -1,0 +1,122 @@
+# pyright: reportPrivateUsage=false, reportUnusedFunction=false
+"""Tests for the external-shipper mode of the structured JSON log sink.
+
+Covers:
+- ``SKULK_LOGGING_EXTERNAL=1`` enables the JSON sink without spawning
+  Skulk's internal Vector subprocess.
+- Toggling via ``set_structured_stdout`` honors the same env var.
+- Falsy / unset values leave the legacy "internal subprocess" path in
+  place (where ingest_url drives ``_start_vector``).
+"""
+
+from __future__ import annotations
+
+import contextlib
+from unittest.mock import patch
+
+import pytest
+from loguru import logger
+
+from exo.shared import logging as skulk_logging
+
+
+@pytest.fixture(autouse=True)
+def _reset_logging_state() -> None:
+    """Drop any sink the previous test left behind so each test starts clean."""
+    if skulk_logging._json_sink_id is not None:
+        with contextlib.suppress(ValueError):
+            logger.remove(skulk_logging._json_sink_id)
+        skulk_logging._json_sink_id = None
+    skulk_logging._vector_pipe = None
+    skulk_logging._vector_process = None
+
+
+def test_external_flag_enables_json_sink_without_starting_vector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SKULK_LOGGING_EXTERNAL=1 should activate the JSON sink and skip _start_vector."""
+    monkeypatch.setenv("SKULK_LOGGING_EXTERNAL", "1")
+
+    with patch.object(skulk_logging, "_start_vector") as start_vector:
+        skulk_logging.logger_setup(
+            log_file=None,
+            verbosity=0,
+            structured_stdout=True,
+            ingest_url="http://example.invalid/ignored",
+        )
+
+    assert skulk_logging._json_sink_id is not None, (
+        "JSON sink should be active in external mode"
+    )
+    start_vector.assert_not_called()
+
+
+def test_external_flag_works_with_empty_ingest_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In external mode, ingest_url is irrelevant — the agent owns transport."""
+    monkeypatch.setenv("SKULK_LOGGING_EXTERNAL", "true")
+
+    with patch.object(skulk_logging, "_start_vector") as start_vector:
+        skulk_logging.logger_setup(
+            log_file=None,
+            verbosity=0,
+            structured_stdout=True,
+            ingest_url="",
+        )
+
+    assert skulk_logging._json_sink_id is not None
+    start_vector.assert_not_called()
+
+
+def test_external_unset_falls_back_to_internal_vector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the external flag, an ingest_url should drive _start_vector as before."""
+    monkeypatch.delenv("SKULK_LOGGING_EXTERNAL", raising=False)
+
+    with patch.object(skulk_logging, "_start_vector", return_value=True) as start_vector:
+        skulk_logging.logger_setup(
+            log_file=None,
+            verbosity=0,
+            structured_stdout=True,
+            ingest_url="http://example.invalid/insert",
+        )
+
+    start_vector.assert_called_once_with("http://example.invalid/insert")
+
+
+def test_external_falsy_values_disable_external_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Truthy detection should be strict — only 1/true/yes/on count."""
+    monkeypatch.setenv("SKULK_LOGGING_EXTERNAL", "0")
+
+    with patch.object(skulk_logging, "_start_vector", return_value=True) as start_vector:
+        skulk_logging.logger_setup(
+            log_file=None,
+            verbosity=0,
+            structured_stdout=True,
+            ingest_url="http://example.invalid/insert",
+        )
+
+    start_vector.assert_called_once()
+
+
+def test_set_structured_stdout_honors_external_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime toggle via cluster sync also respects the external flag."""
+    monkeypatch.setenv("SKULK_LOGGING_EXTERNAL", "1")
+
+    with patch.object(skulk_logging, "_start_vector") as start_vector:
+        skulk_logging.set_structured_stdout(enabled=True, ingest_url="")
+
+    assert skulk_logging._json_sink_id is not None
+    start_vector.assert_not_called()
+
+    with patch.object(skulk_logging, "_stop_vector") as stop_vector:
+        skulk_logging.set_structured_stdout(enabled=False)
+
+    assert skulk_logging._json_sink_id is None
+    stop_vector.assert_called_once()

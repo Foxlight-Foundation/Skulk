@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>foundation.foxlight.skulk-vector</string>
+
+    <!-- Vector runs as its own agent, separate from skulk, so a slow
+         downstream sink or a Vector crash can't backpressure or kill
+         the inference process. The wrapper sources ~/.skulk/skulk.env
+         (same file as skulk) for EXO_LOGGING_INGEST_URL and friends,
+         then execs `vector --config deployment/logging/vector.yaml`,
+         which tails the skulk stdout log file. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>exec __SKULK_REPO__/deployment/install/vector-startup.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__SKULK_REPO__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Vector logs go to a separate file so operators can grep
+         shipping errors without wading through skulk's own output. -->
+    <key>StandardOutPath</key>
+    <string>__SKULK_LOG_DIR__/vector.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>__SKULK_LOG_DIR__/vector.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__USER_PATH__</string>
+    </dict>
+</dict>
+</plist>
