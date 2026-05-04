@@ -145,6 +145,7 @@ from exo.api.types.openai_responses import (
     ResponsesRequest,
     ResponsesResponse,
 )
+from exo.connectivity.remote_access import RemoteAccessInfo, build_remote_access_info
 from exo.connectivity.tailscale import TailscaleStatus, query_tailscale_status
 from exo.master.image_store import ImageStore
 from exo.master.placement import place_instance as get_instance_placements
@@ -1175,9 +1176,21 @@ class API:
             summary="Get Tailscale status",
             description=(
                 "Return whether tailscaled is running on this node and, if so, the node's "
-                "Tailscale IP, hostname, DNS name, and tailnet."
+                "Tailscale IP, hostname, DNS name, and tailnet. "
+                "Pass the node_id query parameter to proxy the request to a specific cluster node."
             ),
         )(self.get_tailscale_status)
+        self.app.get(
+            "/v1/connectivity/remote-access",
+            tags=["Connectivity"],
+            summary="Get remote access info",
+            description=(
+                "Return the preferred URL, local LAN access, and Tailscale overlay access for "
+                "this node. preferredUrl is the Tailscale URL when tailscaled is running, "
+                "otherwise the LAN URL. operatorUrl appends /operator and is suitable for QR "
+                "code generation so mobile users land directly on the operator panel."
+            ),
+        )(self.get_remote_access)
 
     async def place_instance(self, payload: PlaceInstanceParams):
         command = PlaceInstance(
@@ -4445,15 +4458,63 @@ class API:
             }
         )
 
-    async def get_tailscale_status(self) -> TailscaleStatus:
-        """Return the local node's Tailscale connectivity state.
+    async def get_tailscale_status(
+        self, node_id: Annotated[str | None, Query()] = None
+    ) -> TailscaleStatus:
+        """Return this node's (or a peer's) Tailscale connectivity state.
 
-        Queries tailscaled via ``tailscale status --json``.  Returns a
-        ``TailscaleStatus`` with ``running=False`` when tailscale is not
-        installed or tailscaled is not running.
+        Queries tailscaled via ``tailscale status --json`` for the local node.
+        When ``node_id`` is provided and refers to a different cluster node,
+        the request is proxied to that node's ``/v1/connectivity/tailscale``
+        endpoint.  Returns a ``TailscaleStatus`` with ``running=False`` when
+        tailscale is not installed or tailscaled is not running.
+
+        Args:
+            node_id: Optional cluster node ID to proxy the request to.
+                Omit or pass the local node's ID to query this node directly.
         """
 
+        if node_id is not None and node_id != str(self.node_id):
+            peer_urls = await self._reachable_peer_api_urls()
+            base_url = peer_urls.get(node_id)
+            if base_url is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Node not reachable: {node_id}",
+                )
+            timeout = httpx.Timeout(timeout=10.0, connect=2.0)
+            async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+                try:
+                    response = await client.get(f"{base_url}/v1/connectivity/tailscale")
+                except httpx.HTTPError as exc:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Failed to proxy Tailscale status to {node_id}: {exc}",
+                    ) from exc
+            if response.status_code >= 400:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=self._proxy_error_detail(response),
+                )
+            return TailscaleStatus.model_validate(response.json())
+
         return await query_tailscale_status()
+
+    async def get_remote_access(self) -> RemoteAccessInfo:
+        """Return aggregated remote access information for the local node.
+
+        Combines local LAN access and Tailscale overlay access into a single
+        snapshot.  The ``preferredUrl`` field gives the best address to reach
+        this node — Tailscale URL when tailscaled is running, otherwise the
+        LAN URL.  ``operatorUrl`` appends ``/operator`` and is suitable for
+        QR code generation.
+        """
+
+        return await build_remote_access_info(
+            self.node_id,
+            self.state.node_network,
+            self.port,
+        )
 
     async def get_store_downloads(self) -> JSONResponse:
         if self._store_client is None:

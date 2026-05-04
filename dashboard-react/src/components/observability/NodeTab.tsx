@@ -325,7 +325,7 @@ function recorderLine(entry: RunnerFlightRecorderEntry): string {
 
 export function NodeTab({ nodeId }: NodeTabProps) {
   const cluster = useClusterState();
-  const tailscale = useTailscaleStatus();
+  const tailscaleResult = useTailscaleStatus();
   const dispatch = useAppDispatch();
   const setSelectedNodeId = (nodeId: string | null) =>
     dispatch(uiActions.setObservabilitySelectedNodeId(nodeId));
@@ -564,12 +564,14 @@ export function NodeTab({ nodeId }: NodeTabProps) {
               <Row><Key>Logging</Key><Value>{runtime.structuredLoggingConfigured ? 'centralized enabled' : 'not configured'}</Value></Row>
               <Row>
                 <Key>Tailscale</Key>
-                <Value $warn={tailscale !== null && !tailscale.running}>
-                  {tailscale === null
+                <Value $warn={tailscaleResult.status === 'ok' && !tailscaleResult.data.running}>
+                  {tailscaleResult.status === 'loading'
                     ? '…'
-                    : tailscale.running
-                      ? `${tailscale.selfIp ?? '?'} · ${tailscale.dnsName ?? tailscale.hostname ?? '?'}`
-                      : 'not running'}
+                    : tailscaleResult.status === 'error'
+                      ? 'unavailable'
+                      : tailscaleResult.data.running
+                        ? `${tailscaleResult.data.selfIp ?? '?'} · ${tailscaleResult.data.dnsName ?? tailscaleResult.data.hostname ?? '?'}`
+                        : 'not running'}
                 </Value>
               </Row>
             </Section>

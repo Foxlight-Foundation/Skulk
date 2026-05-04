@@ -978,9 +978,12 @@ curl -OJ http://localhost:52415/v1/traces/cluster/<task_id>/raw
 
 ```
 GET /v1/connectivity/tailscale
+GET /v1/connectivity/tailscale?node_id=<id>
 ```
 
-Returns whether tailscaled is running on the **local** node and, if so, the node's Tailscale IP, hostname, DNS name, and tailnet. All fields except `running` are `null` when tailscaled is not installed or not running.
+Returns whether tailscaled is running on a node and, if so, the node's Tailscale IP, hostname, DNS name, and tailnet. All fields except `running` are `null` when tailscaled is not installed or not running.
+
+Pass `node_id` to proxy the request to a specific cluster node. Omit it to query the local node directly. Returns `404` if the target node is not reachable.
 
 **Response fields:**
 
@@ -993,13 +996,90 @@ Returns whether tailscaled is running on the **local** node and, if so, the node
 | `tailnet` | string \| null | Tailnet name derived from `dnsName` |
 | `version` | string \| null | Tailscale client version string |
 
-This endpoint always reflects the **node serving the request**, not a selected remote node. To check Tailscale status on a different cluster node, reach its API directly.
+```bash
+# Local node
+curl http://localhost:52415/v1/connectivity/tailscale
 
-Example:
+# Specific cluster node
+curl "http://localhost:52415/v1/connectivity/tailscale?node_id=<node-id>"
+```
+
+### Remote access info
+
+```
+GET /v1/connectivity/remote-access
+```
+
+Returns aggregated remote access information for the local node: LAN address, Tailscale address, and a `preferredUrl` (Tailscale if running, otherwise LAN). When Tailscale is running, `preferredUrl` uses the node's MagicDNS name (`my-node.tailnet-abc.ts.net`) if available, falling back to the raw `100.x.x.x` IP. `operatorUrl` appends `/operator` to `preferredUrl` — suitable for QR code generation so mobile users land directly on the operator panel.
+
+**Response fields:**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `local.ip` | string \| null | Preferred LAN IPv4 address |
+| `local.port` | integer | API/dashboard port |
+| `local.url` | string \| null | `http://{ip}:{port}` |
+| `tailscale.running` | boolean | `true` when tailscaled is connected |
+| `tailscale.ip` | string \| null | Tailscale IPv4 address (100.x.x.x) |
+| `tailscale.dnsName` | string \| null | MagicDNS fully-qualified name, e.g. `my-node.tailnet-abc.ts.net` |
+| `tailscale.port` | integer | API/dashboard port |
+| `tailscale.url` | string \| null | `http://{dnsName or ip}:{port}` if running |
+| `preferredUrl` | string \| null | MagicDNS URL if available, else Tailscale IP URL, else LAN URL |
+| `operatorUrl` | string \| null | `preferredUrl + /operator` |
 
 ```bash
-curl http://localhost:52415/v1/connectivity/tailscale
+curl http://localhost:52415/v1/connectivity/remote-access | python3 -m json.tool
 ```
+
+Example response when Tailscale is running with MagicDNS:
+
+```json
+{
+  "local": { "ip": "192.168.1.5", "port": 52415, "url": "http://192.168.1.5:52415" },
+  "tailscale": {
+    "running": true,
+    "ip": "100.101.102.103",
+    "dnsName": "my-node.tailnet-abc.ts.net",
+    "port": 52415,
+    "url": "http://my-node.tailnet-abc.ts.net:52415"
+  },
+  "preferredUrl": "http://my-node.tailnet-abc.ts.net:52415",
+  "operatorUrl": "http://my-node.tailnet-abc.ts.net:52415/operator"
+}
+```
+
+## Operator App Integration
+
+The operator panel at `/operator` is designed for mobile access and can also be driven by a native app. The relevant API endpoints are:
+
+### Node and cluster state
+
+| Endpoint | Description |
+| --- | --- |
+| `GET /v1/state` | Full cluster state: nodes, instances, runners, memory, GPU |
+| `GET /node_id` | Local node's ID |
+| `GET /node/identity` | Node ID, hostname, and preferred LAN IP |
+
+### Remote access and connectivity
+
+| Endpoint | Description |
+| --- | --- |
+| `GET /v1/connectivity/remote-access` | LAN + Tailscale addresses, preferred URL, operator URL for QR |
+| `GET /v1/connectivity/tailscale` | Tailscale status for local node |
+| `GET /v1/connectivity/tailscale?node_id=<id>` | Tailscale status for a specific peer node |
+
+### Node management
+
+| Endpoint | Description |
+| --- | --- |
+| `POST /v1/nodes/{node_id}/restart` | Send a restart command to any node in the cluster |
+
+### Typical operator app workflow
+
+1. Call `GET /v1/connectivity/remote-access` on the initially discovered node to get the `preferredUrl` — use that as the base URL for subsequent calls.
+2. Poll `GET /v1/state` every 5 seconds for node health (memory, GPU, temperature).
+3. Show per-node cards with restart buttons that call `POST /v1/nodes/{node_id}/restart`.
+4. On first launch or settings screen, show the `operatorUrl` as a QR code so users can hand it off to another device.
 
 ## Helpful Next Docs
 
