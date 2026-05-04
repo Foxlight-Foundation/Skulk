@@ -72,7 +72,13 @@ Open a terminal, `cd` into your Skulk folder, then run:
 deployment/install/install-systemd.sh
 ```
 
-The script does everything for you. When it finishes (a few seconds), check it's running:
+The script does everything for you:
+
+- Installs the **Skulk** systemd user unit (`skulk.service`).
+- Copies an env file to `~/.skulk/skulk.env` on the first install. This is where you customize behavior; re-running the installer never overwrites your edits.
+- Defaults to `SKULK_LOGGING_EXTERNAL=0` (in-process Vector subprocess shipper) since this release does not include a separate `skulk-vector` systemd unit.
+
+When it finishes (a few seconds), check it's running:
 
 ```bash
 systemctl --user status skulk

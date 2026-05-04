@@ -256,13 +256,14 @@ Then `docker compose up -d` to apply. VictoriaLogs reclaims space within a few m
 
 ### "I changed the ingest URL but Vector still ships to the old one"
 
-Vector reads its config at startup. Restart the Vector agent:
+Vector reads its config at startup. Restart the shipper:
 
 ```bash
-# macOS
+# macOS — restart the launchd Vector agent
 launchctl kickstart -k gui/$(id -u)/foundation.foxlight.skulk-vector
-# Linux
-systemctl --user restart skulk-vector
+
+# Linux — Vector runs as a Skulk subprocess, so restart Skulk itself
+systemctl --user restart skulk
 ```
 
 ## Disabling external logging
@@ -278,14 +279,17 @@ Or re-run the installer with `--no-vector`.
 
 ## Advanced: running Vector standalone (development)
 
-For ad-hoc runs without the LaunchAgent, you can run Vector by hand:
+For ad-hoc runs without the LaunchAgent, run Vector by hand. There are two configs depending on which mode you're iterating on:
 
 ```bash
 # Make sure ~/.skulk/skulk.env is sourced so EXO_LOGGING_INGEST_URL is set
 source ~/.skulk/skulk.env
 
-# Then run vector pointed at the same config the LaunchAgent uses
-vector --config deployment/logging/vector.yaml
+# External mode (file-tail config used by the macOS LaunchAgent)
+vector --config deployment/logging/vector-external.yaml
+
+# Internal mode (stdin config used by the in-process subprocess shipper)
+uv run skulk 2>/dev/tty | vector --config deployment/logging/vector.yaml
 ```
 
-This is useful when iterating on `vector.yaml` — restart picks up changes immediately, and you see Vector's full output in the terminal.
+This is useful when iterating on either config — restart picks up changes immediately, and you see Vector's full output in the terminal.

@@ -38,12 +38,24 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
-- `deployment/logging/vector.yaml` switched from `stdin` source to a `file`
-  source tailing `~/.skulk/logs/skulk.stdout.log`, with a `remap` transform
-  that drops non-JSON lines.
-- `deployment/install/install-launchd.sh` now installs both agents,
-  manages `~/.skulk/skulk.env`, supports `--no-vector` and `--uninstall`,
-  and produces a more useful post-install summary.
+- Two Vector configs now exist for the two transport modes:
+  `deployment/logging/vector.yaml` keeps the original `stdin` source for
+  the in-process subprocess shipper (used by Linux systemd installs and
+  macOS `--no-vector` installs); `deployment/logging/vector-external.yaml`
+  carries a `file` source tailing `~/.skulk/logs/skulk.stdout.log` plus a
+  `remap` transform that drops non-JSON lines, used by the launchd
+  `skulk-vector` agent.
+- `deployment/install/install-launchd.sh` now installs both agents by
+  default, manages `~/.skulk/skulk.env` (auto-flipping
+  `SKULK_LOGGING_EXTERNAL` to match the chosen mode on `--no-vector`),
+  supports `--no-vector` and `--uninstall`, drops `bash -lc` from the
+  plist (so repo paths with spaces work), and produces a more useful
+  post-install summary.
+- `deployment/install/install-systemd.sh` and
+  `deployment/systemd/skulk.service` now use the same wrapper +
+  `~/.skulk/skulk.env` integration as macOS, with
+  `EnvironmentFile=-%h/.skulk/skulk.env` so the unit picks up env-file
+  knobs.
 - `website/docs/run-skulk-as-a-service.md` updated for the auto-update,
   env-file customization, and Vector agent flow.
 
