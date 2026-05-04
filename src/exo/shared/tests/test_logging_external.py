@@ -136,9 +136,17 @@ def _main_gate(log_enabled: bool) -> bool:
     return skulk_logging.external_log_pipe_enabled() or log_enabled
 
 
-def _runtime_sync_gate(log_enabled: bool) -> bool:
-    """Runtime gate from api/main.py and download/coordinator.py."""
-    return skulk_logging.external_log_pipe_enabled() or log_enabled
+def _runtime_sync_gate(log_enabled: bool, ingest_url: str = "x") -> bool:
+    """Runtime gate from api/main.py and download/coordinator.py.
+
+    In internal-subprocess mode (env var off), the legacy contract is
+    that both ``enabled`` and ``ingest_url`` must be set — clearing the
+    URL at runtime disables shipping. The env var bypasses both because
+    transport is owned by the external agent.
+    """
+    return skulk_logging.external_log_pipe_enabled() or (
+        log_enabled and bool(ingest_url)
+    )
 
 
 def test_main_gate_activates_with_external_flag_alone(
@@ -170,5 +178,27 @@ def test_runtime_sync_gate_respects_legacy_path(
 ) -> None:
     """Without the env var, runtime gating still honors logging.enabled."""
     monkeypatch.delenv("SKULK_LOGGING_EXTERNAL", raising=False)
-    assert _runtime_sync_gate(log_enabled=True) is True
-    assert _runtime_sync_gate(log_enabled=False) is False
+    assert _runtime_sync_gate(log_enabled=True, ingest_url="http://x") is True
+    assert _runtime_sync_gate(log_enabled=False, ingest_url="http://x") is False
+
+
+def test_runtime_sync_clearing_ingest_url_disables_internal_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Internal mode: clearing ingest_url at runtime must disable shipping.
+
+    Regression guard for the case where an operator removes ingest_url
+    via a runtime config sync. The legacy contract requires shipping to
+    stop; without this, the in-process Vector subprocess would keep
+    shipping to the prior URL until Skulk is restarted.
+    """
+    monkeypatch.delenv("SKULK_LOGGING_EXTERNAL", raising=False)
+    assert _runtime_sync_gate(log_enabled=True, ingest_url="") is False
+
+
+def test_runtime_sync_external_mode_ignores_empty_ingest_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """External mode: ingest_url is owned by the agent, so empty is fine."""
+    monkeypatch.setenv("SKULK_LOGGING_EXTERNAL", "1")
+    assert _runtime_sync_gate(log_enabled=False, ingest_url="") is True

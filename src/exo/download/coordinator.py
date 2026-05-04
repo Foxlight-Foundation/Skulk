@@ -235,13 +235,15 @@ class DownloadCoordinator:
                 )
 
                 # External-shipper mode is install-level (env var set by
-                # the service wrapper) and overrides runtime sync.
-                log_enabled = external_log_pipe_enabled() or bool(
-                    logging_cfg.get("enabled", False)
+                # the service wrapper) and overrides runtime sync. In
+                # internal-subprocess mode (env var off), require both
+                # `enabled` and a non-empty `ingest_url` so clearing the
+                # URL at runtime disables shipping (legacy contract).
+                ingest_url_str = str(logging_cfg.get("ingest_url", ""))
+                log_enabled = external_log_pipe_enabled() or (
+                    bool(logging_cfg.get("enabled", False)) and bool(ingest_url_str)
                 )
-                set_structured_stdout(
-                    log_enabled, ingest_url=str(logging_cfg.get("ingest_url", ""))
-                )
+                set_structured_stdout(log_enabled, ingest_url=ingest_url_str)
         except Exception as exc:
             logger.warning(f"DownloadCoordinator: failed to sync config: {exc}")
 
