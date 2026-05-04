@@ -134,7 +134,7 @@ _VECTOR_CONFIG_PATH = (
 )
 
 
-def _external_log_pipe_enabled() -> bool:
+def external_log_pipe_enabled() -> bool:
     """Whether an external log shipper handles JSON transport.
 
     When ``SKULK_LOGGING_EXTERNAL`` is truthy (set by the launchd /
@@ -280,7 +280,7 @@ def logger_setup(
         #   2. Internal subprocess: spawn Vector and pipe JSON to its stdin.
         #   3. Disabled: structured_stdout=true with no ingest_url and no
         #      external flag is a no-op (operator hasn't picked a path).
-        if _external_log_pipe_enabled():
+        if external_log_pipe_enabled():
             transport_started = True
         elif ingest_url:
             transport_started = _start_vector(ingest_url)
@@ -312,7 +312,7 @@ def set_structured_stdout(enabled: bool, ingest_url: str = "") -> None:
     """
     global _json_sink_id  # noqa: PLW0603
     if enabled and _json_sink_id is None:
-        if _external_log_pipe_enabled():
+        if external_log_pipe_enabled():
             transport_started = True
         elif ingest_url:
             transport_started = _start_vector(ingest_url)

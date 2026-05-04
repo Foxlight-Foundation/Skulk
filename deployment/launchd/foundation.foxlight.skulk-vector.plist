@@ -9,13 +9,15 @@
          downstream sink or a Vector crash can't backpressure or kill
          the inference process. The wrapper sources ~/.skulk/skulk.env
          (same file as skulk) for EXO_LOGGING_INGEST_URL and friends,
-         then execs `vector --config deployment/logging/vector.yaml`,
-         which tails the skulk stdout log file. -->
+         then execs `vector --config deployment/logging/vector-external.yaml`,
+         which tails the skulk stdout log file.
+
+         The wrapper is exec'd directly (not via `bash -lc`) so a repo
+         path containing spaces or shell metacharacters does not break
+         tokenization. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
-        <string>-lc</string>
-        <string>exec __SKULK_REPO__/deployment/install/vector-startup.sh</string>
+        <string>__SKULK_REPO__/deployment/install/vector-startup.sh</string>
     </array>
 
     <key>WorkingDirectory</key>

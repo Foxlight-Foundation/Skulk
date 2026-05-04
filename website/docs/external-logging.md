@@ -105,35 +105,41 @@ These survive container restarts and image upgrades. To wipe them, `docker compo
 
 ## Step 2 — Point each Skulk node at the central stack
 
+The shipping process model differs between platforms. Both ship to the same central stack:
+
+- **macOS** runs Vector as a separate LaunchAgent (`foundation.foxlight.skulk-vector`) that tails Skulk's captured stdout file. Lifecycle is decoupled from Skulk — a slow VictoriaLogs cannot backpressure inference.
+- **Linux** runs Vector as an in-process subprocess that Skulk spawns when `logging.enabled: true` is set in `skulk.yaml`. JSON is piped directly into Vector's stdin via `deployment/logging/vector.yaml` (stdin source). This release does not include a separate `skulk-vector` systemd unit.
+
 On every node that's running Skulk:
 
-1. **Install Vector.** It's a single binary; instructions at [vector.dev](https://vector.dev/docs/setup/installation/). On macOS: `brew install vectordotdev/brew/vector`. On Debian/Ubuntu: `curl -1sLf 'https://repositories.timber.io/public/vector/cfg/setup/bash.deb.sh' | sudo -E bash && sudo apt install vector`.
+1. **Install Vector.** Single binary; instructions at [vector.dev](https://vector.dev/docs/setup/installation/). On macOS: `brew install vectordotdev/brew/vector`. On Debian/Ubuntu: `curl -1sLf 'https://repositories.timber.io/public/vector/cfg/setup/bash.deb.sh' | sudo -E bash && sudo apt install vector`.
 2. **Install the Skulk service** (if you haven't already):
 
    ```bash
-   deployment/install/install-launchd.sh    # macOS
-   deployment/install/install-systemd.sh    # Linux
+   deployment/install/install-launchd.sh    # macOS — installs both skulk + skulk-vector agents
+   deployment/install/install-systemd.sh    # Linux — installs skulk only
    ```
 
-   The default install includes the Vector log-shipper agent. If you previously installed with `--no-vector`, re-run without that flag.
-3. **Tell Vector where to ship.** Edit `~/.skulk/skulk.env` and set:
+   On macOS, pass `--no-vector` to skip the external Vector agent and fall back to the in-process subprocess model.
+3. **Tell the shipper where to ship.** Edit `~/.skulk/skulk.env` and set:
 
    ```bash
    EXO_LOGGING_INGEST_URL=http://<central-host>:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts
    ```
 
+   On Linux, also set `logging.enabled: true` and `logging.ingest_url: <same-url>` in `skulk.yaml` so Skulk knows to spawn its in-process Vector subprocess.
+
    The query parameters tell VictoriaLogs which fields to use as stream identifiers (so `node_id` and `component` become indexed dimensions).
-4. **Make sure Skulk is emitting JSON.** This is on by default when you install via the wrapper (`SKULK_LOGGING_EXTERNAL=1` in the env file). Skulk writes JSON to stdout; launchd captures it to `~/.skulk/logs/skulk.stdout.log`.
-5. **Restart both agents** so they pick up the new ingest URL:
+4. **Make sure Skulk is emitting JSON.** On macOS this is on by default when you install via the wrapper (`SKULK_LOGGING_EXTERNAL=1` in the env file). On Linux this is gated by `logging.enabled` in `skulk.yaml`.
+5. **Restart so the new config is picked up:**
 
    ```bash
-   # macOS
+   # macOS — restart both agents
    launchctl kickstart -k gui/$(id -u)/foundation.foxlight.skulk
    launchctl kickstart -k gui/$(id -u)/foundation.foxlight.skulk-vector
 
-   # Linux
+   # Linux — Skulk respawns its Vector subprocess on restart
    systemctl --user restart skulk
-   systemctl --user restart skulk-vector
    ```
 
 That's it for that node. Repeat on each one.
@@ -206,14 +212,14 @@ After editing, restart the relevant agents (the table in the [service guide](./r
 
 ### "Logs are flowing on one node but not another"
 
-Check that node's Vector agent:
+Check that node's Vector output:
 
 ```bash
-# macOS
+# macOS — separate LaunchAgent has its own log
 tail -f ~/.skulk/logs/vector.stderr.log
 
-# Linux
-journalctl --user -u skulk-vector -f
+# Linux — Vector runs as a Skulk subprocess; its output is folded into Skulk's
+journalctl --user -u skulk -f | grep -i vector
 ```
 
 Common causes:

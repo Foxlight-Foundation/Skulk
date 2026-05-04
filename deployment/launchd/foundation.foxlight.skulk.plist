@@ -9,12 +9,15 @@
          so the failure policy (best-effort git pull / uv sync, hard
          requirement on a built dashboard) can be edited without
          re-installing the agent. The wrapper sources ~/.skulk/skulk.env
-         for operator-configurable env vars. -->
+         for operator-configurable env vars.
+
+         The wrapper is exec'd directly (not via `bash -lc`) so a repo
+         path containing spaces or shell metacharacters does not break
+         tokenization. PATH and other env vars are supplied via the
+         EnvironmentVariables block below. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
-        <string>-lc</string>
-        <string>exec __SKULK_REPO__/deployment/install/skulk-startup.sh</string>
+        <string>__SKULK_REPO__/deployment/install/skulk-startup.sh</string>
     </array>
 
     <key>WorkingDirectory</key>

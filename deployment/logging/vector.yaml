@@ -1,67 +1,34 @@
-# Vector configuration for Skulk log shipping.
+# Vector configuration for the in-process (internal-subprocess) shipper.
 #
-# Vector tails Skulk's stdout log file (where launchd / systemd capture
-# the JSON log stream) and ships each line to VictoriaLogs. Running as
-# a separate process from Skulk decouples lifecycles: a Vector crash or
-# slow downstream sink cannot backpressure or kill the inference engine.
+# This config is used when Skulk spawns Vector as a child process and
+# pipes structured JSON to its stdin. That path is the default on Linux
+# systemd installs and on macOS installs that opt out of the external
+# Vector LaunchAgent (`install-launchd.sh --no-vector`).
 #
-# Operator usage on macOS / Linux:
-#   - Install via deployment/install/install-launchd.sh (macOS) or the
-#     systemd installer (Linux). A separate `skulk-vector` agent runs
-#     this config in a long-lived loop.
+# For the *external* shipper (a separate LaunchAgent that tails Skulk's
+# captured stdout file and survives across Skulk restarts), see
+# `deployment/logging/vector-external.yaml`.
 #
-# Operator usage standalone (development):
-#   - Run Skulk normally so its stdout lands in ~/.skulk/logs/skulk.stdout.log
-#     (the LaunchAgent / unit handles this; for ad-hoc runs, redirect
-#     manually).
-#   - In another terminal: `vector --config deployment/logging/vector.yaml`
+# Vector reads structured JSON from stdin and ships it to VictoriaLogs.
+# Run Skulk piped through Vector for an ad-hoc dev setup:
 #
-# Operator-tunable env vars (in ~/.skulk/skulk.env or your shell):
-#   EXO_LOGGING_INGEST_URL   Where to ship logs (defaults to the in-house
-#                            VictoriaLogs endpoint on the R720).
-#   EXO_VECTOR_DATA_DIR      Where Vector keeps its on-disk buffer and
-#                            file-position checkpoints (so it resumes
-#                            cleanly after a restart).
-#   SKULK_LOG_FILE           Override the source file path. Defaults to
-#                            ~/.skulk/logs/skulk.stdout.log.
+#   uv run skulk 2>/dev/tty | vector --config deployment/logging/vector.yaml
+#
+# Vector's disk buffer lives under data_dir (defaults to ~/.skulk/vector).
 
 data_dir: ${EXO_VECTOR_DATA_DIR:-${HOME}/.skulk/vector}
 
 sources:
-  skulk_log:
-    type: file
-    include:
-      - ${SKULK_LOG_FILE:-${HOME}/.skulk/logs/skulk.stdout.log}
-    # Read from the beginning on first start so we ship the full log,
-    # then resume from the checkpoint stored under data_dir on restart.
-    read_from: beginning
-    # Skip files that haven't been touched in a day; protects against
-    # picking up rotated archives if log rotation is added later.
-    ignore_older_secs: 86400
-
-transforms:
-  # Parse each line as JSON. Lines that aren't JSON (e.g. a crash
-  # traceback printed before the JSON logger initializes, or a stray
-  # human-readable line) are dropped rather than indexed as malformed
-  # events.
-  parse_json:
-    type: remap
-    inputs:
-      - skulk_log
-    drop_on_error: true
-    drop_on_abort: true
-    source: |
-      parsed, err = parse_json(.message)
-      if err != null {
-        abort
-      }
-      . = parsed
+  skulk_stdout:
+    type: stdin
+    decoding:
+      codec: json
 
 sinks:
   victorialogs:
     type: http
     inputs:
-      - parse_json
+      - skulk_stdout
     uri: ${EXO_LOGGING_INGEST_URL:-http://192.168.0.118:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts}
     encoding:
       codec: json

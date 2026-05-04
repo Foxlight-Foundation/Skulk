@@ -15,7 +15,7 @@ set -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ENV_FILE="${SKULK_ENV_FILE:-$HOME/.skulk/skulk.env}"
-CONFIG="$REPO_ROOT/deployment/logging/vector.yaml"
+CONFIG="$REPO_ROOT/deployment/logging/vector-external.yaml"
 
 if [[ -f "$ENV_FILE" ]]; then
     set -a

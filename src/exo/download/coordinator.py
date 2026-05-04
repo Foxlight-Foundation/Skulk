@@ -229,10 +229,15 @@ class DownloadCoordinator:
             # Apply logging config — enable/disable structured stdout
             logging_cfg = _coerce_json_object(raw.get("logging"))
             if logging_cfg:
-                from exo.shared.logging import set_structured_stdout
+                from exo.shared.logging import (
+                    external_log_pipe_enabled,
+                    set_structured_stdout,
+                )
 
-                log_enabled = bool(logging_cfg.get("enabled", False)) and bool(
-                    logging_cfg.get("ingest_url")
+                # External-shipper mode is install-level (env var set by
+                # the service wrapper) and overrides runtime sync.
+                log_enabled = external_log_pipe_enabled() or bool(
+                    logging_cfg.get("enabled", False)
                 )
                 set_structured_stdout(
                     log_enabled, ingest_url=str(logging_cfg.get("ingest_url", ""))

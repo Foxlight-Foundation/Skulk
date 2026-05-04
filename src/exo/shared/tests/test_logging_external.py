@@ -120,3 +120,55 @@ def test_set_structured_stdout_honors_external_flag(
 
     assert skulk_logging._json_sink_id is None
     stop_vector.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Production call-site gating: callers must allow external mode to activate
+# the JSON sink even when `logging.enabled=false` and `ingest_url=""` in
+# skulk.yaml. These tests reproduce the gating logic from main.py,
+# api/main.py, and download/coordinator.py to catch regressions of the
+# "external mode is unreachable through the real startup path" bug.
+# ---------------------------------------------------------------------------
+
+
+def _main_gate(log_enabled: bool) -> bool:
+    """Boot-time gate from src/exo/main.py."""
+    return skulk_logging.external_log_pipe_enabled() or log_enabled
+
+
+def _runtime_sync_gate(log_enabled: bool) -> bool:
+    """Runtime gate from api/main.py and download/coordinator.py."""
+    return skulk_logging.external_log_pipe_enabled() or log_enabled
+
+
+def test_main_gate_activates_with_external_flag_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SKULK_LOGGING_EXTERNAL=1 alone must satisfy main.py's boot gate."""
+    monkeypatch.setenv("SKULK_LOGGING_EXTERNAL", "1")
+    assert _main_gate(log_enabled=False) is True
+
+
+def test_main_gate_inactive_without_either(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No env var, no logging.enabled → no JSON sink (legacy behavior preserved)."""
+    monkeypatch.delenv("SKULK_LOGGING_EXTERNAL", raising=False)
+    assert _main_gate(log_enabled=False) is False
+
+
+def test_runtime_sync_gate_activates_with_external_flag_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dashboard sync of `enabled=false` cannot disable an env-var-driven sink."""
+    monkeypatch.setenv("SKULK_LOGGING_EXTERNAL", "1")
+    assert _runtime_sync_gate(log_enabled=False) is True
+
+
+def test_runtime_sync_gate_respects_legacy_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the env var, runtime gating still honors logging.enabled."""
+    monkeypatch.delenv("SKULK_LOGGING_EXTERNAL", raising=False)
+    assert _runtime_sync_gate(log_enabled=True) is True
+    assert _runtime_sync_gate(log_enabled=False) is False

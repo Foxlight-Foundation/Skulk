@@ -109,7 +109,7 @@ If it doesn't, jump to [Things that go wrong](#things-that-go-wrong).
 | Check if it's running | `launchctl print gui/$(id -u)/foundation.foxlight.skulk \| grep "state ="` | `systemctl --user status skulk` |
 | Watch the logs live | `tail -f ~/.skulk/logs/skulk.stderr.log` | `journalctl --user -u skulk -f` |
 | Watch boot-time updates (git pull, dashboard build) | `tail -f ~/.skulk/logs/skulk.prep.log` | `tail -f ~/.skulk/logs/skulk.prep.log` |
-| Watch Vector log-shipper output | `tail -f ~/.skulk/logs/vector.stderr.log` | `journalctl --user -u skulk-vector -f` |
+| Watch Vector log-shipper output | `tail -f ~/.skulk/logs/vector.stderr.log` (separate launchd agent) | (in-process — read from skulk's main log via `journalctl --user -u skulk -f`) |
 | Restart it | `launchctl kickstart -k gui/$(id -u)/foundation.foxlight.skulk` | `systemctl --user restart skulk` |
 | Stop it (stays stopped) | `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/foundation.foxlight.skulk.plist` | `systemctl --user stop skulk` |
 | Start it back up | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/foundation.foxlight.skulk.plist` | `systemctl --user start skulk` |
@@ -151,7 +151,7 @@ To disable auto-update entirely, set `SKULK_AUTO_UPDATE=0` in `~/.skulk/skulk.en
 
 ### The Vector log-shipper agent
 
-The installer also installs a second agent (`foundation.foxlight.skulk-vector`) that tails `~/.skulk/logs/skulk.stdout.log` and ships log lines to a central log store (VictoriaLogs by default). This is **separate from Skulk on purpose** — if Vector crashes or the central store is unreachable, Skulk keeps running normally.
+**macOS**: The installer also installs a second agent (`foundation.foxlight.skulk-vector`) that tails `~/.skulk/logs/skulk.stdout.log` and ships log lines to a central log store (VictoriaLogs by default). This is **separate from Skulk on purpose** — if Vector crashes or the central store is unreachable, Skulk keeps running normally.
 
 You only need this if you want centralized cluster-wide logs. To skip it:
 
@@ -164,6 +164,8 @@ To configure where logs are shipped, edit `EXO_LOGGING_INGEST_URL` in `~/.skulk/
 ```bash
 launchctl kickstart -k gui/$(id -u)/foundation.foxlight.skulk-vector
 ```
+
+**Linux**: There's no separate Vector unit yet on Linux — the systemd installer in this release installs only `skulk.service`. When you set `logging.enabled: true` and `logging.ingest_url: ...` in `skulk.yaml`, Skulk spawns Vector as an in-process subprocess and pipes JSON logs to it directly (using `deployment/logging/vector.yaml`). The same VictoriaLogs central stack works for both platforms; only the shipping process model differs.
 
 For full setup of the central log store (VictoriaLogs + Grafana), see the [External logging guide](./external-logging.md).
 
@@ -215,13 +217,16 @@ If the dashboard still doesn't load, check the logs (see the table above). Look 
 
 ### "Vector keeps crashing / no logs are reaching the central store"
 
-The Vector agent is independent — Skulk runs fine even if Vector is broken. To diagnose:
+**macOS** (launchd Vector agent): The agent is independent — Skulk runs fine even if Vector is broken. To diagnose:
 
 ```bash
-# macOS
 tail -f ~/.skulk/logs/vector.stderr.log
-# Linux
-journalctl --user -u skulk-vector -f
+```
+
+**Linux** (in-process Vector subprocess): Vector runs as a child of Skulk and shares its log stream:
+
+```bash
+journalctl --user -u skulk -f | grep -i vector
 ```
 
 Common causes:
