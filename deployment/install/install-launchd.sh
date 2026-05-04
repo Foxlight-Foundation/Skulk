@@ -92,10 +92,31 @@ mkdir -p "$LOG_DIR" "$ENV_TARGET_DIR" "$TARGET_DIR"
 
 # First-install env file. Never overwrite the operator's edits on a
 # re-run; they can diff against the template if they want new defaults.
+#
+# When --no-vector is in effect, flip SKULK_LOGGING_EXTERNAL=0 in the
+# freshly copied file so the in-process Vector subprocess is the
+# transport. Leaving it at 1 with no external agent installed would
+# silently route logs nowhere (Skulk skips _start_vector under
+# SKULK_LOGGING_EXTERNAL=1, but no external shipper is running either).
 if [[ ! -f "$ENV_TARGET" ]]; then
     cp "$ENV_TEMPLATE" "$ENV_TARGET"
-    echo "Created env file: $ENV_TARGET"
+    if [[ "$INSTALL_VECTOR" != "1" ]]; then
+        # macOS sed needs an empty backup-suffix arg; clean it up after.
+        sed -i.bak 's/^SKULK_LOGGING_EXTERNAL=1$/SKULK_LOGGING_EXTERNAL=0/' "$ENV_TARGET"
+        rm -f "$ENV_TARGET.bak"
+        echo "Created env file: $ENV_TARGET (SKULK_LOGGING_EXTERNAL=0 — using in-process Vector subprocess)"
+    else
+        echo "Created env file: $ENV_TARGET (SKULK_LOGGING_EXTERNAL=1 — using external Vector agent)"
+    fi
     echo "  (edit this to customize cluster namespace, debug flags, ingest URL, etc.)"
+elif [[ "$INSTALL_VECTOR" != "1" ]] && grep -q '^SKULK_LOGGING_EXTERNAL=1$' "$ENV_TARGET"; then
+    # Re-run with --no-vector against an existing env file that still
+    # says external mode. Don't overwrite the operator's edits, but
+    # call out the misconfig so they can fix it.
+    echo "warning: --no-vector was specified, but $ENV_TARGET still has SKULK_LOGGING_EXTERNAL=1." >&2
+    echo "         Without the launchd Vector agent, this means Skulk emits JSON to stdout but" >&2
+    echo "         nothing ships it. To use the in-process subprocess shipper instead, edit" >&2
+    echo "         $ENV_TARGET and change SKULK_LOGGING_EXTERNAL to 0, then restart the service." >&2
 else
     echo "Env file already exists: $ENV_TARGET (left untouched)"
     echo "  (compare with $ENV_TEMPLATE if you want to pick up new defaults)"
