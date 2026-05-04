@@ -1177,7 +1177,7 @@ class API:
             description=(
                 "Return whether tailscaled is running on this node and, if so, the node's "
                 "Tailscale IP, hostname, DNS name, and tailnet. "
-                "Pass ?node_id=<id> to proxy the request to a specific cluster node."
+                "Pass the node_id query parameter to proxy the request to a specific cluster node."
             ),
         )(self.get_tailscale_status)
         self.app.get(
