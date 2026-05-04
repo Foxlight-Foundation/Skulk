@@ -1186,8 +1186,8 @@ class API:
             summary="Get remote access info",
             description=(
                 "Return the preferred URL, local LAN access, and Tailscale overlay access for "
-                "this node. The preferred_url is the Tailscale URL when tailscaled is running, "
-                "otherwise the LAN URL. operator_url appends /operator and is suitable for QR "
+                "this node. preferredUrl is the Tailscale URL when tailscaled is running, "
+                "otherwise the LAN URL. operatorUrl appends /operator and is suitable for QR "
                 "code generation so mobile users land directly on the operator panel."
             ),
         )(self.get_remote_access)
@@ -4504,9 +4504,9 @@ class API:
         """Return aggregated remote access information for the local node.
 
         Combines local LAN access and Tailscale overlay access into a single
-        snapshot.  The ``preferred_url`` field gives the best address to reach
+        snapshot.  The ``preferredUrl`` field gives the best address to reach
         this node — Tailscale URL when tailscaled is running, otherwise the
-        LAN URL.  ``operator_url`` appends ``/operator`` and is suitable for
+        LAN URL.  ``operatorUrl`` appends ``/operator`` and is suitable for
         QR code generation.
         """
 
