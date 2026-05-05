@@ -493,13 +493,43 @@ def _json_request_body(schema: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _is_loopback_client(request: Request) -> bool:
-    host = request.client.host if request.client else ""
+def _is_loopback_host(host: str) -> bool:
     if host in {"localhost", "testclient"}:
         return True
     with contextlib.suppress(ValueError):
         return ipaddress.ip_address(host).is_loopback
     return False
+
+
+def _forwarded_host_values(value: str) -> Sequence[str]:
+    hosts: list[str] = []
+    for segment in value.split(","):
+        for part in segment.split(";"):
+            key, separator, raw = part.strip().partition("=")
+            if separator and key.lower() == "for":
+                hosts.append(raw.strip().strip('"').strip("[]"))
+    return tuple(hosts)
+
+
+def _has_non_loopback_forwarded_client(request: Request) -> bool:
+    candidates: list[str] = []
+    x_forwarded_for = request.headers.get("x-forwarded-for")
+    if x_forwarded_for:
+        candidates.extend(host.strip() for host in x_forwarded_for.split(","))
+    x_real_ip = request.headers.get("x-real-ip")
+    if x_real_ip:
+        candidates.append(x_real_ip.strip())
+    forwarded = request.headers.get("forwarded")
+    if forwarded:
+        candidates.extend(_forwarded_host_values(forwarded))
+    return any(host and not _is_loopback_host(host) for host in candidates)
+
+
+def _is_loopback_client(request: Request) -> bool:
+    host = request.client.host if request.client else ""
+    if not _is_loopback_host(host):
+        return False
+    return not _has_non_loopback_forwarded_client(request)
 
 
 class API:

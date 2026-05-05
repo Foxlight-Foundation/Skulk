@@ -128,6 +128,56 @@ def test_pairing_session_creation_requires_operator_token_for_nonlocal_request(
     )
 
 
+def test_pairing_session_creation_rejects_forwarded_nonlocal_loopback_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api = _build_api(tmp_path)
+    client = TestClient(api.app)
+    monkeypatch.setattr(
+        remote_access_module,
+        "query_tailscale_status",
+        AsyncMock(return_value=_tailscale_running()),
+    )
+
+    response = client.post(
+        "/v1/companion/pairing-sessions",
+        headers={"X-Forwarded-For": "203.0.113.10"},
+        json={},
+    )
+
+    assert response.status_code == 403
+    assert (
+        cast(dict[str, object], _json_object(response)["error"])["message"]
+        == "operator_auth_required"
+    )
+
+
+def test_pairing_session_creation_accepts_forwarded_nonlocal_request_with_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api = _build_api(tmp_path)
+    client = TestClient(api.app)
+    monkeypatch.setenv("SKULK_COMPANION_PAIRING_TOKEN", "operator-token")
+    monkeypatch.setattr(
+        remote_access_module,
+        "query_tailscale_status",
+        AsyncMock(return_value=_tailscale_running()),
+    )
+
+    response = client.post(
+        "/v1/companion/pairing-sessions",
+        headers={
+            "X-Forwarded-For": "203.0.113.10",
+            "X-Skulk-Operator-Token": "operator-token",
+        },
+        json={},
+    )
+
+    assert response.status_code == 200
+
+
 def test_pairing_session_creation_accepts_configured_operator_token(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
