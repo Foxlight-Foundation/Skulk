@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import QRCode from 'qrcode';
 import styled from 'styled-components';
 import { FiRefreshCw } from 'react-icons/fi';
 import { Button } from '../common/Button';
+import { QrCode } from '../common/QrCode';
 import { useRemoteAccess, type RemoteAccessInfo } from '../../hooks/useRemoteAccess';
 
 const TAILSCALE_DOCS_URL = 'https://foxlight-foundation.github.io/Skulk/tailscale/';
@@ -28,7 +28,7 @@ interface CompanionPairingSessionResponse {
 type SessionState =
   | { status: 'idle' | 'loading' }
   | { status: 'error'; message: string }
-  | { status: 'ready'; payload: CompanionPairingQrPayload; qrDataUrl: string };
+  | { status: 'ready'; payload: CompanionPairingQrPayload };
 
 const Scroll = styled.div`
   min-height: 0;
@@ -153,15 +153,6 @@ const QrWrap = styled.div`
   flex-wrap: wrap;
 `;
 
-const QrImage = styled.img`
-  width: 220px;
-  height: 220px;
-  border-radius: ${({ theme }) => theme.radii.md};
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  background: #ffffff;
-  padding: 10px;
-`;
-
 const Instructions = styled.ol`
   margin: 0;
   padding-left: 18px;
@@ -240,12 +231,8 @@ export function PairingTab() {
       if (options.showLoading ?? true) setSession({ status: 'loading' });
       try {
         const payload = await createPairingSession(signal);
-        const qrDataUrl = await QRCode.toDataURL(JSON.stringify(payload), {
-          width: 220,
-          margin: 1,
-        });
         if (!signal.aborted && mountedRef.current) {
-          setSession({ status: 'ready', payload, qrDataUrl });
+          setSession({ status: 'ready', payload });
         }
       } catch (error) {
         if (signal.aborted || !mountedRef.current) return;
@@ -385,7 +372,10 @@ export function PairingTab() {
 
         {session.status === 'ready' && (
           <QrWrap>
-            <QrImage src={session.qrDataUrl} alt="SkulkOps companion pairing QR code" />
+            <QrCode
+              value={JSON.stringify(session.payload)}
+              alt="SkulkOps companion pairing QR code"
+            />
             <div>
               <Instructions>
                 <li>Open SkulkOps on your phone.</li>
