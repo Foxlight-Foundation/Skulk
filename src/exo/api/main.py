@@ -1,6 +1,8 @@
 import base64
 import contextlib
 import hashlib
+import hmac
+import ipaddress
 import json
 import os
 import platform
@@ -489,6 +491,15 @@ def _json_request_body(schema: dict[str, object]) -> dict[str, object]:
             },
         }
     }
+
+
+def _is_loopback_client(request: Request) -> bool:
+    host = request.client.host if request.client else ""
+    if host in {"localhost", "testclient"}:
+        return True
+    with contextlib.suppress(ValueError):
+        return ipaddress.ip_address(host).is_loopback
+    return False
 
 
 class API:
@@ -4573,8 +4584,9 @@ class API:
         )
 
     async def create_companion_pairing_session(
-        self, payload: CompanionPairingSessionRequest
+        self, request: Request, payload: CompanionPairingSessionRequest
     ) -> CompanionPairingSessionResponse:
+        self._require_companion_pairing_operator(request)
         remote_access = await self.get_remote_access()
         return self._companion_pairing.create_session(
             request=payload,
@@ -4619,6 +4631,20 @@ class API:
         if not required_scopes.issubset(set(credential.scopes)):
             raise HTTPException(status_code=403, detail="insufficient_scope")
         return credential
+
+    def _require_companion_pairing_operator(self, request: Request) -> None:
+        if _is_loopback_client(request):
+            return
+
+        expected = preferred_env_value(
+            "SKULK_COMPANION_PAIRING_TOKEN",
+            "EXO_COMPANION_PAIRING_TOKEN",
+        )
+        supplied = request.headers.get("x-skulk-operator-token")
+        if expected and supplied and hmac.compare_digest(expected, supplied):
+            return
+
+        raise HTTPException(status_code=403, detail="operator_auth_required")
 
     def _recent_companion_events(self, *, limit: int) -> Sequence[Event]:
         if self._event_log is None or limit <= 0:

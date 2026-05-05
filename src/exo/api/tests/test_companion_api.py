@@ -9,9 +9,11 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 
 import exo.api.companion as companion_module
+import exo.api.main as api_main
 import exo.connectivity.remote_access as remote_access_module
 from exo.api.companion import CompanionPairingManager
 from exo.api.main import API
@@ -70,6 +72,10 @@ def _state_with_lan_ip(node_id: str, ip: str) -> State:
     )
 
 
+def _non_loopback_request(_: Request) -> bool:
+    return False
+
+
 def test_create_pairing_session_returns_companion_qr_payload(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -98,6 +104,72 @@ def test_create_pairing_session_returns_companion_qr_payload(
     assert payload["lanUrl"] == "http://192.168.1.5:52415"
     assert payload["tailscaleUrl"] == "http://my-node.tailnet-abc.ts.net:52415"
     assert str(payload["exchangeUrl"]).endswith("/exchange")
+
+
+def test_pairing_session_creation_requires_operator_token_for_nonlocal_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api = _build_api(tmp_path)
+    client = TestClient(api.app)
+    monkeypatch.setattr(api_main, "_is_loopback_client", _non_loopback_request)
+    monkeypatch.setattr(
+        remote_access_module,
+        "query_tailscale_status",
+        AsyncMock(return_value=_tailscale_running()),
+    )
+
+    response = client.post("/v1/companion/pairing-sessions", json={})
+
+    assert response.status_code == 403
+    assert (
+        cast(dict[str, object], _json_object(response)["error"])["message"]
+        == "operator_auth_required"
+    )
+
+
+def test_pairing_session_creation_accepts_configured_operator_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api = _build_api(tmp_path)
+    client = TestClient(api.app)
+    monkeypatch.setattr(api_main, "_is_loopback_client", _non_loopback_request)
+    monkeypatch.setenv("SKULK_COMPANION_PAIRING_TOKEN", "operator-token")
+    monkeypatch.setattr(
+        remote_access_module,
+        "query_tailscale_status",
+        AsyncMock(return_value=_tailscale_running()),
+    )
+
+    response = client.post(
+        "/v1/companion/pairing-sessions",
+        headers={"X-Skulk-Operator-Token": "operator-token"},
+        json={},
+    )
+
+    assert response.status_code == 200
+    assert cast(dict[str, object], _json_object(response)["qrPayload"])[
+        "pairingNonce"
+    ]
+
+
+def test_companion_cluster_id_is_derived_from_persisted_cluster_key(
+    tmp_path: Path,
+) -> None:
+    key_path = tmp_path / "companion_cluster.key"
+    first = CompanionPairingManager(
+        node_id=NodeId("first-node"),
+        key_path=key_path,
+        credentials_path=tmp_path / "first_credentials.json",
+    )
+    second = CompanionPairingManager(
+        node_id=NodeId("second-node"),
+        key_path=key_path,
+        credentials_path=tmp_path / "second_credentials.json",
+    )
+
+    assert first.cluster_id == second.cluster_id
 
 
 def test_pairing_exchange_returns_read_only_credential(

@@ -213,7 +213,7 @@ class CompanionPairingManager:
 
     @property
     def cluster_id(self) -> str:
-        digest = hashlib.sha256(f"skulk-cluster:{self._node_id}".encode()).hexdigest()
+        digest = hashlib.sha256(self.cluster_public_key.encode()).hexdigest()
         return digest[:24]
 
     @property
