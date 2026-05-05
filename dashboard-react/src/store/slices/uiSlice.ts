@@ -3,7 +3,7 @@ import type { NavRoute } from '../../components/layout/HeaderNav';
 import type { ThemeName } from '../../theme';
 
 /** Tabs available inside the observability panel. */
-export type ObservabilityTab = 'live' | 'node' | 'traces';
+export type ObservabilityTab = 'live' | 'node' | 'traces' | 'pairing';
 
 /** Default width of the right-side observability panel, in pixels. */
 const OBSERVABILITY_WIDTH_DEFAULT = 560;

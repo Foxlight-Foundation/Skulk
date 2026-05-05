@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives.serialization import (
     PrivateFormat,
     PublicFormat,
 )
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from exo.connectivity.remote_access import RemoteAccessInfo
 from exo.shared.constants import (
@@ -354,9 +354,12 @@ class CompanionPairingManager:
     def _load_credentials(self) -> dict[str, CompanionCredential]:
         if not self._credentials_path.exists():
             return {}
-        store = CompanionCredentialStore.model_validate_json(
-            self._credentials_path.read_text()
-        )
+        try:
+            store = CompanionCredentialStore.model_validate_json(
+                self._credentials_path.read_text()
+            )
+        except (OSError, ValidationError):
+            return {}
         return {
             record.credential_id: CompanionCredential(
                 credential_id=record.credential_id,

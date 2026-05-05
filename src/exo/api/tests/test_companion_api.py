@@ -407,3 +407,18 @@ def test_companion_credential_hash_survives_manager_restart(
         "models:read",
         "events:read",
     )
+
+
+def test_corrupted_companion_credential_store_does_not_block_startup(
+    tmp_path: Path,
+) -> None:
+    credentials_path = tmp_path / "companion_credentials.json"
+    credentials_path.write_text("{")
+
+    manager = CompanionPairingManager(
+        node_id=NodeId("local-node"),
+        key_path=tmp_path / "companion_cluster.key",
+        credentials_path=credentials_path,
+    )
+
+    assert manager.revoke_credential("missing") is False
