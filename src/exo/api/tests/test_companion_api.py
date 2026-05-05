@@ -472,3 +472,17 @@ def test_corrupted_companion_credential_store_does_not_block_startup(
     )
 
     assert manager.revoke_credential("missing") is False
+
+
+def test_corrupted_companion_cluster_key_is_regenerated(tmp_path: Path) -> None:
+    key_path = tmp_path / "companion_cluster.key"
+    key_path.write_bytes(b"not-an-ed25519-key")
+
+    manager = CompanionPairingManager(
+        node_id=NodeId("local-node"),
+        key_path=key_path,
+        credentials_path=tmp_path / "companion_credentials.json",
+    )
+
+    assert manager.cluster_public_key.startswith("ed25519:")
+    assert key_path.stat().st_size == 32

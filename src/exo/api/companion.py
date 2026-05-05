@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import secrets
@@ -339,7 +340,17 @@ class CompanionPairingManager:
 
     def _load_or_create_cluster_key(self) -> Ed25519PrivateKey:
         if self._key_path.exists():
-            return Ed25519PrivateKey.from_private_bytes(self._key_path.read_bytes())
+            try:
+                private_key = Ed25519PrivateKey.from_private_bytes(
+                    self._key_path.read_bytes()
+                )
+            except (OSError, ValueError):
+                with contextlib.suppress(OSError):
+                    self._key_path.unlink()
+            else:
+                with contextlib.suppress(OSError):
+                    self._key_path.chmod(0o600)
+                return private_key
         private_key = Ed25519PrivateKey.generate()
         private_bytes = private_key.private_bytes(
             encoding=Encoding.Raw,
