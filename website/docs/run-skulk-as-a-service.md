@@ -12,6 +12,8 @@ Make Skulk start when your computer boots, and restart itself if it ever crashes
 
 - Skulk starts automatically — no more typing `uv run skulk` every time you reboot
 - If Skulk crashes, it comes back up on its own
+- Skulk pulls fresh code, syncs Python deps, and rebuilds the dashboard at every boot (you can turn this off with one line in a config file)
+- A separate Vector log-shipper agent forwards logs to your central log store (you can turn this off too)
 - You'll know exactly how to check it's running, see logs, restart it, and turn it off
 
 About 5 minutes per machine. No coding. No sudo for the standard install.
@@ -36,7 +38,13 @@ Open Terminal, `cd` into your Skulk folder, then run:
 deployment/install/install-launchd.sh
 ```
 
-The script does everything for you. When it finishes (a few seconds), check it's running:
+The script does everything for you:
+
+- Installs the **Skulk** LaunchAgent (`foundation.foxlight.skulk`) — the actual service.
+- Installs the **Vector log-shipper** LaunchAgent (`foundation.foxlight.skulk-vector`) — forwards logs to your central log store. Skip this with `--no-vector` if you don't run centralized logging.
+- Copies an env file to `~/.skulk/skulk.env` on the first install. This is where you customize behavior; re-running the installer never overwrites your edits.
+
+When it finishes (a few seconds), check it's running:
 
 ```bash
 launchctl print gui/$(id -u)/foundation.foxlight.skulk | grep "state ="
@@ -50,6 +58,12 @@ state = running
 
 **That's it.** Skulk will start automatically the next time you log in, and will restart itself if it ever crashes.
 
+If you don't want the log shipper, install with:
+
+```bash
+deployment/install/install-launchd.sh --no-vector
+```
+
 ### Linux
 
 Open a terminal, `cd` into your Skulk folder, then run:
@@ -58,7 +72,13 @@ Open a terminal, `cd` into your Skulk folder, then run:
 deployment/install/install-systemd.sh
 ```
 
-The script does everything for you. When it finishes (a few seconds), check it's running:
+The script does everything for you:
+
+- Installs the **Skulk** systemd user unit (`skulk.service`).
+- Copies an env file to `~/.skulk/skulk.env` on the first install. This is where you customize behavior; re-running the installer never overwrites your edits.
+- Defaults to `SKULK_LOGGING_EXTERNAL=0` (in-process Vector subprocess shipper) since this release does not include a separate `skulk-vector` systemd unit.
+
+When it finishes (a few seconds), check it's running:
 
 ```bash
 systemctl --user status skulk
@@ -94,25 +114,86 @@ If it doesn't, jump to [Things that go wrong](#things-that-go-wrong).
 | --- | --- | --- |
 | Check if it's running | `launchctl print gui/$(id -u)/foundation.foxlight.skulk \| grep "state ="` | `systemctl --user status skulk` |
 | Watch the logs live | `tail -f ~/.skulk/logs/skulk.stderr.log` | `journalctl --user -u skulk -f` |
+| Watch boot-time updates (git pull, dashboard build) | `tail -f ~/.skulk/logs/skulk.prep.log` | `tail -f ~/.skulk/logs/skulk.prep.log` |
+| Watch Vector log-shipper output | `tail -f ~/.skulk/logs/vector.stderr.log` (separate launchd agent) | (in-process — read from skulk's main log via `journalctl --user -u skulk -f`) |
 | Restart it | `launchctl kickstart -k gui/$(id -u)/foundation.foxlight.skulk` | `systemctl --user restart skulk` |
 | Stop it (stays stopped) | `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/foundation.foxlight.skulk.plist` | `systemctl --user stop skulk` |
 | Start it back up | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/foundation.foxlight.skulk.plist` | `systemctl --user start skulk` |
 
-### Updating Skulk after `git pull`
+### Customizing how the service runs (`~/.skulk/skulk.env`)
 
-Pull the new code, rebuild the dashboard, then restart the service so it picks up the changes:
+The installer puts a plain-text env file at `~/.skulk/skulk.env`. Open it in any editor — every line is `KEY=value` and the comments explain what each setting does. After saving, restart the service to pick up your changes:
+
+```bash
+# macOS
+launchctl kickstart -k gui/$(id -u)/foundation.foxlight.skulk
+
+# Linux
+systemctl --user restart skulk
+```
+
+Common things to change:
+
+| Setting | What it does | Default |
+| --- | --- | --- |
+| `SKULK_AUTO_UPDATE` | `1` = auto-update on every boot, `0` = run whatever's already on disk | `1` |
+| `SKULK_VERBOSITY` | Verbosity flag passed to skulk. `-v` is normal verbose, `-vv` is debug, empty string is info-only | `-v` |
+| `SKULK_LIBP2P_NAMESPACE` | Cluster namespace — nodes only join clusters with the same value. Use a unique value per cluster | `foxlight-main` |
+| `EXO_LOGGING_INGEST_URL` | Where Vector ships logs (only relevant if you have the Vector agent installed) | the in-house VictoriaLogs endpoint |
+
+The env file you edit is **yours** — Skulk's `git pull` only updates the template at `deployment/install/skulk.env.example`. Diff against that template if you ever want to pick up a new default.
+
+### Auto-update on boot — what happens and how to turn it off
+
+Every time the service starts (boot, manual restart, post-crash relaunch), it runs through this sequence **before** starting Skulk itself:
+
+1. **`git pull --ff-only`** — pulls new commits if any. Failure (offline, dirty tree, fast-forward not possible) is logged and ignored; the service boots whatever revision is already checked out.
+2. **`uv sync`** — refreshes the Python virtualenv to match the lockfile. Failure (PyPI unreachable, wheel build error) is logged and ignored; the service boots with the current venv.
+3. **`npm install && npm run build`** in `dashboard-react/` — rebuilds the dashboard. Individual failures are logged and ignored as long as a previously built `dashboard-react/dist/` exists. **If `dist/` is missing, the service refuses to start** because there'd be no dashboard to serve.
+
+Everything from this phase is logged to `~/.skulk/logs/skulk.prep.log` so you can audit what actually happened on the last boot.
+
+To disable auto-update entirely, set `SKULK_AUTO_UPDATE=0` in `~/.skulk/skulk.env` and restart the service. This is the right choice if you're pinning a known-good revision or running on a flaky network where boot-time `git pull` causes more pain than it solves.
+
+### The Vector log-shipper agent
+
+**macOS**: The installer also installs a second agent (`foundation.foxlight.skulk-vector`) that tails `~/.skulk/logs/skulk.stdout.log` and ships log lines to a central log store (VictoriaLogs by default). This is **separate from Skulk on purpose** — if Vector crashes or the central store is unreachable, Skulk keeps running normally.
+
+You only need this if you want centralized cluster-wide logs. To skip it:
+
+```bash
+deployment/install/install-launchd.sh --no-vector
+```
+
+To configure where logs are shipped, edit `EXO_LOGGING_INGEST_URL` in `~/.skulk/skulk.env` and restart the Vector agent:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/foundation.foxlight.skulk-vector
+```
+
+**Linux**: There's no separate Vector unit yet on Linux — the systemd installer in this release installs only `skulk.service`. When you set `logging.enabled: true` and `logging.ingest_url: ...` in `skulk.yaml`, Skulk spawns Vector as an in-process subprocess and pipes JSON logs to it directly (using `deployment/logging/vector.yaml`). The same VictoriaLogs central stack works for both platforms; only the shipping process model differs.
+
+For full setup of the central log store (VictoriaLogs + Grafana), see the [External logging guide](./external-logging.md).
+
+### Updating Skulk
+
+You usually don't need to do anything — the service runs `git pull` + `uv sync` + dashboard build at every boot. To pick up an update without rebooting, just restart the service:
+
+```bash
+# macOS
+launchctl kickstart -k gui/$(id -u)/foundation.foxlight.skulk
+# Linux
+systemctl --user restart skulk
+```
+
+If you've turned auto-update off (`SKULK_AUTO_UPDATE=0`), do the manual flow:
 
 ```bash
 git pull
 cd dashboard-react && npm install && npm run build && cd ..
 
-# macOS:
-launchctl kickstart -k gui/$(id -u)/foundation.foxlight.skulk
-# Linux:
-systemctl --user restart skulk
+# then restart the service as above
 ```
-
-That's the whole update flow.
 
 ## Things that go wrong
 
@@ -138,6 +219,27 @@ If the dashboard still doesn't load, check the logs (see the table above). Look 
 - **Another program is using port 52415.** Find it with `lsof -i :52415` and stop it (or change Skulk's port with `--api-port`).
 - **A typo in your `skulk.yaml`.** Skulk logs the parse error on startup — search the log for "config".
 - **You moved your Skulk folder after running the installer.** Re-run the installer; it'll update the path.
+- **The dashboard build failed during boot prep.** Look in `~/.skulk/logs/skulk.prep.log` — if `npm run build` failed and there's no `dashboard-react/dist/` directory, the service refuses to start. Fix: build the dashboard once manually (`cd dashboard-react && npm install && npm run build`), then restart.
+
+### "Vector keeps crashing / no logs are reaching the central store"
+
+**macOS** (launchd Vector agent): The agent is independent — Skulk runs fine even if Vector is broken. To diagnose:
+
+```bash
+tail -f ~/.skulk/logs/vector.stderr.log
+```
+
+**Linux** (in-process Vector subprocess): Vector runs as a child of Skulk and shares its log stream:
+
+```bash
+journalctl --user -u skulk -f | grep -i vector
+```
+
+Common causes:
+
+- **`vector` is not installed.** Install it from [vector.dev](https://vector.dev/docs/setup/installation/) and restart the agent.
+- **`EXO_LOGGING_INGEST_URL` points at an unreachable host.** Vector buffers up to 512 MB on disk while the central store is down — once it comes back, the buffered logs ship automatically. If the URL is permanently wrong, edit `~/.skulk/skulk.env` and restart the agent.
+- **The Skulk JSON log stream isn't enabled.** Vector tails Skulk's stdout file, but that file only contains JSON if Skulk is configured to emit it. See [External logging](./external-logging.md) for the `skulk.yaml` settings.
 
 ### "It keeps crashing in a loop"
 
@@ -165,9 +267,10 @@ Removes the service so Skulk doesn't start automatically anymore. Doesn't touch 
 ### macOS
 
 ```bash
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/foundation.foxlight.skulk.plist
-rm ~/Library/LaunchAgents/foundation.foxlight.skulk.plist
+deployment/install/install-launchd.sh --uninstall
 ```
+
+This removes both the Skulk agent and the Vector agent. Your `~/.skulk/skulk.env`, models, and config are untouched.
 
 ### Linux
 

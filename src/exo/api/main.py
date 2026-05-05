@@ -4362,14 +4362,26 @@ class API:
         # Apply logging config immediately
         logging_cfg_update = _coerce_json_object(config_data.get("logging"))
         if logging_cfg_update:
-            from exo.shared.logging import set_structured_stdout
+            from exo.shared.logging import (
+                external_log_pipe_enabled,
+                set_structured_stdout,
+            )
 
-            log_on = bool(logging_cfg_update.get("enabled", False)) and bool(
-                logging_cfg_update.get("ingest_url")
+            # External-shipper mode is install-level (env var set by the
+            # service wrapper) and overrides runtime sync. Operators turn
+            # it off by removing the env var and restarting Skulk.
+            #
+            # In internal-subprocess mode (env var off), preserve the
+            # legacy contract that runtime sync requires *both* `enabled`
+            # and a non-empty `ingest_url` — clearing the URL at runtime
+            # must still disable shipping, not silently leave the
+            # already-running Vector subprocess shipping to the prior URL.
+            ingest_url_str = str(logging_cfg_update.get("ingest_url", ""))
+            log_on = external_log_pipe_enabled() or (
+                bool(logging_cfg_update.get("enabled", False))
+                and bool(ingest_url_str)
             )
-            set_structured_stdout(
-                log_on, ingest_url=str(logging_cfg_update.get("ingest_url", ""))
-            )
+            set_structured_stdout(log_on, ingest_url=ingest_url_str)
         # model_store changes still require restart; inference-only changes don't
         has_store_changes = "model_store" in config_data
         return JSONResponse(

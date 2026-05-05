@@ -1,16 +1,25 @@
-# Vector configuration for exo log shipping.
+# Vector configuration for the in-process (internal-subprocess) shipper.
 #
-# Vector reads structured JSON from exo's stdout and ships it to
-# VictoriaLogs.  Run exo piped through Vector:
+# This config is used when Skulk spawns Vector as a child process and
+# pipes structured JSON to its stdin. That path is the default on Linux
+# systemd installs and on macOS installs that opt out of the external
+# Vector LaunchAgent (`install-launchd.sh --no-vector`).
 #
-#   uv run exo 2>/dev/tty | vector --config deployment/logging/vector.yaml
+# For the *external* shipper (a separate LaunchAgent that tails Skulk's
+# captured stdout file and survives across Skulk restarts), see
+# `deployment/logging/vector-external.yaml`.
 #
-# Vector's disk buffer lives under data_dir (defaults to ~/.exo/vector/).
+# Vector reads structured JSON from stdin and ships it to VictoriaLogs.
+# Run Skulk piped through Vector for an ad-hoc dev setup:
+#
+#   uv run skulk 2>/dev/tty | vector --config deployment/logging/vector.yaml
+#
+# Vector's disk buffer lives under data_dir (defaults to ~/.skulk/vector).
 
-data_dir: ${EXO_VECTOR_DATA_DIR:-~/.exo/vector}
+data_dir: ${EXO_VECTOR_DATA_DIR:-${HOME}/.skulk/vector}
 
 sources:
-  exo_stdout:
+  skulk_stdout:
     type: stdin
     decoding:
       codec: json
@@ -19,7 +28,7 @@ sinks:
   victorialogs:
     type: http
     inputs:
-      - exo_stdout
+      - skulk_stdout
     uri: ${EXO_LOGGING_INGEST_URL:-http://192.168.0.118:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts}
     encoding:
       codec: json

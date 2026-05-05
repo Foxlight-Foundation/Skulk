@@ -7,6 +7,58 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- Boot-time auto-update for the Skulk service: the LaunchAgent now runs
+  `git pull`, `uv sync`, and the dashboard build through a wrapper
+  (`deployment/install/skulk-startup.sh`) before exec'ing skulk. Failures of
+  the pull / sync steps are non-fatal (logged to
+  `~/.skulk/logs/skulk.prep.log` and the service boots whatever revision is
+  on disk); a missing `dashboard-react/dist/` is fatal because the API has
+  no UI to serve. Toggle with `SKULK_AUTO_UPDATE=0` in `~/.skulk/skulk.env`.
+- Operator-editable env file at `~/.skulk/skulk.env`, copied from
+  `deployment/install/skulk.env.example` on first install and never
+  overwritten on re-run. Surfaces `SKULK_LIBP2P_NAMESPACE`,
+  `SKULK_VERBOSITY`, `PYTHONUNBUFFERED`, debug toggles, and external-logging
+  knobs without requiring a plist edit.
+- Separate `foundation.foxlight.skulk-vector` LaunchAgent that runs Vector
+  as its own process (via `deployment/install/vector-startup.sh`). Vector
+  tails the captured `~/.skulk/logs/skulk.stdout.log` instead of piping
+  through Skulk's process, so a slow VictoriaLogs sink can no longer
+  backpressure inference threads. Opt out with `--no-vector` on the
+  installer.
+- `SKULK_LOGGING_EXTERNAL=1` mode in `exo.shared.logging`: structured JSON
+  goes to stdout for an external shipper to consume, and Skulk does not
+  spawn its own internal Vector subprocess. The launchd installer turns
+  this on by default. JSON sink is now `enqueue=True` so log producers are
+  decoupled from the sink's I/O.
+- New operator guide at `website/docs/external-logging.md` covering the
+  full Vector + VictoriaLogs + Grafana stack: central-host install, per-node
+  configuration, JSON schema, and troubleshooting.
+
+### Changed
+
+- Two Vector configs now exist for the two transport modes:
+  `deployment/logging/vector.yaml` keeps the original `stdin` source for
+  the in-process subprocess shipper (used by Linux systemd installs and
+  macOS `--no-vector` installs); `deployment/logging/vector-external.yaml`
+  carries a `file` source tailing `~/.skulk/logs/skulk.stdout.log` plus a
+  `remap` transform that drops non-JSON lines, used by the launchd
+  `skulk-vector` agent.
+- `deployment/install/install-launchd.sh` now installs both agents by
+  default, manages `~/.skulk/skulk.env` (auto-flipping
+  `SKULK_LOGGING_EXTERNAL` to match the chosen mode on `--no-vector`),
+  supports `--no-vector` and `--uninstall`, drops `bash -lc` from the
+  plist (so repo paths with spaces work), and produces a more useful
+  post-install summary.
+- `deployment/install/install-systemd.sh` and
+  `deployment/systemd/skulk.service` now use the same wrapper +
+  `~/.skulk/skulk.env` integration as macOS, with
+  `EnvironmentFile=-%h/.skulk/skulk.env` so the unit picks up env-file
+  knobs.
+- `website/docs/run-skulk-as-a-service.md` updated for the auto-update,
+  env-file customization, and Vector agent flow.
+
 ## [1.1.0] - 2026-05-03
 
 ### Added

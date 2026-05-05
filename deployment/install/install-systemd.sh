@@ -15,8 +15,12 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TEMPLATE="$REPO_ROOT/deployment/systemd/skulk.service"
+ENV_TEMPLATE="$REPO_ROOT/deployment/install/skulk.env.example"
 TARGET_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 TARGET="$TARGET_DIR/skulk.service"
+
+ENV_TARGET_DIR="$HOME/.skulk"
+ENV_TARGET="$ENV_TARGET_DIR/skulk.env"
 
 if [[ "$OSTYPE" != linux-gnu* ]]; then
     echo "error: install-systemd.sh is for Linux. On macOS use install-launchd.sh." >&2
@@ -33,13 +37,26 @@ if ! command -v systemctl >/dev/null 2>&1; then
     exit 1
 fi
 
-mkdir -p "$TARGET_DIR"
+mkdir -p "$TARGET_DIR" "$ENV_TARGET_DIR"
 
 # Substitute the repo path placeholder. We use sed with a non-/ delimiter so
 # paths containing / don't need escaping.
 sed "s|__SKULK_REPO__|$REPO_ROOT|g" "$TEMPLATE" > "$TARGET"
 
 echo "Installed unit: $TARGET"
+
+# First-install env file. Linux has no separate Vector LaunchAgent in
+# this release, so default to SKULK_LOGGING_EXTERNAL=0 (in-process Vector
+# subprocess). Operators who run an external shipper can flip it to 1.
+# Re-runs never overwrite operator edits.
+if [[ ! -f "$ENV_TARGET" ]]; then
+    cp "$ENV_TEMPLATE" "$ENV_TARGET"
+    sed -i 's/^SKULK_LOGGING_EXTERNAL=1$/SKULK_LOGGING_EXTERNAL=0/' "$ENV_TARGET"
+    echo "Created env file: $ENV_TARGET (SKULK_LOGGING_EXTERNAL=0 — using in-process Vector subprocess)"
+    echo "  (edit this to customize cluster namespace, debug flags, ingest URL, etc.)"
+else
+    echo "Env file already exists: $ENV_TARGET (left untouched)"
+fi
 
 systemctl --user daemon-reload
 
@@ -60,7 +77,10 @@ systemctl --user enable --now skulk.service
 
 echo
 echo "Skulk service is enabled and running."
-echo "  status: systemctl --user status skulk"
-echo "  logs:   journalctl --user -u skulk -f"
-echo "  stop:   systemctl --user stop skulk"
-echo "  remove: systemctl --user disable --now skulk && rm $TARGET"
+echo "  status:    systemctl --user status skulk"
+echo "  logs:      journalctl --user -u skulk -f"
+echo "  prep log:  tail -f $HOME/.skulk/logs/skulk.prep.log"
+echo "  env file:  $ENV_TARGET"
+echo "  restart:   systemctl --user restart skulk"
+echo "  stop:      systemctl --user stop skulk"
+echo "  remove:    systemctl --user disable --now skulk && rm $TARGET"

@@ -1,0 +1,76 @@
+# Vector configuration for the *external* log-shipper agent.
+#
+# This config is used by the macOS LaunchAgent
+# `foundation.foxlight.skulk-vector` installed by
+# `deployment/install/install-launchd.sh`. It tails Skulk's captured
+# stdout log file (where launchd redirects the JSON log stream when
+# `SKULK_LOGGING_EXTERNAL=1`) and ships each line to VictoriaLogs.
+#
+# Running as a separate process from Skulk decouples lifecycles: a
+# Vector crash or slow downstream sink cannot backpressure or kill the
+# inference engine.
+#
+# The internal-subprocess variant (used by Linux systemd installs and
+# macOS `--no-vector` installs) lives at
+# `deployment/logging/vector.yaml`.
+#
+# Operator-tunable env vars (in ~/.skulk/skulk.env or your shell):
+#   EXO_LOGGING_INGEST_URL   Where to ship logs (defaults to the in-house
+#                            VictoriaLogs endpoint on the R720).
+#   EXO_VECTOR_DATA_DIR      Where Vector keeps its on-disk buffer and
+#                            file-position checkpoints (so it resumes
+#                            cleanly after a restart).
+#   SKULK_LOG_FILE           Override the source file path. Defaults to
+#                            ~/.skulk/logs/skulk.stdout.log.
+
+data_dir: ${EXO_VECTOR_DATA_DIR:-${HOME}/.skulk/vector}
+
+sources:
+  skulk_log:
+    type: file
+    include:
+      - ${SKULK_LOG_FILE:-${HOME}/.skulk/logs/skulk.stdout.log}
+    # Read from the beginning on first start so we ship the full log,
+    # then resume from the checkpoint stored under data_dir on restart.
+    read_from: beginning
+    # Skip files that haven't been touched in a day; protects against
+    # picking up rotated archives if log rotation is added later.
+    ignore_older_secs: 86400
+
+transforms:
+  # Parse each line as JSON. Lines that aren't JSON (e.g. a crash
+  # traceback printed before the JSON logger initializes, or a stray
+  # human-readable line) are dropped rather than indexed as malformed
+  # events.
+  parse_json:
+    type: remap
+    inputs:
+      - skulk_log
+    drop_on_error: true
+    drop_on_abort: true
+    source: |
+      parsed, err = parse_json(.message)
+      if err != null {
+        abort
+      }
+      . = parsed
+
+sinks:
+  victorialogs:
+    type: http
+    inputs:
+      - parse_json
+    uri: ${EXO_LOGGING_INGEST_URL:-http://192.168.0.118:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts}
+    encoding:
+      codec: json
+    framing:
+      method: newline_delimited
+    request:
+      timeout_secs: 5
+    batch:
+      max_bytes: 1048576
+      timeout_secs: 2
+    buffer:
+      type: disk
+      max_size: 536870912  # 512 MB — survives VictoriaLogs downtime
+      when_full: drop_newest

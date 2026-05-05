@@ -22,7 +22,11 @@ from exo.routing.event_router import EventRouter
 from exo.routing.router import Router, get_node_id_keypair
 from exo.shared.constants import SKULK_LOG
 from exo.shared.election import Election, ElectionResult
-from exo.shared.logging import logger_cleanup, logger_setup
+from exo.shared.logging import (
+    external_log_pipe_enabled,
+    logger_cleanup,
+    logger_setup,
+)
 from exo.shared.types.commands import ForwarderDownloadCommand, SyncConfig
 from exo.shared.types.common import NodeId, SessionId, SystemId
 from exo.shared.types.state_sync import StateSyncMessage
@@ -675,10 +679,18 @@ def main():
     except Exception:
         pass  # Logged after logger_setup below
 
+    # External-shipper mode (SKULK_LOGGING_EXTERNAL=1, set by the
+    # launchd / systemd wrapper when an external Vector agent is
+    # installed) implies "structured logging on at boot" without
+    # requiring an `enabled: true` in skulk.yaml — the env var is the
+    # operator's signal that they have a shipper hooked up. The
+    # dashboard / config sync still controls the sink at runtime via
+    # set_structured_stdout, so an operator can disable shipping live.
+    _structured = external_log_pipe_enabled() or bool(_log_cfg and _log_cfg.enabled)
     logger_setup(
         SKULK_LOG,
         args.verbosity,
-        structured_stdout=bool(_log_cfg and _log_cfg.enabled and _log_cfg.ingest_url),
+        structured_stdout=_structured,
         ingest_url=_log_cfg.ingest_url if _log_cfg else "",
     )
     logger.info("Starting Skulk")

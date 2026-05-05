@@ -134,6 +134,22 @@ _VECTOR_CONFIG_PATH = (
 )
 
 
+def external_log_pipe_enabled() -> bool:
+    """Whether an external log shipper handles JSON transport.
+
+    When ``SKULK_LOGGING_EXTERNAL`` is truthy (set by the launchd /
+    systemd wrapper when a separate Vector agent is installed), Skulk
+    writes structured JSON to stdout and does not spawn its own Vector
+    subprocess. The external agent tails the captured stdout file.
+    """
+    return os.environ.get("SKULK_LOGGING_EXTERNAL", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _start_vector(ingest_url: str) -> bool:
     """Spawn Vector as a child process reading JSON from a pipe.
 
@@ -257,13 +273,29 @@ def logger_setup(
             compression=_zstd_compress,
         )
 
-    if structured_stdout and ingest_url and _start_vector(ingest_url):
-        global _json_sink_id  # noqa: PLW0603
-        _json_sink_id = logger.add(
-            _json_sink,
-            level="INFO",
-            enqueue=False,
-        )
+    if structured_stdout:
+        # Three transport modes:
+        #   1. External shipper (SKULK_LOGGING_EXTERNAL=1): JSON -> stdout,
+        #      a separate Vector agent tails the captured file.
+        #   2. Internal subprocess: spawn Vector and pipe JSON to its stdin.
+        #   3. Disabled: structured_stdout=true with no ingest_url and no
+        #      external flag is a no-op (operator hasn't picked a path).
+        if external_log_pipe_enabled():
+            transport_started = True
+        elif ingest_url:
+            transport_started = _start_vector(ingest_url)
+        else:
+            transport_started = False
+        if transport_started:
+            global _json_sink_id  # noqa: PLW0603
+            # enqueue=True decouples log producers from the JSON sink's
+            # I/O so a slow stdout consumer (e.g. an overloaded launchd
+            # log file or a downstream pipe) can't block inference threads.
+            _json_sink_id = logger.add(
+                _json_sink,
+                level="INFO",
+                enqueue=True,
+            )
 
 
 def set_structured_stdout(enabled: bool, ingest_url: str = "") -> None:
@@ -272,14 +304,25 @@ def set_structured_stdout(enabled: bool, ingest_url: str = "") -> None:
     Called when logging config is synced across the cluster.  Safe to call
     repeatedly — adding when already active or removing when already
     inactive is a no-op.
+
+    When ``SKULK_LOGGING_EXTERNAL=1`` is set, the sink is enabled without
+    spawning Skulk's internal Vector subprocess; an external Vector agent
+    is expected to tail the captured stdout file. Otherwise, ``ingest_url``
+    must be set for the internal subprocess path.
     """
     global _json_sink_id  # noqa: PLW0603
-    if enabled and ingest_url and _json_sink_id is None:
-        if _start_vector(ingest_url):
+    if enabled and _json_sink_id is None:
+        if external_log_pipe_enabled():
+            transport_started = True
+        elif ingest_url:
+            transport_started = _start_vector(ingest_url)
+        else:
+            transport_started = False
+        if transport_started:
             _json_sink_id = logger.add(
                 _json_sink,
                 level="INFO",
-                enqueue=False,
+                enqueue=True,
             )
             logger.info("Structured JSON log shipping enabled")
     elif not enabled and _json_sink_id is not None:

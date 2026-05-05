@@ -16,10 +16,18 @@ StartLimitIntervalSec=300
 Type=simple
 WorkingDirectory=__SKULK_REPO__
 
-# uv is the canonical runtime path per AGENTS.md. The wrapper invokes it
-# from a login shell so PATH and any user-shell setup (e.g. mise, asdf,
-# pyenv) are available regardless of how systemd was started.
-ExecStart=/bin/bash -lc 'exec uv run skulk'
+# Operator env file. EnvironmentFile loads KEY=VALUE pairs into the
+# unit's environment before ExecStart, matching the macOS LaunchAgent's
+# wrapper-sourced behavior. Leading `-` makes the file optional so a
+# fresh install (before the file is copied) doesn't fail to start.
+EnvironmentFile=-%h/.skulk/skulk.env
+
+# Boot-time prep + skulk launch is delegated to the wrapper so the
+# failure policy (best-effort git pull / uv sync, hard requirement on
+# a built dashboard) is identical to the macOS install. The wrapper
+# also sources ~/.skulk/skulk.env again so values inside the env file
+# (like SKULK_AUTO_UPDATE) reach uv / npm subprocesses.
+ExecStart=__SKULK_REPO__/deployment/install/skulk-startup.sh
 
 # SIGTERM is what `Skulk._signal` already handles via task-group cancel.
 # `mixed` sends SIGTERM to the main process and SIGKILL to remaining
