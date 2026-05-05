@@ -120,6 +120,17 @@ elif [[ "$INSTALL_VECTOR" != "1" ]] && grep -q '^SKULK_LOGGING_EXTERNAL=1$' "$EN
     rm -f "$ENV_TARGET.bak"
     echo "Updated $ENV_TARGET: SKULK_LOGGING_EXTERNAL flipped 1 -> 0 to match --no-vector."
     echo "  (Skulk now uses the in-process Vector subprocess instead of the LaunchAgent.)"
+elif [[ "$INSTALL_VECTOR" == "1" ]] && grep -q '^SKULK_LOGGING_EXTERNAL=0$' "$ENV_TARGET"; then
+    # Re-run without --no-vector (adding the Vector agent) against an
+    # existing env file that says internal mode. Flip to 1 so Skulk
+    # emits JSON to stdout for the newly installed agent to ship.
+    # Without this, the agent is installed but receives no JSON from
+    # Skulk and silently ships nothing. Operator edits to other fields
+    # are preserved.
+    sed -i.bak 's/^SKULK_LOGGING_EXTERNAL=0$/SKULK_LOGGING_EXTERNAL=1/' "$ENV_TARGET"
+    rm -f "$ENV_TARGET.bak"
+    echo "Updated $ENV_TARGET: SKULK_LOGGING_EXTERNAL flipped 0 -> 1 to match Vector agent install."
+    echo "  (Skulk now emits JSON to stdout for the skulk-vector LaunchAgent to ship.)"
 else
     echo "Env file already exists: $ENV_TARGET (left untouched)"
     echo "  (compare with $ENV_TEMPLATE if you want to pick up new defaults)"
