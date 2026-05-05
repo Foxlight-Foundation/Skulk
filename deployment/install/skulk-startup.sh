@@ -43,6 +43,17 @@ fi
 
 cd "$REPO_ROOT"
 
+# Augment PATH with common user-space tool locations so uv, git, and npm
+# are findable when the script is invoked from systemd — which starts with
+# a minimal PATH that excludes ~/.local/bin, ~/.cargo/bin, and Homebrew.
+# On macOS the launchd agent injects __USER_PATH__ at install time, so
+# those directories are already present and this loop is a no-op for them.
+for _d in "$HOME/.local/bin" "$HOME/.cargo/bin" /opt/homebrew/bin /usr/local/bin; do
+    [[ -d "$_d" && ":$PATH:" != *":$_d:"* ]] && PATH="$_d:$PATH"
+done
+export PATH
+unset _d
+
 AUTO_UPDATE="${SKULK_AUTO_UPDATE:-1}"
 VERBOSITY="${SKULK_VERBOSITY:--v}"
 
