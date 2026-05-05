@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import styled from 'styled-components';
 import { FiRefreshCw } from 'react-icons/fi';
@@ -227,6 +227,7 @@ export function PairingTab() {
   const access = useRemoteAccess();
   const [session, setSession] = useState<SessionState>({ status: 'idle' });
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const mountedRef = useRef(false);
 
   const readiness = useMemo(
     () => (access.status === 'ok' ? pairingReadiness(access.data) : null),
@@ -234,18 +235,20 @@ export function PairingTab() {
   );
 
   const loadSession = useCallback(
-    async (signal: AbortSignal) => {
+    async (signal: AbortSignal, options: { showLoading?: boolean } = {}) => {
       if (!readiness?.canPair) return;
-      setSession({ status: 'loading' });
+      if (options.showLoading ?? true) setSession({ status: 'loading' });
       try {
         const payload = await createPairingSession(signal);
         const qrDataUrl = await QRCode.toDataURL(JSON.stringify(payload), {
           width: 220,
           margin: 1,
         });
-        if (!signal.aborted) setSession({ status: 'ready', payload, qrDataUrl });
+        if (!signal.aborted && mountedRef.current) {
+          setSession({ status: 'ready', payload, qrDataUrl });
+        }
       } catch (error) {
-        if (signal.aborted) return;
+        if (signal.aborted || !mountedRef.current) return;
         setSession({
           status: 'error',
           message: error instanceof Error ? error.message : 'Could not create a SkulkOps pairing code.',
@@ -256,6 +259,13 @@ export function PairingTab() {
   );
 
   useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
     const id = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, []);
@@ -264,7 +274,7 @@ export function PairingTab() {
     if (!readiness?.canPair) return;
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
-      void loadSession(controller.signal);
+      void loadSession(controller.signal, { showLoading: true });
     }, 0);
     return () => {
       controller.abort();
@@ -277,13 +287,16 @@ export function PairingTab() {
     const expiresMs = new Date(session.payload.expiresAt).getTime();
     if (!Number.isFinite(expiresMs)) return;
     const delay = Math.max(1000, expiresMs - Date.now() - QR_RENEW_EARLY_MS);
-    const controller = new AbortController();
+    let controller: AbortController | null = null;
+    let fired = false;
     const timer = window.setTimeout(() => {
-      void loadSession(controller.signal);
+      fired = true;
+      controller = new AbortController();
+      void loadSession(controller.signal, { showLoading: false });
     }, delay);
     return () => {
-      controller.abort();
       window.clearTimeout(timer);
+      if (!fired) controller?.abort();
     };
   }, [loadSession, session]);
 
