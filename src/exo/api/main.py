@@ -497,7 +497,7 @@ def _json_request_body(schema: dict[str, object]) -> dict[str, object]:
 
 
 def _is_loopback_host(host: str) -> bool:
-    host = _normalize_forwarded_host(host)
+    host = _normalize_forwarded_host(host).lower()
     if host in {"localhost", "testclient"}:
         return True
     with contextlib.suppress(ValueError):

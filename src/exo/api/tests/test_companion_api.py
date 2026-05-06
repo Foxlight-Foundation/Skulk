@@ -240,6 +240,31 @@ def test_pairing_session_creation_accepts_same_origin_loopback_browser_request(
     assert response.status_code == 200
 
 
+def test_pairing_session_creation_accepts_mixed_case_loopback_host(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api = _build_api(tmp_path)
+    client = _build_client(api)
+    monkeypatch.setattr(
+        remote_access_module,
+        "query_tailscale_status",
+        AsyncMock(return_value=_tailscale_running()),
+    )
+
+    response = client.post(
+        "/v1/companion/pairing-sessions",
+        headers={
+            "Host": "LocalHost:52415",
+            "Origin": "http://LocalHost:52415",
+            "Sec-Fetch-Site": "same-origin",
+        },
+        json={},
+    )
+
+    assert response.status_code == 200
+
+
 def test_pairing_session_creation_rejects_loopback_peer_with_nonlocal_host(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -548,6 +573,48 @@ def test_pairing_exchange_rejects_credential_limit(
         cast(dict[str, object], _json_object(second)["error"])["message"]
         == "credential_limit_reached"
     )
+
+
+def test_pairing_exchange_ignores_revoked_credentials_for_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api = _build_api(tmp_path)
+    client = _build_client(api)
+    monkeypatch.setattr(
+        remote_access_module,
+        "query_tailscale_status",
+        AsyncMock(return_value=_tailscale_running()),
+    )
+    monkeypatch.setattr(companion_module, "MAX_COMPANION_CREDENTIALS", 1)
+
+    first_session = client.post("/v1/companion/pairing-sessions", json={})
+    first_nonce = cast(
+        str,
+        cast(dict[str, object], _json_object(first_session)["qrPayload"])[
+            "pairingNonce"
+        ],
+    )
+    first = client.post(f"/v1/companion/pairing-sessions/{first_nonce}/exchange", json={})
+    first_body = _json_object(first)
+    manager = api._companion_pairing  # pyright: ignore[reportPrivateUsage]
+    assert manager is not None
+    assert manager.revoke_credential(cast(str, first_body["credentialId"])) is True
+
+    second_session = client.post("/v1/companion/pairing-sessions", json={})
+    second_nonce = cast(
+        str,
+        cast(dict[str, object], _json_object(second_session)["qrPayload"])[
+            "pairingNonce"
+        ],
+    )
+    second = client.post(
+        f"/v1/companion/pairing-sessions/{second_nonce}/exchange",
+        json={},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
 
 
 def test_pairing_nonce_survives_failed_credential_persistence(

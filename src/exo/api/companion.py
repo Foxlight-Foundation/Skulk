@@ -298,7 +298,10 @@ class CompanionPairingManager:
             if session.expires_at <= _utc_now():
                 del self._sessions[nonce]
                 raise CompanionAuthError("expired_code")
-            if len(self._credentials) >= MAX_COMPANION_CREDENTIALS:
+            active_credentials = sum(
+                1 for credential in self._credentials.values() if not credential.revoked
+            )
+            if active_credentials >= MAX_COMPANION_CREDENTIALS:
                 raise CompanionAuthError("credential_limit_reached")
 
             session.exchanged = True
