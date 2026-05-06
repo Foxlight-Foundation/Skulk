@@ -7,6 +7,7 @@ import { useRemoteAccess, type RemoteAccessInfo } from '../../hooks/useRemoteAcc
 
 const TAILSCALE_DOCS_URL = 'https://foxlight-foundation.github.io/Skulk/tailscale/';
 const QR_RENEW_EARLY_MS = 30_000;
+const PAIRING_OPERATOR_TOKEN_STORAGE_KEY = 'skulkCompanionPairingToken';
 
 interface CompanionPairingQrPayload {
   version: 1;
@@ -189,15 +190,21 @@ function pairingReadiness(access: RemoteAccessInfo): {
 }
 
 async function createPairingSession(signal: AbortSignal): Promise<CompanionPairingQrPayload> {
+  const operatorToken = window.localStorage.getItem(PAIRING_OPERATOR_TOKEN_STORAGE_KEY);
   const response = await fetch('/v1/companion/pairing-sessions', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(operatorToken ? { 'X-Skulk-Operator-Token': operatorToken } : {}),
+    },
     body: JSON.stringify({}),
     signal,
   });
   if (!response.ok) {
     if (response.status === 403) {
-      throw new Error('Pairing is only available from an authorized dashboard session.');
+      throw new Error(
+        'Pairing requires a local dashboard session. If you are opening this dashboard over LAN or Tailscale, configure SKULK_COMPANION_PAIRING_TOKEN and store it in this browser as skulkCompanionPairingToken.',
+      );
     }
     throw new Error('Could not create a SkulkOps pairing code.');
   }
@@ -219,6 +226,7 @@ export function PairingTab() {
   const [session, setSession] = useState<SessionState>({ status: 'idle' });
   const [nowMs, setNowMs] = useState(() => Date.now());
   const mountedRef = useRef(false);
+  const requestIdRef = useRef(0);
 
   const readiness = useMemo(
     () => (access.status === 'ok' ? pairingReadiness(access.data) : null),
@@ -227,15 +235,19 @@ export function PairingTab() {
 
   const loadSession = useCallback(
     async (signal: AbortSignal, options: { showLoading?: boolean } = {}) => {
-      if (!readiness?.canPair) return;
+      if (!readiness?.canPair) {
+        setSession({ status: 'idle' });
+        return;
+      }
+      const requestId = ++requestIdRef.current;
       if (options.showLoading ?? true) setSession({ status: 'loading' });
       try {
         const payload = await createPairingSession(signal);
-        if (!signal.aborted && mountedRef.current) {
+        if (!signal.aborted && mountedRef.current && requestId === requestIdRef.current) {
           setSession({ status: 'ready', payload });
         }
       } catch (error) {
-        if (signal.aborted || !mountedRef.current) return;
+        if (signal.aborted || !mountedRef.current || requestId !== requestIdRef.current) return;
         setSession({
           status: 'error',
           message: error instanceof Error ? error.message : 'Could not create a SkulkOps pairing code.',
@@ -258,7 +270,10 @@ export function PairingTab() {
   }, []);
 
   useEffect(() => {
-    if (!readiness?.canPair) return;
+    if (!readiness?.canPair) {
+      setSession({ status: 'idle' });
+      return;
+    }
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       void loadSession(controller.signal, { showLoading: true });
@@ -370,7 +385,7 @@ export function PairingTab() {
           <Advisory $level="error">{session.message}</Advisory>
         )}
 
-        {session.status === 'ready' && (
+        {session.status === 'ready' && readiness.canPair && (
           <QrWrap>
             <QrCode
               value={JSON.stringify(session.payload)}

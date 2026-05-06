@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
-import hmac
+import os
 import secrets
 import socket
 from collections.abc import Sequence
@@ -35,6 +35,7 @@ from exo.utils.pydantic_ext import CamelCaseModel, FrozenModel
 
 PAIRING_VERSION: Literal[1] = 1
 PAIRING_SESSION_TTL = timedelta(minutes=5)
+MAX_PAIRING_SESSIONS = 64
 COMPANION_READ_SCOPES: tuple[str, ...] = (
     "cluster:read",
     "nodes:read",
@@ -132,6 +133,7 @@ class CompanionCredentialRecord(FrozenModel):
     scopes: Sequence[str]
     issued_at: datetime
     cluster_name: str
+    client_name: str | None = None
     revoked: bool = False
 
 
@@ -176,6 +178,7 @@ class CompanionCredential:
         scopes: Sequence[str],
         issued_at: datetime,
         cluster_name: str,
+        client_name: str | None = None,
         revoked: bool = False,
     ) -> None:
         self.credential_id = credential_id
@@ -183,11 +186,16 @@ class CompanionCredential:
         self.scopes = tuple(scopes)
         self.issued_at = issued_at
         self.cluster_name = cluster_name
+        self.client_name = client_name
         self.revoked = revoked
 
 
 class CompanionAuthError(Exception):
     """Raised when a companion credential is missing or invalid."""
+
+
+class CompanionPairingError(Exception):
+    """Raised when a pairing session cannot be created or exchanged."""
 
 
 @final
@@ -211,21 +219,26 @@ class CompanionPairingManager:
         self._credentials_path = credentials_path
         self._sessions: dict[str, _PairingSession] = {}
         self._credentials: dict[str, CompanionCredential] = self._load_credentials()
-
-    @property
-    def cluster_id(self) -> str:
-        digest = hashlib.sha256(self.cluster_public_key.encode()).hexdigest()
-        return digest[:24]
-
-    @property
-    def cluster_public_key(self) -> str:
-        private_key = self._load_or_create_cluster_key()
-        public_key = private_key.public_key().public_bytes(
+        self._credential_hash_index: dict[str, CompanionCredential] = {
+            credential.token_hash: credential
+            for credential in self._credentials.values()
+            if not credential.revoked
+        }
+        self._cluster_private_key = self._load_or_create_cluster_key()
+        public_key = self._cluster_private_key.public_key().public_bytes(
             encoding=Encoding.Raw,
             format=PublicFormat.Raw,
         )
-        encoded = base64.urlsafe_b64encode(public_key).decode().rstrip("=")
-        return f"ed25519:{encoded}"
+        self._cluster_public_key = f"ed25519:{base64.urlsafe_b64encode(public_key).decode().rstrip('=')}"
+        self._cluster_id = hashlib.sha256(self._cluster_public_key.encode()).hexdigest()[:24]
+
+    @property
+    def cluster_id(self) -> str:
+        return self._cluster_id
+
+    @property
+    def cluster_public_key(self) -> str:
+        return self._cluster_public_key
 
     def create_session(
         self,
@@ -239,6 +252,8 @@ class CompanionPairingManager:
         expires_at = now + PAIRING_SESSION_TTL
         cluster_name = request.cluster_name or default_cluster_name()
         base_url = remote_access.preferred_url
+        if base_url is None:
+            raise CompanionPairingError("pairing_url_unavailable")
         session = _PairingSession(
             nonce=nonce,
             expires_at=expires_at,
@@ -246,6 +261,7 @@ class CompanionPairingManager:
             base_url=base_url,
         )
         self._sessions[nonce] = session
+        self._trim_pairing_sessions()
         exchange_url = (
             f"{base_url}/v1/companion/pairing-sessions/{nonce}/exchange"
             if base_url
@@ -272,7 +288,6 @@ class CompanionPairingManager:
         nonce: str,
         request: CompanionPairingExchangeRequest,
     ) -> CompanionPairingExchangeResponse:
-        del request
         session = self._sessions.get(nonce)
         if session is None:
             raise CompanionAuthError("invalid_code")
@@ -282,7 +297,6 @@ class CompanionPairingManager:
             del self._sessions[nonce]
             raise CompanionAuthError("expired_code")
 
-        session.exchanged = True
         credential_id = secrets.token_urlsafe(16)
         token = secrets.token_urlsafe(48)
         issued_at = _utc_now()
@@ -292,9 +306,16 @@ class CompanionPairingManager:
             scopes=COMPANION_READ_SCOPES,
             issued_at=issued_at,
             cluster_name=session.cluster_name,
+            client_name=request.client_name,
         )
         self._credentials[credential_id] = credential
-        self._save_credentials()
+        try:
+            self._save_credentials()
+        except Exception:
+            del self._credentials[credential_id]
+            raise
+        self._credential_hash_index[credential.token_hash] = credential
+        session.exchanged = True
         return CompanionPairingExchangeResponse(
             credential_id=credential_id,
             token=token,
@@ -313,11 +334,9 @@ class CompanionPairingManager:
         if not bearer_token:
             raise CompanionAuthError("missing_token")
         token_hash = _hash_token(bearer_token)
-        for credential in self._credentials.values():
-            if credential.revoked:
-                continue
-            if hmac.compare_digest(credential.token_hash, token_hash):
-                return credential
+        credential = self._credential_hash_index.get(token_hash)
+        if credential is not None and not credential.revoked:
+            return credential
         raise CompanionAuthError("auth_failed")
 
     def revoke_credential(self, credential_id: str) -> bool:
@@ -325,6 +344,7 @@ class CompanionPairingManager:
         if credential is None:
             return False
         credential.revoked = True
+        self._credential_hash_index.pop(credential.token_hash, None)
         self._save_credentials()
         return True
 
@@ -337,6 +357,14 @@ class CompanionPairingManager:
         ]
         for nonce in expired:
             del self._sessions[nonce]
+
+    def _trim_pairing_sessions(self) -> None:
+        if len(self._sessions) <= MAX_PAIRING_SESSIONS:
+            return
+        excess = len(self._sessions) - MAX_PAIRING_SESSIONS
+        ordered = sorted(self._sessions.values(), key=lambda session: session.expires_at)
+        for session in ordered[:excess]:
+            self._sessions.pop(session.nonce, None)
 
     def _load_or_create_cluster_key(self) -> Ed25519PrivateKey:
         if self._key_path.exists():
@@ -357,9 +385,7 @@ class CompanionPairingManager:
             format=PrivateFormat.Raw,
             encryption_algorithm=NoEncryption(),
         )
-        self._key_path.parent.mkdir(parents=True, exist_ok=True)
-        self._key_path.write_bytes(private_bytes)
-        self._key_path.chmod(0o600)
+        _atomic_write_private_file(self._key_path, private_bytes)
         return private_key
 
     def _load_credentials(self) -> dict[str, CompanionCredential]:
@@ -369,7 +395,7 @@ class CompanionPairingManager:
             store = CompanionCredentialStore.model_validate_json(
                 self._credentials_path.read_text()
             )
-        except (OSError, ValidationError):
+        except (OSError, UnicodeDecodeError, ValidationError):
             return {}
         return {
             record.credential_id: CompanionCredential(
@@ -378,6 +404,7 @@ class CompanionPairingManager:
                 scopes=record.scopes,
                 issued_at=record.issued_at,
                 cluster_name=record.cluster_name,
+                client_name=record.client_name,
                 revoked=record.revoked,
             )
             for record in store.credentials
@@ -392,14 +419,16 @@ class CompanionPairingManager:
                     scopes=credential.scopes,
                     issued_at=credential.issued_at,
                     cluster_name=credential.cluster_name,
+                    client_name=credential.client_name,
                     revoked=credential.revoked,
                 )
                 for credential in self._credentials.values()
             )
         )
-        self._credentials_path.parent.mkdir(parents=True, exist_ok=True)
-        self._credentials_path.write_text(store.model_dump_json(indent=2))
-        self._credentials_path.chmod(0o600)
+        _atomic_write_private_file(
+            self._credentials_path,
+            store.model_dump_json(indent=2).encode(),
+        )
 
 
 def build_companion_overview(
@@ -493,3 +522,23 @@ def _hash_token(token: str) -> str:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _atomic_write_private_file(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
+        raise

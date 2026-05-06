@@ -65,6 +65,10 @@ def _tailscale_running() -> TailscaleStatus:
     )
 
 
+def _tailscale_not_running() -> TailscaleStatus:
+    return TailscaleStatus(running=False)
+
+
 def _state_with_lan_ip(node_id: str, ip: str) -> State:
     iface = NetworkInterfaceInfo(name="en0", ip_address=ip)
     return State().model_copy(
@@ -133,7 +137,7 @@ def test_pairing_session_creation_rejects_forwarded_nonlocal_loopback_request(
     tmp_path: Path,
 ) -> None:
     api = _build_api(tmp_path)
-    client = TestClient(api.app)
+    client = TestClient(api.app, raise_server_exceptions=False)
     monkeypatch.setattr(
         remote_access_module,
         "query_tailscale_status",
@@ -151,6 +155,48 @@ def test_pairing_session_creation_rejects_forwarded_nonlocal_loopback_request(
         cast(dict[str, object], _json_object(response)["error"])["message"]
         == "operator_auth_required"
     )
+
+
+def test_forwarded_loopback_with_ipv6_port_is_treated_as_local(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api = _build_api(tmp_path)
+    client = TestClient(api.app)
+    monkeypatch.setattr(
+        remote_access_module,
+        "query_tailscale_status",
+        AsyncMock(return_value=_tailscale_running()),
+    )
+
+    response = client.post(
+        "/v1/companion/pairing-sessions",
+        headers={"Forwarded": 'for="[::1]:4711"'},
+        json={},
+    )
+
+    assert response.status_code == 200
+
+
+def test_forwarded_loopback_with_ipv4_port_is_treated_as_local(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api = _build_api(tmp_path)
+    client = TestClient(api.app)
+    monkeypatch.setattr(
+        remote_access_module,
+        "query_tailscale_status",
+        AsyncMock(return_value=_tailscale_running()),
+    )
+
+    response = client.post(
+        "/v1/companion/pairing-sessions",
+        headers={"X-Forwarded-For": "127.0.0.1:4711"},
+        json={},
+    )
+
+    assert response.status_code == 200
 
 
 def test_pairing_session_creation_accepts_forwarded_nonlocal_request_with_token(
@@ -204,6 +250,27 @@ def test_pairing_session_creation_accepts_configured_operator_token(
     ]
 
 
+def test_pairing_session_creation_rejects_missing_reachable_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api = _build_api(tmp_path)
+    client = TestClient(api.app)
+    monkeypatch.setattr(
+        remote_access_module,
+        "query_tailscale_status",
+        AsyncMock(return_value=_tailscale_not_running()),
+    )
+
+    response = client.post("/v1/companion/pairing-sessions", json={})
+
+    assert response.status_code == 409
+    assert (
+        cast(dict[str, object], _json_object(response)["error"])["message"]
+        == "pairing_url_unavailable"
+    )
+
+
 def test_companion_cluster_id_is_derived_from_persisted_cluster_key(
     tmp_path: Path,
 ) -> None:
@@ -220,6 +287,17 @@ def test_companion_cluster_id_is_derived_from_persisted_cluster_key(
     )
 
     assert first.cluster_id == second.cluster_id
+
+
+def test_companion_cluster_key_permissions_are_private(tmp_path: Path) -> None:
+    key_path = tmp_path / "companion_cluster.key"
+    CompanionPairingManager(
+        node_id=NodeId("local-node"),
+        key_path=key_path,
+        credentials_path=tmp_path / "companion_credentials.json",
+    )
+
+    assert key_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_pairing_exchange_returns_read_only_credential(
@@ -258,6 +336,36 @@ def test_pairing_exchange_returns_read_only_credential(
     ]
 
 
+def test_pairing_exchange_persists_client_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api = _build_api(tmp_path)
+    client = TestClient(api.app)
+    monkeypatch.setattr(
+        remote_access_module,
+        "query_tailscale_status",
+        AsyncMock(return_value=_tailscale_running()),
+    )
+    session_response = client.post("/v1/companion/pairing-sessions", json={})
+    nonce = cast(
+        str,
+        cast(dict[str, object], _json_object(session_response)["qrPayload"])[
+            "pairingNonce"
+        ],
+    )
+
+    response = client.post(
+        f"/v1/companion/pairing-sessions/{nonce}/exchange",
+        json={"clientName": "Thomas iPhone"},
+    )
+
+    credential_id = cast(str, _json_object(response)["credentialId"])
+    credentials = (tmp_path / "companion_credentials.json").read_text()
+    assert credential_id in credentials
+    assert "Thomas iPhone" in credentials
+
+
 def test_pairing_nonce_is_single_use(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -286,6 +394,40 @@ def test_pairing_nonce_is_single_use(
         cast(dict[str, object], _json_object(second)["error"])["message"]
         == "already_used"
     )
+
+
+def test_pairing_nonce_survives_failed_credential_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api = _build_api(tmp_path)
+    client = TestClient(api.app, raise_server_exceptions=False)
+    monkeypatch.setattr(
+        remote_access_module,
+        "query_tailscale_status",
+        AsyncMock(return_value=_tailscale_running()),
+    )
+    session_response = client.post("/v1/companion/pairing-sessions", json={})
+    nonce = cast(
+        str,
+        cast(dict[str, object], _json_object(session_response)["qrPayload"])[
+            "pairingNonce"
+        ],
+    )
+    manager = api._companion_pairing  # pyright: ignore[reportPrivateUsage]
+    original_save = manager._save_credentials  # pyright: ignore[reportPrivateUsage]
+
+    def fail_save() -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(manager, "_save_credentials", fail_save)
+    first = client.post(f"/v1/companion/pairing-sessions/{nonce}/exchange", json={})
+    monkeypatch.setattr(manager, "_save_credentials", original_save)
+
+    second = client.post(f"/v1/companion/pairing-sessions/{nonce}/exchange", json={})
+
+    assert first.status_code == 500
+    assert second.status_code == 200
 
 
 def test_pairing_nonce_expiry_is_rejected(
@@ -464,6 +606,21 @@ def test_corrupted_companion_credential_store_does_not_block_startup(
 ) -> None:
     credentials_path = tmp_path / "companion_credentials.json"
     credentials_path.write_text("{")
+
+    manager = CompanionPairingManager(
+        node_id=NodeId("local-node"),
+        key_path=tmp_path / "companion_cluster.key",
+        credentials_path=credentials_path,
+    )
+
+    assert manager.revoke_credential("missing") is False
+
+
+def test_non_utf8_companion_credential_store_does_not_block_startup(
+    tmp_path: Path,
+) -> None:
+    credentials_path = tmp_path / "companion_credentials.json"
+    credentials_path.write_bytes(b"\xff\xfe")
 
     manager = CompanionPairingManager(
         node_id=NodeId("local-node"),

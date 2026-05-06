@@ -57,9 +57,11 @@ from exo.api.adapters.responses import (
     responses_request_to_text_generation,
 )
 from exo.api.companion import (
+    COMPANION_READ_SCOPES,
     CompanionAuthError,
     CompanionCredential,
     CompanionOverviewResponse,
+    CompanionPairingError,
     CompanionPairingExchangeRequest,
     CompanionPairingExchangeResponse,
     CompanionPairingManager,
@@ -494,6 +496,7 @@ def _json_request_body(schema: dict[str, object]) -> dict[str, object]:
 
 
 def _is_loopback_host(host: str) -> bool:
+    host = _normalize_forwarded_host(host)
     if host in {"localhost", "testclient"}:
         return True
     with contextlib.suppress(ValueError):
@@ -507,18 +510,33 @@ def _forwarded_host_values(value: str) -> Sequence[str]:
         for part in segment.split(";"):
             key, separator, raw = part.strip().partition("=")
             if separator and key.lower() == "for":
-                hosts.append(raw.strip().strip('"').strip("[]"))
+                hosts.append(_normalize_forwarded_host(raw))
     return tuple(hosts)
+
+
+def _normalize_forwarded_host(value: str) -> str:
+    host = value.strip().strip('"')
+    if host.startswith("["):
+        end = host.find("]")
+        if end != -1:
+            return host[1:end]
+    if host.count(":") == 1:
+        maybe_host, maybe_port = host.rsplit(":", 1)
+        if maybe_port.isdigit():
+            return maybe_host
+    return host
 
 
 def _has_non_loopback_forwarded_client(request: Request) -> bool:
     candidates: list[str] = []
     x_forwarded_for = request.headers.get("x-forwarded-for")
     if x_forwarded_for:
-        candidates.extend(host.strip() for host in x_forwarded_for.split(","))
+        candidates.extend(
+            _normalize_forwarded_host(host) for host in x_forwarded_for.split(",")
+        )
     x_real_ip = request.headers.get("x-real-ip")
     if x_real_ip:
-        candidates.append(x_real_ip.strip())
+        candidates.append(_normalize_forwarded_host(x_real_ip))
     forwarded = request.headers.get("forwarded")
     if forwarded:
         candidates.extend(_forwarded_host_values(forwarded))
@@ -4618,10 +4636,13 @@ class API:
     ) -> CompanionPairingSessionResponse:
         self._require_companion_pairing_operator(request)
         remote_access = await self.get_remote_access()
-        return self._companion_pairing.create_session(
-            request=payload,
-            remote_access=remote_access,
-        )
+        try:
+            return self._companion_pairing.create_session(
+                request=payload,
+                remote_access=remote_access,
+            )
+        except CompanionPairingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     async def exchange_companion_pairing_session(
         self,
@@ -4657,7 +4678,7 @@ class API:
             credential = self._companion_pairing.authenticate_bearer(token)
         except CompanionAuthError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
-        required_scopes = {"cluster:read", "nodes:read", "models:read", "events:read"}
+        required_scopes = set(COMPANION_READ_SCOPES)
         if not required_scopes.issubset(set(credential.scopes)):
             raise HTTPException(status_code=403, detail="insufficient_scope")
         return credential
