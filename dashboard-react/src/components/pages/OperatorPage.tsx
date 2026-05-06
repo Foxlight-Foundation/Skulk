@@ -1,10 +1,10 @@
-import { useState, useCallback, useEffect } from 'react';
-import QRCode from 'qrcode';
+import { useState, useCallback } from 'react';
 import styled from 'styled-components';
 import { useGetRawStateQuery, useGetLocalNodeIdQuery, useRestartNodeMutation } from '../../store/endpoints/cluster';
 import { addToast } from '../../hooks/useToast';
 import { useRemoteAccess } from '../../hooks/useRemoteAccess';
 import { copyToClipboard } from '../../utils/clipboard';
+import { QrCode } from '../common/QrCode';
 
 /* ── Types ─────────────────────────────────────────────────── */
 
@@ -260,7 +260,6 @@ function fmtBytes(bytes: number): string {
 
 function RemoteAccessCard() {
   const access = useRemoteAccess();
-  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   const operatorUrl =
@@ -271,13 +270,6 @@ function RemoteAccessCard() {
     access.status === 'ok' ? access.data.tailscale.url : null;
   const tailscaleRunning =
     access.status === 'ok' ? access.data.tailscale.running : false;
-
-  useEffect(() => {
-    if (!operatorUrl) { setQrDataUrl(null); return; }
-    QRCode.toDataURL(operatorUrl, { width: 180, margin: 1 })
-      .then(setQrDataUrl)
-      .catch(() => setQrDataUrl(null));
-  }, [operatorUrl]);
 
   const handleCopy = useCallback(() => {
     if (!operatorUrl) return;
@@ -317,9 +309,9 @@ function RemoteAccessCard() {
             <MetricValue>not running</MetricValue>
           </AccessRow>
         )}
-        {operatorUrl && qrDataUrl && (
+        {operatorUrl && (
           <QRWrap>
-            <img src={qrDataUrl} alt="Operator panel QR code" width={180} height={180} />
+            <QrCode value={operatorUrl} alt="Operator panel QR code" size={180} />
             <QRLabel>Scan to open operator panel</QRLabel>
             <CopyButton onClick={handleCopy}>
               {copied ? 'Copied!' : 'Copy URL'}

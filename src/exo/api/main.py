@@ -1,6 +1,8 @@
 import base64
 import contextlib
 import hashlib
+import hmac
+import ipaddress
 import json
 import os
 import platform
@@ -13,6 +15,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import anyio
@@ -53,6 +56,20 @@ from exo.api.adapters.responses import (
     collect_responses_response,
     generate_responses_stream,
     responses_request_to_text_generation,
+)
+from exo.api.companion import (
+    COMPANION_READ_SCOPES,
+    CompanionAuthError,
+    CompanionCredential,
+    CompanionOverviewResponse,
+    CompanionPairingError,
+    CompanionPairingExchangeRequest,
+    CompanionPairingExchangeResponse,
+    CompanionPairingManager,
+    CompanionPairingSessionRequest,
+    CompanionPairingSessionResponse,
+    bearer_token_from_authorization,
+    build_companion_overview,
 )
 from exo.api.keepalive import with_sse_keepalive
 from exo.api.types import (
@@ -365,6 +382,10 @@ API_TAGS_METADATA = [
         "description": "Read-only local and cluster diagnostics for stuck runner, placement, resource, and process inspection.",
     },
     {
+        "name": "Companion",
+        "description": "Native companion app pairing, scoped credentials, and read-only cluster overview.",
+    },
+    {
         "name": "Images",
         "description": "Image generation, editing, retrieval, and benchmarking endpoints.",
     },
@@ -475,6 +496,65 @@ def _json_request_body(schema: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _is_loopback_host(host: str) -> bool:
+    host = _normalize_forwarded_host(host).lower()
+    if host in {"localhost", "testclient"}:
+        return True
+    with contextlib.suppress(ValueError):
+        return ipaddress.ip_address(host).is_loopback
+    return False
+
+
+def _normalize_forwarded_host(value: str) -> str:
+    host = value.strip().strip('"')
+    if host.startswith("["):
+        end = host.find("]")
+        if end != -1:
+            return host[1:end]
+    if host.count(":") == 1:
+        maybe_host, maybe_port = host.rsplit(":", 1)
+        if maybe_port.isdigit():
+            return maybe_host
+    return host
+
+
+def _has_forwarded_client_headers(request: Request) -> bool:
+    return any(
+        header in request.headers
+        for header in ("x-forwarded-for", "x-real-ip", "forwarded")
+    )
+
+
+def _is_loopback_client(request: Request) -> bool:
+    host = request.client.host if request.client else ""
+    if not _is_loopback_host(host):
+        return False
+    return not _has_forwarded_client_headers(request)
+
+
+def _has_loopback_request_host(request: Request) -> bool:
+    host = request.headers.get("host")
+    return bool(host and _is_loopback_host(host))
+
+
+def _has_trusted_loopback_pairing_origin(request: Request) -> bool:
+    if not _has_loopback_request_host(request):
+        return False
+
+    sec_fetch_site = request.headers.get("sec-fetch-site")
+    if sec_fetch_site and sec_fetch_site.lower() not in {"none", "same-origin"}:
+        return False
+
+    origin = request.headers.get("origin")
+    if not origin:
+        return True
+
+    parsed_origin = urlparse(origin)
+    if parsed_origin.scheme not in {"http", "https"}:
+        return False
+    return _is_loopback_host(parsed_origin.hostname or "")
+
+
 class API:
     def __init__(
         self,
@@ -513,6 +593,7 @@ class API:
             [RunnerId, task_types.TaskId], Awaitable[RunnerTaskCancelResponse]
         ] | None = None
         self._sent_image_hashes: set[str] = set()
+        self._companion_pairing: CompanionPairingManager | None = None
         # Initialize optimizer if store path is available
         if exo_config and exo_config.model_store and exo_config.model_store.enabled:
             from exo.store.model_optimizer import ModelOptimizer
@@ -1191,6 +1272,33 @@ class API:
                 "code generation so mobile users land directly on the operator panel."
             ),
         )(self.get_remote_access)
+        self.app.post(
+            "/v1/companion/pairing-sessions",
+            tags=["Companion"],
+            summary="Create companion pairing session",
+            description=(
+                "Create a short-lived, single-use companion pairing QR payload. "
+                "The QR contains a nonce and cluster metadata, not a bearer credential."
+            ),
+        )(self.create_companion_pairing_session)
+        self.app.post(
+            "/v1/companion/pairing-sessions/{nonce}/exchange",
+            tags=["Companion"],
+            summary="Exchange companion pairing nonce",
+            description=(
+                "Exchange a valid pairing nonce for a revocable read-only companion "
+                "credential. The cleartext token is returned once."
+            ),
+        )(self.exchange_companion_pairing_session)
+        self.app.get(
+            "/v1/companion/overview",
+            tags=["Companion"],
+            summary="Get companion cluster overview",
+            description=(
+                "Return a companion-safe read-only cluster overview. Requires a "
+                "read-only companion bearer token."
+            ),
+        )(self.get_companion_overview)
 
     async def place_instance(self, payload: PlaceInstanceParams):
         command = PlaceInstance(
@@ -4527,6 +4635,86 @@ class API:
             self.state.node_network,
             self.port,
         )
+
+    async def create_companion_pairing_session(
+        self, request: Request, payload: CompanionPairingSessionRequest
+    ) -> CompanionPairingSessionResponse:
+        self._require_companion_pairing_operator(request)
+        pairing = self._get_companion_pairing()
+        remote_access = await self.get_remote_access()
+        try:
+            return pairing.create_session(
+                request=payload,
+                remote_access=remote_access,
+            )
+        except CompanionPairingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    async def exchange_companion_pairing_session(
+        self,
+        nonce: str,
+        payload: CompanionPairingExchangeRequest,
+    ) -> CompanionPairingExchangeResponse:
+        pairing = self._get_companion_pairing()
+        try:
+            return pairing.exchange_session(
+                nonce=nonce,
+                request=payload,
+            )
+        except CompanionAuthError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    async def get_companion_overview(
+        self,
+        request: Request,
+    ) -> CompanionOverviewResponse:
+        credential = self._require_companion_credential(request)
+        remote_access = await self.get_remote_access()
+        return build_companion_overview(
+            node_id=self.node_id,
+            state=self.state,
+            remote_access=remote_access,
+            credential=credential,
+            manager=self._get_companion_pairing(),
+            recent_events=self._recent_companion_events(limit=20),
+        )
+
+    def _require_companion_credential(self, request: Request) -> CompanionCredential:
+        token = bearer_token_from_authorization(request.headers.get("authorization"))
+        try:
+            credential = self._get_companion_pairing().authenticate_bearer(token)
+        except CompanionAuthError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        required_scopes = set(COMPANION_READ_SCOPES)
+        if not required_scopes.issubset(set(credential.scopes)):
+            raise HTTPException(status_code=403, detail="insufficient_scope")
+        return credential
+
+    def _get_companion_pairing(self) -> CompanionPairingManager:
+        if self._companion_pairing is None:
+            self._companion_pairing = CompanionPairingManager(node_id=self.node_id)
+        return self._companion_pairing
+
+    def _require_companion_pairing_operator(self, request: Request) -> None:
+        if _is_loopback_client(request) and _has_trusted_loopback_pairing_origin(request):
+            return
+
+        expected = preferred_env_value(
+            "SKULK_COMPANION_PAIRING_TOKEN",
+            "EXO_COMPANION_PAIRING_TOKEN",
+        )
+        supplied = request.headers.get("x-skulk-operator-token")
+        if expected and supplied and hmac.compare_digest(expected, supplied):
+            return
+
+        raise HTTPException(status_code=403, detail="operator_auth_required")
+
+    def _recent_companion_events(self, *, limit: int) -> Sequence[Event]:
+        if self._event_log is None or limit <= 0:
+            return ()
+        end = len(self._event_log)
+        start = max(0, end - limit)
+        return tuple(self._event_log.read_range(start, end))
 
     async def get_store_downloads(self) -> JSONResponse:
         if self._store_client is None:

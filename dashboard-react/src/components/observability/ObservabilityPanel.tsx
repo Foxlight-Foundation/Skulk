@@ -11,6 +11,7 @@ import {
 } from '../../store/slices/uiSlice';
 import { LiveTab } from './LiveTab';
 import { NodeTab } from './NodeTab';
+import { PairingTab } from './PairingTab';
 import { TracesTab } from './TracesTab';
 
 /**
@@ -154,6 +155,7 @@ const TAB_ORDER: { key: ObservabilityTab; label: string }[] = [
   { key: 'live', label: 'Live' },
   { key: 'node', label: 'Node' },
   { key: 'traces', label: 'Traces' },
+  { key: 'pairing', label: 'Pairing' },
 ];
 
 export function ObservabilityPanel() {
@@ -285,6 +287,7 @@ export function ObservabilityPanel() {
           {activeTab === 'live' && <LiveTab />}
           {activeTab === 'node' && <NodeTab nodeId={selectedNodeId} />}
           {activeTab === 'traces' && <TracesTab />}
+          {activeTab === 'pairing' && <PairingTab />}
         </Body>
       </Aside>
     </>
