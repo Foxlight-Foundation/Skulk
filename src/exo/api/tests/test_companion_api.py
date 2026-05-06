@@ -508,6 +508,48 @@ def test_pairing_nonce_is_single_use(
     )
 
 
+def test_pairing_exchange_rejects_credential_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api = _build_api(tmp_path)
+    client = _build_client(api)
+    monkeypatch.setattr(
+        remote_access_module,
+        "query_tailscale_status",
+        AsyncMock(return_value=_tailscale_running()),
+    )
+    monkeypatch.setattr(companion_module, "MAX_COMPANION_CREDENTIALS", 1)
+
+    first_session = client.post("/v1/companion/pairing-sessions", json={})
+    first_nonce = cast(
+        str,
+        cast(dict[str, object], _json_object(first_session)["qrPayload"])[
+            "pairingNonce"
+        ],
+    )
+    second_session = client.post("/v1/companion/pairing-sessions", json={})
+    second_nonce = cast(
+        str,
+        cast(dict[str, object], _json_object(second_session)["qrPayload"])[
+            "pairingNonce"
+        ],
+    )
+
+    first = client.post(f"/v1/companion/pairing-sessions/{first_nonce}/exchange", json={})
+    second = client.post(
+        f"/v1/companion/pairing-sessions/{second_nonce}/exchange",
+        json={},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 400
+    assert (
+        cast(dict[str, object], _json_object(second)["error"])["message"]
+        == "credential_limit_reached"
+    )
+
+
 def test_pairing_nonce_survives_failed_credential_persistence(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

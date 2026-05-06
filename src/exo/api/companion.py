@@ -37,6 +37,7 @@ from exo.utils.pydantic_ext import CamelCaseModel, FrozenModel
 PAIRING_VERSION: Literal[1] = 1
 PAIRING_SESSION_TTL = timedelta(minutes=5)
 MAX_PAIRING_SESSIONS = 64
+MAX_COMPANION_CREDENTIALS = 512
 COMPANION_READ_SCOPES: tuple[str, ...] = (
     "cluster:read",
     "nodes:read",
@@ -297,6 +298,8 @@ class CompanionPairingManager:
             if session.expires_at <= _utc_now():
                 del self._sessions[nonce]
                 raise CompanionAuthError("expired_code")
+            if len(self._credentials) >= MAX_COMPANION_CREDENTIALS:
+                raise CompanionAuthError("credential_limit_reached")
 
             session.exchanged = True
             credential_id = secrets.token_urlsafe(16)
