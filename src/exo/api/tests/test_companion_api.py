@@ -54,6 +54,14 @@ def _build_api(tmp_path: Path, node_id: str = "local-node") -> API:
     return api
 
 
+def _build_client(api: API, *, raise_server_exceptions: bool = True) -> TestClient:
+    return TestClient(
+        api.app,
+        base_url="http://localhost",
+        raise_server_exceptions=raise_server_exceptions,
+    )
+
+
 def _tailscale_running() -> TailscaleStatus:
     return TailscaleStatus(
         running=True,
@@ -86,7 +94,7 @@ def test_create_pairing_session_returns_companion_qr_payload(
 ) -> None:
     api = _build_api(tmp_path)
     api.state = _state_with_lan_ip("local-node", "192.168.1.5")
-    client = TestClient(api.app)
+    client = _build_client(api)
     monkeypatch.setattr(
         remote_access_module,
         "query_tailscale_status",
@@ -115,7 +123,7 @@ def test_pairing_session_creation_requires_operator_token_for_nonlocal_request(
     tmp_path: Path,
 ) -> None:
     api = _build_api(tmp_path)
-    client = TestClient(api.app)
+    client = _build_client(api)
     monkeypatch.setattr(api_main, "_is_loopback_client", _non_loopback_request)
     monkeypatch.setattr(
         remote_access_module,
@@ -137,7 +145,7 @@ def test_pairing_session_creation_rejects_forwarded_nonlocal_loopback_request(
     tmp_path: Path,
 ) -> None:
     api = _build_api(tmp_path)
-    client = TestClient(api.app, raise_server_exceptions=False)
+    client = _build_client(api, raise_server_exceptions=False)
     monkeypatch.setattr(
         remote_access_module,
         "query_tailscale_status",
@@ -162,7 +170,7 @@ def test_pairing_session_creation_rejects_cross_site_loopback_browser_request(
     tmp_path: Path,
 ) -> None:
     api = _build_api(tmp_path)
-    client = TestClient(api.app)
+    client = _build_client(api)
     monkeypatch.setattr(
         remote_access_module,
         "query_tailscale_status",
@@ -190,7 +198,7 @@ def test_pairing_session_creation_accepts_same_origin_loopback_browser_request(
     tmp_path: Path,
 ) -> None:
     api = _build_api(tmp_path)
-    client = TestClient(api.app)
+    client = _build_client(api)
     monkeypatch.setattr(
         remote_access_module,
         "query_tailscale_status",
@@ -209,12 +217,33 @@ def test_pairing_session_creation_accepts_same_origin_loopback_browser_request(
     assert response.status_code == 200
 
 
+def test_pairing_session_creation_rejects_loopback_peer_with_nonlocal_host(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api = _build_api(tmp_path)
+    client = TestClient(api.app, base_url="http://skulk.local")
+    monkeypatch.setattr(
+        remote_access_module,
+        "query_tailscale_status",
+        AsyncMock(return_value=_tailscale_running()),
+    )
+
+    response = client.post("/v1/companion/pairing-sessions", json={})
+
+    assert response.status_code == 403
+    assert (
+        cast(dict[str, object], _json_object(response)["error"])["message"]
+        == "operator_auth_required"
+    )
+
+
 def test_forwarded_loopback_with_ipv6_port_requires_operator_token(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     api = _build_api(tmp_path)
-    client = TestClient(api.app)
+    client = _build_client(api)
     monkeypatch.setattr(
         remote_access_module,
         "query_tailscale_status",
@@ -239,7 +268,7 @@ def test_forwarded_loopback_with_ipv4_port_requires_operator_token(
     tmp_path: Path,
 ) -> None:
     api = _build_api(tmp_path)
-    client = TestClient(api.app)
+    client = _build_client(api)
     monkeypatch.setattr(
         remote_access_module,
         "query_tailscale_status",
@@ -264,7 +293,7 @@ def test_pairing_session_creation_accepts_forwarded_nonlocal_request_with_token(
     tmp_path: Path,
 ) -> None:
     api = _build_api(tmp_path)
-    client = TestClient(api.app)
+    client = _build_client(api)
     monkeypatch.setenv("SKULK_COMPANION_PAIRING_TOKEN", "operator-token")
     monkeypatch.setattr(
         remote_access_module,
@@ -289,7 +318,7 @@ def test_pairing_session_creation_accepts_configured_operator_token(
     tmp_path: Path,
 ) -> None:
     api = _build_api(tmp_path)
-    client = TestClient(api.app)
+    client = _build_client(api)
     monkeypatch.setattr(api_main, "_is_loopback_client", _non_loopback_request)
     monkeypatch.setenv("SKULK_COMPANION_PAIRING_TOKEN", "operator-token")
     monkeypatch.setattr(
@@ -315,7 +344,7 @@ def test_pairing_session_creation_rejects_missing_reachable_url(
     tmp_path: Path,
 ) -> None:
     api = _build_api(tmp_path)
-    client = TestClient(api.app)
+    client = _build_client(api)
     monkeypatch.setattr(
         remote_access_module,
         "query_tailscale_status",
@@ -365,7 +394,7 @@ def test_pairing_exchange_returns_read_only_credential(
     tmp_path: Path,
 ) -> None:
     api = _build_api(tmp_path)
-    client = TestClient(api.app)
+    client = _build_client(api)
     monkeypatch.setattr(
         remote_access_module,
         "query_tailscale_status",
@@ -401,7 +430,7 @@ def test_pairing_exchange_persists_client_name(
     tmp_path: Path,
 ) -> None:
     api = _build_api(tmp_path)
-    client = TestClient(api.app)
+    client = _build_client(api)
     monkeypatch.setattr(
         remote_access_module,
         "query_tailscale_status",
@@ -431,7 +460,7 @@ def test_pairing_nonce_is_single_use(
     tmp_path: Path,
 ) -> None:
     api = _build_api(tmp_path)
-    client = TestClient(api.app)
+    client = _build_client(api)
     monkeypatch.setattr(
         remote_access_module,
         "query_tailscale_status",
@@ -461,7 +490,7 @@ def test_pairing_nonce_survives_failed_credential_persistence(
     tmp_path: Path,
 ) -> None:
     api = _build_api(tmp_path)
-    client = TestClient(api.app, raise_server_exceptions=False)
+    client = _build_client(api, raise_server_exceptions=False)
     monkeypatch.setattr(
         remote_access_module,
         "query_tailscale_status",
@@ -495,7 +524,7 @@ def test_pairing_nonce_expiry_is_rejected(
     tmp_path: Path,
 ) -> None:
     api = _build_api(tmp_path)
-    client = TestClient(api.app)
+    client = _build_client(api)
     now = datetime(2026, 5, 5, tzinfo=timezone.utc)
     monkeypatch.setattr(companion_module, "_utc_now", lambda: now)
     monkeypatch.setattr(
@@ -527,7 +556,7 @@ def test_pairing_nonce_expiry_is_rejected(
 
 def test_companion_overview_requires_bearer_token(tmp_path: Path) -> None:
     api = _build_api(tmp_path)
-    client = TestClient(api.app)
+    client = _build_client(api)
 
     response = client.get("/v1/companion/overview")
 
@@ -544,7 +573,7 @@ def test_companion_overview_returns_safe_read_only_shape(
 ) -> None:
     api = _build_api(tmp_path)
     api.state = _state_with_lan_ip("local-node", "192.168.1.5")
-    client = TestClient(api.app)
+    client = _build_client(api)
     monkeypatch.setattr(
         remote_access_module,
         "query_tailscale_status",
@@ -588,7 +617,7 @@ def test_revoked_companion_credential_cannot_authenticate(
     tmp_path: Path,
 ) -> None:
     api = _build_api(tmp_path)
-    client = TestClient(api.app)
+    client = _build_client(api)
     monkeypatch.setattr(
         remote_access_module,
         "query_tailscale_status",
@@ -628,7 +657,7 @@ def test_companion_credential_hash_survives_manager_restart(
     tmp_path: Path,
 ) -> None:
     api = _build_api(tmp_path)
-    client = TestClient(api.app)
+    client = _build_client(api)
     monkeypatch.setattr(
         remote_access_module,
         "query_tailscale_status",

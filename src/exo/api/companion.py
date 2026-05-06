@@ -82,6 +82,7 @@ class CompanionPairingExchangeRequest(CamelCaseModel):
 class CompanionClusterMetadata(FrozenModel):
     cluster_id: str
     cluster_name: str
+    cluster_public_key: str
     node_id: NodeId
     base_url: str | None
 
@@ -325,6 +326,7 @@ class CompanionPairingManager:
             cluster=CompanionClusterMetadata(
                 cluster_id=self.cluster_id,
                 cluster_name=session.cluster_name,
+                cluster_public_key=self.cluster_public_key,
                 node_id=self._node_id,
                 base_url=session.base_url,
             ),
@@ -465,6 +467,7 @@ def build_companion_overview(
         cluster=CompanionClusterMetadata(
             cluster_id=manager.cluster_id,
             cluster_name=credential.cluster_name,
+            cluster_public_key=manager.cluster_public_key,
             node_id=node_id,
             base_url=remote_access.preferred_url,
         ),

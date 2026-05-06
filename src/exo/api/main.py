@@ -560,7 +560,15 @@ def _is_loopback_client(request: Request) -> bool:
     return not _has_non_loopback_forwarded_client(request)
 
 
+def _has_loopback_request_host(request: Request) -> bool:
+    host = request.headers.get("host")
+    return bool(host and _is_loopback_host(host))
+
+
 def _has_trusted_loopback_pairing_origin(request: Request) -> bool:
+    if not _has_loopback_request_host(request):
+        return False
+
     sec_fetch_site = request.headers.get("sec-fetch-site")
     if sec_fetch_site and sec_fetch_site.lower() not in {"none", "same-origin"}:
         return False
