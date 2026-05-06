@@ -544,9 +544,18 @@ def _has_non_loopback_forwarded_client(request: Request) -> bool:
     return any(host and not _is_loopback_host(host) for host in candidates)
 
 
+def _has_forwarded_client_headers(request: Request) -> bool:
+    return any(
+        header in request.headers
+        for header in ("x-forwarded-for", "x-real-ip", "forwarded")
+    )
+
+
 def _is_loopback_client(request: Request) -> bool:
     host = request.client.host if request.client else ""
     if not _is_loopback_host(host):
+        return False
+    if _has_forwarded_client_headers(request):
         return False
     return not _has_non_loopback_forwarded_client(request)
 

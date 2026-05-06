@@ -209,7 +209,7 @@ def test_pairing_session_creation_accepts_same_origin_loopback_browser_request(
     assert response.status_code == 200
 
 
-def test_forwarded_loopback_with_ipv6_port_is_treated_as_local(
+def test_forwarded_loopback_with_ipv6_port_requires_operator_token(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -227,10 +227,14 @@ def test_forwarded_loopback_with_ipv6_port_is_treated_as_local(
         json={},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 403
+    assert (
+        cast(dict[str, object], _json_object(response)["error"])["message"]
+        == "operator_auth_required"
+    )
 
 
-def test_forwarded_loopback_with_ipv4_port_is_treated_as_local(
+def test_forwarded_loopback_with_ipv4_port_requires_operator_token(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -248,7 +252,11 @@ def test_forwarded_loopback_with_ipv4_port_is_treated_as_local(
         json={},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 403
+    assert (
+        cast(dict[str, object], _json_object(response)["error"])["message"]
+        == "operator_auth_required"
+    )
 
 
 def test_pairing_session_creation_accepts_forwarded_nonlocal_request_with_token(
