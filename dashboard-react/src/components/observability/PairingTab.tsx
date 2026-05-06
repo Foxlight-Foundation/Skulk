@@ -290,15 +290,13 @@ export function PairingTab() {
     if (!Number.isFinite(expiresMs)) return;
     const delay = Math.max(1000, expiresMs - Date.now() - QR_RENEW_EARLY_MS);
     let controller: AbortController | null = null;
-    let fired = false;
     const timer = window.setTimeout(() => {
-      fired = true;
       controller = new AbortController();
       void loadSession(controller.signal, { showLoading: false });
     }, delay);
     return () => {
       window.clearTimeout(timer);
-      if (!fired) controller?.abort();
+      controller?.abort();
     };
   }, [loadSession, session]);
 
