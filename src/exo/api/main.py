@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import anyio
@@ -548,6 +549,21 @@ def _is_loopback_client(request: Request) -> bool:
     if not _is_loopback_host(host):
         return False
     return not _has_non_loopback_forwarded_client(request)
+
+
+def _has_trusted_loopback_pairing_origin(request: Request) -> bool:
+    sec_fetch_site = request.headers.get("sec-fetch-site")
+    if sec_fetch_site and sec_fetch_site.lower() not in {"none", "same-origin"}:
+        return False
+
+    origin = request.headers.get("origin")
+    if not origin:
+        return True
+
+    parsed_origin = urlparse(origin)
+    if parsed_origin.scheme not in {"http", "https"}:
+        return False
+    return _is_loopback_host(parsed_origin.hostname or "")
 
 
 class API:
@@ -4684,7 +4700,7 @@ class API:
         return credential
 
     def _require_companion_pairing_operator(self, request: Request) -> None:
-        if _is_loopback_client(request):
+        if _is_loopback_client(request) and _has_trusted_loopback_pairing_origin(request):
             return
 
         expected = preferred_env_value(

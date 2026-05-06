@@ -157,6 +157,58 @@ def test_pairing_session_creation_rejects_forwarded_nonlocal_loopback_request(
     )
 
 
+def test_pairing_session_creation_rejects_cross_site_loopback_browser_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api = _build_api(tmp_path)
+    client = TestClient(api.app)
+    monkeypatch.setattr(
+        remote_access_module,
+        "query_tailscale_status",
+        AsyncMock(return_value=_tailscale_running()),
+    )
+
+    response = client.post(
+        "/v1/companion/pairing-sessions",
+        headers={
+            "Origin": "https://evil.example",
+            "Sec-Fetch-Site": "cross-site",
+        },
+        json={},
+    )
+
+    assert response.status_code == 403
+    assert (
+        cast(dict[str, object], _json_object(response)["error"])["message"]
+        == "operator_auth_required"
+    )
+
+
+def test_pairing_session_creation_accepts_same_origin_loopback_browser_request(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    api = _build_api(tmp_path)
+    client = TestClient(api.app)
+    monkeypatch.setattr(
+        remote_access_module,
+        "query_tailscale_status",
+        AsyncMock(return_value=_tailscale_running()),
+    )
+
+    response = client.post(
+        "/v1/companion/pairing-sessions",
+        headers={
+            "Origin": "http://localhost:52415",
+            "Sec-Fetch-Site": "same-origin",
+        },
+        json={},
+    )
+
+    assert response.status_code == 200
+
+
 def test_forwarded_loopback_with_ipv6_port_is_treated_as_local(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
