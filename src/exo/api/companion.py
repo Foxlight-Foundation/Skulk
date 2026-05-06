@@ -266,11 +266,7 @@ class CompanionPairingManager:
             )
             self._sessions[nonce] = session
             self._trim_pairing_sessions()
-        exchange_url = (
-            f"{base_url}/v1/companion/pairing-sessions/{nonce}/exchange"
-            if base_url
-            else f"/v1/companion/pairing-sessions/{nonce}/exchange"
-        )
+        exchange_url = f"{base_url}/v1/companion/pairing-sessions/{nonce}/exchange"
         return CompanionPairingSessionResponse(
             qr_payload=CompanionPairingQrPayload(
                 version=PAIRING_VERSION,

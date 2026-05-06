@@ -505,16 +505,6 @@ def _is_loopback_host(host: str) -> bool:
     return False
 
 
-def _forwarded_host_values(value: str) -> Sequence[str]:
-    hosts: list[str] = []
-    for segment in value.split(","):
-        for part in segment.split(";"):
-            key, separator, raw = part.strip().partition("=")
-            if separator and key.lower() == "for":
-                hosts.append(_normalize_forwarded_host(raw))
-    return tuple(hosts)
-
-
 def _normalize_forwarded_host(value: str) -> str:
     host = value.strip().strip('"')
     if host.startswith("["):
@@ -528,22 +518,6 @@ def _normalize_forwarded_host(value: str) -> str:
     return host
 
 
-def _has_non_loopback_forwarded_client(request: Request) -> bool:
-    candidates: list[str] = []
-    x_forwarded_for = request.headers.get("x-forwarded-for")
-    if x_forwarded_for:
-        candidates.extend(
-            _normalize_forwarded_host(host) for host in x_forwarded_for.split(",")
-        )
-    x_real_ip = request.headers.get("x-real-ip")
-    if x_real_ip:
-        candidates.append(_normalize_forwarded_host(x_real_ip))
-    forwarded = request.headers.get("forwarded")
-    if forwarded:
-        candidates.extend(_forwarded_host_values(forwarded))
-    return any(host and not _is_loopback_host(host) for host in candidates)
-
-
 def _has_forwarded_client_headers(request: Request) -> bool:
     return any(
         header in request.headers
@@ -555,9 +529,7 @@ def _is_loopback_client(request: Request) -> bool:
     host = request.client.host if request.client else ""
     if not _is_loopback_host(host):
         return False
-    if _has_forwarded_client_headers(request):
-        return False
-    return not _has_non_loopback_forwarded_client(request)
+    return not _has_forwarded_client_headers(request)
 
 
 def _has_loopback_request_host(request: Request) -> bool:
