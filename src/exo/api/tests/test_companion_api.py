@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import cast
@@ -17,6 +19,11 @@ import exo.api.main as api_main
 import exo.connectivity.remote_access as remote_access_module
 from exo.api.companion import CompanionPairingManager
 from exo.api.main import API
+from exo.connectivity.remote_access import (
+    LocalAccess,
+    RemoteAccessInfo,
+    TailscaleAccess,
+)
 from exo.connectivity.tailscale import TailscaleStatus
 from exo.shared.election import ElectionMessage
 from exo.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
@@ -75,6 +82,22 @@ def _tailscale_running() -> TailscaleStatus:
 
 def _tailscale_not_running() -> TailscaleStatus:
     return TailscaleStatus(running=False)
+
+
+def _remote_access_info() -> RemoteAccessInfo:
+    return RemoteAccessInfo(
+        local=LocalAccess(
+            ip="192.168.1.5",
+            port=52415,
+            url="http://192.168.1.5:52415",
+        ),
+        tailscale=TailscaleAccess(
+            running=False,
+            port=52415,
+        ),
+        preferred_url="http://192.168.1.5:52415",
+        operator_url="http://192.168.1.5:52415/operator",
+    )
 
 
 def _state_with_lan_ip(node_id: str, ip: str) -> State:
@@ -504,6 +527,7 @@ def test_pairing_nonce_survives_failed_credential_persistence(
         ],
     )
     manager = api._companion_pairing  # pyright: ignore[reportPrivateUsage]
+    assert manager is not None
     original_save = manager._save_credentials  # pyright: ignore[reportPrivateUsage]
 
     def fail_save() -> None:
@@ -517,6 +541,45 @@ def test_pairing_nonce_survives_failed_credential_persistence(
 
     assert first.status_code == 500
     assert second.status_code == 200
+
+
+def test_pairing_nonce_exchange_is_concurrency_safe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager = CompanionPairingManager(
+        node_id=NodeId("local-node"),
+        key_path=tmp_path / "companion_cluster.key",
+        credentials_path=tmp_path / "companion_credentials.json",
+    )
+    session = manager.create_session(
+        request=companion_module.CompanionPairingSessionRequest(),
+        remote_access=_remote_access_info(),
+    )
+    nonce = session.qr_payload.pairing_nonce
+    original_save = manager._save_credentials  # pyright: ignore[reportPrivateUsage]
+
+    def slow_save() -> None:
+        time.sleep(0.05)
+        original_save()
+
+    def exchange() -> str:
+        try:
+            response = manager.exchange_session(
+                nonce=nonce,
+                request=companion_module.CompanionPairingExchangeRequest(),
+            )
+        except companion_module.CompanionAuthError as exc:
+            return str(exc)
+        return response.credential_id
+
+    monkeypatch.setattr(manager, "_save_credentials", slow_save)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(exchange) for _ in range(2)]
+        results = tuple(future.result() for future in futures)
+
+    assert sum(result == "already_used" for result in results) == 1
+    assert sum(result != "already_used" for result in results) == 1
 
 
 def test_pairing_nonce_expiry_is_rejected(
@@ -638,6 +701,7 @@ def test_revoked_companion_credential_cannot_authenticate(
     token = cast(str, exchange_body["token"])
     credential_id = cast(str, exchange_body["credentialId"])
     manager = api._companion_pairing  # pyright: ignore[reportPrivateUsage]
+    assert manager is not None
     assert manager.revoke_credential(credential_id) is True
 
     response = client.get(
@@ -650,6 +714,34 @@ def test_revoked_companion_credential_cannot_authenticate(
         cast(dict[str, object], _json_object(response)["error"])["message"]
         == "auth_failed"
     )
+
+
+def test_revoke_credential_rolls_back_memory_state_when_persistence_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manager = CompanionPairingManager(
+        node_id=NodeId("local-node"),
+        key_path=tmp_path / "companion_cluster.key",
+        credentials_path=tmp_path / "companion_credentials.json",
+    )
+    session = manager.create_session(
+        request=companion_module.CompanionPairingSessionRequest(),
+        remote_access=_remote_access_info(),
+    )
+    exchange = manager.exchange_session(
+        nonce=session.qr_payload.pairing_nonce,
+        request=companion_module.CompanionPairingExchangeRequest(),
+    )
+
+    def fail_save() -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(manager, "_save_credentials", fail_save)
+    with pytest.raises(OSError, match="disk full"):
+        manager.revoke_credential(exchange.credential_id)
+
+    assert manager.authenticate_bearer(exchange.token).credential_id == exchange.credential_id
 
 
 def test_companion_credential_hash_survives_manager_restart(
@@ -732,3 +824,29 @@ def test_corrupted_companion_cluster_key_is_regenerated(tmp_path: Path) -> None:
 
     assert manager.cluster_public_key.startswith("ed25519:")
     assert key_path.stat().st_size == 32
+
+
+def test_api_does_not_initialize_companion_pairing_at_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_init(*_: object, **__: object) -> CompanionPairingManager:
+        raise AssertionError("companion pairing should initialize lazily")
+
+    monkeypatch.setattr(api_main, "CompanionPairingManager", fail_init)
+    command_sender, _ = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    _, event_receiver = channel[IndexedEvent]()
+    _, election_receiver = channel[ElectionMessage]()
+
+    api = API(
+        NodeId("local-node"),
+        port=52415,
+        event_receiver=event_receiver,
+        command_sender=command_sender,
+        download_command_sender=download_sender,
+        election_receiver=election_receiver,
+        enable_event_log=False,
+        mount_dashboard=False,
+    )
+
+    assert api._companion_pairing is None  # pyright: ignore[reportPrivateUsage]

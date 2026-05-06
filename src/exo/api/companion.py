@@ -8,6 +8,7 @@ import hashlib
 import os
 import secrets
 import socket
+import threading
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -218,6 +219,7 @@ class CompanionPairingManager:
         self._node_id = node_id
         self._key_path = key_path
         self._credentials_path = credentials_path
+        self._lock = threading.RLock()
         self._sessions: dict[str, _PairingSession] = {}
         self._credentials: dict[str, CompanionCredential] = self._load_credentials()
         self._credential_hash_index: dict[str, CompanionCredential] = {
@@ -247,22 +249,23 @@ class CompanionPairingManager:
         request: CompanionPairingSessionRequest,
         remote_access: RemoteAccessInfo,
     ) -> CompanionPairingSessionResponse:
-        self._prune_expired_sessions()
-        nonce = secrets.token_urlsafe(32)
-        now = _utc_now()
-        expires_at = now + PAIRING_SESSION_TTL
-        cluster_name = request.cluster_name or default_cluster_name()
-        base_url = remote_access.preferred_url
-        if base_url is None:
-            raise CompanionPairingError("pairing_url_unavailable")
-        session = _PairingSession(
-            nonce=nonce,
-            expires_at=expires_at,
-            cluster_name=cluster_name,
-            base_url=base_url,
-        )
-        self._sessions[nonce] = session
-        self._trim_pairing_sessions()
+        with self._lock:
+            self._prune_expired_sessions()
+            nonce = secrets.token_urlsafe(32)
+            now = _utc_now()
+            expires_at = now + PAIRING_SESSION_TTL
+            cluster_name = request.cluster_name or default_cluster_name()
+            base_url = remote_access.preferred_url
+            if base_url is None:
+                raise CompanionPairingError("pairing_url_unavailable")
+            session = _PairingSession(
+                nonce=nonce,
+                expires_at=expires_at,
+                cluster_name=cluster_name,
+                base_url=base_url,
+            )
+            self._sessions[nonce] = session
+            self._trim_pairing_sessions()
         exchange_url = (
             f"{base_url}/v1/companion/pairing-sessions/{nonce}/exchange"
             if base_url
@@ -289,34 +292,36 @@ class CompanionPairingManager:
         nonce: str,
         request: CompanionPairingExchangeRequest,
     ) -> CompanionPairingExchangeResponse:
-        session = self._sessions.get(nonce)
-        if session is None:
-            raise CompanionAuthError("invalid_code")
-        if session.exchanged:
-            raise CompanionAuthError("already_used")
-        if session.expires_at <= _utc_now():
-            del self._sessions[nonce]
-            raise CompanionAuthError("expired_code")
+        with self._lock:
+            session = self._sessions.get(nonce)
+            if session is None:
+                raise CompanionAuthError("invalid_code")
+            if session.exchanged:
+                raise CompanionAuthError("already_used")
+            if session.expires_at <= _utc_now():
+                del self._sessions[nonce]
+                raise CompanionAuthError("expired_code")
 
-        credential_id = secrets.token_urlsafe(16)
-        token = secrets.token_urlsafe(48)
-        issued_at = _utc_now()
-        credential = CompanionCredential(
-            credential_id=credential_id,
-            token_hash=_hash_token(token),
-            scopes=COMPANION_READ_SCOPES,
-            issued_at=issued_at,
-            cluster_name=session.cluster_name,
-            client_name=request.client_name,
-        )
-        self._credentials[credential_id] = credential
-        try:
-            self._save_credentials()
-        except Exception:
-            del self._credentials[credential_id]
-            raise
-        self._credential_hash_index[credential.token_hash] = credential
-        session.exchanged = True
+            session.exchanged = True
+            credential_id = secrets.token_urlsafe(16)
+            token = secrets.token_urlsafe(48)
+            issued_at = _utc_now()
+            credential = CompanionCredential(
+                credential_id=credential_id,
+                token_hash=_hash_token(token),
+                scopes=COMPANION_READ_SCOPES,
+                issued_at=issued_at,
+                cluster_name=session.cluster_name,
+                client_name=request.client_name,
+            )
+            self._credentials[credential_id] = credential
+            try:
+                self._save_credentials()
+            except Exception:
+                session.exchanged = False
+                del self._credentials[credential_id]
+                raise
+            self._credential_hash_index[credential.token_hash] = credential
         return CompanionPairingExchangeResponse(
             credential_id=credential_id,
             token=token,
@@ -342,13 +347,22 @@ class CompanionPairingManager:
         raise CompanionAuthError("auth_failed")
 
     def revoke_credential(self, credential_id: str) -> bool:
-        credential = self._credentials.get(credential_id)
-        if credential is None:
-            return False
-        credential.revoked = True
-        self._credential_hash_index.pop(credential.token_hash, None)
-        self._save_credentials()
-        return True
+        with self._lock:
+            credential = self._credentials.get(credential_id)
+            if credential is None:
+                return False
+            was_revoked = credential.revoked
+            had_hash_index = credential.token_hash in self._credential_hash_index
+            credential.revoked = True
+            self._credential_hash_index.pop(credential.token_hash, None)
+            try:
+                self._save_credentials()
+            except Exception:
+                credential.revoked = was_revoked
+                if had_hash_index:
+                    self._credential_hash_index[credential.token_hash] = credential
+                raise
+            return True
 
     def _prune_expired_sessions(self) -> None:
         now = _utc_now()

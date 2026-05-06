@@ -621,7 +621,7 @@ class API:
             [RunnerId, task_types.TaskId], Awaitable[RunnerTaskCancelResponse]
         ] | None = None
         self._sent_image_hashes: set[str] = set()
-        self._companion_pairing = CompanionPairingManager(node_id=node_id)
+        self._companion_pairing: CompanionPairingManager | None = None
         # Initialize optimizer if store path is available
         if exo_config and exo_config.model_store and exo_config.model_store.enabled:
             from exo.store.model_optimizer import ModelOptimizer
@@ -4668,9 +4668,10 @@ class API:
         self, request: Request, payload: CompanionPairingSessionRequest
     ) -> CompanionPairingSessionResponse:
         self._require_companion_pairing_operator(request)
+        pairing = self._get_companion_pairing()
         remote_access = await self.get_remote_access()
         try:
-            return self._companion_pairing.create_session(
+            return pairing.create_session(
                 request=payload,
                 remote_access=remote_access,
             )
@@ -4682,8 +4683,9 @@ class API:
         nonce: str,
         payload: CompanionPairingExchangeRequest,
     ) -> CompanionPairingExchangeResponse:
+        pairing = self._get_companion_pairing()
         try:
-            return self._companion_pairing.exchange_session(
+            return pairing.exchange_session(
                 nonce=nonce,
                 request=payload,
             )
@@ -4701,20 +4703,25 @@ class API:
             state=self.state,
             remote_access=remote_access,
             credential=credential,
-            manager=self._companion_pairing,
+            manager=self._get_companion_pairing(),
             recent_events=self._recent_companion_events(limit=20),
         )
 
     def _require_companion_credential(self, request: Request) -> CompanionCredential:
         token = bearer_token_from_authorization(request.headers.get("authorization"))
         try:
-            credential = self._companion_pairing.authenticate_bearer(token)
+            credential = self._get_companion_pairing().authenticate_bearer(token)
         except CompanionAuthError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
         required_scopes = set(COMPANION_READ_SCOPES)
         if not required_scopes.issubset(set(credential.scopes)):
             raise HTTPException(status_code=403, detail="insufficient_scope")
         return credential
+
+    def _get_companion_pairing(self) -> CompanionPairingManager:
+        if self._companion_pairing is None:
+            self._companion_pairing = CompanionPairingManager(node_id=self.node_id)
+        return self._companion_pairing
 
     def _require_companion_pairing_operator(self, request: Request) -> None:
         if _is_loopback_client(request) and _has_trusted_loopback_pairing_origin(request):
