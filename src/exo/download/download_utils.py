@@ -148,14 +148,38 @@ def is_vindex_directory_complete(vindex_dir: Path) -> bool:
     return has_metadata and has_payload
 
 
-def resolve_vindex_in_path(vindex_id: ModelId) -> Path | None:
-    """Search configured model paths for a directory-shaped LARQL vindex."""
+def build_vindex_path(vindex_id: ModelId) -> Path:
+    """Return the configured writable cache path for a LARQL vindex artifact."""
 
+    return EXO_MODELS_DIR / vindex_id.normalize()
+
+
+def _vindex_search_path() -> tuple[Path, ...]:
     import exo.shared.constants as _constants
 
-    search_path: tuple[Path, ...] = _constants.EXO_MODELS_PATH or ()
+    configured_paths = _constants.EXO_MODELS_PATH or ()
+    candidates = (
+        *configured_paths,
+        EXO_MODELS_DIR,
+        Path.home() / ".exo" / "models",
+        Path.home() / ".exo" / "staging",
+    )
+    unique_paths: list[Path] = []
+    seen_paths: set[Path] = set()
+    for candidate in candidates:
+        expanded = candidate.expanduser()
+        if expanded in seen_paths:
+            continue
+        seen_paths.add(expanded)
+        unique_paths.append(expanded)
+    return tuple(unique_paths)
+
+
+def resolve_vindex_in_path(vindex_id: ModelId) -> Path | None:
+    """Search model paths for a complete directory-shaped LARQL vindex."""
+
     normalized = vindex_id.normalize()
-    for search_dir in search_path:
+    for search_dir in _vindex_search_path():
         candidate = search_dir / normalized
         if is_vindex_directory_complete(candidate):
             return candidate

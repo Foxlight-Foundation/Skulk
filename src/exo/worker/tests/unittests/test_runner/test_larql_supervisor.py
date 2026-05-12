@@ -17,10 +17,15 @@ from exo.shared.types.events import (
     TaskStatusUpdated,
 )
 from exo.shared.types.memory import Memory
-from exo.shared.types.tasks import LoadModel, TaskStatus
+from exo.shared.types.tasks import LoadModel, Shutdown, TaskStatus
 from exo.shared.types.worker.instances import BoundInstance, InstanceId
 from exo.shared.types.worker.larql import LarqlExpertRange
-from exo.shared.types.worker.runners import RunnerId, RunnerReady
+from exo.shared.types.worker.runners import (
+    RunnerId,
+    RunnerReady,
+    RunnerShutdown,
+    RunnerShuttingDown,
+)
 from exo.shared.types.worker.shards import LarqlShardMetadata, ShardMetadata
 from exo.utils.channels import channel
 from exo.worker.runner.larql_supervisor import (
@@ -160,3 +165,39 @@ async def test_larql_supervisor_load_model_starts_process_and_emits_readiness() 
     completion = await event_receiver.receive()
     assert isinstance(completion, TaskStatusUpdated)
     assert completion.task_status == TaskStatus.Complete
+
+
+@pytest.mark.asyncio
+async def test_larql_supervisor_shutdown_completes_without_failure() -> None:
+    shard = _larql_shard()
+    event_sender, event_receiver = channel[Event]()
+    supervisor = LarqlRunnerSupervisor.create(
+        bound_instance=_bound_instance(shard),
+        event_sender=event_sender,
+    )
+    supervisor._process = cast(  # pyright: ignore[reportPrivateUsage]
+        subprocess.Popen[str],
+        cast(object, _FakeProcess()),
+    )
+
+    await supervisor.start_task(
+        Shutdown(
+            instance_id=supervisor.bound_instance.instance.instance_id,
+            runner_id=supervisor.bound_instance.bound_runner_id,
+        )
+    )
+
+    observed = [
+        await event_receiver.receive(),
+        await event_receiver.receive(),
+        await event_receiver.receive(),
+        await event_receiver.receive(),
+    ]
+
+    assert isinstance(observed[0], TaskAcknowledged)
+    assert isinstance(observed[1], RunnerStatusUpdated)
+    assert isinstance(observed[1].runner_status, RunnerShuttingDown)
+    assert isinstance(observed[2], TaskStatusUpdated)
+    assert observed[2].task_status == TaskStatus.Complete
+    assert isinstance(observed[3], RunnerStatusUpdated)
+    assert isinstance(observed[3].runner_status, RunnerShutdown)

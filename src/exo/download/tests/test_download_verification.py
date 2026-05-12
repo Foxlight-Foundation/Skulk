@@ -12,8 +12,10 @@ import pytest
 from pydantic import TypeAdapter
 
 from exo.download.download_utils import (
+    build_vindex_path,
     delete_model,
     fetch_file_list_with_cache,
+    resolve_vindex_in_path,
 )
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
@@ -32,6 +34,27 @@ async def temp_models_dir(tmp_path: Path) -> AsyncIterator[Path]:
     await aios.makedirs(models_dir, exist_ok=True)
     with patch("exo.download.download_utils.EXO_MODELS_DIR", models_dir):
         yield models_dir
+
+
+class TestVindexPathResolution:
+    """Tests for directory-shaped LARQL vindex cache discovery."""
+
+    def test_resolve_vindex_searches_default_models_dir(
+        self, model_id: ModelId, temp_models_dir: Path
+    ) -> None:
+        """Vindexes in the writable default models dir are reusable offline."""
+
+        vindex_dir = temp_models_dir / model_id.normalize()
+        vindex_dir.mkdir(parents=True)
+        (vindex_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        (vindex_dir / "weights.bin").write_bytes(b"vindex")
+
+        with (
+            patch("exo.download.download_utils.EXO_MODELS_DIR", temp_models_dir),
+            patch("exo.shared.constants.EXO_MODELS_PATH", None),
+        ):
+            assert build_vindex_path(model_id) == vindex_dir
+            assert resolve_vindex_in_path(model_id) == vindex_dir
 
 
 class TestFileVerification:

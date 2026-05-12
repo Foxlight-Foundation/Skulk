@@ -15,7 +15,11 @@ import anyio
 from anyio import BrokenResourceError, ClosedResourceError, to_thread
 from loguru import logger
 
-from exo.download.download_utils import create_http_session, resolve_vindex_in_path
+from exo.download.download_utils import (
+    build_vindex_path,
+    create_http_session,
+    resolve_vindex_in_path,
+)
 from exo.shared.types.diagnostics import (
     RunnerFlightRecorderEntry,
     RunnerLifecycleMilestone,
@@ -31,7 +35,14 @@ from exo.shared.types.events import (
     TaskStatusUpdated,
 )
 from exo.shared.types.memory import Memory
-from exo.shared.types.tasks import LoadModel, StartWarmup, Task, TaskId, TaskStatus
+from exo.shared.types.tasks import (
+    LoadModel,
+    Shutdown,
+    StartWarmup,
+    Task,
+    TaskId,
+    TaskStatus,
+)
 from exo.shared.types.worker.instances import BoundInstance
 from exo.shared.types.worker.larql import LarqlRunnerReadiness
 from exo.shared.types.worker.runners import (
@@ -39,6 +50,7 @@ from exo.shared.types.worker.runners import (
     RunnerIdle,
     RunnerLoading,
     RunnerReady,
+    RunnerShutdown,
     RunnerShuttingDown,
     RunnerStatus,
 )
@@ -117,11 +129,7 @@ def _resolve_larql_vindex_path(shard: LarqlShardMetadata) -> Path:
     found = resolve_vindex_in_path(shard.model_card.model_id)
     if found is not None:
         return found
-    default = Path.home() / ".exo" / "models" / shard.model_card.model_id.normalize()
-    if default.is_dir():
-        return default
-    staging = Path.home() / ".exo" / "staging" / shard.model_card.model_id.normalize()
-    return staging
+    return build_vindex_path(shard.model_card.model_id)
 
 
 @dataclass(eq=False)
@@ -224,6 +232,16 @@ class LarqlRunnerSupervisor:
                         task_status=TaskStatus.Complete,
                     )
                 )
+            elif isinstance(task, Shutdown):
+                await self._terminate_child()
+                self.completed.add(task.task_id)
+                await self._send_event(
+                    TaskStatusUpdated(
+                        task_id=task.task_id,
+                        task_status=TaskStatus.Complete,
+                    )
+                )
+                await self._set_status(RunnerShutdown())
             else:
                 raise RuntimeError(
                     f"LarqlRunner does not execute {task.__class__.__name__} tasks"

@@ -9,6 +9,7 @@ from loguru import logger
 
 from exo.download.download_utils import (
     RepoDownloadProgress,
+    build_vindex_path,
     download_shard,
     resolve_vindex_in_path,
 )
@@ -192,7 +193,7 @@ class ResumableShardDownloader(ShardDownloader):
                 f"LARQL vindex {shard.vindex_uri} is not available locally"
             )
 
-        target_dir = Path.home() / ".exo" / "models" / shard.model_card.model_id.normalize()
+        target_dir = build_vindex_path(shard.model_card.model_id)
         target_dir.mkdir(parents=True, exist_ok=True)
         process = await asyncio.create_subprocess_exec(
             "larql",
