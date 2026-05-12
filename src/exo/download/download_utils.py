@@ -111,22 +111,19 @@ def map_repo_download_progress_to_download_progress_data(
 
 
 def resolve_model_in_path(model_id: ModelId) -> Path | None:
-    """Search EXO_MODELS_PATH directories for a pre-existing model.
+    """Search read-only EXO_MODELS_PATH directories for a pre-existing model.
 
     Checks each directory for the normalized name (org--model).  A candidate
     is only returned if ``is_model_directory_complete`` confirms all weight
-    files are present.
+    files are present. Writable cache directories are intentionally excluded
+    because callers mark returned paths as externally managed/read-only.
 
     Reads the search path dynamically from ``exo.shared.constants`` so that
     paths added at runtime (e.g. by the model store) are picked up.
     """
     import exo.shared.constants as _constants
 
-    search_path: tuple[Path, ...] = (
-        *(_constants.EXO_MODELS_PATH or ()),
-        EXO_MODELS_DIR,
-        Path.home() / ".exo" / "staging",
-    )
+    search_path: tuple[Path, ...] = _constants.EXO_MODELS_PATH or ()
     normalized = model_id.normalize()
     for search_dir in search_path:
         candidate = search_dir / normalized

@@ -12,9 +12,11 @@ import pytest
 from pydantic import TypeAdapter
 
 from exo.download.download_utils import (
+    build_model_path,
     build_vindex_path,
     delete_model,
     fetch_file_list_with_cache,
+    resolve_model_in_path,
     resolve_vindex_in_path,
 )
 from exo.shared.types.common import ModelId
@@ -34,6 +36,47 @@ async def temp_models_dir(tmp_path: Path) -> AsyncIterator[Path]:
     await aios.makedirs(models_dir, exist_ok=True)
     with patch("exo.download.download_utils.EXO_MODELS_DIR", models_dir):
         yield models_dir
+
+
+def _write_complete_model_directory(model_dir: Path) -> None:
+    model_dir.mkdir(parents=True)
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+    (model_dir / "model.safetensors").write_bytes(b"weights")
+    (model_dir / "model.safetensors.index.json").write_text(
+        '{"metadata": {}, "weight_map": {"layer.weight": "model.safetensors"}}',
+        encoding="utf-8",
+    )
+
+
+class TestModelPathResolution:
+    """Tests for read-only search path semantics."""
+
+    def test_resolve_model_in_path_excludes_writable_models_dir(
+        self, model_id: ModelId, temp_models_dir: Path
+    ) -> None:
+        """Writable cache models are loadable but not treated as read-only hits."""
+
+        model_dir = temp_models_dir / model_id.normalize()
+        _write_complete_model_directory(model_dir)
+
+        with (
+            patch("exo.download.download_utils.EXO_MODELS_DIR", temp_models_dir),
+            patch("exo.shared.constants.EXO_MODELS_PATH", None),
+        ):
+            assert resolve_model_in_path(model_id) is None
+            assert build_model_path(model_id) == model_dir
+
+    def test_resolve_model_in_path_returns_configured_read_only_path(
+        self, model_id: ModelId, tmp_path: Path
+    ) -> None:
+        """Explicit search paths remain externally managed read-only hits."""
+
+        search_root = tmp_path / "read-only-models"
+        model_dir = search_root / model_id.normalize()
+        _write_complete_model_directory(model_dir)
+
+        with patch("exo.shared.constants.EXO_MODELS_PATH", (search_root,)):
+            assert resolve_model_in_path(model_id) == model_dir
 
 
 class TestVindexPathResolution:
