@@ -1,5 +1,6 @@
 import io
 import subprocess
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
@@ -21,6 +22,7 @@ from exo.shared.types.tasks import LoadModel, Shutdown, TaskStatus
 from exo.shared.types.worker.instances import BoundInstance, InstanceId
 from exo.shared.types.worker.larql import LarqlExpertRange
 from exo.shared.types.worker.runners import (
+    RunnerFailed,
     RunnerId,
     RunnerReady,
     RunnerShutdown,
@@ -37,22 +39,33 @@ from exo.worker.tests.unittests.conftest import get_mlx_ring_instance
 
 class _FakeProcess:
     pid = 12345
-    returncode: int | None = None
-    stdout = io.StringIO("")
-    stderr = io.StringIO("")
+
+    def __init__(self) -> None:
+        self.returncode: int | None = None
+        self.stdout = io.StringIO("")
+        self.stderr = io.StringIO("")
+        self._exit_event = threading.Event()
 
     def poll(self) -> int | None:
         return self.returncode
 
     def wait(self, _timeout: float | None = None) -> int:
-        self.returncode = 0
-        return 0
+        self._exit_event.wait(_timeout)
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
 
     def terminate(self) -> None:
         self.returncode = -15
+        self._exit_event.set()
 
     def kill(self) -> None:
         self.returncode = -9
+        self._exit_event.set()
+
+    def exit(self, returncode: int) -> None:
+        self.returncode = returncode
+        self._exit_event.set()
 
 
 def _larql_shard() -> LarqlShardMetadata:
@@ -124,10 +137,11 @@ async def test_larql_supervisor_load_model_starts_process_and_emits_readiness() 
     shard = _larql_shard()
     event_sender, event_receiver = channel[Event]()
     commands: list[tuple[str, ...]] = []
+    process = _FakeProcess()
 
     def process_factory(command: Sequence[str]) -> subprocess.Popen[str]:
         commands.append(tuple(str(part) for part in command))
-        return cast(subprocess.Popen[str], cast(object, _FakeProcess()))
+        return cast(subprocess.Popen[str], cast(object, process))
 
     supervisor = LarqlRunnerSupervisor.create(
         bound_instance=_bound_instance(shard),
@@ -165,6 +179,56 @@ async def test_larql_supervisor_load_model_starts_process_and_emits_readiness() 
     completion = await event_receiver.receive()
     assert isinstance(completion, TaskStatusUpdated)
     assert completion.task_status == TaskStatus.Complete
+
+
+@pytest.mark.asyncio
+async def test_larql_supervisor_marks_failed_when_ready_child_exits() -> None:
+    shard = _larql_shard()
+    event_sender, event_receiver = channel[Event]()
+    process = _FakeProcess()
+
+    def process_factory(_command: Sequence[str]) -> subprocess.Popen[str]:
+        return cast(subprocess.Popen[str], cast(object, process))
+
+    supervisor = LarqlRunnerSupervisor.create(
+        bound_instance=_bound_instance(shard),
+        event_sender=event_sender,
+        process_factory=process_factory,
+    )
+
+    async def health_check() -> bool:
+        return True
+
+    supervisor._health_check = health_check  # pyright: ignore[reportPrivateUsage]
+    failed_status: Event | None = None
+    failed_readiness: Event | None = None
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(supervisor.run)
+        await supervisor.start_task(
+            LoadModel(instance_id=supervisor.bound_instance.instance.instance_id)
+        )
+        for _ in range(5):
+            await event_receiver.receive()
+
+        process.exit(42)
+
+        with anyio.fail_after(1):
+            failed_status = await event_receiver.receive()
+            failed_readiness = await event_receiver.receive()
+
+        task_group.cancel_scope.cancel()
+
+    assert isinstance(failed_status, RunnerStatusUpdated)
+    assert isinstance(failed_status.runner_status, RunnerFailed)
+    assert failed_status.runner_status.error_message == (
+        "LARQL child exited unexpectedly with exit code 42"
+    )
+    assert isinstance(failed_readiness, LarqlRunnerReadinessUpdated)
+    assert failed_readiness.readiness.status == "failed"
+    assert failed_readiness.readiness.error_message == (
+        "LARQL child exited unexpectedly with exit code 42"
+    )
 
 
 @pytest.mark.asyncio

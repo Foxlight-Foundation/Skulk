@@ -233,6 +233,7 @@ class LarqlRunnerSupervisor:
                     )
                 )
             elif isinstance(task, Shutdown):
+                self._shutdown_requested = True
                 await self._terminate_child()
                 self.completed.add(task.task_id)
                 await self._send_event(
@@ -280,6 +281,8 @@ class LarqlRunnerSupervisor:
                 await self._wait_until_ready()
                 await self._set_status(RunnerReady())
                 await self._send_readiness("ready")
+                assert self._process is not None
+                self._tg.start_soon(self._watch_process_exit, self._process)
                 return
             except Exception as exc:
                 await self._terminate_child()
@@ -305,6 +308,16 @@ class LarqlRunnerSupervisor:
                 return
             await anyio.sleep(self._readiness_poll_interval)
         raise TimeoutError("Timed out waiting for LARQL readiness")
+
+    async def _watch_process_exit(self, process: subprocess.Popen[str]) -> None:
+        """Report a ready LARQL child that exits outside intentional shutdown."""
+
+        return_code = await to_thread.run_sync(process.wait, abandon_on_cancel=True)
+        if self._shutdown_requested or self._process is not process:
+            return
+        message = f"LARQL child exited unexpectedly with exit code {return_code}"
+        self._record_milestone("larql_exited", message)
+        await self._mark_failed(message)
 
     async def _health_check(self) -> bool:
         port = self._port
@@ -364,7 +377,7 @@ class LarqlRunnerSupervisor:
         if stream is None:
             return
         while True:
-            line = await to_thread.run_sync(stream.readline)
+            line = await to_thread.run_sync(stream.readline, abandon_on_cancel=True)
             if not line:
                 return
             logger.info(f"larql-server[{stream_name}]: {line.rstrip()}")
