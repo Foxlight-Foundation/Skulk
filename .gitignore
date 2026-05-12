@@ -59,3 +59,4 @@ bench/**/*.json
 # tmp
 tmp/models
 ~/
+/${HOME/.skulk/vector}/buffer/

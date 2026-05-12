@@ -35,6 +35,7 @@ dependencies = [
   "types-PyYAML>=6.0.12",
   "mlx-vlm==0.4.4",
   "transformers>=5.0.0,<5.4.0",
+  "cryptography>=46.0.0",
 ]
 
 [project.scripts]
