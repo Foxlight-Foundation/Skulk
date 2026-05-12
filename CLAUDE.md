@@ -145,6 +145,13 @@ Skulk now treats model capability handling as two layers:
 
 This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, and additive `/v1/models` metadata consumed by the dashboard.
 
+### Planned LARQL Slice Mode
+Phase 1 LARQL ADRs live in `docs/adr/` and define roadmap architecture only:
+- `LarqlRunner` is planned as a Worker-managed runner subtype that supervises an upstream `larql-server` child process.
+- The MLX runner remains the head runtime; LARQL peers serve cold FFN / expert slices.
+- The MLX head never loads a vindex. Vindexes are consumed from HuggingFace and produced by the separate `skulk-vindex-publisher` repo.
+- Phase 4 slice-placement code is blocked until the Phase 3 MLX FFN delegation spike confirms the design.
+
 ### Logging & Observability
 Centralized logging uses a three-layer stack:
 - **Structured JSON stdout**: When `logging.enabled` is `true` and `logging.ingest_url` is set in `skulk.yaml` (or dashboard Settings), skulk emits one JSON object per line on stdout (alongside human-readable stderr). Settings sync to all nodes via gossipsub. Configured in `src/exo/shared/logging.py`.

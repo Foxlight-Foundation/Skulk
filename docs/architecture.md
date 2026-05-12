@@ -66,6 +66,13 @@ This is where Skulk selects inference behavior such as:
 - MLX execution path
 - KV cache backend choice
 
+Skulk's accepted LARQL planning ADRs add a future runner subtype:
+`LarqlRunner`. That runner will be worker-managed like the existing MLX
+runners, but will supervise an upstream `larql-server` child process that
+serves vindex-backed FFN or expert slices. This is not implemented in the
+current runtime path yet; Phase 3 of the LARQL roadmap must first prove MLX can
+delegate per-layer FFN work with acceptable overhead.
+
 ### API
 
 The API server exposes:
@@ -152,6 +159,28 @@ Instead, it changes how model artifacts are sourced:
 - with a store, one host keeps shared model files and other nodes stage from it
 
 The rest of the system still uses the same master, worker, API, and placement model.
+
+The LARQL roadmap extends this artifact model to vindexes. Skulk will consume
+HuggingFace-hosted vindex directories, while extraction and publication live in
+the separate `skulk-vindex-publisher` repository. Skulk does not extract
+vindexes in-tree.
+
+## Planned LARQL Slice Mode
+
+The accepted planning ADRs in `docs/adr/` define the intended slice-mode shape:
+
+- `LarqlRunner` is a first-class worker-managed runner type, not an unmanaged
+  sidecar.
+- The MLX runner remains the head runtime. It owns the hot attention/router
+  path and delegates selected FFN or expert work to LARQL peers.
+- The MLX head never loads a vindex; vindexes are cold-tier artifacts served by
+  LARQL runners.
+- Slice mode is additive. Existing MLX placement remains unchanged for models
+  that fit on the selected head node.
+
+This is roadmap architecture, not current runtime behavior. Phase 4 placement
+work is blocked until the Phase 3 MLX delegation spike confirms that the design
+is viable.
 
 ## Where the Dashboard Fits
 

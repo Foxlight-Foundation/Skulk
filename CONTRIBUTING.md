@@ -76,6 +76,7 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
 - `src/exo/worker/` — Worker node (inference, runner management, download coordination)
 - `src/exo/store/` — Model store (registry, downloads, config, model optimizer)
 - `src/exo/shared/` — Shared types, constants, topology
+- `docs/adr/` — Architecture decision records for changes that affect runner taxonomy, placement, event-sourced state, APIs, or operator workflow
 - `website/docs/` — Docusaurus documentation source, including API guide and model-capability docs
 
 ## Development Guidelines
