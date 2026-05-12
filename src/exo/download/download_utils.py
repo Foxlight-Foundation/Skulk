@@ -122,11 +122,42 @@ def resolve_model_in_path(model_id: ModelId) -> Path | None:
     """
     import exo.shared.constants as _constants
 
-    search_path: tuple[Path, ...] = _constants.EXO_MODELS_PATH or ()
+    search_path: tuple[Path, ...] = (
+        *(_constants.EXO_MODELS_PATH or ()),
+        EXO_MODELS_DIR,
+        Path.home() / ".exo" / "staging",
+    )
     normalized = model_id.normalize()
     for search_dir in search_path:
         candidate = search_dir / normalized
         if candidate.is_dir() and is_model_directory_complete(candidate):
+            return candidate
+    return None
+
+
+def is_vindex_directory_complete(vindex_dir: Path) -> bool:
+    """Return whether a staged LARQL vindex directory has usable contents."""
+
+    if not vindex_dir.is_dir():
+        return False
+    files = [path for path in vindex_dir.rglob("*") if path.is_file()]
+    if not files:
+        return False
+    has_metadata = any(path.suffix == ".json" for path in files)
+    has_payload = any(path.suffix == ".bin" for path in files)
+    return has_metadata and has_payload
+
+
+def resolve_vindex_in_path(vindex_id: ModelId) -> Path | None:
+    """Search configured model paths for a directory-shaped LARQL vindex."""
+
+    import exo.shared.constants as _constants
+
+    search_path: tuple[Path, ...] = _constants.EXO_MODELS_PATH or ()
+    normalized = vindex_id.normalize()
+    for search_dir in search_path:
+        candidate = search_dir / normalized
+        if is_vindex_directory_complete(candidate):
             return candidate
     return None
 

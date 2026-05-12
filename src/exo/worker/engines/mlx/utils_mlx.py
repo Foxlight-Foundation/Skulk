@@ -62,6 +62,7 @@ from exo.shared.types.worker.instances import (
 )
 from exo.shared.types.worker.shards import (
     CfgShardMetadata,
+    LarqlShardMetadata,
     PipelineShardMetadata,
     ShardMetadata,
     TensorShardMetadata,
@@ -753,6 +754,8 @@ def shard_and_load(
                 "CfgShardMetadata is not supported for text model loading - "
                 "this metadata type is only for image generation models"
             )
+        case LarqlShardMetadata():
+            raise ValueError("LarqlShardMetadata is not loaded by the MLX runtime")
 
     # TODO: Do we need this?
     mx.eval(model)

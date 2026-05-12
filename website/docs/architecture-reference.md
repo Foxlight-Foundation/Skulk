@@ -45,10 +45,11 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   - `src/exo/worker/runner/image_models/runner.py` — image generation
 - **Communicates via:** `mp.Queue` from worker (incoming tasks); `mp.Queue` to worker (outgoing events); `mlx.distributed` collectives with peer runners
 
-### Planned LarqlRunner
+### LarqlRunner
 
-- **Status:** planned by ADRs; not implemented in runtime code yet
-- **Role:** future worker-managed runner subtype that supervises an upstream `larql-server` child process for vindex-backed FFN / expert slices
+- **Status:** internal Phase 2 supervision/readiness path implemented; no placement flow creates it yet
+- **Role:** worker-managed runner subtype that supervises an upstream `larql serve` child process for vindex-backed FFN / expert slices
+- **Lives in:** `src/exo/worker/runner/larql_supervisor.py`
 - **Decision records:** `docs/adr/0001-larql-runner-type.md`, `docs/adr/0002-head-mlx-cold-larql.md`, `docs/adr/0003-vindex-provenance.md`
 - **Gating:** Phase 4 implementation is blocked until the Phase 3 MLX FFN delegation spike confirms ADR-B
 - **Runtime invariant:** existing MLX runners remain the head path; the MLX head never loads a vindex

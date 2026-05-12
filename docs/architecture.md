@@ -66,12 +66,12 @@ This is where Skulk selects inference behavior such as:
 - MLX execution path
 - KV cache backend choice
 
-Skulk's accepted LARQL planning ADRs add a future runner subtype:
-`LarqlRunner`. That runner will be worker-managed like the existing MLX
-runners, but will supervise an upstream `larql-server` child process that
-serves vindex-backed FFN or expert slices. This is not implemented in the
-current runtime path yet; Phase 3 of the LARQL roadmap must first prove MLX can
-delegate per-layer FFN work with acceptable overhead.
+Skulk's accepted LARQL planning ADRs add a runner subtype: `LarqlRunner`.
+Phase 2 implements its internal worker-managed supervision path. It starts and
+readiness-checks an upstream `larql serve` child process for directory-shaped
+vindex artifacts, but placement does not create LARQL runners yet. Phase 3 of
+the LARQL roadmap must first prove MLX can delegate per-layer FFN work with
+acceptable overhead.
 
 ### API
 
@@ -178,7 +178,8 @@ The accepted planning ADRs in `docs/adr/` define the intended slice-mode shape:
 - Slice mode is additive. Existing MLX placement remains unchanged for models
   that fit on the selected head node.
 
-This is roadmap architecture, not current runtime behavior. Phase 4 placement
+Phase 2 implements internal `LarqlRunner` supervision and readiness state, but
+slice mode is still not an operator-visible placement mode. Phase 4 placement
 work is blocked until the Phase 3 MLX delegation spike confirms that the design
 is viable.
 

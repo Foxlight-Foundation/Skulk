@@ -11,7 +11,7 @@ from loguru import logger
 from PIL import Image
 
 from exo.api.types import ImageEditsTaskParams
-from exo.download.download_utils import resolve_model_in_path
+from exo.download.download_utils import resolve_model_in_path, resolve_vindex_in_path
 from exo.shared.apply import apply
 from exo.shared.constants import EXO_IMAGE_TRANSPORT_DEBUG
 from exo.shared.models.model_cards import ModelId, add_to_card_cache, delete_custom_card
@@ -57,7 +57,7 @@ from exo.shared.types.tasks import (
 from exo.shared.types.topology import Connection, SocketConnection
 from exo.shared.types.worker.downloads import DownloadCompleted, DownloadPending
 from exo.shared.types.worker.runners import RunnerId
-from exo.shared.types.worker.shards import ShardMetadata
+from exo.shared.types.worker.shards import LarqlShardMetadata, ShardMetadata
 from exo.store.config import StagingNodeConfig
 from exo.store.model_store_client import ModelStoreClient
 from exo.utils.channels import Receiver, Sender, channel
@@ -66,7 +66,10 @@ from exo.utils.info_gatherer.net_profile import check_reachable
 from exo.utils.keyed_backoff import KeyedBackoff
 from exo.utils.task_group import TaskGroup
 from exo.worker.plan import plan
+from exo.worker.runner.larql_supervisor import LarqlRunnerSupervisor
 from exo.worker.runner.runner_supervisor import RunnerSupervisor
+
+WorkerRunnerSupervisor = RunnerSupervisor | LarqlRunnerSupervisor
 
 
 def _summarize_worker_task(task: Task) -> str:
@@ -238,7 +241,7 @@ class Worker:
         self._staging_config = staging_config
 
         self.state: State = State()
-        self.runners: dict[RunnerId, RunnerSupervisor] = {}
+        self.runners: dict[RunnerId, WorkerRunnerSupervisor] = {}
         self._tg: TaskGroup = TaskGroup()
 
         self._system_id = SystemId()
@@ -366,7 +369,11 @@ class Worker:
                     model_id = shard.model_card.model_id
                     self._download_backoff.record_attempt(model_id)
 
-                    found_path = resolve_model_in_path(model_id)
+                    found_path = (
+                        resolve_vindex_in_path(model_id)
+                        if isinstance(shard, LarqlShardMetadata)
+                        else resolve_model_in_path(model_id)
+                    )
                     if found_path is not None:
                         logger.info(
                             f"Model {model_id} found in EXO_MODELS_PATH at {found_path}"
@@ -579,7 +586,7 @@ class Worker:
             )
             await self.runners[runner_id].start_task(task)
 
-    def _create_supervisor(self, task: CreateRunner) -> RunnerSupervisor:
+    def _create_supervisor(self, task: CreateRunner) -> WorkerRunnerSupervisor:
         """Creates and stores a new AssignedRunner with initial downloading status."""
         shard = task.bound_instance.bound_shard
         logger.info(
@@ -591,10 +598,16 @@ class Worker:
             f"world_size={shard.world_size}, "
             f"layers={shard.start_layer}:{shard.end_layer})"
         )
-        runner = RunnerSupervisor.create(
-            bound_instance=task.bound_instance,
-            event_sender=self.event_sender.clone(),
-        )
+        if isinstance(shard, LarqlShardMetadata):
+            runner: WorkerRunnerSupervisor = LarqlRunnerSupervisor.create(
+                bound_instance=task.bound_instance,
+                event_sender=self.event_sender.clone(),
+            )
+        else:
+            runner = RunnerSupervisor.create(
+                bound_instance=task.bound_instance,
+                event_sender=self.event_sender.clone(),
+            )
         self.runners[task.bound_instance.bound_runner_id] = runner
         self._tg.start_soon(runner.run)
         return runner

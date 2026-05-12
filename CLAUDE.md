@@ -146,8 +146,9 @@ Skulk now treats model capability handling as two layers:
 This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, and additive `/v1/models` metadata consumed by the dashboard.
 
 ### Planned LARQL Slice Mode
-Phase 1 LARQL ADRs live in `docs/adr/` and define roadmap architecture only:
-- `LarqlRunner` is planned as a Worker-managed runner subtype that supervises an upstream `larql-server` child process.
+Phase 1 LARQL ADRs live in `docs/adr/`. Phase 2 adds internal runner
+supervision/readiness, but not slice placement:
+- `LarqlRunner` is a Worker-managed runner subtype that supervises an upstream `larql serve` child process.
 - The MLX runner remains the head runtime; LARQL peers serve cold FFN / expert slices.
 - The MLX head never loads a vindex. Vindexes are consumed from HuggingFace and produced by the separate `skulk-vindex-publisher` repo.
 - Phase 4 slice-placement code is blocked until the Phase 3 MLX FFN delegation spike confirms the design.

@@ -1,10 +1,28 @@
 from enum import Enum
-from typing import TypeAlias, final
+from typing import Literal, TypeAlias, final
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from exo.shared.models.model_cards import ModelCard
-from exo.utils.pydantic_ext import TaggedModel
+from exo.utils.pydantic_ext import CamelCaseModel, TaggedModel
+
+LarqlPreset = Literal["full", "expert-server"]
+
+
+@final
+class LarqlExpertRange(CamelCaseModel):
+    """Half-open expert range served by one LARQL expert-server runner."""
+
+    start_expert: int = Field(ge=0, description="Inclusive first expert index.")
+    end_expert: int = Field(ge=0, description="Exclusive final expert index.")
+
+    @model_validator(mode="after")
+    def validate_non_empty(self) -> "LarqlExpertRange":
+        """Require a non-empty expert interval."""
+
+        if self.end_expert <= self.start_expert:
+            raise ValueError("end_expert must be greater than start_expert")
+        return self
 
 
 class Sharding(str, Enum):
@@ -79,6 +97,56 @@ class TensorShardMetadata(BaseShardMetadata):
     pass
 
 
+@final
+class LarqlShardMetadata(BaseShardMetadata):
+    """Shard metadata for a future worker-managed LARQL cold-tier runner."""
+
+    vindex_uri: str = Field(
+        description="Immutable URI for the vindex directory artifact."
+    )
+    preset: LarqlPreset = Field(description="LARQL serving preset for this shard.")
+    local_vindex_path: str | None = Field(
+        default=None,
+        description="Resolved local vindex directory after staging, if known.",
+    )
+    server_host: str = Field(
+        default="127.0.0.1",
+        description="Local bind host for the supervised LARQL HTTP server.",
+    )
+    server_port: int | None = Field(
+        default=None,
+        ge=1,
+        le=65535,
+        description="Requested LARQL port; omitted means allocate a free local port.",
+    )
+    expert_range: LarqlExpertRange | None = Field(
+        default=None,
+        description="Optional expert range for expert-server slices.",
+    )
+    units_manifest_path: str | None = Field(
+        default=None,
+        description="Optional LARQL units manifest path; mutually exclusive with expert_range.",
+    )
+    max_crash_restarts: int = Field(
+        default=3,
+        ge=0,
+        description="Maximum ordinary crash restarts before terminal failure.",
+    )
+    readiness_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description="Maximum time to wait for LARQL readiness after process start.",
+    )
+
+    @model_validator(mode="after")
+    def validate_slice_arguments(self) -> "LarqlShardMetadata":
+        """Reject ambiguous expert selection for LARQL serve commands."""
+
+        if self.expert_range is not None and self.units_manifest_path is not None:
+            raise ValueError("expert_range and units_manifest_path are mutually exclusive")
+        return self
+
+
 ShardMetadata: TypeAlias = (
-    PipelineShardMetadata | CfgShardMetadata | TensorShardMetadata
+    PipelineShardMetadata | CfgShardMetadata | TensorShardMetadata | LarqlShardMetadata
 )
