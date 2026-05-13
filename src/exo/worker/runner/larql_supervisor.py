@@ -388,12 +388,18 @@ class LarqlRunnerSupervisor:
             return
         await self._set_status(RunnerShuttingDown())
         process.terminate()
-        with anyio.move_on_after(5):
-            await to_thread.run_sync(process.wait)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            await to_thread.run_sync(
+                lambda: process.wait(timeout=5),
+                abandon_on_cancel=True,
+            )
         if process.poll() is None:
             process.kill()
-            with anyio.move_on_after(5):
-                await to_thread.run_sync(process.wait)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                await to_thread.run_sync(
+                    lambda: process.wait(timeout=5),
+                    abandon_on_cancel=True,
+                )
 
     async def _mark_failed(self, message: str) -> None:
         await self._set_status(RunnerFailed(error_message=message))

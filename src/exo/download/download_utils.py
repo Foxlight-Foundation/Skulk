@@ -1,12 +1,13 @@
 import asyncio
 import hashlib
+import json
 import os
 import shutil
 import ssl
 import time
 import traceback
 from collections.abc import Awaitable
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Literal
 from urllib.parse import urljoin
@@ -42,6 +43,8 @@ from exo.shared.types.worker.downloads import (
     RepoFileDownloadProgress,
 )
 from exo.shared.types.worker.shards import ShardMetadata
+
+VINDEX_COMPLETE_MARKER = ".skulk-vindex-complete.json"
 
 
 class HuggingFaceAuthenticationError(Exception):
@@ -137,12 +140,35 @@ def is_vindex_directory_complete(vindex_dir: Path) -> bool:
 
     if not vindex_dir.is_dir():
         return False
-    files = [path for path in vindex_dir.rglob("*") if path.is_file()]
-    if not files:
+    if not (vindex_dir / VINDEX_COMPLETE_MARKER).is_file():
         return False
-    has_metadata = any(path.suffix == ".json" for path in files)
-    has_payload = any(path.suffix == ".bin" for path in files)
-    return has_metadata and has_payload
+
+    has_metadata = False
+    has_payload = False
+    for path in vindex_dir.rglob("*"):
+        if not path.is_file() or path.name == VINDEX_COMPLETE_MARKER:
+            continue
+        has_metadata = has_metadata or path.suffix == ".json"
+        has_payload = has_payload or path.suffix == ".bin"
+        if has_metadata and has_payload:
+            return True
+    return False
+
+
+def mark_vindex_directory_complete(vindex_dir: Path, vindex_uri: str) -> None:
+    """Persist the success marker for a completed LARQL vindex pull."""
+
+    marker = vindex_dir / VINDEX_COMPLETE_MARKER
+    marker.write_text(
+        json.dumps(
+            {
+                "vindex_uri": vindex_uri,
+                "completed_at": datetime.now(tz=timezone.utc).isoformat(),
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
 
 
 def build_vindex_path(vindex_id: ModelId) -> Path:

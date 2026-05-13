@@ -1,4 +1,6 @@
 import asyncio
+import shutil
+import uuid
 from asyncio import create_task
 from collections.abc import Awaitable
 from datetime import timedelta
@@ -11,6 +13,8 @@ from exo.download.download_utils import (
     RepoDownloadProgress,
     build_vindex_path,
     download_shard,
+    is_vindex_directory_complete,
+    mark_vindex_directory_complete,
     resolve_vindex_in_path,
 )
 from exo.download.shard_downloader import ShardDownloader
@@ -194,19 +198,31 @@ class ResumableShardDownloader(ShardDownloader):
             )
 
         target_dir = build_vindex_path(shard.model_card.model_id)
-        target_dir.mkdir(parents=True, exist_ok=True)
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        temp_dir = target_dir.with_name(f".{target_dir.name}.partial-{uuid.uuid4().hex}")
         process = await asyncio.create_subprocess_exec(
             "larql",
             "pull",
             shard.vindex_uri,
             "--output",
-            str(target_dir),
+            str(temp_dir),
         )
         return_code = await process.wait()
         if return_code != 0:
+            await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
             raise RuntimeError(
                 f"larql pull failed for {shard.vindex_uri} with exit code {return_code}"
             )
+        if not temp_dir.is_dir():
+            await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
+            raise RuntimeError(f"larql pull did not create a vindex at {temp_dir}")
+        mark_vindex_directory_complete(temp_dir, shard.vindex_uri)
+        if not is_vindex_directory_complete(temp_dir):
+            await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
+            raise RuntimeError(f"larql pull produced an incomplete vindex at {temp_dir}")
+        if target_dir.exists():
+            await asyncio.to_thread(shutil.rmtree, target_dir, ignore_errors=True)
+        temp_dir.rename(target_dir)
         await self.on_progress_wrapper(
             shard,
             RepoDownloadProgress(

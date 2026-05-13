@@ -16,6 +16,7 @@ from exo.download.download_utils import (
     build_vindex_path,
     delete_model,
     fetch_file_list_with_cache,
+    mark_vindex_directory_complete,
     resolve_model_in_path,
     resolve_vindex_in_path,
 )
@@ -91,6 +92,7 @@ class TestVindexPathResolution:
         vindex_dir.mkdir(parents=True)
         (vindex_dir / "manifest.json").write_text("{}", encoding="utf-8")
         (vindex_dir / "weights.bin").write_bytes(b"vindex")
+        mark_vindex_directory_complete(vindex_dir, "hf://test-org/test-model")
 
         with (
             patch("exo.download.download_utils.EXO_MODELS_DIR", temp_models_dir),
@@ -98,6 +100,22 @@ class TestVindexPathResolution:
         ):
             assert build_vindex_path(model_id) == vindex_dir
             assert resolve_vindex_in_path(model_id) == vindex_dir
+
+    def test_resolve_vindex_rejects_unmarked_partial_directory(
+        self, model_id: ModelId, temp_models_dir: Path
+    ) -> None:
+        """Partial vindex directories are not reused without a success marker."""
+
+        vindex_dir = temp_models_dir / model_id.normalize()
+        vindex_dir.mkdir(parents=True)
+        (vindex_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        (vindex_dir / "weights.bin").write_bytes(b"partial")
+
+        with (
+            patch("exo.download.download_utils.EXO_MODELS_DIR", temp_models_dir),
+            patch("exo.shared.constants.EXO_MODELS_PATH", None),
+        ):
+            assert resolve_vindex_in_path(model_id) is None
 
 
 class TestFileVerification:

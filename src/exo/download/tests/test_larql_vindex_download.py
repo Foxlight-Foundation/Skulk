@@ -16,6 +16,11 @@ class _SuccessfulProcess:
         return 0
 
 
+class _FailedProcess:
+    async def wait(self) -> int:
+        return 1
+
+
 def _larql_shard() -> LarqlShardMetadata:
     return LarqlShardMetadata(
         model_card=ModelCard(
@@ -46,6 +51,10 @@ async def test_larql_vindex_pull_uses_configured_models_dir(tmp_path: Path) -> N
 
     async def fake_create_subprocess_exec(*args: str) -> _SuccessfulProcess:
         recorded_commands.append(tuple(args))
+        output_dir = Path(args[-1])
+        output_dir.mkdir(parents=True)
+        (output_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        (output_dir / "weights.bin").write_bytes(b"vindex")
         return _SuccessfulProcess()
 
     with (
@@ -61,12 +70,40 @@ async def test_larql_vindex_pull_uses_configured_models_dir(tmp_path: Path) -> N
     target_dir = models_dir / shard.model_card.model_id.normalize()
     assert result == target_dir
     assert target_dir.is_dir()
-    assert recorded_commands == [
-        (
-            "larql",
-            "pull",
-            shard.vindex_uri,
-            "--output",
-            str(target_dir),
-        )
-    ]
+    assert recorded_commands[0][:4] == ("larql", "pull", shard.vindex_uri, "--output")
+    assert recorded_commands[0][4].startswith(str(models_dir / f".{target_dir.name}"))
+
+
+@pytest.mark.asyncio
+async def test_larql_vindex_pull_cleans_partial_directory_on_failure(
+    tmp_path: Path,
+) -> None:
+    """Failed pulls leave no reusable partial vindex directory behind."""
+
+    models_dir = tmp_path / "configured-models"
+    shard = _larql_shard()
+    partial_dir: Path | None = None
+
+    async def fake_create_subprocess_exec(*args: str) -> _FailedProcess:
+        nonlocal partial_dir
+        partial_dir = Path(args[-1])
+        partial_dir.mkdir(parents=True)
+        (partial_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        (partial_dir / "weights.bin").write_bytes(b"partial")
+        return _FailedProcess()
+
+    with (
+        patch("exo.download.download_utils.EXO_MODELS_DIR", models_dir),
+        patch(
+            "exo.download.impl_shard_downloader.resolve_vindex_in_path",
+            return_value=None,
+        ),
+        patch("asyncio.create_subprocess_exec", new=fake_create_subprocess_exec),
+        pytest.raises(RuntimeError, match="larql pull failed"),
+    ):
+        await ResumableShardDownloader().ensure_shard(shard)
+
+    target_dir = models_dir / shard.model_card.model_id.normalize()
+    assert partial_dir is not None
+    assert not partial_dir.exists()
+    assert not target_dir.exists()

@@ -49,8 +49,8 @@ class _FakeProcess:
     def poll(self) -> int | None:
         return self.returncode
 
-    def wait(self, _timeout: float | None = None) -> int:
-        self._exit_event.wait(_timeout)
+    def wait(self, timeout: float | None = None) -> int:
+        self._exit_event.wait(timeout)
         if self.returncode is None:
             self.returncode = 0
         return self.returncode
@@ -65,6 +65,26 @@ class _FakeProcess:
 
     def exit(self, returncode: int) -> None:
         self.returncode = returncode
+        self._exit_event.set()
+
+
+class _HungProcess(_FakeProcess):
+    def __init__(self) -> None:
+        super().__init__()
+        self.terminate_called = False
+        self.kill_called = False
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("larql", timeout or 0)
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminate_called = True
+
+    def kill(self) -> None:
+        self.kill_called = True
+        self.returncode = -9
         self._exit_event.set()
 
 
@@ -265,3 +285,42 @@ async def test_larql_supervisor_shutdown_completes_without_failure() -> None:
     assert observed[2].task_status == TaskStatus.Complete
     assert isinstance(observed[3], RunnerStatusUpdated)
     assert isinstance(observed[3].runner_status, RunnerShutdown)
+
+
+@pytest.mark.asyncio
+async def test_larql_supervisor_shutdown_kills_child_after_wait_timeout() -> None:
+    """Hung child waits fall through to kill during supervisor shutdown."""
+
+    shard = _larql_shard()
+    event_sender, event_receiver = channel[Event]()
+    process = _HungProcess()
+    supervisor = LarqlRunnerSupervisor.create(
+        bound_instance=_bound_instance(shard),
+        event_sender=event_sender,
+    )
+    supervisor._process = cast(  # pyright: ignore[reportPrivateUsage]
+        subprocess.Popen[str],
+        cast(object, process),
+    )
+
+    await supervisor.start_task(
+        Shutdown(
+            instance_id=supervisor.bound_instance.instance.instance_id,
+            runner_id=supervisor.bound_instance.bound_runner_id,
+        )
+    )
+
+    observed = [
+        await event_receiver.receive(),
+        await event_receiver.receive(),
+        await event_receiver.receive(),
+        await event_receiver.receive(),
+    ]
+
+    assert process.terminate_called
+    assert process.kill_called
+    assert process.returncode == -9
+    assert isinstance(observed[1], RunnerStatusUpdated)
+    assert isinstance(observed[1].runner_status, RunnerShuttingDown)
+    assert isinstance(observed[2], TaskStatusUpdated)
+    assert observed[2].task_status == TaskStatus.Complete
