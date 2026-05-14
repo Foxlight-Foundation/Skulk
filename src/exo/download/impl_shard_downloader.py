@@ -172,7 +172,7 @@ class ResumableShardDownloader(ShardDownloader):
     async def _ensure_larql_vindex(self, shard: LarqlShardMetadata) -> Path:
         """Pull or reuse one directory-shaped LARQL vindex artifact."""
 
-        found = resolve_vindex_in_path(shard.model_card.model_id)
+        found = resolve_vindex_in_path(shard.model_card.model_id, shard.vindex_uri)
         if found is not None:
             await self.on_progress_wrapper(
                 shard,
@@ -279,7 +279,10 @@ class ResumableShardDownloader(ShardDownloader):
         self, shard: ShardMetadata
     ) -> RepoDownloadProgress:
         if isinstance(shard, LarqlShardMetadata):
-            complete = resolve_vindex_in_path(shard.model_card.model_id) is not None
+            complete = (
+                resolve_vindex_in_path(shard.model_card.model_id, shard.vindex_uri)
+                is not None
+            )
             return RepoDownloadProgress(
                 repo_id=shard.vindex_uri,
                 repo_revision="main",

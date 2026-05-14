@@ -126,7 +126,7 @@ def _resolve_larql_vindex_path(shard: LarqlShardMetadata) -> Path:
 
     if shard.local_vindex_path is not None:
         return Path(shard.local_vindex_path).expanduser()
-    found = resolve_vindex_in_path(shard.model_card.model_id)
+    found = resolve_vindex_in_path(shard.model_card.model_id, shard.vindex_uri)
     if found is not None:
         return found
     return build_vindex_path(shard.model_card.model_id)

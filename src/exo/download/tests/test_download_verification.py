@@ -19,6 +19,7 @@ from exo.download.download_utils import (
     mark_vindex_directory_complete,
     resolve_model_in_path,
     resolve_vindex_in_path,
+    resolve_vindex_location,
 )
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
@@ -99,7 +100,47 @@ class TestVindexPathResolution:
             patch("exo.shared.constants.EXO_MODELS_PATH", None),
         ):
             assert build_vindex_path(model_id) == vindex_dir
-            assert resolve_vindex_in_path(model_id) == vindex_dir
+            assert resolve_vindex_in_path(model_id, "hf://test-org/test-model") == vindex_dir
+            resolved = resolve_vindex_location(model_id, "hf://test-org/test-model")
+            assert resolved is not None
+            assert resolved.path == vindex_dir
+            assert not resolved.read_only
+
+    def test_resolve_vindex_rejects_marker_uri_mismatch(
+        self, model_id: ModelId, temp_models_dir: Path
+    ) -> None:
+        """A cache entry is not reusable for a different vindex URI."""
+
+        vindex_dir = temp_models_dir / model_id.normalize()
+        vindex_dir.mkdir(parents=True)
+        (vindex_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        (vindex_dir / "weights.bin").write_bytes(b"vindex")
+        mark_vindex_directory_complete(vindex_dir, "hf://test-org/old-vindex")
+
+        with (
+            patch("exo.download.download_utils.EXO_MODELS_DIR", temp_models_dir),
+            patch("exo.shared.constants.EXO_MODELS_PATH", None),
+        ):
+            assert resolve_vindex_in_path(model_id, "hf://test-org/new-vindex") is None
+
+    def test_resolve_vindex_reports_configured_search_path_read_only(
+        self, model_id: ModelId, tmp_path: Path
+    ) -> None:
+        """Explicit vindex search roots remain protected from deletion."""
+
+        search_root = tmp_path / "read-only-vindexes"
+        vindex_dir = search_root / model_id.normalize()
+        vindex_dir.mkdir(parents=True)
+        (vindex_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        (vindex_dir / "weights.bin").write_bytes(b"vindex")
+        mark_vindex_directory_complete(vindex_dir, "hf://test-org/test-model")
+
+        with patch("exo.shared.constants.EXO_MODELS_PATH", (search_root,)):
+            resolved = resolve_vindex_location(model_id, "hf://test-org/test-model")
+
+        assert resolved is not None
+        assert resolved.path == vindex_dir
+        assert resolved.read_only
 
     def test_resolve_vindex_rejects_unmarked_partial_directory(
         self, model_id: ModelId, temp_models_dir: Path

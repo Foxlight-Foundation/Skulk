@@ -5,10 +5,17 @@ from unittest.mock import patch
 
 import pytest
 
+from exo.download.coordinator import DownloadCoordinator
+from exo.download.download_utils import VindexPathResolution
 from exo.download.impl_shard_downloader import ResumableShardDownloader
 from exo.shared.models.model_cards import ModelCard, ModelId, ModelTask
+from exo.shared.types.commands import ForwarderDownloadCommand
+from exo.shared.types.common import NodeId
+from exo.shared.types.events import Event, NodeDownloadProgress
 from exo.shared.types.memory import Memory
+from exo.shared.types.worker.downloads import DownloadCompleted
 from exo.shared.types.worker.shards import LarqlShardMetadata
+from exo.utils.channels import channel
 
 
 class _SuccessfulProcess:
@@ -107,3 +114,34 @@ async def test_larql_vindex_pull_cleans_partial_directory_on_failure(
     assert partial_dir is not None
     assert not partial_dir.exists()
     assert not target_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_larql_vindex_writable_cache_hit_remains_deletable(
+    tmp_path: Path,
+) -> None:
+    """Coordinator preserves writable ownership when reusing local vindexes."""
+
+    _, command_receiver = channel[ForwarderDownloadCommand]()
+    event_sender, event_receiver = channel[Event]()
+    shard = _larql_shard()
+    vindex_dir = tmp_path / "configured-models" / shard.model_card.model_id.normalize()
+    coordinator = DownloadCoordinator(
+        node_id=NodeId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        shard_downloader=ResumableShardDownloader(),
+        download_command_receiver=command_receiver,
+        event_sender=event_sender,
+    )
+
+    with patch(
+        "exo.download.coordinator.resolve_vindex_location",
+        return_value=VindexPathResolution(path=vindex_dir, read_only=False),
+    ):
+        await coordinator._start_download(shard)  # pyright: ignore[reportPrivateUsage]
+
+    event = await event_receiver.receive()
+
+    assert isinstance(event, NodeDownloadProgress)
+    assert isinstance(event.download_progress, DownloadCompleted)
+    assert event.download_progress.model_directory == str(vindex_dir)
+    assert not event.download_progress.read_only

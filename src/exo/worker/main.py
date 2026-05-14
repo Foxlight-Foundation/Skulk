@@ -11,7 +11,7 @@ from loguru import logger
 from PIL import Image
 
 from exo.api.types import ImageEditsTaskParams
-from exo.download.download_utils import resolve_model_in_path, resolve_vindex_in_path
+from exo.download.download_utils import resolve_model_in_path, resolve_vindex_location
 from exo.shared.apply import apply
 from exo.shared.constants import EXO_IMAGE_TRANSPORT_DEBUG
 from exo.shared.models.model_cards import ModelId, add_to_card_cache, delete_custom_card
@@ -369,9 +369,14 @@ class Worker:
                     model_id = shard.model_card.model_id
                     self._download_backoff.record_attempt(model_id)
 
-                    found_path = (
-                        resolve_vindex_in_path(model_id)
+                    vindex_location = (
+                        resolve_vindex_location(model_id, shard.vindex_uri)
                         if isinstance(shard, LarqlShardMetadata)
+                        else None
+                    )
+                    found_path = (
+                        vindex_location.path
+                        if vindex_location is not None
                         else resolve_model_in_path(model_id)
                     )
                     if found_path is not None:
@@ -385,7 +390,9 @@ class Worker:
                                     shard_metadata=shard,
                                     model_directory=str(found_path),
                                     total=shard.model_card.storage_size,
-                                    read_only=True,
+                                    read_only=vindex_location.read_only
+                                    if vindex_location is not None
+                                    else True,
                                 )
                             )
                         )

@@ -7,6 +7,7 @@ import ssl
 import time
 import traceback
 from collections.abc import Awaitable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Literal
@@ -22,6 +23,7 @@ from huggingface_hub import (
 from loguru import logger
 from pydantic import (
     TypeAdapter,
+    ValidationError,
 )
 
 from exo.download.huggingface_utils import (
@@ -45,6 +47,15 @@ from exo.shared.types.worker.downloads import (
 from exo.shared.types.worker.shards import ShardMetadata
 
 VINDEX_COMPLETE_MARKER = ".skulk-vindex-complete.json"
+VINDEX_COMPLETE_MARKER_ADAPTER = TypeAdapter(dict[str, object])
+
+
+@dataclass(frozen=True)
+class VindexPathResolution:
+    """Resolved local LARQL vindex path plus ownership metadata."""
+
+    path: Path
+    read_only: bool
 
 
 class HuggingFaceAuthenticationError(Exception):
@@ -135,12 +146,29 @@ def resolve_model_in_path(model_id: ModelId) -> Path | None:
     return None
 
 
-def is_vindex_directory_complete(vindex_dir: Path) -> bool:
+def _read_vindex_complete_marker(vindex_dir: Path) -> dict[str, object] | None:
+    marker = vindex_dir / VINDEX_COMPLETE_MARKER
+    if not marker.is_file():
+        return None
+    try:
+        return VINDEX_COMPLETE_MARKER_ADAPTER.validate_json(
+            marker.read_text(encoding="utf-8")
+        )
+    except (OSError, ValidationError):
+        return None
+
+
+def is_vindex_directory_complete(
+    vindex_dir: Path, expected_vindex_uri: str | None = None
+) -> bool:
     """Return whether a staged LARQL vindex directory has usable contents."""
 
     if not vindex_dir.is_dir():
         return False
-    if not (vindex_dir / VINDEX_COMPLETE_MARKER).is_file():
+    marker = _read_vindex_complete_marker(vindex_dir)
+    if marker is None:
+        return False
+    if expected_vindex_uri is not None and marker.get("vindex_uri") != expected_vindex_uri:
         return False
 
     has_metadata = False
@@ -177,36 +205,47 @@ def build_vindex_path(vindex_id: ModelId) -> Path:
     return EXO_MODELS_DIR / vindex_id.normalize()
 
 
-def _vindex_search_path() -> tuple[Path, ...]:
+def _vindex_search_path() -> tuple[VindexPathResolution, ...]:
     import exo.shared.constants as _constants
 
     configured_paths = _constants.EXO_MODELS_PATH or ()
     candidates = (
-        *configured_paths,
-        EXO_MODELS_DIR,
-        Path.home() / ".exo" / "models",
-        Path.home() / ".exo" / "staging",
+        *((path, True) for path in configured_paths),
+        (EXO_MODELS_DIR, False),
+        (Path.home() / ".exo" / "models", False),
+        (Path.home() / ".exo" / "staging", False),
     )
-    unique_paths: list[Path] = []
+    unique_paths: list[VindexPathResolution] = []
     seen_paths: set[Path] = set()
-    for candidate in candidates:
+    for candidate, read_only in candidates:
         expanded = candidate.expanduser()
         if expanded in seen_paths:
             continue
         seen_paths.add(expanded)
-        unique_paths.append(expanded)
+        unique_paths.append(VindexPathResolution(path=expanded, read_only=read_only))
     return tuple(unique_paths)
 
 
-def resolve_vindex_in_path(vindex_id: ModelId) -> Path | None:
-    """Search model paths for a complete directory-shaped LARQL vindex."""
+def resolve_vindex_location(
+    vindex_id: ModelId, expected_vindex_uri: str | None = None
+) -> VindexPathResolution | None:
+    """Search model paths for a complete LARQL vindex and return ownership."""
 
     normalized = vindex_id.normalize()
-    for search_dir in _vindex_search_path():
-        candidate = search_dir / normalized
-        if is_vindex_directory_complete(candidate):
-            return candidate
+    for search_root in _vindex_search_path():
+        candidate = search_root.path / normalized
+        if is_vindex_directory_complete(candidate, expected_vindex_uri):
+            return VindexPathResolution(path=candidate, read_only=search_root.read_only)
     return None
+
+
+def resolve_vindex_in_path(
+    vindex_id: ModelId, expected_vindex_uri: str | None = None
+) -> Path | None:
+    """Search model paths for a complete directory-shaped LARQL vindex."""
+
+    found = resolve_vindex_location(vindex_id, expected_vindex_uri)
+    return found.path if found is not None else None
 
 
 def build_model_path(model_id: ModelId) -> Path:
