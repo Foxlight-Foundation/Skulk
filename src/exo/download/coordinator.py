@@ -13,8 +13,10 @@ from loguru import logger
 from exo.download.download_utils import (
     RepoDownloadProgress,
     delete_model,
+    is_vindex_directory_complete,
     map_repo_download_progress_to_download_progress_data,
     resolve_model_in_path,
+    resolve_vindex_location,
 )
 from exo.download.shard_downloader import ShardDownloader
 from exo.shared.constants import EXO_MODELS_DIR
@@ -40,7 +42,11 @@ from exo.shared.types.worker.downloads import (
     DownloadPending,
     DownloadProgress,
 )
-from exo.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
+from exo.shared.types.worker.shards import (
+    LarqlShardMetadata,
+    PipelineShardMetadata,
+    ShardMetadata,
+)
 from exo.store.config import resolve_config_path
 from exo.utils.channels import Receiver, Sender
 from exo.utils.task_group import TaskGroup
@@ -342,7 +348,12 @@ class DownloadCoordinator:
             # clear the stale status and re-download from scratch.
             if isinstance(status, DownloadCompleted) and status.model_directory:
                 model_dir = Path(status.model_directory)
-                if not model_dir.is_dir() or not (model_dir / "config.json").exists():
+                directory_is_complete = (
+                    is_vindex_directory_complete(model_dir, shard.vindex_uri)
+                    if isinstance(shard, LarqlShardMetadata)
+                    else model_dir.is_dir() and (model_dir / "config.json").exists()
+                )
+                if not directory_is_complete:
                     logger.info(
                         f"DownloadCoordinator: {model_id} was DownloadCompleted but "
                         f"model directory {status.model_directory} no longer exists, re-downloading"
@@ -367,7 +378,16 @@ class DownloadCoordinator:
                 return
 
         # Check EXO_MODELS_PATH for pre-downloaded models
-        found_path = resolve_model_in_path(model_id)
+        vindex_location = (
+            resolve_vindex_location(model_id, shard.vindex_uri)
+            if isinstance(shard, LarqlShardMetadata)
+            else None
+        )
+        found_path = (
+            vindex_location.path
+            if vindex_location is not None
+            else resolve_model_in_path(model_id)
+        )
         if found_path is not None:
             logger.info(
                 f"DownloadCoordinator: Model {model_id} found in EXO_MODELS_PATH at {found_path}"
@@ -377,7 +397,9 @@ class DownloadCoordinator:
                 node_id=self.node_id,
                 total=shard.model_card.storage_size,
                 model_directory=str(found_path),
-                read_only=True,
+                read_only=vindex_location.read_only
+                if vindex_location is not None
+                else True,
             )
             self.download_status[model_id] = completed
             await self.event_sender.send(

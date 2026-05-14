@@ -42,13 +42,16 @@ from exo.shared.types.worker.runners import (
     RunnerWarmingUp,
 )
 from exo.shared.types.worker.shards import ShardMetadata
+from exo.worker.runner.larql_supervisor import LarqlRunnerSupervisor
 from exo.worker.runner.runner_supervisor import RunnerSupervisor
+
+WorkerRunnerSupervisor = RunnerSupervisor | LarqlRunnerSupervisor
 
 
 def plan(
     node_id: NodeId,
     # Runners is expected to be FRESH and so should not come from state
-    runners: Mapping[RunnerId, RunnerSupervisor],
+    runners: Mapping[RunnerId, WorkerRunnerSupervisor],
     global_download_status: Mapping[NodeId, Sequence[DownloadProgress]],
     instances: Mapping[InstanceId, Instance],
     all_runners: Mapping[RunnerId, RunnerStatus],  # all global
@@ -73,7 +76,7 @@ def plan(
 
 
 def _kill_runner(
-    runners: Mapping[RunnerId, RunnerSupervisor],
+    runners: Mapping[RunnerId, WorkerRunnerSupervisor],
     all_runners: Mapping[RunnerId, RunnerStatus],
     instances: Mapping[InstanceId, Instance],
 ) -> Shutdown | None:
@@ -97,7 +100,7 @@ def _kill_runner(
 
 def _create_runner(
     node_id: NodeId,
-    runners: Mapping[RunnerId, RunnerSupervisor],
+    runners: Mapping[RunnerId, WorkerRunnerSupervisor],
     instances: Mapping[InstanceId, Instance],
 ) -> CreateRunner | None:
     for instance in instances.values():
@@ -121,7 +124,7 @@ def _create_runner(
 
 def _model_needs_download(
     node_id: NodeId,
-    runners: Mapping[RunnerId, RunnerSupervisor],
+    runners: Mapping[RunnerId, WorkerRunnerSupervisor],
     global_download_status: Mapping[NodeId, Sequence[DownloadProgress]],
 ) -> DownloadModel | None:
     local_downloads = global_download_status.get(node_id, [])
@@ -146,7 +149,7 @@ def _model_needs_download(
 
 
 def _init_distributed_backend(
-    runners: Mapping[RunnerId, RunnerSupervisor],
+    runners: Mapping[RunnerId, WorkerRunnerSupervisor],
     all_runners: Mapping[RunnerId, RunnerStatus],
 ):
     for runner in runners.values():
@@ -196,7 +199,7 @@ def _init_distributed_backend(
 
 
 def _load_model(
-    runners: Mapping[RunnerId, RunnerSupervisor],
+    runners: Mapping[RunnerId, WorkerRunnerSupervisor],
     all_runners: Mapping[RunnerId, RunnerStatus],
     global_download_status: Mapping[NodeId, Sequence[DownloadProgress]],
 ) -> LoadModel | None:
@@ -237,7 +240,7 @@ def _load_model(
 
 
 def _ready_to_warmup(
-    runners: Mapping[RunnerId, RunnerSupervisor],
+    runners: Mapping[RunnerId, WorkerRunnerSupervisor],
     all_runners: Mapping[RunnerId, RunnerStatus],
 ) -> StartWarmup | None:
     for runner in runners.values():
@@ -303,7 +306,7 @@ def _uses_independent_distributed_warmup(shard: ShardMetadata) -> bool:
 
 
 def _pending_tasks(
-    runners: Mapping[RunnerId, RunnerSupervisor],
+    runners: Mapping[RunnerId, WorkerRunnerSupervisor],
     tasks: Mapping[TaskId, Task],
     all_runners: Mapping[RunnerId, RunnerStatus],
     input_chunk_buffer: Mapping[CommandId, Mapping[int, InputImageChunk]] | None,
@@ -346,7 +349,7 @@ def _pending_tasks(
 
 
 def _cancel_tasks(
-    runners: Mapping[RunnerId, RunnerSupervisor],
+    runners: Mapping[RunnerId, WorkerRunnerSupervisor],
     tasks: Mapping[TaskId, Task],
 ) -> Task | None:
     for task in tasks.values():

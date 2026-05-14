@@ -12,8 +12,14 @@ import pytest
 from pydantic import TypeAdapter
 
 from exo.download.download_utils import (
+    build_model_path,
+    build_vindex_path,
     delete_model,
     fetch_file_list_with_cache,
+    mark_vindex_directory_complete,
+    resolve_model_in_path,
+    resolve_vindex_in_path,
+    resolve_vindex_location,
 )
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
@@ -32,6 +38,125 @@ async def temp_models_dir(tmp_path: Path) -> AsyncIterator[Path]:
     await aios.makedirs(models_dir, exist_ok=True)
     with patch("exo.download.download_utils.EXO_MODELS_DIR", models_dir):
         yield models_dir
+
+
+def _write_complete_model_directory(model_dir: Path) -> None:
+    model_dir.mkdir(parents=True)
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+    (model_dir / "model.safetensors").write_bytes(b"weights")
+    (model_dir / "model.safetensors.index.json").write_text(
+        '{"metadata": {}, "weight_map": {"layer.weight": "model.safetensors"}}',
+        encoding="utf-8",
+    )
+
+
+class TestModelPathResolution:
+    """Tests for read-only search path semantics."""
+
+    def test_resolve_model_in_path_excludes_writable_models_dir(
+        self, model_id: ModelId, temp_models_dir: Path
+    ) -> None:
+        """Writable cache models are loadable but not treated as read-only hits."""
+
+        model_dir = temp_models_dir / model_id.normalize()
+        _write_complete_model_directory(model_dir)
+
+        with (
+            patch("exo.download.download_utils.EXO_MODELS_DIR", temp_models_dir),
+            patch("exo.shared.constants.EXO_MODELS_PATH", None),
+        ):
+            assert resolve_model_in_path(model_id) is None
+            assert build_model_path(model_id) == model_dir
+
+    def test_resolve_model_in_path_returns_configured_read_only_path(
+        self, model_id: ModelId, tmp_path: Path
+    ) -> None:
+        """Explicit search paths remain externally managed read-only hits."""
+
+        search_root = tmp_path / "read-only-models"
+        model_dir = search_root / model_id.normalize()
+        _write_complete_model_directory(model_dir)
+
+        with patch("exo.shared.constants.EXO_MODELS_PATH", (search_root,)):
+            assert resolve_model_in_path(model_id) == model_dir
+
+
+class TestVindexPathResolution:
+    """Tests for directory-shaped LARQL vindex cache discovery."""
+
+    def test_resolve_vindex_searches_default_models_dir(
+        self, model_id: ModelId, temp_models_dir: Path
+    ) -> None:
+        """Vindexes in the writable default models dir are reusable offline."""
+
+        vindex_dir = temp_models_dir / model_id.normalize()
+        vindex_dir.mkdir(parents=True)
+        (vindex_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        (vindex_dir / "weights.bin").write_bytes(b"vindex")
+        mark_vindex_directory_complete(vindex_dir, "hf://test-org/test-model")
+
+        with (
+            patch("exo.download.download_utils.EXO_MODELS_DIR", temp_models_dir),
+            patch("exo.shared.constants.EXO_MODELS_PATH", None),
+        ):
+            assert build_vindex_path(model_id) == vindex_dir
+            assert resolve_vindex_in_path(model_id, "hf://test-org/test-model") == vindex_dir
+            resolved = resolve_vindex_location(model_id, "hf://test-org/test-model")
+            assert resolved is not None
+            assert resolved.path == vindex_dir
+            assert not resolved.read_only
+
+    def test_resolve_vindex_rejects_marker_uri_mismatch(
+        self, model_id: ModelId, temp_models_dir: Path
+    ) -> None:
+        """A cache entry is not reusable for a different vindex URI."""
+
+        vindex_dir = temp_models_dir / model_id.normalize()
+        vindex_dir.mkdir(parents=True)
+        (vindex_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        (vindex_dir / "weights.bin").write_bytes(b"vindex")
+        mark_vindex_directory_complete(vindex_dir, "hf://test-org/old-vindex")
+
+        with (
+            patch("exo.download.download_utils.EXO_MODELS_DIR", temp_models_dir),
+            patch("exo.shared.constants.EXO_MODELS_PATH", None),
+        ):
+            assert resolve_vindex_in_path(model_id, "hf://test-org/new-vindex") is None
+
+    def test_resolve_vindex_reports_configured_search_path_read_only(
+        self, model_id: ModelId, tmp_path: Path
+    ) -> None:
+        """Explicit vindex search roots remain protected from deletion."""
+
+        search_root = tmp_path / "read-only-vindexes"
+        vindex_dir = search_root / model_id.normalize()
+        vindex_dir.mkdir(parents=True)
+        (vindex_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        (vindex_dir / "weights.bin").write_bytes(b"vindex")
+        mark_vindex_directory_complete(vindex_dir, "hf://test-org/test-model")
+
+        with patch("exo.shared.constants.EXO_MODELS_PATH", (search_root,)):
+            resolved = resolve_vindex_location(model_id, "hf://test-org/test-model")
+
+        assert resolved is not None
+        assert resolved.path == vindex_dir
+        assert resolved.read_only
+
+    def test_resolve_vindex_rejects_unmarked_partial_directory(
+        self, model_id: ModelId, temp_models_dir: Path
+    ) -> None:
+        """Partial vindex directories are not reused without a success marker."""
+
+        vindex_dir = temp_models_dir / model_id.normalize()
+        vindex_dir.mkdir(parents=True)
+        (vindex_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        (vindex_dir / "weights.bin").write_bytes(b"partial")
+
+        with (
+            patch("exo.download.download_utils.EXO_MODELS_DIR", temp_models_dir),
+            patch("exo.shared.constants.EXO_MODELS_PATH", None),
+        ):
+            assert resolve_vindex_in_path(model_id) is None
 
 
 class TestFileVerification:
