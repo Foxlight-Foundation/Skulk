@@ -76,6 +76,16 @@ def allocate_larql_port(host: str = "127.0.0.1") -> int:
         return port
 
 
+def _format_larql_inclusive_range(
+    range_name: Literal["layers", "experts"], start: int, exclusive_end: int
+) -> str:
+    """Convert Skulk half-open intervals to LARQL CLI inclusive ranges."""
+
+    if exclusive_end <= start:
+        raise ValueError(f"LARQL {range_name} range must be non-empty")
+    return f"{start}-{exclusive_end - 1}"
+
+
 def build_larql_serve_command(
     shard: LarqlShardMetadata,
     *,
@@ -94,7 +104,7 @@ def build_larql_serve_command(
         str(port),
         "--ffn-only",
         "--layers",
-        f"{shard.start_layer}-{shard.end_layer}",
+        _format_larql_inclusive_range("layers", shard.start_layer, shard.end_layer),
         "--preset",
         shard.preset,
     ]
@@ -102,7 +112,11 @@ def build_larql_serve_command(
         command.extend(
             [
                 "--experts",
-                f"{shard.expert_range.start_expert}-{shard.expert_range.end_expert}",
+                _format_larql_inclusive_range(
+                    "experts",
+                    shard.expert_range.start_expert,
+                    shard.expert_range.end_expert,
+                ),
             ]
         )
     if shard.units_manifest_path is not None:

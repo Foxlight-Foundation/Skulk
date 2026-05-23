@@ -144,12 +144,23 @@ def test_build_larql_serve_command_includes_slice_arguments() -> None:
         "49152",
         "--ffn-only",
         "--layers",
-        "4-12",
+        "4-11",
         "--preset",
         "expert-server",
         "--experts",
-        "0-8",
+        "0-7",
     )
+
+
+def test_build_larql_serve_command_rejects_empty_layer_range() -> None:
+    shard = _larql_shard().model_copy(update={"end_layer": 4})
+
+    with pytest.raises(ValueError, match="layers range must be non-empty"):
+        build_larql_serve_command(
+            shard,
+            vindex_path=Path("/tmp/gemma-vindex"),
+            port=49152,
+        )
 
 
 @pytest.mark.asyncio
