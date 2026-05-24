@@ -46,8 +46,6 @@ const config: Config = {
           // Required by docusaurus-plugin-openapi-docs so API pages render
           // with the interactive request/response UI rather than plain MDX.
           docItemComponent: "@theme/ApiItem",
-          editUrl:
-            "https://github.com/Foxlight-Foundation/Skulk/edit/main/website/",
         },
         blog: false,
         theme: {
