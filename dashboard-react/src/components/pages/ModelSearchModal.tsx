@@ -71,6 +71,7 @@ export function ModelSearchModal({
   const [hfResults, setHfResults] = useState<HuggingFaceModel[]>([]);
   const [hfTrending, setHfTrending] = useState<HuggingFaceModel[]>([]);
   const [hfSearching, setHfSearching] = useState(false);
+  const [mlxOnly, setMlxOnly] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   useEffect(() => {
@@ -106,17 +107,22 @@ export function ModelSearchModal({
         setModels(data.data ?? []);
       } catch { /* ignore */ }
     })();
-    // Fetch trending
+  }, [open]);
+
+  // Fetch trending whenever the modal opens or mlxOnly changes
+  useEffect(() => {
+    if (!open) return;
     (async () => {
       try {
-        const res = await fetch('/models/search?query=&limit=20');
+        const params = new URLSearchParams({ query: '', limit: '20', mlx_only: String(mlxOnly) });
+        const res = await fetch(`/models/search?${params}`);
         if (!res.ok) return;
         setHfTrending(await res.json());
       } catch { /* ignore */ }
     })();
-  }, [open]);
+  }, [open, mlxOnly]);
 
-  const handleHfSearch = useCallback((query: string) => {
+  const handleHfSearch = useCallback((query: string, mlxOnlyOverride?: boolean) => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (!query.trim()) {
       setHfResults([]);
@@ -124,14 +130,16 @@ export function ModelSearchModal({
       return;
     }
     setHfSearching(true);
+    const useMlxOnly = mlxOnlyOverride ?? mlxOnly;
     debounceRef.current = setTimeout(async () => {
       try {
-        const res = await fetch(`/models/search?query=${encodeURIComponent(query)}&limit=20`);
+        const params = new URLSearchParams({ query, limit: '20', mlx_only: String(useMlxOnly) });
+        const res = await fetch(`/models/search?${params}`);
         if (res.ok) setHfResults(await res.json());
       } catch { /* ignore */ }
       finally { setHfSearching(false); }
     }, 500);
-  }, []);
+  }, [mlxOnly]);
 
   const handleSelect = useCallback(async (modelId: string) => {
     try {
@@ -167,6 +175,10 @@ export function ModelSearchModal({
         }
       }
     } catch { /* ignore */ }
+  }, []);
+
+  const handleToggleMlxOnly = useCallback(() => {
+    setMlxOnly(prev => !prev);
   }, []);
 
   const toggleFavorite = useCallback((groupId: string) => {
@@ -216,6 +228,8 @@ export function ModelSearchModal({
             hfTrendingModels={hfTrending}
             hfIsSearching={hfSearching}
             onHfSearch={handleHfSearch}
+            mlxOnly={mlxOnly}
+            onToggleMlxOnly={handleToggleMlxOnly}
             mode="store-download"
           />
         </ModalBody>

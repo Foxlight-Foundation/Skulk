@@ -37,6 +37,8 @@ export interface ModelBrowserProps {
   hfTrendingModels?: HuggingFaceModel[];
   hfIsSearching?: boolean;
   onHfSearch?: (query: string) => void;
+  mlxOnly?: boolean;
+  onToggleMlxOnly?: () => void;
 }
 
 /* ---------- layout ---------- */
@@ -127,6 +129,8 @@ export function ModelBrowser({
   hfTrendingModels,
   hfIsSearching,
   onHfSearch,
+  mlxOnly = false,
+  onToggleMlxOnly,
 }: ModelBrowserProps) {
   const picker = useModelPicker({
     models,
@@ -171,9 +175,19 @@ export function ModelBrowser({
               picker.setSearchQuery(q);
               if (isHf && onHfSearch) onHfSearch(q);
             }}
-            placeholder={isHf ? 'Search mlx-community models…' : 'Search models…'}
+            placeholder={isHf ? (mlxOnly ? 'Search mlx-community…' : 'Search all of HuggingFace…') : 'Search models…'}
             autoFocus
           />
+          {isHf && onToggleMlxOnly && (
+            <FilterBtn
+              variant="outline"
+              size="sm"
+              $active={mlxOnly}
+              onClick={onToggleMlxOnly}
+            >
+              MLX only
+            </FilterBtn>
+          )}
           {!isHf && (
             <FilterBtn
               variant="outline"

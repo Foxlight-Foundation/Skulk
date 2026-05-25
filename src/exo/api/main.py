@@ -712,8 +712,8 @@ class API:
             tags=["Models"],
             summary="Search Hugging Face for models",
             description=(
-                "Search for models to add or launch. Skulk prefers MLX-friendly results first, "
-                "then falls back to broader Hugging Face search results."
+                "Search for models to add or launch. Pass mlx_only=true to restrict results "
+                "to mlx-community; omit or pass false to search all of Hugging Face."
             ),
         )(self.search_models)
         self.app.post(
@@ -2728,9 +2728,9 @@ class API:
         )
 
     async def search_models(
-        self, query: str = "", limit: int = 20
+        self, query: str = "", limit: int = 20, mlx_only: bool = False
     ) -> list[HuggingFaceSearchResult]:
-        """Search HuggingFace Hub — tries mlx-community first, falls back to all of HuggingFace."""
+        """Search HuggingFace Hub. When mlx_only=True, restricts to mlx-community."""
         from huggingface_hub import ModelInfo, list_models
 
         def _to_results(models: Iterable[ModelInfo]) -> list[HuggingFaceSearchResult]:
@@ -2746,22 +2746,10 @@ class API:
                 for m in models
             ]
 
-        # Search mlx-community first
-        mlx_results = _to_results(
-            list_models(
-                search=query or None,
-                author="mlx-community",
-                sort="downloads",
-                limit=limit,
-            )
-        )
-        if mlx_results:
-            return mlx_results
-
-        # Fall back to searching all of HuggingFace
         return _to_results(
             list_models(
                 search=query or None,
+                author="mlx-community" if mlx_only else None,
                 sort="downloads",
                 limit=limit,
             )
