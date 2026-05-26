@@ -179,6 +179,7 @@ export function ModelSearchModal({
 
   const handleToggleMlxOnly = useCallback(() => {
     setMlxOnly(prev => !prev);
+    setHfResults([]);
   }, []);
 
   const toggleFavorite = useCallback((groupId: string) => {

@@ -36,7 +36,7 @@ export interface ModelBrowserProps {
   hfSearchResults?: HuggingFaceModel[];
   hfTrendingModels?: HuggingFaceModel[];
   hfIsSearching?: boolean;
-  onHfSearch?: (query: string) => void;
+  onHfSearch?: (query: string, mlxOnly?: boolean) => void;
   mlxOnly?: boolean;
   onToggleMlxOnly?: () => void;
 }
@@ -183,7 +183,13 @@ export function ModelBrowser({
               variant="outline"
               size="sm"
               $active={mlxOnly}
-              onClick={onToggleMlxOnly}
+              onClick={() => {
+                const nextMlxOnly = !mlxOnly;
+                onToggleMlxOnly();
+                if (picker.searchQuery.trim() && onHfSearch) {
+                  onHfSearch(picker.searchQuery, nextMlxOnly);
+                }
+              }}
             >
               MLX only
             </FilterBtn>
