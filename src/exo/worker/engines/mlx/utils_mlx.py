@@ -694,13 +694,18 @@ def load_mlx_items(
     mtp_weights: dict[str, mx.array] | None = None
     runtime = bound_instance.bound_shard.model_card.runtime
     if runtime and runtime.mtp_sidecar_repo and runtime.mtp_heads:
-        sidecar_path = build_model_path(ModelId(runtime.mtp_sidecar_repo))
-        mtp_safetensors = sidecar_path / "mtp.safetensors"
-        if mtp_safetensors.exists():
-            mtp_weights = cast("dict[str, mx.array]", mx.load(str(mtp_safetensors)))
-        else:
+        try:
+            sidecar_path = build_model_path(ModelId(runtime.mtp_sidecar_repo))
+            mtp_safetensors = sidecar_path / "mtp.safetensors"
+            if mtp_safetensors.exists():
+                mtp_weights = cast("dict[str, mx.array]", mx.load(str(mtp_safetensors)))
+            else:
+                logger.warning(
+                    f"MTP sidecar declared but not found at {mtp_safetensors}; running without MTP"
+                )
+        except FileNotFoundError:
             logger.warning(
-                f"MTP sidecar declared but not found at {mtp_safetensors}; running without MTP"
+                f"MTP sidecar repo {runtime.mtp_sidecar_repo!r} not downloaded; running without MTP"
             )
 
     return cast(Model, model), tokenizer, vision_processor, mtp_weights
