@@ -2415,20 +2415,28 @@ def mlx_generate(
         mx_barrier(group)
 
     # Resolve MTP head for single-node speculative decoding (D=1).
-    # MTP is only used on the non-pipeline path: pipeline decode doesn't expose
-    # the trunk/head split needed to extract intermediate hidden states.
+    # MTP requires greedy (temperature=0) sampling: the Phase 1 acceptance check
+    # is exact argmax match, which is only distribution-preserving at T=0.
+    # Probability-ratio acceptance for T>0 is tracked in issue #180.
+    _is_greedy = task.temperature is not None and task.temperature == 0.0
     _mtp_head: MTPHead | None = None
     _trunk_fn: Callable[..., mx.array] | None = None
     _head_fn: Callable[..., mx.array] | None = None
     if mtp_weights is not None and not (
         group is not None and _has_pipeline_communication_layer(model)
     ):
-        trunk_head = _get_trunk_and_head(model)
-        if trunk_head is not None:
-            _trunk_fn, _head_fn = trunk_head
-            _mtp_head = build_mtp_head(model, mtp_weights)
-            if _mtp_head is not None:
-                logger.info("MTP speculative decoding enabled (D=1)")
+        if not _is_greedy:
+            logger.info(
+                "MTP speculative decoding requires temperature=0 (Phase 1 greedy-only); "
+                f"skipping MTP (temperature={task.temperature})"
+            )
+        else:
+            trunk_head = _get_trunk_and_head(model)
+            if trunk_head is not None:
+                _trunk_fn, _head_fn = trunk_head
+                _mtp_head = build_mtp_head(model, mtp_weights)
+                if _mtp_head is not None:
+                    logger.info("MTP speculative decoding enabled (D=1)")
 
     with runner_phase(
         "decode_stream",
