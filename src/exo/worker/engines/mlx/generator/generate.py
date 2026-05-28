@@ -60,7 +60,6 @@ from exo.worker.engines.mlx.cache import (
     snapshot_ssm_states,
     trim_cache,
 )
-from exo.worker.engines.mlx.mtp import MTPHead, build_mtp_head
 from exo.worker.engines.mlx.constants import (
     DEFAULT_TOP_LOGPROBS,
     KV_BITS,
@@ -68,6 +67,7 @@ from exo.worker.engines.mlx.constants import (
     KV_GROUP_SIZE,
     MAX_TOKENS,
 )
+from exo.worker.engines.mlx.mtp import MTPHead, build_mtp_head
 from exo.worker.engines.mlx.utils_mlx import (
     apply_chat_template,
     fix_unmatched_think_end_tokens,
@@ -1252,6 +1252,19 @@ def _stream_generate_with_mtp(
             finish_reason = "stop"
             detokenizer.add_token(main_tok_int)
             generated_count += 1
+            yield MlxGenerationResponse(
+                text=detokenizer.last_segment,
+                token=main_tok_int,
+                logprobs=logprobs_main.squeeze(0) if logprobs_main.ndim > 1 else logprobs_main,
+                from_draft=False,
+                prompt_tokens=prompt.size,
+                prompt_tps=prompt_tps,
+                generation_tokens=generated_count,
+                generation_tps=generated_count
+                / max(time.perf_counter() - generation_start, 1e-9),
+                peak_memory=mx.get_peak_memory() / 1e9,
+                finish_reason="stop",
+            )
             break
 
         # Track token history for logits processors
@@ -1337,6 +1350,19 @@ def _stream_generate_with_mtp(
                 detokenizer.add_token(draft_tok_int)
                 generated_count += 1
                 finish_reason = "stop"
+                yield MlxGenerationResponse(
+                    text=detokenizer.last_segment,
+                    token=draft_tok_int,
+                    logprobs=v_lp_draft.squeeze(0) if v_lp_draft.ndim > 1 else v_lp_draft,
+                    from_draft=True,
+                    prompt_tokens=prompt.size,
+                    prompt_tps=prompt_tps,
+                    generation_tokens=generated_count,
+                    generation_tps=generated_count
+                    / max(time.perf_counter() - generation_start, 1e-9),
+                    peak_memory=mx.get_peak_memory() / 1e9,
+                    finish_reason="stop",
+                )
                 break
 
             detokenizer.add_token(draft_tok_int)
@@ -1388,7 +1414,60 @@ def _stream_generate_with_mtp(
             # ---- REJECT ----
             # Trim the draft_tok position that was appended by the verify pass.
             trim_cache(prompt_cache, 1)
-            # target_tok is the corrected token at the verify position.
+            # target_tok is the verifier's corrected token for the rejected position;
+            # emit it before feeding it as input to the next forward.
+            if target_int in eos_token_ids:
+                detokenizer.add_token(target_int)
+                generated_count += 1
+                finish_reason = "stop"
+                yield MlxGenerationResponse(
+                    text=detokenizer.last_segment,
+                    token=target_int,
+                    logprobs=v_lp_draft.squeeze(0) if v_lp_draft.ndim > 1 else v_lp_draft,
+                    from_draft=False,
+                    prompt_tokens=prompt.size,
+                    prompt_tps=prompt_tps,
+                    generation_tokens=generated_count,
+                    generation_tps=generated_count
+                    / max(time.perf_counter() - generation_start, 1e-9),
+                    peak_memory=mx.get_peak_memory() / 1e9,
+                    finish_reason="stop",
+                )
+                break
+
+            detokenizer.add_token(target_int)
+            generated_count += 1
+
+            if generated_count >= max_tokens:
+                yield MlxGenerationResponse(
+                    text=detokenizer.last_segment,
+                    token=target_int,
+                    logprobs=v_lp_draft.squeeze(0) if v_lp_draft.ndim > 1 else v_lp_draft,
+                    from_draft=False,
+                    prompt_tokens=prompt.size,
+                    prompt_tps=prompt_tps,
+                    generation_tokens=generated_count,
+                    generation_tps=generated_count
+                    / max(time.perf_counter() - generation_start, 1e-9),
+                    peak_memory=mx.get_peak_memory() / 1e9,
+                    finish_reason=finish_reason,
+                )
+                break
+
+            yield MlxGenerationResponse(
+                text=detokenizer.last_segment,
+                token=target_int,
+                logprobs=v_lp_draft.squeeze(0) if v_lp_draft.ndim > 1 else v_lp_draft,
+                from_draft=False,
+                prompt_tokens=prompt.size,
+                prompt_tps=prompt_tps,
+                generation_tokens=generated_count,
+                generation_tps=generated_count
+                / max(time.perf_counter() - generation_start, 1e-9),
+                peak_memory=mx.get_peak_memory() / 1e9,
+                finish_reason=None,
+            )
+
             input_tokens = target_tok
             cached_hidden = None
 

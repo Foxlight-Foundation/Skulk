@@ -11,14 +11,11 @@ Tests cover:
 
 from __future__ import annotations
 
-from typing import Callable
 from unittest.mock import MagicMock
 
 import mlx.core as mx
-import pytest
 
-from exo.worker.engines.mlx.mtp import MTPHead, _REQUIRED_KEYS, build_mtp_head
-
+from exo.worker.engines.mlx.mtp import _REQUIRED_KEYS, MTPHead, build_mtp_head
 
 # ---------------------------------------------------------------------------
 # Helpers
