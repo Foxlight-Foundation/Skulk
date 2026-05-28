@@ -1250,7 +1250,6 @@ def _stream_generate_with_mtp(
 
         if main_tok_int in eos_token_ids:
             finish_reason = "stop"
-            detokenizer.add_token(main_tok_int)
             generated_count += 1
             yield MlxGenerationResponse(
                 text=detokenizer.last_segment,
@@ -1347,7 +1346,6 @@ def _stream_generate_with_mtp(
             accepted += 1
 
             if draft_tok_int in eos_token_ids:
-                detokenizer.add_token(draft_tok_int)
                 generated_count += 1
                 finish_reason = "stop"
                 yield MlxGenerationResponse(
@@ -1417,7 +1415,6 @@ def _stream_generate_with_mtp(
             # target_tok is the verifier's corrected token for the rejected position;
             # emit it before feeding it as input to the next forward.
             if target_int in eos_token_ids:
-                detokenizer.add_token(target_int)
                 generated_count += 1
                 finish_reason = "stop"
                 yield MlxGenerationResponse(
