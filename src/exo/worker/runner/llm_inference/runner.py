@@ -740,6 +740,7 @@ class Builder:
         force_sequential_for_gemma4 = is_gemma4_family(
             self.model_card, model_id=self.model_id
         )
+        force_sequential_for_mtp = self.mtp_weights is not None
         no_batch_requested = os.environ.get("SKULK_NO_BATCH") or os.environ.get(
             "EXO_NO_BATCH"
         )
@@ -747,6 +748,7 @@ class Builder:
             no_batch_requested
             or force_sequential_for_kv_backend
             or force_sequential_for_gemma4
+            or force_sequential_for_mtp
         ):
             if force_sequential_for_kv_backend and not no_batch_requested:
                 logger.warning(
@@ -761,6 +763,8 @@ class Builder:
                     "mode yet; forcing SequentialGenerator"
                 )
                 logger.info("using SequentialGenerator (model_family=gemma4)")
+            elif force_sequential_for_mtp and not no_batch_requested:
+                logger.info("MTP speculative decoding requires SequentialGenerator; forcing (mtp_heads=true)")
             else:
                 logger.info("using SequentialGenerator (batching disabled)")
             return SequentialGenerator(

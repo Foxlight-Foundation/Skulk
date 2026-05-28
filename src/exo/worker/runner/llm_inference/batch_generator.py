@@ -441,6 +441,7 @@ class SequentialGenerator(InferenceGenerator):
             vision_processor=self.vision_processor,
             trace_task_id=task.task_id,
             trace_rank=self.device_rank,
+            mtp_weights=self.mtp_weights,
         )
 
     def close(self) -> None:
