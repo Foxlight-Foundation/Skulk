@@ -13,13 +13,16 @@ The full transformer-block path (mtp.0.transformer.*) is tracked in issue #152
 and will land once we have real sidecar weights to validate against.
 
 Weight format (as saved by SWP / mtp_extractor.py):
-  mtp.0.enorm.weight                            float16  (hidden_size,)
-  mtp.0.hnorm.weight                            float16  (hidden_size,)
+  mtp.0.enorm.weight                            float16  (hidden_size,)   actual scale
+  mtp.0.hnorm.weight                            float16  (hidden_size,)   actual scale
   mtp.0.eh_proj.weight                          int4     (hidden_size, 2*hidden_size//8)
   mtp.0.eh_proj.weight_scales                   float16  (hidden_size, 2*hidden_size//group_size)
   mtp.0.eh_proj.weight_biases                   float16  same as scales
-  mtp.0.shared_head.norm.weight                 float16  (hidden_size,)   optional
+  mtp.0.shared_head.norm.weight                 float16  (hidden_size,)   actual scale; optional
   mtp.0.shared_head.head.weight                 int4     optional; tied to main lm_head
+
+Norm weights follow standard Qwen/DeepSeek RMSNorm convention: the stored value IS the
+scale (e.g. ~1.0 at init), not a deviation from 1.  _rms_norm multiplies by w directly.
 
 The model prefix varies by checkpoint family:
   - Top-level keys:   mtp.0.enorm.weight
@@ -37,19 +40,13 @@ import mlx.core as mx
 
 logger = logging.getLogger(__name__)
 
-_NORM_SHIFT_KEYS = (
-    "enorm.weight",
-    "hnorm.weight",
-    "shared_head.norm.weight",
-)
-
 _REQUIRED_KEYS = frozenset({"enorm.weight", "hnorm.weight", "eh_proj.weight"})
 
 
 def _rms_norm(x: mx.array, w: mx.array, eps: float = 1e-6) -> mx.array:
-    """Apply RMSNorm with pre-loaded weight vector."""
+    """Apply RMSNorm with pre-loaded weight vector (actual scale, not deviation)."""
     rms_sq: mx.array = mx.mean(x * x, axis=-1, keepdims=True) + eps
-    return (x / mx.sqrt(rms_sq)) * (1.0 + w)
+    return (x / mx.sqrt(rms_sq)) * w
 
 
 def _dequant_linear(
@@ -80,7 +77,7 @@ class MTPHead:
     validated sidecar weights are available.
     """
 
-    # Norm weights (stored as deviations: actual weight = 1.0 + stored_value)
+    # Norm weights (actual scales, matching standard Qwen/DeepSeek RMSNorm convention)
     hnorm_w: mx.array
     enorm_w: mx.array
 

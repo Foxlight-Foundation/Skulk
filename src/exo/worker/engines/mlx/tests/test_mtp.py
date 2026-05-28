@@ -34,8 +34,8 @@ def _make_weights(
 ) -> dict[str, mx.array]:
     """Return a minimal sidecar weight dict."""
     w: dict[str, mx.array] = {}
-    w[f"{prefix}hnorm.weight"] = mx.zeros(HIDDEN)
-    w[f"{prefix}enorm.weight"] = mx.zeros(HIDDEN)
+    w[f"{prefix}hnorm.weight"] = mx.ones(HIDDEN)
+    w[f"{prefix}enorm.weight"] = mx.ones(HIDDEN)
 
     if quantized:
         # 4-bit packed: (out, in // 8)
@@ -51,7 +51,7 @@ def _make_weights(
         w[f"{prefix}eh_proj.weight"] = mx.zeros((HIDDEN, 2 * HIDDEN))
 
     if add_shared_norm:
-        w[f"{prefix}shared_head.norm.weight"] = mx.zeros(HIDDEN)
+        w[f"{prefix}shared_head.norm.weight"] = mx.ones(HIDDEN)
 
     return w
 
