@@ -246,6 +246,26 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     to ``True`` for models that have been measured to benefit and are
     known to be safe under the deployment's collective backend.
     """
+    mtp_heads: bool | None = None
+    """True when native MTP prediction heads are available via sidecar.
+
+    Set alongside ``mtp_sidecar_repo``. When false or absent, the runner
+    skips sidecar loading and uses standard autoregressive generation.
+    """
+    mtp_max_depth: int | None = None
+    """Maximum draft depth the MTP heads support.
+
+    Start at 1 for Apple Silicon. Deeper values can be evaluated via
+    profiling but are unlikely to amortize on Metal due to near-linear
+    verify-pass scaling.
+    """
+    mtp_sidecar_repo: str | None = None
+    """Hugging Face repo ID containing the published ``mtp.safetensors`` sidecar.
+
+    Example: ``"FoxlightAI/qwen3-5-7b-instruct-mtp-q4k"``
+    The sidecar is downloaded alongside the base model weights and loaded
+    into the runner for speculative decoding. Produced by SWP.
+    """
 
     @field_validator("prompt_renderer", mode="before")
     @classmethod
