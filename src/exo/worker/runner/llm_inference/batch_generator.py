@@ -142,6 +142,7 @@ class SequentialGenerator(InferenceGenerator):
     cancel_receiver: MpReceiver[TaskId]
     event_sender: MpSender[Event]
     vision_processor: VisionProcessor | None = None
+    mtp_weights: "dict[str, mx.array] | None" = None
     check_for_cancel_every: int = 50
 
     _cancelled_tasks: set[TaskId] = field(default_factory=set, init=False)
@@ -474,6 +475,7 @@ class BatchGenerator(InferenceGenerator):
     event_sender: MpSender[Event]
     check_for_cancel_every: int = 50
     vision_processor: VisionProcessor | None = None
+    mtp_weights: "dict[str, mx.array] | None" = None
 
     _cancelled_tasks: set[TaskId] = field(default_factory=set, init=False)
     _maybe_queue: list[TextGeneration] = field(default_factory=list, init=False)

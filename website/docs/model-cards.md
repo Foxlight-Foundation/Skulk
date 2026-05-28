@@ -148,6 +148,53 @@ Declares runtime integration preferences:
   - prompt renderer to use, such as `tokenizer`, `gemma4`, or `dsml`
 - `output_parser`
   - output parser to use, such as `generic`, `gemma4`, `gpt_oss`, or `deepseek_v32`
+- `metal_fast_synch`
+  - per-model override for the MLX `MLX_METAL_FAST_SYNCH` flag; set to `false` for models that deadlock under FAST_SYNCH on the ring backend
+- `mtp_heads`
+  - set to `true` when the model has native MTP prediction heads available via sidecar; required alongside `mtp_sidecar_repo` to enable speculative decoding
+- `mtp_max_depth`
+  - maximum draft depth the MTP heads support; start at `1` for Apple Silicon (deeper values rarely amortize on Metal due to near-linear verify-pass scaling)
+- `mtp_sidecar_repo`
+  - Hugging Face repo ID containing the published `mtp.safetensors` sidecar (e.g. `"FoxlightAI/qwen3-5-7b-instruct-mtp-q4k"`); produced by SWP from the original BF16 checkpoint
+
+## MTP Speculative Decoding
+
+Some models include native multi-token prediction (MTP) heads baked into their checkpoint weights. Skulk uses these heads for speculative decoding: the MTP heads draft candidate tokens cheaply, a full forward pass verifies them, and accepted tokens are emitted in bulk — substantially increasing throughput with no accuracy loss.
+
+### Why a sidecar
+
+Standard quantization pipelines — including mlx-lm's `sanitize()` — strip `mtp.*` tensor keys at conversion time. The MLX-quantized checkpoint you download from Hugging Face typically does not contain MTP weights.
+
+SWP (Skulk Weights Publisher) solves this by re-extracting the `mtp.*` tensors from the original BF16 checkpoint, quantizing only those tensors, and publishing the result as `mtp.safetensors` to a dedicated sidecar repo on Hugging Face. This is the same pattern Skulk uses for vision encoder weights.
+
+### How it works
+
+When a model card declares `mtp_heads = true` and `mtp_sidecar_repo`, Skulk:
+
+1. Downloads `mtp.safetensors` from the sidecar repo alongside the base model weights.
+2. Loads the sidecar at model load time and makes the weights available to the runner.
+3. Uses the MTP heads during generation for speculative decoding (requires runner support — see issue #152).
+
+If the sidecar is declared but the file is not found locally, Skulk logs a warning and continues with standard autoregressive generation.
+
+### Models with native MTP heads
+
+- Qwen3.5 variants (7B, 14B, 32B, 72B)
+- Qwen3.6 variants
+- DeepSeek V3 / R1
+
+Gemma 4 does **not** use native MTP heads — it uses an external drafter model for speculative decoding, which is a separate feature.
+
+### Adding MTP to a card
+
+```toml
+[runtime]
+mtp_heads = true
+mtp_max_depth = 1
+mtp_sidecar_repo = "FoxlightAI/qwen3-5-7b-instruct-mtp-q4k"
+```
+
+The sidecar repo must be published by SWP before adding these fields. See the [SWP documentation](https://foxlight-foundation.github.io/skulk-weights-publisher/) for how sidecars are produced and published.
 
 ## Declarative vs Resolved
 

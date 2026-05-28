@@ -633,7 +633,7 @@ def load_mlx_items(
     group: Group | None,
     on_timeout: TimeoutCallback | None,
     on_layer_loaded: LayerLoadedCallback | None,
-) -> "tuple[Model, TokenizerWrapper, VisionProcessor | None]":
+) -> "tuple[Model, TokenizerWrapper, VisionProcessor | None, dict[str, mx.array] | None]":
     if group is None:
         logger.info(f"Single device used for {bound_instance.instance}")
         model_path = build_model_path(bound_instance.bound_shard.model_card.model_id)
@@ -691,7 +691,19 @@ def load_mlx_items(
     else:
         vision_processor = None
 
-    return cast(Model, model), tokenizer, vision_processor
+    mtp_weights: dict[str, mx.array] | None = None
+    runtime = bound_instance.bound_shard.model_card.runtime
+    if runtime and runtime.mtp_sidecar_repo and runtime.mtp_heads:
+        sidecar_path = build_model_path(ModelId(runtime.mtp_sidecar_repo))
+        mtp_safetensors = sidecar_path / "mtp.safetensors"
+        if mtp_safetensors.exists():
+            mtp_weights = cast("dict[str, mx.array]", mx.load(str(mtp_safetensors)))
+        else:
+            logger.warning(
+                f"MTP sidecar declared but not found at {mtp_safetensors}; running without MTP"
+            )
+
+    return cast(Model, model), tokenizer, vision_processor, mtp_weights
 
 
 def shard_and_load(

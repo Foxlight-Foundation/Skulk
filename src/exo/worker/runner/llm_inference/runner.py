@@ -302,6 +302,7 @@ class Runner:
                         self.generator.inference_model,
                         self.generator.tokenizer,
                         self.generator.vision_processor,
+                        self.generator.mtp_weights,
                     ) = load_mlx_items(
                         self.bound_instance,
                         self.generator.group,
@@ -696,6 +697,7 @@ class Builder:
     tokenizer: TokenizerWrapper | None = None
     group: mx.distributed.Group | None = None
     vision_processor: VisionProcessor | None = None
+    mtp_weights: dict[str, mx.array] | None = None
 
     def build(
         self,
@@ -773,6 +775,7 @@ class Builder:
                 cancel_receiver=self.cancel_receiver,
                 event_sender=self.event_sender,
                 vision_processor=vision_processor,
+                mtp_weights=self.mtp_weights,
             )
         logger.info("using BatchGenerator")
         return BatchGenerator(
@@ -787,4 +790,5 @@ class Builder:
             cancel_receiver=self.cancel_receiver,
             event_sender=self.event_sender,
             vision_processor=vision_processor,
+            mtp_weights=self.mtp_weights,
         )
