@@ -9,10 +9,12 @@ through the main model.
 Phase 1 implements the projection-only head:
     draft = lm_head(shared_norm(eh_proj(concat(hnorm(h), enorm(embed(t_next))))))
 
-The full transformer-block path (mtp.0.transformer.*) is tracked in issue #152
-and will land once we have real sidecar weights to validate against.
+The full transformer-block path is tracked in issue #152 and will land once we
+have real sidecar weights to validate against.
 
-Weight format (as saved by SWP / mtp_extractor.py):
+Two sidecar key layouts are supported:
+
+DeepSeek V3/R1 layout (prefix "mtp.0." or "model.mtp.0."):
   mtp.0.enorm.weight                            float16  (hidden_size,)   actual scale
   mtp.0.hnorm.weight                            float16  (hidden_size,)   actual scale
   mtp.0.eh_proj.weight                          int4     (hidden_size, 2*hidden_size//8)
@@ -21,13 +23,17 @@ Weight format (as saved by SWP / mtp_extractor.py):
   mtp.0.shared_head.norm.weight                 float16  (hidden_size,)   actual scale; optional
   mtp.0.shared_head.head.weight                 int4     optional; tied to main lm_head
 
+Qwen3.5 layout (prefix "mtp.", keys as in the BF16 checkpoint):
+  mtp.pre_fc_norm_hidden.weight                 float16  (hidden_size,)
+  mtp.pre_fc_norm_embedding.weight              float16  (hidden_size,)
+  mtp.fc.weight                                 int4     (hidden_size, 2*hidden_size//8)
+  mtp.fc.weight_scales                          float16  optional
+  mtp.fc.weight_biases                          float16  optional
+  mtp.norm.weight                               float16  (hidden_size,)  optional
+  mtp.layers.0.*                                various  Phase 2 transformer block (deferred)
+
 Norm weights follow standard Qwen/DeepSeek RMSNorm convention: the stored value IS the
 scale (e.g. ~1.0 at init), not a deviation from 1.  _rms_norm multiplies by w directly.
-
-The model prefix varies by checkpoint family:
-  - Top-level keys:   mtp.0.enorm.weight
-  - Under model.*:    model.mtp.0.enorm.weight
-`build_mtp_head` probes both.
 """
 
 from __future__ import annotations
@@ -41,6 +47,11 @@ import mlx.core as mx
 logger = logging.getLogger(__name__)
 
 _REQUIRED_KEYS = frozenset({"enorm.weight", "hnorm.weight", "eh_proj.weight"})
+_QWEN35_REQUIRED_KEYS = frozenset({
+    "pre_fc_norm_hidden.weight",
+    "pre_fc_norm_embedding.weight",
+    "fc.weight",
+})
 
 
 def _rms_norm(x: mx.array, w: mx.array, eps: float = 1e-6) -> mx.array:
@@ -141,12 +152,23 @@ class MTPHead:
         """No-op for Phase 1 (no KV cache to reset)."""
 
 
-def _extract_prefix(weights: dict[str, mx.array]) -> str | None:
-    """Detect the key prefix used for MTP layer 0 in the sidecar."""
-    for candidate in ("mtp.0.", "model.mtp.0."):
-        if all(f"{candidate}{k}" in weights for k in _REQUIRED_KEYS):
-            return candidate
-    return None
+_LAYOUT_DEEPSEEK = "deepseek"
+_LAYOUT_QWEN35 = "qwen35"
+
+# (prefix, required_keys, layout) — probed in order; first match wins.
+_PREFIX_CANDIDATES: tuple[tuple[str, frozenset[str], str], ...] = (
+    ("mtp.0.", _REQUIRED_KEYS, _LAYOUT_DEEPSEEK),
+    ("model.mtp.0.", _REQUIRED_KEYS, _LAYOUT_DEEPSEEK),
+    ("mtp.", _QWEN35_REQUIRED_KEYS, _LAYOUT_QWEN35),
+)
+
+
+def _extract_prefix(weights: dict[str, mx.array]) -> tuple[str, str] | tuple[None, None]:
+    """Detect the key prefix and layout family used for MTP layer 0 in the sidecar."""
+    for prefix, required, layout in _PREFIX_CANDIDATES:
+        if all(f"{prefix}{k}" in weights for k in required):
+            return prefix, layout
+    return None, None
 
 
 def _load_weight(
@@ -228,11 +250,13 @@ def build_mtp_head(
     - the sidecar does not contain the expected Qwen3.5/DeepSeek key layout, or
     - the main model's embed_tokens or lm_head cannot be located.
     """
-    prefix = _extract_prefix(mtp_weights)
+    prefix, layout = _extract_prefix(mtp_weights)
     if prefix is None:
         logger.warning(
             "MTP sidecar loaded but key layout not recognised — "
-            "expected 'mtp.0.{enorm,hnorm,eh_proj}.weight'; running without MTP"
+            "expected DeepSeek 'mtp.0.{enorm,hnorm,eh_proj}.weight' or "
+            "Qwen3.5 'mtp.{pre_fc_norm_hidden,pre_fc_norm_embedding,fc}.weight'; "
+            "running without MTP"
         )
         return None
 
@@ -247,16 +271,22 @@ def build_mtp_head(
         )
         return None
 
-    hnorm_w = _load_weight(mtp_weights, prefix, "hnorm.weight")
-    enorm_w = _load_weight(mtp_weights, prefix, "enorm.weight")
-    eh_proj_w = _load_weight(mtp_weights, prefix, "eh_proj.weight")
+    if layout == _LAYOUT_QWEN35:
+        hnorm_w = _load_weight(mtp_weights, prefix, "pre_fc_norm_hidden.weight")
+        enorm_w = _load_weight(mtp_weights, prefix, "pre_fc_norm_embedding.weight")
+        eh_proj_w = _load_weight(mtp_weights, prefix, "fc.weight")
+        scales, biases, bits, group_size = _detect_quant(mtp_weights, prefix, "fc.weight")
+        shared_norm_w = _load_weight(mtp_weights, prefix, "norm.weight")
+    else:
+        hnorm_w = _load_weight(mtp_weights, prefix, "hnorm.weight")
+        enorm_w = _load_weight(mtp_weights, prefix, "enorm.weight")
+        eh_proj_w = _load_weight(mtp_weights, prefix, "eh_proj.weight")
+        scales, biases, bits, group_size = _detect_quant(mtp_weights, prefix, "eh_proj.weight")
+        shared_norm_w = _load_weight(mtp_weights, prefix, "shared_head.norm.weight")
 
     if hnorm_w is None or enorm_w is None or eh_proj_w is None:
         logger.warning("MTP: missing required weight tensors — running without MTP")
         return None
-
-    scales, biases, bits, group_size = _detect_quant(mtp_weights, prefix, "eh_proj.weight")
-    shared_norm_w = _load_weight(mtp_weights, prefix, "shared_head.norm.weight")
 
     eps_candidates = [1e-6, 1e-5]
     eps = eps_candidates[0]
@@ -287,5 +317,8 @@ def build_mtp_head(
         _norm_fn=effective_norm_fn,
         eps=eps,
     )
-    logger.info(f"MTP head initialised (prefix={prefix!r}, quantized={scales is not None})")
+    logger.info(
+        f"MTP head initialised (layout={layout!r}, prefix={prefix!r}, "
+        f"quantized={scales is not None})"
+    )
     return head

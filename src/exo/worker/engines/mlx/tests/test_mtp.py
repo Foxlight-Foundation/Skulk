@@ -15,7 +15,12 @@ from unittest.mock import MagicMock
 
 import mlx.core as mx
 
-from exo.worker.engines.mlx.mtp import _REQUIRED_KEYS, MTPHead, build_mtp_head
+from exo.worker.engines.mlx.mtp import (
+    _QWEN35_REQUIRED_KEYS,
+    _REQUIRED_KEYS,
+    MTPHead,
+    build_mtp_head,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -32,7 +37,7 @@ def _make_weights(
     quantized: bool = False,
     add_shared_norm: bool = False,
 ) -> dict[str, mx.array]:
-    """Return a minimal sidecar weight dict."""
+    """Return a minimal DeepSeek-style sidecar weight dict."""
     w: dict[str, mx.array] = {}
     w[f"{prefix}hnorm.weight"] = mx.ones(HIDDEN)
     w[f"{prefix}enorm.weight"] = mx.ones(HIDDEN)
@@ -52,6 +57,29 @@ def _make_weights(
 
     if add_shared_norm:
         w[f"{prefix}shared_head.norm.weight"] = mx.ones(HIDDEN)
+
+    return w
+
+
+def _make_qwen35_weights(
+    *,
+    quantized: bool = False,
+    add_norm: bool = True,
+) -> dict[str, mx.array]:
+    """Return a minimal Qwen3.5-style sidecar weight dict (prefix 'mtp.')."""
+    w: dict[str, mx.array] = {}
+    w["mtp.pre_fc_norm_hidden.weight"] = mx.ones(HIDDEN)
+    w["mtp.pre_fc_norm_embedding.weight"] = mx.ones(HIDDEN)
+
+    if quantized:
+        w["mtp.fc.weight"] = mx.zeros((HIDDEN, 2 * HIDDEN // 8), dtype=mx.uint32)
+        w["mtp.fc.weight_scales"] = mx.zeros((HIDDEN, 2 * HIDDEN // GROUP), dtype=mx.float16)
+        w["mtp.fc.weight_biases"] = mx.zeros((HIDDEN, 2 * HIDDEN // GROUP), dtype=mx.float16)
+    else:
+        w["mtp.fc.weight"] = mx.zeros((HIDDEN, 2 * HIDDEN))
+
+    if add_norm:
+        w["mtp.norm.weight"] = mx.ones(HIDDEN)
 
     return w
 
@@ -139,6 +167,67 @@ class TestBuildMtpHead:
         head = build_mtp_head(model, weights)
         assert head is not None
         assert head.shared_norm_w is None
+
+
+# ---------------------------------------------------------------------------
+# build_mtp_head — Qwen3.5 key layout
+# ---------------------------------------------------------------------------
+
+
+class TestBuildMtpHeadQwen35:
+    def test_returns_none_for_unrecognised_qwen35_prefix(self) -> None:
+        model = _make_model()
+        weights = {f"other.{k}": mx.zeros(HIDDEN) for k in _QWEN35_REQUIRED_KEYS}
+        head = build_mtp_head(model, weights)
+        assert head is None
+
+    def test_float_weights_qwen35(self) -> None:
+        model = _make_model()
+        weights = _make_qwen35_weights()
+        head = build_mtp_head(model, weights)
+        assert head is not None
+        assert isinstance(head, MTPHead)
+
+    def test_qwen35_shared_norm_loaded(self) -> None:
+        model = _make_model()
+        weights = _make_qwen35_weights(add_norm=True)
+        head = build_mtp_head(model, weights)
+        assert head is not None
+        assert head.shared_norm_w is not None
+
+    def test_qwen35_without_norm_uses_model_norm(self) -> None:
+        model = _make_model()
+        weights = _make_qwen35_weights(add_norm=False)
+        head = build_mtp_head(model, weights)
+        assert head is not None
+        assert head.shared_norm_w is None
+
+    def test_qwen35_quantized(self) -> None:
+        model = _make_model()
+        weights = _make_qwen35_weights(quantized=True)
+        head = build_mtp_head(model, weights)
+        assert head is not None
+        assert head.eh_proj_scales is not None
+        assert head.eh_proj_biases is not None
+
+    def test_qwen35_draft_output_shape(self) -> None:
+        model = _make_model()
+        weights = _make_qwen35_weights()
+        head = build_mtp_head(model, weights)
+        assert head is not None
+        logits = head.draft(mx.zeros(HIDDEN), next_token_id=0)
+        assert logits.ndim >= 1
+        assert logits.dtype == mx.float32
+
+    def test_deepseek_prefix_not_confused_with_qwen35(self) -> None:
+        # DeepSeek weights should not be matched by Qwen3.5 detection
+        model = _make_model()
+        weights = _make_weights(prefix="mtp.0.")
+        head = build_mtp_head(model, weights)
+        assert head is not None
+        # Confirm it loaded as DeepSeek (hnorm from DeepSeek key, not Qwen3.5 key)
+        assert "mtp.0.hnorm.weight" in weights
+        assert "mtp.pre_fc_norm_hidden.weight" not in weights
 
 
 # ---------------------------------------------------------------------------
