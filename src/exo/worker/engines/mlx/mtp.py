@@ -109,6 +109,12 @@ class MTPHead:
 
     eps: float = 1e-6
 
+    # Concatenation order for the FC projection input.
+    # "hidden_first": concat([hnorm(h), enorm(e)]) — DeepSeek convention (h_t || e_{t+1}).
+    # "embed_first":  concat([enorm(e), hnorm(h)]) — set this once Qwen3.5 real-weight
+    #                 testing confirms the order (currently unverified; see Skulk #181).
+    input_order: str = "hidden_first"
+
     def draft(self, hidden: mx.array, next_token_id: int) -> mx.array:
         """Return logits for the position *after* next_token_id.
 
@@ -128,7 +134,8 @@ class MTPHead:
         h = _rms_norm(h, self.hnorm_w, self.eps)
 
         # Project combined representation: (1, hidden_size)
-        combined = mx.concatenate([h, e], axis=-1)
+        parts = [e, h] if self.input_order == "embed_first" else [h, e]
+        combined = mx.concatenate(parts, axis=-1)
         proj = _dequant_linear(
             combined,
             self.eh_proj_w,
@@ -303,6 +310,10 @@ def build_mtp_head(
     else:
         effective_norm_fn = norm_fn
 
+    # Qwen3.5 concat order: unverified (see issue #183). Default to hidden_first
+    # (same as DeepSeek) until real sidecar weights confirm the layout.
+    input_order = "hidden_first"
+
     head = MTPHead(
         hnorm_w=hnorm_w,
         enorm_w=enorm_w,
@@ -316,6 +327,7 @@ def build_mtp_head(
         _head_fn=head_fn,
         _norm_fn=effective_norm_fn,
         eps=eps,
+        input_order=input_order,
     )
     logger.info(
         f"MTP head initialised (layout={layout!r}, prefix={prefix!r}, "
