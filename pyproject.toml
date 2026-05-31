@@ -71,7 +71,15 @@ exo_pyo3_bindings = { workspace = true }
 # build on macOS 26 Metal SDK. The fork's only change is a DSB memory barrier for
 # Thunderbolt RDMA GPU coherence, which we don't need (exo uses libp2p, not RDMA).
 # mlx = { git = "https://github.com/rltakashige/mlx-jaccl-fix-small-recv.git", branch = "address-rdma-gpu-locks", marker = "sys_platform == 'darwin'" }
-mlx-lm = { git = "https://github.com/rltakashige/mlx-lm", branch = "leo/fix-arrayscache-leak" }
+# Foxlight-owned custody copy of rltakashige/mlx-lm @ leo/fix-arrayscache-leak.
+# Pinned by exact rev to the commit Skulk has always consumed (d36e9b6) — a
+# byte-identical, behavior-frozen custody cutover (tag: foxlight-consumed-d36e9b6).
+# Carries fixes not in upstream mlx-lm: float32 logprobs, DeepSeek-V3.2
+# lightning-indexer batch fix, ArraysCache leak, GDN precision, left_padding eval.
+# NOTE: the branch tip moved past this commit and requires a newer mlx than our
+# pinned 0.31.1 — do NOT track the branch. Reconcile onto upstream >=0.31.3 as a
+# separate, tested step before bumping mlx / mlx-vlm. See docs/gemma4-assistant-plan.md.
+mlx-lm = { git = "https://github.com/Foxlight-Foundation/mlx-lm", rev = "d36e9b661e55a5fc0f77fb6f17ea643aa2dc87aa" }
 # Uncomment to use local mlx/mlx-lm development versions:
 # mlx = { path = "/Users/Shared/mlx", editable=true }
 # mlx-lm = { path = "/Users/Shared/mlx-lm", editable=true }
