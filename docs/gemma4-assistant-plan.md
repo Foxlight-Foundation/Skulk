@@ -157,13 +157,15 @@ integrate**, not **implement**.
 ### Phase B — Adopt the upstream drafter via the mlx-vlm 0.5.0 bump (~1 day)
 
 > **Decision (current, matches [`gemma4-mtp-initiative.md`](./gemma4-mtp-initiative.md)
-> §decision-log): bump mlx-vlm to 0.5.0, do NOT vendor.** The §6a audit first
-> concluded "vendor" because the bump looked blocked by the mlx-lm fork stuck at
-> 0.31.2. That blocker is removed by *owning and reconciling* the fork onto
-> upstream ≥0.31.3 (initiative critical-path step 2). With that done, mlx-vlm
-> 0.5.0 installs cleanly and the drafter arrives as a **maintained dependency**
-> (plus APC / continuous-batching / dflash). Vendoring is retained below only as
-> the fallback if the bump proves problematic.
+> §decision-log): bump mlx-vlm to 0.5.0, do NOT vendor.** Reaching the bump
+> requires the **full version ladder** (§6a), not the fork alone: reconciling the
+> mlx-lm fork onto ≥0.31.3 is *necessary but not sufficient* — the bump also needs
+> `mlx` 0.31.1→0.31.2, the `transformers<5.4.0` cap lifted past 5.5, and the new
+> `llguidance` / `mlx-audio` deps. The fork was the gating blocker (it can't be
+> dropped); once the whole ladder lands, mlx-vlm 0.5.0 installs cleanly and the
+> drafter arrives as a **maintained dependency** (plus APC / continuous-batching /
+> dflash). Vendoring is retained below only as the fallback if the bump proves
+> problematic.
 
 **Preferred path — bump:** after the fork is reconciled (step 2) and the version
 ladder lands (step 3), mlx-vlm 0.5.0 brings
@@ -179,22 +181,28 @@ ladder lands (step 3), mlx-vlm 0.5.0 brings
   `from ....models.gemma4.language import DecoderLayer`) at Skulk's installed
   `mlx_vlm.models.gemma4` — confirmed present and structurally compatible (§6a).
 
-### Phase 6a — Dependency / vendoring audit (COMPLETE)
+### Phase 6a — Dependency audit (COMPLETE)
 
-**A straight bump to mlx-vlm 0.5.0 is blocked:**
+**The mlx-vlm 0.5.0 bump requires a version ladder — fork reconcile is necessary
+but not sufficient.** All of the following must land together; the fork is the
+gating item because it can't be dropped (it carries fixes not upstream):
 
-| Constraint | Skulk pins | 0.5.0 requires | Result |
+| Constraint | Skulk pins | 0.5.0 requires | Action |
 | ---------- | ---------- | -------------- | ------ |
-| `transformers` | `>=5.0.0,<5.4.0` | `>=5.5.0` | ❌ unsatisfiable |
-| `mlx` (darwin) | `==0.31.1` | `>=0.31.2` | ❌ conflict |
-| new deps | — | `llguidance`, `mlx-audio` | added surface |
-| gemma4 vision | Skulk's `_Gemma4DynamicVisionTower` wraps mlx-vlm vision internals | extensively changed in 0.5.0 | ❌ wrapper could break |
+| `mlx-lm` (fork) | fork @ d36e9b6 (0.31.2) | `>=0.31.3` | reconcile fork onto ≥0.31.3 (gating; step 2) |
+| `transformers` | `>=5.0.0,<5.4.0` | `>=5.5.0` | lift cap (audited safe — Skulk uses only stable `Auto*.from_pretrained`) |
+| `mlx` (darwin) | `==0.31.1` | `>=0.31.2` | bump one patch; re-verify macOS-26 Metal build |
+| new deps | — | `llguidance`, `mlx-audio` | accept (added surface) |
 
-So bumping would force a transformers + mlx upgrade and risk Skulk's existing
-Gemma 4 *vision* wrapper — high cost for unrelated reasons.
+**Gemma 4 vision wrapper — audited, NOT a blocker.** An earlier draft worried
+that Skulk's `_Gemma4DynamicVisionTower` (which wraps mlx-vlm's gemma4 vision
+internals) might break on 0.5.0. The audit resolved this: every attribute the
+wrapper touches — `patch_embedder`, `encoder`, `pooler`, `std_bias`, `std_scale`,
+and the call signatures — is unchanged between 0.4.4 and 0.5.0. The wrapper needs
+no changes. (This matches the initiative tracker's decision log.)
 
-**The drafter, by contrast, vendors cleanly.** Verified imports of the
-`gemma4_assistant` drafter (v0.5.0):
+**If the bump is undesirable, the drafter vendors cleanly** (the fallback path
+in Phase B). Verified imports of the `gemma4_assistant` drafter (v0.5.0):
 
 - `gemma4_assistant.py`: `mlx.core`, `mlx.nn`, `mlx.nn.RMSNorm`,
   `.config`, `.masked_embedder`, `.masks`, and
@@ -244,9 +252,12 @@ match makes this low-probability.
 ## 7. Risks / open questions
 
 - ~~mlx-vlm 0.5.0 bump blast radius.~~ RESOLVED — audit complete (§6a). The
-  bump's only real blocker was the mlx-lm fork pinned at 0.31.2; **owning and
-  reconciling that fork onto ≥0.31.3 (critical-path step 2) unblocks the bump**,
-  which is the chosen path. Vendoring is the documented fallback only.
+  mlx-lm fork (pinned at 0.31.2) was the **gating** blocker, but unblocking the
+  bump also requires the rest of the version ladder: `mlx` 0.31.2, the
+  `transformers` cap lifted past 5.5, and the new `llguidance` / `mlx-audio`
+  deps. Reconciling the fork is necessary but not sufficient. The gemma4 vision
+  wrapper was audited as safe (unchanged in 0.5.0). Vendoring is the documented
+  fallback only.
 - **KV-cache exposure refactor** is the riskiest change — it touches the hot
   generation loop. Gate it behind the existing MTP single-node guard so the
   default path is untouched.
