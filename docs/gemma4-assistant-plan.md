@@ -154,26 +154,30 @@ integrate**, not **implement**.
 - Author Gemma 4 model cards pointing at the `mlx-community/*-assistant-bf16`
   repos. Reuse the SWP field name verbatim.
 
-### Phase B — Vendor the upstream drafter (DECIDED: vendor, not bump; ~1 day)
+### Phase B — Adopt the upstream drafter via the mlx-vlm 0.5.0 bump (~1 day)
 
-**Decision: vendor, do not bump.** The 0.4.4→0.5.0 audit (see §6a) shows a
-straight bump is blocked by dependency conflicts, while the drafter itself is
-nearly self-contained and vendors cleanly.
+> **Decision (current, matches [`gemma4-mtp-initiative.md`](./gemma4-mtp-initiative.md)
+> §decision-log): bump mlx-vlm to 0.5.0, do NOT vendor.** The §6a audit first
+> concluded "vendor" because the bump looked blocked by the mlx-lm fork stuck at
+> 0.31.2. That blocker is removed by *owning and reconciling* the fork onto
+> upstream ≥0.31.3 (initiative critical-path step 2). With that done, mlx-vlm
+> 0.5.0 installs cleanly and the drafter arrives as a **maintained dependency**
+> (plus APC / continuous-batching / dflash). Vendoring is retained below only as
+> the fallback if the bump proves problematic.
 
+**Preferred path — bump:** after the fork is reconciled (step 2) and the version
+ladder lands (step 3), mlx-vlm 0.5.0 brings
+`mlx_vlm/speculative/drafters/gemma4_assistant/` directly. Wrap it behind a
+`Drafter` protocol with `draft_block(...)`, alongside the existing `MTPHead`.
+
+**Fallback path — vendor** (only if the bump is blocked for unforeseen reasons):
 - Copy these 0.5.0 files into `src/exo/worker/engines/mlx/drafters/gemma4_assistant/`
   with a provenance header (upstream path + commit/tag `v0.5.0`):
-  - `gemma4_assistant.py` — `Gemma4AssistantDraftModel`
-  - `config.py` — `Gemma4AssistantConfig`
-  - `masked_embedder.py` — sparse centroid head (E2B/E4B)
-  - `masks.py` — drafter masks
-  - `__init__.py`
+  `gemma4_assistant.py`, `config.py`, `masked_embedder.py`, `masks.py`, `__init__.py`.
 - Repoint the two relative imports
   (`from ....models.gemma4.config import TextConfig`,
   `from ....models.gemma4.language import DecoderLayer`) at Skulk's installed
-  `mlx_vlm.models.gemma4` (0.4.4) — confirmed present and structurally
-  compatible (see §6a).
-- Wrap behind a `Drafter` protocol with `draft_block(...)`, alongside the
-  existing `MTPHead`. The sparse centroid head (E2B/E4B) comes along for free.
+  `mlx_vlm.models.gemma4` — confirmed present and structurally compatible (§6a).
 
 ### Phase 6a — Dependency / vendoring audit (COMPLETE)
 
@@ -239,10 +243,10 @@ match makes this low-probability.
 
 ## 7. Risks / open questions
 
-- ~~mlx-vlm 0.5.0 bump blast radius.~~ RESOLVED — audit complete (§6a). Bump is
-  blocked by transformers/mlx pin conflicts; **vendoring the drafter is the
-  chosen path** and is clean (only external dep is `dynamic_roll`, already
-  present).
+- ~~mlx-vlm 0.5.0 bump blast radius.~~ RESOLVED — audit complete (§6a). The
+  bump's only real blocker was the mlx-lm fork pinned at 0.31.2; **owning and
+  reconciling that fork onto ≥0.31.3 (critical-path step 2) unblocks the bump**,
+  which is the chosen path. Vendoring is the documented fallback only.
 - **KV-cache exposure refactor** is the riskiest change — it touches the hot
   generation loop. Gate it behind the existing MTP single-node guard so the
   default path is untouched.
@@ -261,7 +265,7 @@ match makes this low-probability.
 | Phase | Work | Est. |
 | ----- | ---- | ---- |
 | A | Model-card + loader plumbing | ~0.5 day |
-| B | Vendor drafter (audit done — clean) | ~1 day |
+| B | Adopt drafter via mlx-vlm 0.5.0 bump (fork reconciled first) | ~1 day |
 | C | Generation-loop integration + KV exposure | ~2 days |
 | D | Tests + parity + docs | ~1 day |
 
@@ -275,8 +279,9 @@ Skulk's generation loop — is now unambiguously the critical path.
 
 1. Land **Phase A** first — cheap, unblocks model cards, makes SWP↔Skulk field
    names agree.
-2. Before Phase B, **audit the mlx-vlm 0.4.4 → 0.5.0 delta** to choose bump vs
-   vendor. This is the single most important de-risking step.
+2. **Reconcile the mlx-lm fork onto ≥0.31.3** (critical-path step 2) — this is
+   what unblocks the mlx-vlm 0.5.0 bump that delivers the drafter. The audit
+   (§6a) confirmed the bump is otherwise clean. Vendoring stays as fallback only.
 3. Phase C is the genuine engineering; everything the drafter needs
    mathematically already exists upstream and is parity-checked, so the focus is
    wiring it into Skulk's loop, not reimplementing model math.
