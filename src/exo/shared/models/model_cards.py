@@ -266,6 +266,21 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     The sidecar is downloaded alongside the base model weights and loaded
     into the runner for speculative decoding. Produced by SWP.
     """
+    assistant_model_repo: str | None = None
+    """Hugging Face repo ID of a companion *assistant* (drafter) model.
+
+    Gemma 4 does speculative decoding differently from the Qwen3/DeepSeek
+    ``mtp.*`` heads: instead of embedded prediction heads, it pairs the target
+    with a separate small ``gemma4_assistant`` model (e.g.
+    ``"mlx-community/gemma-4-26B-A4B-it-assistant-bf16"``) that cross-attends
+    over the target's KV cache. When set, the assistant repo is downloaded
+    alongside the base model. Mutually exclusive with the ``mtp_*`` fields.
+
+    NOTE: consuming the assistant for speculative generation requires the
+    ``gemma4_assistant`` drafter from mlx-vlm >= 0.5.0 and is not yet wired into
+    the runner — declaring it here only pre-downloads it. See the Gemma 4 MTP
+    initiative in the foxlight-docs hub (Phase C).
+    """
 
     @field_validator("prompt_renderer", mode="before")
     @classmethod
