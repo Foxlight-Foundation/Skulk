@@ -333,3 +333,15 @@ GitHub's API doesn't support direct image upload for PR comments. Workaround:
    git push origin <branch>
    ```
    The images still render in the PR comment because they reference the permanent commit SHA.
+
+## Foxlight docs hub
+
+Cross-project planning, roadmaps, and decision logs (spanning Skulk, SWP,
+FoxlightWeb) live in the **private** repo `Foxlight-Foundation/foxlight-docs`.
+Read its `INDEX.md` first for anything cross-cutting. Clone with
+`gh repo clone Foxlight-Foundation/foxlight-docs`.
+
+The **Gemma 4 MTP speculative-decoding** initiative — tracker, implementation
+plan, and the solved drafter mechanism — lives there at
+`initiatives/gemma4-mtp/` (moved out of this repo so internal strategy/roadmap
+isn't in a public repo).
