@@ -187,6 +187,39 @@ class ResumableShardDownloader(ShardDownloader):
                 skip_internet=self.offline,
             )
 
+        if (
+            not config_only
+            and not self.offline
+            and shard.model_card.runtime
+            and shard.model_card.runtime.assistant_model_repo
+        ):
+            assistant_repo = shard.model_card.runtime.assistant_model_repo
+            assistant_card = ModelCard(
+                model_id=ModelId(assistant_repo),
+                storage_size=Memory.from_bytes(0),
+                n_layers=1,
+                hidden_size=1,
+                supports_tensor=False,
+                tasks=[ModelTask.TextGeneration],
+            )
+            assistant_shard = PipelineShardMetadata(
+                model_card=assistant_card,
+                device_rank=0,
+                world_size=1,
+                start_layer=0,
+                end_layer=1,
+                n_layers=1,
+            )
+            # The assistant is a small full model (config + a single
+            # safetensors), so pull the weights and config alongside the target.
+            await download_shard(
+                assistant_shard,
+                self.on_progress_wrapper,
+                max_parallel_downloads=self.max_parallel_downloads,
+                allow_patterns=["*.safetensors", "config.json"],
+                skip_internet=self.offline,
+            )
+
         return target_dir
 
     async def get_shard_download_status(

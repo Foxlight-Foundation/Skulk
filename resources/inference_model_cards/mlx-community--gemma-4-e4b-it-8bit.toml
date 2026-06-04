@@ -24,6 +24,10 @@ tool_call_format = "gemma4"
 [runtime]
 prompt_renderer = "gemma4"
 output_parser = "gemma4"
+# Companion drafter for speculative decoding (Gemma 4 assistant pattern).
+# Pre-downloaded with the model; consumed once the gemma4_assistant
+# drafter (mlx-vlm >= 0.5.0) is wired in (Phase C).
+assistant_model_repo = "mlx-community/gemma-4-E4B-it-assistant-bf16"
 # Same FAST_SYNCH wedge as the 26b card — GPU command queue stalls in the
 # pipeline-parallel inference path, kernel watchdog panics the box. Disable
 # until the upstream MLX issue is fixed or a cheap inference-side fence

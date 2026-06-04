@@ -25,6 +25,10 @@ tool_call_format = "gemma4"
 [runtime]
 prompt_renderer = "gemma4"
 output_parser = "gemma4"
+# Companion drafter for speculative decoding (Gemma 4 assistant pattern).
+# Pre-downloaded with the model; consumed once the gemma4_assistant
+# drafter (mlx-vlm >= 0.5.0) is wired in (Phase C).
+assistant_model_repo = "mlx-community/gemma-4-26B-A4B-it-assistant-bf16"
 # MLX_METAL_FAST_SYNCH wedges the GPU command queue on this model under the
 # ring backend with multimodal load: the runner thread enters TH_UNINT in
 # the AGX driver at pipeline_last_eval_output, transitively starves
