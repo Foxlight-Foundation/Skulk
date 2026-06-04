@@ -5,7 +5,7 @@ from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
-from httpx import Response
+from httpx2 import Response
 
 from exo.api.main import API
 from exo.shared.election import ElectionMessage
