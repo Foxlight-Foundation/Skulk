@@ -45,6 +45,18 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   - `src/exo/worker/runner/image_models/runner.py` — image generation
 - **Communicates via:** `mp.Queue` from worker (incoming tasks); `mp.Queue` to worker (outgoing events); `mlx.distributed` collectives with peer runners
 
+### Drafters (speculative decoding)
+
+`src/exo/worker/engines/mlx/drafters/`. Single-node, greedy-only (D=1), forces `SequentialGenerator`.
+
+- **Protocol:** `protocol.py::Drafter` — `begin_request(prompt_cache)` / `observe(hiddens, next_tokens)` / `draft(hidden, next_token) -> logits`. The generation loop owns verify/accept/reject, target-cache trims, and SSM snapshots; drafters own only their private state. The loop feeds every committed position's `(pre-final-norm hidden, next token)` pair exactly once, in order (the pair-stream contract).
+- **Builder:** `builder.py::build_drafter(model, mtp_weights, runtime)` — detects sidecar key layout, resolves family facts (norm convention, fc concat order) from layout-keyed defaults with model-card `runtime` overrides.
+- **Implementations:**
+  - `qwen_sidecar.py::QwenSidecarDrafter` — Phase 2: +1.0 zero-centered norm shift, `embed_first` concat, sidecar `mtp.layers.0` block instantiated from the target family's own decoder-layer class (strict-loaded), private `KVCache`. Validated ~58–74% acceptance on Qwen3.5-2B (issue #192).
+  - `deepseek_sidecar.py::DeepseekSidecarDrafter` — legacy projection-only head; conventions unverified against real weights.
+  - Planned: Gemma 4 assistant-model drafter (foxlight-docs `gemma4-mtp` Phase C).
+- **Observability:** the loop logs `MTP acceptance so far: A/N` every 32 drafts; the public `GenerationResponse` does not carry per-token draft provenance.
+
 ### Router (libp2p)
 
 - **Role:** transport for all inter-node communication
@@ -303,7 +315,7 @@ Note: there is no `master_node_id` field on `State`. Master identity lives outsi
 - `reasoning: ReasoningCardConfig | None` — supports_toggle, supports_budget, format, default_effort
 - `modalities: ModalitiesCardConfig | None` — supports_native_multimodal, supports_audio_input
 - `tooling: ToolingCardConfig | None` — tool_call_format, supports_tool_calling, builtin_tools
-- `runtime: RuntimeCapabilityCardConfig | None` — prompt_renderer, output_parser, metal_fast_synch
+- `runtime: RuntimeCapabilityCardConfig | None` — prompt_renderer, output_parser, metal_fast_synch, mtp_heads, mtp_max_depth, mtp_sidecar_repo, mtp_norm_convention, mtp_concat_order, assistant_model_repo
 
 ### Capability profile
 

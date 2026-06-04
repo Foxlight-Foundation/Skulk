@@ -1,0 +1,684 @@
+# pyright: reportPrivateUsage=false, reportUnknownLambdaType=false
+# pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false
+# pyright: reportArgumentType=false
+"""Unit tests for the speculative-decoding drafters package.
+
+Tests cover:
+- build_drafter: layout dispatch (Qwen / DeepSeek / unrecognised) and
+  model-card convention overrides
+- QwenSidecarDrafter: +1.0 zero-centered norm shift, embed_first concat
+  order, block strict-load against a real tiny qwen3_5 decoder layer,
+  private KV cache advancement through observe/draft, failure fallbacks
+- DeepseekSidecarDrafter: build paths, quantized eh_proj, draft shape/dtype
+- introspection: tied-embedding head discovery
+- _stream_generate_with_mtp: begin_request/observe pair-stream symmetry on
+  the prompt, accept, and reject paths; SSM state restoration on reject
+
+The Qwen tests use a REAL one-layer qwen3_5 text model at tiny dimensions
+(not mocks) so block instantiation, strict weight loading, and attention
+cache behavior are exercised against genuine mlx-lm modules.
+"""
+
+from __future__ import annotations
+
+from typing import cast
+from unittest.mock import MagicMock
+
+import mlx.core as mx
+from mlx.utils import tree_flatten
+from mlx_lm.models import qwen3_5
+
+from exo.shared.models.model_cards import RuntimeCapabilityCardConfig
+from exo.worker.engines.mlx.drafters import Drafter, build_drafter
+from exo.worker.engines.mlx.drafters.deepseek_sidecar import (
+    DeepseekSidecarDrafter,
+    build_deepseek_sidecar_drafter,
+)
+from exo.worker.engines.mlx.drafters.introspection import get_head_fn
+from exo.worker.engines.mlx.drafters.qwen_sidecar import (
+    QwenSidecarDrafter,
+    build_qwen_sidecar_drafter,
+)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+HIDDEN = 16
+VOCAB = 32
+GROUP = 4
+
+
+def _tiny_args() -> qwen3_5.TextModelArgs:
+    """Args for a one-layer, all-full-attention qwen3_5 model at toy size."""
+    # mlx-lm's BaseModelArgs dataclass machinery is unannotated, so pyright
+    # cannot see the field defaults.
+    return qwen3_5.TextModelArgs(  # pyright: ignore[reportCallIssue]
+        model_type="qwen3_5",
+        hidden_size=HIDDEN,
+        intermediate_size=2 * HIDDEN,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        vocab_size=VOCAB,
+        full_attention_interval=1,
+        tie_word_embeddings=True,
+    )
+
+
+class _TinyModel:
+    """Wrapper mimicking the loaded-model shape (`.language_model`)."""
+
+    def __init__(self) -> None:
+        self.language_model = qwen3_5.TextModel(_tiny_args())
+
+
+def _make_qwen35_weights(
+    *,
+    with_block: bool = True,
+    with_norm: bool = True,
+    norm_value: float = 1.0,
+) -> dict[str, mx.array]:
+    """Return a Qwen3.5-style sidecar dict shaped for the tiny model."""
+    w: dict[str, mx.array] = {
+        "mtp.pre_fc_norm_hidden.weight": mx.full((HIDDEN,), norm_value),
+        "mtp.pre_fc_norm_embedding.weight": mx.full((HIDDEN,), norm_value),
+        "mtp.fc.weight": mx.zeros((HIDDEN, 2 * HIDDEN)),
+    }
+    if with_norm:
+        w["mtp.norm.weight"] = mx.full((HIDDEN,), norm_value)
+    if with_block:
+        # Borrow exact parameter names/shapes from a real decoder layer so
+        # strict-load is guaranteed to match.
+        layer = qwen3_5.DecoderLayer(_tiny_args(), layer_idx=0)
+        for name, value in tree_flatten(layer.parameters()):
+            w[f"mtp.layers.0.{name}"] = value
+    return w
+
+
+def _make_deepseek_weights(
+    *,
+    prefix: str = "mtp.0.",
+    quantized: bool = False,
+    add_shared_norm: bool = False,
+) -> dict[str, mx.array]:
+    """Return a minimal DeepSeek-style sidecar weight dict."""
+    w: dict[str, mx.array] = {}
+    w[f"{prefix}hnorm.weight"] = mx.ones(HIDDEN)
+    w[f"{prefix}enorm.weight"] = mx.ones(HIDDEN)
+    if quantized:
+        w[f"{prefix}eh_proj.weight"] = mx.zeros((HIDDEN, 2 * HIDDEN // 8), dtype=mx.uint32)
+        w[f"{prefix}eh_proj.weight_scales"] = mx.zeros(
+            (HIDDEN, 2 * HIDDEN // GROUP), dtype=mx.float16
+        )
+        w[f"{prefix}eh_proj.weight_biases"] = mx.zeros(
+            (HIDDEN, 2 * HIDDEN // GROUP), dtype=mx.float16
+        )
+    else:
+        w[f"{prefix}eh_proj.weight"] = mx.zeros((HIDDEN, 2 * HIDDEN))
+    if add_shared_norm:
+        w[f"{prefix}shared_head.norm.weight"] = mx.ones(HIDDEN)
+    return w
+
+
+# ---------------------------------------------------------------------------
+# build_drafter — layout dispatch and overrides
+# ---------------------------------------------------------------------------
+
+
+class TestBuildDrafterDispatch:
+    def test_returns_none_for_empty_weights(self) -> None:
+        assert build_drafter(_TinyModel(), {}) is None
+
+    def test_returns_none_for_unrecognised_layout(self) -> None:
+        weights = {"other.norm.weight": mx.ones(HIDDEN)}
+        assert build_drafter(_TinyModel(), weights) is None
+
+    def test_qwen_layout_builds_qwen_drafter(self) -> None:
+        drafter = build_drafter(_TinyModel(), _make_qwen35_weights())
+        assert isinstance(drafter, QwenSidecarDrafter)
+        assert isinstance(drafter, Drafter)
+
+    def test_deepseek_layout_builds_deepseek_drafter(self) -> None:
+        drafter = build_drafter(_TinyModel(), _make_deepseek_weights())
+        assert isinstance(drafter, DeepseekSidecarDrafter)
+        assert isinstance(drafter, Drafter)
+
+    def test_deepseek_model_prefix(self) -> None:
+        drafter = build_drafter(_TinyModel(), _make_deepseek_weights(prefix="model.mtp.0."))
+        assert isinstance(drafter, DeepseekSidecarDrafter)
+
+    def test_qwen_default_conventions(self) -> None:
+        # zero_centered default: norms stored as 0.0 become effective 1.0.
+        weights = _make_qwen35_weights(norm_value=0.0)
+        drafter = build_drafter(_TinyModel(), weights)
+        assert isinstance(drafter, QwenSidecarDrafter)
+        assert mx.allclose(drafter._hnorm_w, mx.ones(HIDDEN))
+        assert drafter._concat_order == "embed_first"
+
+    def test_card_overrides_take_precedence(self) -> None:
+        runtime = RuntimeCapabilityCardConfig(
+            mtp_norm_convention="actual_scale",
+            mtp_concat_order="hidden_first",
+        )
+        weights = _make_qwen35_weights(norm_value=0.5)
+        drafter = build_drafter(_TinyModel(), weights, runtime=runtime)
+        assert isinstance(drafter, QwenSidecarDrafter)
+        # actual_scale: stored value used verbatim, no +1 shift.
+        assert mx.allclose(drafter._hnorm_w, mx.full((HIDDEN,), 0.5))
+        assert drafter._concat_order == "hidden_first"
+
+
+# ---------------------------------------------------------------------------
+# QwenSidecarDrafter
+# ---------------------------------------------------------------------------
+
+
+class TestQwenSidecarDrafter:
+    def _build(self, **kwargs: object) -> QwenSidecarDrafter:
+        drafter = build_qwen_sidecar_drafter(
+            _TinyModel(),
+            _make_qwen35_weights(**kwargs),
+            norm_convention="zero_centered",
+            concat_order="embed_first",
+        )
+        assert drafter is not None
+        return drafter
+
+    def test_norm_shift_applied_to_all_norm_weights(self) -> None:
+        drafter = self._build(norm_value=0.0)
+        assert mx.allclose(drafter._hnorm_w, mx.ones(HIDDEN))
+        assert mx.allclose(drafter._enorm_w, mx.ones(HIDDEN))
+        assert mx.allclose(drafter._final_norm_w, mx.ones(HIDDEN))
+        # Block norms shift too: input_layernorm initialises to 1.0 in the
+        # real layer, so the shifted load must read 2.0.
+        block_norm = drafter._block.input_layernorm.weight  # type: ignore[union-attr]
+        assert mx.allclose(block_norm, mx.full((HIDDEN,), 2.0))
+
+    def test_missing_block_returns_none(self) -> None:
+        drafter = build_qwen_sidecar_drafter(
+            _TinyModel(),
+            _make_qwen35_weights(with_block=False),
+            norm_convention="zero_centered",
+            concat_order="embed_first",
+        )
+        assert drafter is None
+
+    def test_missing_final_norm_returns_none(self) -> None:
+        drafter = build_qwen_sidecar_drafter(
+            _TinyModel(),
+            _make_qwen35_weights(with_norm=False),
+            norm_convention="zero_centered",
+            concat_order="embed_first",
+        )
+        assert drafter is None
+
+    def test_corrupt_block_shape_returns_none(self) -> None:
+        weights = _make_qwen35_weights()
+        weights["mtp.layers.0.self_attn.q_proj.weight"] = mx.zeros((3, 3))
+        drafter = build_qwen_sidecar_drafter(
+            _TinyModel(),
+            weights,
+            norm_convention="zero_centered",
+            concat_order="embed_first",
+        )
+        assert drafter is None
+
+    def test_quantized_sidecar_rejected(self) -> None:
+        weights = _make_qwen35_weights()
+        weights["mtp.fc.weight_scales"] = mx.zeros((HIDDEN, 2 * HIDDEN // GROUP))
+        weights["mtp.fc.weight_biases"] = mx.zeros((HIDDEN, 2 * HIDDEN // GROUP))
+        drafter = build_qwen_sidecar_drafter(
+            _TinyModel(),
+            weights,
+            norm_convention="zero_centered",
+            concat_order="embed_first",
+        )
+        assert drafter is None
+
+    def test_draft_output_shape_and_dtype(self) -> None:
+        drafter = self._build()
+        drafter.begin_request([])
+        logits = drafter.draft(mx.zeros(HIDDEN), next_token=1)
+        assert logits.shape == (VOCAB,)
+        assert logits.dtype == mx.float32
+
+    def test_observe_and_draft_advance_private_cache(self) -> None:
+        drafter = self._build()
+        drafter.begin_request([])
+        assert drafter._cache.offset == 0
+        drafter.observe(mx.zeros((3, HIDDEN)), mx.array([1, 2, 3]))
+        assert drafter._cache.offset == 3
+        drafter.draft(mx.zeros(HIDDEN), next_token=4)
+        assert drafter._cache.offset == 4
+
+    def test_begin_request_resets_private_cache(self) -> None:
+        drafter = self._build()
+        drafter.begin_request([])
+        drafter.observe(mx.zeros((3, HIDDEN)), mx.array([1, 2, 3]))
+        drafter.begin_request([])
+        assert drafter._cache.offset == 0
+
+
+class TestQwenConcatOrder:
+    """Behavioral check that concat order controls which half fc consumes."""
+
+    def _project_with_order(self, order: str) -> mx.array:
+        # fc = [I | 0]: output equals the FIRST half of the concat input.
+        fc = mx.concatenate([mx.eye(HIDDEN), mx.zeros((HIDDEN, HIDDEN))], axis=1)
+        drafter = QwenSidecarDrafter(
+            hnorm_w=mx.ones(HIDDEN),
+            enorm_w=mx.ones(HIDDEN),
+            fc_w=fc,
+            final_norm_w=mx.ones(HIDDEN),
+            block=MagicMock(),
+            embed_fn=lambda tokens: mx.ones((tokens.shape[0], HIDDEN)),
+            head_fn=lambda x: x,
+            concat_order=order,
+            eps=1e-6,
+        )
+        # rms_norm(ones) = ones; rms_norm(-ones) = -ones.
+        return drafter._project(mx.full((1, HIDDEN), -1.0), mx.array([0]))
+
+    def test_embed_first_picks_embedding_half(self) -> None:
+        out = self._project_with_order("embed_first")
+        assert mx.allclose(out[0, 0], mx.ones(HIDDEN), atol=1e-2)
+
+    def test_hidden_first_picks_hidden_half(self) -> None:
+        out = self._project_with_order("hidden_first")
+        assert mx.allclose(out[0, 0], -mx.ones(HIDDEN), atol=1e-2)
+
+
+# ---------------------------------------------------------------------------
+# DeepseekSidecarDrafter
+# ---------------------------------------------------------------------------
+
+
+class TestDeepseekSidecarDrafter:
+    def test_float_weights_top_level_prefix(self) -> None:
+        drafter = build_deepseek_sidecar_drafter(_TinyModel(), _make_deepseek_weights())
+        assert isinstance(drafter, DeepseekSidecarDrafter)
+
+    def test_unrecognised_layout_returns_none(self) -> None:
+        weights = {"other.0.hnorm.weight": mx.ones(HIDDEN)}
+        assert build_deepseek_sidecar_drafter(_TinyModel(), weights) is None
+
+    def test_quantized_eh_proj(self) -> None:
+        drafter = build_deepseek_sidecar_drafter(
+            _TinyModel(), _make_deepseek_weights(quantized=True)
+        )
+        assert drafter is not None
+        assert drafter._eh_proj_scales is not None
+        assert drafter._eh_proj_biases is not None
+
+    def test_shared_norm_loaded(self) -> None:
+        drafter = build_deepseek_sidecar_drafter(
+            _TinyModel(), _make_deepseek_weights(add_shared_norm=True)
+        )
+        assert drafter is not None
+        assert drafter._shared_norm_w is not None
+
+    def test_draft_output_dtype(self) -> None:
+        drafter = build_deepseek_sidecar_drafter(_TinyModel(), _make_deepseek_weights())
+        assert drafter is not None
+        drafter.begin_request([])
+        logits = drafter.draft(mx.zeros(HIDDEN), next_token=5)
+        assert logits.dtype == mx.float32
+
+    def test_observe_is_noop(self) -> None:
+        drafter = build_deepseek_sidecar_drafter(_TinyModel(), _make_deepseek_weights())
+        assert drafter is not None
+        drafter.observe(mx.zeros((3, HIDDEN)), mx.array([1, 2, 3]))  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# introspection
+# ---------------------------------------------------------------------------
+
+
+class TestTiedEmbeddingsHead:
+    def test_head_located_via_as_linear(self) -> None:
+        """Tied-embedding models (mlx-lm >= 0.31.3 qwen3_5 TextModel) expose
+        no lm_head; the head is embed_tokens.as_linear."""
+
+        class _Embed:
+            def as_linear(self, x: mx.array) -> mx.array:
+                return x
+
+        class _Trunk:
+            embed_tokens = _Embed()
+
+        class _TextModel:
+            model = _Trunk()
+            # no lm_head attribute
+
+        class _Model:
+            language_model = _TextModel()
+
+        head = get_head_fn(_Model())
+        assert head is not None
+        probe = mx.array([1.0])
+        assert mx.array_equal(head(probe), probe)
+
+
+# ---------------------------------------------------------------------------
+# _get_trunk_and_head
+# ---------------------------------------------------------------------------
+
+
+class TestGetTrunkAndHead:
+    def test_qwen_style(self) -> None:
+        from exo.worker.engines.mlx.generator.generate import _get_trunk_and_head
+
+        trunk = MagicMock()
+        lm_head = MagicMock()
+        lm = MagicMock()
+        lm.model = trunk
+        lm.lm_head = lm_head
+        model = MagicMock()
+        model.language_model = lm
+
+        result = _get_trunk_and_head(model)
+        assert result is not None
+        t, h = result
+        assert t is trunk
+        assert h is lm_head
+
+    def test_deepseek_style(self) -> None:
+        from exo.worker.engines.mlx.generator.generate import _get_trunk_and_head
+
+        trunk = MagicMock()
+        lm_head = MagicMock()
+        model = MagicMock(spec=[])  # no attributes
+        model.model = trunk
+        model.lm_head = lm_head
+
+        result = _get_trunk_and_head(model)
+        assert result is not None
+        t, h = result
+        assert t is trunk
+        assert h is lm_head
+
+    def test_unsupported_returns_none(self) -> None:
+        from exo.worker.engines.mlx.generator.generate import _get_trunk_and_head
+
+        model = MagicMock(spec=[])  # no relevant attributes
+        result = _get_trunk_and_head(model)
+        assert result is None
+
+
+class TestPrenormTrunk:
+    def test_trunk_fn_returns_prenorm_hiddens(self) -> None:
+        """The MTP trunk_fn must return PRE-final-norm hiddens.
+
+        Regression test for the live 0%-acceptance finding: feeding the
+        drafter post-norm hiddens silently breaks drafting while keeping
+        main-path logits correct. Pin the contract on a real tiny model:
+        norm(trunk_fn(x)) == full trunk forward, and head_fn folds the norm.
+        """
+        from exo.worker.engines.mlx.generator.generate import _get_trunk_and_head
+
+        model = _TinyModel()
+        text_model = model.language_model
+        result = _get_trunk_and_head(model)
+        assert result is not None
+        trunk_fn, head_fn = result
+
+        tokens = mx.array([[1, 2, 3, 4]])
+        prenorm = trunk_fn(tokens, cache=None)
+        full = text_model.model(tokens)  # applies the final norm
+        assert not mx.allclose(prenorm, full)
+        assert mx.allclose(text_model.model.norm(prenorm), full, atol=1e-5)
+        # head_fn must reproduce the model's own logits from prenorm hiddens.
+        assert mx.allclose(head_fn(prenorm), text_model(tokens), atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# _stream_generate_with_mtp — pair-stream symmetry and token sequences
+# ---------------------------------------------------------------------------
+
+
+class _FakeDrafter:
+    """Protocol-satisfying fake that records every loop interaction."""
+
+    def __init__(self, draft_token_id: int, vocab_size: int = VOCAB) -> None:
+        self._draft_id = draft_token_id
+        self._v = vocab_size
+        self.begin_request_count = 0
+        self.observe_calls: list[tuple[int, list[int]]] = []
+        self.draft_calls: list[int] = []
+
+    def begin_request(self, prompt_cache: object) -> None:
+        self.begin_request_count += 1
+
+    def observe(self, hiddens: mx.array, next_tokens: mx.array) -> None:
+        tokens = [int(t) for t in cast("list[int]", next_tokens.tolist())]
+        self.observe_calls.append((int(hiddens.shape[0]), tokens))
+
+    def draft(self, hidden: mx.array, next_token: int) -> mx.array:
+        self.draft_calls.append(next_token)
+        logits = mx.zeros(self._v)
+        logits = mx.where(mx.arange(self._v) == self._draft_id, mx.array(100.0), logits)
+        return logits.astype(mx.float32)
+
+
+def _build_fake_stream_env(
+    *,
+    vocab_size: int = VOCAB,
+    hidden_size: int = HIDDEN,
+    main_token_ids: list[int],  # what the "trunk+head" return each call
+    draft_token_id: int,
+):
+    """Build minimal fakes for testing _stream_generate_with_mtp."""
+    from mlx_lm.tokenizer_utils import TokenizerWrapper
+
+    _main_token_iter = iter(main_token_ids)
+
+    def fake_trunk(tokens: mx.array, cache: object = None) -> mx.array:
+        seq_len = tokens.shape[1] if tokens.ndim == 2 else 1
+        return mx.zeros((1, seq_len, hidden_size))
+
+    def fake_head(hidden: mx.array) -> mx.array:
+        seq_len = hidden.shape[1] if hidden.ndim == 3 else 1
+        out = mx.zeros((1, seq_len, vocab_size))
+        try:
+            tok = next(_main_token_iter)
+        except StopIteration:
+            tok = 0  # EOS or fallback
+        return mx.where(
+            mx.arange(vocab_size)[None, None, :] == tok,
+            mx.array(100.0),
+            out,
+        )
+
+    tokenizer = MagicMock(spec=TokenizerWrapper)
+    detokenizer = MagicMock()
+    detokenizer.last_segment = "hi"
+    tokenizer.detokenizer = detokenizer
+    tokenizer.eos_token_ids = []
+
+    model = MagicMock()
+    drafter = _FakeDrafter(draft_token_id=draft_token_id, vocab_size=vocab_size)
+
+    class _FakeCache:
+        def __init__(self):
+            self.state = []
+            self.offset = 0
+            self._trimmed = 0
+
+        def trim(self, n: int) -> None:
+            self._trimmed += n
+
+    fake_cache = [_FakeCache()]
+
+    return model, tokenizer, drafter, fake_trunk, fake_head, fake_cache
+
+
+class TestStreamGenerateWithMTP:
+    def _run(
+        self,
+        *,
+        main_token_ids: list[int],
+        draft_token_id: int,
+        max_tokens: int = 10,
+    ):
+        from exo.worker.engines.mlx.generator.generate import _stream_generate_with_mtp
+
+        model, tokenizer, drafter, trunk_fn, head_fn, cache = _build_fake_stream_env(
+            main_token_ids=main_token_ids,
+            draft_token_id=draft_token_id,
+        )
+
+        sampler = lambda lp: mx.argmax(lp, axis=-1)  # noqa: E731
+        prompt = mx.array([1, 2, 3])
+
+        outputs = list(
+            _stream_generate_with_mtp(
+                model=model,
+                tokenizer=tokenizer,
+                drafter=drafter,
+                trunk_fn=trunk_fn,
+                head_fn=head_fn,
+                prompt=prompt,
+                max_tokens=max_tokens,
+                sampler=sampler,
+                logits_processors=[],
+                prompt_cache=cache,
+                kv_group_size=None,
+                kv_bits=None,
+            )
+        )
+        return outputs, drafter, cache
+
+    def test_yields_responses(self) -> None:
+        outputs, _, _ = self._run(
+            main_token_ids=[5, 0],
+            draft_token_id=5,
+            max_tokens=5,
+        )
+        assert len(outputs) >= 1
+
+    def test_begin_request_called_once(self) -> None:
+        _, drafter, _ = self._run(
+            main_token_ids=[5, 0],
+            draft_token_id=5,
+            max_tokens=5,
+        )
+        assert drafter.begin_request_count == 1
+
+    def test_prompt_pairs_bulk_observed(self) -> None:
+        _, drafter, _ = self._run(
+            main_token_ids=[5, 0],
+            draft_token_id=5,
+            max_tokens=5,
+        )
+        # Prompt [1, 2, 3]: positions 0..1 pair with tokens [2, 3].
+        assert drafter.observe_calls[0] == (2, [2, 3])
+
+    def test_accept_observes_skipped_draft_pair(self) -> None:
+        # main 5, draft 5, verify target 5 → accept. The skipped position's
+        # pair carries the accepted draft token.
+        _, drafter, _ = self._run(
+            main_token_ids=[5, 5, 0],
+            draft_token_id=5,
+            max_tokens=4,
+        )
+        assert (1, [5]) in drafter.observe_calls[1:]
+
+    def test_reject_observes_target_pair(self) -> None:
+        # main 5, draft 7, verify target 3 → reject. The skipped position's
+        # pair carries the verifier's corrected token, not the draft.
+        _, drafter, _ = self._run(
+            main_token_ids=[5, 3, 0],
+            draft_token_id=7,
+            max_tokens=4,
+        )
+        assert (1, [3]) in drafter.observe_calls[1:]
+        assert all(7 not in tokens for _, tokens in drafter.observe_calls)
+
+    def test_draft_calls_track_main_tokens(self) -> None:
+        _outputs, drafter, _ = self._run(
+            main_token_ids=[5, 6, 0],
+            draft_token_id=5,
+            max_tokens=3,
+        )
+        assert 5 in drafter.draft_calls
+
+    def test_max_tokens_respected(self) -> None:
+        limit = 4
+        outputs, _, _ = self._run(
+            main_token_ids=[5] * 20,
+            draft_token_id=5,
+            max_tokens=limit,
+        )
+        # Accept chains can yield 2 per pass so allow a small window.
+        assert len(outputs) <= limit + 2
+
+    def test_reject_path_does_not_crash(self) -> None:
+        outputs, _drafter, _cache = self._run(
+            main_token_ids=[5, 3, 0],
+            draft_token_id=7,  # draft != verify → reject
+            max_tokens=3,
+        )
+        assert len(outputs) >= 1
+
+
+class TestRejectPathSSMState:
+    def test_reject_restores_ssm_state(self) -> None:
+        """A reject must restore SSM (ArraysCache) state, not zero it.
+
+        Regression test: trim_cache without a snapshot sets ArraysCache
+        state to [None, ...], silently wiping the recurrent state of hybrid
+        models (Qwen3.5 GDN) on every rejected draft and degenerating the
+        output. The reject path must snapshot before the verify pass and
+        restore on reject.
+        """
+        from mlx_lm.models.cache import ArraysCache, KVCache
+
+        from exo.worker.engines.mlx.generator.generate import (
+            _stream_generate_with_mtp,
+        )
+
+        model, tokenizer, drafter, trunk_fn, head_fn, _fake_cache = (
+            _build_fake_stream_env(
+                main_token_ids=[5, 3, 0],
+                draft_token_id=7,  # head verifies 5/3 → draft 7 always rejected
+            )
+        )
+
+        ssm_cache = ArraysCache(size=1)
+        sentinel = mx.ones((1, 4))
+        ssm_cache.state = [sentinel]
+        # Seed the KV cache: in production it always holds prompt positions
+        # by the time the MTP loop runs, and trim on an empty KVCache throws.
+        kv_cache = KVCache()
+        _ = kv_cache.update_and_fetch(  # pyright: ignore[reportUnknownMemberType]
+            mx.zeros((1, 1, 8, 4)), mx.zeros((1, 1, 8, 4))
+        )
+        cache = [ssm_cache, kv_cache]
+
+        sampler = lambda lp: mx.argmax(lp, axis=-1)  # noqa: E731
+        outputs = list(
+            _stream_generate_with_mtp(
+                model=model,
+                tokenizer=tokenizer,
+                drafter=drafter,
+                trunk_fn=trunk_fn,
+                head_fn=head_fn,
+                prompt=mx.array([1, 2, 3]),
+                max_tokens=3,
+                sampler=sampler,
+                logits_processors=[],
+                prompt_cache=cache,
+                kv_group_size=None,
+                kv_bits=None,
+            )
+        )
+
+        assert len(outputs) >= 1
+        # The fake trunk never advances SSM state, so after snapshot+restore
+        # the sentinel must survive verbatim. The pre-fix code left this
+        # zeroed ([None]) after the first reject.
+        assert ssm_cache.state[0] is not None, "reject zeroed the SSM state"
+        assert mx.array_equal(ssm_cache.state[0], sentinel)

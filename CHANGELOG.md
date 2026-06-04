@@ -9,6 +9,30 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Phase 2 MTP speculative decoding behind a modular `Drafter` protocol
+  (`src/exo/worker/engines/mlx/drafters/`). The generation loop now talks to
+  a mechanism-agnostic drafter seam (`begin_request` / `observe` / `draft`)
+  so Qwen sidecar heads, DeepSeek heads, and the planned Gemma 4 assistant
+  drafter all plug into the same verify/accept/reject machinery. The
+  Qwen3.5 drafter applies the three empirically isolated fixes from issue
+  #192 — +1.0 zero-centered norm shift, `embed_first` fc concat order, and
+  running the sidecar's `mtp.layers.0` transformer block with a private KV
+  cache — measured live at ~58–66% draft acceptance on Qwen3.5-2B (0%
+  before). Model cards gain optional `mtp_norm_convention` /
+  `mtp_concat_order` runtime overrides keyed to layout-detected family
+  defaults, and the loop logs a periodic `MTP acceptance so far` line as
+  the production acceptance signal.
+
+### Fixed
+
+- MTP drafting consumed post-final-norm hidden states; the trunk accessor
+  now returns pre-norm hiddens (what the heads were trained on) and folds
+  the final norm into the head callable, keeping main-path logits
+  unchanged. Also fixed the accept-path token-history divergence (a
+  never-emitted sampled token entered logits-processor history — PR #191
+  review finding) and the pure-KV reject path dropping the emitted main
+  token from processor history.
+
 - Boot-time auto-update for the Skulk service: the LaunchAgent now runs
   `git pull`, `uv sync`, and the dashboard build through a wrapper
   (`deployment/install/skulk-startup.sh`) before exec'ing skulk. Failures of
