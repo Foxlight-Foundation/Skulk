@@ -49,9 +49,9 @@ This project records release notes here and mirrors public-facing notes in
   `e2f7ddcd`). The fork now carries only two non-upstream fixes (ArraysCache
   leak, DeepSeek-V3.2 lightning-indexer batch>1); float32 logprobs, GDN
   precision, and left-padding eval are absorbed upstream. mlx-vlm 0.5.0
-  brings the `gemma4_assistant` drafter as a maintained dependency.
-  `starlette` is constrained `<1.0` so the web-framework major bump stays a
-  separate, deliberate migration.
+  brings the `gemma4_assistant` drafter as a maintained dependency. (The
+  ladder initially held `starlette<1.0`; the starlette 1.x migration above
+  landed as its own change and removed that constraint.)
 - Distributed/prefix-cache slow tests now select their model by available
   GPU working-set size: GPT-OSS-20B on machines that fit it, otherwise
   Llama-3.2-1B (override with `SKULK_TEST_DISTRIBUTED_MODEL`). Previously
