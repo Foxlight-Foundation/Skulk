@@ -94,6 +94,7 @@ class StoreModelEntry(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     model_id: str
+    artifact_kind: Literal["model", "vindex"] = "model"
     store_path: str
     files: list[str]
     downloaded_at: str
@@ -226,6 +227,7 @@ class ModelStore:
         model_path: Path,
         files: list[str],
         total_bytes: int,
+        artifact_kind: Literal["model", "vindex"] = "model",
     ) -> None:
         """Add or update *model_id* in the registry.
 
@@ -238,10 +240,13 @@ class ModelStore:
                 Must be inside ``store_path``.
             files: List of file paths relative to *model_path*.
             total_bytes: Sum of file sizes in bytes.
+            artifact_kind: Whether this entry contains MLX weights or a LARQL
+                vindex directory.
         """
         relative_path = str(model_path.relative_to(self._store_path))
         entry = StoreModelEntry(
             model_id=model_id,
+            artifact_kind=artifact_kind,
             store_path=relative_path,
             files=files,
             downloaded_at=datetime.now(tz=timezone.utc).isoformat(),
@@ -251,6 +256,23 @@ class ModelStore:
         logger.info(
             f"ModelStore: registered {model_id} at {relative_path} "
             f"({total_bytes:,} bytes, {len(files)} files)"
+        )
+
+    def register_vindex(
+        self,
+        vindex_id: str,
+        vindex_path: Path,
+        files: list[str],
+        total_bytes: int,
+    ) -> None:
+        """Add or update a directory-shaped LARQL vindex artifact."""
+
+        self.register_model(
+            vindex_id,
+            vindex_path,
+            files,
+            total_bytes,
+            artifact_kind="vindex",
         )
 
     def list_files_for_model(self, model_id: str) -> list[str] | None:

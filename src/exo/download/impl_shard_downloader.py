@@ -1,6 +1,9 @@
 import asyncio
+import shutil
+import uuid
 from asyncio import create_task
 from collections.abc import Awaitable
+from datetime import timedelta
 from pathlib import Path
 from typing import AsyncIterator, Callable
 
@@ -8,7 +11,11 @@ from loguru import logger
 
 from exo.download.download_utils import (
     RepoDownloadProgress,
+    build_vindex_path,
     download_shard,
+    is_vindex_directory_complete,
+    mark_vindex_directory_complete,
+    resolve_vindex_in_path,
 )
 from exo.download.shard_downloader import ShardDownloader
 from exo.shared.models.model_cards import (
@@ -19,6 +26,7 @@ from exo.shared.models.model_cards import (
 )
 from exo.shared.types.memory import Memory
 from exo.shared.types.worker.shards import (
+    LarqlShardMetadata,
     PipelineShardMetadata,
     ShardMetadata,
 )
@@ -115,6 +123,9 @@ class ResumableShardDownloader(ShardDownloader):
     async def ensure_shard(
         self, shard: ShardMetadata, config_only: bool = False
     ) -> Path:
+        if isinstance(shard, LarqlShardMetadata):
+            return await self._ensure_larql_vindex(shard)
+
         allow_patterns = ["config.json"] if config_only else None
 
         target_dir, _ = await download_shard(
@@ -189,6 +200,78 @@ class ResumableShardDownloader(ShardDownloader):
 
         return target_dir
 
+    async def _ensure_larql_vindex(self, shard: LarqlShardMetadata) -> Path:
+        """Pull or reuse one directory-shaped LARQL vindex artifact."""
+
+        found = resolve_vindex_in_path(shard.model_card.model_id, shard.vindex_uri)
+        if found is not None:
+            await self.on_progress_wrapper(
+                shard,
+                RepoDownloadProgress(
+                    repo_id=shard.vindex_uri,
+                    repo_revision="main",
+                    shard=shard,
+                    completed_files=1,
+                    total_files=1,
+                    downloaded=shard.model_card.storage_size,
+                    downloaded_this_session=Memory.from_bytes(0),
+                    total=shard.model_card.storage_size,
+                    overall_speed=0,
+                    overall_eta=timedelta(seconds=0),
+                    status="complete",
+                ),
+            )
+            return found
+
+        if self.offline:
+            raise FileNotFoundError(
+                f"LARQL vindex {shard.vindex_uri} is not available locally"
+            )
+
+        target_dir = build_vindex_path(shard.model_card.model_id)
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        temp_dir = target_dir.with_name(f".{target_dir.name}.partial-{uuid.uuid4().hex}")
+        process = await asyncio.create_subprocess_exec(
+            "larql",
+            "pull",
+            shard.vindex_uri,
+            "--output",
+            str(temp_dir),
+        )
+        return_code = await process.wait()
+        if return_code != 0:
+            await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
+            raise RuntimeError(
+                f"larql pull failed for {shard.vindex_uri} with exit code {return_code}"
+            )
+        if not temp_dir.is_dir():
+            await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
+            raise RuntimeError(f"larql pull did not create a vindex at {temp_dir}")
+        mark_vindex_directory_complete(temp_dir, shard.vindex_uri)
+        if not is_vindex_directory_complete(temp_dir):
+            await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
+            raise RuntimeError(f"larql pull produced an incomplete vindex at {temp_dir}")
+        if target_dir.exists():
+            await asyncio.to_thread(shutil.rmtree, target_dir, ignore_errors=True)
+        temp_dir.rename(target_dir)
+        await self.on_progress_wrapper(
+            shard,
+            RepoDownloadProgress(
+                repo_id=shard.vindex_uri,
+                repo_revision="main",
+                shard=shard,
+                completed_files=1,
+                total_files=1,
+                downloaded=shard.model_card.storage_size,
+                downloaded_this_session=shard.model_card.storage_size,
+                total=shard.model_card.storage_size,
+                overall_speed=0,
+                overall_eta=timedelta(seconds=0),
+                status="complete",
+            ),
+        )
+        return target_dir
+
     async def get_shard_download_status(
         self,
     ) -> AsyncIterator[tuple[Path, RepoDownloadProgress]]:
@@ -226,6 +309,24 @@ class ResumableShardDownloader(ShardDownloader):
     async def get_shard_download_status_for_shard(
         self, shard: ShardMetadata
     ) -> RepoDownloadProgress:
+        if isinstance(shard, LarqlShardMetadata):
+            complete = (
+                resolve_vindex_in_path(shard.model_card.model_id, shard.vindex_uri)
+                is not None
+            )
+            return RepoDownloadProgress(
+                repo_id=shard.vindex_uri,
+                repo_revision="main",
+                shard=shard,
+                completed_files=1 if complete else 0,
+                total_files=1,
+                downloaded=shard.model_card.storage_size if complete else Memory(),
+                downloaded_this_session=Memory(),
+                total=shard.model_card.storage_size,
+                overall_speed=0,
+                overall_eta=timedelta(seconds=0),
+                status="complete" if complete else "not_started",
+            )
         _, progress = await download_shard(
             shard,
             self.on_progress_wrapper,

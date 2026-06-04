@@ -19,6 +19,7 @@ The design choices that shape almost everything else:
 - **libp2p pub/sub for transport.** Topics carry commands, events, election messages, and connection updates between nodes.
 - **MLX as the inference backend.** Pipeline-parallel and tensor-parallel sharding strategies sit on top of `mlx.distributed`'s ring or jaccl/RDMA backends.
 - **Subprocess isolation for runners.** Each model instance runs in its own `mp.Process` with its own MLX/Metal context, so a crash or hang in one runner can't bring down the rest of the node.
+- **LARQL slice mode is planned, not active.** The accepted planning ADRs keep MLX as the head runtime. Phase 2 adds internal `LarqlRunner` supervision/readiness for cold FFN/expert slices, but placement remains gated by the Phase 3 MLX delegation spike.
 
 ## The shape of a node
 
@@ -58,6 +59,8 @@ Each subsystem has its own concern:
 - **Runner** is *not* in the same process — it's a `mp.Process` daemon spawned by the worker. It owns one model and serves inference tasks for it. Multiple runners (one per pipeline rank) coordinate via `mlx.distributed` collectives.
 - **API** is a FastAPI app that exposes inference endpoints in four wire formats (OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, Ollama) and Skulk-native control endpoints (placements, diagnostics, traces, config). It also serves the dashboard build at `/`.
 - **Storage** is a collection of on-disk responsibilities: the event log (msgpack + zstd), the model cache directory, custom model cards (per-user TOML files), and the optional shared model store.
+
+The LARQL roadmap adds a runner subtype, `LarqlRunner`, that remains worker-managed but supervises an upstream `larql serve` process instead of loading an MLX model directly. Phase 2 implements this internal supervision/readiness path, but no current placement flow creates LARQL runners. The design is captured in `docs/adr/0001-larql-runner-type.md` and is intentionally additive to the current MLX runner path.
 
 ## The shape of a cluster
 
@@ -159,6 +162,25 @@ A snapshot-bootstrap rollout has one operational rule: once a master starts comp
 ## The inference engine
 
 Inference happens entirely inside the runner subprocess. Skulk wraps MLX (and the upstream mlx-lm model implementations) in a layer that handles distributed coordination, family-specific behavior, and operator-controlled knobs.
+
+### Planned LARQL slice mode
+
+The Phase 1 LARQL ADRs define a future second placement mode. The selected head
+node remains an MLX runner and owns the hot path: embeddings, attention, norms,
+router, and locally assigned layers. Phase 2 adds the internal `LarqlRunner`
+supervisor that can start and readiness-check a vindex-backed LARQL HTTP
+server, but cold-tier placement remains future work.
+
+Important constraints:
+
+- Existing MLX placement is unchanged for models that fit on the head node.
+- The MLX head never loads a vindex.
+- Skulk consumes HuggingFace-hosted vindexes; extraction and publication belong
+  to the separate `skulk-vindex-publisher` repo.
+- Vindexes are directory-shaped model-store artifacts with replay-safe
+  readiness state separate from ordinary MLX runner status.
+- Phase 4 slice placement must not start until the Phase 3 spike proves MLX can
+  delegate per-layer FFN work and continue generation with acceptable overhead.
 
 ### Pipeline parallelism
 

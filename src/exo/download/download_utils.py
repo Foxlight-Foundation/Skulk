@@ -1,12 +1,14 @@
 import asyncio
 import hashlib
+import json
 import os
 import shutil
 import ssl
 import time
 import traceback
 from collections.abc import Awaitable
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Literal
 from urllib.parse import urljoin
@@ -21,6 +23,7 @@ from huggingface_hub import (
 from loguru import logger
 from pydantic import (
     TypeAdapter,
+    ValidationError,
 )
 
 from exo.download.huggingface_utils import (
@@ -42,6 +45,17 @@ from exo.shared.types.worker.downloads import (
     RepoFileDownloadProgress,
 )
 from exo.shared.types.worker.shards import ShardMetadata
+
+VINDEX_COMPLETE_MARKER = ".skulk-vindex-complete.json"
+VINDEX_COMPLETE_MARKER_ADAPTER = TypeAdapter(dict[str, object])
+
+
+@dataclass(frozen=True)
+class VindexPathResolution:
+    """Resolved local LARQL vindex path plus ownership metadata."""
+
+    path: Path
+    read_only: bool
 
 
 class HuggingFaceAuthenticationError(Exception):
@@ -111,11 +125,12 @@ def map_repo_download_progress_to_download_progress_data(
 
 
 def resolve_model_in_path(model_id: ModelId) -> Path | None:
-    """Search EXO_MODELS_PATH directories for a pre-existing model.
+    """Search read-only EXO_MODELS_PATH directories for a pre-existing model.
 
     Checks each directory for the normalized name (org--model).  A candidate
     is only returned if ``is_model_directory_complete`` confirms all weight
-    files are present.
+    files are present. Writable cache directories are intentionally excluded
+    because callers mark returned paths as externally managed/read-only.
 
     Reads the search path dynamically from ``exo.shared.constants`` so that
     paths added at runtime (e.g. by the model store) are picked up.
@@ -129,6 +144,108 @@ def resolve_model_in_path(model_id: ModelId) -> Path | None:
         if candidate.is_dir() and is_model_directory_complete(candidate):
             return candidate
     return None
+
+
+def _read_vindex_complete_marker(vindex_dir: Path) -> dict[str, object] | None:
+    marker = vindex_dir / VINDEX_COMPLETE_MARKER
+    if not marker.is_file():
+        return None
+    try:
+        return VINDEX_COMPLETE_MARKER_ADAPTER.validate_json(
+            marker.read_text(encoding="utf-8")
+        )
+    except (OSError, ValidationError):
+        return None
+
+
+def is_vindex_directory_complete(
+    vindex_dir: Path, expected_vindex_uri: str | None = None
+) -> bool:
+    """Return whether a staged LARQL vindex directory has usable contents."""
+
+    if not vindex_dir.is_dir():
+        return False
+    marker = _read_vindex_complete_marker(vindex_dir)
+    if marker is None:
+        return False
+    if expected_vindex_uri is not None and marker.get("vindex_uri") != expected_vindex_uri:
+        return False
+
+    has_metadata = False
+    has_payload = False
+    for path in vindex_dir.rglob("*"):
+        if not path.is_file() or path.name == VINDEX_COMPLETE_MARKER:
+            continue
+        has_metadata = has_metadata or path.suffix == ".json"
+        has_payload = has_payload or path.suffix == ".bin"
+        if has_metadata and has_payload:
+            return True
+    return False
+
+
+def mark_vindex_directory_complete(vindex_dir: Path, vindex_uri: str) -> None:
+    """Persist the success marker for a completed LARQL vindex pull."""
+
+    marker = vindex_dir / VINDEX_COMPLETE_MARKER
+    marker.write_text(
+        json.dumps(
+            {
+                "vindex_uri": vindex_uri,
+                "completed_at": datetime.now(tz=timezone.utc).isoformat(),
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+
+def build_vindex_path(vindex_id: ModelId) -> Path:
+    """Return the configured writable cache path for a LARQL vindex artifact."""
+
+    return EXO_MODELS_DIR / vindex_id.normalize()
+
+
+def _vindex_search_path() -> tuple[VindexPathResolution, ...]:
+    import exo.shared.constants as _constants
+
+    configured_paths = _constants.EXO_MODELS_PATH or ()
+    candidates = (
+        *((path, True) for path in configured_paths),
+        (EXO_MODELS_DIR, False),
+        (Path.home() / ".exo" / "models", False),
+        (Path.home() / ".exo" / "staging", False),
+    )
+    unique_paths: list[VindexPathResolution] = []
+    seen_paths: set[Path] = set()
+    for candidate, read_only in candidates:
+        expanded = candidate.expanduser()
+        if expanded in seen_paths:
+            continue
+        seen_paths.add(expanded)
+        unique_paths.append(VindexPathResolution(path=expanded, read_only=read_only))
+    return tuple(unique_paths)
+
+
+def resolve_vindex_location(
+    vindex_id: ModelId, expected_vindex_uri: str | None = None
+) -> VindexPathResolution | None:
+    """Search model paths for a complete LARQL vindex and return ownership."""
+
+    normalized = vindex_id.normalize()
+    for search_root in _vindex_search_path():
+        candidate = search_root.path / normalized
+        if is_vindex_directory_complete(candidate, expected_vindex_uri):
+            return VindexPathResolution(path=candidate, read_only=search_root.read_only)
+    return None
+
+
+def resolve_vindex_in_path(
+    vindex_id: ModelId, expected_vindex_uri: str | None = None
+) -> Path | None:
+    """Search model paths for a complete directory-shaped LARQL vindex."""
+
+    found = resolve_vindex_location(vindex_id, expected_vindex_uri)
+    return found.path if found is not None else None
 
 
 def build_model_path(model_id: ModelId) -> Path:

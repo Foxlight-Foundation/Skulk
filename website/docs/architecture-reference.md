@@ -45,6 +45,15 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
   - `src/exo/worker/runner/image_models/runner.py` — image generation
 - **Communicates via:** `mp.Queue` from worker (incoming tasks); `mp.Queue` to worker (outgoing events); `mlx.distributed` collectives with peer runners
 
+### LarqlRunner
+
+- **Status:** internal Phase 2 supervision/readiness path implemented; no placement flow creates it yet
+- **Role:** worker-managed runner subtype that supervises an upstream `larql serve` child process for vindex-backed FFN / expert slices
+- **Lives in:** `src/exo/worker/runner/larql_supervisor.py`
+- **Decision records:** `docs/adr/0001-larql-runner-type.md`, `docs/adr/0002-head-mlx-cold-larql.md`, `docs/adr/0003-vindex-provenance.md`
+- **Gating:** Phase 4 implementation is blocked until the Phase 3 MLX FFN delegation spike confirms ADR-B
+- **Runtime invariant:** existing MLX runners remain the head path; the MLX head never loads a vindex
+
 ### Router (libp2p)
 
 - **Role:** transport for all inter-node communication
@@ -83,6 +92,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Custom cards:** `SKULK_CUSTOM_MODEL_CARDS_DIR` (default `SKULK_DATA_HOME/custom_model_cards`) as TOML
 - **Built-in cards:** `resources/inference_model_cards/` as TOML
 - **Optional model store:** shared host with rsync-style staging — `src/exo/store/`
+- **Planned vindex source:** Skulk consumes `hf://...` vindex directories produced by the separate `skulk-vindex-publisher` repo; Skulk does not extract vindexes in-tree
 
 ## Pubsub topics
 

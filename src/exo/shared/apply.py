@@ -14,6 +14,7 @@ from exo.shared.types.events import (
     InputChunkReceived,
     InstanceCreated,
     InstanceDeleted,
+    LarqlRunnerReadinessUpdated,
     NodeDownloadProgress,
     NodeGatheredInfo,
     NodeTimedOut,
@@ -43,6 +44,7 @@ from exo.shared.types.tasks import Task, TaskId, TaskStatus
 from exo.shared.types.topology import Connection, RDMAConnection
 from exo.shared.types.worker.downloads import DownloadProgress
 from exo.shared.types.worker.instances import Instance, InstanceId
+from exo.shared.types.worker.larql import LarqlRunnerReadiness
 from exo.shared.types.worker.runners import RunnerId, RunnerShutdown, RunnerStatus
 from exo.utils.info_gatherer.info_gatherer import (
     MacmonMetrics,
@@ -85,6 +87,8 @@ def event_apply(event: Event, state: State) -> State:
             return apply_node_gathered_info(event, state)
         case RunnerStatusUpdated():
             return apply_runner_status_updated(event, state)
+        case LarqlRunnerReadinessUpdated():
+            return apply_larql_runner_readiness_updated(event, state)
         case TaskCreated():
             return apply_task_created(event, state)
         case TaskDeleted():
@@ -201,10 +205,24 @@ def apply_instance_created(event: InstanceCreated, state: State) -> State:
 
 
 def apply_instance_deleted(event: InstanceDeleted, state: State) -> State:
+    instance = state.instances.get(event.instance_id)
     new_instances: Mapping[InstanceId, Instance] = {
         iid: inst for iid, inst in state.instances.items() if iid != event.instance_id
     }
-    return state.model_copy(update={"instances": new_instances})
+    if instance is None:
+        return state.model_copy(update={"instances": new_instances})
+    removed_runner_ids = set(instance.shard_assignments.runner_to_shard)
+    new_larql_readiness: Mapping[RunnerId, LarqlRunnerReadiness] = {
+        rid: readiness
+        for rid, readiness in state.larql_runner_readiness.items()
+        if rid not in removed_runner_ids
+    }
+    return state.model_copy(
+        update={
+            "instances": new_instances,
+            "larql_runner_readiness": new_larql_readiness,
+        }
+    )
 
 
 def apply_runner_status_updated(event: RunnerStatusUpdated, state: State) -> State:
@@ -212,12 +230,35 @@ def apply_runner_status_updated(event: RunnerStatusUpdated, state: State) -> Sta
         new_runners: Mapping[RunnerId, RunnerStatus] = {
             rid: rs for rid, rs in state.runners.items() if rid != event.runner_id
         }
-        return state.model_copy(update={"runners": new_runners})
+        new_larql_readiness: Mapping[RunnerId, LarqlRunnerReadiness] = {
+            rid: readiness
+            for rid, readiness in state.larql_runner_readiness.items()
+            if rid != event.runner_id
+        }
+        return state.model_copy(
+            update={
+                "runners": new_runners,
+                "larql_runner_readiness": new_larql_readiness,
+            }
+        )
     new_runners = {
         **state.runners,
         event.runner_id: event.runner_status,
     }
     return state.model_copy(update={"runners": new_runners})
+
+
+def apply_larql_runner_readiness_updated(
+    event: LarqlRunnerReadinessUpdated, state: State
+) -> State:
+    """Store the latest replay-safe LARQL readiness record for one runner."""
+
+    readiness = event.readiness
+    new_readiness: Mapping[RunnerId, LarqlRunnerReadiness] = {
+        **state.larql_runner_readiness,
+        readiness.runner_id: readiness,
+    }
+    return state.model_copy(update={"larql_runner_readiness": new_readiness})
 
 
 def apply_node_timed_out(event: NodeTimedOut, state: State) -> State:
