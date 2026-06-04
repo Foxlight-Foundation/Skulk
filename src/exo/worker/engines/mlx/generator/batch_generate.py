@@ -97,22 +97,39 @@ class ExoBatchGenerator:
 
     _mlx_gen: MlxBatchGenerator = field(init=False)
     _active_tasks: dict[int, _EngineTask] = field(default_factory=dict, init=False)
+    # Cumulative wall time spent inside _mlx_gen.next(). Generation time is
+    # derived as (this - upstream's _prompt_time_counter), mirroring how
+    # mlx-lm 0.31.3's own stats() context manager computes it — the split
+    # BatchGenerator no longer keeps a continuously-updated
+    # _stats.generation_time field.
+    _next_time_total: float = field(default=0.0, init=False)
 
     def __post_init__(self) -> None:
         self._mlx_gen = MlxBatchGenerator(
             model=self.model,
-            stop_tokens=set(eos_ids_from_tokenizer(self.tokenizer)),
+            # 0.31.3 stop_tokens are sequences of token sequences (multi-token
+            # stop support); each EOS id is a single-token stop sequence.
+            stop_tokens=[
+                [token_id] for token_id in eos_ids_from_tokenizer(self.tokenizer)
+            ],
             prefill_step_size=4096,
         )
         self._mlx_gen._needs_topk = False  # pyright: ignore[reportAttributeAccessIssue]
 
+    def _generation_time(self) -> float:
+        """Total generation seconds so far (next() wall time minus prompt time)."""
+        return self._next_time_total - self._mlx_gen._prompt_time_counter
+
     @property
     def has_work(self) -> bool:
-        return (
-            bool(self._active_tasks)
-            or bool(self._mlx_gen.unprocessed_prompts)
-            or self._mlx_gen.active_batch is not None
+        # The 0.31.3 BatchGenerator queues work across three containers:
+        # not-yet-started sequences, the prefill batch, and the decode batch.
+        mlx_gen_busy = (
+            len(self._mlx_gen._unprocessed_sequences) > 0
+            or len(self._mlx_gen._prompt_batch) > 0
+            or len(self._mlx_gen._generation_batch) > 0
         )
+        return bool(self._active_tasks) or mlx_gen_busy
 
     def submit(
         self,
@@ -312,7 +329,7 @@ class ExoBatchGenerator:
             on_generation_token=on_generation_token,
             generation_start_time=time.perf_counter(),
             prefill_tps=_prefill_tps,
-            generation_time_at_start=self._mlx_gen._stats.generation_time,
+            generation_time_at_start=self._generation_time(),
             media_regions=media_regions,
         )
 
@@ -326,8 +343,12 @@ class ExoBatchGenerator:
             t.task_params.logprobs for t in self._active_tasks.values()
         )
         _step_tic = time.perf_counter()
-        responses = self._mlx_gen.next()
+        # 0.31.3 next() returns (prompt_responses, generation_responses).
+        # Prompt responses are uninteresting here: Skulk prefills each request
+        # itself before insert(), so the prompt phase is a single token.
+        _prompt_responses, responses = self._mlx_gen.next()
         _next_elapsed = time.perf_counter() - _step_tic
+        self._next_time_total += _next_elapsed
 
         results: list[tuple[int, GenerationResponse]] = []
 
@@ -402,8 +423,7 @@ class ExoBatchGenerator:
             usage: Usage | None = None
             if is_done:
                 gen_time_delta = (
-                    self._mlx_gen._stats.generation_time
-                    - state.generation_time_at_start
+                    self._generation_time() - state.generation_time_at_start
                 )
                 generation_tps = (
                     state.completion_tokens / gen_time_delta
@@ -458,7 +478,7 @@ class ExoBatchGenerator:
 
         _step_elapsed = time.perf_counter() - _step_tic
         _overhead = _step_elapsed - _next_elapsed
-        if self._mlx_gen._next_count % 64 == 0 and responses:
+        if self._mlx_gen._steps_counter % 64 == 0 and responses:
             logger.debug(
                 f"step overhead: {_overhead * 1000:.2f}ms (next={_next_elapsed * 1000:.2f}ms total={_step_elapsed * 1000:.2f}ms)"
             )
