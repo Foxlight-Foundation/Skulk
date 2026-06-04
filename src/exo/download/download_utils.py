@@ -131,6 +131,28 @@ def resolve_model_in_path(model_id: ModelId) -> Path | None:
     return None
 
 
+def build_sidecar_path(model_id: ModelId, sidecar_filename: str) -> Path | None:
+    """Resolve a companion-artifact file (e.g. an ``mtp.safetensors`` sidecar).
+
+    Sidecar repos are not models: they ship a single weights file and no
+    ``config.json``, so ``build_model_path``'s model-completeness checks
+    reject their directories. Searches ``EXO_MODELS_PATH`` and then
+    ``EXO_MODELS_DIR`` for ``<org--repo>/<sidecar_filename>``.
+
+    Returns:
+        The path to the sidecar file, or ``None`` if it is not on disk.
+    """
+    import exo.shared.constants as _constants
+
+    normalized = model_id.normalize()
+    search_dirs = [*(_constants.EXO_MODELS_PATH or ()), EXO_MODELS_DIR]
+    for search_dir in search_dirs:
+        candidate = search_dir / normalized / sidecar_filename
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def build_model_path(model_id: ModelId) -> Path:
     """Resolve a local filesystem path for *model_id*.
 

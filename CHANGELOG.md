@@ -36,6 +36,24 @@ This project records release notes here and mirrors public-facing notes in
   full Vector + VictoriaLogs + Grafana stack: central-host install, per-node
   configuration, JSON schema, and troubleshooting.
 
+### Fixed
+
+- Phase 1 MTP speculative decoding repaired on the post-ladder stack (it had
+  never been validated end-to-end): the GDN softplus patch no longer probes
+  foreign lazy modules (transformers 5.10 resolved a `compute_g` probe into
+  an aria image-processing import requiring torchvision, crashing every GDN
+  runner at startup); tied-embedding models (Qwen3.5 small variants) locate
+  their output head via `embed_tokens.as_linear`; the MTP loop feeds the
+  trunk correctly-shaped token batches; rejects snapshot/restore SSM
+  (ArraysCache) state instead of zeroing it — the bug that degenerated
+  hybrid-model output; and `mtp.safetensors` sidecars resolve via a new
+  `build_sidecar_path` (sidecar repos have no `config.json`, so the model
+  resolver rejected them and MTP silently never engaged). Verified
+  end-to-end: greedy parity is byte-exact with MTP on vs off
+  (Qwen3.5-2B-4bit + the FoxlightAI bf16 sidecar). Draft acceptance is
+  currently 0% — the Phase 1 head intentionally omits the sidecar's
+  transformer block (Phase 2); tracked separately.
+
 ### Changed
 
 - Web framework migrated to starlette 1.x (1.2.1) / fastapi 0.136, unified
