@@ -12,14 +12,18 @@ tolerance. Uses random weights — no model download required.
 The comparison is teacher-forced: the B=1 pass defines the canonical token
 sequence and the B=2 pass is fed those same tokens, so per-step logits are
 compared like-for-like. The tests originally asserted bit-exactness
-(max diff < 0.002), but that premise is hardware-dependent: batched decode
-can dispatch a different kernel/reduction order than B=1. On an M5
-(applegpu_g17g) the step-0 divergence is ~0.11 on mlx 0.31.1 and ~0.15 on
-0.31.2 — already far over the bit-exact threshold before any Skulk code
-runs. Without teacher forcing, that wobble eventually flips an argmax on
-near-flat random-weight logits and the self-fed sequences cascade apart,
-producing meaningless 100+ "diffs". Real corruption (e.g. wrong batched
-attention masking) still blows past the tolerance even when teacher-forced.
+(max diff < 0.002), but that premise is hardware-dependent: on M5-class
+GPUs, MLX routes float32 GEMM (B>=2) through the Neural Accelerators at
+TF32-style reduced precision by default, while GEMV (B=1) keeps full fp32
+(ml-explore/mlx#3534, closed as expected behavior; opt out with
+``MLX_ENABLE_TF32=0``, under which these paths are bit-exact again). On an
+M5 the default-precision step-0 divergence is ~0.15 — far over the
+bit-exact threshold before any Skulk code runs. Without teacher forcing,
+that wobble eventually flips an argmax on near-flat random-weight logits
+and the self-fed sequences cascade apart, producing meaningless 100+
+"diffs". The tolerance is asserted under default precision deliberately —
+that is what production runs. Real corruption (e.g. wrong batched
+attention masking) still blows past it even when teacher-forced.
 """
 
 from pathlib import Path

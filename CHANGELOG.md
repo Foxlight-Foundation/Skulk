@@ -52,9 +52,12 @@ This project records release notes here and mirrors public-facing notes in
   Llama-3.2-1B (override with `SKULK_TEST_DISTRIBUTED_MODEL`). Previously
   the hardcoded 20B memory-exhausted 16 GB machines.
 - `test_batch_generate` B=1 vs B=2 equivalence is now teacher-forced with a
-  relative logit tolerance instead of bit-exactness, which is
-  hardware-dependent (batched decode can dispatch different kernels; on M5
-  the divergence pre-dates the mlx 0.31.2 bump).
+  relative logit tolerance instead of bit-exactness. Root cause of the
+  divergence: M5-class Neural Accelerators run float32 GEMM (batch ≥ 2) at
+  TF32-style reduced precision by default while GEMV (batch 1) stays full
+  fp32 (ml-explore/mlx#3534; `MLX_ENABLE_TF32=0` opts out and restores
+  bit-exactness). The test asserts under default precision — what
+  production runs.
 - The `opt_batch_gen` top-logprobs precompute patch is version-gated: it
   no-ops with a warning on mlx-lm ≥ 0.31.3 (BatchGenerator split) and
   `extract_top_logprobs` falls back to its synchronous path. Re-port
