@@ -6,8 +6,24 @@
 """Test B=1 vs B=2 equivalence for batch generation.
 
 Verifies that running two requests concurrently in a batch (B=2) produces
-identical token selections to running them sequentially (B=1).
-Uses random weights — no model download required.
+the same logits as running them sequentially (B=1), within a numerical
+tolerance. Uses random weights — no model download required.
+
+The comparison is teacher-forced: the B=1 pass defines the canonical token
+sequence and the B=2 pass is fed those same tokens, so per-step logits are
+compared like-for-like. The tests originally asserted bit-exactness
+(max diff < 0.002), but that premise is hardware-dependent: on M5-class
+GPUs, MLX routes float32 GEMM (B>=2) through the Neural Accelerators at
+TF32-style reduced precision by default, while GEMV (B=1) keeps full fp32
+(ml-explore/mlx#3534, closed as expected behavior; opt out with
+``MLX_ENABLE_TF32=0``, under which these paths are bit-exact again). On an
+M5 the default-precision step-0 divergence is ~0.15 — far over the
+bit-exact threshold before any Skulk code runs. Without teacher forcing,
+that wobble eventually flips an argmax on near-flat random-weight logits
+and the self-fed sequences cascade apart, producing meaningless 100+
+"diffs". The tolerance is asserted under default precision deliberately —
+that is what production runs. Real corruption (e.g. wrong batched
+attention masking) still blows past it even when teacher-forced.
 """
 
 from pathlib import Path
@@ -30,6 +46,14 @@ from exo.worker.engines.mlx.generator.generate import prefill
 
 NUM_STEPS = 20
 
+# Per-step relative logit tolerance for B=1 vs B=2 under teacher forcing.
+# Empirical envelope on an M5 / mlx 0.31.2: steady-state ~0.002 with isolated
+# spikes to ~0.056 (batched decode dispatches a different kernel/reduction
+# order than B=1). Real batched-attention corruption (wrong masking/layout)
+# produces relative diffs of O(1) at every step, so 0.25 keeps ~4x headroom
+# in both directions.
+MAX_RELATIVE_LOGIT_DIFF = 0.25
+
 
 def _init_random(model: nn.Module) -> None:
     """Initialize all model parameters with random values."""
@@ -50,7 +74,19 @@ def _run_b1_vs_b2(
     tokens_a: mx.array,
     tokens_b: mx.array,
 ) -> tuple[float, int]:
-    """Run B=1 sequential and B=2 batched, return (max_diff, mismatches)."""
+    """Run B=1 sequential and teacher-forced B=2 batched decode.
+
+    The B=1 pass picks tokens greedily and defines the canonical
+    continuation; the B=2 pass is fed those exact tokens so per-step logits
+    compare like-for-like (no argmax-flip cascade).
+
+    Returns:
+        (max_relative_logit_diff, argmax_disagreements) where the relative
+        diff is per-step ``max|b1 - b2| / max|b1|`` — scale-robust across
+        models and hardware. Disagreements is informational: on near-flat
+        random-weight logits a sub-tolerance wobble can legitimately flip
+        an argmax.
+    """
     sampler = make_sampler(temp=0.0)
 
     # B=1 sequential
@@ -74,18 +110,21 @@ def _run_b1_vs_b2(
     for c in merged_b1:
         c.finalize()
 
+    # The B=1 greedy pass defines the canonical token sequence; the B=2 pass
+    # below is teacher-forced with these same inputs.
     b1_logits_a: list[mx.array] = []
     b1_logits_b: list[mx.array] = []
-    next_a, next_b = tokens_a[-1].item(), tokens_b[-1].item()
+    forced_a: list[int] = [int(tokens_a[-1].item())]
+    forced_b: list[int] = [int(tokens_b[-1].item())]
     for _ in range(NUM_STEPS):
-        la = model(mx.array([[next_a]]), cache=merged_a1)
+        la = model(mx.array([[forced_a[-1]]]), cache=merged_a1)
         mx.eval(la)
         b1_logits_a.append(la[0, -1])
-        next_a = int(mx.argmax(la[0, -1]).item())
-        lb = model(mx.array([[next_b]]), cache=merged_b1)
+        forced_a.append(int(mx.argmax(la[0, -1]).item()))
+        lb = model(mx.array([[forced_b[-1]]]), cache=merged_b1)
         mx.eval(lb)
         b1_logits_b.append(lb[0, -1])
-        next_b = int(mx.argmax(lb[0, -1]).item())
+        forced_b.append(int(mx.argmax(lb[0, -1]).item()))
 
     # B=2 batched
     cache_a2 = make_kv_cache(model)
@@ -105,46 +144,31 @@ def _run_b1_vs_b2(
 
     b2_logits_a: list[mx.array] = []
     b2_logits_b: list[mx.array] = []
-    next_a2, next_b2 = tokens_a[-1].item(), tokens_b[-1].item()
-    for _ in range(NUM_STEPS):
-        l2 = model(mx.array([[next_a2], [next_b2]]), cache=merged_b2)
+    for step in range(NUM_STEPS):
+        l2 = model(
+            mx.array([[forced_a[step]], [forced_b[step]]]), cache=merged_b2
+        )
         mx.eval(l2)
         b2_logits_a.append(l2[0, -1])
         b2_logits_b.append(l2[1, -1])
-        next_a2 = int(mx.argmax(l2[0, -1]).item())
-        next_b2 = int(mx.argmax(l2[1, -1]).item())
 
-    # Compare
-    max_diff = 0.0
+    # Compare per-step, relative to that step's B=1 logit scale.
+    max_rel_diff = 0.0
     mismatches = 0
     for step in range(NUM_STEPS):
-        diff_a = float(
-            mx.max(
-                mx.abs(
-                    b1_logits_a[step].astype(mx.float32)
-                    - b2_logits_a[step].astype(mx.float32)
-                )
-            ).item()
-        )
-        diff_b = float(
-            mx.max(
-                mx.abs(
-                    b1_logits_b[step].astype(mx.float32)
-                    - b2_logits_b[step].astype(mx.float32)
-                )
-            ).item()
-        )
-        max_diff = max(max_diff, diff_a, diff_b)
-        if int(mx.argmax(b1_logits_a[step]).item()) != int(
-            mx.argmax(b2_logits_a[step]).item()
+        for b1_logits, b2_logits in (
+            (b1_logits_a[step], b2_logits_a[step]),
+            (b1_logits_b[step], b2_logits_b[step]),
         ):
-            mismatches += 1
-        if int(mx.argmax(b1_logits_b[step]).item()) != int(
-            mx.argmax(b2_logits_b[step]).item()
-        ):
-            mismatches += 1
+            b1_f32 = b1_logits.astype(mx.float32)
+            b2_f32 = b2_logits.astype(mx.float32)
+            diff = float(mx.max(mx.abs(b1_f32 - b2_f32)).item())
+            scale = float(mx.max(mx.abs(b1_f32)).item())
+            max_rel_diff = max(max_rel_diff, diff / max(scale, 1e-6))
+            if int(mx.argmax(b1_logits).item()) != int(mx.argmax(b2_logits).item()):
+                mismatches += 1
 
-    return max_diff, mismatches
+    return max_rel_diff, mismatches
 
 
 def _make_tokenizer() -> TokenizerWrapper:
@@ -163,10 +187,12 @@ def _make_tokenizer() -> TokenizerWrapper:
 
 @pytest.mark.slow
 def test_batch_b2_llama() -> None:
-    """Llama-style model (KVCache only) must produce bit-exact logits in B=2.
+    """Llama-style model (KVCache only): B=2 logits must match B=1 within tolerance.
 
-    Right-padded BatchKVCache keeps data at position 0 for all sequences,
-    so flash attention sees identical data layout as B=1 → bit-exact output.
+    Right-padded BatchKVCache keeps data at position 0 for all sequences, so
+    batched attention sees the same data layout as B=1. Output is compared
+    teacher-forced within MAX_RELATIVE_LOGIT_DIFF (bit-exactness is
+    hardware-dependent — see module docstring).
     """
     from mlx_lm.models.llama import Model as LlamaModel
     from mlx_lm.models.llama import ModelArgs
@@ -191,19 +217,23 @@ def test_batch_b2_llama() -> None:
     tokens_a = encode_prompt(tokenizer, "Write a short essay about AI.")
     tokens_b = encode_prompt(tokenizer, "Explain evolution briefly.")
 
-    max_diff, mismatches = _run_b1_vs_b2(
+    max_rel_diff, mismatches = _run_b1_vs_b2(
         cast(Model, model), tokenizer, tokens_a, tokens_b
     )
-    assert mismatches == 0, f"Llama B=2 token mismatches: {mismatches}/{NUM_STEPS * 2}"
-    assert max_diff < 0.002, f"Llama B=2 max logit diff: {max_diff}"
+    assert max_rel_diff < MAX_RELATIVE_LOGIT_DIFF, (
+        f"Llama B=2 max relative logit diff: {max_rel_diff} "
+        f"(argmax disagreements: {mismatches}/{NUM_STEPS * 2})"
+    )
 
 
 @pytest.mark.slow
 def test_batch_b2_qwen35_moe() -> None:
-    """Qwen3.5 MoE model (hybrid SSM+attention+MoE) must produce bit-exact logits in B=2.
+    """Qwen3.5 MoE (hybrid SSM+attention+MoE): B=2 logits must match B=1 within tolerance.
 
-    Right-padded BatchKVCache keeps data at position 0 for all sequences,
-    so flash attention sees identical data layout as B=1 → bit-exact output.
+    Right-padded BatchKVCache keeps data at position 0 for all sequences, so
+    batched attention sees the same data layout as B=1. Output is compared
+    teacher-forced within MAX_RELATIVE_LOGIT_DIFF (bit-exactness is
+    hardware-dependent — see module docstring).
     """
     from mlx_lm.models.qwen3_5_moe import Model as Qwen35MoeModel
     from mlx_lm.models.qwen3_5_moe import ModelArgs
@@ -259,10 +289,99 @@ def test_batch_b2_qwen35_moe() -> None:
     tokens_a = encode_prompt(tokenizer, "Write a short essay about AI.")
     tokens_b = encode_prompt(tokenizer, "Explain evolution briefly.")
 
-    max_diff, mismatches = _run_b1_vs_b2(
+    max_rel_diff, mismatches = _run_b1_vs_b2(
         cast(Model, model), tokenizer, tokens_a, tokens_b
     )
-    assert mismatches == 0, (
-        f"Qwen3.5 MoE B=2 token mismatches: {mismatches}/{NUM_STEPS * 2}"
+    assert max_rel_diff < MAX_RELATIVE_LOGIT_DIFF, (
+        f"Qwen3.5 MoE B=2 max relative logit diff: {max_rel_diff} "
+        f"(argmax disagreements: {mismatches}/{NUM_STEPS * 2})"
     )
-    assert max_diff < 0.002, f"Qwen3.5 MoE B=2 max logit diff: {max_diff}"
+
+
+def _tiny_llama() -> Model:
+    """Build the same tiny random-weight llama the B1/B2 tests use."""
+    from mlx_lm.models.llama import Model as LlamaModel
+    from mlx_lm.models.llama import ModelArgs
+
+    mx.random.seed(42)
+    args = ModelArgs(
+        model_type="llama",
+        hidden_size=256,
+        num_hidden_layers=4,
+        intermediate_size=512,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        rms_norm_eps=1e-6,
+        vocab_size=248320,
+        rope_theta=10000.0,
+        tie_word_embeddings=True,
+    )
+    model = LlamaModel(args)
+    _init_random(model)
+    return cast(Model, model)
+
+
+@pytest.mark.slow
+def test_exo_batch_generator_end_to_end() -> None:
+    """Drive ExoBatchGenerator through submit -> step -> completion.
+
+    Regression test for the mlx-lm 0.31.3 BatchGenerator split: the wrapper
+    integrates against upstream internals (insert, next()'s response shape,
+    pending-work containers, timing counters), and nothing else in the suite
+    exercises that integration — the ladder bump shipped with the wrapper
+    reading attributes that no longer existed, and every test still passed.
+    Random weights never emit EOS, so both tasks must finish with
+    finish_reason="length" after exactly max_output_tokens steps.
+    """
+    from exo.shared.types.tasks import TaskId
+    from exo.shared.types.text_generation import (
+        InputMessage,
+        TextGenerationTaskParams,
+    )
+    from exo.worker.engines.mlx.generator.batch_generate import ExoBatchGenerator
+
+    model = _tiny_llama()
+    tokenizer = _make_tokenizer()
+    engine = ExoBatchGenerator(
+        model=model,
+        tokenizer=tokenizer,
+        group=None,
+        kv_prefix_cache=None,
+    )
+
+    max_tokens = 8
+    uids: dict[int, str] = {}
+    for i, content in enumerate(["Write a short essay.", "Explain evolution."]):
+        task_params = TextGenerationTaskParams(
+            model="test-model",
+            input=[InputMessage(role="user", content=content)],
+            max_output_tokens=max_tokens,
+            temperature=0.0,
+        )
+        uid = engine.submit(
+            task_id=TaskId(f"task-{i}"),
+            task_params=task_params,
+            prompt=content,
+        )
+        uids[uid] = content
+
+    assert engine.has_work
+
+    tokens_seen: dict[int, int] = {uid: 0 for uid in uids}
+    finish_reasons: dict[int, str] = {}
+    for _ in range(max_tokens * 8):  # generous bound; loop exits via has_work
+        for uid, response in engine.step():
+            assert uid in uids
+            tokens_seen[uid] += 1
+            if response.finish_reason is not None:
+                finish_reasons[uid] = response.finish_reason
+                assert response.usage is not None
+                assert response.usage.completion_tokens == tokens_seen[uid]
+                assert response.stats is not None
+                assert response.stats.generation_tps >= 0.0
+        if not engine.has_work:
+            break
+
+    assert not engine.has_work
+    assert finish_reasons == {uid: "length" for uid in uids}
+    assert all(count == max_tokens for count in tokens_seen.values()), tokens_seen

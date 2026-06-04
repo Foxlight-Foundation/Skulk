@@ -17,7 +17,7 @@ dependencies = [
   "loguru>=0.7.3",
   "exo_pyo3_bindings",                            # rust bindings
   "anyio==4.11.0",
-  "mlx==0.31.1; sys_platform == 'darwin'",
+  "mlx==0.31.2; sys_platform == 'darwin'",
   "mlx[cpu]==0.30.6; sys_platform == 'linux'",
   "mlx-lm",
   "mlx-optiq[convert]; sys_platform == 'darwin'",
@@ -33,8 +33,12 @@ dependencies = [
   "zstandard>=0.23.0",
   "pyyaml>=6.0.2",
   "types-PyYAML>=6.0.12",
-  "mlx-vlm==0.4.4",
-  "transformers>=5.0.0,<5.4.0",
+  # 0.5.0 (not latest) by design: it brings the gemma4_assistant drafter and
+  # matches the §6a ladder audit exactly. 0.6.x requires starlette>=1.0.1,
+  # which drags fastapi to 0.136/starlette 1.x on darwin — a web-framework
+  # major bump (TestClient/httpx2 migration) that belongs in its own PR.
+  "mlx-vlm==0.5.0; sys_platform == 'darwin'",
+  "transformers>=5.5.0,<6.0.0",
 ]
 
 [project.scripts]
@@ -71,15 +75,15 @@ exo_pyo3_bindings = { workspace = true }
 # build on macOS 26 Metal SDK. The fork's only change is a DSB memory barrier for
 # Thunderbolt RDMA GPU coherence, which we don't need (exo uses libp2p, not RDMA).
 # mlx = { git = "https://github.com/rltakashige/mlx-jaccl-fix-small-recv.git", branch = "address-rdma-gpu-locks", marker = "sys_platform == 'darwin'" }
-# Foxlight-owned custody copy of rltakashige/mlx-lm @ leo/fix-arrayscache-leak.
-# Pinned by exact rev to the commit Skulk has always consumed (d36e9b6) — a
-# byte-identical, behavior-frozen custody cutover (tag: foxlight-consumed-d36e9b6).
-# Carries fixes not in upstream mlx-lm: float32 logprobs, DeepSeek-V3.2
-# lightning-indexer batch fix, ArraysCache leak, GDN precision, left_padding eval.
-# NOTE: the branch tip moved past this commit and requires a newer mlx than our
-# pinned 0.31.1 — do NOT track the branch. Reconcile onto upstream >=0.31.3 as a
-# separate, tested step before bumping mlx / mlx-vlm. See docs/gemma4-assistant-plan.md.
-mlx-lm = { git = "https://github.com/Foxlight-Foundation/mlx-lm", rev = "d36e9b661e55a5fc0f77fb6f17ea643aa2dc87aa" }
+# Foxlight-owned mlx-lm, reconciled onto upstream v0.31.3 (version 0.31.3.post1).
+# Pinned to the merge of Foxlight-Foundation/mlx-lm PR #1 (branch
+# foxlight/v0.31.3-base). Carries two Foxlight fixes not in upstream:
+# ArraysCache leak (mx.depends on BatchKVCache.extend) and the DeepSeek-V3.2
+# lightning-indexer batch>1 fix. The other historic carries (float32 logprobs,
+# GDN precision via upstream #997, left_padding eval via upstream #960) are
+# absorbed in upstream v0.31.3. See foxlight-docs initiatives/gemma4-mtp/
+# reconcile-notes.md for the sign-off evidence.
+mlx-lm = { git = "https://github.com/Foxlight-Foundation/mlx-lm", rev = "e2f7ddcd31ec7d5214447a8d3206af0d2bff6e35" }
 # Uncomment to use local mlx/mlx-lm development versions:
 # mlx = { path = "/Users/Shared/mlx", editable=true }
 # mlx-lm = { path = "/Users/Shared/mlx-lm", editable=true }
@@ -133,6 +137,11 @@ required-version = ">=0.8.6"
 prerelease = "allow"
 environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
 extra-build-dependencies = { "miniaudio" = ["setuptools", "cffi", "pycparser"] }
+# Hold the line on the web framework: starlette 1.x deprecates the
+# httpx-based TestClient (wants httpx2) and breaks strict typing across the
+# API tests. Migrating is a deliberate standalone change, not a side effect
+# of the mlx version ladder.
+constraint-dependencies = ["starlette<1.0"]
 
 ###
 # ruff configuration

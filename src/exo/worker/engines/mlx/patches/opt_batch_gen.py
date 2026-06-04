@@ -1,3 +1,10 @@
+# pyright: reportAttributeAccessIssue=false, reportUnknownMemberType=false
+# pyright: reportUnknownArgumentType=false, reportUnknownVariableType=false
+# pyright: reportUnknownParameterType=false
+# NOTE: this module is written against the PRE-0.31.3 BatchGenerator, whose
+# shape the .mlx_typings stubs no longer describe (they track 0.31.3). It is
+# runtime-gated off on >= 0.31.3 via _BATCHGEN_COMPATIBLE and quarantined from
+# strict typing until the re-port (#187), at which point these pragmas go away.
 """Optimised ``BatchGenerator.next()`` for decode-only steps.
 
 Replaces the default mlx-lm ``BatchGenerator.next`` with a faster path that
@@ -5,17 +12,37 @@ precomputes top-k logprobs asynchronously during decode. The precomputed
 values are attached to the ``Response`` object and consumed by
 ``extract_top_logprobs`` one step later, overlapping GPU work with token
 emission.
+
+Written against the pre-0.31.3 ``BatchGenerator`` internals. mlx-lm 0.31.3
+split that class into ``PromptProcessingBatch`` / ``GenerationBatch`` plus an
+orchestrating ``BatchGenerator`` with no nested ``Response``, so this patch
+cannot apply there. ``_BATCHGEN_COMPATIBLE`` gates application: on
+incompatible versions the patch is skipped with a warning and
+``extract_top_logprobs`` uses its synchronous fallback path — a per-token
+perf regression (sync argpartition), not a correctness change. Re-port
+against the split architecture is tracked in
+https://github.com/Foxlight-Foundation/Skulk/issues/187.
 """
 
+from __future__ import annotations
+
 import time
+from collections.abc import Callable
 from typing import Any, cast
 
 import mlx.core as mx
+from loguru import logger
 from mlx_lm.generate import BatchGenerator, generation_stream
 
 _PRECOMPUTE_TOP_K = 20
 
-_original_public_next = BatchGenerator.next
+# The optimisation rewrites BatchGenerator.next against pre-0.31.3 internals;
+# the nested Response class is the cheapest reliable fingerprint of that era.
+_BATCHGEN_COMPATIBLE = hasattr(BatchGenerator, "Response")
+
+_original_public_next: Callable[[BatchGenerator], list[BatchGenerator.Response]] | None = (
+    getattr(BatchGenerator, "next", None)
+)
 
 _pending_topk_idx: mx.array | None = None
 _pending_topk_val: mx.array | None = None
@@ -139,9 +166,9 @@ def _fast_next(self: BatchGenerator) -> list[BatchGenerator.Response]:
             cache = batch.extract_cache(e)
         response = self.Response(uid, t, prev_logprobs[e], finish_reason, cache)
         if emit_topk_indices and e < len(emit_topk_indices):
-            response._topk_indices = emit_topk_indices[e]  # pyright: ignore[reportAttributeAccessIssue]
-            response._topk_values = emit_topk_values[e]  # pyright: ignore[reportAttributeAccessIssue]
-            response._selected_logprob = emit_selected_lps[e]  # pyright: ignore[reportAttributeAccessIssue]
+            response._topk_indices = emit_topk_indices[e]
+            response._topk_values = emit_topk_values[e]
+            response._selected_logprob = emit_selected_lps[e]
         responses.append(response)
 
     if end_idx:
@@ -175,9 +202,23 @@ def _patched_public_next(self: BatchGenerator) -> list[BatchGenerator.Response]:
     if batch is not None and not self.unprocessed_prompts:
         with mx.stream(generation_stream):
             return _fast_next(self)
+    # Only installed via apply_batch_gen_patch when _BATCHGEN_COMPATIBLE,
+    # in which case the original ``next`` was captured above.
+    assert _original_public_next is not None
     return _original_public_next(self)
 
 
 def apply_batch_gen_patch() -> None:
-    """Monkey-patch ``BatchGenerator.next`` with the optimised decode path."""
+    """Monkey-patch ``BatchGenerator.next`` with the optimised decode path.
+
+    No-op (with a warning) on mlx-lm versions whose BatchGenerator internals
+    moved (>= 0.31.3 split) — see module docstring.
+    """
+    if not _BATCHGEN_COMPATIBLE:
+        logger.warning(
+            "opt_batch_gen patch skipped: mlx-lm BatchGenerator internals "
+            "changed (0.31.3 class split); top-logprobs precompute disabled, "
+            "extract_top_logprobs will use its synchronous fallback."
+        )
+        return
     BatchGenerator.next = _patched_public_next

@@ -6,22 +6,22 @@ from typing import Any, Callable
 import pytest
 
 from exo.worker.tests.unittests.test_mlx.conftest import (
-    DEFAULT_GPT_OSS_CONFIG,
+    DISTRIBUTED_TEST_CONFIG,
     create_hostfile,
-    run_gpt_oss_pipeline_device,
-    run_gpt_oss_tensor_parallel_device,
+    run_distributed_pipeline_device,
+    run_distributed_tensor_parallel_device,
 )
 
 
 def _check_model_exists() -> bool:
-    return DEFAULT_GPT_OSS_CONFIG.model_path.exists()
+    return DISTRIBUTED_TEST_CONFIG.model_path.exists()
 
 
 pytestmark = [
     pytest.mark.slow,
     pytest.mark.skipif(
         not _check_model_exists(),
-        reason=f"GPT-OSS model not found at {DEFAULT_GPT_OSS_CONFIG.model_path}",
+        reason=f"Distributed test model not found at {DISTRIBUTED_TEST_CONFIG.model_path}",
     ),
 ]
 
@@ -48,7 +48,7 @@ def run_distributed_test(
 ) -> DistributedTestResult:
     ctx = mp.get_context("spawn")
     hostfile_path, _ = create_hostfile(
-        world_size, DEFAULT_GPT_OSS_CONFIG.base_port + port_offset
+        world_size, DISTRIBUTED_TEST_CONFIG.base_port + port_offset
     )
 
     try:
@@ -105,7 +105,7 @@ def run_pipeline_test(
         world_size=len(layer_splits),
         port_offset=port_offset,
         process_timeout=process_timeout,
-        target=run_gpt_oss_pipeline_device,
+        target=run_distributed_pipeline_device,
         make_args=make_args,
     )
 
@@ -126,13 +126,19 @@ def run_tensor_test(
         world_size=2,
         port_offset=port_offset,
         process_timeout=process_timeout,
-        target=run_gpt_oss_tensor_parallel_device,
+        target=run_distributed_tensor_parallel_device,
         make_args=make_args,
     )
 
 
+# Splits are fractions of the selected model's layer count so they stay valid
+# whichever model the conftest picks (24-layer GPT-OSS-20B or 16-layer Llama).
+_TOTAL_LAYERS = DISTRIBUTED_TEST_CONFIG.total_layers
+
+
 class TestPipelineParallelFix:
-    BUG_TRIGGER_SPLITS: list[tuple[int, int]] = [(0, 1), (1, 24)]
+    # A single layer on rank 0 is the historical bug trigger.
+    BUG_TRIGGER_SPLITS: list[tuple[int, int]] = [(0, 1), (1, _TOTAL_LAYERS)]
 
     def test_pipeline_single_layer_first_device(self) -> None:
         result = run_pipeline_test(
@@ -149,11 +155,11 @@ class TestPipelineSplitConfigurations:
     @pytest.mark.parametrize(
         "layer_splits",
         [
-            [(0, 1), (1, 24)],
-            [(0, 6), (6, 24)],
-            [(0, 12), (12, 24)],
+            [(0, 1), (1, _TOTAL_LAYERS)],
+            [(0, _TOTAL_LAYERS // 4), (_TOTAL_LAYERS // 4, _TOTAL_LAYERS)],
+            [(0, _TOTAL_LAYERS // 2), (_TOTAL_LAYERS // 2, _TOTAL_LAYERS)],
         ],
-        ids=["1_23", "6_18", "12_12"],
+        ids=["single_first", "quarter", "half"],
     )
     def test_pipeline_splits(
         self,
@@ -186,7 +192,7 @@ class TestPrefillStepSizeBoundaries:
         prompt_tokens: int,
     ) -> None:
         result = run_pipeline_test(
-            layer_splits=[(0, 12), (12, 24)],
+            layer_splits=[(0, _TOTAL_LAYERS // 2), (_TOTAL_LAYERS // 2, _TOTAL_LAYERS)],
             prompt_tokens=prompt_tokens,
             prefill_step_size=prefill_step_size,
             port_offset=200,

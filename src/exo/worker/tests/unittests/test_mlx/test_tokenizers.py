@@ -16,7 +16,12 @@ from exo.download.download_utils import (
     ensure_models_dir,
     fetch_file_list_with_cache,
 )
-from exo.shared.models.model_cards import ModelCard, ModelId, get_model_cards
+from exo.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    ModelTask,
+    get_model_cards,
+)
 from exo.worker.engines.mlx.utils_mlx import (
     get_eos_token_ids_for_model,
     load_tokenizer_for_model_id,
@@ -198,13 +203,15 @@ async def test_tokenizer_has_required_attributes(model_card: ModelCard) -> None:
     )
     assert vocab_size > 0, f"Tokenizer should have vocab_size > 0 for {model_id}"
 
-    # Check for EOS token (either from tokenizer or explicitly provided)
-    has_eos = (
-        eos_token_ids is not None
-        or getattr(tokenizer, "eos_token_id", None) is not None
-        or getattr(tokenizer, "eos_token", None) is not None
-    )
-    assert has_eos, f"Tokenizer should have EOS token for {model_id}"
+    # EOS is a generation-stop concept; embedding models (BERT-style
+    # tokenizers using [CLS]/[SEP]) legitimately have none.
+    if ModelTask.TextGeneration in model_card.tasks:
+        has_eos = (
+            eos_token_ids is not None
+            or getattr(tokenizer, "eos_token_id", None) is not None
+            or getattr(tokenizer, "eos_token", None) is not None
+        )
+        assert has_eos, f"Tokenizer should have EOS token for {model_id}"
 
 
 @pytest.mark.parametrize(
