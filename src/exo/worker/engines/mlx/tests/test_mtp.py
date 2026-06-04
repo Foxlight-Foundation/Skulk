@@ -1,3 +1,6 @@
+# pyright: reportPrivateUsage=false, reportUnknownLambdaType=false
+# pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false
+# pyright: reportArgumentType=false
 """Unit tests for MTP speculative decoding.
 
 Tests cover:
@@ -294,14 +297,14 @@ class TestGetTrunkAndHead:
         lm_head = MagicMock()
         model = MagicMock()
         del model.language_model  # not present
-        model.language_model = None  # type: ignore[assignment]
+        model.language_model = None
         model.model = trunk
         model.lm_head = lm_head
 
         # Need to ensure the qwen path doesn't match
         model2 = MagicMock(spec=[])  # no attributes
-        model2.model = trunk  # type: ignore[assignment]
-        model2.lm_head = lm_head  # type: ignore[assignment]
+        model2.model = trunk
+        model2.lm_head = lm_head
 
         result = _get_trunk_and_head(model2)
         assert result is not None
@@ -468,7 +471,7 @@ class TestStreamGenerateWithMTP:
 
     def test_draft_calls_track_main_tokens(self) -> None:
         # main_token_ids: 5, then more
-        outputs, mtp_head, _ = self._run(
+        _outputs, mtp_head, _ = self._run(
             main_token_ids=[5, 6, 0],
             draft_token_id=5,
             max_tokens=3,
@@ -490,7 +493,7 @@ class TestStreamGenerateWithMTP:
     def test_reject_path_does_not_crash(self) -> None:
         # main_token 5, draft is 7, but head always returns token 5
         # → head_fn will return 5 for verify position, draft is 7 → reject
-        outputs, mtp_head, cache = self._run(
+        outputs, _mtp_head, _cache = self._run(
             main_token_ids=[5, 3, 0],
             draft_token_id=7,  # draft != verify → reject
             max_tokens=3,

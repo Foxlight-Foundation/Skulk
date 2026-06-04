@@ -38,6 +38,27 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- MLX dependency version ladder (darwin): `mlx` 0.31.1 → 0.31.2, `mlx-vlm`
+  0.4.4 → 0.5.0, `transformers` cap lifted to `>=5.5,<6`, and the Foxlight
+  `mlx-lm` fork reconciled onto upstream v0.31.3 (`0.31.3.post1`, rev
+  `e2f7ddcd`). The fork now carries only two non-upstream fixes (ArraysCache
+  leak, DeepSeek-V3.2 lightning-indexer batch>1); float32 logprobs, GDN
+  precision, and left-padding eval are absorbed upstream. mlx-vlm 0.5.0
+  brings the `gemma4_assistant` drafter as a maintained dependency.
+  `starlette` is constrained `<1.0` so the web-framework major bump stays a
+  separate, deliberate migration.
+- Distributed/prefix-cache slow tests now select their model by available
+  GPU working-set size: GPT-OSS-20B on machines that fit it, otherwise
+  Llama-3.2-1B (override with `SKULK_TEST_DISTRIBUTED_MODEL`). Previously
+  the hardcoded 20B memory-exhausted 16 GB machines.
+- `test_batch_generate` B=1 vs B=2 equivalence is now teacher-forced with a
+  relative logit tolerance instead of bit-exactness, which is
+  hardware-dependent (batched decode can dispatch different kernels; on M5
+  the divergence pre-dates the mlx 0.31.2 bump).
+- The `opt_batch_gen` top-logprobs precompute patch is version-gated: it
+  no-ops with a warning on mlx-lm ≥ 0.31.3 (BatchGenerator split) and
+  `extract_top_logprobs` falls back to its synchronous path. Re-port
+  tracked in #187.
 - Two Vector configs now exist for the two transport modes:
   `deployment/logging/vector.yaml` keeps the original `stdin` source for
   the in-process subprocess shipper (used by Linux systemd installs and

@@ -15,15 +15,18 @@ from typing import Any, cast
 
 import pytest
 
-from exo.shared.constants import EXO_MODELS_DIR
 from exo.shared.models.model_cards import ModelCard, ModelTask
 from exo.shared.types.common import ModelId
-from exo.shared.types.memory import Memory
 from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
+from exo.worker.tests.unittests.test_mlx.conftest import (
+    DISTRIBUTED_TEST_CONFIG,
+    DISTRIBUTED_TEST_MODEL,
+    DISTRIBUTED_TEST_MODEL_ID,
+)
 
-MODEL_ID = "mlx-community/gpt-oss-20b-MXFP4-Q8"
-MODEL_PATH = EXO_MODELS_DIR / "mlx-community--gpt-oss-20b-MXFP4-Q8"
-TOTAL_LAYERS = 24
+MODEL_ID = DISTRIBUTED_TEST_MODEL_ID
+MODEL_PATH = DISTRIBUTED_TEST_CONFIG.model_path
+TOTAL_LAYERS = DISTRIBUTED_TEST_CONFIG.total_layers
 MAX_TOKENS = 10
 SEED = 42
 TEMPERATURE = 0.0
@@ -32,9 +35,9 @@ TEMPERATURE = 0.0
 def _model_card() -> ModelCard:
     return ModelCard(
         model_id=ModelId(MODEL_ID),
-        storage_size=Memory.from_gb(12),
+        storage_size=DISTRIBUTED_TEST_MODEL.storage,
         n_layers=TOTAL_LAYERS,
-        hidden_size=2880,
+        hidden_size=DISTRIBUTED_TEST_MODEL.hidden_size,
         supports_tensor=False,
         tasks=[ModelTask.TextGeneration],
     )
@@ -207,7 +210,10 @@ def _run_pipeline_device(
                 break
 
         all_tokens = encode_prompt(tokenizer, prompt)
-        prefill_token_count = len(all_tokens) - 1
+        # Pipeline decode prefills the FULL prompt (since 0eaa5fff "avoid
+        # pipeline decode prompt bridge"), unlike the single-device path
+        # which prefills prompt_tokens[:-1].
+        prefill_token_count = len(all_tokens)
 
         result_queue.put(
             (
@@ -317,12 +323,22 @@ pytestmark = [
     pytest.mark.slow,
     pytest.mark.skipif(
         not MODEL_PATH.exists(),
-        reason=f"GPT-OSS model not found at {MODEL_PATH}",
+        reason=f"Distributed test model not found at {MODEL_PATH}",
     ),
 ]
 
-LAYER_SPLITS_4WAY: list[tuple[int, int]] = [(0, 6), (6, 12), (12, 18), (18, 24)]
-LAYER_SPLITS_2WAY: list[tuple[int, int]] = [(0, 12), (12, 24)]
+# Even quarters/halves of whichever model the conftest selected.
+_QUARTER = TOTAL_LAYERS // 4
+LAYER_SPLITS_4WAY: list[tuple[int, int]] = [
+    (0, _QUARTER),
+    (_QUARTER, 2 * _QUARTER),
+    (2 * _QUARTER, 3 * _QUARTER),
+    (3 * _QUARTER, TOTAL_LAYERS),
+]
+LAYER_SPLITS_2WAY: list[tuple[int, int]] = [
+    (0, TOTAL_LAYERS // 2),
+    (TOTAL_LAYERS // 2, TOTAL_LAYERS),
+]
 
 
 class TestPipelineNoDeadlock:

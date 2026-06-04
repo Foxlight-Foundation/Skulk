@@ -1,3 +1,4 @@
+# pyright: reportAny=false
 """Tests for MTP sidecar download in ResumableShardDownloader."""
 
 from pathlib import Path

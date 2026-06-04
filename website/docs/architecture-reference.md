@@ -401,6 +401,7 @@ Selection logic: `src/exo/worker/engines/mlx/cache.py::make_kv_cache`. Some back
 | `EXO_VISION_DEBUG_SAVE_DIR` | Save debug image artifacts |
 | `EXO_NATIVE_VISION_REFERENCE_PATH` | Force native-vision reference path (Gemma 4) |
 | `EXO_OFFLINE` | Run without internet checks (no model fetching) |
+| `SKULK_TEST_DISTRIBUTED_MODEL` | Tests only: force the distributed/prefix-cache slow-test model (`gpt-oss-20b` or `llama-3.2-1b`); default auto-selects by Metal working-set size |
 | `MLX_METAL_FAST_SYNCH` | Set by Skulk based on resolved card preference; not for direct operator use |
 | `MLX_HOSTFILE`, `MLX_RANK`, `MLX_RING_VERBOSE`, `MLX_IBV_DEVICES`, `MLX_JACCL_COORDINATOR` | MLX upstream env vars; auto-set by Skulk during distributed init |
 

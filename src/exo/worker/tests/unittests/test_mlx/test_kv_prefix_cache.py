@@ -17,18 +17,19 @@ from exo.worker.engines.mlx.cache import (
     encode_prompt,
     get_kv_cache_backend,
     get_prefix_length,
+    has_non_kv_caches,
     make_kv_cache,
 )
 from exo.worker.engines.mlx.generator.generate import mlx_generate, prefill
 from exo.worker.engines.mlx.utils_mlx import apply_chat_template
 from exo.worker.tests.unittests.test_mlx.conftest import (
-    DEFAULT_GPT_OSS_CONFIG,
-    DEFAULT_GPT_OSS_MODEL_ID,
+    DISTRIBUTED_TEST_CONFIG,
+    DISTRIBUTED_TEST_MODEL_ID,
 )
 
 
 def _check_model_exists() -> bool:
-    return DEFAULT_GPT_OSS_CONFIG.model_path.exists()
+    return DISTRIBUTED_TEST_CONFIG.model_path.exists()
 
 
 class TestGetPrefixLength:
@@ -221,13 +222,13 @@ class TestKVCacheBackends:
         assert len(cache) == 4
 
 
-def _load_gpt_oss() -> tuple[Model, object]:
+def _load_distributed_test_model() -> tuple[Model, object]:
     from mlx_lm.utils import load_model
 
     from exo.worker.engines.mlx.utils_mlx import load_tokenizer_for_model_id
 
-    model_path = DEFAULT_GPT_OSS_CONFIG.model_path
-    model_id = ModelId(DEFAULT_GPT_OSS_MODEL_ID)
+    model_path = DISTRIBUTED_TEST_CONFIG.model_path
+    model_id = ModelId(DISTRIBUTED_TEST_MODEL_ID)
 
     model, _ = load_model(model_path, lazy=False)
     tokenizer = load_tokenizer_for_model_id(model_id, model_path)
@@ -237,19 +238,19 @@ def _load_gpt_oss() -> tuple[Model, object]:
 @pytest.mark.slow
 @pytest.mark.skipif(
     not _check_model_exists(),
-    reason=f"GPT-OSS model not found at {DEFAULT_GPT_OSS_CONFIG.model_path}",
+    reason=f"Distributed test model not found at {DISTRIBUTED_TEST_CONFIG.model_path}",
 )
 class TestKVPrefixCacheWithModel:
     @pytest.fixture(scope="class")
     def model_and_tokenizer(self):
-        model, tokenizer = _load_gpt_oss()
+        model, tokenizer = _load_distributed_test_model()
         return model, tokenizer
 
     def test_prefill_populates_cache(self, model_and_tokenizer):
         model, tokenizer = model_and_tokenizer
 
         task = TextGenerationTaskParams(
-            model=DEFAULT_GPT_OSS_MODEL_ID,
+            model=DISTRIBUTED_TEST_MODEL_ID,
             input=[InputMessage(role="user", content="Hello!!")],
             max_output_tokens=1,
         )
@@ -270,14 +271,18 @@ class TestKVPrefixCacheWithModel:
 
         # Cache should now hold the prompt tokens minus one
         assert cache_length(cache) == len(tokens) - 1
-        # Snapshots should be available for models with non-KV caches
-        assert len(snapshots) > 0
+        # Snapshots exist only for models with non-KV caches (rotating/SSM,
+        # e.g. GPT-OSS); plain KV caches (e.g. Llama) trim exactly and need none.
+        if has_non_kv_caches(cache):
+            assert len(snapshots) > 0
+        else:
+            assert len(snapshots) == 0
 
     def test_add_and_get_exact_match(self, model_and_tokenizer):
         model, tokenizer = model_and_tokenizer
 
         task = TextGenerationTaskParams(
-            model=DEFAULT_GPT_OSS_MODEL_ID,
+            model=DISTRIBUTED_TEST_MODEL_ID,
             input=[InputMessage(role="user", content="Test exact")],
             max_output_tokens=1,
         )
@@ -320,7 +325,7 @@ class TestKVPrefixCacheWithModel:
         model, tokenizer = model_and_tokenizer
 
         short_task = TextGenerationTaskParams(
-            model=DEFAULT_GPT_OSS_MODEL_ID,
+            model=DISTRIBUTED_TEST_MODEL_ID,
             input=[InputMessage(role="user", content="Hi")],
             max_output_tokens=1,
         )
@@ -344,7 +349,7 @@ class TestKVPrefixCacheWithModel:
 
         # Query with longer prompt that shares the chat template prefix
         long_task = TextGenerationTaskParams(
-            model=DEFAULT_GPT_OSS_MODEL_ID,
+            model=DISTRIBUTED_TEST_MODEL_ID,
             input=[InputMessage(role="user", content="Hi there, how are you?")],
             max_output_tokens=1,
         )
@@ -372,7 +377,7 @@ class TestKVPrefixCacheWithModel:
         model, tokenizer = model_and_tokenizer
 
         task = TextGenerationTaskParams(
-            model=DEFAULT_GPT_OSS_MODEL_ID,
+            model=DISTRIBUTED_TEST_MODEL_ID,
             input=[InputMessage(role="user", content="Mutation test")],
             max_output_tokens=1,
         )
@@ -419,7 +424,7 @@ class TestKVPrefixCacheWithModel:
         model, tokenizer = model_and_tokenizer
 
         task = TextGenerationTaskParams(
-            model=DEFAULT_GPT_OSS_MODEL_ID,
+            model=DISTRIBUTED_TEST_MODEL_ID,
             input=[InputMessage(role="user", content="Repeat test")],
             max_output_tokens=1,
         )
@@ -463,7 +468,7 @@ class TestKVPrefixCacheWithModel:
 
         kv_prefix_cache = KVPrefixCache(None)
         task = TextGenerationTaskParams(
-            model=DEFAULT_GPT_OSS_MODEL_ID,
+            model=DISTRIBUTED_TEST_MODEL_ID,
             input=[InputMessage(role="user", content="Hello")],
             max_output_tokens=5,
         )
@@ -494,7 +499,7 @@ class TestKVPrefixCacheWithModel:
 
         kv_prefix_cache = KVPrefixCache(None)
         task = TextGenerationTaskParams(
-            model=DEFAULT_GPT_OSS_MODEL_ID,
+            model=DISTRIBUTED_TEST_MODEL_ID,
             input=[InputMessage(role="user", content="Reuse test")],
             max_output_tokens=5,
         )
@@ -522,9 +527,13 @@ class TestKVPrefixCacheWithModel:
         # The stored cache is longer than the prompt (it includes generated tokens),
         # so this is a prefix match where our prompt is fully contained
         assert matched_index == 0
-        # Exact match: remaining_tokens is just the last token and the one before
-        assert len(remaining_tokens) == 2
-        assert mx.array_equal(remaining_tokens, prompt_tokens[-2:])
+        # Plain KV caches trim exactly to the last prompt token (1 remaining);
+        # rotating/SSM caches restore to the nearest earlier snapshot, which
+        # leaves one extra (2 remaining with GPT-OSS's snapshot spacing).
+        assert 1 <= len(remaining_tokens) <= 2
+        assert mx.array_equal(
+            remaining_tokens, prompt_tokens[-len(remaining_tokens) :]
+        )
 
     def test_mlx_generate_long_prompt_updates_cache_in_place(self, model_and_tokenizer):
         """With a prompt > 1000 tokens, second generation should update the cache entry in-place."""
@@ -539,7 +548,7 @@ class TestKVPrefixCacheWithModel:
         long_content = base_text * repeats
 
         task1 = TextGenerationTaskParams(
-            model=DEFAULT_GPT_OSS_MODEL_ID,
+            model=DISTRIBUTED_TEST_MODEL_ID,
             input=[InputMessage(role="user", content=long_content)],
             max_output_tokens=5,
         )
@@ -567,7 +576,7 @@ class TestKVPrefixCacheWithModel:
 
         # Second generation: same long prompt + extra content (simulating multi-turn)
         task2 = TextGenerationTaskParams(
-            model=DEFAULT_GPT_OSS_MODEL_ID,
+            model=DISTRIBUTED_TEST_MODEL_ID,
             input=[
                 InputMessage(role="user", content=long_content),
                 InputMessage(role="assistant", content="Sure, I can help."),
@@ -595,11 +604,16 @@ class TestKVPrefixCacheWithModel:
             pass
         second_gen_time = time.perf_counter() - t0
 
-        # Second generation should be significantly faster due to prefix cache hit - hopefully not flaky
-        assert second_gen_time < first_gen_time * 0.5, (
-            f"Expected prefix cache speedup: "
-            f"first={first_gen_time:.2f}s, second={second_gen_time:.2f}s"
-        )
+        # Second generation should be significantly faster due to the prefix
+        # cache hit — but with a small test model both runs are sub-second and
+        # scheduler noise dominates, so only enforce the wall-clock comparison
+        # when the first run is long enough to measure meaningfully. The
+        # functional asserts below verify the cache-hit path regardless.
+        if first_gen_time > 2.0:
+            assert second_gen_time < first_gen_time * 0.5, (
+                f"Expected prefix cache speedup: "
+                f"first={first_gen_time:.2f}s, second={second_gen_time:.2f}s"
+            )
 
         # With prefix_hit > 1000, should update in-place (not add a second entry)
         assert len(kv_prefix_cache.prompts) == 1
@@ -613,7 +627,7 @@ class TestKVPrefixCacheWithModel:
 
         kv_prefix_cache = KVPrefixCache(None)
         task = TextGenerationTaskParams(
-            model=DEFAULT_GPT_OSS_MODEL_ID,
+            model=DISTRIBUTED_TEST_MODEL_ID,
             input=[InputMessage(role="user", content="Immutable test")],
             max_output_tokens=5,
         )
@@ -656,7 +670,7 @@ class TestKVPrefixCacheWithModel:
         prompts = ["First entry", "Second entry", "Third entry"]
         for i, content in enumerate(prompts):
             task = TextGenerationTaskParams(
-                model=DEFAULT_GPT_OSS_MODEL_ID,
+                model=DISTRIBUTED_TEST_MODEL_ID,
                 input=[InputMessage(role="user", content=content)],
                 max_output_tokens=1,
             )
@@ -690,7 +704,7 @@ class TestKVPrefixCacheWithModel:
         ):
             # Trigger eviction by adding a new entry
             task = TextGenerationTaskParams(
-                model=DEFAULT_GPT_OSS_MODEL_ID,
+                model=DISTRIBUTED_TEST_MODEL_ID,
                 input=[InputMessage(role="user", content="New entry")],
                 max_output_tokens=1,
             )

@@ -1,4 +1,6 @@
 # type: ignore
+from __future__ import annotations
+
 import math
 from unittest.mock import MagicMock
 
@@ -9,6 +11,7 @@ from mlx_lm.generate import BatchGenerator
 
 from exo.worker.engines.mlx.generator.generate import extract_top_logprobs
 from exo.worker.engines.mlx.patches.opt_batch_gen import (
+    _BATCHGEN_COMPATIBLE,
     _PRECOMPUTE_TOP_K,
     apply_batch_gen_patch,
 )
@@ -173,6 +176,11 @@ def _tiny_model() -> nn.Module:
 
 
 @pytest.mark.slow
+@pytest.mark.skipif(
+    not _BATCHGEN_COMPATIBLE,
+    reason="opt_batch_gen patch does not apply to mlx-lm >= 0.31.3 "
+    "(BatchGenerator split); precompute path inactive, fallback covered above",
+)
 class TestBatchedTopKPrecompute:
     @pytest.fixture(autouse=True)
     def _reset_globals(self) -> None:

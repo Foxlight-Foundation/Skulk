@@ -49,20 +49,92 @@ def create_hostfile(world_size: int, base_port: int) -> tuple[str, list[str]]:
     return hostfile_path, hosts
 
 
-# Use GPT OSS 20b to test as it is a model with a lot of strange behaviour
+@dataclass(frozen=True)
+class DistributedTestModel:
+    """A model usable by the distributed/prefix-cache tests.
 
-DEFAULT_GPT_OSS_CONFIG = PipelineTestConfig(
-    model_path=EXO_MODELS_DIR / "mlx-community--gpt-oss-20b-MXFP4-Q8",
+    Pipeline layer splits in test_distributed_fix.py are derived from
+    ``total_layers``, so entries may have different layer counts. Any
+    substitute must use an architecture supported by
+    ``tensor_auto_parallel`` (see auto_parallel.py's model allowlist).
+    """
+
+    model_id: str
+    directory_name: str
+    total_layers: int
+    hidden_size: int
+    storage: Memory
+
+
+# GPT-OSS-20B is the preferred test model because it has a lot of strange
+# behaviour (MoE routing, MXFP4 quantization, alternating sliding-window
+# attention) that historically shook out distributed bugs dense models missed.
+# But it needs ~12 GB of wired GPU memory across multi-rank subprocesses, which
+# memory-exhausts (and has hard-rebooted) 16 GB machines. Llama-3.2-1B
+# exercises the same pipeline/tensor-parallel/prefix-cache infrastructure at
+# ~0.7 GB (llama is on the tensor_auto_parallel allowlist; most tiny models,
+# e.g. qwen2, are not).
+_GPT_OSS_20B = DistributedTestModel(
+    model_id="mlx-community/gpt-oss-20b-MXFP4-Q8",
+    directory_name="mlx-community--gpt-oss-20b-MXFP4-Q8",
     total_layers=24,
+    hidden_size=2880,
+    storage=Memory.from_gb(12),
+)
+_LLAMA_3_2_1B = DistributedTestModel(
+    model_id="mlx-community/Llama-3.2-1B-Instruct-4bit",
+    directory_name="mlx-community--Llama-3.2-1B-Instruct-4bit",
+    total_layers=16,
+    hidden_size=2048,
+    storage=Memory.from_gb(1),
+)
+
+_TEST_MODELS_BY_NAME: dict[str, DistributedTestModel] = {
+    "gpt-oss-20b": _GPT_OSS_20B,
+    "llama-3.2-1b": _LLAMA_3_2_1B,
+}
+
+# The 20B needs its 12 GB plus activations and multi-rank overhead resident at
+# once; below a 24 GB Metal working set that ends in SIGABRT (or an OS reboot),
+# not a test failure.
+_GPT_OSS_MIN_WORKING_SET_BYTES = 24 * 1024**3
+
+
+def _select_distributed_test_model() -> DistributedTestModel:
+    """Pick the distributed-test model for this machine.
+
+    ``SKULK_TEST_DISTRIBUTED_MODEL`` (a key of ``_TEST_MODELS_BY_NAME``)
+    forces a specific model; otherwise GPT-OSS-20B is used only when the
+    Metal working-set budget can actually hold it.
+    """
+    override = os.environ.get("SKULK_TEST_DISTRIBUTED_MODEL")
+    if override is not None:
+        if override not in _TEST_MODELS_BY_NAME:
+            raise ValueError(
+                f"SKULK_TEST_DISTRIBUTED_MODEL={override!r} is not one of "
+                f"{sorted(_TEST_MODELS_BY_NAME)}"
+            )
+        return _TEST_MODELS_BY_NAME[override]
+    device_info = mx.device_info()
+    working_set = int(device_info["max_recommended_working_set_size"])
+    if working_set >= _GPT_OSS_MIN_WORKING_SET_BYTES:
+        return _GPT_OSS_20B
+    return _LLAMA_3_2_1B
+
+
+DISTRIBUTED_TEST_MODEL = _select_distributed_test_model()
+
+DISTRIBUTED_TEST_CONFIG = PipelineTestConfig(
+    model_path=EXO_MODELS_DIR / DISTRIBUTED_TEST_MODEL.directory_name,
+    total_layers=DISTRIBUTED_TEST_MODEL.total_layers,
     base_port=29600,
     max_tokens=200,
 )
 
+DISTRIBUTED_TEST_MODEL_ID = DISTRIBUTED_TEST_MODEL.model_id
 
-DEFAULT_GPT_OSS_MODEL_ID = "mlx-community/gpt-oss-20b-MXFP4-Q8"
 
-
-def run_gpt_oss_pipeline_device(
+def run_distributed_pipeline_device(
     rank: int,
     world_size: int,
     hostfile_path: str,
@@ -82,10 +154,10 @@ def run_gpt_oss_pipeline_device(
 
         shard_meta = PipelineShardMetadata(
             model_card=ModelCard(
-                model_id=ModelId(DEFAULT_GPT_OSS_MODEL_ID),
-                storage_size=Memory.from_gb(12),
-                n_layers=24,
-                hidden_size=2880,
+                model_id=ModelId(DISTRIBUTED_TEST_MODEL_ID),
+                storage_size=DISTRIBUTED_TEST_MODEL.storage,
+                n_layers=DISTRIBUTED_TEST_MODEL.total_layers,
+                hidden_size=DISTRIBUTED_TEST_MODEL.hidden_size,
                 supports_tensor=False,
                 tasks=[ModelTask.TextGeneration],
             ),
@@ -93,7 +165,7 @@ def run_gpt_oss_pipeline_device(
             world_size=world_size,
             start_layer=start_layer,
             end_layer=end_layer,
-            n_layers=24,
+            n_layers=DISTRIBUTED_TEST_MODEL.total_layers,
         )
 
         model, tokenizer = shard_and_load(
@@ -115,7 +187,7 @@ def run_gpt_oss_pipeline_device(
         prompt_text = tokenizer.decode(tokens)
 
         task = TextGenerationTaskParams(
-            model=DEFAULT_GPT_OSS_MODEL_ID,
+            model=DISTRIBUTED_TEST_MODEL_ID,
             input=[InputMessage(role="user", content=prompt_text)],
             max_output_tokens=max_tokens,
         )
@@ -142,7 +214,7 @@ def run_gpt_oss_pipeline_device(
         result_queue.put((rank, False, f"{e}\n{traceback.format_exc()}"))  # pyright: ignore[reportAny]
 
 
-def run_gpt_oss_tensor_parallel_device(
+def run_distributed_tensor_parallel_device(
     rank: int,
     world_size: int,
     hostfile_path: str,
@@ -160,18 +232,18 @@ def run_gpt_oss_tensor_parallel_device(
         # For tensor parallelism, all devices run all layers
         shard_meta = TensorShardMetadata(
             model_card=ModelCard(
-                model_id=ModelId(DEFAULT_GPT_OSS_MODEL_ID),
-                storage_size=Memory.from_gb(12),
-                n_layers=24,
-                hidden_size=2880,
+                model_id=ModelId(DISTRIBUTED_TEST_MODEL_ID),
+                storage_size=DISTRIBUTED_TEST_MODEL.storage,
+                n_layers=DISTRIBUTED_TEST_MODEL.total_layers,
+                hidden_size=DISTRIBUTED_TEST_MODEL.hidden_size,
                 supports_tensor=True,
                 tasks=[ModelTask.TextGeneration],
             ),
             device_rank=rank,
             world_size=world_size,
             start_layer=0,
-            end_layer=24,
-            n_layers=24,
+            end_layer=DISTRIBUTED_TEST_MODEL.total_layers,
+            n_layers=DISTRIBUTED_TEST_MODEL.total_layers,
         )
 
         model, tokenizer = shard_and_load(
@@ -190,7 +262,7 @@ def run_gpt_oss_tensor_parallel_device(
         prompt_text = tokenizer.decode(tokens)
 
         task = TextGenerationTaskParams(
-            model=DEFAULT_GPT_OSS_MODEL_ID,
+            model=DISTRIBUTED_TEST_MODEL_ID,
             input=[InputMessage(role="user", content=prompt_text)],
             max_output_tokens=max_tokens,
         )
