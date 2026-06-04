@@ -1,3 +1,10 @@
+# pyright: reportAttributeAccessIssue=false, reportUnknownMemberType=false
+# pyright: reportUnknownArgumentType=false, reportUnknownVariableType=false
+# pyright: reportUnknownParameterType=false
+# NOTE: this module is written against the PRE-0.31.3 BatchGenerator, whose
+# shape the .mlx_typings stubs no longer describe (they track 0.31.3). It is
+# runtime-gated off on >= 0.31.3 via _BATCHGEN_COMPATIBLE and quarantined from
+# strict typing until the re-port (#187), at which point these pragmas go away.
 """Optimised ``BatchGenerator.next()`` for decode-only steps.
 
 Replaces the default mlx-lm ``BatchGenerator.next`` with a faster path that
@@ -159,9 +166,9 @@ def _fast_next(self: BatchGenerator) -> list[BatchGenerator.Response]:
             cache = batch.extract_cache(e)
         response = self.Response(uid, t, prev_logprobs[e], finish_reason, cache)
         if emit_topk_indices and e < len(emit_topk_indices):
-            response._topk_indices = emit_topk_indices[e]  # pyright: ignore[reportAttributeAccessIssue]
-            response._topk_values = emit_topk_values[e]  # pyright: ignore[reportAttributeAccessIssue]
-            response._selected_logprob = emit_selected_lps[e]  # pyright: ignore[reportAttributeAccessIssue]
+            response._topk_indices = emit_topk_indices[e]
+            response._topk_values = emit_topk_values[e]
+            response._selected_logprob = emit_selected_lps[e]
         responses.append(response)
 
     if end_idx:

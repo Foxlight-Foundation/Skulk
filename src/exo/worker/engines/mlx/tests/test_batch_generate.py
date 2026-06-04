@@ -296,3 +296,92 @@ def test_batch_b2_qwen35_moe() -> None:
         f"Qwen3.5 MoE B=2 max relative logit diff: {max_rel_diff} "
         f"(argmax disagreements: {mismatches}/{NUM_STEPS * 2})"
     )
+
+
+def _tiny_llama() -> Model:
+    """Build the same tiny random-weight llama the B1/B2 tests use."""
+    from mlx_lm.models.llama import Model as LlamaModel
+    from mlx_lm.models.llama import ModelArgs
+
+    mx.random.seed(42)
+    args = ModelArgs(
+        model_type="llama",
+        hidden_size=256,
+        num_hidden_layers=4,
+        intermediate_size=512,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        rms_norm_eps=1e-6,
+        vocab_size=248320,
+        rope_theta=10000.0,
+        tie_word_embeddings=True,
+    )
+    model = LlamaModel(args)
+    _init_random(model)
+    return cast(Model, model)
+
+
+@pytest.mark.slow
+def test_exo_batch_generator_end_to_end() -> None:
+    """Drive ExoBatchGenerator through submit -> step -> completion.
+
+    Regression test for the mlx-lm 0.31.3 BatchGenerator split: the wrapper
+    integrates against upstream internals (insert, next()'s response shape,
+    pending-work containers, timing counters), and nothing else in the suite
+    exercises that integration — the ladder bump shipped with the wrapper
+    reading attributes that no longer existed, and every test still passed.
+    Random weights never emit EOS, so both tasks must finish with
+    finish_reason="length" after exactly max_output_tokens steps.
+    """
+    from exo.shared.types.tasks import TaskId
+    from exo.shared.types.text_generation import (
+        InputMessage,
+        TextGenerationTaskParams,
+    )
+    from exo.worker.engines.mlx.generator.batch_generate import ExoBatchGenerator
+
+    model = _tiny_llama()
+    tokenizer = _make_tokenizer()
+    engine = ExoBatchGenerator(
+        model=model,
+        tokenizer=tokenizer,
+        group=None,
+        kv_prefix_cache=None,
+    )
+
+    max_tokens = 8
+    uids: dict[int, str] = {}
+    for i, content in enumerate(["Write a short essay.", "Explain evolution."]):
+        task_params = TextGenerationTaskParams(
+            model="test-model",
+            input=[InputMessage(role="user", content=content)],
+            max_output_tokens=max_tokens,
+            temperature=0.0,
+        )
+        uid = engine.submit(
+            task_id=TaskId(f"task-{i}"),
+            task_params=task_params,
+            prompt=content,
+        )
+        uids[uid] = content
+
+    assert engine.has_work
+
+    tokens_seen: dict[int, int] = {uid: 0 for uid in uids}
+    finish_reasons: dict[int, str] = {}
+    for _ in range(max_tokens * 8):  # generous bound; loop exits via has_work
+        for uid, response in engine.step():
+            assert uid in uids
+            tokens_seen[uid] += 1
+            if response.finish_reason is not None:
+                finish_reasons[uid] = response.finish_reason
+                assert response.usage is not None
+                assert response.usage.completion_tokens == tokens_seen[uid]
+                assert response.stats is not None
+                assert response.stats.generation_tps >= 0.0
+        if not engine.has_work:
+            break
+
+    assert not engine.has_work
+    assert finish_reasons == {uid: "length" for uid in uids}
+    assert all(count == max_tokens for count in tokens_seen.values()), tokens_seen
