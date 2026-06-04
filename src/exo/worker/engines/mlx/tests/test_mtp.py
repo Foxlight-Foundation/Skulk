@@ -89,17 +89,20 @@ def _make_qwen35_weights(
 
 def _make_model(*, missing_head: bool = False, missing_embed: bool = False) -> MagicMock:
     """Return a fake model with Qwen3.5-style structure."""
-    embed = MagicMock()
+    # For missing_head, constrain the mock so it does not auto-create
+    # `as_linear` either — tied-embedding models are headed via
+    # embed_tokens.as_linear, so a truly headless model must lack both.
+    embed = MagicMock(spec=["__call__"]) if missing_head else MagicMock()
     embed.return_value = mx.zeros((1, HIDDEN))
 
     lm_head = MagicMock()
     lm_head.return_value = mx.zeros((1, 1, VOCAB))
 
-    trunk = MagicMock()
+    trunk = MagicMock(spec=["norm", "embed_tokens"])
     trunk.norm = MagicMock(side_effect=lambda x: x)
     trunk.embed_tokens = embed
 
-    lm = MagicMock()
+    lm = MagicMock(spec=["model", "lm_head"])
     lm.model = trunk
     lm.lm_head = None if missing_head else lm_head
 
@@ -500,3 +503,119 @@ class TestStreamGenerateWithMTP:
         )
         # After rejection we expect at least 1 token emitted
         assert len(outputs) >= 1
+
+
+class TestRejectPathSSMState:
+    def test_reject_restores_ssm_state(self) -> None:
+        """A reject must restore SSM (ArraysCache) state, not zero it.
+
+        Regression test: trim_cache without a snapshot sets ArraysCache
+        state to [None, ...], silently wiping the recurrent state of hybrid
+        models (Qwen3.5 GDN) on every rejected draft and degenerating the
+        output. The reject path must snapshot before the verify pass and
+        restore on reject.
+        """
+        from mlx_lm.models.cache import ArraysCache, KVCache
+
+        from exo.worker.engines.mlx.generator.generate import (
+            _stream_generate_with_mtp,
+        )
+
+        model, tokenizer, mtp_head, trunk_fn, head_fn, _fake_cache = (
+            _build_fake_stream_env(
+                main_token_ids=[5, 3, 0],
+                draft_token_id=7,  # head verifies 5/3 → draft 7 always rejected
+            )
+        )
+
+        ssm_cache = ArraysCache(size=1)
+        sentinel = mx.ones((1, 4))
+        ssm_cache.state = [sentinel]
+        # Seed the KV cache: in production it always holds prompt positions
+        # by the time the MTP loop runs, and trim on an empty KVCache throws.
+        kv_cache = KVCache()
+        _ = kv_cache.update_and_fetch(  # pyright: ignore[reportUnknownMemberType]
+            mx.zeros((1, 1, 8, 4)), mx.zeros((1, 1, 8, 4))
+        )
+        cache = [ssm_cache, kv_cache]
+
+        sampler = lambda lp: mx.argmax(lp, axis=-1)  # noqa: E731
+        outputs = list(
+            _stream_generate_with_mtp(
+                model=model,
+                tokenizer=tokenizer,
+                mtp_head=mtp_head,
+                trunk_fn=trunk_fn,
+                head_fn=head_fn,
+                prompt=mx.array([1, 2, 3]),
+                max_tokens=3,
+                sampler=sampler,
+                logits_processors=[],
+                prompt_cache=cache,
+                kv_group_size=None,
+                kv_bits=None,
+            )
+        )
+
+        assert len(outputs) >= 1
+        # The fake trunk never advances SSM state, so after snapshot+restore
+        # the sentinel must survive verbatim. The pre-fix code left this
+        # zeroed ([None]) after the first reject.
+        assert ssm_cache.state[0] is not None, "reject zeroed the SSM state"
+        assert mx.array_equal(ssm_cache.state[0], sentinel)
+
+
+class TestTiedEmbeddingsHead:
+    def test_head_located_via_as_linear(self) -> None:
+        """Tied-embedding models (mlx-lm >= 0.31.3 qwen3_5 TextModel) expose
+        no lm_head; the head is embed_tokens.as_linear."""
+
+        class _Embed:
+            def as_linear(self, x: mx.array) -> mx.array:
+                return x
+
+        class _Trunk:
+            embed_tokens = _Embed()
+
+        class _TextModel:
+            model = _Trunk()
+            # no lm_head attribute
+
+        class _Model:
+            language_model = _TextModel()
+
+        from exo.worker.engines.mlx.mtp import _get_head_fn
+
+        head = _get_head_fn(_Model())
+        assert head is not None
+        probe = mx.array([1.0])
+        assert mx.array_equal(head(probe), probe)
+
+
+class TestGdnPatchModuleSweep:
+    def test_sweep_skips_foreign_lazy_modules(self) -> None:
+        """patch_gdn_softplus must not probe non-mlx modules for compute_g.
+
+        Regression test: transformers 5.10's lazy top-level namespace
+        resolves a "compute_g" attribute probe by importing an unrelated
+        aria image-processing module that requires torchvision — crashing
+        the runner at startup. The sweep must only touch mlx_lm/mlx_vlm
+        modules.
+        """
+        import sys
+        import types
+
+        class _LazyBoobyTrap(types.ModuleType):
+            def __getattr__(self, name: str) -> object:
+                raise ModuleNotFoundError(f"booby trap tripped resolving {name!r}")
+
+        trap = _LazyBoobyTrap("fake_lazy_package")
+        sys.modules["fake_lazy_package"] = trap
+        try:
+            from exo.worker.engines.mlx.patches.high_precision_gdn_softplus import (
+                patch_gdn_softplus,
+            )
+
+            patch_gdn_softplus()  # raised ModuleNotFoundError before the fix
+        finally:
+            del sys.modules["fake_lazy_package"]

@@ -28,8 +28,18 @@ def patch_gdn_softplus() -> None:
 
     gated_delta.compute_g = _compute_g_f32
 
+    # Only mlx-lm/mlx-vlm model modules can hold a `from gated_delta import
+    # compute_g` copy. Probing arbitrary modules is dangerous: lazy-loading
+    # packages run imports on attribute access — transformers 5.10 resolves
+    # a top-level "compute_g" probe to an unrelated symbol in
+    # models.aria.image_processing_aria, whose import requires torchvision
+    # and crashed the runner at startup (ModuleNotFoundError escapes a
+    # getattr default, which only covers AttributeError).
     for mod in list(sys.modules.values()):
         if mod is gated_delta:
+            continue
+        module_name = getattr(mod, "__name__", "")
+        if not module_name.startswith(("mlx_lm", "mlx_vlm")):
             continue
         if getattr(mod, "compute_g", None) is compute_g:
             object.__setattr__(mod, "compute_g", _compute_g_f32)

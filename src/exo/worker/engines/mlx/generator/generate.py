@@ -1221,6 +1221,10 @@ def _stream_generate_with_mtp(
     accepted = 0
     attempted_drafts = 0
     finish_reason = "length"
+    # Hybrid models (e.g. Qwen3.5 GDN) carry recurrent SSM state that cannot
+    # be trimmed positionally — and trim_cache without a snapshot ZEROES it.
+    # Rejects must restore a pre-verify snapshot instead.
+    mtp_has_ssm = has_non_kv_caches(prompt_cache)
 
     # cached_hidden: (hidden_size,) from a previous verify pass, or None (need main fwd)
     cached_hidden: mx.array | None = None
@@ -1324,10 +1328,16 @@ def _stream_generate_with_mtp(
 
         if draft_tok_int in eos_token_ids:
             # Draft would end sequence — do not verify, let next loop pick up EOS naturally
-            input_tokens = main_tok
+            # (sampler output is 0-d; the trunk needs (1, N) token ids — the
+            # 0.31.3 qwen3_5 rewrite unpacks (B, S, _) strictly and crashes
+            # on the 2-D hidden states the old module tolerated).
+            input_tokens = main_tok.reshape(-1)
             continue
 
         # ---- VERIFY PASS: process [main_tok, draft_tok] in one batched forward ----
+        # Snapshot recurrent (SSM) state first so a reject can restore it —
+        # the verify forward advances it by two positions irreversibly.
+        pre_verify_snapshot = snapshot_ssm_states(prompt_cache) if mtp_has_ssm else None
         verify_input = mx.array([main_tok_int, draft_tok_int])
         with mx.stream(generation_stream):
             v_h = trunk_fn(verify_input[None], cache=prompt_cache)  # (1, 2, H)
@@ -1407,11 +1417,21 @@ def _stream_generate_with_mtp(
 
             # Stash hidden state at draft_tok position for next MTP round.
             cached_hidden = v_h[0, 1, :]
-            input_tokens = next_main
+            input_tokens = next_main.reshape(-1)
         else:
             # ---- REJECT ----
-            # Trim the draft_tok position that was appended by the verify pass.
-            trim_cache(prompt_cache, 1)
+            if pre_verify_snapshot is not None:
+                # Hybrid model: drop BOTH verify positions from the KV caches
+                # and restore the SSM state to pre-verify; the next main
+                # forward replays [main_tok, target] so every cache lands
+                # consistently at ...main, target. (Trimming only the draft
+                # position would zero the recurrent state — see trim_cache.)
+                trim_cache(prompt_cache, 2, pre_verify_snapshot)
+                replay_tokens = [main_tok_int, target_int]
+            else:
+                # Pure-KV model: trim just the rejected draft position.
+                trim_cache(prompt_cache, 1)
+                replay_tokens = [target_int]
             # target_tok is the verifier's corrected token for the rejected position;
             # emit it before feeding it as input to the next forward.
             if target_int in eos_token_ids:
@@ -1465,7 +1485,7 @@ def _stream_generate_with_mtp(
                 finish_reason=None,
             )
 
-            input_tokens = target_tok
+            input_tokens = mx.array(replay_tokens)
             cached_hidden = None
 
     else:

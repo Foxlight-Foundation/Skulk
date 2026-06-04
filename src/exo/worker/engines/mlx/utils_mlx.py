@@ -49,7 +49,7 @@ import mlx.nn as nn
 from mlx_lm.utils import load_model as _mlx_lm_load_model
 from pydantic import RootModel
 
-from exo.download.download_utils import build_model_path
+from exo.download.download_utils import build_model_path, build_sidecar_path
 from exo.shared.types.common import Host
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import Model
@@ -694,18 +694,19 @@ def load_mlx_items(
     mtp_weights: dict[str, mx.array] | None = None
     runtime = bound_instance.bound_shard.model_card.runtime
     if runtime and runtime.mtp_sidecar_repo and runtime.mtp_heads:
-        try:
-            sidecar_path = build_model_path(ModelId(runtime.mtp_sidecar_repo))
-            mtp_safetensors = sidecar_path / "mtp.safetensors"
-            if mtp_safetensors.exists():
-                mtp_weights = cast("dict[str, mx.array]", mx.load(str(mtp_safetensors)))
-            else:
-                logger.warning(
-                    f"MTP sidecar declared but not found at {mtp_safetensors}; running without MTP"
-                )
-        except FileNotFoundError:
+        # Sidecar repos carry only mtp.safetensors (no config.json), so they
+        # must be resolved with the sidecar resolver — build_model_path's
+        # model-completeness check rejects their directories.
+        mtp_safetensors = build_sidecar_path(
+            ModelId(runtime.mtp_sidecar_repo), "mtp.safetensors"
+        )
+        if mtp_safetensors is not None:
+            mtp_weights = cast("dict[str, mx.array]", mx.load(str(mtp_safetensors)))
+            logger.info(f"MTP sidecar weights loaded from {mtp_safetensors}")
+        else:
             logger.warning(
-                f"MTP sidecar repo {runtime.mtp_sidecar_repo!r} not downloaded; running without MTP"
+                f"MTP sidecar repo {runtime.mtp_sidecar_repo!r} not downloaded; "
+                "running without MTP"
             )
 
     return cast(Model, model), tokenizer, vision_processor, mtp_weights

@@ -221,17 +221,36 @@ def _get_embed_fn(model: object) -> Callable[[mx.array], mx.array] | None:
     return None
 
 
+def _tied_head_fn(trunk: object | None) -> Callable[[mx.array], mx.array] | None:
+    """Output head for tied-embedding models: ``embed_tokens.as_linear``.
+
+    mlx-lm >= 0.31.3 qwen3_5 TextModel has no ``lm_head`` attribute when
+    ``tie_word_embeddings`` is set — its ``__call__`` projects through
+    ``self.model.embed_tokens.as_linear`` instead.
+    """
+    if trunk is None:
+        return None
+    embed: object | None = getattr(trunk, "embed_tokens", None)
+    as_linear: object | None = getattr(embed, "as_linear", None)
+    if as_linear is not None and callable(as_linear):
+        return cast(Callable[[mx.array], mx.array], as_linear)
+    return None
+
+
 def _get_head_fn(model: object) -> Callable[[mx.array], mx.array] | None:
-    """Extract lm_head callable from the main model."""
+    """Extract the lm_head callable (or tied-embedding equivalent)."""
     lm: object | None = getattr(model, "language_model", None)
     if lm is not None:
         head: object | None = getattr(lm, "lm_head", None)
         if head is not None and callable(head):
             return cast(Callable[[mx.array], mx.array], head)
+        tied = _tied_head_fn(getattr(lm, "model", None))
+        if tied is not None:
+            return tied
     top_head: object | None = getattr(model, "lm_head", None)
     if top_head is not None and callable(top_head):
         return cast(Callable[[mx.array], mx.array], top_head)
-    return None
+    return _tied_head_fn(getattr(model, "model", None))
 
 
 def _get_norm_fn(model: object) -> Callable[[mx.array], mx.array] | None:
