@@ -25,17 +25,37 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol, cast
+from typing import TYPE_CHECKING, Any, Callable, Protocol, cast
 
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 from mlx_lm.tokenizer_utils import TokenizerWrapper
-from mlx_vlm.prompt_utils import get_message_json
-from mlx_vlm.utils import load_image_processor
 from PIL import Image
 from safetensors import safe_open
 from transformers import AutoImageProcessor
+
+if TYPE_CHECKING:
+    from mlx_vlm.prompt_utils import get_message_json
+    from mlx_vlm.utils import load_image_processor
+else:
+    # mlx-vlm ships only on darwin: its mlx floor (>=0.31.2) is unsatisfiable
+    # against the Linux mlx[cpu]==0.30.6 pin. Text-only inference must still
+    # import this module, so the dependency is optional at runtime — the two
+    # vision entry points below raise only when vision is actually used.
+    try:
+        from mlx_vlm.prompt_utils import get_message_json
+        from mlx_vlm.utils import load_image_processor
+    except ImportError:
+
+        def _raise_mlx_vlm_unavailable(*_args, **_kwargs):
+            raise RuntimeError(
+                "mlx-vlm is not installed (it is a darwin-only dependency); "
+                "vision/VLM features are unavailable on this platform"
+            )
+
+        get_message_json = _raise_mlx_vlm_unavailable
+        load_image_processor = _raise_mlx_vlm_unavailable
 
 from exo.download.download_utils import build_model_path
 from exo.shared.constants import EXO_IMAGE_TRANSPORT_DEBUG

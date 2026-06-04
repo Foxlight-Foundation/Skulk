@@ -115,8 +115,12 @@ def _select_distributed_test_model() -> DistributedTestModel:
                 f"{sorted(_TEST_MODELS_BY_NAME)}"
             )
         return _TEST_MODELS_BY_NAME[override]
+    # This module is imported during pytest collection on every platform.
+    # The working-set key is Metal-only — non-Metal backends (Linux CPU)
+    # don't expose it, so default to 0 there and fall back to the small
+    # model (the 20B needs Metal anyway).
     device_info = mx.device_info()
-    working_set = int(device_info["max_recommended_working_set_size"])
+    working_set = int(device_info.get("max_recommended_working_set_size", 0))
     if working_set >= _GPT_OSS_MIN_WORKING_SET_BYTES:
         return _GPT_OSS_20B
     return _LLAMA_3_2_1B
