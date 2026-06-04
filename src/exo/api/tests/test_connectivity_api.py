@@ -4,6 +4,7 @@ from typing import cast
 from unittest.mock import AsyncMock
 
 import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -20,7 +21,7 @@ from exo.shared.types.state import State
 from exo.utils.channels import channel
 
 
-def _json_object(response: httpx.Response) -> dict[str, object]:
+def _json_object(response: httpx2.Response) -> dict[str, object]:
     return cast(dict[str, object], cast(object, response.json()))
 
 

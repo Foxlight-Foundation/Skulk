@@ -1,3 +1,4 @@
+# pyright: reportAny=false
 """Tests for Gemma 4 assistant-model download in ResumableShardDownloader."""
 
 from pathlib import Path

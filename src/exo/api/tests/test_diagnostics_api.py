@@ -3,6 +3,7 @@
 from typing import cast
 
 import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -34,7 +35,7 @@ from exo.shared.types.worker.shards import PipelineShardMetadata
 from exo.utils.channels import channel
 
 
-def _json_object(response: httpx.Response) -> dict[str, object]:
+def _json_object(response: httpx2.Response) -> dict[str, object]:
     """Return a JSON response payload as a typed object mapping."""
 
     return cast(dict[str, object], cast(object, response.json()))

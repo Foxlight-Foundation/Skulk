@@ -33,10 +33,8 @@ dependencies = [
   "zstandard>=0.23.0",
   "pyyaml>=6.0.2",
   "types-PyYAML>=6.0.12",
-  # 0.5.0 (not latest) by design: it brings the gemma4_assistant drafter and
-  # matches the §6a ladder audit exactly. 0.6.x requires starlette>=1.0.1,
-  # which drags fastapi to 0.136/starlette 1.x on darwin — a web-framework
-  # major bump (TestClient/httpx2 migration) that belongs in its own PR.
+  # 0.6.1 bump is the next step (needs a vision-wrapper compat re-audit);
+  # this starlette-1.x migration unblocks it.
   "mlx-vlm==0.5.0; sys_platform == 'darwin'",
   "transformers>=5.5.0,<6.0.0",
 ]
@@ -49,6 +47,9 @@ exo = "exo.main:main"  # deprecated alias — use `uv run skulk`
 [dependency-groups]
 dev = [
   "basedpyright>=1.29.0",
+  # starlette >= 1.0 deprecates httpx-backed TestClient; httpx2 is its
+  # supported test transport. Production HTTP-client code stays on httpx.
+  "httpx2>=2.0",
   "pyinstaller>=6.17.0",
   "pytest>=8.4.0",
   "pytest-asyncio>=1.0.0",
@@ -137,11 +138,6 @@ required-version = ">=0.8.6"
 prerelease = "allow"
 environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
 extra-build-dependencies = { "miniaudio" = ["setuptools", "cffi", "pycparser"] }
-# Hold the line on the web framework: starlette 1.x deprecates the
-# httpx-based TestClient (wants httpx2) and breaks strict typing across the
-# API tests. Migrating is a deliberate standalone change, not a side effect
-# of the mlx version ladder.
-constraint-dependencies = ["starlette<1.0"]
 
 ###
 # ruff configuration
