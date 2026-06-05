@@ -1312,6 +1312,135 @@ class TestDeferredReplay:
 
 
 # ---------------------------------------------------------------------------
+# Per-expert MoE sidecar key stacking
+# ---------------------------------------------------------------------------
+
+
+class TestPerExpertStacking:
+    """SWP sidecars for MoE backbones preserve raw per-expert keys
+    (``mlp.experts.N.*``); mlx-lm decoder layers hold stacked SwitchGLU
+    tensors. The builder must normalize on load (found on the 35B-A3B
+    sidecar; the family sanitize that normally does this never runs on the
+    sidecar strict-load path)."""
+
+    def test_stacks_per_expert_keys(self) -> None:
+        from exo.worker.engines.mlx.drafters.qwen_sidecar import (
+            _stack_per_expert_block_weights,
+        )
+
+        pairs = [
+            ("input_layernorm.weight", mx.ones(4)),
+            ("mlp.experts.1.gate_proj.weight", mx.full((8, 4), 1.0)),
+            ("mlp.experts.0.gate_proj.weight", mx.full((8, 4), 0.0)),
+            ("mlp.experts.0.down_proj.weight", mx.full((4, 8), 0.0)),
+            ("mlp.experts.1.down_proj.weight", mx.full((4, 8), 1.0)),
+            ("mlp.gate.weight", mx.zeros((2, 4))),
+        ]
+        out = dict(_stack_per_expert_block_weights(pairs))
+        assert "mlp.switch_mlp.gate_proj.weight" in out
+        gate = out["mlp.switch_mlp.gate_proj.weight"]
+        # (num_experts, out, in), expert order by index regardless of input
+        # order.
+        assert gate.shape == (2, 8, 4)
+        assert mx.allclose(gate[0], mx.zeros((8, 4)))
+        assert mx.allclose(gate[1], mx.ones((8, 4)))
+        assert out["mlp.switch_mlp.down_proj.weight"].shape == (2, 4, 8)
+        # Router and norms pass through untouched.
+        assert "mlp.gate.weight" in out
+        assert "input_layernorm.weight" in out
+        assert not any("experts." in k for k in out)
+
+    def test_dense_pairs_pass_through(self) -> None:
+        from exo.worker.engines.mlx.drafters.qwen_sidecar import (
+            _stack_per_expert_block_weights,
+        )
+
+        pairs = [("self_attn.q_proj.weight", mx.zeros((4, 4)))]
+        assert _stack_per_expert_block_weights(pairs) == pairs
+
+    def test_expert_gap_left_unstacked_for_loud_failure(self) -> None:
+        from exo.worker.engines.mlx.drafters.qwen_sidecar import (
+            _stack_per_expert_block_weights,
+        )
+
+        pairs = [
+            ("mlp.experts.0.gate_proj.weight", mx.zeros((8, 4))),
+            ("mlp.experts.2.gate_proj.weight", mx.ones((8, 4))),  # 1 missing
+        ]
+        out = dict(_stack_per_expert_block_weights(pairs))
+        # Truncated sidecar: keys stay per-expert so the strict load fails
+        # on the missing stacked key instead of stacking a wrong tensor.
+        assert "mlp.switch_mlp.gate_proj.weight" not in out
+        assert len(out) == 2
+
+
+# ---------------------------------------------------------------------------
+# Sibling-layer construction under pipeline slicing
+# ---------------------------------------------------------------------------
+
+
+def _hybrid_args() -> qwen3_5.TextModelArgs:
+    """Toy hybrid args: full attention every 4th layer (like real Qwen3.5)."""
+    return qwen3_5.TextModelArgs(  # pyright: ignore[reportCallIssue]
+        model_type="qwen3_5",
+        hidden_size=HIDDEN,
+        intermediate_size=2 * HIDDEN,
+        num_hidden_layers=8,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        vocab_size=VOCAB,
+        full_attention_interval=4,
+        tie_word_embeddings=True,
+    )
+
+
+class TestSiblingLayerSliceAlignment:
+    """Hybrid constructors derive layer TYPE from layer_idx; a pipeline
+    slice whose offset is not a multiple of the attention interval makes the
+    local index of a full-attention layer map to a LINEAR position — the
+    naive ``type(layer)(args, layer_idx=<local>)`` silently builds a GDN
+    sibling and the strict-load fails (#201 Track 2a flagship run). The
+    builder must self-validate that the constructed sibling carries
+    ``self_attn``.
+    """
+
+    def test_aligned_slice_builds_attention_sibling(self) -> None:
+        from exo.worker.engines.mlx.drafters.introspection import (
+            build_sibling_attention_layer,
+        )
+
+        class _Model:
+            def __init__(self) -> None:
+                self.language_model = qwen3_5.TextModel(_hybrid_args())
+
+        sibling = build_sibling_attention_layer(_Model())
+        assert sibling is not None
+        assert getattr(sibling, "self_attn", None) is not None
+
+    def test_misaligned_slice_builds_attention_sibling(self) -> None:
+        # Simulate a pipeline shard: slice the trunk so the first
+        # full-attention layer (global 3) lands at local index 1 — a linear
+        # position in args terms. The 27B's 21-layer thirds hit exactly
+        # this; the 2B's 12-layer halves dodged it (12 % 4 == 0).
+        from exo.worker.engines.mlx.drafters.introspection import (
+            build_sibling_attention_layer,
+        )
+
+        class _Model:
+            def __init__(self) -> None:
+                self.language_model = qwen3_5.TextModel(_hybrid_args())
+
+        model = _Model()
+        trunk = model.language_model.model
+        trunk.layers = trunk.layers[2:]  # offset 2: 2 % 4 != 0
+
+        sibling = build_sibling_attention_layer(model)
+        assert sibling is not None
+        assert getattr(sibling, "self_attn", None) is not None
+
+
+# ---------------------------------------------------------------------------
 # Quantize-on-load — sidecar matches the target's precision
 # ---------------------------------------------------------------------------
 

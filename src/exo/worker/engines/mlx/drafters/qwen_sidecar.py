@@ -32,6 +32,7 @@ sidecar is rejected loudly at build time rather than silently mis-loaded.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Callable, Literal, Sequence, cast, final
 
 import mlx.core as mx
@@ -204,6 +205,53 @@ class QwenSidecarDrafter:
         return self._fc(combined)[None]
 
 
+_PER_EXPERT_KEY = re.compile(
+    r"^(.*)\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight$"
+)
+
+
+def _stack_per_expert_block_weights(
+    pairs: list[tuple[str, mx.array]],
+) -> list[tuple[str, mx.array]]:
+    """Normalize raw per-expert MoE keys to mlx-lm's stacked switch layout.
+
+    SWP sidecars preserve the checkpoint's original per-expert keys
+    (``mlp.experts.<n>.{gate,up,down}_proj.weight``), but mlx-lm decoder
+    layers hold stacked ``SwitchGLU`` tensors
+    (``mlp.switch_mlp.<proj>.weight``, shape ``(num_experts, out, in)``) —
+    the conversion normally happens in the family ``sanitize()``, which the
+    sidecar strict-load path never runs. Dense sidecars pass through
+    untouched.
+    """
+    stacked_groups: dict[tuple[str, str], dict[int, mx.array]] = {}
+    passthrough: list[tuple[str, mx.array]] = []
+    for key, value in pairs:
+        match = _PER_EXPERT_KEY.match(key)
+        if match is None:
+            passthrough.append((key, value))
+            continue
+        group_key = (match.group(1), match.group(3))
+        stacked_groups.setdefault(group_key, {})[int(match.group(2))] = value
+    for (prefix, projection), by_expert in stacked_groups.items():
+        expert_count = len(by_expert)
+        if sorted(by_expert) != list(range(expert_count)):
+            # A gap means a truncated/corrupt sidecar — let the strict load
+            # fail loudly on the missing stacked key rather than stacking
+            # a silently wrong tensor.
+            passthrough.extend(
+                (f"{prefix}.experts.{idx}.{projection}.weight", tensor)
+                for idx, tensor in by_expert.items()
+            )
+            continue
+        passthrough.append(
+            (
+                f"{prefix}.switch_mlp.{projection}.weight",
+                mx.stack([by_expert[idx] for idx in range(expert_count)]),
+            )
+        )
+    return passthrough
+
+
 def build_qwen_sidecar_drafter(
     model: object,
     weights: dict[str, mx.array],
@@ -252,14 +300,16 @@ def build_qwen_sidecar_drafter(
         )
         return None
 
-    block_pairs = [
-        (
-            key.removeprefix(QWEN35_BLOCK_PREFIX),
-            norm_weight(key) if "norm" in key else value,
-        )
-        for key, value in weights.items()
-        if key.startswith(QWEN35_BLOCK_PREFIX)
-    ]
+    block_pairs = _stack_per_expert_block_weights(
+        [
+            (
+                key.removeprefix(QWEN35_BLOCK_PREFIX),
+                norm_weight(key) if "norm" in key else value,
+            )
+            for key, value in weights.items()
+            if key.startswith(QWEN35_BLOCK_PREFIX)
+        ]
+    )
     if not block_pairs:
         logger.warning(
             "MTP: sidecar has no mtp.layers.0.* transformer block — the "
