@@ -608,16 +608,20 @@ class TestStreamGenerateWithMTP:
         )
         assert (1, [5]) in drafter.observe_calls[1:]
 
-    def test_reject_observes_target_pair(self) -> None:
-        # main 5, draft 7, verify target 3 → reject. The skipped position's
-        # pair carries the verifier's corrected token, not the draft.
+    def test_reject_observes_nothing_and_drafts_from_correction(self) -> None:
+        # Bonus-driven rounds: on a reject the correction becomes the next
+        # bonus — consumed by the next draft() call, never observed. The
+        # rejected draft token must never enter the pair stream.
         _, drafter, _ = self._run(
             main_token_ids=[5, 3, 0],
             draft_token_id=7,
             max_tokens=4,
         )
-        assert (1, [3]) in drafter.observe_calls[1:]
         assert all(7 not in tokens for _, tokens in drafter.observe_calls)
+        # Post-prefill, rejects contribute no observes (only accepted drafts do).
+        assert all(count == 2 for count, _ in drafter.observe_calls[:1])
+        # The correction (3) is consumed as the next draft's bonus pair.
+        assert 3 in drafter.draft_calls
 
     def test_draft_calls_track_main_tokens(self) -> None:
         _outputs, drafter, _ = self._run(
@@ -843,7 +847,7 @@ class TestStreamGenerateDepth(TestStreamGenerateWithMTP):
 
     def test_partial_accept_commits_prefix_plus_correction(self) -> None:
         # Chain [5, 9]: first draft matches the verifier (5), second rejects;
-        # the correction (5) commits in its place.
+        # the correction becomes the next bonus.
         outputs, drafter, _ = self._run(
             main_token_ids=[5] * 8,
             draft_token_id=[5, 9],
@@ -851,11 +855,12 @@ class TestStreamGenerateDepth(TestStreamGenerateWithMTP):
             depth=2,
         )
         assert any(o.from_draft for o in outputs)
-        # Partial accept observes accepted draft + correction in one call.
-        assert (2, [5, 5]) in drafter.observe_calls[1:]
+        # Only the ACCEPTED prefix is observed (the correction rides as the
+        # next bonus into draft()).
+        assert (1, [5]) in drafter.observe_calls[1:]
         assert all(9 not in tokens for _, tokens in drafter.observe_calls)
 
-    def test_full_reject_observes_only_correction(self) -> None:
+    def test_full_reject_observes_nothing(self) -> None:
         outputs, drafter, _ = self._run(
             main_token_ids=[5, 3, 3, 0],
             draft_token_id=[7, 9],
@@ -863,11 +868,13 @@ class TestStreamGenerateDepth(TestStreamGenerateWithMTP):
             depth=2,
         )
         assert len(outputs) >= 1
-        assert (1, [3]) in drafter.observe_calls[1:]
+        # Rejected drafts never enter the pair stream; no observes beyond
+        # the prefill bulk-ingest on a full reject.
         assert all(
             7 not in tokens and 9 not in tokens
             for _, tokens in drafter.observe_calls
         )
+        assert len(drafter.observe_calls) == 1  # prefill only
 
     def test_depth_reject_restores_ssm_state(self) -> None:
         """A depth-2 reject must trim all three verify positions and restore
