@@ -33,9 +33,9 @@ dependencies = [
   "zstandard>=0.23.0",
   "pyyaml>=6.0.2",
   "types-PyYAML>=6.0.12",
-  # 0.6.1 bump is the next step (needs a vision-wrapper compat re-audit);
-  # this starlette-1.x migration unblocks it.
-  "mlx-vlm==0.5.0; sys_platform == 'darwin'",
+  # 0.6.1 ships the speculative-drafter catalog (gemma4_assistant et al.,
+  # Gemma 4 MTP Phase B); vision-wrapper touchpoints re-audited against it.
+  "mlx-vlm==0.6.1; sys_platform == 'darwin'",
   "transformers>=5.5.0,<6.0.0",
 ]
 
