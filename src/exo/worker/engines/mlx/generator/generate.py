@@ -2579,7 +2579,7 @@ def mlx_generate(
     _drafter: Drafter | None = None
     _trunk_fn: Callable[..., mx.array] | None = None
     _head_fn: Callable[..., mx.array] | None = None
-    if mtp_weights is not None and group is not None:
+    if mtp_weights is not None and group is not None and group.size() > 1:
         # MTP is single-node only for now. Pipeline sharding needs the
         # distributed draft/verify design (#152 Phase 2: last-rank drafting,
         # K+1 pipeline verify, trim broadcast). Tensor-parallel would
