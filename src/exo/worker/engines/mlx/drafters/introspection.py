@@ -8,7 +8,7 @@ builders can fall back to running without speculation rather than crashing.
 
 from __future__ import annotations
 
-from typing import Callable, cast
+from typing import Callable, Protocol, cast
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -79,6 +79,35 @@ def get_norm_fn(model: object) -> Callable[[mx.array], mx.array] | None:
         norm: object | None = getattr(trunk, "norm", None)
         if norm is not None and callable(norm):
             return cast(Callable[[mx.array], mx.array], norm)
+    return None
+
+
+class _QuantizedLinearFacts(Protocol):
+    """The two quantization parameters mlx's untyped QuantizedLinear carries."""
+
+    group_size: int
+    bits: int
+
+
+def detect_quantization(model: object) -> tuple[int, int] | None:
+    """Return the target trunk's ``(group_size, bits)``, or ``None`` if bf16.
+
+    Drafters that borrow structure from the target should match its
+    quantization: an unquantized bf16 sidecar block on a 4-bit target makes
+    the draft forward memory-bound on weights several times larger than the
+    verifier's own layers read.
+    """
+    trunk = get_trunk(model)
+    if not isinstance(trunk, nn.Module):
+        return None
+    modules = cast(
+        "list[tuple[str, nn.Module]]",
+        trunk.named_modules(),  # pyright: ignore[reportUnknownMemberType]
+    )
+    for _name, module in modules:
+        if isinstance(module, nn.QuantizedLinear):
+            facts = cast(_QuantizedLinearFacts, cast(object, module))
+            return int(facts.group_size), int(facts.bits)
     return None
 
 

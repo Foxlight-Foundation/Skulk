@@ -96,6 +96,10 @@ generation_stream = mx.new_stream(mx.default_device())
 
 _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
 _MIN_CANCEL_CHECK_INTERVAL = 10
+# Ceiling on deferred-replay tokens riding along in an MTP verify forward.
+# Verify width is near-free while decode stays memory-bound; the cap only
+# exists so a pathological reject streak cannot grow the window unboundedly.
+_MTP_MAX_PENDING_REPLAY = 8
 
 
 class _FrameLookup(Protocol):
@@ -1282,7 +1286,9 @@ def _stream_generate_with_mtp(
     The loop owns verification, accept/reject, and cache reconciliation —
     preferring the language model's own ``rollback_speculative_cache`` when
     it exists (gemma4; no snapshots, no replay), falling back to
-    snapshot/restore + replay for hybrid-SSM caches (qwen GDN) and plain
+    snapshot/restore with *deferred replay* for hybrid-SSM caches (qwen
+    GDN) — committed-but-restored tokens ride at the front of the next
+    verify forward instead of paying a dedicated replay pass — and plain
     trim for pure-KV models. Drafters stay behind the
     :class:`~exo.worker.engines.mlx.drafters.protocol.Drafter` protocol,
     and the pair-stream contract holds: ``draft()`` consumes the
@@ -1326,6 +1332,15 @@ def _stream_generate_with_mtp(
     # Rejects must restore a pre-verify snapshot instead (unless the model
     # provides native rollback, which handles its own cache types).
     mtp_has_ssm = has_non_kv_caches(prompt_cache) and not callable(native_rollback)
+
+    # Deferred replay (snapshot path only): committed tokens whose cache
+    # entries were lost to a reject-restore. Instead of paying a dedicated
+    # replay forward per reject (~a full vanilla step), they ride along at
+    # the front of the next verify — extra verify *width* is effectively
+    # free on memory-bound decode (measured 46.6ms 2-wide vs 47.8ms 1-wide
+    # on Qwen3.5-9B). Capped so pathological reject streaks cannot grow the
+    # verify window without bound.
+    pending_replay: list[int] = []
 
     generated_count = 0
     accepted = 0
@@ -1390,6 +1405,21 @@ def _stream_generate_with_mtp(
             else addition
         )
 
+    def _flush_pending_replay() -> None:
+        """Forward deferred-replay tokens so the prompt cache catches up.
+
+        Called when the next forward cannot carry them (plain-decode
+        fallback), when the pending window hits its cap, and at stream end
+        so a persisted prefix cache stays consistent with the emitted text.
+        """
+        nonlocal pending_replay
+        if not pending_replay:
+            return
+        with mx.stream(generation_stream):
+            trunk_fn(mx.array(pending_replay)[None], cache=prompt_cache)
+            quantize_cache_fn(prompt_cache)
+        pending_replay = []
+
     # ---- prefill (loop-internal tail; the heavy prefill ran upstream) ----
     prompt_start = time.perf_counter()
     if len(prompt) > 1:
@@ -1428,6 +1458,7 @@ def _stream_generate_with_mtp(
     while generated_count < max_tokens:
         if speculation_disabled:
             # Plain decode: forward the bonus, sample the next one.
+            _flush_pending_replay()
             with mx.stream(generation_stream):
                 h_seq = trunk_fn(mx.array([[bonus]]), cache=prompt_cache)
                 quantize_cache_fn(prompt_cache)
@@ -1486,13 +1517,17 @@ def _stream_generate_with_mtp(
                 draft_toks = draft_toks[: eos_index + 1]
                 break
 
-        # ---- VERIFY: [bonus, d0..dK-1] — the round's only target forward ----
+        # ---- VERIFY: [pending..., bonus, d0..dK-1] — the round's only ----
+        # ---- target forward. Deferred-replay tokens ride at the front; ----
+        # ---- their rows are discarded (they were scored last round).   ----
         chain_len = len(draft_toks)
+        replay_len = len(pending_replay)
         pre_verify_snapshot = snapshot_ssm_states(prompt_cache) if mtp_has_ssm else None
-        verify_input = mx.array([bonus, *draft_toks])
+        verify_input = mx.array([*pending_replay, bonus, *draft_toks])
         with mx.stream(generation_stream):
-            v_h = trunk_fn(verify_input[None], cache=prompt_cache)  # (1, K+1, H)
+            full_h = trunk_fn(verify_input[None], cache=prompt_cache)  # (1,R+K+1,H)
             quantize_cache_fn(prompt_cache)
+            v_h = full_h[:, replay_len:, :]  # (1, K+1, H)
             v_logits = head_fn(v_h)  # (1, K+1, V)
             v_lp = v_logits[0].astype(mx.float32)
             v_lp = v_lp - mx.logsumexp(v_lp, axis=-1, keepdims=True)
@@ -1535,25 +1570,32 @@ def _stream_generate_with_mtp(
         full_accept = prefix_len == chain_len
 
         # ---- cache reconciliation BEFORE emitting (emits may break out) ----
-        # Verify forwarded K+1 positions: [bonus, drafts]. Committed:
-        # bonus + accepted prefix = prefix_len + 1 positions; the next bonus
-        # is NOT forwarded (next round's verify carries it).
+        # Verify forwarded R+K+1 positions: [pending, bonus, drafts].
+        # Committed: pending + bonus + accepted prefix; the next bonus is
+        # NOT forwarded (next round's verify carries it).
         if not full_accept:
             rejected = chain_len - prefix_len
             if callable(native_rollback):
+                # Native rollback never coexists with deferred replay
+                # (pending accrues on the snapshot path only).
                 with mx.stream(generation_stream):
                     native_rollback(prompt_cache, None, prefix_len, chain_len + 1)
             elif pre_verify_snapshot is not None:
-                # Hybrid model: restore SSM/rotating state and replay the
-                # committed prefix so every cache lands consistently.
-                trim_cache(prompt_cache, chain_len + 1, pre_verify_snapshot)
-                if prefix_len + 1 > 0:
-                    replay_input = mx.array([bonus, *draft_toks[:prefix_len]])
-                    with mx.stream(generation_stream):
-                        trunk_fn(replay_input[None], cache=prompt_cache)
-                        quantize_cache_fn(prompt_cache)
+                # Hybrid model: SSM state cannot be trimmed positionally, so
+                # restore the pre-verify snapshot and DEFER the committed
+                # prefix to the next verify instead of paying a dedicated
+                # replay forward now (a reject used to cost a full extra
+                # trunk pass; riding along in the next verify is free).
+                trim_cache(prompt_cache, replay_len + chain_len + 1, pre_verify_snapshot)
+                pending_replay = [*pending_replay, bonus, *draft_toks[:prefix_len]]
+                if len(pending_replay) >= _MTP_MAX_PENDING_REPLAY:
+                    _flush_pending_replay()
             else:
                 trim_cache(prompt_cache, rejected)
+        else:
+            # Full accept: the verify forward itself committed the pending
+            # tokens (and everything after them).
+            pending_replay = []
 
         # Pair-stream: draft() consumed the (hidden, bonus) pair; the
         # accepted drafts commit as next-tokens for positions bonus..d_{p-2},
@@ -1614,6 +1656,12 @@ def _stream_generate_with_mtp(
 
         # Hidden at the last committed position seeds the next round.
         hidden = v_h[0, prefix_len, :]
+
+    # Catch the cache up on any still-deferred tokens so a persisted prefix
+    # cache stays consistent with the emitted text. (Abandoned generators
+    # skip this, but they hold a private deepcopy from get_kv_cache — never
+    # the stored entry — so nothing shared can go stale.)
+    _flush_pending_replay()
 
     # No finalize here: every terminal yield above finalizes inside
     # _response — finalization happens exactly once, structurally.

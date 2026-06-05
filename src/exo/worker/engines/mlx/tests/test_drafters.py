@@ -21,10 +21,11 @@ cache behavior are exercised against genuine mlx-lm modules.
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Callable, cast
 from unittest.mock import MagicMock
 
 import mlx.core as mx
+import mlx.nn as nn
 from mlx.utils import tree_flatten
 from mlx_lm.models import qwen3_5
 
@@ -891,6 +892,10 @@ class TestStreamGenerateDepth(TestStreamGenerateWithMTP):
                 draft_token_id=[7, 9],  # always rejected at position 0
             )
         )
+        # Without this, MagicMock auto-provides a callable
+        # rollback_speculative_cache and the snapshot path under test is
+        # silently bypassed.
+        model.language_model = None
         ssm_cache = ArraysCache(size=1)
         sentinel = mx.ones((1, 4))
         ssm_cache.state = [sentinel]
@@ -945,6 +950,10 @@ class TestRejectPathSSMState:
                 draft_token_id=7,  # head verifies 5/3 → draft 7 always rejected
             )
         )
+        # Without this, MagicMock auto-provides a callable
+        # rollback_speculative_cache and the snapshot path under test is
+        # silently bypassed.
+        model.language_model = None
 
         ssm_cache = ArraysCache(size=1)
         sentinel = mx.ones((1, 4))
@@ -981,3 +990,218 @@ class TestRejectPathSSMState:
         # zeroed ([None]) after the first reject.
         assert ssm_cache.state[0] is not None, "reject zeroed the SSM state"
         assert mx.array_equal(ssm_cache.state[0], sentinel)
+
+
+# ---------------------------------------------------------------------------
+# Deferred replay — reject-restored tokens ride the next verify forward
+# ---------------------------------------------------------------------------
+
+
+class TestDeferredReplay:
+    """On the hybrid-SSM path a reject must NOT pay a dedicated replay
+    forward: restored-but-committed tokens are deferred and prepended to the
+    next verify input (extra verify width is free on memory-bound decode).
+    """
+
+    def _run_ssm_logged(
+        self,
+        *,
+        main_token_ids: list[int],
+        draft_token_id: int | list[int],
+        max_tokens: int,
+        depth: int = 1,
+    ) -> tuple[list[int], object]:
+        """Run the loop on a real ArraysCache+KVCache pair, logging every
+        trunk forward's sequence width."""
+        from mlx_lm.models.cache import ArraysCache, KVCache
+
+        from exo.worker.engines.mlx.generator.generate import (
+            _stream_generate_with_mtp,
+        )
+
+        model, tokenizer, drafter, trunk_fn, head_fn, _unused = (
+            _build_fake_stream_env(
+                main_token_ids=main_token_ids,
+                draft_token_id=draft_token_id,
+            )
+        )
+        # MagicMock would auto-provide language_model.rollback_speculative_cache
+        # as a callable, silently routing the loop down the native-rollback
+        # branch instead of the snapshot path under test.
+        model.language_model = None
+
+        widths: list[int] = []
+
+        def logging_trunk(tokens: mx.array, cache: object = None) -> mx.array:
+            widths.append(int(tokens.shape[1] if tokens.ndim == 2 else 1))
+            return trunk_fn(tokens, cache=cache)
+
+        ssm_cache = ArraysCache(size=1)
+        ssm_cache.state = [mx.ones((1, 4))]
+        kv_cache = KVCache()
+        # Generous seed: reject trims grow with the pending window and the
+        # fake trunk never advances offsets.
+        _ = kv_cache.update_and_fetch(  # pyright: ignore[reportUnknownMemberType]
+            mx.zeros((1, 1, 128, 4)), mx.zeros((1, 1, 128, 4))
+        )
+        cache = [ssm_cache, kv_cache]
+
+        sampler = lambda lp: mx.argmax(lp, axis=-1)  # noqa: E731
+        outputs = list(
+            _stream_generate_with_mtp(
+                model=model,
+                tokenizer=tokenizer,
+                drafter=drafter,
+                trunk_fn=logging_trunk,
+                head_fn=head_fn,
+                prompt=mx.array([1, 2, 3]),
+                max_tokens=max_tokens,
+                sampler=sampler,
+                logits_processors=[],
+                prompt_cache=cache,
+                kv_group_size=None,
+                kv_bits=None,
+                depth=depth,
+            )
+        )
+        assert len(outputs) >= 1
+        return widths, outputs
+
+    def test_rejects_pay_no_dedicated_replay_forward(self) -> None:
+        # Draft 31 never matches the verify targets → every round rejects.
+        # Old shape per reject: verify + a 1-wide replay forward. New shape:
+        # the restored [bonus] rides the next verify, growing its width.
+        widths, _ = self._run_ssm_logged(
+            main_token_ids=[5, 3, 9, 11, 0],
+            draft_token_id=31,
+            max_tokens=4,
+        )
+        # prefill(2), first-bonus(1), verify(2), verify(3: 1 pending),
+        # verify(4: 2 pending), end flush(3).
+        assert widths == [2, 1, 2, 3, 4, 3]
+
+    def test_full_accept_clears_pending(self) -> None:
+        # Round 1 rejects (target 3 ≠ draft 7) → pending [bonus]. Round 2
+        # accepts (target 7 == draft 7) → the verify commits the pending
+        # token, so round 3's verify is back to minimum width.
+        widths, _ = self._run_ssm_logged(
+            main_token_ids=[5, 3, 7, 9, 0],
+            draft_token_id=7,
+            max_tokens=5,
+        )
+        # prefill(2), first-bonus(1), verify(2: reject), verify(3: 1
+        # pending, full accept), verify(2: pending cleared), ...
+        assert widths[:5] == [2, 1, 2, 3, 2]
+
+    def test_pending_window_is_capped(self) -> None:
+        from exo.worker.engines.mlx.generator.generate import (
+            _MTP_MAX_PENDING_REPLAY,
+        )
+
+        widths, _ = self._run_ssm_logged(
+            main_token_ids=list(range(3, 18)),
+            draft_token_id=31,  # never matches → reject streak
+            max_tokens=14,
+        )
+        # The verify window may grow to cap+1 (cap pending + bonus + draft)
+        # but a reject streak must flush rather than grow without bound.
+        assert max(widths) <= _MTP_MAX_PENDING_REPLAY + 2
+        assert _MTP_MAX_PENDING_REPLAY in widths  # the mid-stream flush
+
+
+# ---------------------------------------------------------------------------
+# Quantize-on-load — sidecar matches the target's precision
+# ---------------------------------------------------------------------------
+
+
+def _tiny_args_quantizable() -> qwen3_5.TextModelArgs:
+    """Toy args big enough for mlx quantization (group size 32)."""
+    return qwen3_5.TextModelArgs(  # pyright: ignore[reportCallIssue]
+        model_type="qwen3_5",
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=32,
+        vocab_size=64,
+        full_attention_interval=1,
+        tie_word_embeddings=True,
+    )
+
+
+class TestQuantizeOnLoad:
+    """The builder quantizes the sidecar to the target's (group_size, bits).
+
+    Published sidecars ship bf16; leaving them unquantized on a quantized
+    target makes the draft forward read several times more weight bytes than
+    the verifier's own layers (measured 10.7ms/draft vs 1.2ms observe on
+    Qwen3.5-9B-4bit).
+    """
+
+    def _quantized_target(self) -> object:
+        from exo.worker.engines.mlx.drafters.introspection import get_trunk
+
+        class _Model:
+            def __init__(self) -> None:
+                self.language_model = qwen3_5.TextModel(_tiny_args_quantizable())
+
+        model = _Model()
+        trunk = get_trunk(model)
+        assert isinstance(trunk, nn.Module)
+        quantize_module = cast("Callable[..., object]", nn.quantize)
+        quantize_module(trunk, group_size=32, bits=4)
+        return model
+
+    def _sidecar_weights(self) -> dict[str, mx.array]:
+        hidden = 64
+        w: dict[str, mx.array] = {
+            "mtp.pre_fc_norm_hidden.weight": mx.ones((hidden,)),
+            "mtp.pre_fc_norm_embedding.weight": mx.ones((hidden,)),
+            "mtp.fc.weight": mx.zeros((hidden, 2 * hidden)),
+            "mtp.norm.weight": mx.ones((hidden,)),
+        }
+        layer = qwen3_5.DecoderLayer(_tiny_args_quantizable(), layer_idx=0)
+        for name, value in tree_flatten(layer.parameters()):
+            w[f"mtp.layers.0.{name}"] = value
+        return w
+
+    def test_detect_quantization(self) -> None:
+        from exo.worker.engines.mlx.drafters.introspection import (
+            detect_quantization,
+        )
+
+        assert detect_quantization(self._quantized_target()) == (32, 4)
+        assert detect_quantization(_TinyModel()) is None
+
+    def test_builder_quantizes_sidecar_to_match(self) -> None:
+        drafter = build_qwen_sidecar_drafter(
+            self._quantized_target(),
+            self._sidecar_weights(),
+            norm_convention="actual_scale",
+            concat_order="embed_first",
+        )
+        assert drafter is not None
+        assert isinstance(drafter._fc, nn.QuantizedLinear)
+        block_modules = cast(
+            "list[tuple[str, nn.Module]]",
+            drafter._block.named_modules(),  # pyright: ignore[reportUnknownMemberType]
+        )
+        assert any(
+            isinstance(module, nn.QuantizedLinear) for _name, module in block_modules
+        )
+        # The quantized drafter still drafts end-to-end.
+        drafter.begin_request([])
+        out = drafter.draft(mx.zeros(64), next_token=1)
+        assert out.shape == (1, 64)
+
+    def test_bf16_target_keeps_bf16_sidecar(self) -> None:
+        drafter = build_qwen_sidecar_drafter(
+            _TinyModel(),
+            _make_qwen35_weights(),
+            norm_convention="actual_scale",
+            concat_order="embed_first",
+        )
+        assert drafter is not None
+        assert isinstance(drafter._fc, nn.Linear)
+        assert not isinstance(drafter._fc, nn.QuantizedLinear)

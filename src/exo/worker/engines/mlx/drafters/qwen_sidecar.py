@@ -41,6 +41,7 @@ from mlx_lm.models.cache import KVCache
 
 from exo.worker.engines.mlx.drafters.introspection import (
     build_sibling_attention_layer,
+    detect_quantization,
     get_embed_fn,
     get_head_fn,
 )
@@ -106,7 +107,12 @@ class QwenSidecarDrafter:
     ) -> None:
         self._hnorm_w = hnorm_w
         self._enorm_w = enorm_w
-        self._fc_w = fc_w
+        # fc as a real Linear module so quantize_to_match can swap it for a
+        # QuantizedLinear; Linear(x) computes x @ W.T, matching the published
+        # raw-matmul semantics exactly.
+        fc_linear = nn.Linear(fc_w.shape[1], fc_w.shape[0], bias=False)
+        fc_linear.weight = fc_w
+        self._fc: nn.Module = fc_linear
         self._final_norm_w = final_norm_w
         self._block = block
         self._embed_fn = embed_fn
@@ -114,6 +120,24 @@ class QwenSidecarDrafter:
         self._concat_order: ConcatOrder = concat_order
         self._eps = eps
         self._cache = KVCache()
+
+    def quantize_to_match(self, *, group_size: int, bits: int) -> None:
+        """Quantize the sidecar block and fc to the target's precision.
+
+        Published sidecars ship bf16; on a quantized target the unquantized
+        block dominates draft cost (~350MB of MLP weight reads per draft on
+        Qwen3.5-9B — 10.7ms against the 1.2ms K/V-only observe). Drafts are
+        always verified by the target, so reduced drafter precision can only
+        nudge acceptance, never correctness.
+        """
+        # mlx ships no annotations for nn.quantize, hence the cast.
+        quantize_module = cast("Callable[..., object]", nn.quantize)
+        quantize_module(self._block, group_size=group_size, bits=bits)
+        fc = self._fc
+        if isinstance(fc, nn.Linear):
+            self._fc = nn.QuantizedLinear.from_linear(
+                fc, group_size=group_size, bits=bits
+            )
 
     def begin_request(self, prompt_cache: Sequence[object]) -> None:
         """Reset the private block KV cache for a new request.
@@ -177,7 +201,7 @@ class QwenSidecarDrafter:
         hn = _rms_norm(hiddens, self._hnorm_w, self._eps)
         parts = [en, hn] if self._concat_order == "embed_first" else [hn, en]
         combined = mx.concatenate(parts, axis=-1)
-        return (combined @ self._fc_w.T)[None]
+        return self._fc(combined)[None]
 
 
 def build_qwen_sidecar_drafter(
@@ -264,8 +288,23 @@ def build_qwen_sidecar_drafter(
         concat_order=concat_order,
         eps=eps,
     )
+
+    quantization = detect_quantization(model)
+    if quantization is not None:
+        target_group_size, target_bits = quantization
+        try:
+            drafter.quantize_to_match(group_size=target_group_size, bits=target_bits)
+        except ValueError as error:
+            # Mismatched dims (e.g. hidden size not divisible by group size)
+            # — keep the bf16 sidecar; it is slower, never wrong.
+            logger.warning(
+                f"MTP: could not quantize sidecar to match target ({error}) — keeping bf16 sidecar"
+            )
+            quantization = None
+
     logger.info(
         f"MTP drafter initialised (family=qwen-sidecar, phase=2, "
-        f"norm_convention={norm_convention!r}, concat_order={concat_order!r})"
+        f"norm_convention={norm_convention!r}, concat_order={concat_order!r}, "
+        f"quantized={quantization!r})"
     )
     return drafter
