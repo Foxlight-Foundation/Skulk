@@ -1276,7 +1276,7 @@ def _exchange_drafts(
     depth: int,
     sampling: SamplingParams,
     vocab_size: int,
-    round_index: int,
+    draft_key: int,
 ) -> tuple[list[int], mx.array | None]:
     """Distributed-draft round: drafting rank drafts, every rank receives.
 
@@ -1313,9 +1313,12 @@ def _exchange_drafts(
             q_row = warp_to_probs(chain_lp[0], sampling)
             # Explicit per-round key: only this rank draws here, and using
             # the global stream would desync it from the peers' aligned
-            # streams (they don't draft). categorical(log q) == draw from
-            # the same effective distribution the local path samples.
-            key = mx.random.key(round_index)
+            # streams (they don't draft). The key folds in a per-request
+            # value drawn from the SEEDED stream (symmetrically, on every
+            # rank — see the loop init), so the proposal remains a true
+            # seed-dependent sample from q and the Leviathan-Chen
+            # acceptance below stays distribution-preserving.
+            key = mx.random.key(draft_key)
             tok = mx.random.categorical(mx.log(q_row + 1e-12), key=key)
             payload = mx.concatenate(
                 [
@@ -1459,6 +1462,15 @@ def _stream_generate_with_mtp(
     drafter_reads_target_cache = draft_group is not None or bool(
         getattr(drafter, "reads_target_cache", False)
     )
+    # Per-request seed component for the drafting rank's explicit draw
+    # keys. Drawn from the SEEDED global stream on EVERY rank (one
+    # symmetric draw, so the shared stream stays aligned): without it the
+    # distributed sampled proposal would be a fixed function of the round
+    # index, ignoring task.seed and breaking the over-seeds output
+    # distribution Leviathan-Chen acceptance guarantees.
+    draft_key_base = 0
+    if draft_group is not None and not sampling.is_greedy:
+        draft_key_base = int(mx.random.randint(0, 2**31 - 1, shape=()).item())
 
     generated_count = 0
     accepted = 0
@@ -1628,7 +1640,7 @@ def _stream_generate_with_mtp(
                     depth=depth,
                     sampling=sampling,
                     vocab_size=vocab_size,
-                    round_index=generated_count,
+                    draft_key=draft_key_base + generated_count,
                 )
         else:
             assert drafter is not None  # checked at entry

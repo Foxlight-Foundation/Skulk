@@ -1126,7 +1126,7 @@ class TestExchangeDrafts:
             depth=2,
             sampling=SamplingParams(temperature=0.0),
             vocab_size=VOCAB,
-            round_index=3,
+            draft_key=3,
         )
         assert toks == [7, 9]
         assert probs is None
@@ -1162,7 +1162,7 @@ class TestExchangeDrafts:
             depth=2,
             sampling=SamplingParams(temperature=0.0),
             vocab_size=VOCAB,
-            round_index=3,
+            draft_key=3,
         )
         assert toks == [7, 9]
         assert probs is None
@@ -1186,7 +1186,7 @@ class TestExchangeDrafts:
             depth=1,
             sampling=SamplingParams(temperature=0.7),
             vocab_size=VOCAB,
-            round_index=3,
+            draft_key=3,
         )
         assert len(toks) == 1
         assert probs is not None
