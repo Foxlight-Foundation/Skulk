@@ -1196,6 +1196,69 @@ class TestDeferredReplay:
 
 
 # ---------------------------------------------------------------------------
+# Per-expert MoE sidecar key stacking
+# ---------------------------------------------------------------------------
+
+
+class TestPerExpertStacking:
+    """SWP sidecars for MoE backbones preserve raw per-expert keys
+    (``mlp.experts.N.*``); mlx-lm decoder layers hold stacked SwitchGLU
+    tensors. The builder must normalize on load (found on the 35B-A3B
+    sidecar; the family sanitize that normally does this never runs on the
+    sidecar strict-load path)."""
+
+    def test_stacks_per_expert_keys(self) -> None:
+        from exo.worker.engines.mlx.drafters.qwen_sidecar import (
+            _stack_per_expert_block_weights,
+        )
+
+        pairs = [
+            ("input_layernorm.weight", mx.ones(4)),
+            ("mlp.experts.1.gate_proj.weight", mx.full((8, 4), 1.0)),
+            ("mlp.experts.0.gate_proj.weight", mx.full((8, 4), 0.0)),
+            ("mlp.experts.0.down_proj.weight", mx.full((4, 8), 0.0)),
+            ("mlp.experts.1.down_proj.weight", mx.full((4, 8), 1.0)),
+            ("mlp.gate.weight", mx.zeros((2, 4))),
+        ]
+        out = dict(_stack_per_expert_block_weights(pairs))
+        assert "mlp.switch_mlp.gate_proj.weight" in out
+        gate = out["mlp.switch_mlp.gate_proj.weight"]
+        # (num_experts, out, in), expert order by index regardless of input
+        # order.
+        assert gate.shape == (2, 8, 4)
+        assert mx.allclose(gate[0], mx.zeros((8, 4)))
+        assert mx.allclose(gate[1], mx.ones((8, 4)))
+        assert out["mlp.switch_mlp.down_proj.weight"].shape == (2, 4, 8)
+        # Router and norms pass through untouched.
+        assert "mlp.gate.weight" in out
+        assert "input_layernorm.weight" in out
+        assert not any("experts." in k for k in out)
+
+    def test_dense_pairs_pass_through(self) -> None:
+        from exo.worker.engines.mlx.drafters.qwen_sidecar import (
+            _stack_per_expert_block_weights,
+        )
+
+        pairs = [("self_attn.q_proj.weight", mx.zeros((4, 4)))]
+        assert _stack_per_expert_block_weights(pairs) == pairs
+
+    def test_expert_gap_left_unstacked_for_loud_failure(self) -> None:
+        from exo.worker.engines.mlx.drafters.qwen_sidecar import (
+            _stack_per_expert_block_weights,
+        )
+
+        pairs = [
+            ("mlp.experts.0.gate_proj.weight", mx.zeros((8, 4))),
+            ("mlp.experts.2.gate_proj.weight", mx.ones((8, 4))),  # 1 missing
+        ]
+        out = dict(_stack_per_expert_block_weights(pairs))
+        # Truncated sidecar: keys stay per-expert so the strict load fails
+        # on the missing stacked key instead of stacking a wrong tensor.
+        assert "mlp.switch_mlp.gate_proj.weight" not in out
+        assert len(out) == 2
+
+
+# ---------------------------------------------------------------------------
 # Sibling-layer construction under pipeline slicing
 # ---------------------------------------------------------------------------
 
