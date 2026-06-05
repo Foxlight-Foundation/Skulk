@@ -1,15 +1,17 @@
 # pyright: reportAny=false, reportUnknownMemberType=false
 # pyright: reportUnknownArgumentType=false, reportUnknownVariableType=false
 # pyright: reportPrivateUsage=false
-"""TP lockstep regression test for distributed MTP (#201 Track 1).
+"""Distributed lockstep regression tests for MTP (#201 Tracks 1-2a).
 
-Spawns two local ranks over the ring backend, tensor-shards a real MTP
-model, and drives the production speculative loop on both ranks. The
-lockstep invariant under test: TP collectives give every rank identical
-logits and per-request RNG seeding aligns sampled draws, so accept/reject
-decisions — and therefore token traces and cache lengths — are identical
-on every rank. A divergence either fails the trace comparison or
-deadlocks a collective (caught by the join timeout).
+Spawns two local ranks over the ring backend, shards a real MTP model
+(tensor-parallel or pipeline), and drives the production speculative loop
+on both ranks. The lockstep invariant under test: distributed placements
+give every rank identical logits (TP via collectives; pipeline via the
+decode-mode all_gather plus replicated embed/norm/head) and per-request
+RNG seeding aligns sampled draws, so accept/reject decisions — and
+therefore token traces and cache lengths — are identical on every rank.
+A divergence either fails the trace comparison or deadlocks a collective
+(caught by the join timeout).
 
 Requires Qwen3.5-2B-4bit and its sidecar in the model store; skipped
 otherwise (same convention as test_distributed_fix.py).
@@ -51,6 +53,7 @@ def _lockstep_rank(
     hostfile_path: str,
     temperature: float,
     max_tokens: int,
+    shard_kind: str,
     result_queue: Any,
 ) -> None:
     os.environ["MLX_HOSTFILE"] = hostfile_path
@@ -65,7 +68,10 @@ def _lockstep_rank(
         from exo.shared.models.model_cards import ModelCard, ModelTask
         from exo.shared.types.common import ModelId
         from exo.shared.types.memory import Memory
-        from exo.shared.types.worker.shards import TensorShardMetadata
+        from exo.shared.types.worker.shards import (
+            PipelineShardMetadata,
+            TensorShardMetadata,
+        )
         from exo.worker.engines.mlx.cache import cache_length
         from exo.worker.engines.mlx.drafters import build_drafter
         from exo.worker.engines.mlx.generator.generate import (
@@ -82,21 +88,36 @@ def _lockstep_rank(
         # mlx_generate — replicate that contract here.
         mx.random.seed(42)
 
-        shard_meta = TensorShardMetadata(
-            model_card=ModelCard(
-                model_id=ModelId(MTP_TEST_MODEL_ID),
-                storage_size=Memory.from_bytes(1755848704),
-                n_layers=24,
-                hidden_size=2048,
-                supports_tensor=True,
-                tasks=[ModelTask.TextGeneration],
-            ),
-            device_rank=rank,
-            world_size=WORLD_SIZE,
-            start_layer=0,
-            end_layer=24,
+        model_card = ModelCard(
+            model_id=ModelId(MTP_TEST_MODEL_ID),
+            storage_size=Memory.from_bytes(1755848704),
             n_layers=24,
+            hidden_size=2048,
+            supports_tensor=True,
+            tasks=[ModelTask.TextGeneration],
         )
+        if shard_kind == "tensor":
+            shard_meta: TensorShardMetadata | PipelineShardMetadata = (
+                TensorShardMetadata(
+                    model_card=model_card,
+                    device_rank=rank,
+                    world_size=WORLD_SIZE,
+                    start_layer=0,
+                    end_layer=24,
+                    n_layers=24,
+                )
+            )
+        else:
+            # Pipeline: split the 24 layers across the two ranks.
+            start_layer, end_layer = [(0, 12), (12, 24)][rank]
+            shard_meta = PipelineShardMetadata(
+                model_card=model_card,
+                device_rank=rank,
+                world_size=WORLD_SIZE,
+                start_layer=start_layer,
+                end_layer=end_layer,
+                n_layers=24,
+            )
         from exo.shared.types.mlx import Model
 
         loaded_model, tokenizer = shard_and_load(
@@ -148,7 +169,12 @@ def _lockstep_rank(
         result_queue.put((rank, False, repr(error)))
 
 
-def _run_lockstep(temperature: float, max_tokens: int, port_offset: int) -> None:
+def _run_lockstep(
+    temperature: float,
+    max_tokens: int,
+    port_offset: int,
+    shard_kind: str = "tensor",
+) -> None:
     hosts = [f"127.0.0.1:{BASE_PORT + port_offset + i}" for i in range(WORLD_SIZE)]
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(hosts, f)
@@ -159,7 +185,7 @@ def _run_lockstep(temperature: float, max_tokens: int, port_offset: int) -> None
     procs = [
         ctx.Process(
             target=_lockstep_rank,
-            args=(rank, hostfile_path, temperature, max_tokens, queue),
+            args=(rank, hostfile_path, temperature, max_tokens, shard_kind, queue),
         )
         for rank in range(WORLD_SIZE)
     ]
@@ -199,3 +225,15 @@ def test_sampled_tp_lockstep() -> None:
     """Seeded sampled decoding: aligned RNG streams + data-dependent draw
     counts stay in lockstep (the #201 Track 1 open question)."""
     _run_lockstep(temperature=0.7, max_tokens=60, port_offset=4)
+
+
+def test_greedy_pipeline_lockstep() -> None:
+    """Pipeline shards run the same rank-symmetric loop (#201 Track 2a):
+    decode-mode all_gather hands every rank the final hidden, and
+    embed/norm/head are replicated — byte parity across the layer split."""
+    _run_lockstep(temperature=0.0, max_tokens=60, port_offset=8, shard_kind="pipeline")
+
+
+def test_sampled_pipeline_lockstep() -> None:
+    """Seeded sampled decoding under a pipeline split stays in lockstep."""
+    _run_lockstep(temperature=0.7, max_tokens=60, port_offset=12, shard_kind="pipeline")

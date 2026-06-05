@@ -698,24 +698,20 @@ def load_mlx_items(
 
     mtp_weights: dict[str, mx.array] | None = None
     runtime = bound_instance.bound_shard.model_card.runtime
-    # Speculation runs single-node and tensor-parallel (TP lockstep
-    # validated, #201 Track 1: identical logits from collectives +
-    # per-request RNG seeding align every accept/reject decision across
-    # ranks). Pipeline placements still disengage — they need the
-    # distributed draft/verify design (#201 Track 2) — so don't pay
-    # sidecar/assistant memory for speculation that will never run; on
-    # tight shard fits the eager load could even OOM.
-    placement_supports_speculation = (
-        group is None
-        or group.size() <= 1
-        or isinstance(bound_instance.bound_shard, TensorShardMetadata)
+    # Sidecar speculation runs everywhere (#201 Tracks 1-2a): the MTP loop
+    # is rank-symmetric on TP (identical logits from collectives) and on
+    # pipeline (decode-mode all_gather hands every rank the final hidden;
+    # embed/norm/head are replicated), with per-request RNG seeding
+    # aligning sampled decisions. Assistant drafters cross-attend the
+    # TARGET's KV cache, which a pipeline shard only holds for its own
+    # layers — they stay single-node/TP pending the last-rank protocol
+    # (#201 Track 2b); don't pay assistant memory for speculation that
+    # will never run, and on tight shard fits the eager load could OOM.
+    single_node = group is None or group.size() <= 1
+    assistant_placement_ok = single_node or isinstance(
+        bound_instance.bound_shard, TensorShardMetadata
     )
-    if (
-        runtime
-        and runtime.mtp_sidecar_repo
-        and runtime.mtp_heads
-        and placement_supports_speculation
-    ):
+    if runtime and runtime.mtp_sidecar_repo and runtime.mtp_heads:
         # Sidecar repos carry only mtp.safetensors (no config.json), so they
         # must be resolved with the sidecar resolver — build_model_path's
         # model-completeness check rejects their directories.
@@ -730,19 +726,8 @@ def load_mlx_items(
                 f"MTP sidecar repo {runtime.mtp_sidecar_repo!r} not downloaded; "
                 "running without MTP"
             )
-    elif runtime and runtime.mtp_sidecar_repo and runtime.mtp_heads:
-        logger.info(
-            "MTP sidecar declared but placement is pipeline-sharded "
-            f"(group size {group.size() if group else 0}); skipping sidecar "
-            "load — pipeline speculation pending #201 Track 2"
-        )
-
     assistant_model: object | None = None
-    if (
-        runtime
-        and runtime.assistant_model_repo
-        and placement_supports_speculation
-    ):
+    if runtime and runtime.assistant_model_repo and assistant_placement_ok:
         # Gemma 4 assistant drafter (gemma4-mtp Phase C). Same placement
         # envelope as MTP sidecars (#200/#201).
         assistant_dir = build_companion_model_path(
@@ -760,7 +745,8 @@ def load_mlx_items(
         logger.info(
             "Assistant model declared but placement is pipeline-sharded "
             f"(group size {group.size() if group else 0}); skipping assistant "
-            "load — pipeline speculation pending #201 Track 2"
+            "load — assistant drafters cross-attend the target's KV and "
+            "need the #201 Track 2b last-rank protocol on pipeline"
         )
 
     return cast(Model, model), tokenizer, vision_processor, mtp_weights, assistant_model

@@ -48,7 +48,10 @@ from exo.worker.engines.mlx.auto_parallel import (
     PipelineFirstLayer,
     PipelineLastLayer,
     clear_prefill_sends,
+    eval_with_timeout,
     flush_prefill_sends,
+    pipeline_eval_timeout_seconds,
+    pipeline_timeout_callback,
     set_pipeline_prefill,
     set_pipeline_queue_sends,
 )
@@ -1262,8 +1265,9 @@ def _stream_generate_with_mtp(
     kv_bits: int | None,
     depth: int = 1,
     sampling: SamplingParams | None = None,
+    fail_loud_on_drafter_error: bool = False,
 ) -> Generator[MlxGenerationResponse, None, None]:
-    """Single-node speculative decode loop: bonus-driven rounds via a Drafter.
+    """Speculative decode loop: bonus-driven rounds via a Drafter.
 
     Round structure (matching the reference implementations this was
     validated against): the loop carries a *bonus* token ``b`` — emitted but
@@ -1296,11 +1300,14 @@ def _stream_generate_with_mtp(
     ``(v_h[:, :p], drafts[:p])`` so stateful drafters keep gapless
     positional history.
 
-    This path is used for single-node and tensor-parallel inference — TP
-    ranks run it in validated lockstep (identical logits from collectives +
-    per-request RNG seeding align every accept/reject decision, #201
-    Track 1). The pipeline path (`_stream_generate_without_lookahead`) does
-    not support speculation yet.
+    This path is rank-symmetric and used for single-node, tensor-parallel,
+    and pipeline inference alike — distributed ranks run it in validated
+    lockstep (#201 Tracks 1-2a): TP collectives and pipeline's decode-mode
+    all_gather both give every rank identical logits, and per-request RNG
+    seeding aligns every sampled accept/reject decision. Sidecar drafters
+    are rank-local (replicated embed/head, zero collectives); assistant
+    drafters cross-attend the target's KV and stay excluded from pipeline
+    placements (#201 Track 2b).
     """
     if len(prompt) == 0:
         raise ValueError("MTP decode requires at least one prompt token")
@@ -1511,6 +1518,14 @@ def _stream_generate_with_mtp(
                     chain_sampled = sampler(chain_lp)  # (1,)
                 mx.eval(chain_sampled)
         except Exception as draft_error:  # noqa: BLE001 — speculation is best-effort
+            if fail_loud_on_drafter_error:
+                # Multi-rank placements: a rank-local fallback to plain
+                # decode would silently fork the collective schedule and
+                # corrupt/wedge the peers — abort the request loudly
+                # instead (#201 Track 2a, design seam 3). Deterministic
+                # drafter failures hit every rank identically before this
+                # point; what reaches here is resource-class (e.g. OOM).
+                raise
             logger.warning(
                 f"Drafter failed ({draft_error}); disabling speculation for "
                 "the remainder of this request"
@@ -2620,26 +2635,7 @@ def mlx_generate(
     _trunk_fn: Callable[..., mx.array] | None = None
     _head_fn: Callable[..., mx.array] | None = None
     _speculation_assets = mtp_weights is not None or assistant_model is not None
-    if (
-        _speculation_assets
-        and group is not None
-        and group.size() > 1
-        and _has_pipeline_communication_layer(model)
-    ):
-        # Pipeline sharding needs the distributed draft/verify design
-        # (#152 Phase 2: last-rank drafting, K+1 pipeline verify, trim
-        # broadcast). Tensor-parallel placements run the loop in validated
-        # lockstep (#201 Track 1, 2026-06-05: greedy byte-parity and
-        # seeded-sampled trace-hash parity on localhost ring and on real
-        # two-node hardware) — every rank sees identical logits from the
-        # collectives and the per-request mx.random.seed above aligns the
-        # sampled draws, so accept/reject decisions cannot diverge.
-        logger.info(
-            "Speculative decoding is not supported on pipeline placements "
-            f"(group size {group.size()}); skipping speculation pending #201 "
-            "Track 2"
-        )
-    elif _speculation_assets:
+    if _speculation_assets:
         if logits_processors:
             # Accepted draft tokens are committed from RAW verifier logits —
             # logits processors (repetition penalty, bench EOS ban) are only
@@ -2664,6 +2660,47 @@ def mlx_generate(
                 if _drafter is not None:
                     logger.info("MTP speculative decoding enabled (D=1)")
 
+    # Gate the agreement on the model CARD declaring speculation — the card
+    # is identical on every rank, so the collective count stays symmetric;
+    # what varies per rank (a missing sidecar download, a failed drafter
+    # build) is exactly what the collective settles.
+    _card_declares_speculation = (
+        model_card is not None
+        and model_card.runtime is not None
+        and (
+            model_card.runtime.mtp_sidecar_repo is not None
+            or model_card.runtime.assistant_model_repo is not None
+        )
+    )
+    if _card_declares_speculation and group is not None and group.size() > 1:
+        # Distributed lockstep requires every rank to make the same
+        # speculate-or-not choice: a rank whose sidecar download is missing
+        # or whose drafter build failed would otherwise run plain decode
+        # while its peers run speculative rounds — desynchronizing the
+        # collective schedule. One tiny all_sum per request settles it
+        # (#201 Track 2a, design seam 3).
+        drafter_ready = mx.distributed.all_sum(
+            mx.array(1.0 if _drafter is not None else 0.0),
+            group=group,
+            stream=mx.default_stream(mx.Device(mx.cpu)),
+        )
+        eval_with_timeout(
+            drafter_ready,
+            timeout_seconds=pipeline_eval_timeout_seconds(),
+            on_timeout=pipeline_timeout_callback(
+                "mtp_drafter_agreement",
+                {"group_size": group.size()},
+                is_prefill=False,
+            ),
+        )
+        ready_count = int(drafter_ready.item())
+        if _drafter is not None and ready_count != group.size():
+            logger.warning(
+                f"Speculation disabled for this request: only {ready_count}/"
+                f"{group.size()} ranks have a working drafter"
+            )
+            _drafter = None
+
     with runner_phase(
         "decode_stream",
         detail="stream_generate_setup",
@@ -2675,22 +2712,12 @@ def mlx_generate(
         task_id=trace_task_id,
         include_memory=True,
     ):
-        if group is not None and _has_pipeline_communication_layer(model):
-            logger.info(
-                "Using sequential pipeline decode without stream_generate lookahead"
-            )
-            token_generator = _stream_generate_without_lookahead(
-                model=model,
-                tokenizer=tokenizer,
-                prompt=last_token,
-                max_tokens=max_tokens,
-                sampler=sampler,
-                logits_processors=logits_processors,
-                prompt_cache=caches,
-                kv_group_size=KV_GROUP_SIZE,
-                kv_bits=KV_BITS,
-            )
-        elif _drafter is not None:
+        if _drafter is not None:
+            # The MTP loop is rank-symmetric and runs on single-node, TP,
+            # and pipeline placements alike (#201 Tracks 1-2a): pipeline
+            # decode all-gathers the final hidden to every rank and
+            # embed/norm/head are replicated, so every rank sees identical
+            # logits and the per-request seed aligns sampled draws.
             assert _trunk_fn is not None and _head_fn is not None
             token_generator = _stream_generate_with_mtp(
                 model=model,
@@ -2713,6 +2740,26 @@ def mlx_generate(
                     else 1
                 ),
                 sampling=_mtp_sampling,
+                # A rank-local drafter failure mid-request would silently
+                # fork the collective schedule; on multi-rank placements
+                # the loop aborts loud instead (peers surface via the
+                # pipeline eval watchdogs).
+                fail_loud_on_drafter_error=group is not None and group.size() > 1,
+            )
+        elif group is not None and _has_pipeline_communication_layer(model):
+            logger.info(
+                "Using sequential pipeline decode without stream_generate lookahead"
+            )
+            token_generator = _stream_generate_without_lookahead(
+                model=model,
+                tokenizer=tokenizer,
+                prompt=last_token,
+                max_tokens=max_tokens,
+                sampler=sampler,
+                logits_processors=logits_processors,
+                prompt_cache=caches,
+                kv_group_size=KV_GROUP_SIZE,
+                kv_bits=KV_BITS,
             )
         else:
             token_generator = stream_generate(
