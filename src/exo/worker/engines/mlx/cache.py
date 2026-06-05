@@ -75,11 +75,45 @@ class _OptiqKVCacheFactory(Protocol):
     def __call__(self, *, head_dim: int, bits: int, seed: int) -> object: ...
 
 
+def _clone_arrays_cache(source: ArraysCache) -> ArraysCache:
+    """Reference-clone an ArraysCache without copying its arrays.
+
+    SSM layers (GDN / Mamba-style) *replace* their cache slots wholesale on
+    every forward (``cache[0] = new_state``) and never mutate the stored
+    arrays in place, so the clone and the live cache can safely share array
+    references. Cloning only the wrapper keeps the snapshot immune to those
+    slot replacements while avoiding the recurrent-state buffer copy (and
+    the GPU sync it forces) that ``deepcopy`` would pay — which matters in
+    the MTP verify loop, where a snapshot is taken every round.
+    """
+    clone = ArraysCache(len(source.state))
+    clone.state = list(source.state)
+    # Batch-mode bookkeeping (None on the single-sequence decode path);
+    # carried across so the clone matches deepcopy semantics for batched
+    # callers. Dynamic attrs in mlx-lm, hence the targeted ignores.
+    clone.left_padding = source.left_padding  # type: ignore[reportAttributeAccessIssue]
+    clone.lengths = source.lengths  # type: ignore[reportAttributeAccessIssue]
+    return clone
+
+
+def _copy_cache_entry(
+    entry: ArraysCache | RotatingKVCache,
+) -> ArraysCache | RotatingKVCache:
+    """Copy a non-trimmable cache entry as cheaply as correctness allows.
+
+    RotatingKVCache writes into preallocated buffers in place, so reference
+    sharing would alias live state into the snapshot — it needs a real copy.
+    """
+    if isinstance(entry, ArraysCache):
+        return _clone_arrays_cache(entry)
+    return deepcopy(entry)
+
+
 def snapshot_ssm_states(cache: KVCacheType) -> CacheSnapshot:
     states: list[ArraysCache | RotatingKVCache | None] = []
     for c in cache:
         if isinstance(c, (ArraysCache, RotatingKVCache)):
-            states.append(deepcopy(c))
+            states.append(_copy_cache_entry(c))
         else:
             states.append(None)
     token_count = cache_length(cache)
@@ -365,8 +399,12 @@ def trim_cache(
 ) -> None:
     for i, c in enumerate(cache):
         if isinstance(c, (ArraysCache, RotatingKVCache)):
-            if snapshot is not None and snapshot.states[i] is not None:
-                cache[i] = deepcopy(snapshot.states[i])  # type: ignore
+            snapshot_state = snapshot.states[i] if snapshot is not None else None
+            if snapshot_state is not None:
+                # Copy on restore too: snapshots can be restored more than
+                # once (KVPrefixCache reuse), so the live cache must not BE
+                # the snapshot's stored object.
+                cache[i] = _copy_cache_entry(snapshot_state)  # type: ignore
             else:
                 c.state = [None] * len(c.state)
         else:
