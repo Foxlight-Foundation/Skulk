@@ -9,6 +9,28 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Bonus-driven MTP rounds: the speculative loop was restructured to the
+  cadence the reference implementations use — every round verifies
+  `[bonus, drafts]` in one forward and the very next round drafts from
+  the correction position, instead of skipping post-correction drafts
+  (statistically the easiest ones; the old cadence forfeited ~25pp of
+  acceptance on identical inputs). Two companion optimizations close the
+  hybrid-SSM gap the new cadence exposed: *deferred replay* (on a reject,
+  restored-but-committed tokens ride at the front of the next verify
+  forward instead of paying a dedicated replay pass — extra verify width
+  is free on memory-bound decode, measured 46.6ms 2-wide vs 47.8ms 1-wide
+  on Qwen3.5-9B) and *quantize-on-load sidecars* (the builder quantizes
+  the bf16 sidecar block + fc to the target's `(group_size, bits)`; the
+  unquantized block was ~10.7ms of the round budget). Re-measured
+  2026-06-05 on M4/24GB, superseding all earlier figures in this section:
+  Qwen3.5-9B 79% acceptance / 1.38x greedy (1.43x at T=0.7), Qwen3.5-27B
+  depth-2 82% / 10.5 tok/s (1.87x), gemma-4-26B-A4B 84% / 35.1 tok/s
+  (~2.2x vs warm vanilla), gemma-4-E4B depth-3 1.86x — beating upstream
+  mlx-vlm (1.43x/1.66x) on identical artifacts. This RETRACTS the earlier
+  "chained depth does not pay on quantized targets" finding below: it was
+  an artifact of the old cadence's skipped drafts, not of quantized
+  hiddens (E4B's carded depth is now 3).
+
 - Gemma 4 assistant speculative decoding (gemma4-mtp Phase C): the
   separate 4-layer assistant models Google publishes per Gemma 4 target
   now draft through Skulk's Drafter protocol — the assistant cross-attends

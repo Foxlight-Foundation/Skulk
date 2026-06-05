@@ -16,14 +16,15 @@ format = "token_delimited"
 default_effort = "medium"
 disabled_effort = "none"
 
-# MTP speculative decoding validated 2026-06-04 on M4/24GB: 87.6% draft
-# acceptance (657/750 across a 10-prompt suite, exact-attempt metric),
-# 1.20x decode speedup. Base heads chosen deliberately: a 750-draft/arm
+# MTP speculative decoding re-validated 2026-06-05 on M4/24GB under the
+# bonus-driven cadence (deferred replay + quantize-on-load sidecar):
+# 79% acceptance, 28.8 tok/s vs 20.9 vanilla (1.38x greedy; 85%/1.43x at
+# temperature 0.7). Base heads chosen deliberately: a 750-draft/arm
 # comparison measured base (87.6%) and instruct (87.3%) heads as
 # statistically indistinguishable, so one base sidecar serves every
 # variant of this backbone (Skulk #192 / PR #193 validation sweep).
-# Depth stays 1: chained depth-2 measured SLOWER here (1.15x vs 1.30x) —
-# the drafter's extra chain cost outweighs the tokens on a 9B-fast trunk.
+# Depth stays 1: chained depth-2 measured SLOWER than vanilla (0.87x) —
+# 56% chained acceptance cannot carry the extra cost on a 9B-fast trunk.
 [runtime]
 mtp_heads = true
 mtp_max_depth = 1

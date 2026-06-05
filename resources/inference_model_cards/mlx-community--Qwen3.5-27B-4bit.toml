@@ -15,11 +15,12 @@ format = "token_delimited"
 default_effort = "medium"
 disabled_effort = "none"
 
-# MTP speculative decoding validated 2026-06-04 on M4/24GB at depth 2:
-# 1.92x decode speedup (5.4 -> 10.4 tok/s), 78% chained acceptance, greedy
-# parity OK. Depth 2 pays only on models this size — the trunk dominates
-# the drafter's extra chain cost (the 9B measured slower at depth 2 than
-# depth 1 and stays at 1) (Skulk #192 / PR #193 / depth-K follow-up).
+# MTP speculative decoding re-validated 2026-06-05 on M4/24GB under the
+# bonus-driven cadence (deferred replay + quantize-on-load sidecar):
+# depth 2 — 82% acceptance, 10.5 tok/s vs ~5.4-6.0 vanilla (1.87x; depth 1
+# reference: 83%, 10.2 tok/s). Depth 2 still pays on models this size —
+# the trunk dominates the drafter's extra chain cost; the 9B stays at
+# depth 1 (Skulk #192 / PR #193 / bonus-driven cadence rework).
 [runtime]
 mtp_heads = true
 mtp_max_depth = 2

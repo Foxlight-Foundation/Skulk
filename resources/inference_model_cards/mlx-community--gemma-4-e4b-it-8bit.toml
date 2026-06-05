@@ -25,10 +25,15 @@ tool_call_format = "gemma4"
 prompt_renderer = "gemma4"
 output_parser = "gemma4"
 # Companion drafter for speculative decoding (Gemma 4 assistant pattern).
-# ACTIVE since gemma4-mtp Phase C: validated 2026-06-05 on M4/24GB —
-# depth 1: 48% acceptance, 1.26x; depth 3: 1.30x (marginal; default depth
-# 1 retained — chain acceptance decays on quantized targets).
+# ACTIVE since gemma4-mtp Phase C; re-validated 2026-06-05 under the
+# bonus-driven cadence: depth 3 — 50% chained acceptance, 34.4 tok/s vs
+# 18.5 vanilla (1.86x; depth 1 reference: 74%, 1.68x). Beats upstream
+# mlx-vlm on identical artifacts (1.43x/1.66x at the same depths). The
+# earlier "chain acceptance decays on quantized targets" depth law was an
+# artifact of the pre-cadence loop skipping post-correction drafts and is
+# retracted.
 assistant_model_repo = "mlx-community/gemma-4-E4B-it-assistant-bf16"
+mtp_max_depth = 3
 # Same FAST_SYNCH wedge as the 26b card — GPU command queue stalls in the
 # pipeline-parallel inference path, kernel watchdog panics the box. Disable
 # until the upstream MLX issue is fixed or a cheap inference-side fence
