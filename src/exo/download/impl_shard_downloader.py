@@ -271,7 +271,15 @@ class ResumableShardDownloader(ShardDownloader):
         # never fetched (phase-c spec gotcha, flagged on PR #185). Degrade
         # the reported status when a declared companion is missing on disk
         # so the download path runs and pulls it.
-        if progress.status == "complete" and self._missing_companion(shard):
+        # Never degrade in offline mode: the companion cannot be fetched
+        # anyway, and load_mlx_items treats missing companions as optional —
+        # degrading would turn a perfectly loadable cached base into
+        # DownloadFailed on air-gapped nodes.
+        if (
+            progress.status == "complete"
+            and not self.offline
+            and self._missing_companion(shard)
+        ):
             return progress.model_copy(update={"status": "in_progress"})
         return progress
 

@@ -240,6 +240,12 @@ def build_gemma4_assistant_drafter(
             "running without speculation"
         )
         return None
+    if not callable(getattr(assistant, "_input_embed", None)):
+        logger.warning(
+            "Gemma 4 assistant: bind(target) did not resolve the target's "
+            "input embeddings — assistant drafting disabled"
+        )
+        return None
     drafter = Gemma4AssistantDrafter(assistant=assistant, target_model=model)
     logger.info("Gemma 4 assistant drafter initialised (family=gemma4-assistant)")
     return drafter
@@ -251,21 +257,23 @@ def load_assistant_model(model_dir: Path) -> object | None:
     Enforces bf16 (fp16 assistants degenerate after ~50 tokens — unscaled
     QK per the phase-c spec). Returns ``None`` on any failure, logged.
     """
-    # Deferred import: mlx-vlm is darwin-only and heavy.
-    from mlx_vlm.speculative.drafters.gemma4_assistant import (  # pyright: ignore[reportMissingTypeStubs]
-        Gemma4AssistantDraftModel,
-        ModelConfig,
-    )
-
     config_path = model_dir / "config.json"
     weights_path = model_dir / "model.safetensors"
     if not config_path.is_file() or not weights_path.is_file():
         logger.warning(
             f"Gemma 4 assistant at {model_dir} is incomplete "
-            "(needs config.json + model.safetensors) — running without speculation"
+            "(needs config.json + model.safetensors) — assistant drafting disabled"
         )
         return None
     try:
+        # Deferred import: mlx-vlm is darwin-only and heavy; importing here
+        # keeps non-darwin environments (and the missing-file fast path)
+        # from ever touching it.
+        from mlx_vlm.speculative.drafters.gemma4_assistant import (  # pyright: ignore[reportMissingTypeStubs]
+            Gemma4AssistantDraftModel,
+            ModelConfig,
+        )
+
         with open(config_path) as fh:
             config_dict = cast("dict[str, object]", json.load(fh))
         config = ModelConfig.from_dict(config_dict)  # pyright: ignore[reportUnknownMemberType]

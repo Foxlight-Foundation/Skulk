@@ -740,7 +740,8 @@ def load_mlx_items(
         else:
             logger.warning(
                 f"Assistant model repo {runtime.assistant_model_repo!r} not "
-                "downloaded; running without speculation"
+                "downloaded; assistant drafting disabled (MTP sidecar "
+                "speculation, if configured, is unaffected)"
             )
     elif runtime and runtime.assistant_model_repo:
         logger.info(
