@@ -7,14 +7,6 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
-### Fixed
-
-- MTP terminal responses (EOS / max-tokens break paths) now finalize the
-  detokenizer before yielding, matching the non-MTP path — sentencepiece-
-  backed tokenizers buffer partial byte sequences until finalize() and
-  could drop the last token's tail bytes (#180 item 4; latent for current
-  tiktoken-backed targets).
-
 ### Added
 
 - Sampled-decoding support for MTP speculative decoding (issue #180 item 1):
@@ -76,6 +68,11 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- MTP terminal responses (EOS / max-tokens break paths) now finalize the
+  detokenizer exactly once before yielding, matching the non-MTP path —
+  sentencepiece-backed tokenizers buffer partial byte sequences until
+  finalize() and could drop the last token's tail bytes (#180 item 4;
+  latent for current tiktoken-backed targets).
 - MTP drafting consumed post-final-norm hidden states; the trunk accessor
   now returns pre-norm hiddens (what the heads were trained on) and folds
   the final norm into the head callable, keeping main-path logits
