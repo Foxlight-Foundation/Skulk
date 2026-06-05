@@ -26,8 +26,12 @@ tool_call_format = "gemma4"
 prompt_renderer = "gemma4"
 output_parser = "gemma4"
 # Companion drafter for speculative decoding (Gemma 4 assistant pattern).
-# Pre-downloaded with the model; consumed once the gemma4_assistant
-# drafter (mlx-vlm >= 0.5.0) is wired in (Phase C).
+# ACTIVE since gemma4-mtp Phase C: validated 2026-06-05 on M4/24GB at
+# depth 1 — 55% acceptance, 28.8 tok/s vs 15.5-17.8 vanilla (1.6-1.85x;
+# the MoE vanilla baseline is noisy, speculative throughput is stable).
+# Depth > 1 measured SLOWER on this 4-bit target (chain acceptance decays
+# against quantized hiddens; the assistant is trained against bf16) —
+# leave depth at the default 1.
 assistant_model_repo = "mlx-community/gemma-4-26B-A4B-it-assistant-bf16"
 # MLX_METAL_FAST_SYNCH wedges the GPU command queue on this model under the
 # ring backend with multimodal load: the runner thread enters TH_UNINT in

@@ -170,18 +170,32 @@ class TestGemma4AssistantDrafter:
         drafter, _, _ = self._drafter()
         drafter.observe(mx.zeros((3, HIDDEN)), mx.array([1, 2, 3]))  # must not raise
 
-    def test_layer_cache_mismatch_raises(self) -> None:
+    def test_kv_shared_prefix_mapping(self) -> None:
+        """Fewer caches than layers = KV-shared model: caches map to the
+        layer prefix (gemma4 make_cache builds layers[:first_kv_shared])."""
         assistant = _FakeAssistant()
         drafter = Gemma4AssistantDrafter(
             assistant=assistant, target_model=_FakeGemmaModel()
         )
-        drafter.begin_request([_kv_cache_with(2, 1.0)])  # 1 cache vs 2 layers
+        # 1 cache vs 2 layers -> only the first (sliding) layer participates.
+        drafter.begin_request([_kv_cache_with(2, 1.0)])
+        drafter.draft(mx.zeros(HIDDEN), next_token=1)
+        assert assistant.set_shared_kv_calls == [({"sliding_attention"}, 2)]
+
+    def test_more_caches_than_layers_raises(self) -> None:
+        assistant = _FakeAssistant()
+        drafter = Gemma4AssistantDrafter(
+            assistant=assistant, target_model=_FakeGemmaModel()
+        )
+        drafter.begin_request(
+            [_kv_cache_with(2, 1.0), _kv_cache_with(2, 1.0), _kv_cache_with(2, 1.0)]
+        )
         try:
             drafter.draft(mx.zeros(HIDDEN), next_token=1)
         except RuntimeError as error:
-            assert "mismatch" in str(error)
+            assert "more caches" in str(error)
         else:
-            raise AssertionError("expected RuntimeError on layer/cache mismatch")
+            raise AssertionError("expected RuntimeError on cache surplus")
 
 
 class TestBuilderDispatch:

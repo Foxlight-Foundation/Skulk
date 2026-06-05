@@ -54,7 +54,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Implementations:**
   - `qwen_sidecar.py::QwenSidecarDrafter` — Phase 2: +1.0 zero-centered norm shift, `embed_first` concat, sidecar `mtp.layers.0` block instantiated from the target family's own decoder-layer class (strict-loaded), private `KVCache`. Validated ~58–74% acceptance on Qwen3.5-2B (issue #192).
   - `deepseek_sidecar.py::DeepseekSidecarDrafter` — legacy projection-only head; conventions unverified against real weights.
-  - Planned: Gemma 4 assistant-model drafter (foxlight-docs `gemma4-mtp` Phase C).
+  - `gemma4_assistant.py::Gemma4AssistantDrafter` — wraps mlx-vlm's chain-trained assistant model: cross-attends over the target's KV (shared-KV extraction incl. RotatingKVCache temporal restore), consumes post-norm hiddens, loads via `assistant_model_repo` (bf16-enforced). Depth 1 is the measured optimum on quantized targets.
 - **Observability:** the loop logs `MTP acceptance so far: A/N` every 32 drafts; the public `GenerationResponse` does not carry per-token draft provenance.
 
 ### Router (libp2p)

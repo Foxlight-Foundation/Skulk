@@ -25,8 +25,9 @@ tool_call_format = "gemma4"
 prompt_renderer = "gemma4"
 output_parser = "gemma4"
 # Companion drafter for speculative decoding (Gemma 4 assistant pattern).
-# Pre-downloaded with the model; consumed once the gemma4_assistant
-# drafter (mlx-vlm >= 0.5.0) is wired in (Phase C).
+# ACTIVE since gemma4-mtp Phase C: validated 2026-06-05 on M4/24GB —
+# depth 1: 48% acceptance, 1.26x; depth 3: 1.30x (marginal; default depth
+# 1 retained — chain acceptance decays on quantized targets).
 assistant_model_repo = "mlx-community/gemma-4-E4B-it-assistant-bf16"
 # Same FAST_SYNCH wedge as the 26b card — GPU command queue stalls in the
 # pipeline-parallel inference path, kernel watchdog panics the box. Disable

@@ -151,12 +151,19 @@ class Gemma4AssistantDrafter:
         ``position_ids`` held constant at the bonus offset, ``h_prev``
         advanced with the assistant's own ``post_projection`` output.
         """
-        if len(self._layers) != len(self._prompt_cache):
+        if len(self._prompt_cache) > len(self._layers):
             raise RuntimeError(
-                "Gemma 4 assistant drafter: target layer/cache count mismatch "
+                "Gemma 4 assistant drafter: more caches than target layers "
                 f"({len(self._layers)} layers vs {len(self._prompt_cache)} caches)"
             )
-        shared = _extract_shared_kv(self._layers, self._prompt_cache)
+        # KV-shared models (E2B/E4B: num_kv_shared_layers > 0) own caches only
+        # for the first N layers (gemma4 make_cache builds
+        # layers[:first_kv_shared_layer_idx]); the deeper layers reuse that
+        # K/V — and the last cache-owning layer of each type is exactly what
+        # the assistant cross-attends over.
+        shared = _extract_shared_kv(
+            self._layers[: len(self._prompt_cache)], self._prompt_cache
+        )
         # The bonus position == the target cache offset at draft time (the
         # position next_token is about to occupy).
         offset = max(

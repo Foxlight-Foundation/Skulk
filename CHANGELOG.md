@@ -9,6 +9,23 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Gemma 4 assistant speculative decoding (gemma4-mtp Phase C): the
+  separate 4-layer assistant models Google publishes per Gemma 4 target
+  now draft through Skulk's Drafter protocol — the assistant cross-attends
+  over the target's KV cache (shared-KV extraction with RotatingKVCache
+  temporal restore), consumes the target's post-norm hidden, and loads
+  bf16-enforced when a card declares `assistant_model_repo` (single-node,
+  same #200/#201 envelope; forces SequentialGenerator like MTP). Measured
+  on M4/24GB: gemma-4-26B-A4B-it-4bit 55% acceptance, 28.8 tok/s vs
+  15.5–17.8 vanilla (1.6–1.85×); gemma-4-e4b-it-8bit 48%, 1.26×. Notable
+  finding: chained depth does NOT pay on quantized targets (the assistant
+  is trained against bf16 hiddens; chain acceptance decays to ~30% and MoE
+  verify cost grows with block size) — depth 1 is the default and the
+  measured optimum for the carded quants. Also fixed en route: the
+  pre-norm trunk wrapper is gated to qwen-shaped trunks (it would build
+  wrong masks for gemma4's sliding/full layers), and the companion-repo
+  download-completeness gap (#185 flag) — cached bases now fetch newly
+  declared sidecars/assistants.
 - Sampled-decoding support for MTP speculative decoding (issue #180 item 1):
   at temperature > 0 the loop switches from argmax-prefix acceptance to
   Leviathan-Chen probability-ratio rejection sampling over the *effective*
