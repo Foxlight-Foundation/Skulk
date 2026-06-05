@@ -9,6 +9,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Sampled-decoding support for MTP speculative decoding (issue #180 item 1):
+  at temperature > 0 the loop switches from argmax-prefix acceptance to
+  Leviathan-Chen probability-ratio rejection sampling over the *effective*
+  sampler distributions (temp + top_p + min_p + top_k, computed by reusing
+  mlx-lm's own filter functions so they cannot drift), with residual
+  resampling on reject — distribution-preserving by construction and
+  verified by a 40k-draw statistical unit test. Depth is forced to 1 under
+  sampling (the drafter's internal chain is greedy). Measured at T=0.7
+  with default min_p: 9B 87% acceptance / 1.33x, 2B 71% / 1.09x; greedy
+  path regression-checked identical. MTP previously disengaged entirely
+  for any temperature > 0 — this extends every speedup to default-
+  temperature chat traffic.
+
 - Depth-K chained MTP drafting: the speculative loop now verifies up to
   `mtp_max_depth` chained drafts in a single K+1-token forward, committing
   the longest matching prefix (plus the verifier's correction on partial

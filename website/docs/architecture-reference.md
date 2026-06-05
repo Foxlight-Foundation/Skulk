@@ -47,7 +47,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ### Drafters (speculative decoding)
 
-`src/exo/worker/engines/mlx/drafters/`. Single-node, greedy-only, forces `SequentialGenerator`. Draft depth comes from the card's `mtp_max_depth` (default 1); the loop verifies the chained drafts in one K+1-token forward and commits the longest matching prefix.
+`src/exo/worker/engines/mlx/drafters/`. Single-node, forces `SequentialGenerator`. Greedy requests use argmax-prefix acceptance; temperature > 0 uses Leviathan-Chen probability-ratio acceptance over the effective sampler distributions (`src/exo/worker/engines/mlx/generator/speculative_sampling.py`, depth forced to 1). Draft depth comes from the card's `mtp_max_depth` (default 1); the loop verifies the chained drafts in one K+1-token forward and commits the longest matching prefix.
 
 - **Protocol:** `protocol.py::Drafter` — `begin_request(prompt_cache)` / `observe(hiddens, next_tokens)` / `draft(hidden, next_token, depth=1) -> (K, vocab) logits`. The generation loop owns verify/accept/reject, target-cache trims, and SSM snapshots; drafters own only their private state. The loop feeds every committed position's `(pre-final-norm hidden, next token)` pair exactly once, in order (the pair-stream contract).
 - **Builder:** `builder.py::build_drafter(model, mtp_weights, runtime)` — detects sidecar key layout, resolves family facts (norm convention, fc concat order) from layout-keyed defaults with model-card `runtime` overrides.
