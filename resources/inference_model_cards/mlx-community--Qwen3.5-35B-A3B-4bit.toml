@@ -9,5 +9,13 @@ quantization = "4bit"
 base_model = "Qwen3.5 35B A3B"
 capabilities = ["text", "thinking", "thinking_toggle"]
 
+# NO MTP section — by measurement, not omission (2026-06-05, 3-node
+# pipeline, M4 fleet): the FoxlightAI/qwen3-5-35b-a3b-base-mtp sidecar
+# builds and drafts at 85% acceptance, but MTP measured 0.63x (35.6 ->
+# 22.3 tok/s). Fast MoEs are structurally MTP-hostile: each verify token
+# routes to its own experts (verify width is not free, unlike dense), and
+# a 28ms/step baseline magnifies fixed per-round overhead. Do not add a
+# sidecar here without re-measuring on materially different hardware.
+
 [storage_size]
 in_bytes = 20391405152
