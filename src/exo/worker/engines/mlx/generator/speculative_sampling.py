@@ -1,4 +1,8 @@
-"""Distribution-preserving speculative sampling (Leviathan & Matias 2023).
+"""Distribution-preserving speculative sampling.
+
+The probability-ratio acceptance + residual-resampling rule was published
+concurrently by Leviathan & Matias (2023) and Chen et al. (2023) —
+referred to as "Leviathan-Chen" throughout this codebase.
 
 At temperature > 0, greedy argmax acceptance biases MTP output toward argmax
 tokens (Skulk #180). The correct criterion is probability-ratio rejection
@@ -22,6 +26,7 @@ categorical draw — the warp mirrors that exactly.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Callable, cast, final
 
@@ -54,6 +59,15 @@ class SamplingParams:
     min_p: float = 0.05
     min_tokens_to_keep: int = 1
     top_k: int = 0
+
+    def __post_init__(self) -> None:
+        # warp_to_probs divides by temperature; the API layer does not
+        # validate task params, so fail fast here instead of dividing by
+        # zero or letting a NaN poison the acceptance math.
+        if not math.isfinite(self.temperature) or self.temperature < 0.0:
+            raise ValueError(
+                f"temperature must be finite and >= 0, got {self.temperature}"
+            )
 
     @property
     def is_greedy(self) -> bool:

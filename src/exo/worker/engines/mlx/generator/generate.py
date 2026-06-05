@@ -1254,9 +1254,11 @@ def _stream_generate_with_mtp(
     batched K+1-token forward.  The longest matching draft prefix commits
     (plus the verifier's correction token on a partial reject), so a fully
     accepted cycle yields K+1 tokens per verify pass.  On a full accept the
-    next main token is taken directly from the verify logits — no
-    processors is guaranteed by the caller, so the head resample it skips
-    would be byte-identical (greedy) or an equally valid draw (sampled).
+    next main token is taken directly from the verify logits, skipping a
+    head resample that would be byte-identical (greedy) or an equally valid
+    draw (sampled). That fast path is only valid without logits processors
+    — mlx_generate enforces that in production, and the loop guards it
+    internally for callers (tests) that do pass processors.
 
     At temperature > 0 (``sampling.is_greedy`` false) acceptance switches
     from argmax matching to Leviathan-Chen probability-ratio rejection
@@ -1475,13 +1477,14 @@ def _stream_generate_with_mtp(
             # the drafts; row K is the bonus next-token on a full accept.
             v_lp = v_logits[0].astype(mx.float32)
             v_lp = v_lp - mx.logsumexp(v_lp, axis=-1, keepdims=True)
-            mx.eval(v_h, v_lp)
 
         if sampling.is_greedy:
             # Greedy: argmax-match the longest draft prefix; row prefix_len
             # is the correction (partial) or the bonus next token (full).
+            # Only the argmax is forced — the full (K+1, vocab) v_lp tensor
+            # stays lazy unless a consumer (response logprobs) reads it.
             verify_sampled = sampler(v_lp)  # (K+1,)
-            mx.eval(verify_sampled)
+            mx.eval(v_h, verify_sampled)
             target_ints = [int(t) for t in cast("list[int]", verify_sampled.tolist())]
             prefix_len = 0
             while (
@@ -1499,6 +1502,7 @@ def _stream_generate_with_mtp(
             # these make every committed token an exact sample from p.
             assert draft_probs is not None and chain_len == 1
             verify_probs = warp_to_probs(v_lp[0], sampling)
+            mx.eval(v_h, verify_probs)
             if ratio_accept(draft_toks[0], draft_probs, verify_probs):
                 prefix_len = 1
                 correction_int = None
