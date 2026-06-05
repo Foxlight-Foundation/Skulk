@@ -68,6 +68,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- MTP is explicitly single-node for now: distributed placements (any group
+  size > 1) disengage speculation with a logged fallback. Pipeline sharding
+  was already excluded; tensor-parallel would mechanically run but
+  accept/reject decisions consume per-rank RNG and cross-rank lockstep is
+  unvalidated — a divergent decision would silently corrupt every rank's
+  cache. Distributed MTP (TP lockstep validation, then pipeline
+  draft/verify) is the next workstream.
 - MTP terminal responses (EOS / max-tokens break paths) now finalize the
   detokenizer exactly once before yielding, matching the non-MTP path —
   sentencepiece-backed tokenizers buffer partial byte sequences until
