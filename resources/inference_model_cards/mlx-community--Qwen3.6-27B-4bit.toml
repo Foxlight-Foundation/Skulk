@@ -18,12 +18,16 @@ disabled_effort = "none"
 
 # Qwen3.6 ships model_type=qwen3_5 (same architecture family) — loads and
 # drafts through the existing qwen3_5 stack with zero code changes.
-# MTP validated 2026-06-04 on M4/24GB at depth 2: 1.80x decode speedup
-# (5.5 -> 10.0 tok/s), 78% chained acceptance, greedy parity OK (depth-1
-# reference: 88% acceptance, 1.73x) (Skulk #192 / PR #193 / depth-K).
+# MTP re-validated 2026-06-05 on M4/24GB under the bonus-driven cadence
+# (deferred replay + quantize-on-load sidecar): depth 1 — 88% acceptance,
+# 10.5 tok/s vs 6.0 vanilla (1.74x), greedy parity OK. Depth 2 measured
+# SLOWER under the new cadence (76%, 9.1 tok/s) — the higher round
+# acceptance makes single-step drafts the optimum here, unlike the
+# Qwen3.5-27B where depth 2 still edges ahead (Skulk #192 / PR #193 /
+# bonus-driven cadence rework).
 [runtime]
 mtp_heads = true
-mtp_max_depth = 2
+mtp_max_depth = 1
 mtp_sidecar_repo = "FoxlightAI/qwen3-6-27b-mtp"
 
 [storage_size]

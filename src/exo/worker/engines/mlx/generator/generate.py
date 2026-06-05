@@ -96,6 +96,10 @@ generation_stream = mx.new_stream(mx.default_device())
 
 _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
 _MIN_CANCEL_CHECK_INTERVAL = 10
+# Ceiling on deferred-replay tokens riding along in an MTP verify forward.
+# Verify width is near-free while decode stays memory-bound; the cap only
+# exists so a pathological reject streak cannot grow the window unboundedly.
+_MTP_MAX_PENDING_REPLAY = 8
 
 
 class _FrameLookup(Protocol):
@@ -1259,34 +1263,38 @@ def _stream_generate_with_mtp(
     depth: int = 1,
     sampling: SamplingParams | None = None,
 ) -> Generator[MlxGenerationResponse, None, None]:
-    """Single-node decode loop with depth-K speculative decoding via a Drafter.
+    """Single-node speculative decode loop: bonus-driven rounds via a Drafter.
 
-    Each iteration does a main forward pass on one token, asks the drafter
-    for up to *depth* chained candidates, then verifies them in a single
-    batched K+1-token forward.  The longest matching draft prefix commits
-    (plus the verifier's correction token on a partial reject), so a fully
-    accepted cycle yields K+1 tokens per verify pass.  On a full accept the
-    next main token is taken directly from the verify logits, skipping a
-    head resample that would be byte-identical (greedy) or an equally valid
-    draw (sampled). That fast path is only valid without logits processors
-    — mlx_generate enforces that in production, and the loop guards it
-    internally for callers (tests) that do pass processors.
+    Round structure (matching the reference implementations this was
+    validated against): the loop carries a *bonus* token ``b`` — emitted but
+    not yet forwarded — and the hidden state ``h`` at the position whose
+    logits produced it. Each round drafts up to ``depth`` candidates from
+    ``(h, b)``, verifies ``[b, d0..dK-1]`` in a single K+1-token forward
+    (the round's ONLY target forward), commits the longest matching draft
+    prefix, and samples the next bonus from the first non-matching row —
+    which is the correction on a partial reject and the free next token on
+    a full accept. Crucially, the very next round drafts from the
+    correction position: those post-correction drafts are statistically the
+    easiest, and a cadence that skips them (as this loop's previous shape
+    did) measurably forfeits ~25pp of acceptance on identical inputs.
 
     At temperature > 0 (``sampling.is_greedy`` false) acceptance switches
-    from argmax matching to Leviathan-Chen probability-ratio rejection
-    sampling over the effective (filter-warped, tempered) distributions —
-    distribution-preserving by construction (see
-    :mod:`.speculative_sampling`) — and depth is forced to 1, because the
-    drafter's internal chain is greedy and would not represent the sampled
-    path.
+    to Leviathan-Chen probability-ratio rejection sampling over the
+    effective distributions (see :mod:`.speculative_sampling`), with the
+    residual resample supplying the correction; depth is forced to 1.
 
-    The loop owns verification, accept/reject, cache trimming, and SSM
-    snapshots; everything mechanism-specific lives behind the
-    :class:`~exo.worker.engines.mlx.drafters.protocol.Drafter` protocol.  The
-    loop upholds the drafter pair-stream contract: every committed position's
-    (hidden, next-token) pair is fed exactly once, in order — the prompt in
-    bulk after prefill, one pair per ``draft()`` call, and the single skipped
-    pair after each verify resolution (both accept and reject).
+    The loop owns verification, accept/reject, and cache reconciliation —
+    preferring the language model's own ``rollback_speculative_cache`` when
+    it exists (gemma4; no snapshots, no replay), falling back to
+    snapshot/restore with *deferred replay* for hybrid-SSM caches (qwen
+    GDN) — committed-but-restored tokens ride at the front of the next
+    verify forward instead of paying a dedicated replay pass — and plain
+    trim for pure-KV models. Drafters stay behind the
+    :class:`~exo.worker.engines.mlx.drafters.protocol.Drafter` protocol,
+    and the pair-stream contract holds: ``draft()`` consumes the
+    ``(h, b)`` pair, and the round's accepted drafts are observed as
+    ``(v_h[:, :p], drafts[:p])`` so stateful drafters keep gapless
+    positional history.
 
     This path is only used for single-node inference; the pipeline path
     (`_stream_generate_without_lookahead`) does not support speculation yet.
@@ -1307,50 +1315,38 @@ def _stream_generate_with_mtp(
 
     eos_token_ids = {int(t) for t in eos_ids_from_tokenizer(tokenizer)}
     token_history: mx.array | None = None
-
-    prompt_start = time.perf_counter()
-    if len(prompt) > 1:
-        with mx.stream(generation_stream):
-            prefill_hidden = trunk_fn(prompt[:-1][None], cache=prompt_cache)
-            quantize_cache_fn(prompt_cache)
-            # Bulk-ingest the prompt's (hidden, next-token) pairs so stateful
-            # drafters start decode with full positional history — matching
-            # the conditions the heads were trained (and offline-validated)
-            # under. Positions 0..P-2 pair with tokens 1..P-1.
-            drafter.observe(prefill_hidden[0], prompt[1:])
-            mx.eval([c.state for c in prompt_cache])  # type: ignore[attr-defined]
-
-    prompt_tps = len(prompt) / max(time.perf_counter() - prompt_start, 1e-9)
-    generation_start = time.perf_counter()
-
-    input_tokens = prompt[-1:]
-    # Tokens committed by the previous iteration that have not yet been added
-    # to token_history. Kept separate from input_tokens because the two
-    # diverge on accept (input is unused; two tokens committed) and on
-    # pure-KV reject (trunk replays [target] but [main, target] committed).
-    history_carry = prompt[-1:]
-    generated_count = 0
-    accepted = 0
-    attempted_drafts = 0
-    finish_reason = "length"
-    # Hybrid models (e.g. Qwen3.5 GDN) carry recurrent SSM state that cannot
-    # be trimmed positionally — and trim_cache without a snapshot ZEROES it.
-    # Rejects must restore a pre-verify snapshot instead.
-    mtp_has_ssm = has_non_kv_caches(prompt_cache)
-
-    # cached_hidden: (hidden_size,) from a previous verify pass, or None (need main fwd)
-    cached_hidden: mx.array | None = None
-    # Set on the first drafter exception; decode continues plain thereafter.
-    speculation_disabled = False
-    # pending_main: (token, logprobs) precomputed by the verify pass on a full
-    # accept — skips the head recompute at the next iteration (valid only when
-    # no logits processors are active, which the caller guarantees).
-    pending_main: tuple[int, mx.array] | None = None
     if sampling is None:
         sampling = SamplingParams(temperature=0.0)
     # Sampled decoding forces depth 1: the drafter chains greedily, which
     # does not represent the sampled trajectory beyond the first draft.
     depth = max(depth, 1) if sampling.is_greedy else 1
+
+    # Model-native speculative rollback (gemma4): no snapshots, no replay.
+    _lm: object | None = getattr(model, "language_model", None)
+    native_rollback = cast(
+        "Callable[..., None] | None",
+        getattr(_lm, "rollback_speculative_cache", None) if _lm is not None else None,
+    )
+    # Hybrid models (e.g. Qwen3.5 GDN) carry recurrent SSM state that cannot
+    # be trimmed positionally — and trim_cache without a snapshot ZEROES it.
+    # Rejects must restore a pre-verify snapshot instead (unless the model
+    # provides native rollback, which handles its own cache types).
+    mtp_has_ssm = has_non_kv_caches(prompt_cache) and not callable(native_rollback)
+
+    # Deferred replay (snapshot path only): committed tokens whose cache
+    # entries were lost to a reject-restore. Instead of paying a dedicated
+    # replay forward per reject (~a full vanilla step), they ride along at
+    # the front of the next verify — extra verify *width* is effectively
+    # free on memory-bound decode (measured 46.6ms 2-wide vs 47.8ms 1-wide
+    # on Qwen3.5-9B). Capped so pathological reject streaks cannot grow the
+    # verify window without bound.
+    pending_replay: list[int] = []
+
+    generated_count = 0
+    accepted = 0
+    attempted_drafts = 0
+    finish_reason = "length"
+    speculation_disabled = False
 
     def _response(
         token_int: int,
@@ -1382,87 +1378,129 @@ def _stream_generate_with_mtp(
             generation_tps=generated_count
             / max(time.perf_counter() - generation_start, 1e-9),
             peak_memory=mx.get_peak_memory() / 1e9,
-            finish_reason=finish,
+            finish_reason=None if finish is None else finish,
         )
 
-    while generated_count < max_tokens:
-        # Fold the previous iteration's committed tokens into the processor
-        # history BEFORE computing this position's logits, so processors see
-        # everything committed so far (previously this ran post-sampling,
-        # lagging the history by one iteration).
-        if logits_processors:
-            token_history = (
-                mx.concat([token_history, history_carry])
-                if token_history is not None
-                else history_carry
+    def _sample_row(lp_row: mx.array) -> tuple[int, mx.array]:
+        """Sample one token from a normalized logprob row, with processors."""
+        nonlocal token_history
+        row = lp_row
+        if logits_processors and token_history is not None:
+            for proc in logits_processors:
+                row = proc(token_history, row[None])[0]
+            row = row.astype(mx.float32) - mx.logsumexp(
+                row.astype(mx.float32), keepdims=True
             )
+        tok = sampler(row)
+        return int(tok.item()), row
 
-        # ---- MAIN (forward | cached hidden | verify-precomputed token) ----
+    def _record_history(tokens: list[int]) -> None:
+        nonlocal token_history
+        if not logits_processors or not tokens:
+            return
+        addition = mx.array(tokens)
+        token_history = (
+            mx.concat([token_history, addition])
+            if token_history is not None
+            else addition
+        )
+
+    def _flush_pending_replay() -> None:
+        """Forward deferred-replay tokens so the prompt cache catches up.
+
+        Called when the next forward cannot carry them (plain-decode
+        fallback), when the pending window hits its cap, and at stream end
+        so a persisted prefix cache stays consistent with the emitted text.
+        """
+        nonlocal pending_replay
+        if not pending_replay:
+            return
         with mx.stream(generation_stream):
-            if cached_hidden is None:
-                h_seq = trunk_fn(input_tokens[None], cache=prompt_cache)
-                quantize_cache_fn(prompt_cache)
-                last_hidden = h_seq[0, -1, :]
-            else:
-                last_hidden = cached_hidden
-                cached_hidden = None
-            if pending_main is not None:
-                main_tok_int, logprobs_main = pending_main
-                pending_main = None
-                mx.eval(last_hidden)
-            else:
-                logits_main: mx.array = head_fn(last_hidden[None, None])  # (1, 1, V)
-                logits_main = logits_main[0, 0, :]
-                if logits_processors and token_history is not None:
-                    for proc in logits_processors:
-                        logits_main = proc(token_history, logits_main[None])[0]
-                logprobs_main = logits_main.astype(mx.float32) - mx.logsumexp(
-                    logits_main.astype(mx.float32), keepdims=True
-                )
-                main_tok = sampler(logprobs_main)
-                mx.eval(main_tok, last_hidden)
-                main_tok_int = int(main_tok.item())
+            trunk_fn(mx.array(pending_replay)[None], cache=prompt_cache)
+            quantize_cache_fn(prompt_cache)
+        pending_replay = []
 
-        if main_tok_int in eos_token_ids:
-            finish_reason = "stop"
-            generated_count += 1
-            yield _response(main_tok_int, logprobs_main, from_draft=False, finish="stop")
-            break
+    # ---- prefill (loop-internal tail; the heavy prefill ran upstream) ----
+    prompt_start = time.perf_counter()
+    if len(prompt) > 1:
+        with mx.stream(generation_stream):
+            prefill_hidden = trunk_fn(prompt[:-1][None], cache=prompt_cache)
+            quantize_cache_fn(prompt_cache)
+            # Bulk-ingest the prompt pairs so stateful drafters start decode
+            # with positional history (positions 0..P-2 pair with tokens
+            # 1..P-1).
+            drafter.observe(prefill_hidden[0], prompt[1:])
+            mx.eval([c.state for c in prompt_cache])  # type: ignore[attr-defined]
+    _record_history([int(t) for t in cast("list[int]", prompt.tolist())])
 
-        # ---- DRAFT (chained to `depth`) ----
-        # Speculation must never abort generation: a drafter failure
-        # (unexpected model shape, upstream API drift) disables drafting for
-        # the rest of the request and decode continues plain.
+    # First bonus: forward the last prompt token, sample from its logits.
+    with mx.stream(generation_stream):
+        h_seq = trunk_fn(prompt[-1:][None], cache=prompt_cache)
+        quantize_cache_fn(prompt_cache)
+        hidden = h_seq[0, -1, :]
+        first_logits = head_fn(hidden[None, None])[0, 0, :].astype(mx.float32)
+        first_lp = first_logits - mx.logsumexp(first_logits, keepdims=True)
+        mx.eval(hidden, first_lp)
+
+    prompt_tps = len(prompt) / max(time.perf_counter() - prompt_start, 1e-9)
+    generation_start = time.perf_counter()
+
+    bonus, bonus_lp = _sample_row(first_lp)
+    # EOS never enters the detokenizer (matching the non-MTP decode paths
+    # and the accepted-draft emit below) — its decoded special-token text
+    # must not leak into the terminal segment.
+    if bonus not in eos_token_ids:
+        detokenizer.add_token(bonus)
+    generated_count = 1
+    _record_history([bonus])
+    if bonus in eos_token_ids or generated_count >= max_tokens:
+        finish_reason = "stop" if bonus in eos_token_ids else "length"
+        yield _response(bonus, bonus_lp, from_draft=False, finish=finish_reason)
+        return
+    yield _response(bonus, bonus_lp, from_draft=False, finish=None)
+
+    while generated_count < max_tokens:
         if speculation_disabled:
-            input_tokens = mx.array([main_tok_int])
-            if logits_processors:
-                history_carry = mx.array([main_tok_int])
-            detokenizer.add_token(main_tok_int)
+            # Plain decode: forward the bonus, sample the next one.
+            _flush_pending_replay()
+            with mx.stream(generation_stream):
+                h_seq = trunk_fn(mx.array([[bonus]]), cache=prompt_cache)
+                quantize_cache_fn(prompt_cache)
+                hidden = h_seq[0, -1, :]
+                lp = head_fn(hidden[None, None])[0, 0, :].astype(mx.float32)
+                lp = lp - mx.logsumexp(lp, keepdims=True)
+                mx.eval(hidden, lp)
+            bonus, bonus_lp = _sample_row(lp)
+            # EOS never enters the detokenizer — see the first-bonus emit.
+            if bonus not in eos_token_ids:
+                detokenizer.add_token(bonus)
             generated_count += 1
-            if generated_count >= max_tokens:
-                yield _response(
-                    main_tok_int, logprobs_main, from_draft=False, finish=finish_reason
-                )
+            _record_history([bonus])
+            finish = (
+                "stop"
+                if bonus in eos_token_ids
+                else finish_reason
+                if generated_count >= max_tokens
+                else None
+            )
+            yield _response(bonus, bonus_lp, from_draft=False, finish=finish)
+            if finish is not None:
+                if finish == "stop":
+                    finish_reason = "stop"
                 break
-            yield _response(main_tok_int, logprobs_main, from_draft=False, finish=None)
             continue
+
+        # ---- DRAFT from (hidden, bonus) ----
         draft_probs: mx.array | None = None
         try:
             with mx.stream(generation_stream):
-                chain_logits = drafter.draft(
-                    last_hidden, main_tok_int, depth=depth
-                ).astype(mx.float32)  # (K, V), K <= depth
+                chain_logits = drafter.draft(hidden, bonus, depth=depth).astype(
+                    mx.float32
+                )  # (K, V), K <= depth
                 if sampling.is_greedy:
-                    # Log-softmax is rank-preserving, so the greedy sampler
-                    # (argmax) reads raw logits — no logsumexp over the vocab
-                    # per chained draft.
+                    # Log-softmax is rank-preserving: argmax reads raw logits.
                     chain_sampled = sampler(chain_logits)  # (K,)
                 else:
-                    # Sampled decoding (depth forced to 1): draw the draft
-                    # from the configured sampler and keep its effective
-                    # distribution q for the ratio-acceptance test in the
-                    # verify pass. The filters need normalized
-                    # log-probabilities.
                     chain_lp = chain_logits - mx.logsumexp(
                         chain_logits, axis=-1, keepdims=True
                     )
@@ -1475,73 +1513,32 @@ def _stream_generate_with_mtp(
                 "the remainder of this request"
             )
             speculation_disabled = True
-            input_tokens = mx.array([main_tok_int])
-            if logits_processors:
-                history_carry = mx.array([main_tok_int])
-            detokenizer.add_token(main_tok_int)
-            generated_count += 1
-            if generated_count >= max_tokens:
-                yield _response(
-                    main_tok_int, logprobs_main, from_draft=False, finish=finish_reason
-                )
-                break
-            yield _response(main_tok_int, logprobs_main, from_draft=False, finish=None)
             continue
 
         draft_toks = [int(t) for t in cast("list[int]", chain_sampled.tolist())]
-        # Truncate at the first EOS draft: tokens past it are meaningless, and
-        # an EOS draft itself is not verified — the next main forward picks up
-        # EOS naturally (matching the depth-1 behavior).
+        # Truncate after the first EOS draft (keep the EOS itself: the
+        # verifier may legitimately accept it and end the stream).
         for eos_index, candidate in enumerate(draft_toks):
             if candidate in eos_token_ids:
-                draft_toks = draft_toks[:eos_index]
+                draft_toks = draft_toks[: eos_index + 1]
                 break
 
-        # Emit main token
-        detokenizer.add_token(main_tok_int)
-        generated_count += 1
-
-        if generated_count >= max_tokens:
-            yield _response(
-                main_tok_int, logprobs_main, from_draft=False, finish=finish_reason
-            )
-            break
-
-        yield _response(main_tok_int, logprobs_main, from_draft=False, finish=None)
-
-        if not draft_toks:
-            # First draft was EOS — do not verify, let the next loop pick up
-            # EOS naturally. (Sampler output is 0-d; the trunk needs (1, N)
-            # token ids — the 0.31.3 qwen3_5 rewrite unpacks (B, S, _)
-            # strictly and crashes on 2-D hidden states.)
-            # Pair-stream: draft() already consumed (h, main_tok); the next
-            # trunk forward produces the next hidden, so no observe needed.
-            attempted_drafts += 1
-            input_tokens = mx.array([main_tok_int])
-            if logits_processors:
-                history_carry = mx.array([main_tok_int])
-            continue
-
-        # ---- VERIFY: [main_tok, d0..dK-1] in one batched K+1 forward ----
-        # Snapshot recurrent (SSM) state first so a partial reject can restore
-        # it — the verify forward advances it by K+1 positions irreversibly.
+        # ---- VERIFY: [pending..., bonus, d0..dK-1] — the round's only ----
+        # ---- target forward. Deferred-replay tokens ride at the front; ----
+        # ---- their rows are discarded (they were scored last round).   ----
         chain_len = len(draft_toks)
+        replay_len = len(pending_replay)
         pre_verify_snapshot = snapshot_ssm_states(prompt_cache) if mtp_has_ssm else None
-        verify_input = mx.array([main_tok_int, *draft_toks])
+        verify_input = mx.array([*pending_replay, bonus, *draft_toks])
         with mx.stream(generation_stream):
-            v_h = trunk_fn(verify_input[None], cache=prompt_cache)  # (1, K+1, H)
+            full_h = trunk_fn(verify_input[None], cache=prompt_cache)  # (1,R+K+1,H)
             quantize_cache_fn(prompt_cache)
+            v_h = full_h[:, replay_len:, :]  # (1, K+1, H)
             v_logits = head_fn(v_h)  # (1, K+1, V)
-            # Row i scores the token after verify_input[i]: rows 0..K-1 check
-            # the drafts; row K is the bonus next-token on a full accept.
             v_lp = v_logits[0].astype(mx.float32)
             v_lp = v_lp - mx.logsumexp(v_lp, axis=-1, keepdims=True)
 
         if sampling.is_greedy:
-            # Greedy: argmax-match the longest draft prefix; row prefix_len
-            # is the correction (partial) or the bonus next token (full).
-            # Only the argmax is forced — the full (K+1, vocab) v_lp tensor
-            # stays lazy unless a consumer (response logprobs) reads it.
             verify_sampled = sampler(v_lp)  # (K+1,)
             mx.eval(v_h, verify_sampled)
             target_ints = [int(t) for t in cast("list[int]", verify_sampled.tolist())]
@@ -1551,142 +1548,131 @@ def _stream_generate_with_mtp(
                 and draft_toks[prefix_len] == target_ints[prefix_len]
             ):
                 prefix_len += 1
-            correction_int = target_ints[prefix_len] if prefix_len < chain_len else None
-            bonus_int = target_ints[chain_len] if prefix_len == chain_len else None
+            # Row prefix_len yields the next bonus: the correction on a
+            # partial reject, the free next token on a full accept. (With
+            # processors active the row is re-sampled through them below.)
+            raw_bonus_next = target_ints[prefix_len] if not logits_processors else None
         else:
-            # Sampled (chain_len == 1): Leviathan-Chen ratio acceptance over
-            # the effective distributions; the correction on reject comes
-            # from the residual distribution, the bonus on accept is a fresh
-            # sampler draw from the verifier's next-position row — together
-            # these make every committed token an exact sample from p.
             assert draft_probs is not None and chain_len == 1
             verify_probs = warp_to_probs(v_lp[0], sampling)
             mx.eval(v_h, verify_probs)
             if ratio_accept(draft_toks[0], draft_probs, verify_probs):
                 prefix_len = 1
-                correction_int = None
-                bonus_int = int(sampler(v_lp[chain_len]).item())
+                raw_bonus_next = None  # sampled from row 1 below
             else:
                 prefix_len = 0
-                correction_int = residual_sample(draft_probs, verify_probs)
-                bonus_int = None
+                raw_bonus_next = residual_sample(draft_probs, verify_probs)
         attempted_drafts += chain_len
         accepted += prefix_len
-        # Consumers usually abandon this generator mid-stream (the tail-of-
-        # function summary never runs), and the public GenerationResponse
-        # carries no from_draft field — this periodic line is the production
-        # acceptance signal. Measuring acceptance via from_draft on
-        # mlx_generate's outputs silently reads 0 (issue #192 false alarm).
+        # Consumers usually abandon this generator mid-stream and the public
+        # GenerationResponse carries no from_draft field — this periodic
+        # line is the production acceptance signal (issue #192 false alarm).
         if attempted_drafts // 32 != (attempted_drafts - chain_len) // 32:
             logger.info(
                 f"MTP acceptance so far: {accepted}/{attempted_drafts} "
                 f"({accepted / attempted_drafts:.0%})"
             )
 
-        # Tokens committed this verify: accepted drafts, then the verifier's
-        # correction when the prefix is partial.
-        committed: list[tuple[int, bool]] = [
-            (draft_toks[i], True) for i in range(prefix_len)
-        ]
         full_accept = prefix_len == chain_len
+
+        # ---- cache reconciliation BEFORE emitting (emits may break out) ----
+        # Verify forwarded R+K+1 positions: [pending, bonus, drafts].
+        # Committed: pending + bonus + accepted prefix; the next bonus is
+        # NOT forwarded (next round's verify carries it).
         if not full_accept:
-            assert correction_int is not None
-            committed.append((correction_int, False))
-
-        # Reconcile the target caches BEFORE emitting (emits may break out).
-        if full_accept:
-            replay_tokens = None  # cache already holds exactly main + all drafts
-        elif pre_verify_snapshot is not None:
-            # Hybrid model: drop ALL verify positions and restore the SSM
-            # state; the next main forward replays the accepted prefix plus
-            # the correction so every cache lands consistently. (Partial trims
-            # would zero the recurrent state — see trim_cache.)
-            trim_cache(prompt_cache, chain_len + 1, pre_verify_snapshot)
-            assert correction_int is not None
-            replay_tokens = [main_tok_int, *draft_toks[:prefix_len], correction_int]
+            rejected = chain_len - prefix_len
+            if callable(native_rollback):
+                # Native rollback never coexists with deferred replay
+                # (pending accrues on the snapshot path only).
+                with mx.stream(generation_stream):
+                    native_rollback(prompt_cache, None, prefix_len, chain_len + 1)
+            elif pre_verify_snapshot is not None:
+                # Hybrid model: SSM state cannot be trimmed positionally, so
+                # restore the pre-verify snapshot and DEFER the committed
+                # prefix to the next verify instead of paying a dedicated
+                # replay forward now (a reject used to cost a full extra
+                # trunk pass; riding along in the next verify is free).
+                trim_cache(prompt_cache, replay_len + chain_len + 1, pre_verify_snapshot)
+                pending_replay = [*pending_replay, bonus, *draft_toks[:prefix_len]]
+                if len(pending_replay) >= _MTP_MAX_PENDING_REPLAY:
+                    _flush_pending_replay()
+            else:
+                trim_cache(prompt_cache, rejected)
         else:
-            # Pure-KV model: trim just the rejected draft tail.
-            trim_cache(prompt_cache, chain_len - prefix_len)
-            assert correction_int is not None
-            replay_tokens = [correction_int]
+            # Full accept: the verify forward itself committed the pending
+            # tokens (and everything after them).
+            pending_replay = []
 
-        # Pair-stream: draft() consumed only the (h, main_tok) pair, but
-        # len(committed) further tokens commit this iteration. v_h[0, i] is
-        # the hidden at committed token i's predecessor position, computed
-        # against a fully committed prefix — valid regardless of the
-        # trim/restore above.
-        drafter.observe(
-            v_h[0, : len(committed), :],
-            mx.array([token for token, _ in committed]),
-        )
+        # Pair-stream: draft() consumed the (hidden, bonus) pair; the
+        # accepted drafts commit as next-tokens for positions bonus..d_{p-2},
+        # whose hiddens are v_h rows 0..p-1. The next bonus pair is consumed
+        # by the next draft() from v_h[:, p].
+        if prefix_len > 0:
+            drafter.observe(
+                v_h[0, :prefix_len, :], mx.array(draft_toks[:prefix_len])
+            )
 
-        # Emit the committed tokens in order, honoring EOS and max_tokens.
+        # ---- emit accepted drafts ----
         stream_done = False
-        for i, (token_int, is_draft) in enumerate(committed):
+        committed_this_round: list[int] = []
+        for i in range(prefix_len):
+            token_int = draft_toks[i]
+            committed_this_round.append(token_int)
             if token_int in eos_token_ids:
                 generated_count += 1
                 finish_reason = "stop"
-                yield _response(token_int, v_lp[i], from_draft=is_draft, finish="stop")
+                yield _response(token_int, v_lp[i], from_draft=True, finish="stop")
                 stream_done = True
                 break
             detokenizer.add_token(token_int)
             generated_count += 1
             if generated_count >= max_tokens:
                 yield _response(
-                    token_int, v_lp[i], from_draft=is_draft, finish=finish_reason
+                    token_int, v_lp[i], from_draft=True, finish=finish_reason
                 )
                 stream_done = True
                 break
-            yield _response(token_int, v_lp[i], from_draft=is_draft, finish=None)
+            yield _response(token_int, v_lp[i], from_draft=True, finish=None)
         if stream_done:
             break
+        _record_history(committed_this_round)
 
-        if full_accept:
-            # Hidden at the last draft's position seeds the next round, and
-            # row K of the verify logits IS the next main token at greedy —
-            # skip the head recompute (only safe with no processors, which
-            # the caller guarantees; tests may pass processors, so guard).
-            cached_hidden = v_h[0, chain_len, :]
-            if not logits_processors:
-                assert bonus_int is not None
-                pending_main = (bonus_int, v_lp[chain_len])
-            input_tokens = mx.array([draft_toks[-1]])
+        # ---- next bonus from row prefix_len ----
+        if raw_bonus_next is not None:
+            bonus = raw_bonus_next
+            bonus_lp = v_lp[prefix_len]
         else:
-            assert replay_tokens is not None
-            input_tokens = mx.array(replay_tokens)
-            cached_hidden = None
-        # Everything committed this iteration feeds the processor history;
-        # the replay list is the *trunk* input (which differs for pure-KV
-        # models) and must not double as the history carry. Only maintained
-        # when processors are active — the only consumer.
-        if logits_processors:
-            history_carry = mx.array(
-                [main_tok_int, *[token for token, _ in committed]]
-            )
+            bonus, bonus_lp = _sample_row(v_lp[prefix_len])
+        # EOS never enters the detokenizer — see the first-bonus emit.
+        if bonus not in eos_token_ids:
+            detokenizer.add_token(bonus)
+        generated_count += 1
+        _record_history([bonus])
+        finish = (
+            "stop"
+            if bonus in eos_token_ids
+            else finish_reason
+            if generated_count >= max_tokens
+            else None
+        )
+        if finish == "stop":
+            finish_reason = "stop"
+            generated_count = generated_count  # emitted below with finish
+        yield _response(bonus, bonus_lp, from_draft=False, finish=finish)
+        if finish is not None:
+            break
 
-    else:
-        # Loop ended without break — finalize detokenizer
-        detokenizer.finalize()
-        last_text = detokenizer.last_segment
-        if generated_count > 0:
-            yield MlxGenerationResponse(
-                text=last_text,
-                token=int(input_tokens.item()) if input_tokens.size == 1 else 0,
-                logprobs=mx.zeros((1,), dtype=mx.float32),
-                from_draft=False,
-                prompt_tokens=prompt.size,
-                prompt_tps=prompt_tps,
-                generation_tokens=generated_count,
-                generation_tps=generated_count
-                / max(time.perf_counter() - generation_start, 1e-9),
-                peak_memory=mx.get_peak_memory() / 1e9,
-                finish_reason=finish_reason,
-            )
-        return
+        # Hidden at the last committed position seeds the next round.
+        hidden = v_h[0, prefix_len, :]
 
-    # No finalize here: this tail only runs after a `break`, and every break
-    # path yields a terminal response, which finalizes inside _response —
-    # finalization happens exactly once, structurally.
+    # Catch the cache up on any still-deferred tokens so a persisted prefix
+    # cache stays consistent with the emitted text. (Abandoned generators
+    # skip this, but they hold a private deepcopy from get_kv_cache — never
+    # the stored entry — so nothing shared can go stale.)
+    _flush_pending_replay()
+
+    # No finalize here: every terminal yield above finalizes inside
+    # _response — finalization happens exactly once, structurally.
     acceptance_rate = accepted / attempted_drafts if attempted_drafts > 0 else 0.0
     logger.debug(
         f"MTP decode complete: {generated_count} tokens, "
