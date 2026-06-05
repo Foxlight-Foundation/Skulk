@@ -993,6 +993,92 @@ class TestRejectPathSSMState:
 
 
 # ---------------------------------------------------------------------------
+# Bonus EOS detokenization — special-token text must not leak into output
+# ---------------------------------------------------------------------------
+
+
+class TestBonusEosDetokenization:
+    """EOS bonus tokens must never enter the detokenizer.
+
+    The accepted-draft emit checks `eos_token_ids` before `add_token`; the
+    three bonus emits (first bonus, plain-decode fallback, post-verify) must
+    match, or a stop-terminated generation leaks the EOS token's decoded
+    special-token text into the terminal segment (PR #204 review).
+    """
+
+    EOS = 9
+
+    def _run_with_eos(
+        self,
+        *,
+        main_token_ids: list[int],
+        draft_token_id: int,
+        break_drafter: bool = False,
+    ):
+        from exo.worker.engines.mlx.generator.generate import (
+            _stream_generate_with_mtp,
+        )
+
+        model, tokenizer, drafter, trunk_fn, head_fn, cache = (
+            _build_fake_stream_env(
+                main_token_ids=main_token_ids,
+                draft_token_id=draft_token_id,
+            )
+        )
+        tokenizer.eos_token_ids = [self.EOS]
+        if break_drafter:
+            # Force the speculation_disabled plain-decode fallback.
+            drafter.draft = MagicMock(side_effect=RuntimeError("boom"))
+
+        sampler = lambda lp: mx.argmax(lp, axis=-1)  # noqa: E731
+        outputs = list(
+            _stream_generate_with_mtp(
+                model=model,
+                tokenizer=tokenizer,
+                drafter=drafter,
+                trunk_fn=trunk_fn,
+                head_fn=head_fn,
+                prompt=mx.array([1, 2, 3]),
+                max_tokens=8,
+                sampler=sampler,
+                logits_processors=[],
+                prompt_cache=cache,
+                kv_group_size=None,
+                kv_bits=None,
+            )
+        )
+        add_token_mock: MagicMock = cast(
+            MagicMock,
+            tokenizer.detokenizer.add_token,  # pyright: ignore[reportAny]
+        )
+        added = cast(
+            "list[int]",
+            [call.args[0] for call in add_token_mock.call_args_list],
+        )
+        return outputs, added
+
+    def test_first_bonus_eos_not_detokenized(self) -> None:
+        outputs, added = self._run_with_eos(main_token_ids=[9], draft_token_id=5)
+        assert outputs[-1].finish_reason == "stop"
+        assert self.EOS not in added
+
+    def test_post_verify_bonus_eos_not_detokenized(self) -> None:
+        # First bonus 5; round 1 verify targets 9 → draft 5 rejected, the
+        # correction bonus IS the EOS.
+        outputs, added = self._run_with_eos(main_token_ids=[5, 9], draft_token_id=5)
+        assert outputs[-1].finish_reason == "stop"
+        assert self.EOS not in added
+        assert 5 in added  # non-EOS tokens still detokenize
+
+    def test_plain_decode_bonus_eos_not_detokenized(self) -> None:
+        outputs, added = self._run_with_eos(
+            main_token_ids=[5, 9], draft_token_id=5, break_drafter=True
+        )
+        assert outputs[-1].finish_reason == "stop"
+        assert self.EOS not in added
+
+
+# ---------------------------------------------------------------------------
 # Deferred replay — reject-restored tokens ride the next verify forward
 # ---------------------------------------------------------------------------
 

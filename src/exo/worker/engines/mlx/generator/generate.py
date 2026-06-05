@@ -1446,7 +1446,11 @@ def _stream_generate_with_mtp(
     generation_start = time.perf_counter()
 
     bonus, bonus_lp = _sample_row(first_lp)
-    detokenizer.add_token(bonus)
+    # EOS never enters the detokenizer (matching the non-MTP decode paths
+    # and the accepted-draft emit below) — its decoded special-token text
+    # must not leak into the terminal segment.
+    if bonus not in eos_token_ids:
+        detokenizer.add_token(bonus)
     generated_count = 1
     _record_history([bonus])
     if bonus in eos_token_ids or generated_count >= max_tokens:
@@ -1467,7 +1471,9 @@ def _stream_generate_with_mtp(
                 lp = lp - mx.logsumexp(lp, keepdims=True)
                 mx.eval(hidden, lp)
             bonus, bonus_lp = _sample_row(lp)
-            detokenizer.add_token(bonus)
+            # EOS never enters the detokenizer — see the first-bonus emit.
+            if bonus not in eos_token_ids:
+                detokenizer.add_token(bonus)
             generated_count += 1
             _record_history([bonus])
             finish = (
@@ -1637,7 +1643,9 @@ def _stream_generate_with_mtp(
             bonus_lp = v_lp[prefix_len]
         else:
             bonus, bonus_lp = _sample_row(v_lp[prefix_len])
-        detokenizer.add_token(bonus)
+        # EOS never enters the detokenizer — see the first-bonus emit.
+        if bonus not in eos_token_ids:
+            detokenizer.add_token(bonus)
         generated_count += 1
         _record_history([bonus])
         finish = (
