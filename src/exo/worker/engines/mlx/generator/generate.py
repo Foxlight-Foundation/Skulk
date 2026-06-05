@@ -20,6 +20,7 @@ from mlx_lm.generate import (
     maybe_quantize_kv_cache,
     stream_generate,
 )
+from mlx_lm.models import base as _mlx_lm_base
 from mlx_lm.models.cache import ArraysCache, RotatingKVCache
 from mlx_lm.sample_utils import make_logits_processors, make_sampler
 from mlx_lm.tokenizer_utils import TokenizerWrapper
@@ -67,7 +68,7 @@ from exo.worker.engines.mlx.constants import (
     KV_GROUP_SIZE,
     MAX_TOKENS,
 )
-from exo.worker.engines.mlx.mtp import MTPHead, build_mtp_head
+from exo.worker.engines.mlx.drafters import Drafter, build_drafter
 from exo.worker.engines.mlx.utils_mlx import (
     apply_chat_template,
     fix_unmatched_think_end_tokens,
@@ -1124,12 +1125,64 @@ def _stream_generate_without_lookahead(
     )
 
 
+def _make_prenorm_trunk_fn(trunk: object) -> Callable[..., mx.array] | None:
+    """Wrap a TextModel trunk to return PRE-final-norm hidden states.
+
+    MTP heads consume the trunk's hidden state *before* the final RMSNorm —
+    that is what they were trained against, and feeding post-norm hiddens
+    measured 0% draft acceptance live while the offline pre-norm validation
+    measured 72.4% (issue #192). This mirrors ``Qwen3_5TextModel.__call__``
+    (embed → per-layer-type masks → layers) minus the trailing ``norm``.
+
+    Returns ``None`` when the trunk does not expose the expected structure;
+    callers fall back to the post-norm trunk (and should not enable
+    block-based drafting in that case).
+    """
+    embed: object | None = getattr(trunk, "embed_tokens", None)
+    layers: object | None = getattr(trunk, "layers", None)
+    if embed is None or not callable(embed) or not isinstance(layers, list):
+        return None
+    layer_list = cast("list[Callable[..., mx.array]]", layers)
+    # Hybrid (GDN/SSM) trunks key their masks off specific layer indices;
+    # pure-attention trunks use the first cache entry.
+    fa_idx = int(cast(int, getattr(trunk, "fa_idx", 0)))
+    ssm_idx_attr: object | None = getattr(trunk, "ssm_idx", None)
+    ssm_idx: int | None = int(cast(int, ssm_idx_attr)) if ssm_idx_attr is not None else None
+    make_attention_mask = cast(
+        "Callable[[mx.array, object], object]",
+        _mlx_lm_base.create_attention_mask,
+    )
+    make_ssm_mask = cast(
+        "Callable[[mx.array, object], object]",
+        _mlx_lm_base.create_ssm_mask,
+    )
+    embed_fn = cast(Callable[..., mx.array], embed)
+
+    def trunk_fn(tokens: mx.array, cache: KVCacheType | None = None) -> mx.array:
+        h = embed_fn(tokens)
+        layer_caches: list[object | None] = (
+            list(cache) if cache is not None else [None] * len(layer_list)
+        )
+        fa_mask = make_attention_mask(h, layer_caches[fa_idx])
+        ssm_mask = (
+            make_ssm_mask(h, layer_caches[ssm_idx]) if ssm_idx is not None else None
+        )
+        for layer, layer_cache in zip(layer_list, layer_caches, strict=True):
+            mask = ssm_mask if getattr(layer, "is_linear", False) else fa_mask
+            h = layer(h, mask=mask, cache=layer_cache)
+        return h
+
+    return trunk_fn
+
+
 def _get_trunk_and_head(
     model: Model,
 ) -> tuple[Callable[..., mx.array], Callable[..., mx.array]] | None:
     """Return (trunk_fn, head_fn) for hidden-state access, or None if unsupported.
 
-    trunk_fn(tokens, cache) → (1, seq, hidden_size) hidden states (already normed).
+    trunk_fn(tokens, cache) → (1, seq, hidden_size) hidden states. For
+    Qwen3.5-style models these are PRE-final-norm (what MTP heads consume);
+    head_fn applies the final norm itself, so main-path logits are unchanged.
     head_fn(hidden) → (1, seq, vocab_size) logits.
     """
     # Qwen3.5-style: model.language_model wraps a TextModel with .model and .lm_head
@@ -1138,20 +1191,27 @@ def _get_trunk_and_head(
         trunk: object | None = getattr(lm, "model", None)
         if trunk is not None and callable(trunk):
             head: object | None = getattr(lm, "lm_head", None)
-            if head is not None and callable(head):
-                return (
-                    cast(Callable[..., mx.array], trunk),
-                    cast(Callable[..., mx.array], head),
-                )
-            # Tied word embeddings: embed_tokens.as_linear acts as the head
-            embed: object | None = getattr(trunk, "embed_tokens", None)
-            if embed is not None and hasattr(embed, "as_linear"):
+            if head is None or not callable(head):
+                # Tied word embeddings: embed_tokens.as_linear acts as the head
+                embed: object | None = getattr(trunk, "embed_tokens", None)
                 as_linear: object | None = getattr(embed, "as_linear", None)
-                if as_linear is not None and callable(as_linear):
-                    return (
-                        cast(Callable[..., mx.array], trunk),
-                        cast(Callable[..., mx.array], as_linear),
-                    )
+                head = as_linear if as_linear is not None and callable(as_linear) else None
+            if head is not None:
+                head_fn = cast(Callable[..., mx.array], head)
+                norm: object | None = getattr(trunk, "norm", None)
+                prenorm_trunk_fn = _make_prenorm_trunk_fn(trunk)
+                if prenorm_trunk_fn is not None and norm is not None and callable(norm):
+                    norm_fn = cast(Callable[..., mx.array], norm)
+
+                    def normed_head_fn(hidden: mx.array) -> mx.array:
+                        return head_fn(norm_fn(hidden))
+
+                    return (prenorm_trunk_fn, normed_head_fn)
+                logger.warning(
+                    "MTP: trunk structure not introspectable for pre-norm hiddens; "
+                    "falling back to post-norm trunk (draft acceptance will suffer)"
+                )
+                return (cast(Callable[..., mx.array], trunk), head_fn)
     # DeepSeek-style: trunk = model.model, head = model.lm_head
     ds_trunk: object | None = getattr(model, "model", None)
     if ds_trunk is not None and callable(ds_trunk):
@@ -1168,7 +1228,7 @@ def _stream_generate_with_mtp(
     *,
     model: Model,
     tokenizer: TokenizerWrapper,
-    mtp_head: MTPHead,
+    drafter: Drafter,
     trunk_fn: Callable[..., mx.array],
     head_fn: Callable[..., mx.array],
     prompt: mx.array,
@@ -1179,22 +1239,31 @@ def _stream_generate_with_mtp(
     kv_group_size: int | None,
     kv_bits: int | None,
 ) -> Generator[MlxGenerationResponse, None, None]:
-    """Single-node decode loop with D=1 MTP speculative decoding.
+    """Single-node decode loop with D=1 speculative decoding via a Drafter.
 
-    Each iteration does a main forward pass on one token, uses the MTP head to
-    draft the token after that cheaply, then verifies the draft by running the
-    main model on both tokens in a single batched pass.  Accepted drafts yield
-    two tokens per verify pass; rejections trim the cache and fall back to one.
+    Each iteration does a main forward pass on one token, asks the drafter for
+    a candidate for the token after that, then verifies the candidate by
+    running the main model on both tokens in a single batched pass.  Accepted
+    drafts yield two tokens per verify pass; rejections trim the cache and
+    fall back to one.
+
+    The loop owns verification, accept/reject, cache trimming, and SSM
+    snapshots; everything mechanism-specific lives behind the
+    :class:`~exo.worker.engines.mlx.drafters.protocol.Drafter` protocol.  The
+    loop upholds the drafter pair-stream contract: every committed position's
+    (hidden, next-token) pair is fed exactly once, in order — the prompt in
+    bulk after prefill, one pair per ``draft()`` call, and the single skipped
+    pair after each verify resolution (both accept and reject).
 
     This path is only used for single-node inference; the pipeline path
-    (`_stream_generate_without_lookahead`) does not support MTP yet.
+    (`_stream_generate_without_lookahead`) does not support speculation yet.
     """
     if len(prompt) == 0:
         raise ValueError("MTP decode requires at least one prompt token")
 
     detokenizer = cast(_DetokenizerProtocol, cast(object, tokenizer.detokenizer))
     detokenizer.reset()
-    mtp_head.reset()
+    drafter.begin_request(prompt_cache)
 
     quantize_cache_fn = functools.partial(
         maybe_quantize_kv_cache,
@@ -1209,14 +1278,24 @@ def _stream_generate_with_mtp(
     prompt_start = time.perf_counter()
     if len(prompt) > 1:
         with mx.stream(generation_stream):
-            trunk_fn(prompt[:-1][None], cache=prompt_cache)
+            prefill_hidden = trunk_fn(prompt[:-1][None], cache=prompt_cache)
             quantize_cache_fn(prompt_cache)
+            # Bulk-ingest the prompt's (hidden, next-token) pairs so stateful
+            # drafters start decode with full positional history — matching
+            # the conditions the heads were trained (and offline-validated)
+            # under. Positions 0..P-2 pair with tokens 1..P-1.
+            drafter.observe(prefill_hidden[0], prompt[1:])
             mx.eval([c.state for c in prompt_cache])  # type: ignore[attr-defined]
 
     prompt_tps = len(prompt) / max(time.perf_counter() - prompt_start, 1e-9)
     generation_start = time.perf_counter()
 
     input_tokens = prompt[-1:]
+    # Tokens committed by the previous iteration that have not yet been added
+    # to token_history. Kept separate from input_tokens because the two
+    # diverge on accept (input is unused; two tokens committed) and on
+    # pure-KV reject (trunk replays [target] but [main, target] committed).
+    history_carry = prompt[-1:]
     generated_count = 0
     accepted = 0
     attempted_drafts = 0
@@ -1230,6 +1309,17 @@ def _stream_generate_with_mtp(
     cached_hidden: mx.array | None = None
 
     while generated_count < max_tokens:
+        # Fold the previous iteration's committed tokens into the processor
+        # history BEFORE computing this position's logits, so processors see
+        # everything committed so far (previously this ran post-sampling,
+        # lagging the history by one iteration).
+        if logits_processors:
+            token_history = (
+                mx.concat([token_history, history_carry])
+                if token_history is not None
+                else history_carry
+            )
+
         # ---- MAIN FORWARD (or use cached result from previous accept) ----
         with mx.stream(generation_stream):
             if cached_hidden is None:
@@ -1270,23 +1360,25 @@ def _stream_generate_with_mtp(
             )
             break
 
-        # Track token history for logits processors
-        if logits_processors:
-            token_history = (
-                mx.concat([token_history, input_tokens])
-                if token_history is not None
-                else input_tokens
-            )
-
-        # ---- MTP DRAFT ----
+        # ---- DRAFT ----
         with mx.stream(generation_stream):
-            draft_logits = mtp_head.draft(last_hidden, main_tok_int).astype(mx.float32)
+            draft_logits = drafter.draft(last_hidden, main_tok_int).astype(mx.float32)
             draft_logprobs = draft_logits - mx.logsumexp(draft_logits, keepdims=True)
             draft_tok = sampler(draft_logprobs)
             mx.eval(draft_tok)
 
         draft_tok_int = int(draft_tok.item())
         attempted_drafts += 1
+        # Consumers usually abandon this generator mid-stream (the tail-of-
+        # function summary never runs), and the public GenerationResponse
+        # carries no from_draft field — this periodic line is the production
+        # acceptance signal. Measuring acceptance via from_draft on
+        # mlx_generate's outputs silently reads 0 (issue #192 false alarm).
+        if attempted_drafts % 32 == 0:
+            logger.info(
+                f"MTP acceptance so far: {accepted}/{attempted_drafts} "
+                f"({accepted / attempted_drafts:.0%})"
+            )
 
         # Emit main token
         detokenizer.add_token(main_tok_int)
@@ -1331,7 +1423,10 @@ def _stream_generate_with_mtp(
             # (sampler output is 0-d; the trunk needs (1, N) token ids — the
             # 0.31.3 qwen3_5 rewrite unpacks (B, S, _) strictly and crashes
             # on the 2-D hidden states the old module tolerated).
+            # Pair-stream: draft() already consumed (h, main_tok); the next
+            # trunk forward produces the next hidden, so no observe needed.
             input_tokens = main_tok.reshape(-1)
+            history_carry = main_tok.reshape(-1)
             continue
 
         # ---- VERIFY PASS: process [main_tok, draft_tok] in one batched forward ----
@@ -1355,6 +1450,11 @@ def _stream_generate_with_mtp(
             # ---- ACCEPT ----
             accepted += 1
 
+            # Pair-stream: two tokens commit this iteration but draft() only
+            # consumed one pair — feed the skipped (h@main_tok, draft_tok)
+            # pair so stateful drafters keep gapless positional history.
+            drafter.observe(v_h[0, 0:1, :], mx.array([draft_tok_int]))
+
             if draft_tok_int in eos_token_ids:
                 generated_count += 1
                 finish_reason = "stop"
@@ -1375,13 +1475,6 @@ def _stream_generate_with_mtp(
 
             detokenizer.add_token(draft_tok_int)
             generated_count += 1
-
-            # Cache has both main_tok and draft_tok committed — we can sample the
-            # next main token from the verify pass's second output position.
-            v_lp_next = v_logits[0, 1, :].astype(mx.float32)
-            v_lp_next = v_lp_next - mx.logsumexp(v_lp_next, keepdims=True)
-            next_main = sampler(v_lp_next)
-            mx.eval(next_main)
 
             if generated_count >= max_tokens:
                 yield MlxGenerationResponse(
@@ -1415,9 +1508,14 @@ def _stream_generate_with_mtp(
                 finish_reason=None,
             )
 
-            # Stash hidden state at draft_tok position for next MTP round.
+            # Stash hidden state at draft_tok position for the next round —
+            # the next iteration's main logits come from head_fn(cached_hidden),
+            # so no token needs pre-sampling here (the previous phantom
+            # `next_main` sample entered token_history without ever being
+            # emitted — PR #191 review finding).
             cached_hidden = v_h[0, 1, :]
-            input_tokens = next_main.reshape(-1)
+            input_tokens = mx.array([draft_tok_int])
+            history_carry = mx.array([main_tok_int, draft_tok_int])
         else:
             # ---- REJECT ----
             if pre_verify_snapshot is not None:
@@ -1432,6 +1530,13 @@ def _stream_generate_with_mtp(
                 # Pure-KV model: trim just the rejected draft position.
                 trim_cache(prompt_cache, 1)
                 replay_tokens = [target_int]
+
+            # Pair-stream: the committed token after main_tok is the
+            # verifier's target, not the draft — feed the (h@main_tok, target)
+            # pair. v_h[0, 0, :] was computed against the untrimmed prefix and
+            # remains numerically valid after the trim/restore above.
+            drafter.observe(v_h[0, 0:1, :], mx.array([target_int]))
+
             # target_tok is the verifier's corrected token for the rejected position;
             # emit it before feeding it as input to the next forward.
             if target_int in eos_token_ids:
@@ -1486,6 +1591,10 @@ def _stream_generate_with_mtp(
             )
 
             input_tokens = mx.array(replay_tokens)
+            # Both main_tok and target committed this iteration — the replay
+            # list is the *trunk* input (which differs for pure-KV models) and
+            # must not double as the processor-history carry.
+            history_carry = mx.array([main_tok_int, target_int])
             cached_hidden = None
 
     else:
@@ -1999,6 +2108,7 @@ def mlx_generate(
     trace_task_id: str | None = None,
     trace_rank: int = 0,
     mtp_weights: "dict[str, mx.array] | None" = None,
+    model_card: ModelCard | None = None,
 ) -> Generator[GenerationResponse]:
     # Ensure that generation stats only contains peak memory for this generation
     mx.reset_peak_memory()
@@ -2434,12 +2544,12 @@ def mlx_generate(
     ), _hang_debug_watch(f"decode barrier ({decode_context})"):
         mx_barrier(group)
 
-    # Resolve MTP head for single-node speculative decoding (D=1).
-    # MTP requires greedy (temperature=0) sampling: the Phase 1 acceptance check
-    # is exact argmax match, which is only distribution-preserving at T=0.
+    # Resolve a drafter for single-node speculative decoding (D=1).
+    # MTP requires greedy (temperature=0) sampling: the acceptance check is
+    # exact argmax match, which is only distribution-preserving at T=0.
     # Probability-ratio acceptance for T>0 is tracked in issue #180.
     _is_greedy = task.temperature is not None and task.temperature == 0.0
-    _mtp_head: MTPHead | None = None
+    _drafter: Drafter | None = None
     _trunk_fn: Callable[..., mx.array] | None = None
     _head_fn: Callable[..., mx.array] | None = None
     if mtp_weights is not None and not (
@@ -2447,15 +2557,30 @@ def mlx_generate(
     ):
         if not _is_greedy:
             logger.info(
-                "MTP speculative decoding requires temperature=0 (Phase 1 greedy-only); "
+                "MTP speculative decoding requires temperature=0 (greedy-only); "
                 f"skipping MTP (temperature={task.temperature})"
+            )
+        elif logits_processors:
+            # Accepted draft tokens are committed from RAW verifier logits —
+            # logits processors (repetition penalty, bench EOS ban) are only
+            # applied on the main-forward sampling path, so a constrained
+            # token could slip through via an accepted draft. Until the
+            # verify pass applies processors, MTP and processors are
+            # mutually exclusive.
+            logger.info(
+                "MTP speculative decoding is incompatible with logits "
+                f"processors ({len(logits_processors)} active); skipping MTP"
             )
         else:
             trunk_head = _get_trunk_and_head(model)
             if trunk_head is not None:
                 _trunk_fn, _head_fn = trunk_head
-                _mtp_head = build_mtp_head(model, mtp_weights)
-                if _mtp_head is not None:
+                _drafter = build_drafter(
+                    model,
+                    mtp_weights,
+                    runtime=model_card.runtime if model_card is not None else None,
+                )
+                if _drafter is not None:
                     logger.info("MTP speculative decoding enabled (D=1)")
 
     with runner_phase(
@@ -2464,7 +2589,7 @@ def mlx_generate(
         attrs={
             "max_tokens": max_tokens,
             "last_token_count": len(last_token),
-            "mtp": _mtp_head is not None,
+            "mtp": _drafter is not None,
         },
         task_id=trace_task_id,
         include_memory=True,
@@ -2484,12 +2609,12 @@ def mlx_generate(
                 kv_group_size=KV_GROUP_SIZE,
                 kv_bits=KV_BITS,
             )
-        elif _mtp_head is not None:
+        elif _drafter is not None:
             assert _trunk_fn is not None and _head_fn is not None
             token_generator = _stream_generate_with_mtp(
                 model=model,
                 tokenizer=tokenizer,
-                mtp_head=_mtp_head,
+                drafter=_drafter,
                 trunk_fn=_trunk_fn,
                 head_fn=_head_fn,
                 prompt=last_token,

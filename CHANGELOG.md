@@ -9,6 +9,44 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Phase 2 MTP speculative decoding behind a modular `Drafter` protocol
+  (`src/exo/worker/engines/mlx/drafters/`). The generation loop now talks to
+  a mechanism-agnostic drafter seam (`begin_request` / `observe` / `draft`)
+  so Qwen sidecar heads, DeepSeek heads, and the planned Gemma 4 assistant
+  drafter all plug into the same verify/accept/reject machinery. The
+  Qwen3.5 drafter applies the three empirically isolated fixes from issue
+  #192 — +1.0 zero-centered norm shift, `embed_first` fc concat order, and
+  running the sidecar's `mtp.layers.0` transformer block with a private KV
+  cache — measured live at ~58–66% draft acceptance on Qwen3.5-2B (0%
+  before). Model cards gain optional `mtp_norm_convention` /
+  `mtp_concat_order` runtime overrides keyed to layout-detected family
+  defaults, and the loop logs a periodic `MTP acceptance so far` line as
+  the production acceptance signal. Model cards for Qwen3.5 2B-4bit (69%
+  acceptance, 1.26x), 9B-MLX-4bit (88%, 1.20x), and 27B-4bit (1.75x) now
+  declare MTP sidecars, validated by a per-model sweep plus a 10-prompt
+  exact-attempt acceptance suite. All shipped sidecars use base heads: a
+  750-draft/arm comparison measured base vs instruct heads as
+  statistically indistinguishable (87.6% vs 87.3% on 9B), so one base
+  sidecar serves every variant of a backbone. Qwen3.6-27B-4bit (88%
+  acceptance, 1.73x) is carded too — Qwen3.6 ships model_type=qwen3_5
+  and works through the existing stack with zero code changes. MTP is
+  skipped when logits processors are active (repetition penalty, bench
+  EOS ban): accepted drafts commit from raw verifier logits, so
+  processor-aware verification is required first (tracked follow-up). Known property: on hybrid (GDN) models, MTP greedy output is
+  semantically greedy but not guaranteed byte-identical to non-MTP decode —
+  the batched verify/replay chunked-scan numerics drift the recurrent state
+  and can flip near-tie tokens.
+
+### Fixed
+
+- MTP drafting consumed post-final-norm hidden states; the trunk accessor
+  now returns pre-norm hiddens (what the heads were trained on) and folds
+  the final norm into the head callable, keeping main-path logits
+  unchanged. Also fixed the accept-path token-history divergence (a
+  never-emitted sampled token entered logits-processor history — PR #191
+  review finding) and the pure-KV reject path dropping the emitted main
+  token from processor history.
+
 - Boot-time auto-update for the Skulk service: the LaunchAgent now runs
   `git pull`, `uv sync`, and the dashboard build through a wrapper
   (`deployment/install/skulk-startup.sh`) before exec'ing skulk. Failures of

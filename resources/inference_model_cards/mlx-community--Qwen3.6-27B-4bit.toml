@@ -1,0 +1,30 @@
+model_id = "mlx-community/Qwen3.6-27B-4bit"
+n_layers = 64
+hidden_size = 5120
+num_key_value_heads = 4
+supports_tensor = true
+tasks = ["TextGeneration"]
+family = "qwen"
+quantization = "4bit"
+base_model = "Qwen3.6 27B"
+capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 262144
+
+[reasoning]
+supports_toggle = true
+format = "token_delimited"
+default_effort = "medium"
+disabled_effort = "none"
+
+# Qwen3.6 ships model_type=qwen3_5 (same architecture family) — loads and
+# drafts through the existing qwen3_5 stack with zero code changes.
+# MTP validated 2026-06-04 on M4/24GB: 88% draft acceptance (66/75,
+# exact-attempt metric), 1.73x decode speedup (5.7 -> 9.8 tok/s), greedy
+# parity OK (Skulk #192 / PR #193 validation sweep).
+[runtime]
+mtp_heads = true
+mtp_max_depth = 1
+mtp_sidecar_repo = "FoxlightAI/qwen3-6-27b-mtp"
+
+[storage_size]
+in_bytes = 16081490064

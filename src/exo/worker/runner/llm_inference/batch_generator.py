@@ -442,6 +442,7 @@ class SequentialGenerator(InferenceGenerator):
             trace_task_id=task.task_id,
             trace_rank=self.device_rank,
             mtp_weights=self.mtp_weights,
+            model_card=self.model_card,
         )
 
     def close(self) -> None:

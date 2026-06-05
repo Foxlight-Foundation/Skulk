@@ -1,6 +1,6 @@
 import json
 from enum import Enum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import aiofiles
 import aiofiles.os as aios
@@ -265,6 +265,26 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     Example: ``"FoxlightAI/qwen3-5-7b-instruct-mtp-q4k"``
     The sidecar is downloaded alongside the base model weights and loaded
     into the runner for speculative decoding. Produced by SWP.
+    """
+    mtp_norm_convention: Literal["zero_centered", "actual_scale"] | None = None
+    """How the sidecar stores its RMSNorm weights.
+
+    ``"zero_centered"`` means deviation-from-1 (the raw Qwen3.5 checkpoint
+    convention — the runner applies a +1.0 shift at load, mirroring what
+    mlx-lm's ``sanitize()`` does for trunk weights). ``"actual_scale"`` means
+    the stored value is the scale itself (DeepSeek convention). ``None``
+    falls through to the family default keyed off the detected sidecar
+    layout. Override per card when a publisher changes conventions — getting
+    this wrong measured 0% draft acceptance on Qwen3.5-2B (issue #192).
+    """
+    mtp_concat_order: Literal["embed_first", "hidden_first"] | None = None
+    """Concatenation order of the MTP fc projection input.
+
+    ``"embed_first"`` = ``fc(concat([enorm(embed(t_next)), hnorm(h)]))`` —
+    verified for Qwen3.5 (72.4% offline agreement, issue #192).
+    ``"hidden_first"`` is the inherited DeepSeek assumption (unverified).
+    ``None`` falls through to the family default keyed off the detected
+    sidecar layout.
     """
     assistant_model_repo: str | None = None
     """Hugging Face repo ID of a companion *assistant* (drafter) model.
