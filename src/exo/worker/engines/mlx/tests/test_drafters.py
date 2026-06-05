@@ -26,6 +26,7 @@ from unittest.mock import MagicMock
 
 import mlx.core as mx
 import mlx.nn as nn
+import pytest
 from mlx.utils import tree_flatten
 from mlx_lm.models import qwen3_5
 
@@ -1079,8 +1080,123 @@ class TestBonusEosDetokenization:
 
 
 # ---------------------------------------------------------------------------
-# Deferred replay — reject-restored tokens ride the next verify forward
+# Distributed draft exchange (#201 Track 2b)
 # ---------------------------------------------------------------------------
+
+
+class TestExchangeDrafts:
+    """Payload round-trip for last-rank drafting: the drafting rank encodes
+    [chain_len, toks..., (q row under sampling)], non-drafting ranks decode
+    the broadcast. The all_sum is monkeypatched to identity (a one-rank sum)
+    so both directions are exercised without a real ring."""
+
+    def _patch_broadcast(
+        self, monkeypatch: pytest.MonkeyPatch, captured: list[mx.array]
+    ):
+        from exo.worker.engines.mlx.generator import generate as generate_module
+
+        def fake_broadcast(
+            group: object, payload: mx.array, *, detail: str
+        ) -> mx.array:
+            del group, detail
+            captured.append(payload)
+            return payload
+
+        monkeypatch.setattr(
+            generate_module, "_broadcast_via_all_sum", fake_broadcast
+        )
+        return generate_module
+
+    def test_greedy_drafting_rank_round_trip(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from exo.worker.engines.mlx.generator.speculative_sampling import (
+            SamplingParams,
+        )
+
+        captured: list[mx.array] = []
+        generate_module = self._patch_broadcast(monkeypatch, captured)
+
+        drafter = _FakeDrafter(draft_token_id=[7, 9])
+        toks, probs = generate_module._exchange_drafts(
+            draft_group=cast("mx.distributed.Group", cast(object, MagicMock())),
+            drafter=drafter,
+            hidden=mx.zeros(HIDDEN),
+            bonus=5,
+            depth=2,
+            sampling=SamplingParams(temperature=0.0),
+            vocab_size=VOCAB,
+            round_index=3,
+        )
+        assert toks == [7, 9]
+        assert probs is None
+        # Greedy payload: 1 + depth slots, no vocab row.
+        assert captured[0].shape == (3,)
+
+    def test_greedy_receiving_rank_decodes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from exo.worker.engines.mlx.generator import generate as generate_module
+        from exo.worker.engines.mlx.generator.speculative_sampling import (
+            SamplingParams,
+        )
+
+        def fake_broadcast(
+            group: object, payload: mx.array, *, detail: str
+        ) -> mx.array:
+            del group, detail
+            # Receiving rank contributed zeros of the right shape; the "sum"
+            # is the drafting rank's payload.
+            assert payload.shape == (3,)
+            assert float(mx.sum(mx.abs(payload)).item()) == 0.0
+            return mx.array([2.0, 7.0, 9.0])
+
+        monkeypatch.setattr(
+            generate_module, "_broadcast_via_all_sum", fake_broadcast
+        )
+        toks, probs = generate_module._exchange_drafts(
+            draft_group=cast("mx.distributed.Group", cast(object, MagicMock())),
+            drafter=None,
+            hidden=mx.zeros(HIDDEN),
+            bonus=5,
+            depth=2,
+            sampling=SamplingParams(temperature=0.0),
+            vocab_size=VOCAB,
+            round_index=3,
+        )
+        assert toks == [7, 9]
+        assert probs is None
+
+    def test_sampled_payload_carries_q_row(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from exo.worker.engines.mlx.generator.speculative_sampling import (
+            SamplingParams,
+        )
+
+        captured: list[mx.array] = []
+        generate_module = self._patch_broadcast(monkeypatch, captured)
+
+        drafter = _FakeDrafter(draft_token_id=[7])
+        toks, probs = generate_module._exchange_drafts(
+            draft_group=cast("mx.distributed.Group", cast(object, MagicMock())),
+            drafter=drafter,
+            hidden=mx.zeros(HIDDEN),
+            bonus=5,
+            depth=1,
+            sampling=SamplingParams(temperature=0.7),
+            vocab_size=VOCAB,
+            round_index=3,
+        )
+        assert len(toks) == 1
+        assert probs is not None
+        assert probs.shape == (VOCAB,)
+        # The drafter's one-hot logits warp to a near-one-hot distribution;
+        # the sampled token must come from it.
+        assert toks[0] == 7
+        assert float(probs[7].item()) > 0.99
+        # Sampled payload: 1 + depth slot + vocab row.
+        assert captured[0].shape == (1 + 1 + VOCAB,)
 
 
 class TestDeferredReplay:

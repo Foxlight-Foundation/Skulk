@@ -1249,11 +1249,97 @@ def _get_trunk_and_head(
     return None
 
 
+def _broadcast_via_all_sum(
+    group: "mx.distributed.Group", payload: mx.array, *, detail: str
+) -> mx.array:
+    """One-to-all broadcast built from ``all_sum`` (non-senders contribute
+    zeros), on the CPU stream with the shared pipeline watchdog."""
+    summed = mx.distributed.all_sum(
+        payload, group=group, stream=mx.default_stream(mx.Device(mx.cpu))
+    )
+    eval_with_timeout(
+        summed,
+        timeout_seconds=pipeline_eval_timeout_seconds(),
+        on_timeout=pipeline_timeout_callback(
+            detail, {"group_size": group.size()}, is_prefill=False
+        ),
+    )
+    return summed
+
+
+def _exchange_drafts(
+    *,
+    draft_group: "mx.distributed.Group",
+    drafter: Drafter | None,
+    hidden: mx.array,
+    bonus: int,
+    depth: int,
+    sampling: SamplingParams,
+    vocab_size: int,
+    round_index: int,
+) -> tuple[list[int], mx.array | None]:
+    """Distributed-draft round: drafting rank drafts, every rank receives.
+
+    Payload layout (fp32; token ids are exact in fp32 up to 2^24, far above
+    any vocab): ``[chain_len, tok_0..tok_{D-1} (zero-padded)]``, plus the
+    drafter's full effective distribution row appended under sampling so
+    ratio-acceptance and residual resampling run identically on every rank.
+    The payload shape is fixed per request, so the collective schedule stays
+    symmetric regardless of which rank drafts.
+
+    Returns ``(draft_tokens, draft_probs_or_None)``. Drafting-rank failures
+    propagate (fail-loud is mandatory in distributed mode); the peers'
+    watchdogs surface the abandoned collective.
+    """
+    slots = max(depth, 1)
+    payload_len = 1 + slots + (0 if sampling.is_greedy else vocab_size)
+    payload = mx.zeros((payload_len,), dtype=mx.float32)
+    if drafter is not None:
+        chain_logits = drafter.draft(hidden, bonus, depth=depth).astype(mx.float32)
+        if sampling.is_greedy:
+            toks = mx.argmax(chain_logits, axis=-1)
+            tok_list = [int(t) for t in cast("list[int]", toks.tolist())]
+            payload = mx.concatenate(
+                [
+                    mx.array([float(len(tok_list))]),
+                    toks.astype(mx.float32),
+                    mx.zeros((slots - len(tok_list),), dtype=mx.float32),
+                ]
+            )
+        else:
+            chain_lp = chain_logits - mx.logsumexp(
+                chain_logits, axis=-1, keepdims=True
+            )
+            q_row = warp_to_probs(chain_lp[0], sampling)
+            # Explicit per-round key: only this rank draws here, and using
+            # the global stream would desync it from the peers' aligned
+            # streams (they don't draft). categorical(log q) == draw from
+            # the same effective distribution the local path samples.
+            key = mx.random.key(round_index)
+            tok = mx.random.categorical(mx.log(q_row + 1e-12), key=key)
+            payload = mx.concatenate(
+                [
+                    mx.array([1.0]),
+                    tok.astype(mx.float32)[None],
+                    mx.zeros((slots - 1,), dtype=mx.float32),
+                    q_row.astype(mx.float32),
+                ]
+            )
+        mx.eval(payload)
+    summed = _broadcast_via_all_sum(
+        draft_group, payload, detail="mtp_draft_exchange"
+    )
+    chain_len = int(summed[0].item())
+    draft_toks = [int(t) for t in cast("list[int]", summed[1 : 1 + chain_len].tolist())]
+    draft_probs = None if sampling.is_greedy else summed[1 + slots :]
+    return draft_toks, draft_probs
+
+
 def _stream_generate_with_mtp(
     *,
     model: Model,
     tokenizer: TokenizerWrapper,
-    drafter: Drafter,
+    drafter: Drafter | None,
     trunk_fn: Callable[..., mx.array],
     head_fn: Callable[..., mx.array],
     prompt: mx.array,
@@ -1266,6 +1352,7 @@ def _stream_generate_with_mtp(
     depth: int = 1,
     sampling: SamplingParams | None = None,
     fail_loud_on_drafter_error: bool = False,
+    draft_group: "mx.distributed.Group | None" = None,
 ) -> Generator[MlxGenerationResponse, None, None]:
     """Speculative decode loop: bonus-driven rounds via a Drafter.
 
@@ -1305,16 +1392,30 @@ def _stream_generate_with_mtp(
     lockstep (#201 Tracks 1-2a): TP collectives and pipeline's decode-mode
     all_gather both give every rank identical logits, and per-request RNG
     seeding aligns every sampled accept/reject decision. Sidecar drafters
-    are rank-local (replicated embed/head, zero collectives); assistant
-    drafters cross-attend the target's KV and stay excluded from pipeline
-    placements (#201 Track 2b).
+    are rank-local (replicated embed/head, zero collectives).
+
+    Assistant drafters (gemma4) cross-attend the target's KV cache, which a
+    pipeline shard only holds for its own layers — under pipeline they run
+    on the LAST rank only (#201 Track 2b: the last full-attention and
+    sliding KV layers live there by construction, and the post-norm hidden
+    is already all-gathered to every rank). Pass ``draft_group`` to enable
+    the distributed-draft exchange: the drafting rank (non-None *drafter*)
+    drafts locally and every rank joins one fixed-shape ``all_sum`` per
+    round that lands the draft tokens (and, under sampling, the drafter's
+    effective distribution) everywhere — keeping the collective schedule
+    symmetric while only one rank pays the draft. Drafting-rank sampled
+    draws use an explicit per-round key so the shared global RNG stream
+    stays aligned across ranks.
     """
     if len(prompt) == 0:
         raise ValueError("MTP decode requires at least one prompt token")
+    if drafter is None and draft_group is None:
+        raise ValueError("drafter may only be None in distributed-draft mode")
 
     detokenizer = cast(_DetokenizerProtocol, cast(object, tokenizer.detokenizer))
     detokenizer.reset()
-    drafter.begin_request(prompt_cache)
+    if drafter is not None:
+        drafter.begin_request(prompt_cache)
 
     quantize_cache_fn = functools.partial(
         maybe_quantize_kv_cache,
@@ -1439,7 +1540,8 @@ def _stream_generate_with_mtp(
             # Bulk-ingest the prompt pairs so stateful drafters start decode
             # with positional history (positions 0..P-2 pair with tokens
             # 1..P-1).
-            drafter.observe(prefill_hidden[0], prompt[1:])
+            if drafter is not None:
+                drafter.observe(prefill_hidden[0], prompt[1:])
             mx.eval([c.state for c in prompt_cache])  # type: ignore[attr-defined]
     _record_history([int(t) for t in cast("list[int]", prompt.tolist())])
 
@@ -1454,6 +1556,9 @@ def _stream_generate_with_mtp(
 
     prompt_tps = len(prompt) / max(time.perf_counter() - prompt_start, 1e-9)
     generation_start = time.perf_counter()
+    # Distributed-draft payloads carry a full-vocab row under sampling; the
+    # non-drafting ranks size their zero contribution from here.
+    vocab_size = int(first_lp.shape[0])
 
     bonus, bonus_lp = _sample_row(first_lp)
     # EOS never enters the detokenizer (matching the non-MTP decode paths
@@ -1502,38 +1607,57 @@ def _stream_generate_with_mtp(
 
         # ---- DRAFT from (hidden, bonus) ----
         draft_probs: mx.array | None = None
-        try:
+        if draft_group is not None:
+            # Distributed drafts (#201 Track 2b): only the drafting rank
+            # holds a drafter; the exchange lands identical tokens (and the
+            # effective draft distribution, under sampling) on every rank.
+            # No try/except: distributed drafter failures are always loud.
             with mx.stream(generation_stream):
-                chain_logits = drafter.draft(hidden, bonus, depth=depth).astype(
-                    mx.float32
-                )  # (K, V), K <= depth
-                if sampling.is_greedy:
-                    # Log-softmax is rank-preserving: argmax reads raw logits.
-                    chain_sampled = sampler(chain_logits)  # (K,)
-                else:
-                    chain_lp = chain_logits - mx.logsumexp(
-                        chain_logits, axis=-1, keepdims=True
-                    )
-                    draft_probs = warp_to_probs(chain_lp[0], sampling)
-                    chain_sampled = sampler(chain_lp)  # (1,)
-                mx.eval(chain_sampled)
-        except Exception as draft_error:  # noqa: BLE001 — speculation is best-effort
-            if fail_loud_on_drafter_error:
-                # Multi-rank placements: a rank-local fallback to plain
-                # decode would silently fork the collective schedule and
-                # corrupt/wedge the peers — abort the request loudly
-                # instead (#201 Track 2a, design seam 3). Deterministic
-                # drafter failures hit every rank identically before this
-                # point; what reaches here is resource-class (e.g. OOM).
-                raise
-            logger.warning(
-                f"Drafter failed ({draft_error}); disabling speculation for "
-                "the remainder of this request"
-            )
-            speculation_disabled = True
-            continue
+                draft_toks, draft_probs = _exchange_drafts(
+                    draft_group=draft_group,
+                    drafter=drafter,
+                    hidden=hidden,
+                    bonus=bonus,
+                    depth=depth,
+                    sampling=sampling,
+                    vocab_size=vocab_size,
+                    round_index=generated_count,
+                )
+        else:
+            assert drafter is not None  # checked at entry
+            try:
+                with mx.stream(generation_stream):
+                    chain_logits = drafter.draft(hidden, bonus, depth=depth).astype(
+                        mx.float32
+                    )  # (K, V), K <= depth
+                    if sampling.is_greedy:
+                        # Log-softmax is rank-preserving: argmax reads raw
+                        # logits.
+                        chain_sampled = sampler(chain_logits)  # (K,)
+                    else:
+                        chain_lp = chain_logits - mx.logsumexp(
+                            chain_logits, axis=-1, keepdims=True
+                        )
+                        draft_probs = warp_to_probs(chain_lp[0], sampling)
+                        chain_sampled = sampler(chain_lp)  # (1,)
+                    mx.eval(chain_sampled)
+            except Exception as draft_error:  # noqa: BLE001 — best-effort
+                if fail_loud_on_drafter_error:
+                    # Multi-rank placements: a rank-local fallback to plain
+                    # decode would silently fork the collective schedule and
+                    # corrupt/wedge the peers — abort the request loudly
+                    # instead (#201 Track 2a, design seam 3). Deterministic
+                    # drafter failures hit every rank identically before
+                    # this point; what reaches here is resource-class (OOM).
+                    raise
+                logger.warning(
+                    f"Drafter failed ({draft_error}); disabling speculation "
+                    "for the remainder of this request"
+                )
+                speculation_disabled = True
+                continue
 
-        draft_toks = [int(t) for t in cast("list[int]", chain_sampled.tolist())]
+            draft_toks = [int(t) for t in cast("list[int]", chain_sampled.tolist())]
         # Truncate after the first EOS draft (keep the EOS itself: the
         # verifier may legitimately accept it and end the stream).
         for eos_index, candidate in enumerate(draft_toks):
@@ -1625,7 +1749,7 @@ def _stream_generate_with_mtp(
         # accepted drafts commit as next-tokens for positions bonus..d_{p-2},
         # whose hiddens are v_h rows 0..p-1. The next bonus pair is consumed
         # by the next draft() from v_h[:, p].
-        if prefix_len > 0:
+        if prefix_len > 0 and drafter is not None:
             drafter.observe(
                 v_h[0, :prefix_len, :], mx.array(draft_toks[:prefix_len])
             )
@@ -2635,7 +2759,19 @@ def mlx_generate(
     _trunk_fn: Callable[..., mx.array] | None = None
     _head_fn: Callable[..., mx.array] | None = None
     _speculation_assets = mtp_weights is not None or assistant_model is not None
-    if _speculation_assets:
+    # Assistant drafters on pipeline placements draft on the LAST rank only
+    # (#201 Track 2b): assets load there alone, but every rank must resolve
+    # trunk/head and join the distributed-draft exchange — so the mode is
+    # derived from the rank-invariant card declaration, not local assets.
+    _pipeline_assistant_mode = (
+        model_card is not None
+        and model_card.runtime is not None
+        and model_card.runtime.assistant_model_repo is not None
+        and group is not None
+        and group.size() > 1
+        and _has_pipeline_communication_layer(model)
+    )
+    if _speculation_assets or _pipeline_assistant_mode:
         if logits_processors:
             # Accepted draft tokens are committed from RAW verifier logits —
             # logits processors (repetition penalty, bench EOS ban) are only
@@ -2651,12 +2787,15 @@ def mlx_generate(
             trunk_head = _get_trunk_and_head(model)
             if trunk_head is not None:
                 _trunk_fn, _head_fn = trunk_head
-                _drafter = build_drafter(
-                    model,
-                    mtp_weights,
-                    assistant_model=assistant_model,
-                    runtime=model_card.runtime if model_card is not None else None,
-                )
+                if _speculation_assets:
+                    _drafter = build_drafter(
+                        model,
+                        mtp_weights,
+                        assistant_model=assistant_model,
+                        runtime=model_card.runtime
+                        if model_card is not None
+                        else None,
+                    )
                 if _drafter is not None:
                     logger.info("MTP speculative decoding enabled (D=1)")
 
@@ -2664,6 +2803,7 @@ def mlx_generate(
     # is identical on every rank, so the collective count stays symmetric;
     # what varies per rank (a missing sidecar download, a failed drafter
     # build) is exactly what the collective settles.
+    _distributed_drafts_ok = False
     _card_declares_speculation = (
         model_card is not None
         and model_card.runtime is not None
@@ -2694,7 +2834,19 @@ def mlx_generate(
             ),
         )
         ready_count = int(drafter_ready.item())
-        if _drafter is not None and ready_count != group.size():
+        if _pipeline_assistant_mode:
+            # Last-rank drafting: exactly ONE rank should hold the
+            # assistant; every rank joins the per-round draft exchange.
+            _distributed_drafts_ok = ready_count == 1 and _trunk_fn is not None
+            if not _distributed_drafts_ok:
+                if _drafter is not None or ready_count > 0:
+                    logger.warning(
+                        "Assistant speculation disabled for this request: "
+                        f"{ready_count} rank(s) hold a drafter (expected "
+                        "exactly 1 on the last pipeline rank)"
+                    )
+                _drafter = None
+        elif _drafter is not None and ready_count != group.size():
             logger.warning(
                 f"Speculation disabled for this request: only {ready_count}/"
                 f"{group.size()} ranks have a working drafter"
@@ -2712,12 +2864,14 @@ def mlx_generate(
         task_id=trace_task_id,
         include_memory=True,
     ):
-        if _drafter is not None:
+        if _drafter is not None or _distributed_drafts_ok:
             # The MTP loop is rank-symmetric and runs on single-node, TP,
             # and pipeline placements alike (#201 Tracks 1-2a): pipeline
             # decode all-gathers the final hidden to every rank and
             # embed/norm/head are replicated, so every rank sees identical
             # logits and the per-request seed aligns sampled draws.
+            # Assistant drafters on pipeline draft on the last rank only
+            # and fan drafts out via the per-round exchange (Track 2b).
             assert _trunk_fn is not None and _head_fn is not None
             token_generator = _stream_generate_with_mtp(
                 model=model,
@@ -2745,6 +2899,7 @@ def mlx_generate(
                 # the loop aborts loud instead (peers surface via the
                 # pipeline eval watchdogs).
                 fail_loud_on_drafter_error=group is not None and group.size() > 1,
+                draft_group=group if _distributed_drafts_ok else None,
             )
         elif group is not None and _has_pipeline_communication_layer(model):
             logger.info(

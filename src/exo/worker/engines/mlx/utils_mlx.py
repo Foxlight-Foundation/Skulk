@@ -708,8 +708,20 @@ def load_mlx_items(
     # (#201 Track 2b); don't pay assistant memory for speculation that
     # will never run, and on tight shard fits the eager load could OOM.
     single_node = group is None or group.size() <= 1
-    assistant_placement_ok = single_node or isinstance(
-        bound_instance.bound_shard, TensorShardMetadata
+    # Assistants on pipeline placements load on the LAST rank only (#201
+    # Track 2b): the assistant cross-attends the target's last
+    # full-attention and sliding KV layers, which live in the final slice —
+    # other ranks join the per-round draft exchange without paying
+    # assistant memory.
+    bound_shard = bound_instance.bound_shard
+    is_last_pipeline_rank = (
+        isinstance(bound_shard, PipelineShardMetadata)
+        and bound_shard.device_rank == bound_shard.world_size - 1
+    )
+    assistant_placement_ok = (
+        single_node
+        or isinstance(bound_shard, TensorShardMetadata)
+        or is_last_pipeline_rank
     )
     if runtime and runtime.mtp_sidecar_repo and runtime.mtp_heads:
         # Sidecar repos carry only mtp.safetensors (no config.json), so they
@@ -743,10 +755,10 @@ def load_mlx_items(
             )
     elif runtime and runtime.assistant_model_repo:
         logger.info(
-            "Assistant model declared but placement is pipeline-sharded "
-            f"(group size {group.size() if group else 0}); skipping assistant "
-            "load — assistant drafters cross-attend the target's KV and "
-            "need the #201 Track 2b last-rank protocol on pipeline"
+            "Assistant model declared; this pipeline rank "
+            f"({bound_shard.device_rank}/{bound_shard.world_size}) skips the "
+            "assistant load — drafting runs on the last rank only and drafts "
+            "arrive via the per-round exchange (#201 Track 2b)"
         )
 
     return cast(Model, model), tokenizer, vision_processor, mtp_weights, assistant_model

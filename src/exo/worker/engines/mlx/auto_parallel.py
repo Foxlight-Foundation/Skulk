@@ -401,7 +401,19 @@ class PipelineLastLayer(CustomMlxLayer):
         ), _hang_debug_watch(
             f"pipeline_last original_layer rank={self.r} world={self.s} prefill={self.is_prefill}"
         ):
-            output: mx.array = self.original_layer(x, *args, **kwargs)
+            raw_output = self.original_layer(x, *args, **kwargs)
+
+        # gemma4-family decoder layers return (hidden, kvs, offset); only
+        # the hidden crosses the rank boundary. The KV-sharing tail (kvs,
+        # offset) is layer-local for the families pipeline supports —
+        # pipeline_auto_parallel rejects slices that cut a KV-sharing edge.
+        extra: tuple[object, ...] = ()
+        if isinstance(raw_output, tuple):
+            untyped_output = cast("tuple[object, ...]", raw_output)
+            output = cast(mx.array, untyped_output[0])
+            extra = untyped_output[1:]
+        else:
+            output = raw_output
 
         # Eval layer output to materialize it before send — this splits the graph
         # so the send is isolated and the receiving rank's recv can complete.
@@ -497,6 +509,9 @@ class PipelineLastLayer(CustomMlxLayer):
                     ),
                 )
 
+        if extra:
+            # Preserve the family's layer-return shape (h, kvs, offset).
+            return cast(mx.array, cast(object, (output, *extra)))
         return output
 
 
@@ -696,6 +711,43 @@ def pipeline_auto_parallel(
                 ssm_idx=inner_model_instance.ssm_idx,
                 has_linear=has_mamba,
             )
+
+    full_previous_kvs = getattr(inner_model_instance, "previous_kvs", None)
+    if isinstance(full_previous_kvs, list):
+        # gemma4-family: layer types, the KV-sharing graph, and make_cache
+        # all derive from FULL-config indices — re-key them to the slice.
+        sliced_prev = cast("list[int]", full_previous_kvs)[start_layer:end_layer]
+        if any(prev_idx < start_layer for prev_idx in sliced_prev):
+            # A KV-shared layer would consume K/V produced on an earlier
+            # rank — a real cross-rank tensor dependency the pipeline does
+            # not carry. KV-shared models (gemma4 E-series) are small
+            # enough to never need sharding; fail loud rather than compute
+            # silently wrong attention.
+            raise ValueError(
+                "gemma4 pipeline slice cuts a KV-sharing edge "
+                f"(slice [{start_layer}, {end_layer}) consumes K/V from an "
+                "earlier rank); KV-shared models are not pipeline-shardable"
+            )
+        inner_model_instance.previous_kvs = [
+            prev_idx - start_layer for prev_idx in sliced_prev
+        ]
+        gemma_args = cast(Any, inner_model_instance).args  # pyright: ignore[reportAny]
+        gemma_args.layer_types = list(
+            cast("list[str]", gemma_args.layer_types)
+        )[start_layer:end_layer]
+        gemma_args.num_hidden_layers = len(layers)
+        # make_cache builds (num_hidden_layers - num_kv_shared_layers)
+        # caches over layer_types; recompute the shared tail for the slice
+        # (zero for the dense/MoE models that pass the edge check above
+        # with shared layers absent).
+        local_prev = inner_model_instance.previous_kvs
+        shared_tail = 0
+        for local_idx in range(len(local_prev) - 1, -1, -1):
+            if local_prev[local_idx] != local_idx:
+                shared_tail += 1
+            else:
+                break
+        gemma_args.num_kv_shared_layers = shared_tail
 
     _set_layers(model, layers)
 
