@@ -100,8 +100,14 @@ class _FakeAssistant:
         self.reset_calls += 1
         return []
 
-    def set_shared_kv(self, shared_kv_states: dict[str, tuple[mx.array, mx.array]], kv_offset: int) -> None:
-        self.set_shared_kv_calls.append((set(shared_kv_states), kv_offset))
+    def set_shared_kv(
+        self,
+        shared_kv_states: dict[str, tuple[mx.array, mx.array]],
+        kv_offset: int,
+        position: int | None = None,
+        kv_valid_len: int | None = None,
+    ) -> None:
+        self.set_shared_kv_calls.append((set(shared_kv_states), kv_offset, position))
 
     def __call__(
         self,
@@ -159,11 +165,12 @@ class TestGemma4AssistantDrafter:
         rows = drafter.draft(mx.zeros(HIDDEN), next_token=7, depth=3)
         assert rows.shape == (3, VOCAB)
         assert rows.dtype == mx.float32
-        # Position held constant at the cache offset (5) across all steps.
-        assert assistant.call_positions == [5, 5, 5]
+        # Query position anchored at the LAST CACHED position (offset - 1,
+        # matching mlx-vlm's _mtp_draft_position) and held constant.
+        assert assistant.call_positions == [4, 4, 4]
         # Shared KV carried both layer types; kv_offset = cache offset.
         assert assistant.set_shared_kv_calls == [
-            ({"sliding_attention", "full_attention"}, 5)
+            ({"sliding_attention", "full_attention"}, 5, 4)
         ]
 
     def test_observe_is_noop(self) -> None:
@@ -180,7 +187,7 @@ class TestGemma4AssistantDrafter:
         # 1 cache vs 2 layers -> only the first (sliding) layer participates.
         drafter.begin_request([_kv_cache_with(2, 1.0)])
         drafter.draft(mx.zeros(HIDDEN), next_token=1)
-        assert assistant.set_shared_kv_calls == [({"sliding_attention"}, 2)]
+        assert assistant.set_shared_kv_calls == [({"sliding_attention"}, 2, 1)]
 
     def test_more_caches_than_layers_raises(self) -> None:
         assistant = _FakeAssistant()

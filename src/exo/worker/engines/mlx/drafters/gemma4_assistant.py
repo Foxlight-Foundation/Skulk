@@ -58,7 +58,13 @@ class AssistantModel(Protocol):
 
     def reset(self, target_model: object) -> list[object]: ...
 
-    def set_shared_kv(self, shared_kv_states: SharedKV, kv_offset: int) -> None: ...
+    def set_shared_kv(
+        self,
+        shared_kv_states: SharedKV,
+        kv_offset: int,
+        position: int | None = None,
+        kv_valid_len: int | None = None,
+    ) -> None: ...
 
     def __call__(
         self,
@@ -173,8 +179,17 @@ class Gemma4AssistantDrafter:
             ),
             default=0,
         )
-        self._assistant.set_shared_kv(shared, kv_offset=offset)
-        position_ids = mx.array([[offset]])
+        # Upstream anchors the drafter's constant query position at the LAST
+        # CACHED position (kv_offset - 1), not at kv_offset — set_shared_kv's
+        # default (position = kv_offset) is one off, and that RoPE off-by-one
+        # measured a ~21pp acceptance loss (48% vs upstream's 69.3% on
+        # identical E4B-8bit artifacts) before this was matched to
+        # mlx-vlm's _mtp_draft_position.
+        draft_position = max(offset - 1, 0)
+        self._assistant.set_shared_kv(
+            shared, kv_offset=offset, position=draft_position, kv_valid_len=offset
+        )
+        position_ids = mx.array([[draft_position]])
 
         embed_fn = cast(
             "Callable[[mx.array], mx.array] | None",
