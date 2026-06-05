@@ -2579,9 +2579,19 @@ def mlx_generate(
     _drafter: Drafter | None = None
     _trunk_fn: Callable[..., mx.array] | None = None
     _head_fn: Callable[..., mx.array] | None = None
-    if mtp_weights is not None and not (
-        group is not None and _has_pipeline_communication_layer(model)
-    ):
+    if mtp_weights is not None and group is not None and group.size() > 1:
+        # MTP is single-node only for now. Pipeline sharding needs the
+        # distributed draft/verify design (#152 Phase 2: last-rank drafting,
+        # K+1 pipeline verify, trim broadcast). Tensor-parallel would
+        # mechanically run today, but accept/reject and residual draws
+        # consume per-rank RNG — lockstep across ranks is unvalidated, and a
+        # divergent decision silently corrupts every rank's cache. Lift
+        # per-mode once TP lockstep is validated on real hardware.
+        logger.info(
+            "MTP speculative decoding is single-node only (group size "
+            f"{group.size()}); skipping MTP pending distributed support"
+        )
+    elif mtp_weights is not None:
         if logits_processors:
             # Accepted draft tokens are committed from RAW verifier logits —
             # logits processors (repetition penalty, bench EOS ban) are only

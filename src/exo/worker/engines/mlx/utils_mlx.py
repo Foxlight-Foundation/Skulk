@@ -693,7 +693,13 @@ def load_mlx_items(
 
     mtp_weights: dict[str, mx.array] | None = None
     runtime = bound_instance.bound_shard.model_card.runtime
-    if runtime and runtime.mtp_sidecar_repo and runtime.mtp_heads:
+    if runtime and runtime.mtp_sidecar_repo and runtime.mtp_heads and (
+        group is None or group.size() <= 1
+    ):
+        # Distributed placements disengage MTP (single-node only pending
+        # distributed support, #201) — don't pay sidecar memory for
+        # speculation that will never run; on tight shard fits the eager
+        # load could even OOM.
         # Sidecar repos carry only mtp.safetensors (no config.json), so they
         # must be resolved with the sidecar resolver — build_model_path's
         # model-completeness check rejects their directories.
@@ -708,6 +714,12 @@ def load_mlx_items(
                 f"MTP sidecar repo {runtime.mtp_sidecar_repo!r} not downloaded; "
                 "running without MTP"
             )
+    elif runtime and runtime.mtp_sidecar_repo and runtime.mtp_heads:
+        logger.info(
+            "MTP sidecar declared but placement is distributed "
+            f"(group size {group.size() if group else 0}); skipping sidecar "
+            "load — MTP is single-node only pending #201"
+        )
 
     return cast(Model, model), tokenizer, vision_processor, mtp_weights
 
