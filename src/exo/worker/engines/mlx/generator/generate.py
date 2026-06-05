@@ -2560,6 +2560,17 @@ def mlx_generate(
                 "MTP speculative decoding requires temperature=0 (greedy-only); "
                 f"skipping MTP (temperature={task.temperature})"
             )
+        elif logits_processors:
+            # Accepted draft tokens are committed from RAW verifier logits —
+            # logits processors (repetition penalty, bench EOS ban) are only
+            # applied on the main-forward sampling path, so a constrained
+            # token could slip through via an accepted draft. Until the
+            # verify pass applies processors, MTP and processors are
+            # mutually exclusive.
+            logger.info(
+                "MTP speculative decoding is incompatible with logits "
+                f"processors ({len(logits_processors)} active); skipping MTP"
+            )
         else:
             trunk_head = _get_trunk_and_head(model)
             if trunk_head is not None:

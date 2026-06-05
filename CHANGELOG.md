@@ -27,7 +27,12 @@ This project records release notes here and mirrors public-facing notes in
   exact-attempt acceptance suite. All shipped sidecars use base heads: a
   750-draft/arm comparison measured base vs instruct heads as
   statistically indistinguishable (87.6% vs 87.3% on 9B), so one base
-  sidecar serves every variant of a backbone. Known property: on hybrid (GDN) models, MTP greedy output is
+  sidecar serves every variant of a backbone. Qwen3.6-27B-4bit (88%
+  acceptance, 1.73x) is carded too — Qwen3.6 ships model_type=qwen3_5
+  and works through the existing stack with zero code changes. MTP is
+  skipped when logits processors are active (repetition penalty, bench
+  EOS ban): accepted drafts commit from raw verifier logits, so
+  processor-aware verification is required first (tracked follow-up). Known property: on hybrid (GDN) models, MTP greedy output is
   semantically greedy but not guaranteed byte-identical to non-MTP decode —
   the batched verify/replay chunked-scan numerics drift the recurrent state
   and can flip near-tie tokens.
