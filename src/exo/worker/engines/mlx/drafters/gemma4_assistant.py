@@ -125,6 +125,10 @@ class Gemma4AssistantDrafter:
     Construct via :func:`build_gemma4_assistant_drafter`.
     """
 
+    # The assistant cross-attends the TARGET's KV cache: the loop must keep
+    # that cache fully committed before every draft (no deferred replay).
+    reads_target_cache = True
+
     def __init__(self, *, assistant: AssistantModel, target_model: object) -> None:
         self._assistant = assistant
         self._target = target_model

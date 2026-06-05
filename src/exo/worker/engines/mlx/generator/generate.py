@@ -1452,6 +1452,13 @@ def _stream_generate_with_mtp(
     # on Qwen3.5-9B). Capped so pathological reject streaks cannot grow the
     # verify window without bound.
     pending_replay: list[int] = []
+    # Cross-attending drafters read the TARGET's cache when drafting, so
+    # deferral starves them of the newest committed tokens. Derived
+    # rank-invariantly: distributed-draft mode is assistant-only, and on
+    # local/TP placements every rank builds the same drafter object.
+    drafter_reads_target_cache = draft_group is not None or bool(
+        getattr(drafter, "reads_target_cache", False)
+    )
 
     generated_count = 0
     accepted = 0
@@ -1736,7 +1743,17 @@ def _stream_generate_with_mtp(
                 # trunk pass; riding along in the next verify is free).
                 trim_cache(prompt_cache, replay_len + chain_len + 1, pre_verify_snapshot)
                 pending_replay = [*pending_replay, bonus, *draft_toks[:prefix_len]]
-                if len(pending_replay) >= _MTP_MAX_PENDING_REPLAY:
+                if (
+                    drafter_reads_target_cache
+                    or len(pending_replay) >= _MTP_MAX_PENDING_REPLAY
+                ):
+                    # Cross-attending drafters (gemma4 assistants) read the
+                    # TARGET's KV cache when drafting — deferred tokens are
+                    # invisible to them, so every post-reject draft would
+                    # run against a stale cache and crater acceptance
+                    # (measured 74% -> 28% on a 31B target whose loader
+                    # lacks native rollback). Pay the replay immediately
+                    # for those drafters; sidecars keep the free deferral.
                     _flush_pending_replay()
             else:
                 trim_cache(prompt_cache, rejected)
