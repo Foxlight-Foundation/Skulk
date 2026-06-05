@@ -1296,8 +1296,11 @@ def _stream_generate_with_mtp(
     ``(v_h[:, :p], drafts[:p])`` so stateful drafters keep gapless
     positional history.
 
-    This path is only used for single-node inference; the pipeline path
-    (`_stream_generate_without_lookahead`) does not support speculation yet.
+    This path is used for single-node and tensor-parallel inference — TP
+    ranks run it in validated lockstep (identical logits from collectives +
+    per-request RNG seeding align every accept/reject decision, #201
+    Track 1). The pipeline path (`_stream_generate_without_lookahead`) does
+    not support speculation yet.
     """
     if len(prompt) == 0:
         raise ValueError("MTP decode requires at least one prompt token")
@@ -2617,17 +2620,24 @@ def mlx_generate(
     _trunk_fn: Callable[..., mx.array] | None = None
     _head_fn: Callable[..., mx.array] | None = None
     _speculation_assets = mtp_weights is not None or assistant_model is not None
-    if _speculation_assets and group is not None and group.size() > 1:
-        # MTP is single-node only for now. Pipeline sharding needs the
-        # distributed draft/verify design (#152 Phase 2: last-rank drafting,
-        # K+1 pipeline verify, trim broadcast). Tensor-parallel would
-        # mechanically run today, but accept/reject and residual draws
-        # consume per-rank RNG — lockstep across ranks is unvalidated, and a
-        # divergent decision silently corrupts every rank's cache. Lift
-        # per-mode once TP lockstep is validated on real hardware.
+    if (
+        _speculation_assets
+        and group is not None
+        and group.size() > 1
+        and _has_pipeline_communication_layer(model)
+    ):
+        # Pipeline sharding needs the distributed draft/verify design
+        # (#152 Phase 2: last-rank drafting, K+1 pipeline verify, trim
+        # broadcast). Tensor-parallel placements run the loop in validated
+        # lockstep (#201 Track 1, 2026-06-05: greedy byte-parity and
+        # seeded-sampled trace-hash parity on localhost ring and on real
+        # two-node hardware) — every rank sees identical logits from the
+        # collectives and the per-request mx.random.seed above aligns the
+        # sampled draws, so accept/reject decisions cannot diverge.
         logger.info(
-            "Speculative decoding is single-node only (group size "
-            f"{group.size()}); skipping speculation pending distributed support"
+            "Speculative decoding is not supported on pipeline placements "
+            f"(group size {group.size()}); skipping speculation pending #201 "
+            "Track 2"
         )
     elif _speculation_assets:
         if logits_processors:

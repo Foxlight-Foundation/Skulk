@@ -9,6 +9,22 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Tensor-parallel speculative decoding (#201 Track 1): the #200
+  single-node guard is lifted for TP placements after lockstep was
+  validated on real hardware — greedy byte-parity and seeded-sampled
+  trace-hash parity across ranks, on both a localhost ring and a real
+  two-node cluster (kite1+kite2, Qwen3.5-2B TP=2, 150–300-token
+  generations, multiple seeds, depths 1–2). The two invariants that make
+  it safe: TP collectives give every rank identical logits (embeddings
+  and lm_head are replicated, only layer internals shard), and
+  `mlx_generate` already seeds the RNG per request from the shared task,
+  so sampled accept/reject draws are aligned with zero extra
+  communication — unseeded ranks fork on the first draw (measured), which
+  is why the probe validates the production seeding contract. Pipeline
+  placements still disengage speculation pending the distributed
+  draft/verify design (#201 Track 2). A two-rank lockstep regression test
+  (greedy + sampled) guards the invariant.
+
 - Bonus-driven MTP rounds: the speculative loop was restructured to the
   cadence the reference implementations use — every round verifies
   `[bonus, drafts]` in one forward and the very next round drafts from
