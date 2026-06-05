@@ -22,6 +22,8 @@ disabled_effort = "none"
 # comparison measured base (87.6%) and instruct (87.3%) heads as
 # statistically indistinguishable, so one base sidecar serves every
 # variant of this backbone (Skulk #192 / PR #193 validation sweep).
+# Depth stays 1: chained depth-2 measured SLOWER here (1.15x vs 1.30x) —
+# the drafter's extra chain cost outweighs the tokens on a 9B-fast trunk.
 [runtime]
 mtp_heads = true
 mtp_max_depth = 1

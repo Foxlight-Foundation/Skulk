@@ -9,6 +9,22 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Depth-K chained MTP drafting: the speculative loop now verifies up to
+  `mtp_max_depth` chained drafts in a single K+1-token forward, committing
+  the longest matching prefix (plus the verifier's correction on partial
+  rejects). The Qwen drafter chains by recursing its block on its own
+  output hidden — measured conditional acceptance decays fast beyond one
+  step (86.8% / 39.2% / 28.2% at depths 1-3 on Qwen3.5-9B), so depth 2 is
+  the practical ceiling for the single trained block; deeper gains need
+  heads trained for chaining (or the Gemma 4 assistant drafter). On a full
+  accept the next main token now comes straight from the verify logits,
+  eliminating a redundant lm_head pass per accepted cycle. Measured: the
+  recompute fix alone lifts 9B depth-1 from 1.20x to 1.30x; depth 2 lifts
+  Qwen3.5-27B to 1.92x (from 1.73x, 78% chained acceptance, parity OK) but
+  is SLOWER than depth 1 on the 9B (1.15x vs 1.30x) — depth only pays when
+  the trunk dwarfs the drafter, so `mtp_max_depth` is set per card (2 on
+  27B-class, 1 elsewhere).
+
 - Phase 2 MTP speculative decoding behind a modular `Drafter` protocol
   (`src/exo/worker/engines/mlx/drafters/`). The generation loop now talks to
   a mechanism-agnostic drafter seam (`begin_request` / `observe` / `draft`)

@@ -241,8 +241,18 @@ class TestQwenSidecarDrafter:
         drafter = self._build()
         drafter.begin_request([])
         logits = drafter.draft(mx.zeros(HIDDEN), next_token=1)
-        assert logits.shape == (VOCAB,)
+        assert logits.shape == (1, VOCAB)
         assert logits.dtype == mx.float32
+
+    def test_chained_draft_shape_and_cache_rollback(self) -> None:
+        """A depth-3 chain returns 3 rows but persists only the input pair —
+        chained entries use block-output hiddens, not canonical pairs, and
+        must be rolled back (the pair-stream contract)."""
+        drafter = self._build()
+        drafter.begin_request([])
+        logits = drafter.draft(mx.zeros(HIDDEN), next_token=1, depth=3)
+        assert logits.shape == (3, VOCAB)
+        assert drafter._cache.offset == 1
 
     def test_observe_and_draft_advance_private_cache(self) -> None:
         drafter = self._build()
@@ -440,10 +450,18 @@ class TestPrenormTrunk:
 
 
 class _FakeDrafter:
-    """Protocol-satisfying fake that records every loop interaction."""
+    """Protocol-satisfying fake that records every loop interaction.
 
-    def __init__(self, draft_token_id: int, vocab_size: int = VOCAB) -> None:
-        self._draft_id = draft_token_id
+    Drafts the configured chain (a one-hot row per chain entry, capped by
+    the requested depth), so depth tests can stage exact prefix outcomes.
+    """
+
+    def __init__(
+        self, draft_token_id: int | list[int], vocab_size: int = VOCAB
+    ) -> None:
+        self._chain = (
+            [draft_token_id] if isinstance(draft_token_id, int) else draft_token_id
+        )
         self._v = vocab_size
         self.begin_request_count = 0
         self.observe_calls: list[tuple[int, list[int]]] = []
@@ -456,11 +474,13 @@ class _FakeDrafter:
         tokens = [int(t) for t in cast("list[int]", next_tokens.tolist())]
         self.observe_calls.append((int(hiddens.shape[0]), tokens))
 
-    def draft(self, hidden: mx.array, next_token: int) -> mx.array:
+    def draft(self, hidden: mx.array, next_token: int, depth: int = 1) -> mx.array:
         self.draft_calls.append(next_token)
-        logits = mx.zeros(self._v)
-        logits = mx.where(mx.arange(self._v) == self._draft_id, mx.array(100.0), logits)
-        return logits.astype(mx.float32)
+        rows: list[mx.array] = []
+        for token in self._chain[: max(depth, 1)]:
+            row = mx.zeros(self._v)
+            rows.append(mx.where(mx.arange(self._v) == token, mx.array(100.0), row))
+        return mx.stack(rows).astype(mx.float32)
 
 
 def _build_fake_stream_env(
@@ -520,8 +540,9 @@ class TestStreamGenerateWithMTP:
         self,
         *,
         main_token_ids: list[int],
-        draft_token_id: int,
+        draft_token_id: int | list[int],
         max_tokens: int = 10,
+        depth: int = 1,
     ):
         from exo.worker.engines.mlx.generator.generate import _stream_generate_with_mtp
 
@@ -547,6 +568,7 @@ class TestStreamGenerateWithMTP:
                 prompt_cache=cache,
                 kv_group_size=None,
                 kv_bits=None,
+                depth=depth,
             )
         )
         return outputs, drafter, cache
@@ -622,6 +644,98 @@ class TestStreamGenerateWithMTP:
             max_tokens=3,
         )
         assert len(outputs) >= 1
+
+
+class TestStreamGenerateDepth(TestStreamGenerateWithMTP):
+    """Depth-K prefix-acceptance outcomes (fake head emits the same token at
+    every verify position, so chain entries equal to the current main id are
+    accepted and others reject at that position)."""
+
+    def test_full_accept_emits_all_drafts(self) -> None:
+        # mains all 5, chain [5, 5] → both drafts match every verify row.
+        outputs, drafter, _ = self._run(
+            main_token_ids=[5] * 8,
+            draft_token_id=[5, 5],
+            max_tokens=6,
+            depth=2,
+        )
+        assert sum(int(o.from_draft) for o in outputs) >= 2
+        # Full accept observes one pair per accepted draft.
+        assert (2, [5, 5]) in drafter.observe_calls[1:]
+
+    def test_partial_accept_commits_prefix_plus_correction(self) -> None:
+        # Chain [5, 9]: first draft matches the verifier (5), second rejects;
+        # the correction (5) commits in its place.
+        outputs, drafter, _ = self._run(
+            main_token_ids=[5] * 8,
+            draft_token_id=[5, 9],
+            max_tokens=6,
+            depth=2,
+        )
+        assert any(o.from_draft for o in outputs)
+        # Partial accept observes accepted draft + correction in one call.
+        assert (2, [5, 5]) in drafter.observe_calls[1:]
+        assert all(9 not in tokens for _, tokens in drafter.observe_calls)
+
+    def test_full_reject_observes_only_correction(self) -> None:
+        outputs, drafter, _ = self._run(
+            main_token_ids=[5, 3, 3, 0],
+            draft_token_id=[7, 9],
+            max_tokens=4,
+            depth=2,
+        )
+        assert len(outputs) >= 1
+        assert (1, [3]) in drafter.observe_calls[1:]
+        assert all(
+            7 not in tokens and 9 not in tokens
+            for _, tokens in drafter.observe_calls
+        )
+
+    def test_depth_reject_restores_ssm_state(self) -> None:
+        """A depth-2 reject must trim all three verify positions and restore
+        the SSM snapshot."""
+        from mlx_lm.models.cache import ArraysCache, KVCache
+
+        from exo.worker.engines.mlx.generator.generate import (
+            _stream_generate_with_mtp,
+        )
+
+        model, tokenizer, drafter, trunk_fn, head_fn, _unused = (
+            _build_fake_stream_env(
+                main_token_ids=[5, 3, 0],
+                draft_token_id=[7, 9],  # always rejected at position 0
+            )
+        )
+        ssm_cache = ArraysCache(size=1)
+        sentinel = mx.ones((1, 4))
+        ssm_cache.state = [sentinel]
+        kv_cache = KVCache()
+        _ = kv_cache.update_and_fetch(  # pyright: ignore[reportUnknownMemberType]
+            mx.zeros((1, 1, 8, 4)), mx.zeros((1, 1, 8, 4))
+        )
+        cache = [ssm_cache, kv_cache]
+
+        sampler = lambda lp: mx.argmax(lp, axis=-1)  # noqa: E731
+        outputs = list(
+            _stream_generate_with_mtp(
+                model=model,
+                tokenizer=tokenizer,
+                drafter=drafter,
+                trunk_fn=trunk_fn,
+                head_fn=head_fn,
+                prompt=mx.array([1, 2, 3]),
+                max_tokens=3,
+                sampler=sampler,
+                logits_processors=[],
+                prompt_cache=cache,
+                kv_group_size=None,
+                kv_bits=None,
+                depth=2,
+            )
+        )
+        assert len(outputs) >= 1
+        assert ssm_cache.state[0] is not None, "depth reject zeroed the SSM state"
+        assert mx.array_equal(ssm_cache.state[0], sentinel)
 
 
 class TestRejectPathSSMState:
