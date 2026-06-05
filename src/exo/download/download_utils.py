@@ -153,6 +153,30 @@ def build_sidecar_path(model_id: ModelId, sidecar_filename: str) -> Path | None:
     return None
 
 
+def build_companion_model_path(model_id: ModelId) -> Path | None:
+    """Resolve a companion *model* directory (e.g. a Gemma 4 assistant).
+
+    Companion model repos ship a single ``model.safetensors`` plus
+    ``config.json`` and no ``*.safetensors.index.json``, so
+    ``build_model_path``'s index-based completeness check rejects them.
+    Searches ``EXO_MODELS_PATH`` then ``EXO_MODELS_DIR``.
+
+    Returns:
+        The companion model directory, or ``None`` if it is not on disk.
+    """
+    import exo.shared.constants as _constants
+
+    normalized = model_id.normalize()
+    search_dirs = [*(_constants.EXO_MODELS_PATH or ()), EXO_MODELS_DIR]
+    for search_dir in search_dirs:
+        candidate = search_dir / normalized
+        if (candidate / "config.json").is_file() and (
+            candidate / "model.safetensors"
+        ).is_file():
+            return candidate
+    return None
+
+
 def build_model_path(model_id: ModelId) -> Path:
     """Resolve a local filesystem path for *model_id*.
 

@@ -1148,6 +1148,14 @@ def _make_prenorm_trunk_fn(trunk: object) -> Callable[..., mx.array] | None:
     layers: object | None = getattr(trunk, "layers", None)
     if embed is None or not callable(embed) or not isinstance(layers, list):
         return None
+    # Gate to qwen-shaped trunks: the manual mask construction below mirrors
+    # Qwen3.5's ssm/full-attention split. Other families (gemma4's
+    # sliding/full split) would get WRONG masks — and the gemma4 assistant
+    # drafter wants the post-norm fallback path anyway.
+    if not hasattr(trunk, "fa_idx") and not any(
+        hasattr(layer, "is_linear") for layer in cast("list[object]", layers)
+    ):
+        return None
     layer_list = cast("list[Callable[..., mx.array]]", layers)
     # Hybrid (GDN/SSM) trunks key their masks off specific layer indices;
     # pure-attention trunks use the first cache entry.
@@ -1213,9 +1221,13 @@ def _get_trunk_and_head(
                         return head_fn(norm_fn(hidden))
 
                     return (prenorm_trunk_fn, normed_head_fn)
-                logger.warning(
-                    "MTP: trunk structure not introspectable for pre-norm hiddens; "
-                    "falling back to post-norm trunk (draft acceptance will suffer)"
+                # Post-norm fallback. For qwen-family sidecar heads this
+                # degrades acceptance (they train on pre-norm hiddens); for
+                # the gemma4 assistant it is exactly the convention the
+                # drafter consumes.
+                logger.info(
+                    "MTP: using post-norm trunk hiddens (pre-norm wrapper "
+                    "unavailable for this trunk shape)"
                 )
                 return (cast(Callable[..., mx.array], trunk), head_fn)
     # DeepSeek-style: trunk = model.model, head = model.lm_head
@@ -2127,6 +2139,7 @@ def mlx_generate(
     trace_task_id: str | None = None,
     trace_rank: int = 0,
     mtp_weights: "dict[str, mx.array] | None" = None,
+    assistant_model: object | None = None,
     model_card: ModelCard | None = None,
 ) -> Generator[GenerationResponse]:
     # Ensure that generation stats only contains peak memory for this generation
@@ -2579,7 +2592,8 @@ def mlx_generate(
     _drafter: Drafter | None = None
     _trunk_fn: Callable[..., mx.array] | None = None
     _head_fn: Callable[..., mx.array] | None = None
-    if mtp_weights is not None and group is not None and group.size() > 1:
+    _speculation_assets = mtp_weights is not None or assistant_model is not None
+    if _speculation_assets and group is not None and group.size() > 1:
         # MTP is single-node only for now. Pipeline sharding needs the
         # distributed draft/verify design (#152 Phase 2: last-rank drafting,
         # K+1 pipeline verify, trim broadcast). Tensor-parallel would
@@ -2591,7 +2605,7 @@ def mlx_generate(
             "MTP speculative decoding is single-node only (group size "
             f"{group.size()}); skipping MTP pending distributed support"
         )
-    elif mtp_weights is not None:
+    elif _speculation_assets:
         if logits_processors:
             # Accepted draft tokens are committed from RAW verifier logits —
             # logits processors (repetition penalty, bench EOS ban) are only
@@ -2610,6 +2624,7 @@ def mlx_generate(
                 _drafter = build_drafter(
                     model,
                     mtp_weights,
+                    assistant_model=assistant_model,
                     runtime=model_card.runtime if model_card is not None else None,
                 )
                 if _drafter is not None:
