@@ -9,6 +9,32 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Distributed gemma4 assistant drafting + gemma4 pipeline sharding (#201
+  Track 2b): assistant-model speculation now runs on pipeline placements
+  via LAST-RANK drafting — the assistant cross-attends the target's last
+  full-attention/sliding KV layers (resident on the final slice by
+  construction) and post-norm hidden (already all-gathered), and every
+  rank joins one fixed-shape `all_sum` per round carrying the draft
+  tokens (plus the drafter's effective distribution under sampling, so
+  ratio-acceptance runs identically everywhere; drafting-rank draws use
+  explicit per-round keys to keep global RNG streams aligned). Assistants
+  load on the last pipeline rank only. En route, gemma4 pipeline sharding
+  itself was made to work at all: decoder layers return (hidden, kvs,
+  offset) tuples the wrappers now carry, and layer_types/previous_kvs/
+  make_cache are re-keyed per slice — slices cutting a KV-sharing edge
+  (E-series) fail loud, since those models fit single-node anyway. Two
+  cross-attention correctness bugs found and fixed (masked by mlx-vlm's
+  native rollback): deferred replay starved assistant drafters of
+  committed tokens (74% -> 28% acceptance; the Drafter protocol gains
+  `reads_target_cache` and the loop flushes immediately for such
+  drafters), and the drafter held a COPY of the cache list that froze its
+  view at the first reject-restore (progressive 56% -> 26% decay; it now
+  holds the live sequence). Gemma4 coverage grew three validated cards —
+  12B (2.03x single-node, 95%-of-single across 2 nodes), 31B (2.48x
+  single; the pipeline flagship: 2x16GB nodes lift vanilla 3.8 -> 5.6 and
+  MTP reaches 7.75 tok/s), E2B (1.56x) — with assistant-pipeline lockstep
+  regression tests (greedy + sampled) alongside the Track 1/2a ones.
+
 - Pipeline speculative decoding (#201 Track 2a): sidecar MTP now runs on
   pipeline-sharded placements with NO new distributed protocol — pipeline
   decode was already rank-symmetric (`pipeline_auto_parallel` slices only
