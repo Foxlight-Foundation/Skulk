@@ -10,8 +10,9 @@ base_model = "Qwen3.5 2B"
 capabilities = ["text", "thinking"]
 context_length = 262144
 
-# MTP speculative decoding validated live 2026-06-04: 74% draft acceptance,
-# +26% tok/s, identical greedy output (Skulk #192 / PR #193).
+# MTP speculative decoding validated 2026-06-04: 69.1% draft acceptance
+# (518/750 across a 10-prompt suite, exact-attempt metric), 1.26x decode
+# speedup (Skulk #192 / PR #193).
 [runtime]
 mtp_heads = true
 mtp_max_depth = 1
