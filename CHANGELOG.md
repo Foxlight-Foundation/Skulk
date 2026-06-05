@@ -7,6 +7,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- MTP terminal responses (EOS / max-tokens break paths) now finalize the
+  detokenizer before yielding, matching the non-MTP path — sentencepiece-
+  backed tokenizers buffer partial byte sequences until finalize() and
+  could drop the last token's tail bytes (#180 item 4; latent for current
+  tiktoken-backed targets).
+
 ### Added
 
 - Sampled-decoding support for MTP speculative decoding (issue #180 item 1):

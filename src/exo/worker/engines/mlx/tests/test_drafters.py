@@ -637,6 +637,58 @@ class TestStreamGenerateWithMTP:
         # Accept chains can yield 2 per pass so allow a small window.
         assert len(outputs) <= limit + 2
 
+    def test_terminal_response_carries_finalized_segment(self) -> None:
+        """Break-path terminal yields must finalize the detokenizer first —
+        sentencepiece-backed tokenizers buffer tail bytes until finalize()
+        (#180 item 4). The fake reveals its buffered tail only on finalize."""
+        from exo.worker.engines.mlx.generator.generate import _stream_generate_with_mtp
+
+        model, tokenizer, drafter, trunk_fn, head_fn, cache = _build_fake_stream_env(
+            main_token_ids=[5] * 20,
+            draft_token_id=5,
+        )
+
+        class _BufferingDetokenizer:
+            def __init__(self) -> None:
+                self._finalized = False
+
+            @property
+            def last_segment(self) -> str:
+                return "tail" if self._finalized else "hi"
+
+            def reset(self) -> None:
+                self._finalized = False
+
+            def add_token(self, token: int) -> None:
+                del token
+
+            def finalize(self) -> None:
+                self._finalized = True
+
+        tokenizer.detokenizer = _BufferingDetokenizer()
+        sampler = lambda lp: mx.argmax(lp, axis=-1)  # noqa: E731
+        outputs = list(
+            _stream_generate_with_mtp(
+                model=model,
+                tokenizer=tokenizer,
+                drafter=drafter,
+                trunk_fn=trunk_fn,
+                head_fn=head_fn,
+                prompt=mx.array([1, 2, 3]),
+                max_tokens=4,  # terminal via max_tokens break path
+                sampler=sampler,
+                logits_processors=[],
+                prompt_cache=cache,
+                kv_group_size=None,
+                kv_bits=None,
+            )
+        )
+        terminal = [o for o in outputs if o.finish_reason is not None]
+        assert terminal, "loop must yield a terminal response"
+        assert terminal[-1].text == "tail", (
+            "terminal response was built before detokenizer.finalize()"
+        )
+
     def test_reject_path_does_not_crash(self) -> None:
         outputs, _drafter, _cache = self._run(
             main_token_ids=[5, 3, 0],
