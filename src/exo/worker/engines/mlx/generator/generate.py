@@ -1345,7 +1345,16 @@ def _stream_generate_with_mtp(
         from_draft: bool,
         finish: str | None,
     ) -> MlxGenerationResponse:
-        """Build a response for *token_int* using the enclosing loop state."""
+        """Build a response for *token_int* using the enclosing loop state.
+
+        Terminal responses (``finish`` set) finalize the detokenizer first
+        so buffered partial byte/BPE sequences flush into the final segment
+        — sentencepiece-backed tokenizers buffer tail bytes until
+        ``finalize()`` (#180 item 4; tiktoken-backed targets flush eagerly,
+        so this is latent for current models).
+        """
+        if finish is not None:
+            detokenizer.finalize()
         return MlxGenerationResponse(
             text=detokenizer.last_segment,
             token=token_int,
@@ -1625,7 +1634,9 @@ def _stream_generate_with_mtp(
             )
         return
 
-    detokenizer.finalize()
+    # No finalize here: this tail only runs after a `break`, and every break
+    # path yields a terminal response, which finalizes inside _response —
+    # finalization happens exactly once, structurally.
     acceptance_rate = accepted / attempted_drafts if attempted_drafts > 0 else 0.0
     logger.debug(
         f"MTP decode complete: {generated_count} tokens, "
