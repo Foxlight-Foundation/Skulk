@@ -123,6 +123,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- mlx-vlm 0.5.0 → 0.6.1 (Gemma 4 MTP initiative Phase B). 0.6.1 ships the
+  speculative-drafter catalog Phase C consumes (`gemma4_assistant`,
+  `gemma4_unified_assistant`, `gemma4_dflash` — plus upstream
+  `qwen3_5_mtp` and `deepseek_v4_mtp` drafters relevant to #194 and the
+  DeepSeek sidecar path). All Skulk touchpoints verified against 0.6.1
+  (prompt_utils, load_image_processor, dynamic `mlx_vlm.models.*` imports);
+  dependency floors were already satisfied by the #188/#190 ladder.
+
 - Web framework migrated to starlette 1.x (1.2.1) / fastapi 0.136, unified
   across darwin and linux. Test code uses `httpx2` for starlette's
   `TestClient` (the httpx-backed client is deprecated in 1.x); production
