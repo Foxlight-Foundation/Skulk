@@ -48,6 +48,14 @@ class Drafter(Protocol):
     Implementations must be cheap to call per decode step and must never
     touch the target model's caches except through handles received in
     :meth:`begin_request`.
+
+    Implementations that READ the target's KV cache when drafting (gemma4
+    assistants cross-attend it) must expose ``reads_target_cache = True``:
+    the loop keeps the target cache fully committed before every draft for
+    them — the deferred-replay optimisation silently starves them
+    otherwise (measured 74% -> 28% acceptance on a target whose loader
+    lacks native rollback). Sidecar drafters carry private state and omit
+    the attribute (the loop defaults it False).
     """
 
     def begin_request(self, prompt_cache: Sequence[object]) -> None:
