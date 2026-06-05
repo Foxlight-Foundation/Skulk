@@ -111,16 +111,33 @@ def detect_quantization(model: object) -> tuple[int, int] | None:
     return None
 
 
+# How many candidate layer_idx values to probe when constructing a sibling
+# full-attention layer. Covers any plausible hybrid attention interval (the
+# known families use 4) with margin.
+_SIBLING_LAYER_IDX_PROBE_LIMIT = 16
+
+
 def build_sibling_attention_layer(model: object) -> nn.Module | None:
     """Construct an uninitialised sibling of the trunk's full-attention layer.
 
     MTP transformer blocks in Qwen3Next-descended families are architecturally
     one of the family's own decoder layers, so the most future-proof way to
     build one is to find a full-attention layer in the loaded trunk and
-    instantiate ``type(layer)(args, layer_idx=<same index>)``. New families
-    then work without new block code — and if a future family changes its
-    constructor signature, this returns ``None`` and the caller falls back to
-    running without MTP (loud log, no crash).
+    instantiate the family's own decoder-layer class. New families then work
+    without new block code — and if a future family changes its constructor
+    signature, this returns ``None`` and the caller falls back to running
+    without MTP (loud log, no crash).
+
+    Hybrid constructors derive the layer TYPE from ``layer_idx`` (e.g.
+    qwen3_5 full-attention iff ``(idx + 1) % full_attention_interval == 0``),
+    and under pipeline slicing the local position of a full-attention layer
+    no longer maps to a full-attention index in args terms — the 2B's
+    12-layer halves only worked because 12 is a multiple of the interval;
+    the 27B's 21-layer thirds are not, and the misaligned index silently
+    constructs a GDN sibling whose strict-load then fails (#201 Track 2a,
+    flagship run 2026-06-05). So instead of trusting the local index, probe
+    candidate indices until the constructed sibling actually carries
+    ``self_attn`` — self-validating against any family's indexing scheme.
     """
     trunk = get_trunk(model)
     args = get_model_args(model)
@@ -131,9 +148,16 @@ def build_sibling_attention_layer(model: object) -> nn.Module | None:
         # Full-attention layers carry `self_attn`; linear/SSM layers do not.
         if getattr(layer, "self_attn", None) is None:
             continue
-        try:
-            sibling = type(layer)(args, layer_idx=layer_idx)  # type: ignore[call-arg]
-        except TypeError:
-            return None
-        return cast(nn.Module, sibling)
+        # Pipeline wrappers proxy attribute access to the wrapped layer (so
+        # the self_attn scan sees them), but type(wrapper) is not the family
+        # decoder class — unwrap before constructing.
+        layer_source: object = getattr(layer, "original_layer", layer)
+        for candidate_idx in (layer_idx, *range(_SIBLING_LAYER_IDX_PROBE_LIMIT)):
+            try:
+                sibling = type(layer_source)(args, layer_idx=candidate_idx)  # type: ignore[call-arg]
+            except TypeError:
+                return None
+            if getattr(sibling, "self_attn", None) is not None:
+                return cast(nn.Module, sibling)
+        return None
     return None

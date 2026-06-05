@@ -1196,6 +1196,72 @@ class TestDeferredReplay:
 
 
 # ---------------------------------------------------------------------------
+# Sibling-layer construction under pipeline slicing
+# ---------------------------------------------------------------------------
+
+
+def _hybrid_args() -> qwen3_5.TextModelArgs:
+    """Toy hybrid args: full attention every 4th layer (like real Qwen3.5)."""
+    return qwen3_5.TextModelArgs(  # pyright: ignore[reportCallIssue]
+        model_type="qwen3_5",
+        hidden_size=HIDDEN,
+        intermediate_size=2 * HIDDEN,
+        num_hidden_layers=8,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        vocab_size=VOCAB,
+        full_attention_interval=4,
+        tie_word_embeddings=True,
+    )
+
+
+class TestSiblingLayerSliceAlignment:
+    """Hybrid constructors derive layer TYPE from layer_idx; a pipeline
+    slice whose offset is not a multiple of the attention interval makes the
+    local index of a full-attention layer map to a LINEAR position — the
+    naive ``type(layer)(args, layer_idx=<local>)`` silently builds a GDN
+    sibling and the strict-load fails (#201 Track 2a flagship run). The
+    builder must self-validate that the constructed sibling carries
+    ``self_attn``.
+    """
+
+    def test_aligned_slice_builds_attention_sibling(self) -> None:
+        from exo.worker.engines.mlx.drafters.introspection import (
+            build_sibling_attention_layer,
+        )
+
+        class _Model:
+            def __init__(self) -> None:
+                self.language_model = qwen3_5.TextModel(_hybrid_args())
+
+        sibling = build_sibling_attention_layer(_Model())
+        assert sibling is not None
+        assert getattr(sibling, "self_attn", None) is not None
+
+    def test_misaligned_slice_builds_attention_sibling(self) -> None:
+        # Simulate a pipeline shard: slice the trunk so the first
+        # full-attention layer (global 3) lands at local index 1 — a linear
+        # position in args terms. The 27B's 21-layer thirds hit exactly
+        # this; the 2B's 12-layer halves dodged it (12 % 4 == 0).
+        from exo.worker.engines.mlx.drafters.introspection import (
+            build_sibling_attention_layer,
+        )
+
+        class _Model:
+            def __init__(self) -> None:
+                self.language_model = qwen3_5.TextModel(_hybrid_args())
+
+        model = _Model()
+        trunk = model.language_model.model
+        trunk.layers = trunk.layers[2:]  # offset 2: 2 % 4 != 0
+
+        sibling = build_sibling_attention_layer(model)
+        assert sibling is not None
+        assert getattr(sibling, "self_attn", None) is not None
+
+
+# ---------------------------------------------------------------------------
 # Quantize-on-load — sidecar matches the target's precision
 # ---------------------------------------------------------------------------
 
