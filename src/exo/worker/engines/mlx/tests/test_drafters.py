@@ -667,7 +667,8 @@ class TestStreamGenerateWithMTP:
                 self._finalized = True
                 self.finalize_calls += 1
 
-        tokenizer.detokenizer = _BufferingDetokenizer()
+        buffering_detokenizer = _BufferingDetokenizer()
+        tokenizer.detokenizer = buffering_detokenizer
         sampler = lambda lp: mx.argmax(lp, axis=-1)  # noqa: E731
         outputs = list(
             _stream_generate_with_mtp(
@@ -692,7 +693,7 @@ class TestStreamGenerateWithMTP:
         )
         # Exactly once: the post-loop tail must not double-finalize after a
         # break path already finalized via the terminal response.
-        assert tokenizer.detokenizer.finalize_calls == 1
+        assert buffering_detokenizer.finalize_calls == 1
 
     def test_reject_path_does_not_crash(self) -> None:
         outputs, _drafter, _cache = self._run(
