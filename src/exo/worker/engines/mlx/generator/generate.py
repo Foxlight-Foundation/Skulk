@@ -69,6 +69,12 @@ from exo.worker.engines.mlx.constants import (
     MAX_TOKENS,
 )
 from exo.worker.engines.mlx.drafters import Drafter, build_drafter
+from exo.worker.engines.mlx.generator.speculative_sampling import (
+    SamplingParams,
+    ratio_accept,
+    residual_sample,
+    warp_to_probs,
+)
 from exo.worker.engines.mlx.utils_mlx import (
     apply_chat_template,
     fix_unmatched_think_end_tokens,
@@ -1239,6 +1245,7 @@ def _stream_generate_with_mtp(
     kv_group_size: int | None,
     kv_bits: int | None,
     depth: int = 1,
+    sampling: SamplingParams | None = None,
 ) -> Generator[MlxGenerationResponse, None, None]:
     """Single-node decode loop with depth-K speculative decoding via a Drafter.
 
@@ -1247,9 +1254,17 @@ def _stream_generate_with_mtp(
     batched K+1-token forward.  The longest matching draft prefix commits
     (plus the verifier's correction token on a partial reject), so a fully
     accepted cycle yields K+1 tokens per verify pass.  On a full accept the
-    next main token is taken directly from the verify logits — greedy with
-    no processors is guaranteed by the caller, so resampling through the
-    head would be byte-identical work.
+    next main token is taken directly from the verify logits — no
+    processors is guaranteed by the caller, so the head resample it skips
+    would be byte-identical (greedy) or an equally valid draw (sampled).
+
+    At temperature > 0 (``sampling.is_greedy`` false) acceptance switches
+    from argmax matching to Leviathan-Chen probability-ratio rejection
+    sampling over the effective (filter-warped, tempered) distributions —
+    distribution-preserving by construction (see
+    :mod:`.speculative_sampling`) — and depth is forced to 1, because the
+    drafter's internal chain is greedy and would not represent the sampled
+    path.
 
     The loop owns verification, accept/reject, cache trimming, and SSM
     snapshots; everything mechanism-specific lives behind the
@@ -1315,7 +1330,11 @@ def _stream_generate_with_mtp(
     # accept — skips the head recompute at the next iteration (valid only when
     # no logits processors are active, which the caller guarantees).
     pending_main: tuple[int, mx.array] | None = None
-    depth = max(depth, 1)
+    if sampling is None:
+        sampling = SamplingParams(temperature=0.0)
+    # Sampled decoding forces depth 1: the drafter chains greedily, which
+    # does not represent the sampled trajectory beyond the first draft.
+    depth = max(depth, 1) if sampling.is_greedy else 1
 
     def _response(
         token_int: int,
@@ -1386,14 +1405,26 @@ def _stream_generate_with_mtp(
             break
 
         # ---- DRAFT (chained to `depth`) ----
+        draft_probs: mx.array | None = None
         with mx.stream(generation_stream):
             chain_logits = drafter.draft(
                 last_hidden, main_tok_int, depth=depth
             ).astype(mx.float32)  # (K, V), K <= depth
-            # MTP is greedy-only and log-softmax is rank-preserving, so the
-            # sampler (argmax) reads raw logits — no logsumexp over the
-            # vocab per chained draft.
-            chain_sampled = sampler(chain_logits)  # (K,)
+            if sampling.is_greedy:
+                # Log-softmax is rank-preserving, so the greedy sampler
+                # (argmax) reads raw logits — no logsumexp over the vocab
+                # per chained draft.
+                chain_sampled = sampler(chain_logits)  # (K,)
+            else:
+                # Sampled decoding (depth forced to 1): draw the draft from
+                # the configured sampler and keep its effective distribution
+                # q for the ratio-acceptance test in the verify pass. The
+                # filters need normalized log-probabilities.
+                chain_lp = chain_logits - mx.logsumexp(
+                    chain_logits, axis=-1, keepdims=True
+                )
+                draft_probs = warp_to_probs(chain_lp[0], sampling)
+                chain_sampled = sampler(chain_lp)  # (1,)
             mx.eval(chain_sampled)
 
         draft_toks = [int(t) for t in cast("list[int]", chain_sampled.tolist())]
@@ -1444,14 +1475,38 @@ def _stream_generate_with_mtp(
             # the drafts; row K is the bonus next-token on a full accept.
             v_lp = v_logits[0].astype(mx.float32)
             v_lp = v_lp - mx.logsumexp(v_lp, axis=-1, keepdims=True)
-            verify_sampled = sampler(v_lp)  # (K+1,)
-            mx.eval(v_h, verify_sampled)
-        target_ints = [int(t) for t in cast("list[int]", verify_sampled.tolist())]
+            mx.eval(v_h, v_lp)
 
-        # Longest accepted draft prefix.
-        prefix_len = 0
-        while prefix_len < chain_len and draft_toks[prefix_len] == target_ints[prefix_len]:
-            prefix_len += 1
+        if sampling.is_greedy:
+            # Greedy: argmax-match the longest draft prefix; row prefix_len
+            # is the correction (partial) or the bonus next token (full).
+            verify_sampled = sampler(v_lp)  # (K+1,)
+            mx.eval(verify_sampled)
+            target_ints = [int(t) for t in cast("list[int]", verify_sampled.tolist())]
+            prefix_len = 0
+            while (
+                prefix_len < chain_len
+                and draft_toks[prefix_len] == target_ints[prefix_len]
+            ):
+                prefix_len += 1
+            correction_int = target_ints[prefix_len] if prefix_len < chain_len else None
+            bonus_int = target_ints[chain_len] if prefix_len == chain_len else None
+        else:
+            # Sampled (chain_len == 1): Leviathan-Chen ratio acceptance over
+            # the effective distributions; the correction on reject comes
+            # from the residual distribution, the bonus on accept is a fresh
+            # sampler draw from the verifier's next-position row — together
+            # these make every committed token an exact sample from p.
+            assert draft_probs is not None and chain_len == 1
+            verify_probs = warp_to_probs(v_lp[0], sampling)
+            if ratio_accept(draft_toks[0], draft_probs, verify_probs):
+                prefix_len = 1
+                correction_int = None
+                bonus_int = int(sampler(v_lp[chain_len]).item())
+            else:
+                prefix_len = 0
+                correction_int = residual_sample(draft_probs, verify_probs)
+                bonus_int = None
         attempted_drafts += chain_len
         accepted += prefix_len
         # Consumers usually abandon this generator mid-stream (the tail-of-
@@ -1472,7 +1527,8 @@ def _stream_generate_with_mtp(
         ]
         full_accept = prefix_len == chain_len
         if not full_accept:
-            committed.append((target_ints[prefix_len], False))
+            assert correction_int is not None
+            committed.append((correction_int, False))
 
         # Reconcile the target caches BEFORE emitting (emits may break out).
         if full_accept:
@@ -1483,11 +1539,13 @@ def _stream_generate_with_mtp(
             # the correction so every cache lands consistently. (Partial trims
             # would zero the recurrent state — see trim_cache.)
             trim_cache(prompt_cache, chain_len + 1, pre_verify_snapshot)
-            replay_tokens = [main_tok_int, *draft_toks[:prefix_len], target_ints[prefix_len]]
+            assert correction_int is not None
+            replay_tokens = [main_tok_int, *draft_toks[:prefix_len], correction_int]
         else:
             # Pure-KV model: trim just the rejected draft tail.
             trim_cache(prompt_cache, chain_len - prefix_len)
-            replay_tokens = [target_ints[prefix_len]]
+            assert correction_int is not None
+            replay_tokens = [correction_int]
 
         # Pair-stream: draft() consumed only the (h, main_tok) pair, but
         # len(committed) further tokens commit this iteration. v_h[0, i] is
@@ -1527,7 +1585,8 @@ def _stream_generate_with_mtp(
             # the caller guarantees; tests may pass processors, so guard).
             cached_hidden = v_h[0, chain_len, :]
             if not logits_processors:
-                pending_main = (target_ints[chain_len], v_lp[chain_len])
+                assert bonus_int is not None
+                pending_main = (bonus_int, v_lp[chain_len])
             input_tokens = mx.array([draft_toks[-1]])
         else:
             assert replay_tokens is not None
@@ -2489,23 +2548,26 @@ def mlx_generate(
     ), _hang_debug_watch(f"decode barrier ({decode_context})"):
         mx_barrier(group)
 
-    # Resolve a drafter for single-node speculative decoding (D=1).
-    # MTP requires greedy (temperature=0) sampling: the acceptance check is
-    # exact argmax match, which is only distribution-preserving at T=0.
-    # Probability-ratio acceptance for T>0 is tracked in issue #180.
-    _is_greedy = task.temperature is not None and task.temperature == 0.0
+    # Resolve a drafter for single-node speculative decoding.
+    # Greedy uses argmax-prefix acceptance; temperature > 0 uses
+    # Leviathan-Chen probability-ratio acceptance (distribution-preserving,
+    # issue #180) with the effective sampler distributions mirrored by
+    # SamplingParams — which covers temp/top_p/min_p/top_k but not
+    # arbitrary samplers, so the params below must stay in lockstep with
+    # the make_sampler call above.
+    _mtp_sampling = SamplingParams(
+        temperature=task.temperature if task.temperature is not None else 0.7,
+        top_p=task.top_p if task.top_p is not None else 1.0,
+        min_p=task.min_p if task.min_p is not None else 0.05,
+        top_k=task.top_k if task.top_k is not None else 0,
+    )
     _drafter: Drafter | None = None
     _trunk_fn: Callable[..., mx.array] | None = None
     _head_fn: Callable[..., mx.array] | None = None
     if mtp_weights is not None and not (
         group is not None and _has_pipeline_communication_layer(model)
     ):
-        if not _is_greedy:
-            logger.info(
-                "MTP speculative decoding requires temperature=0 (greedy-only); "
-                f"skipping MTP (temperature={task.temperature})"
-            )
-        elif logits_processors:
+        if logits_processors:
             # Accepted draft tokens are committed from RAW verifier logits —
             # logits processors (repetition penalty, bench EOS ban) are only
             # applied on the main-forward sampling path, so a constrained
@@ -2576,6 +2638,7 @@ def mlx_generate(
                     and model_card.runtime.mtp_max_depth is not None
                     else 1
                 ),
+                sampling=_mtp_sampling,
             )
         else:
             token_generator = stream_generate(

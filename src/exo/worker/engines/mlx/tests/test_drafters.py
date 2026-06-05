@@ -646,6 +646,77 @@ class TestStreamGenerateWithMTP:
         assert len(outputs) >= 1
 
 
+class TestStreamGenerateSampled(TestStreamGenerateWithMTP):
+    """T>0 ratio-acceptance paths. The fake head/drafter emit near-one-hot
+    distributions, so accept (p(x)≈1/q(x)≈1) and reject (p(x)≈0) outcomes
+    are deterministic even under sampling."""
+
+    def _run_sampled(
+        self,
+        *,
+        main_token_ids: list[int],
+        draft_token_id: int | list[int],
+        max_tokens: int = 6,
+        depth: int = 1,
+    ):
+        from exo.worker.engines.mlx.generator.generate import _stream_generate_with_mtp
+        from exo.worker.engines.mlx.generator.speculative_sampling import (
+            SamplingParams,
+        )
+
+        model, tokenizer, drafter, trunk_fn, head_fn, cache = _build_fake_stream_env(
+            main_token_ids=main_token_ids,
+            draft_token_id=draft_token_id,
+        )
+        sampler = lambda lp: mx.argmax(lp, axis=-1)  # noqa: E731
+
+        outputs = list(
+            _stream_generate_with_mtp(
+                model=model,
+                tokenizer=tokenizer,
+                drafter=drafter,
+                trunk_fn=trunk_fn,
+                head_fn=head_fn,
+                prompt=mx.array([1, 2, 3]),
+                max_tokens=max_tokens,
+                sampler=sampler,
+                logits_processors=[],
+                prompt_cache=cache,
+                kv_group_size=None,
+                kv_bits=None,
+                depth=depth,
+                sampling=SamplingParams(temperature=0.7, top_p=1.0, min_p=0.0),
+            )
+        )
+        return outputs, drafter
+
+    def test_sampled_accept_emits_draft(self) -> None:
+        mx.random.seed(11)
+        outputs, _ = self._run_sampled(
+            main_token_ids=[5] * 8, draft_token_id=5, max_tokens=5
+        )
+        assert any(o.from_draft for o in outputs)
+
+    def test_sampled_reject_emits_residual_not_draft(self) -> None:
+        mx.random.seed(11)
+        outputs, _ = self._run_sampled(
+            main_token_ids=[5, 3, 3, 0], draft_token_id=7, max_tokens=4
+        )
+        emitted = [o.token for o in outputs]
+        assert 7 not in emitted  # p(7) ≈ 0 → always rejected
+        assert any(o.token == 3 for o in outputs)  # residual ≈ p → target
+
+    def test_sampled_forces_depth_one(self) -> None:
+        mx.random.seed(11)
+        _, drafter = self._run_sampled(
+            main_token_ids=[5] * 8, draft_token_id=[5, 5], max_tokens=5, depth=2
+        )
+        # The fake records depth via rows returned; with depth forced to 1
+        # the configured 2-token chain is truncated to a single draft per
+        # call — observe payloads therefore never exceed one token.
+        assert all(count == 1 for count, _ in drafter.observe_calls[1:])
+
+
 class TestStreamGenerateDepth(TestStreamGenerateWithMTP):
     """Depth-K prefix-acceptance outcomes (fake head emits the same token at
     every verify position, so chain entries equal to the current main id are
