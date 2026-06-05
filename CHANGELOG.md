@@ -21,7 +21,13 @@ This project records release notes here and mirrors public-facing notes in
   before). Model cards gain optional `mtp_norm_convention` /
   `mtp_concat_order` runtime overrides keyed to layout-detected family
   defaults, and the loop logs a periodic `MTP acceptance so far` line as
-  the production acceptance signal.
+  the production acceptance signal. Model cards for Qwen3.5 2B-4bit (74%
+  acceptance, 1.26x), 9B-MLX-4bit (67%, 1.20x, instruct heads), and
+  27B-4bit (76%, 1.75x) now declare MTP sidecars, validated by a per-model
+  sweep. Known property: on hybrid (GDN) models, MTP greedy output is
+  semantically greedy but not guaranteed byte-identical to non-MTP decode —
+  the batched verify/replay chunked-scan numerics drift the recurrent state
+  and can flip near-tie tokens.
 
 ### Fixed
 

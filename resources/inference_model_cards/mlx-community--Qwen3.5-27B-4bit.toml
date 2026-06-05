@@ -15,5 +15,13 @@ format = "token_delimited"
 default_effort = "medium"
 disabled_effort = "none"
 
+# MTP speculative decoding validated 2026-06-04 on M4/24GB: 76% draft
+# acceptance, 1.75x decode speedup (5.6 -> 9.8 tok/s), greedy parity OK
+# (Skulk #192 / PR #193 validation sweep).
+[runtime]
+mtp_heads = true
+mtp_max_depth = 1
+mtp_sidecar_repo = "FoxlightAI/qwen3-5-27b-mtp"
+
 [storage_size]
 in_bytes = 16054266848
