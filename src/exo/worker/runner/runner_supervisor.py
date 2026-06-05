@@ -439,10 +439,20 @@ class RunnerSupervisor:
     def _diagnostic_context(self) -> RunnerDiagnosticContext:
         """Build the stable runner context used by supervisor-authored entries."""
 
+        # A crashed-and-reaped runner's process object is CLOSED; reading
+        # .pid raises ValueError. Diagnostics must never take down the
+        # worker plan-step — cancelling a task on a dead runner is exactly
+        # when these entries matter most (launch E2E smoke 2026-06-05:
+        # warmup crash -> cancel -> closed-pid ValueError -> node down).
+        try:
+            runner_pid = self.runner_process.pid
+        except ValueError:
+            runner_pid = None
+
         return RunnerDiagnosticContext(
             node_id=str(self.bound_instance.bound_node_id),
             runner_id=str(self.bound_instance.bound_runner_id),
-            pid=self.runner_process.pid,
+            pid=runner_pid,
             instance_id=str(self.bound_instance.instance.instance_id),
             model_id=str(self.shard_metadata.model_card.model_id),
             rank=self.shard_metadata.device_rank,
