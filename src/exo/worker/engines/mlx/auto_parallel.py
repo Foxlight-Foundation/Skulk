@@ -594,6 +594,16 @@ def _patch_hybrid_cache(
     model.make_cache = patched
 
 
+class _Gemma4ArgsLike(Protocol):
+    """The slice-relevant fields of gemma4-family ModelArgs (untyped in
+    mlx-lm; stored as ``args`` on the outer model and ``config`` on the
+    inner trunk — the same object)."""
+
+    layer_types: list[str]
+    num_hidden_layers: int
+    num_kv_shared_layers: int
+
+
 def pipeline_auto_parallel(
     model: nn.Module,
     group: mx.distributed.Group,
@@ -731,11 +741,24 @@ def pipeline_auto_parallel(
         inner_model_instance.previous_kvs = [
             prev_idx - start_layer for prev_idx in sliced_prev
         ]
-        gemma_args = cast(Any, inner_model_instance).args  # pyright: ignore[reportAny]
-        gemma_args.layer_types = list(
-            cast("list[str]", gemma_args.layer_types)
-        )[start_layer:end_layer]
+        # The inner trunk stores its ModelArgs as `config` (and snapshots
+        # num_hidden_layers at init); the outer Model shares the same args
+        # object as `args` — one patch covers make_cache and the masks.
+        gemma_args_source: object | None = getattr(
+            inner_model_instance, "args", None
+        ) or getattr(inner_model_instance, "config", None)
+        if gemma_args_source is None:
+            raise ValueError(
+                "gemma4-family trunk exposes previous_kvs but neither args "
+                "nor config — cannot re-key the slice"
+            )
+        gemma_args = cast(_Gemma4ArgsLike, gemma_args_source)
+        gemma_args.layer_types = list(gemma_args.layer_types)[
+            start_layer:end_layer
+        ]
         gemma_args.num_hidden_layers = len(layers)
+        if hasattr(inner_model_instance, "num_hidden_layers"):
+            inner_model_instance.num_hidden_layers = len(layers)
         # make_cache builds (num_hidden_layers - num_kv_shared_layers)
         # caches over layer_types; recompute the shared tail for the slice
         # (zero for the dense/MoE models that pass the edge check above
