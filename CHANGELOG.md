@@ -9,6 +9,28 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Pipeline speculative decoding (#201 Track 2a): sidecar MTP now runs on
+  pipeline-sharded placements with NO new distributed protocol — pipeline
+  decode was already rank-symmetric (`pipeline_auto_parallel` slices only
+  layers; embed/norm/head load in full everywhere, and decode-mode
+  `PipelineLastLayer` all-gathers the final hidden to every rank), so the
+  existing bonus-driven loop runs identically on each rank. Lockstep
+  validated like Track 1: greedy byte-parity (depths 1-2) and
+  seeded-sampled trace parity over 300-token generations, on a localhost
+  ring and on real two-node hardware; pipeline acceptance matches
+  single-node (79% on the 2B — full-precision slices, unlike TP's
+  resharded reductions). Drafting is rank-local against replicated
+  embed/head and overlaps the pipeline's sequential bubble; the K+1-wide
+  verify pays one hop-set regardless of width, so inter-node latency
+  amortizes per committed token — the placement where speculation helps
+  most. Safety rails: a per-request `all_sum` keeps the speculate-or-not
+  choice symmetric when a rank's sidecar is missing, and mid-request
+  drafter failures abort loudly on multi-rank placements instead of
+  silently forking the collective schedule. Assistant drafters (gemma4)
+  cross-attend the target's KV — which a pipeline shard only holds for
+  its own layers — and stay single-node/TP (#201 Track 2b). Pipeline
+  lockstep regression tests (greedy + sampled) join the TP ones.
+
 - Tensor-parallel speculative decoding (#201 Track 1): the #200
   single-node guard is lifted for TP placements after lockstep was
   validated on real hardware — greedy byte-parity and seeded-sampled
