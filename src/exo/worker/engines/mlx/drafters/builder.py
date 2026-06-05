@@ -26,6 +26,9 @@ from exo.worker.engines.mlx.drafters.deepseek_sidecar import (
     build_deepseek_sidecar_drafter,
     detect_deepseek_prefix,
 )
+from exo.worker.engines.mlx.drafters.gemma4_assistant import (
+    build_gemma4_assistant_drafter,
+)
 from exo.worker.engines.mlx.drafters.protocol import Drafter
 from exo.worker.engines.mlx.drafters.qwen_sidecar import (
     QWEN35_REQUIRED_KEYS,
@@ -49,7 +52,9 @@ _QWEN_DEFAULT_CONCAT_ORDER: ConcatOrder = "embed_first"
 
 def build_drafter(
     model: object,
-    mtp_weights: dict[str, mx.array],
+    mtp_weights: dict[str, mx.array] | None,
+    *,
+    assistant_model: object | None = None,
     runtime: RuntimeCapabilityCardConfig | None = None,
 ) -> Drafter | None:
     """Detect the sidecar layout and build the matching drafter.
@@ -66,6 +71,14 @@ def build_drafter(
         speculation (unrecognised layout or any construction failure —
         always logged, never raised).
     """
+    if assistant_model is not None:
+        # Gemma 4 assistant pattern: a separate chain-trained draft model
+        # cross-attending over the target's KV (gemma4-mtp Phase C).
+        return build_gemma4_assistant_drafter(model, assistant_model)
+
+    if mtp_weights is None:
+        return None
+
     if mtp_weights.keys() >= QWEN35_REQUIRED_KEYS:
         norm_convention: NormConvention = (
             runtime.mtp_norm_convention

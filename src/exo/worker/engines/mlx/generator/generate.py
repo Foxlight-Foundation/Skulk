@@ -1148,6 +1148,14 @@ def _make_prenorm_trunk_fn(trunk: object) -> Callable[..., mx.array] | None:
     layers: object | None = getattr(trunk, "layers", None)
     if embed is None or not callable(embed) or not isinstance(layers, list):
         return None
+    # Gate to qwen-shaped trunks: the manual mask construction below mirrors
+    # Qwen3.5's ssm/full-attention split. Other families (gemma4's
+    # sliding/full split) would get WRONG masks — and the gemma4 assistant
+    # drafter wants the post-norm fallback path anyway.
+    if not hasattr(trunk, "fa_idx") and not any(
+        hasattr(layer, "is_linear") for layer in cast("list[object]", layers)
+    ):
+        return None
     layer_list = cast("list[Callable[..., mx.array]]", layers)
     # Hybrid (GDN/SSM) trunks key their masks off specific layer indices;
     # pure-attention trunks use the first cache entry.
@@ -1213,9 +1221,13 @@ def _get_trunk_and_head(
                         return head_fn(norm_fn(hidden))
 
                     return (prenorm_trunk_fn, normed_head_fn)
-                logger.warning(
-                    "MTP: trunk structure not introspectable for pre-norm hiddens; "
-                    "falling back to post-norm trunk (draft acceptance will suffer)"
+                # Post-norm fallback. For qwen-family sidecar heads this
+                # degrades acceptance (they train on pre-norm hiddens); for
+                # the gemma4 assistant it is exactly the convention the
+                # drafter consumes.
+                logger.info(
+                    "MTP: using post-norm trunk hiddens (pre-norm wrapper "
+                    "unavailable for this trunk shape)"
                 )
                 return (cast(Callable[..., mx.array], trunk), head_fn)
     # DeepSeek-style: trunk = model.model, head = model.lm_head
@@ -1328,6 +1340,8 @@ def _stream_generate_with_mtp(
 
     # cached_hidden: (hidden_size,) from a previous verify pass, or None (need main fwd)
     cached_hidden: mx.array | None = None
+    # Set on the first drafter exception; decode continues plain thereafter.
+    speculation_disabled = False
     # pending_main: (token, logprobs) precomputed by the verify pass on a full
     # accept — skips the head recompute at the next iteration (valid only when
     # no logits processors are active, which the caller guarantees).
@@ -1416,27 +1430,63 @@ def _stream_generate_with_mtp(
             break
 
         # ---- DRAFT (chained to `depth`) ----
-        draft_probs: mx.array | None = None
-        with mx.stream(generation_stream):
-            chain_logits = drafter.draft(
-                last_hidden, main_tok_int, depth=depth
-            ).astype(mx.float32)  # (K, V), K <= depth
-            if sampling.is_greedy:
-                # Log-softmax is rank-preserving, so the greedy sampler
-                # (argmax) reads raw logits — no logsumexp over the vocab
-                # per chained draft.
-                chain_sampled = sampler(chain_logits)  # (K,)
-            else:
-                # Sampled decoding (depth forced to 1): draw the draft from
-                # the configured sampler and keep its effective distribution
-                # q for the ratio-acceptance test in the verify pass. The
-                # filters need normalized log-probabilities.
-                chain_lp = chain_logits - mx.logsumexp(
-                    chain_logits, axis=-1, keepdims=True
+        # Speculation must never abort generation: a drafter failure
+        # (unexpected model shape, upstream API drift) disables drafting for
+        # the rest of the request and decode continues plain.
+        if speculation_disabled:
+            input_tokens = mx.array([main_tok_int])
+            if logits_processors:
+                history_carry = mx.array([main_tok_int])
+            detokenizer.add_token(main_tok_int)
+            generated_count += 1
+            if generated_count >= max_tokens:
+                yield _response(
+                    main_tok_int, logprobs_main, from_draft=False, finish=finish_reason
                 )
-                draft_probs = warp_to_probs(chain_lp[0], sampling)
-                chain_sampled = sampler(chain_lp)  # (1,)
-            mx.eval(chain_sampled)
+                break
+            yield _response(main_tok_int, logprobs_main, from_draft=False, finish=None)
+            continue
+        draft_probs: mx.array | None = None
+        try:
+            with mx.stream(generation_stream):
+                chain_logits = drafter.draft(
+                    last_hidden, main_tok_int, depth=depth
+                ).astype(mx.float32)  # (K, V), K <= depth
+                if sampling.is_greedy:
+                    # Log-softmax is rank-preserving, so the greedy sampler
+                    # (argmax) reads raw logits — no logsumexp over the vocab
+                    # per chained draft.
+                    chain_sampled = sampler(chain_logits)  # (K,)
+                else:
+                    # Sampled decoding (depth forced to 1): draw the draft
+                    # from the configured sampler and keep its effective
+                    # distribution q for the ratio-acceptance test in the
+                    # verify pass. The filters need normalized
+                    # log-probabilities.
+                    chain_lp = chain_logits - mx.logsumexp(
+                        chain_logits, axis=-1, keepdims=True
+                    )
+                    draft_probs = warp_to_probs(chain_lp[0], sampling)
+                    chain_sampled = sampler(chain_lp)  # (1,)
+                mx.eval(chain_sampled)
+        except Exception as draft_error:  # noqa: BLE001 — speculation is best-effort
+            logger.warning(
+                f"Drafter failed ({draft_error}); disabling speculation for "
+                "the remainder of this request"
+            )
+            speculation_disabled = True
+            input_tokens = mx.array([main_tok_int])
+            if logits_processors:
+                history_carry = mx.array([main_tok_int])
+            detokenizer.add_token(main_tok_int)
+            generated_count += 1
+            if generated_count >= max_tokens:
+                yield _response(
+                    main_tok_int, logprobs_main, from_draft=False, finish=finish_reason
+                )
+                break
+            yield _response(main_tok_int, logprobs_main, from_draft=False, finish=None)
+            continue
 
         draft_toks = [int(t) for t in cast("list[int]", chain_sampled.tolist())]
         # Truncate at the first EOS draft: tokens past it are meaningless, and
@@ -2127,6 +2177,7 @@ def mlx_generate(
     trace_task_id: str | None = None,
     trace_rank: int = 0,
     mtp_weights: "dict[str, mx.array] | None" = None,
+    assistant_model: object | None = None,
     model_card: ModelCard | None = None,
 ) -> Generator[GenerationResponse]:
     # Ensure that generation stats only contains peak memory for this generation
@@ -2579,7 +2630,8 @@ def mlx_generate(
     _drafter: Drafter | None = None
     _trunk_fn: Callable[..., mx.array] | None = None
     _head_fn: Callable[..., mx.array] | None = None
-    if mtp_weights is not None and group is not None and group.size() > 1:
+    _speculation_assets = mtp_weights is not None or assistant_model is not None
+    if _speculation_assets and group is not None and group.size() > 1:
         # MTP is single-node only for now. Pipeline sharding needs the
         # distributed draft/verify design (#152 Phase 2: last-rank drafting,
         # K+1 pipeline verify, trim broadcast). Tensor-parallel would
@@ -2588,10 +2640,10 @@ def mlx_generate(
         # divergent decision silently corrupts every rank's cache. Lift
         # per-mode once TP lockstep is validated on real hardware.
         logger.info(
-            "MTP speculative decoding is single-node only (group size "
-            f"{group.size()}); skipping MTP pending distributed support"
+            "Speculative decoding is single-node only (group size "
+            f"{group.size()}); skipping speculation pending distributed support"
         )
-    elif mtp_weights is not None:
+    elif _speculation_assets:
         if logits_processors:
             # Accepted draft tokens are committed from RAW verifier logits —
             # logits processors (repetition penalty, bench EOS ban) are only
@@ -2610,6 +2662,7 @@ def mlx_generate(
                 _drafter = build_drafter(
                     model,
                     mtp_weights,
+                    assistant_model=assistant_model,
                     runtime=model_card.runtime if model_card is not None else None,
                 )
                 if _drafter is not None:

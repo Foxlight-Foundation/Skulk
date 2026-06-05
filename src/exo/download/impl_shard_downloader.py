@@ -265,4 +265,46 @@ class ResumableShardDownloader(ShardDownloader):
             skip_download=True,
             skip_internet=self.offline,
         )
+        # A base cached before its card declared companion repos
+        # (mtp_sidecar_repo / assistant_model_repo) reports complete here and
+        # the coordinator never calls ensure_shard — so the companion is
+        # never fetched (phase-c spec gotcha, flagged on PR #185). Degrade
+        # the reported status when a declared companion is missing on disk
+        # so the download path runs and pulls it.
+        # Never degrade in offline mode: the companion cannot be fetched
+        # anyway, and load_mlx_items treats missing companions as optional —
+        # degrading would turn a perfectly loadable cached base into
+        # DownloadFailed on air-gapped nodes.
+        if (
+            progress.status == "complete"
+            and not self.offline
+            and self._missing_companion(shard)
+        ):
+            return progress.model_copy(update={"status": "in_progress"})
         return progress
+
+    @staticmethod
+    def _missing_companion(shard: ShardMetadata) -> bool:
+        """True when the card declares a companion repo absent from disk."""
+        from exo.download.download_utils import (
+            build_companion_model_path,
+            build_sidecar_path,
+        )
+
+        runtime = shard.model_card.runtime
+        if runtime is None:
+            return False
+        if (
+            runtime.mtp_sidecar_repo
+            and runtime.mtp_heads
+            and build_sidecar_path(
+                ModelId(runtime.mtp_sidecar_repo), "mtp.safetensors"
+            )
+            is None
+        ):
+            return True
+        return bool(
+            runtime.assistant_model_repo
+            and build_companion_model_path(ModelId(runtime.assistant_model_repo))
+            is None
+        )

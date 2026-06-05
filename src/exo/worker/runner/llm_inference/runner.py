@@ -303,6 +303,7 @@ class Runner:
                         self.generator.tokenizer,
                         self.generator.vision_processor,
                         self.generator.mtp_weights,
+                        self.generator.assistant_model,
                     ) = load_mlx_items(
                         self.bound_instance,
                         self.generator.group,
@@ -698,6 +699,7 @@ class Builder:
     group: mx.distributed.Group | None = None
     vision_processor: VisionProcessor | None = None
     mtp_weights: dict[str, mx.array] | None = None
+    assistant_model: object | None = None
 
     def build(
         self,
@@ -740,7 +742,9 @@ class Builder:
         force_sequential_for_gemma4 = is_gemma4_family(
             self.model_card, model_id=self.model_id
         )
-        force_sequential_for_mtp = self.mtp_weights is not None
+        force_sequential_for_mtp = (
+            self.mtp_weights is not None or self.assistant_model is not None
+        )
         no_batch_requested = os.environ.get("SKULK_NO_BATCH") or os.environ.get(
             "EXO_NO_BATCH"
         )
@@ -780,6 +784,7 @@ class Builder:
                 event_sender=self.event_sender,
                 vision_processor=vision_processor,
                 mtp_weights=self.mtp_weights,
+                assistant_model=self.assistant_model,
             )
         logger.info("using BatchGenerator")
         return BatchGenerator(

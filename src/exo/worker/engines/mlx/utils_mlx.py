@@ -49,7 +49,11 @@ import mlx.nn as nn
 from mlx_lm.utils import load_model as _mlx_lm_load_model
 from pydantic import RootModel
 
-from exo.download.download_utils import build_model_path, build_sidecar_path
+from exo.download.download_utils import (
+    build_companion_model_path,
+    build_model_path,
+    build_sidecar_path,
+)
 from exo.shared.types.common import Host
 from exo.shared.types.memory import Memory
 from exo.shared.types.mlx import Model
@@ -77,6 +81,7 @@ from exo.worker.engines.mlx.auto_parallel import (
     pipeline_timeout_callback,
     tensor_auto_parallel,
 )
+from exo.worker.engines.mlx.drafters.gemma4_assistant import load_assistant_model
 from exo.worker.engines.mlx.gemma4_prompt import render_gemma4_prompt
 from exo.worker.runner.bootstrap import logger
 from exo.worker.runner.diagnostics import remember_wired_limit_bytes
@@ -633,7 +638,7 @@ def load_mlx_items(
     group: Group | None,
     on_timeout: TimeoutCallback | None,
     on_layer_loaded: LayerLoadedCallback | None,
-) -> "tuple[Model, TokenizerWrapper, VisionProcessor | None, dict[str, mx.array] | None]":
+) -> "tuple[Model, TokenizerWrapper, VisionProcessor | None, dict[str, mx.array] | None, object | None]":
     if group is None:
         logger.info(f"Single device used for {bound_instance.instance}")
         model_path = build_model_path(bound_instance.bound_shard.model_card.model_id)
@@ -721,7 +726,31 @@ def load_mlx_items(
             "load — MTP is single-node only pending #201"
         )
 
-    return cast(Model, model), tokenizer, vision_processor, mtp_weights
+    assistant_model: object | None = None
+    if runtime and runtime.assistant_model_repo and (
+        group is None or group.size() <= 1
+    ):
+        # Gemma 4 assistant drafter (gemma4-mtp Phase C). Same single-node
+        # envelope as MTP sidecars (#200/#201).
+        assistant_dir = build_companion_model_path(
+            ModelId(runtime.assistant_model_repo)
+        )
+        if assistant_dir is not None:
+            assistant_model = load_assistant_model(assistant_dir)
+        else:
+            logger.warning(
+                f"Assistant model repo {runtime.assistant_model_repo!r} not "
+                "downloaded; assistant drafting disabled (MTP sidecar "
+                "speculation, if configured, is unaffected)"
+            )
+    elif runtime and runtime.assistant_model_repo:
+        logger.info(
+            "Assistant model declared but placement is distributed "
+            f"(group size {group.size() if group else 0}); skipping assistant "
+            "load — speculation is single-node only pending #201"
+        )
+
+    return cast(Model, model), tokenizer, vision_processor, mtp_weights, assistant_model
 
 
 def shard_and_load(

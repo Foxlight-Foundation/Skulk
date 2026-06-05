@@ -695,6 +695,55 @@ class TestStreamGenerateWithMTP:
         # break path already finalized via the terminal response.
         assert buffering_detokenizer.finalize_calls == 1
 
+    def test_drafter_exception_disables_speculation_not_generation(self) -> None:
+        """Speculation must never abort generation: a drafter that raises
+        disables drafting for the request and decode continues plain."""
+        from exo.worker.engines.mlx.generator.generate import _stream_generate_with_mtp
+
+        model, tokenizer, _drafter, trunk_fn, head_fn, cache = _build_fake_stream_env(
+            main_token_ids=[5, 6, 7, 0],
+            draft_token_id=5,
+        )
+
+        class _ExplodingDrafter:
+            def __init__(self) -> None:
+                self.draft_attempts = 0
+
+            def begin_request(self, prompt_cache: object) -> None:
+                pass
+
+            def observe(self, hiddens: mx.array, next_tokens: mx.array) -> None:
+                pass
+
+            def draft(
+                self, hidden: mx.array, next_token: int, depth: int = 1
+            ) -> mx.array:
+                self.draft_attempts += 1
+                raise RuntimeError("upstream API drift")
+
+        exploding = _ExplodingDrafter()
+        sampler = lambda lp: mx.argmax(lp, axis=-1)  # noqa: E731
+        outputs = list(
+            _stream_generate_with_mtp(
+                model=model,
+                tokenizer=tokenizer,
+                drafter=exploding,
+                trunk_fn=trunk_fn,
+                head_fn=head_fn,
+                prompt=mx.array([1, 2, 3]),
+                max_tokens=4,
+                sampler=sampler,
+                logits_processors=[],
+                prompt_cache=cache,
+                kv_group_size=None,
+                kv_bits=None,
+            )
+        )
+        # Generation completed despite the drafter failing...
+        assert len(outputs) >= 3
+        # ...and drafting was attempted exactly once, then disabled.
+        assert exploding.draft_attempts == 1
+
     def test_reject_path_does_not_crash(self) -> None:
         outputs, _drafter, _cache = self._run(
             main_token_ids=[5, 3, 0],
