@@ -132,7 +132,7 @@ class Gemma4AssistantDrafter:
     def __init__(self, *, assistant: AssistantModel, target_model: object) -> None:
         self._assistant = assistant
         self._target = target_model
-        self._prompt_cache: list[object] = []
+        self._prompt_cache: Sequence[object] = []
         trunk = get_trunk(target_model)
         layers = getattr(trunk, "layers", None)
         self._layers: list[object] = (
@@ -147,7 +147,14 @@ class Gemma4AssistantDrafter:
         :meth:`draft`.
         """
         self._assistant.reset(self._target)
-        self._prompt_cache = list(prompt_cache)
+        # Hold the LIVE cache sequence, never a copy: the loop's
+        # reject-restore REPLACES rotating entries in its cache list
+        # (trim_cache assigns fresh objects), so a copied list freezes this
+        # drafter's cross-attention view at the first reject — measured as
+        # progressive acceptance decay (56% -> 26% over 150 tokens) on
+        # snapshot-path targets. Native-rollback targets mutate in place
+        # and masked the bug.
+        self._prompt_cache = prompt_cache
 
     def observe(self, hiddens: mx.array, next_tokens: mx.array) -> None:
         """No-op: the assistant carries no positional history of its own."""
