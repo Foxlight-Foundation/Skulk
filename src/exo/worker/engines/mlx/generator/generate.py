@@ -1390,10 +1390,10 @@ def _stream_generate_with_mtp(
             chain_logits = drafter.draft(
                 last_hidden, main_tok_int, depth=depth
             ).astype(mx.float32)  # (K, V), K <= depth
-            chain_logprobs = chain_logits - mx.logsumexp(
-                chain_logits, axis=-1, keepdims=True
-            )
-            chain_sampled = sampler(chain_logprobs)  # (K,)
+            # MTP is greedy-only and log-softmax is rank-preserving, so the
+            # sampler (argmax) reads raw logits — no logsumexp over the
+            # vocab per chained draft.
+            chain_sampled = sampler(chain_logits)  # (K,)
             mx.eval(chain_sampled)
 
         draft_toks = [int(t) for t in cast("list[int]", chain_sampled.tolist())]
@@ -1426,7 +1426,8 @@ def _stream_generate_with_mtp(
             # trunk forward produces the next hidden, so no observe needed.
             attempted_drafts += 1
             input_tokens = mx.array([main_tok_int])
-            history_carry = mx.array([main_tok_int])
+            if logits_processors:
+                history_carry = mx.array([main_tok_int])
             continue
 
         # ---- VERIFY: [main_tok, d0..dK-1] in one batched K+1 forward ----
@@ -1534,8 +1535,12 @@ def _stream_generate_with_mtp(
             cached_hidden = None
         # Everything committed this iteration feeds the processor history;
         # the replay list is the *trunk* input (which differs for pure-KV
-        # models) and must not double as the history carry.
-        history_carry = mx.array([main_tok_int, *[token for token, _ in committed]])
+        # models) and must not double as the history carry. Only maintained
+        # when processors are active — the only consumer.
+        if logits_processors:
+            history_carry = mx.array(
+                [main_tok_int, *[token for token, _ in committed]]
+            )
 
     else:
         # Loop ended without break — finalize detokenizer

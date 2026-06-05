@@ -452,7 +452,7 @@ class TestPrenormTrunk:
 class _FakeDrafter:
     """Protocol-satisfying fake that records every loop interaction.
 
-    Drafts the configured chain (one one-hot row per chain entry, capped by
+    Drafts the configured chain (a one-hot row per chain entry, capped by
     the requested depth), so depth tests can stage exact prefix outcomes.
     """
 
