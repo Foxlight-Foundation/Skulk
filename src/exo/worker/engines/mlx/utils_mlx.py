@@ -698,13 +698,24 @@ def load_mlx_items(
 
     mtp_weights: dict[str, mx.array] | None = None
     runtime = bound_instance.bound_shard.model_card.runtime
-    if runtime and runtime.mtp_sidecar_repo and runtime.mtp_heads and (
-        group is None or group.size() <= 1
+    # Speculation runs single-node and tensor-parallel (TP lockstep
+    # validated, #201 Track 1: identical logits from collectives +
+    # per-request RNG seeding align every accept/reject decision across
+    # ranks). Pipeline placements still disengage — they need the
+    # distributed draft/verify design (#201 Track 2) — so don't pay
+    # sidecar/assistant memory for speculation that will never run; on
+    # tight shard fits the eager load could even OOM.
+    placement_supports_speculation = (
+        group is None
+        or group.size() <= 1
+        or isinstance(bound_instance.bound_shard, TensorShardMetadata)
+    )
+    if (
+        runtime
+        and runtime.mtp_sidecar_repo
+        and runtime.mtp_heads
+        and placement_supports_speculation
     ):
-        # Distributed placements disengage MTP (single-node only pending
-        # distributed support, #201) — don't pay sidecar memory for
-        # speculation that will never run; on tight shard fits the eager
-        # load could even OOM.
         # Sidecar repos carry only mtp.safetensors (no config.json), so they
         # must be resolved with the sidecar resolver — build_model_path's
         # model-completeness check rejects their directories.
@@ -721,16 +732,18 @@ def load_mlx_items(
             )
     elif runtime and runtime.mtp_sidecar_repo and runtime.mtp_heads:
         logger.info(
-            "MTP sidecar declared but placement is distributed "
+            "MTP sidecar declared but placement is pipeline-sharded "
             f"(group size {group.size() if group else 0}); skipping sidecar "
-            "load — MTP is single-node only pending #201"
+            "load — pipeline speculation pending #201 Track 2"
         )
 
     assistant_model: object | None = None
-    if runtime and runtime.assistant_model_repo and (
-        group is None or group.size() <= 1
+    if (
+        runtime
+        and runtime.assistant_model_repo
+        and placement_supports_speculation
     ):
-        # Gemma 4 assistant drafter (gemma4-mtp Phase C). Same single-node
+        # Gemma 4 assistant drafter (gemma4-mtp Phase C). Same placement
         # envelope as MTP sidecars (#200/#201).
         assistant_dir = build_companion_model_path(
             ModelId(runtime.assistant_model_repo)
@@ -745,9 +758,9 @@ def load_mlx_items(
             )
     elif runtime and runtime.assistant_model_repo:
         logger.info(
-            "Assistant model declared but placement is distributed "
+            "Assistant model declared but placement is pipeline-sharded "
             f"(group size {group.size() if group else 0}); skipping assistant "
-            "load — speculation is single-node only pending #201"
+            "load — pipeline speculation pending #201 Track 2"
         )
 
     return cast(Model, model), tokenizer, vision_processor, mtp_weights, assistant_model
