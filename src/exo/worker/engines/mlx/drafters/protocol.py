@@ -81,20 +81,29 @@ class Drafter(Protocol):
         """
         ...
 
-    def draft(self, hidden: mx.array, next_token: int) -> mx.array:
-        """Consume one pair and return draft logits for the following position.
+    def draft(self, hidden: mx.array, next_token: int, depth: int = 1) -> mx.array:
+        """Consume one pair and return chained draft logits.
 
-        Equivalent to ``observe(hidden[None], [next_token])`` followed by
-        predicting the token *after* ``next_token`` — implementations advance
-        their state by exactly one position.
+        Consumes the ``(hidden, next_token)`` pair (advancing state by
+        exactly one position, equivalent to ``observe``) and returns greedy-
+        chained draft logits for up to *depth* successive positions.
+        Implementations chain however their mechanism allows — e.g. by
+        recursing on their own block's output hidden — and may return fewer
+        rows than requested (a projection-only head returns one). Chaining
+        must NOT leave speculative state behind: only the consumed input
+        pair may persist (chained positions use drafter-internal hiddens
+        that differ from the canonical pairs ``observe`` feeds later, so
+        implementations roll them back before returning).
 
         Args:
             hidden: ``(hidden_size,)`` pre-final-norm trunk hidden state at
                 the current position.
             next_token: Token id of the next committed token.
+            depth: Maximum number of chained drafts to attempt (>= 1).
 
         Returns:
-            ``(vocab_size,)`` float32 logits for the position after
-            ``next_token``.
+            ``(K, vocab_size)`` float32 logits, ``1 <= K <= depth``; row
+            ``k`` is the draft distribution for the ``k+1``-th position
+            after ``next_token``'s position.
         """
         ...

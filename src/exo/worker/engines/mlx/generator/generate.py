@@ -1238,14 +1238,18 @@ def _stream_generate_with_mtp(
     prompt_cache: KVCacheType,
     kv_group_size: int | None,
     kv_bits: int | None,
+    depth: int = 1,
 ) -> Generator[MlxGenerationResponse, None, None]:
-    """Single-node decode loop with D=1 speculative decoding via a Drafter.
+    """Single-node decode loop with depth-K speculative decoding via a Drafter.
 
-    Each iteration does a main forward pass on one token, asks the drafter for
-    a candidate for the token after that, then verifies the candidate by
-    running the main model on both tokens in a single batched pass.  Accepted
-    drafts yield two tokens per verify pass; rejections trim the cache and
-    fall back to one.
+    Each iteration does a main forward pass on one token, asks the drafter
+    for up to *depth* chained candidates, then verifies them in a single
+    batched K+1-token forward.  The longest matching draft prefix commits
+    (plus the verifier's correction token on a partial reject), so a fully
+    accepted cycle yields K+1 tokens per verify pass.  On a full accept the
+    next main token is taken directly from the verify logits — greedy with
+    no processors is guaranteed by the caller, so resampling through the
+    head would be byte-identical work.
 
     The loop owns verification, accept/reject, cache trimming, and SSM
     snapshots; everything mechanism-specific lives behind the
@@ -1307,6 +1311,35 @@ def _stream_generate_with_mtp(
 
     # cached_hidden: (hidden_size,) from a previous verify pass, or None (need main fwd)
     cached_hidden: mx.array | None = None
+    # pending_main: (token, logprobs) precomputed by the verify pass on a full
+    # accept — skips the head recompute at the next iteration (valid only when
+    # no logits processors are active, which the caller guarantees).
+    pending_main: tuple[int, mx.array] | None = None
+    depth = max(depth, 1)
+
+    def _response(
+        token_int: int,
+        logprobs_row: mx.array,
+        *,
+        from_draft: bool,
+        finish: str | None,
+    ) -> MlxGenerationResponse:
+        """Build a response for *token_int* using the enclosing loop state."""
+        return MlxGenerationResponse(
+            text=detokenizer.last_segment,
+            token=token_int,
+            logprobs=logprobs_row.squeeze(0)
+            if logprobs_row.ndim > 1
+            else logprobs_row,
+            from_draft=from_draft,
+            prompt_tokens=prompt.size,
+            prompt_tps=prompt_tps,
+            generation_tokens=generated_count,
+            generation_tps=generated_count
+            / max(time.perf_counter() - generation_start, 1e-9),
+            peak_memory=mx.get_peak_memory() / 1e9,
+            finish_reason=finish,
+        )
 
     while generated_count < max_tokens:
         # Fold the previous iteration's committed tokens into the processor
@@ -1320,7 +1353,7 @@ def _stream_generate_with_mtp(
                 else history_carry
             )
 
-        # ---- MAIN FORWARD (or use cached result from previous accept) ----
+        # ---- MAIN (forward | cached hidden | verify-precomputed token) ----
         with mx.stream(generation_stream):
             if cached_hidden is None:
                 h_seq = trunk_fn(input_tokens[None], cache=prompt_cache)
@@ -1329,273 +1362,180 @@ def _stream_generate_with_mtp(
             else:
                 last_hidden = cached_hidden
                 cached_hidden = None
-            logits_main: mx.array = head_fn(last_hidden[None, None])  # (1, 1, V)
-            logits_main = logits_main[0, 0, :]
-            if logits_processors and token_history is not None:
-                for proc in logits_processors:
-                    logits_main = proc(token_history, logits_main[None])[0]
-            logprobs_main: mx.array = logits_main.astype(mx.float32) - mx.logsumexp(
-                logits_main.astype(mx.float32), keepdims=True
-            )
-            main_tok = sampler(logprobs_main)
-            mx.eval(main_tok, last_hidden)
-
-        main_tok_int = int(main_tok.item())
+            if pending_main is not None:
+                main_tok_int, logprobs_main = pending_main
+                pending_main = None
+                mx.eval(last_hidden)
+            else:
+                logits_main: mx.array = head_fn(last_hidden[None, None])  # (1, 1, V)
+                logits_main = logits_main[0, 0, :]
+                if logits_processors and token_history is not None:
+                    for proc in logits_processors:
+                        logits_main = proc(token_history, logits_main[None])[0]
+                logprobs_main = logits_main.astype(mx.float32) - mx.logsumexp(
+                    logits_main.astype(mx.float32), keepdims=True
+                )
+                main_tok = sampler(logprobs_main)
+                mx.eval(main_tok, last_hidden)
+                main_tok_int = int(main_tok.item())
 
         if main_tok_int in eos_token_ids:
             finish_reason = "stop"
             generated_count += 1
-            yield MlxGenerationResponse(
-                text=detokenizer.last_segment,
-                token=main_tok_int,
-                logprobs=logprobs_main.squeeze(0) if logprobs_main.ndim > 1 else logprobs_main,
-                from_draft=False,
-                prompt_tokens=prompt.size,
-                prompt_tps=prompt_tps,
-                generation_tokens=generated_count,
-                generation_tps=generated_count
-                / max(time.perf_counter() - generation_start, 1e-9),
-                peak_memory=mx.get_peak_memory() / 1e9,
-                finish_reason="stop",
-            )
+            yield _response(main_tok_int, logprobs_main, from_draft=False, finish="stop")
             break
 
-        # ---- DRAFT ----
+        # ---- DRAFT (chained to `depth`) ----
         with mx.stream(generation_stream):
-            draft_logits = drafter.draft(last_hidden, main_tok_int).astype(mx.float32)
-            draft_logprobs = draft_logits - mx.logsumexp(draft_logits, keepdims=True)
-            draft_tok = sampler(draft_logprobs)
-            mx.eval(draft_tok)
-
-        draft_tok_int = int(draft_tok.item())
-        attempted_drafts += 1
-        # Consumers usually abandon this generator mid-stream (the tail-of-
-        # function summary never runs), and the public GenerationResponse
-        # carries no from_draft field — this periodic line is the production
-        # acceptance signal. Measuring acceptance via from_draft on
-        # mlx_generate's outputs silently reads 0 (issue #192 false alarm).
-        if attempted_drafts % 32 == 0:
-            logger.info(
-                f"MTP acceptance so far: {accepted}/{attempted_drafts} "
-                f"({accepted / attempted_drafts:.0%})"
+            chain_logits = drafter.draft(
+                last_hidden, main_tok_int, depth=depth
+            ).astype(mx.float32)  # (K, V), K <= depth
+            chain_logprobs = chain_logits - mx.logsumexp(
+                chain_logits, axis=-1, keepdims=True
             )
+            chain_sampled = sampler(chain_logprobs)  # (K,)
+            mx.eval(chain_sampled)
+
+        draft_toks = [int(t) for t in cast("list[int]", chain_sampled.tolist())]
+        # Truncate at the first EOS draft: tokens past it are meaningless, and
+        # an EOS draft itself is not verified — the next main forward picks up
+        # EOS naturally (matching the depth-1 behavior).
+        for eos_index, candidate in enumerate(draft_toks):
+            if candidate in eos_token_ids:
+                draft_toks = draft_toks[:eos_index]
+                break
 
         # Emit main token
         detokenizer.add_token(main_tok_int)
         generated_count += 1
 
         if generated_count >= max_tokens:
-            yield MlxGenerationResponse(
-                text=detokenizer.last_segment,
-                token=main_tok_int,
-                logprobs=logprobs_main.squeeze(0)
-                if logprobs_main.ndim > 1
-                else logprobs_main,
-                from_draft=False,
-                prompt_tokens=prompt.size,
-                prompt_tps=prompt_tps,
-                generation_tokens=generated_count,
-                generation_tps=generated_count
-                / max(time.perf_counter() - generation_start, 1e-9),
-                peak_memory=mx.get_peak_memory() / 1e9,
-                finish_reason=finish_reason,
+            yield _response(
+                main_tok_int, logprobs_main, from_draft=False, finish=finish_reason
             )
             break
 
-        yield MlxGenerationResponse(
-            text=detokenizer.last_segment,
-            token=main_tok_int,
-            logprobs=logprobs_main.squeeze(0)
-            if logprobs_main.ndim > 1
-            else logprobs_main,
-            from_draft=False,
-            prompt_tokens=prompt.size,
-            prompt_tps=prompt_tps,
-            generation_tokens=generated_count,
-            generation_tps=generated_count
-            / max(time.perf_counter() - generation_start, 1e-9),
-            peak_memory=mx.get_peak_memory() / 1e9,
-            finish_reason=None,
-        )
+        yield _response(main_tok_int, logprobs_main, from_draft=False, finish=None)
 
-        if draft_tok_int in eos_token_ids:
-            # Draft would end sequence — do not verify, let next loop pick up EOS naturally
-            # (sampler output is 0-d; the trunk needs (1, N) token ids — the
-            # 0.31.3 qwen3_5 rewrite unpacks (B, S, _) strictly and crashes
-            # on the 2-D hidden states the old module tolerated).
+        if not draft_toks:
+            # First draft was EOS — do not verify, let the next loop pick up
+            # EOS naturally. (Sampler output is 0-d; the trunk needs (1, N)
+            # token ids — the 0.31.3 qwen3_5 rewrite unpacks (B, S, _)
+            # strictly and crashes on 2-D hidden states.)
             # Pair-stream: draft() already consumed (h, main_tok); the next
             # trunk forward produces the next hidden, so no observe needed.
-            input_tokens = main_tok.reshape(-1)
-            history_carry = main_tok.reshape(-1)
+            attempted_drafts += 1
+            input_tokens = mx.array([main_tok_int])
+            history_carry = mx.array([main_tok_int])
             continue
 
-        # ---- VERIFY PASS: process [main_tok, draft_tok] in one batched forward ----
-        # Snapshot recurrent (SSM) state first so a reject can restore it —
-        # the verify forward advances it by two positions irreversibly.
+        # ---- VERIFY: [main_tok, d0..dK-1] in one batched K+1 forward ----
+        # Snapshot recurrent (SSM) state first so a partial reject can restore
+        # it — the verify forward advances it by K+1 positions irreversibly.
+        chain_len = len(draft_toks)
         pre_verify_snapshot = snapshot_ssm_states(prompt_cache) if mtp_has_ssm else None
-        verify_input = mx.array([main_tok_int, draft_tok_int])
+        verify_input = mx.array([main_tok_int, *draft_toks])
         with mx.stream(generation_stream):
-            v_h = trunk_fn(verify_input[None], cache=prompt_cache)  # (1, 2, H)
+            v_h = trunk_fn(verify_input[None], cache=prompt_cache)  # (1, K+1, H)
             quantize_cache_fn(prompt_cache)
-            v_logits = head_fn(v_h)  # (1, 2, V)
-            # v_logits[:,0,:] verifies what comes after main_tok (i.e., checks draft)
-            v_lp_draft = v_logits[0, 0, :].astype(mx.float32)
-            v_lp_draft = v_lp_draft - mx.logsumexp(v_lp_draft, keepdims=True)
-            target_tok = sampler(v_lp_draft)
-            mx.eval(v_h, target_tok, v_logits)
+            v_logits = head_fn(v_h)  # (1, K+1, V)
+            # Row i scores the token after verify_input[i]: rows 0..K-1 check
+            # the drafts; row K is the bonus next-token on a full accept.
+            v_lp = v_logits[0].astype(mx.float32)
+            v_lp = v_lp - mx.logsumexp(v_lp, axis=-1, keepdims=True)
+            verify_sampled = sampler(v_lp)  # (K+1,)
+            mx.eval(v_h, verify_sampled)
+        target_ints = [int(t) for t in cast("list[int]", verify_sampled.tolist())]
 
-        target_int = int(target_tok.item())
-
-        if target_int == draft_tok_int:
-            # ---- ACCEPT ----
-            accepted += 1
-
-            # Pair-stream: two tokens commit this iteration but draft() only
-            # consumed one pair — feed the skipped (h@main_tok, draft_tok)
-            # pair so stateful drafters keep gapless positional history.
-            drafter.observe(v_h[0, 0:1, :], mx.array([draft_tok_int]))
-
-            if draft_tok_int in eos_token_ids:
-                generated_count += 1
-                finish_reason = "stop"
-                yield MlxGenerationResponse(
-                    text=detokenizer.last_segment,
-                    token=draft_tok_int,
-                    logprobs=v_lp_draft.squeeze(0) if v_lp_draft.ndim > 1 else v_lp_draft,
-                    from_draft=True,
-                    prompt_tokens=prompt.size,
-                    prompt_tps=prompt_tps,
-                    generation_tokens=generated_count,
-                    generation_tps=generated_count
-                    / max(time.perf_counter() - generation_start, 1e-9),
-                    peak_memory=mx.get_peak_memory() / 1e9,
-                    finish_reason="stop",
-                )
-                break
-
-            detokenizer.add_token(draft_tok_int)
-            generated_count += 1
-
-            if generated_count >= max_tokens:
-                yield MlxGenerationResponse(
-                    text=detokenizer.last_segment,
-                    token=draft_tok_int,
-                    logprobs=v_lp_draft.squeeze(0)
-                    if v_lp_draft.ndim > 1
-                    else v_lp_draft,
-                    from_draft=True,
-                    prompt_tokens=prompt.size,
-                    prompt_tps=prompt_tps,
-                    generation_tokens=generated_count,
-                    generation_tps=generated_count
-                    / max(time.perf_counter() - generation_start, 1e-9),
-                    peak_memory=mx.get_peak_memory() / 1e9,
-                    finish_reason=finish_reason,
-                )
-                break
-
-            yield MlxGenerationResponse(
-                text=detokenizer.last_segment,
-                token=draft_tok_int,
-                logprobs=v_lp_draft.squeeze(0) if v_lp_draft.ndim > 1 else v_lp_draft,
-                from_draft=True,
-                prompt_tokens=prompt.size,
-                prompt_tps=prompt_tps,
-                generation_tokens=generated_count,
-                generation_tps=generated_count
-                / max(time.perf_counter() - generation_start, 1e-9),
-                peak_memory=mx.get_peak_memory() / 1e9,
-                finish_reason=None,
+        # Longest accepted draft prefix.
+        prefix_len = 0
+        while prefix_len < chain_len and draft_toks[prefix_len] == target_ints[prefix_len]:
+            prefix_len += 1
+        attempted_drafts += chain_len
+        accepted += prefix_len
+        # Consumers usually abandon this generator mid-stream (the tail-of-
+        # function summary never runs), and the public GenerationResponse
+        # carries no from_draft field — this periodic line is the production
+        # acceptance signal. Measuring acceptance via from_draft on
+        # mlx_generate's outputs silently reads 0 (issue #192 false alarm).
+        if attempted_drafts // 32 != (attempted_drafts - chain_len) // 32:
+            logger.info(
+                f"MTP acceptance so far: {accepted}/{attempted_drafts} "
+                f"({accepted / attempted_drafts:.0%})"
             )
 
-            # Stash hidden state at draft_tok position for the next round —
-            # the next iteration's main logits come from head_fn(cached_hidden),
-            # so no token needs pre-sampling here (the previous phantom
-            # `next_main` sample entered token_history without ever being
-            # emitted — PR #191 review finding).
-            cached_hidden = v_h[0, 1, :]
-            input_tokens = mx.array([draft_tok_int])
-            history_carry = mx.array([main_tok_int, draft_tok_int])
+        # Tokens committed this verify: accepted drafts, then the verifier's
+        # correction when the prefix is partial.
+        committed: list[tuple[int, bool]] = [
+            (draft_toks[i], True) for i in range(prefix_len)
+        ]
+        full_accept = prefix_len == chain_len
+        if not full_accept:
+            committed.append((target_ints[prefix_len], False))
+
+        # Reconcile the target caches BEFORE emitting (emits may break out).
+        if full_accept:
+            replay_tokens = None  # cache already holds exactly main + all drafts
+        elif pre_verify_snapshot is not None:
+            # Hybrid model: drop ALL verify positions and restore the SSM
+            # state; the next main forward replays the accepted prefix plus
+            # the correction so every cache lands consistently. (Partial trims
+            # would zero the recurrent state — see trim_cache.)
+            trim_cache(prompt_cache, chain_len + 1, pre_verify_snapshot)
+            replay_tokens = [main_tok_int, *draft_toks[:prefix_len], target_ints[prefix_len]]
         else:
-            # ---- REJECT ----
-            if pre_verify_snapshot is not None:
-                # Hybrid model: drop BOTH verify positions from the KV caches
-                # and restore the SSM state to pre-verify; the next main
-                # forward replays [main_tok, target] so every cache lands
-                # consistently at ...main, target. (Trimming only the draft
-                # position would zero the recurrent state — see trim_cache.)
-                trim_cache(prompt_cache, 2, pre_verify_snapshot)
-                replay_tokens = [main_tok_int, target_int]
-            else:
-                # Pure-KV model: trim just the rejected draft position.
-                trim_cache(prompt_cache, 1)
-                replay_tokens = [target_int]
+            # Pure-KV model: trim just the rejected draft tail.
+            trim_cache(prompt_cache, chain_len - prefix_len)
+            replay_tokens = [target_ints[prefix_len]]
 
-            # Pair-stream: the committed token after main_tok is the
-            # verifier's target, not the draft — feed the (h@main_tok, target)
-            # pair. v_h[0, 0, :] was computed against the untrimmed prefix and
-            # remains numerically valid after the trim/restore above.
-            drafter.observe(v_h[0, 0:1, :], mx.array([target_int]))
+        # Pair-stream: draft() consumed only the (h, main_tok) pair, but
+        # len(committed) further tokens commit this iteration. v_h[0, i] is
+        # the hidden at committed token i's predecessor position, computed
+        # against a fully committed prefix — valid regardless of the
+        # trim/restore above.
+        drafter.observe(
+            v_h[0, : len(committed), :],
+            mx.array([token for token, _ in committed]),
+        )
 
-            # target_tok is the verifier's corrected token for the rejected position;
-            # emit it before feeding it as input to the next forward.
-            if target_int in eos_token_ids:
+        # Emit the committed tokens in order, honoring EOS and max_tokens.
+        stream_done = False
+        for i, (token_int, is_draft) in enumerate(committed):
+            if token_int in eos_token_ids:
                 generated_count += 1
                 finish_reason = "stop"
-                yield MlxGenerationResponse(
-                    text=detokenizer.last_segment,
-                    token=target_int,
-                    logprobs=v_lp_draft.squeeze(0) if v_lp_draft.ndim > 1 else v_lp_draft,
-                    from_draft=False,
-                    prompt_tokens=prompt.size,
-                    prompt_tps=prompt_tps,
-                    generation_tokens=generated_count,
-                    generation_tps=generated_count
-                    / max(time.perf_counter() - generation_start, 1e-9),
-                    peak_memory=mx.get_peak_memory() / 1e9,
-                    finish_reason="stop",
-                )
+                yield _response(token_int, v_lp[i], from_draft=is_draft, finish="stop")
+                stream_done = True
                 break
-
-            detokenizer.add_token(target_int)
+            detokenizer.add_token(token_int)
             generated_count += 1
-
             if generated_count >= max_tokens:
-                yield MlxGenerationResponse(
-                    text=detokenizer.last_segment,
-                    token=target_int,
-                    logprobs=v_lp_draft.squeeze(0) if v_lp_draft.ndim > 1 else v_lp_draft,
-                    from_draft=False,
-                    prompt_tokens=prompt.size,
-                    prompt_tps=prompt_tps,
-                    generation_tokens=generated_count,
-                    generation_tps=generated_count
-                    / max(time.perf_counter() - generation_start, 1e-9),
-                    peak_memory=mx.get_peak_memory() / 1e9,
-                    finish_reason=finish_reason,
+                yield _response(
+                    token_int, v_lp[i], from_draft=is_draft, finish=finish_reason
                 )
+                stream_done = True
                 break
+            yield _response(token_int, v_lp[i], from_draft=is_draft, finish=None)
+        if stream_done:
+            break
 
-            yield MlxGenerationResponse(
-                text=detokenizer.last_segment,
-                token=target_int,
-                logprobs=v_lp_draft.squeeze(0) if v_lp_draft.ndim > 1 else v_lp_draft,
-                from_draft=False,
-                prompt_tokens=prompt.size,
-                prompt_tps=prompt_tps,
-                generation_tokens=generated_count,
-                generation_tps=generated_count
-                / max(time.perf_counter() - generation_start, 1e-9),
-                peak_memory=mx.get_peak_memory() / 1e9,
-                finish_reason=None,
-            )
-
+        if full_accept:
+            # Hidden at the last draft's position seeds the next round, and
+            # row K of the verify logits IS the next main token at greedy —
+            # skip the head recompute (only safe with no processors, which
+            # the caller guarantees; tests may pass processors, so guard).
+            cached_hidden = v_h[0, chain_len, :]
+            if not logits_processors:
+                pending_main = (target_ints[chain_len], v_lp[chain_len])
+            input_tokens = mx.array([draft_toks[-1]])
+        else:
+            assert replay_tokens is not None
             input_tokens = mx.array(replay_tokens)
-            # Both main_tok and target committed this iteration — the replay
-            # list is the *trunk* input (which differs for pure-KV models) and
-            # must not double as the processor-history carry.
-            history_carry = mx.array([main_tok_int, target_int])
             cached_hidden = None
+        # Everything committed this iteration feeds the processor history;
+        # the replay list is the *trunk* input (which differs for pure-KV
+        # models) and must not double as the history carry.
+        history_carry = mx.array([main_tok_int, *[token for token, _ in committed]])
 
     else:
         # Loop ended without break — finalize detokenizer
@@ -2624,6 +2564,13 @@ def mlx_generate(
                 prompt_cache=caches,
                 kv_group_size=KV_GROUP_SIZE,
                 kv_bits=KV_BITS,
+                depth=(
+                    model_card.runtime.mtp_max_depth
+                    if model_card is not None
+                    and model_card.runtime is not None
+                    and model_card.runtime.mtp_max_depth is not None
+                    else 1
+                ),
             )
         else:
             token_generator = stream_generate(

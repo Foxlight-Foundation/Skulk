@@ -136,13 +136,39 @@ class QwenSidecarDrafter:
         # Output discarded — this call exists to write the block's KV entries.
         self._block(x, mask=mask, cache=self._cache)
 
-    def draft(self, hidden: mx.array, next_token: int) -> mx.array:
-        """Consume one pair and return float32 logits for the next position."""
-        x = self._project(hidden[None], mx.array([next_token]))
-        mask = _attention_mask(x, self._cache)
-        out = self._block(x, mask=mask, cache=self._cache)
-        logits = self._head_fn(_rms_norm(out, self._final_norm_w, self._eps))
-        return logits[0, -1].astype(mx.float32)
+    def draft(self, hidden: mx.array, next_token: int, depth: int = 1) -> mx.array:
+        """Consume one pair and return (K, vocab) chained greedy draft logits.
+
+        Depth-1 is the trained regime. Deeper rows chain the block on its
+        own output hidden — out-of-distribution for the single trained
+        block, so conditional acceptance decays fast (measured 86.8% →
+        39.2% → 28.2% at depths 1..3 on Qwen3.5-9B); depth 2 is the
+        practical ceiling for these heads. Chained cache entries are
+        speculative (block-output hiddens, not the canonical trunk-hidden
+        pairs) and are trimmed before returning — only the consumed input
+        pair persists, preserving the pair-stream contract.
+        """
+        rows: list[mx.array] = []
+        step_hidden = hidden
+        step_token = next_token
+        chained = 0
+        for step in range(max(depth, 1)):
+            x = self._project(step_hidden[None], mx.array([step_token]))
+            mask = _attention_mask(x, self._cache)
+            out = self._block(x, mask=mask, cache=self._cache)
+            if step > 0:
+                chained += 1
+            logits = self._head_fn(_rms_norm(out, self._final_norm_w, self._eps))
+            row = logits[0, -1].astype(mx.float32)
+            rows.append(row)
+            if step + 1 < max(depth, 1):
+                # Greedy-select the draft to feed the next chain step (MTP is
+                # greedy-only; the loop's sampler is argmax at temp=0).
+                step_token = int(mx.argmax(row).item())
+                step_hidden = out[0, -1, :]
+        if chained:
+            self._cache.trim(chained)
+        return mx.stack(rows)
 
     def _project(self, hiddens: mx.array, next_tokens: mx.array) -> mx.array:
         """fc projection of normed (embedding, hidden) pairs: (T,H),(T,) → (1,T,H)."""

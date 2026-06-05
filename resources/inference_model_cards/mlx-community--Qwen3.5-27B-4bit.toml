@@ -15,13 +15,14 @@ format = "token_delimited"
 default_effort = "medium"
 disabled_effort = "none"
 
-# MTP speculative decoding validated 2026-06-04 on M4/24GB: 1.75x decode
-# speedup (5.6 -> 9.8 tok/s), greedy parity OK. Acceptance >= 76% (single
-# -prompt token-arithmetic metric, which undercounts; the 9B exact-attempt
-# equivalent measured ~20pp higher) (Skulk #192 / PR #193 sweep).
+# MTP speculative decoding validated 2026-06-04 on M4/24GB at depth 2:
+# 1.92x decode speedup (5.4 -> 10.4 tok/s), 78% chained acceptance, greedy
+# parity OK. Depth 2 pays only on models this size — the trunk dominates
+# the drafter's extra chain cost (the 9B measured slower at depth 2 than
+# depth 1 and stays at 1) (Skulk #192 / PR #193 / depth-K follow-up).
 [runtime]
 mtp_heads = true
-mtp_max_depth = 1
+mtp_max_depth = 2
 mtp_sidecar_repo = "FoxlightAI/qwen3-5-27b-mtp"
 
 [storage_size]

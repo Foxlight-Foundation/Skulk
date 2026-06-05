@@ -112,8 +112,13 @@ class DeepseekSidecarDrafter:
         """No-op: the projection-only head has no positional state to advance."""
         del hiddens, next_tokens
 
-    def draft(self, hidden: mx.array, next_token: int) -> mx.array:
-        """Return float32 logits for the position after *next_token*."""
+    def draft(self, hidden: mx.array, next_token: int, depth: int = 1) -> mx.array:
+        """Return (1, vocab) float32 logits for the position after *next_token*.
+
+        The projection-only head cannot chain (it has no block to produce a
+        successor hidden), so *depth* is ignored and a single row returns.
+        """
+        del depth
         e = self._embed_fn(mx.array([next_token]))
         e = _rms_norm(e, self._enorm_w, self._eps)
         h = hidden[None] if hidden.ndim == 1 else hidden
@@ -136,7 +141,7 @@ class DeepseekSidecarDrafter:
         else:
             proj = self._norm_fn(proj)
         logits = self._head_fn(proj)
-        return logits[0].astype(mx.float32)
+        return logits[0].astype(mx.float32)[None]
 
 
 def _detect_quant(
