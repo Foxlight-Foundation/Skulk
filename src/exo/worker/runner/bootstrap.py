@@ -34,6 +34,24 @@ under the env-var → typed-config migration; do not flip without measuring
 the perf delta on a representative workload first."""
 
 
+def _card_declares_speculative_decoding(
+    card_runtime: RuntimeCapabilityCardConfig | None,
+) -> bool:
+    """True when the card declares any speculative-decoding mechanism.
+
+    Covers both the Qwen3/DeepSeek embedded-head convention
+    (``mtp_heads`` / ``mtp_sidecar_repo``) and the Gemma 4 companion
+    assistant convention (``assistant_model_repo``).
+    """
+    if card_runtime is None:
+        return False
+    return bool(
+        card_runtime.mtp_heads
+        or card_runtime.mtp_sidecar_repo
+        or card_runtime.assistant_model_repo
+    )
+
+
 def resolve_metal_fast_synch(card_runtime: RuntimeCapabilityCardConfig | None) -> bool:
     """Resolve the effective ``MLX_METAL_FAST_SYNCH`` setting for this runner.
 
@@ -46,7 +64,17 @@ def resolve_metal_fast_synch(card_runtime: RuntimeCapabilityCardConfig | None) -
     2. **Model card.** ``runtime.metal_fast_synch`` on the bound shard's model
        card. Pinned per-model when the model is known to deadlock or
        known to benefit measurably from FAST_SYNCH.
-    3. **Cluster default.** ``FAST_SYNCH_CLUSTER_DEFAULT`` (True today).
+    3. **Speculative-decoding default.** Cards that declare an MTP sidecar,
+       embedded MTP heads, or a companion assistant model default to
+       ``False``. FAST_SYNCH is catastrophically incompatible with the
+       speculative decoding loop: measured 2026-06-06 on Qwen3.5-9B-4bit
+       (M4, mlx 0.31.2), the same MTP loop runs 27.7 tok/s with
+       ``MLX_METAL_FAST_SYNCH=0`` and 0.6 tok/s with ``=1`` — a 46x
+       collapse — while vanilla decode is unaffected (20.8 vs 20.7 tok/s).
+       The per-round pattern of small evals across streams that
+       speculative decoding requires is exactly the shape FAST_SYNCH's
+       completion-signal path pathologizes.
+    4. **Cluster default.** ``FAST_SYNCH_CLUSTER_DEFAULT`` (True today).
 
     Returns ``True`` when ``MLX_METAL_FAST_SYNCH`` should be ``"1"``.
     """
@@ -63,6 +91,8 @@ def resolve_metal_fast_synch(card_runtime: RuntimeCapabilityCardConfig | None) -
         # someone set the env var by hand to an unknown value.
     if card_runtime is not None and card_runtime.metal_fast_synch is not None:
         return card_runtime.metal_fast_synch
+    if _card_declares_speculative_decoding(card_runtime):
+        return False
     return FAST_SYNCH_CLUSTER_DEFAULT
 
 

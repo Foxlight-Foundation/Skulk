@@ -103,3 +103,78 @@ def test_unknown_env_value_with_no_card_falls_to_default(
     monkeypatch.setenv("SKULK_FAST_SYNCH", "yes")
     monkeypatch.delenv("EXO_FAST_SYNCH", raising=False)
     assert resolve_metal_fast_synch(None) is FAST_SYNCH_CLUSTER_DEFAULT
+
+
+# --- speculative-decoding default ------------------------------------------
+#
+# FAST_SYNCH collapses the MTP/speculative loop (measured 2026-06-06,
+# Qwen3.5-9B-4bit on M4: 27.7 tok/s -> 0.6 tok/s, 46x) while leaving
+# vanilla decode untouched. Cards that declare any speculation mechanism
+# must therefore default to FAST_SYNCH off — silently inheriting the
+# cluster default of True re-introduces a production-only 20x+ slowdown
+# that no probe harness reproduces.
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [
+        RuntimeCapabilityCardConfig(
+            mtp_heads=True,
+            mtp_sidecar_repo="FoxlightAI/qwen3-5-9b-base-mtp",
+        ),
+        RuntimeCapabilityCardConfig(
+            mtp_sidecar_repo="FoxlightAI/qwen3-5-9b-base-mtp"
+        ),
+        RuntimeCapabilityCardConfig(
+            assistant_model_repo="mlx-community/gemma-4-12b-it-assistant-bf16"
+        ),
+    ],
+    ids=["mtp_heads_and_sidecar", "sidecar_only", "gemma_assistant"],
+)
+def test_speculative_card_defaults_fast_synch_off(
+    monkeypatch: pytest.MonkeyPatch, runtime: RuntimeCapabilityCardConfig
+) -> None:
+    monkeypatch.delenv("SKULK_FAST_SYNCH", raising=False)
+    monkeypatch.delenv("EXO_FAST_SYNCH", raising=False)
+    assert resolve_metal_fast_synch(runtime) is False
+
+
+def test_explicit_card_pin_beats_speculative_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A card that declares MTP but explicitly pins fast_synch=True wins.
+
+    The explicit pin is the documented escape hatch for models measured
+    to be safe; the speculative default only fills in when the card has
+    no opinion.
+    """
+    monkeypatch.delenv("SKULK_FAST_SYNCH", raising=False)
+    monkeypatch.delenv("EXO_FAST_SYNCH", raising=False)
+    runtime = RuntimeCapabilityCardConfig(
+        metal_fast_synch=True,
+        mtp_heads=True,
+        mtp_sidecar_repo="FoxlightAI/qwen3-5-9b-base-mtp",
+    )
+    assert resolve_metal_fast_synch(runtime) is True
+
+
+def test_operator_on_beats_speculative_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SKULK_FAST_SYNCH", "on")
+    monkeypatch.delenv("EXO_FAST_SYNCH", raising=False)
+    runtime = RuntimeCapabilityCardConfig(
+        mtp_sidecar_repo="FoxlightAI/qwen3-5-9b-base-mtp"
+    )
+    assert resolve_metal_fast_synch(runtime) is True
+
+
+def test_non_speculative_card_keeps_cluster_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plain decode is unaffected by FAST_SYNCH (20.8 vs 20.7 tok/s measured);
+    non-speculative cards must keep inheriting the cluster default."""
+    monkeypatch.delenv("SKULK_FAST_SYNCH", raising=False)
+    monkeypatch.delenv("EXO_FAST_SYNCH", raising=False)
+    runtime = RuntimeCapabilityCardConfig(prompt_renderer=None)
+    assert resolve_metal_fast_synch(runtime) is FAST_SYNCH_CLUSTER_DEFAULT

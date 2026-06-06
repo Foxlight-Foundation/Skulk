@@ -7,6 +7,22 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- **Production MTP no longer runs ~20-46x slower than plain decode.**
+  `FAST_SYNCH_CLUSTER_DEFAULT = True` silently applied
+  `MLX_METAL_FAST_SYNCH=1` to every MTP runner, collapsing the
+  speculative loop (Qwen3.5-9B-4bit on M4, mlx 0.31.2: 27.7 tok/s with
+  the flag off vs 0.6 tok/s with it on) while leaving vanilla decode
+  untouched (20.8 vs 20.7 tok/s). Probe harnesses never set the flag,
+  which is why isolated measurements showed +26-50% while the production
+  stack inverted. `resolve_metal_fast_synch` now defaults to OFF for any
+  card that declares a speculation mechanism (`mtp_heads`,
+  `mtp_sidecar_repo`, or `assistant_model_repo`); operator overrides and
+  explicit card pins keep their precedence. Validated end-to-end:
+  production Qwen 9B MTP went from 9.5 to 27.7-28.5 tok/s on a 16GB M4
+  (~+55% over plain decode, 82-84% acceptance).
+
 ### Added
 
 - Distributed gemma4 assistant drafting + gemma4 pipeline sharding (#201
