@@ -79,7 +79,7 @@ import aiofiles.os as aios
 import aiohttp
 from loguru import logger
 
-from exo.download.download_utils import create_http_session
+from exo.download.download_utils import companion_download_specs, create_http_session
 from exo.download.shard_downloader import ShardDownloader
 from exo.shared.types.memory import Memory
 from exo.shared.types.worker.downloads import RepoDownloadProgress
@@ -744,7 +744,53 @@ class ModelStoreDownloader(ShardDownloader):
     async def ensure_shard(
         self, shard: ShardMetadata, config_only: bool = False
     ) -> Path:
-        """Ensure the shard is available locally, staging from the store if needed.
+        """Ensure the shard AND its companion repos are available locally.
+
+        Resolves the base model via :meth:`_ensure_base_shard` (store-first
+        with optional HF fallback), then ensures every companion repo the
+        card declares (vision weights, MTP sidecar, assistant model) through
+        the same store-first path. Before this wrapper existed, three of the
+        four base-resolution paths returned without fetching companions — a
+        staged base model would load and run with speculative decoding
+        silently unavailable (launch smoke, 2026-06-06).
+
+        Companion failures are logged loudly but never fail the base load:
+        the runner treats missing companions as "run without speculation",
+        and a missing sidecar should not turn a loadable model into a
+        download error.
+        """
+        path = await self._ensure_base_shard(shard, config_only)
+        if not config_only:
+            await self._ensure_companion_shards(shard)
+        return path
+
+    async def _ensure_companion_shards(self, shard: ShardMetadata) -> None:
+        """Ensure every companion repo declared by the shard's model card.
+
+        Recurses through :meth:`ensure_shard` so companions get the same
+        store-first resolution as base models (already staged → skip; in
+        store → stage; missing → store-host HF fetch / inner fallback).
+        Companion cards are bare, so the recursion terminates after one
+        level.
+        """
+        for companion_shard, _allow_patterns in companion_download_specs(
+            shard.model_card
+        ):
+            companion_id = companion_shard.model_card.model_id
+            try:
+                await self.ensure_shard(companion_shard)
+            except Exception as error:
+                logger.warning(
+                    f"ModelStoreDownloader: companion repo {companion_id} for "
+                    f"{shard.model_card.model_id} could not be fetched "
+                    f"({error}); speculative decoding / vision features that "
+                    "depend on it will be unavailable on this node."
+                )
+
+    async def _ensure_base_shard(
+        self, shard: ShardMetadata, config_only: bool = False
+    ) -> Path:
+        """Ensure the base model is available locally, staging from the store if needed.
 
         Resolution order:
 

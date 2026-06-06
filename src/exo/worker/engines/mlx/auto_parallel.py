@@ -734,9 +734,13 @@ def pipeline_auto_parallel(
             # enough to never need sharding; fail loud rather than compute
             # silently wrong attention.
             raise ValueError(
-                "gemma4 pipeline slice cuts a KV-sharing edge "
-                f"(slice [{start_layer}, {end_layer}) consumes K/V from an "
-                "earlier rank); KV-shared models are not pipeline-shardable"
+                "This model shares KV caches across layers (gemma 4 "
+                "E-series) and cannot be split across nodes: the pipeline "
+                f"slice [{start_layer}, {end_layer}) would consume K/V "
+                "produced on an earlier rank, which the pipeline does not "
+                "carry — attention would be silently wrong. Place this "
+                "model on a single node instead (KV-shared models are "
+                "small enough to fit)."
             )
         inner_model_instance.previous_kvs = [
             prev_idx - start_layer for prev_idx in sliced_prev
