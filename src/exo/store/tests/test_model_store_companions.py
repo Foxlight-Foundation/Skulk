@@ -187,3 +187,45 @@ async def test_companion_recursion_terminates_on_bare_cards(tmp_path: Path) -> N
     await downloader.ensure_shard(_shard_with_sidecar())
     # One staging call per repo — no repeated/looping companion fetches.
     assert store.staged.count(_SIDECAR_REPO) == 1
+
+
+@pytest.mark.anyio
+async def test_terminal_progress_waits_for_companions(tmp_path: Path) -> None:
+    """The base's "complete" progress becomes cluster-visible download state
+    that gates model loads — it must not fire until companions are ensured,
+    or a runner can load while the sidecar is still staging and silently
+    run without speculation (codex review, #213)."""
+    base_dir = tmp_path / "mlx-community--Qwen-test-9B-4bit"
+    base_dir.mkdir(parents=True)
+    (base_dir / "model.safetensors").write_bytes(b"fake-weights")
+
+    store = _RecordingStoreClient(available={_SIDECAR_REPO})
+    downloader = _downloader(store, tmp_path)
+
+    ordering: list[str] = []
+
+    async def _on_progress(shard: ShardMetadata, progress: object) -> None:
+        status = getattr(progress, "status", "?")
+        if status == "complete":
+            ordering.append(f"complete:{shard.model_card.model_id}")
+
+    original_stage = store.stage_shard
+
+    async def _recording_stage(
+        model_id: str,
+        dest_path: Path,
+        on_progress: Callable[[int, int], Awaitable[None]] | None = None,
+    ) -> Path:
+        ordering.append(f"staged:{model_id}")
+        return await original_stage(model_id, dest_path, on_progress=on_progress)
+
+    store.stage_shard = _recording_stage
+    downloader.on_progress(_on_progress)
+
+    await downloader.ensure_shard(_shard_with_sidecar())
+
+    base_complete = ordering.index(f"complete:{_BASE_MODEL}")
+    sidecar_staged = ordering.index(f"staged:{_SIDECAR_REPO}")
+    assert sidecar_staged < base_complete, (
+        f"base completed before its sidecar staged: {ordering}"
+    )

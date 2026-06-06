@@ -116,19 +116,16 @@ class ResumableShardDownloader(ShardDownloader):
     ) -> Path:
         allow_patterns = ["config.json"] if config_only else None
 
-        target_dir, _ = await download_shard(
-            shard,
-            self.on_progress_wrapper,
-            max_parallel_downloads=self.max_parallel_downloads,
-            allow_patterns=allow_patterns,
-            skip_internet=self.offline,
-        )
-
+        # Companions download BEFORE the base on purpose: the base repo's
+        # "complete" progress event becomes cluster-visible download state
+        # the moment it fires, and the planner dispatches model loads off
+        # that state — so it must mean "everything the model needs is
+        # here", not "the base is here and the sidecar is on its way".
+        # Companions are best-effort: the runtime treats a missing
+        # sidecar/assistant/vision repo as "run without that feature",
+        # so a transient fetch failure must not turn a loadable base
+        # model into a download error. Failures log loudly instead.
         if not config_only and not self.offline:
-            # Companions are best-effort: the runtime treats a missing
-            # sidecar/assistant/vision repo as "run without that feature",
-            # so a transient fetch failure must not turn a loadable base
-            # model into a download error. Failures log loudly instead.
             for companion_shard, allow in companion_download_specs(shard.model_card):
                 try:
                     await download_shard(
@@ -145,6 +142,14 @@ class ResumableShardDownloader(ShardDownloader):
                         f"({error}); speculative decoding / vision features "
                         "that depend on it will be unavailable on this node."
                     )
+
+        target_dir, _ = await download_shard(
+            shard,
+            self.on_progress_wrapper,
+            max_parallel_downloads=self.max_parallel_downloads,
+            allow_patterns=allow_patterns,
+            skip_internet=self.offline,
+        )
 
         return target_dir
 

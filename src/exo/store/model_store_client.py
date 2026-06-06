@@ -762,6 +762,13 @@ class ModelStoreDownloader(ShardDownloader):
         path = await self._ensure_base_shard(shard, config_only)
         if not config_only:
             await self._ensure_companion_shards(shard)
+        # Terminal progress is emitted HERE, after companions: the
+        # "complete" status becomes cluster-visible DownloadCompleted state
+        # the moment it fires, and the planner dispatches LoadModel off
+        # that state — emitting it from the base-resolution paths let a
+        # runner load while a companion was still staging and run without
+        # speculation (codex review on #213).
+        await self._emit_progress(shard, status="complete")
         return path
 
     async def _ensure_companion_shards(self, shard: ShardMetadata) -> None:
@@ -823,7 +830,6 @@ class ModelStoreDownloader(ShardDownloader):
                     logger.info(
                         f"ModelStoreDownloader: staging disabled — loading {model_id} directly from store at {direct_path}"
                     )
-                    await self._emit_progress(shard, status="complete")
                     return direct_path
             return await self._inner.ensure_shard(shard, config_only)
 
@@ -835,7 +841,6 @@ class ModelStoreDownloader(ShardDownloader):
             logger.info(
                 f"ModelStoreDownloader: {model_id} already staged at {dest_path} — skipping availability probe"
             )
-            await self._emit_progress(shard, status="complete")
             return dest_path
 
         available = await self._store_client.is_model_available(model_id)
@@ -855,7 +860,6 @@ class ModelStoreDownloader(ShardDownloader):
                         total_bytes=total,
                     ),
                 )
-                await self._emit_progress(shard, status="complete")
                 return path
             except ModelNotInStoreError:
                 # Store index was stale — the file was reported present but
@@ -896,7 +900,6 @@ class ModelStoreDownloader(ShardDownloader):
                     total_bytes=total,
                 ),
             )
-            await self._emit_progress(shard, status="complete")
             return path
 
         raise ModelNotInStoreError(
