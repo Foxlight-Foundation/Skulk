@@ -243,6 +243,10 @@ class Worker:
 
         self.state: State = State()
         self.runners: dict[RunnerId, RunnerSupervisor] = {}
+        # Models evicted by startup reconciliation whose DownloadCompleted
+        # entries may still be replicating in; countered lazily by
+        # plan_step once state carries them.
+        self._stale_downloads_pending_reset: set[str] = set()
         self._tg: TaskGroup = TaskGroup()
 
         self._system_id = SystemId()
@@ -335,6 +339,8 @@ class Worker:
     async def plan_step(self):
         while True:
             await anyio.sleep(0.1)
+            if self._stale_downloads_pending_reset:
+                await self._reset_stale_downloads_from_state()
             task: Task | None = plan(
                 self.node_id,
                 self.runners,
@@ -775,6 +781,44 @@ class Worker:
             logger.warning(f"Worker: staging budget enforcement failed: {exc}")
             return None
 
+    async def _reset_stale_downloads_from_state(self) -> None:
+        """Counter stale DownloadCompleted entries for startup-evicted models.
+
+        Runs from plan_step while any evicted ID lacks its reset: once the
+        replicated state shows a DownloadCompleted for this node naming an
+        evicted model, emit DownloadPending with that entry's own shard
+        metadata so the planner re-stages instead of dispatching a load
+        against deleted files.
+        """
+        if self._staging_config is None:
+            self._stale_downloads_pending_reset.clear()
+            return
+        cache_path = Path(self._staging_config.node_cache_path).expanduser()
+        for progress in self.state.downloads.get(self.node_id, []):
+            if not isinstance(progress, DownloadCompleted):
+                continue
+            model_id = str(progress.shard_metadata.model_card.model_id)
+            if model_id not in self._stale_downloads_pending_reset:
+                continue
+            staged_dir = cache_path / model_id.replace("/", "--")
+            if staged_dir.exists():
+                # Re-staged since eviction — state is truthful again.
+                self._stale_downloads_pending_reset.discard(model_id)
+                continue
+            pending = DownloadPending(
+                shard_metadata=progress.shard_metadata,
+                node_id=self.node_id,
+                model_directory=str(staged_dir),
+            )
+            await self.event_sender.send(
+                NodeDownloadProgress(download_progress=pending)
+            )
+            self._stale_downloads_pending_reset.discard(model_id)
+            logger.info(
+                f"Worker: reset stale DownloadCompleted for {model_id} "
+                "(staged files were evicted at startup)"
+            )
+
     def _reconcile_staging_on_startup(self) -> None:
         """Reconcile staging orphans left by a crashed or killed session.
 
@@ -797,6 +841,14 @@ class Worker:
                 f"{len(report.evicted_model_ids)} orphaned model(s) "
                 f"({report.evicted_bytes / 2**30:.1f} GiB)"
             )
+            # The master may still hold DownloadCompleted entries for the
+            # files we just deleted, but this runs BEFORE state replay —
+            # there is no shard metadata to build the reset events from
+            # yet. Remember the IDs; plan_step counters the stale entries
+            # as soon as they appear in replicated state (the plan layer
+            # consults state.downloads, so leaving them would skip
+            # re-staging and fail a later load).
+            self._stale_downloads_pending_reset.update(report.evicted_model_ids)
 
     async def _poll_connection_updates(self):
         while True:

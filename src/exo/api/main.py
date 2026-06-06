@@ -3018,9 +3018,16 @@ class API:
         )
 
     def _store_models_in_use(self) -> frozenset[str]:
-        """Repo-form model IDs any live instance depends on, incl. companions."""
+        """Repo-form model IDs THIS node's live shards depend on, incl. companions.
+
+        Node-scoped on purpose: the storage view describes this node's
+        staging directory, and an idle staged copy here is an eviction
+        candidate even when some other node runs the same model.
+        """
         in_use: set[str] = set()
         for instance in self.state.instances.values():
+            if self.node_id not in instance.shard_assignments.node_to_runner:
+                continue
             for shard in instance.shard_assignments.runner_to_shard.values():
                 card = shard.model_card
                 in_use.add(str(card.model_id))
@@ -3066,15 +3073,21 @@ class API:
                 with contextlib.suppress(OSError):
                     if file_path.is_file():
                         event_log_bytes += file_path.stat().st_size
-            disk = shutil.disk_usage(EXO_MODELS_DIR)
+            try:
+                disk = shutil.disk_usage(EXO_MODELS_DIR)
+                disk_total_bytes, disk_free_bytes = disk.total, disk.free
+            except OSError:
+                # Fresh node where the models dir doesn't exist yet — the
+                # summary is best-effort, report zeros rather than 500.
+                disk_total_bytes, disk_free_bytes = 0, 0
             return NodeStorageSummary(
                 node_id=str(self.node_id),
                 staging_root=str(staging_root) if staging_root is not None else None,
                 staged_models=staged,
                 staged_total_bytes=sum(info.size_bytes for info in staged),
                 event_log_bytes=event_log_bytes,
-                disk_total_bytes=disk.total,
-                disk_free_bytes=disk.free,
+                disk_total_bytes=disk_total_bytes,
+                disk_free_bytes=disk_free_bytes,
             )
 
         return await to_thread.run_sync(_collect)

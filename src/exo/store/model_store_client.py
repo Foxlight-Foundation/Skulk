@@ -853,6 +853,7 @@ class ModelStoreDownloader(ShardDownloader):
                     total_bytes=total,
                 ),
             )
+            touch_last_used(path)
             await self._emit_progress(shard, status="complete")
             return path
 
