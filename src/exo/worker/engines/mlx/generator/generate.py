@@ -2498,7 +2498,15 @@ def mlx_generate(
     logits_processors: list[Callable[[mx.array, mx.array], mx.array]] = (
         make_logits_processors(
             repetition_penalty=task.repetition_penalty,
-            repetition_context_size=task.repetition_context_size,
+            # None must not override mlx-lm's default context size: the
+            # penalty processor slices tokens[-context_size:], and a None
+            # context crashes the runner on the first penalized request
+            # (clients routinely send repetition_penalty alone).
+            repetition_context_size=(
+                task.repetition_context_size
+                if task.repetition_context_size is not None
+                else 20
+            ),
         )
     )
     if is_bench:
