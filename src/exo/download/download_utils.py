@@ -235,6 +235,35 @@ def companion_download_specs(
     return specs
 
 
+def model_companions_present_on_disk(model_card: ModelCard) -> bool:
+    """True when every *checkable* companion the card declares is on disk.
+
+    Used to decide whether an already-on-disk base model can be treated as
+    download-complete: a staged base with a missing MTP sidecar or assistant
+    must NOT short-circuit the download path, or the model loads with
+    speculative decoding silently unavailable (launch smoke, 2026-06-06).
+
+    Split vision repos are intentionally NOT checked here: there is no
+    reliable on-disk completeness probe for an arbitrary multi-file vision
+    repo, and a false "missing" from this function would make the
+    coordinator re-run the download path forever.
+    """
+    runtime = model_card.runtime
+    if runtime is None:
+        return True
+    if (
+        runtime.mtp_sidecar_repo
+        and runtime.mtp_heads
+        and build_sidecar_path(ModelId(runtime.mtp_sidecar_repo), "mtp.safetensors")
+        is None
+    ):
+        return False
+    return not (
+        runtime.assistant_model_repo
+        and build_companion_model_path(ModelId(runtime.assistant_model_repo)) is None
+    )
+
+
 def build_model_path(model_id: ModelId) -> Path:
     """Resolve a local filesystem path for *model_id*.
 

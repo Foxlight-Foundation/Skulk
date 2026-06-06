@@ -124,8 +124,10 @@ def resolve_warmup_deadline_seconds() -> float:
         except ValueError:
             pass
         logger.warning(
-            f"Ignoring invalid SKULK_WARMUP_DEADLINE_SECONDS value {raw!r}; "
-            f"using default {WARMUP_DEADLINE_SECONDS_DEFAULT:.0f}s"
+            "Ignoring invalid warmup-deadline override "
+            f"(SKULK_WARMUP_DEADLINE_SECONDS / EXO_WARMUP_DEADLINE_SECONDS) "
+            f"value {raw!r}; using default "
+            f"{WARMUP_DEADLINE_SECONDS_DEFAULT:.0f}s"
         )
     return WARMUP_DEADLINE_SECONDS_DEFAULT
 

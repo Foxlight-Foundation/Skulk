@@ -125,14 +125,26 @@ class ResumableShardDownloader(ShardDownloader):
         )
 
         if not config_only and not self.offline:
+            # Companions are best-effort: the runtime treats a missing
+            # sidecar/assistant/vision repo as "run without that feature",
+            # so a transient fetch failure must not turn a loadable base
+            # model into a download error. Failures log loudly instead.
             for companion_shard, allow in companion_download_specs(shard.model_card):
-                await download_shard(
-                    companion_shard,
-                    self.on_progress_wrapper,
-                    max_parallel_downloads=self.max_parallel_downloads,
-                    allow_patterns=allow,
-                    skip_internet=self.offline,
-                )
+                try:
+                    await download_shard(
+                        companion_shard,
+                        self.on_progress_wrapper,
+                        max_parallel_downloads=self.max_parallel_downloads,
+                        allow_patterns=allow,
+                        skip_internet=self.offline,
+                    )
+                except Exception as error:
+                    logger.warning(
+                        f"Companion repo {companion_shard.model_card.model_id} "
+                        f"for {shard.model_card.model_id} could not be fetched "
+                        f"({error}); speculative decoding / vision features "
+                        "that depend on it will be unavailable on this node."
+                    )
 
         return target_dir
 
@@ -200,25 +212,6 @@ class ResumableShardDownloader(ShardDownloader):
     @staticmethod
     def _missing_companion(shard: ShardMetadata) -> bool:
         """True when the card declares a companion repo absent from disk."""
-        from exo.download.download_utils import (
-            build_companion_model_path,
-            build_sidecar_path,
-        )
+        from exo.download.download_utils import model_companions_present_on_disk
 
-        runtime = shard.model_card.runtime
-        if runtime is None:
-            return False
-        if (
-            runtime.mtp_sidecar_repo
-            and runtime.mtp_heads
-            and build_sidecar_path(
-                ModelId(runtime.mtp_sidecar_repo), "mtp.safetensors"
-            )
-            is None
-        ):
-            return True
-        return bool(
-            runtime.assistant_model_repo
-            and build_companion_model_path(ModelId(runtime.assistant_model_repo))
-            is None
-        )
+        return not model_companions_present_on_disk(shard.model_card)

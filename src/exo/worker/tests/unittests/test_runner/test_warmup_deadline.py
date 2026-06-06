@@ -9,7 +9,6 @@ which cannot run inside pytest).
 """
 
 import threading
-import time
 
 import pytest
 
@@ -33,9 +32,9 @@ def test_watchdog_does_not_fire_when_block_completes() -> None:
     with deadline_watchdog(0.2, "test block", on_timeout=fired.set):
         pass  # completes immediately
 
-    # Give the watchdog thread ample time to (incorrectly) fire.
-    time.sleep(0.4)
-    assert not fired.is_set(), "watchdog fired after the block completed"
+    # Wait past the deadline; the event staying unset proves the watchdog
+    # was disarmed (waiting on the event returns early only if it fires).
+    assert not fired.wait(0.4), "watchdog fired after the block completed"
 
 
 def test_watchdog_does_not_fire_on_exception_exit() -> None:
@@ -48,8 +47,7 @@ def test_watchdog_does_not_fire_on_exception_exit() -> None:
     ):
         raise RuntimeError("boom")
 
-    time.sleep(0.4)
-    assert not fired.is_set(), "watchdog fired after exceptional exit"
+    assert not fired.wait(0.4), "watchdog fired after exceptional exit"
 
 
 def test_resolver_returns_default_without_env(
