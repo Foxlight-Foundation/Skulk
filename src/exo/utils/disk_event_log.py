@@ -85,6 +85,9 @@ class DiskEventLog:
         self._offset_cache: OrderedDict[int, int] = OrderedDict()
         self._base_idx: int = 0
         self._count: int = 0
+        # Set on the first failed disk write (e.g. ENOSPC); the log then
+        # counts events without persisting so indices stay coherent.
+        self._persistence_failed: bool = False
 
         # Rotate stale active file from a previous session/crash
         if self._active_path.exists():
@@ -136,14 +139,50 @@ class DiskEventLog:
         self._cache_offset(target_idx, f.tell())
 
     def append(self, event: Event) -> None:
-        packed = _serialize_event(event)
-        self._file.write(len(packed).to_bytes(_HEADER_SIZE, byteorder="big"))
-        self._file.write(packed)
-        self._count += 1
-        self._write_metadata()
+        # Persistence failures (disk full being the canonical case) must
+        # NEVER take down the event processor: the in-memory state apply
+        # and the broadcast are the critical path, and event indices derive
+        # from len(self) — so the count keeps advancing even when the disk
+        # write fails, keeping follower replay indices coherent. The log
+        # degrades to in-memory-only with one CRITICAL line (launch E2E
+        # smoke 2026-06-05: ENOSPC in _write_metadata killed the node).
+        if self._persistence_failed:
+            self._count += 1
+            return
+        counted = False
+        try:
+            packed = _serialize_event(event)
+            self._file.write(len(packed).to_bytes(_HEADER_SIZE, byteorder="big"))
+            self._file.write(packed)
+            self._count += 1
+            counted = True
+            self._write_metadata()
+        except OSError as error:
+            # The count must advance EXACTLY once per append: a failure in
+            # _write_metadata (the observed ENOSPC site) arrives here with
+            # the increment already done.
+            if not counted:
+                self._count += 1
+            self._persistence_failed = True
+            # Dispose the dirty handle: buffered record bytes may be
+            # stranded and any later flush would raise again. All write
+            # and read paths are short-circuited by the flag from here.
+            with contextlib.suppress(Exception):
+                self._file.close()
+            logger.critical(
+                "Event-log persistence failed and is now DISABLED for this "
+                f"session ({error}); the node continues with in-memory state "
+                "only — follower replay from this node's disk log will be "
+                "unavailable. Free disk space and restart to restore "
+                "persistence."
+            )
 
     def compact(self, keep_from_idx: int) -> None:
         """Discard events before ``keep_from_idx`` while preserving absolute indices."""
+
+        if self._persistence_failed:
+            # Counting-only mode: there is no coherent disk tail to rebuild.
+            return
 
         absolute_end = len(self)
         keep_from_idx = max(keep_from_idx, self._base_idx)
@@ -197,6 +236,11 @@ class DiskEventLog:
 
     def read_range(self, start: int, end: int) -> Iterator[Event]:
         """Yield events from index start (inclusive) to end (exclusive)."""
+        if self._persistence_failed:
+            # Counting-only mode: the disk tail is incomplete and the file
+            # handle is closed — replay from this log is unavailable (the
+            # append-time CRITICAL log already told the operator).
+            return
         if start < 0 or end < 0:
             return
         start = max(start, self._base_idx)
@@ -228,7 +272,7 @@ class DiskEventLog:
 
     def read_all(self) -> Iterator[Event]:
         """Yield all events from the log one at a time."""
-        if self._count == 0:
+        if self._persistence_failed or self._count == 0:
             return
         self._file.flush()
         with open(self._active_path, "rb") as f:
@@ -243,6 +287,12 @@ class DiskEventLog:
 
     def close(self) -> None:
         """Close the file and rotate active file to compressed archive."""
+        if self._persistence_failed:
+            # The active file holds an incomplete tail; archiving it would
+            # preserve a corrupt log. Leave it for post-mortem inspection.
+            with contextlib.suppress(Exception):
+                self._file.close()
+            return
         if self._file.closed:
             return
         self._file.close()

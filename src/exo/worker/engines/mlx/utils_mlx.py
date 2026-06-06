@@ -1214,10 +1214,24 @@ def fix_unmatched_think_end_tokens(
 ) -> mx.array:
     if not tokenizer.has_thinking:
         return tokens
-    assert tokenizer.think_start_id
-    assert tokenizer.think_end_id
-    think_start_id: int = tokenizer.think_start_id
-    think_end_id: int = tokenizer.think_end_id
+    try:
+        maybe_start_id: int | None = tokenizer.think_start_id
+        maybe_end_id: int | None = tokenizer.think_end_id
+    except ValueError:
+        # mlx-lm raises when a tokenizer's think marker is not a single
+        # token (observed: gemma-4-12B-it's unified tokenizer, launch E2E
+        # smoke 2026-06-05). The unmatched-end fix only makes sense for
+        # single-token markers — skip it rather than crash the runner
+        # during warmup of an otherwise healthy model.
+        logger.info(
+            "Thinking markers are multi-token for this tokenizer; "
+            "skipping unmatched think-end token fix"
+        )
+        return tokens
+    if maybe_start_id is None or maybe_end_id is None:
+        return tokens
+    think_start_id: int = maybe_start_id
+    think_end_id: int = maybe_end_id
     token_list: list[int] = cast(list[int], tokens.tolist())
     result: list[int] = []
     depth = 0
