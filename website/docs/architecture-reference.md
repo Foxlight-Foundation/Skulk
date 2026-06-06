@@ -316,7 +316,7 @@ Note: there is no `master_node_id` field on `State`. Master identity lives outsi
 - `reasoning: ReasoningCardConfig | None` — supports_toggle, supports_budget, format, default_effort
 - `modalities: ModalitiesCardConfig | None` — supports_native_multimodal, supports_audio_input
 - `tooling: ToolingCardConfig | None` — tool_call_format, supports_tool_calling, builtin_tools
-- `runtime: RuntimeCapabilityCardConfig | None` — prompt_renderer, output_parser, metal_fast_synch, mtp_heads, mtp_max_depth, mtp_sidecar_repo, mtp_norm_convention, mtp_concat_order, assistant_model_repo
+- `runtime: RuntimeCapabilityCardConfig | None` — prompt_renderer, output_parser, metal_fast_synch, mtp_heads, mtp_max_depth, mtp_sidecar_repo, mtp_norm_convention, mtp_concat_order, assistant_model_repo, speculative_multi_node (set `false` where multi-node speculation measures slower than plain sharded decode — e.g. gemma-4-26B-A4B MoE, 2026-06-06 matrix: 30.2 plain vs 28.2 MTP on 2 nodes; single-node speculation unaffected; card-driven so the agreement collective stays rank-symmetric)
 
 ### Capability profile
 

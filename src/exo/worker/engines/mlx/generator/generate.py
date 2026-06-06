@@ -35,7 +35,7 @@ from exo.api.types import (
     Usage,
 )
 from exo.shared.constants import preferred_env_value
-from exo.shared.models.model_cards import ModelCard
+from exo.shared.models.model_cards import ModelCard, multi_node_speculation_disabled
 from exo.shared.tracing import TraceAttrValue, record_trace_marker, trace
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
@@ -2799,6 +2799,7 @@ def mlx_generate(
         and group is not None
         and group.size() > 1
         and _has_pipeline_communication_layer(model)
+        and not multi_node_speculation_disabled(model_card.runtime, group.size())
     )
     if _speculation_assets or _pipeline_assistant_mode:
         if logits_processors:
@@ -2853,6 +2854,13 @@ def mlx_generate(
         and (
             model_card.runtime.mtp_sidecar_repo is not None
             or model_card.runtime.assistant_model_repo is not None
+        )
+        # A card that forbids multi-node speculation does not declare it
+        # for this placement — no rank opens the agreement collective and
+        # every rank skips it identically (the knob is card-driven, hence
+        # rank-symmetric).
+        and not multi_node_speculation_disabled(
+            model_card.runtime, 1 if group is None else group.size()
         )
     )
     if _card_declares_speculation and group is not None and group.size() > 1:

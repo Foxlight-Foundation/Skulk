@@ -39,6 +39,13 @@ assistant_model_repo = "mlx-community/gemma-4-26B-A4B-it-assistant-bf16"
 # WindowServer, and trips the macOS userspace watchdog into a kernel panic.
 # Reproduced 2026-04 on M4 (Mac16,10) with multinode pipeline-parallel.
 metal_fast_synch = false
+# Multi-node speculation measured SLOWER than plain sharded decode on this
+# MoE: 2026-06-06 matrix, 2-node pipeline on 2x M4 16GB — 30.2 tok/s plain
+# vs 28.2 with MTP (62-76% acceptance). Sharding halves the active-params
+# bandwidth bottleneck, so plain decode is already fast and the per-round
+# draft+verify overhead nets negative. Single-node MTP on this model
+# measures 2.2x (16 -> 35.1 tok/s) and stays enabled.
+speculative_multi_node = false
 
 [vision]
 image_token_id = 258880

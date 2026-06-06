@@ -131,6 +131,22 @@ class VisionCardConfig(CamelCaseModel):
     eoi_token_id: int | None = None
 
 
+def multi_node_speculation_disabled(
+    runtime: "RuntimeCapabilityCardConfig | None", world_size: int
+) -> bool:
+    """True when the card forbids speculation for this placement size.
+
+    Shared by the runner's drafter-load gate and the generation loop's
+    distributed-agreement gate so both make the identical, rank-symmetric
+    decision from the card alone.
+    """
+    return (
+        world_size > 1
+        and runtime is not None
+        and runtime.speculative_multi_node is False
+    )
+
+
 class ReasoningFormat(str, Enum):
     """Reasoning marker formats used by model families."""
 
@@ -286,6 +302,21 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     ``None`` falls through to the family default keyed off the detected
     sidecar layout.
     """
+    speculative_multi_node: bool | None = None
+    """Whether speculation may run on multi-node placements of this model.
+
+    ``None`` (default) places no restriction. Set ``False`` for models
+    where multi-node speculation is measured SLOWER than plain distributed
+    decode: the 2026-06-06 benchmark matrix found gemma-4-26B-A4B (MoE)
+    at 30.2 tok/s plain vs 28.2 with MTP on a 2-node pipeline (-7%), while
+    single-node MTP on the same model measures 2.2x — fast sharded MoE
+    decode plus modest acceptance makes the per-round draft+verify
+    overhead net negative. Single-node speculation is unaffected by this
+    knob. The decision is card-driven so every rank makes the same
+    speculate-or-not choice (the distributed agreement collective requires
+    rank symmetry).
+    """
+
     assistant_model_repo: str | None = None
     """Hugging Face repo ID of a companion *assistant* (drafter) model.
 
