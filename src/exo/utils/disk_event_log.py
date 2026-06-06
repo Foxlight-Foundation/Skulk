@@ -164,6 +164,11 @@ class DiskEventLog:
             if not counted:
                 self._count += 1
             self._persistence_failed = True
+            # Dispose the dirty handle: buffered record bytes may be
+            # stranded and any later flush would raise again. All write
+            # and read paths are short-circuited by the flag from here.
+            with contextlib.suppress(Exception):
+                self._file.close()
             logger.critical(
                 "Event-log persistence failed and is now DISABLED for this "
                 f"session ({error}); the node continues with in-memory state "
@@ -231,6 +236,11 @@ class DiskEventLog:
 
     def read_range(self, start: int, end: int) -> Iterator[Event]:
         """Yield events from index start (inclusive) to end (exclusive)."""
+        if self._persistence_failed:
+            # Counting-only mode: the disk tail is incomplete and the file
+            # handle is closed — replay from this log is unavailable (the
+            # append-time CRITICAL log already told the operator).
+            return
         if start < 0 or end < 0:
             return
         start = max(start, self._base_idx)
@@ -262,7 +272,7 @@ class DiskEventLog:
 
     def read_all(self) -> Iterator[Event]:
         """Yield all events from the log one at a time."""
-        if self._count == 0:
+        if self._persistence_failed or self._count == 0:
             return
         self._file.flush()
         with open(self._active_path, "rb") as f:
@@ -277,6 +287,12 @@ class DiskEventLog:
 
     def close(self) -> None:
         """Close the file and rotate active file to compressed archive."""
+        if self._persistence_failed:
+            # The active file holds an incomplete tail; archiving it would
+            # preserve a corrupt log. Leave it for post-mortem inspection.
+            with contextlib.suppress(Exception):
+                self._file.close()
+            return
         if self._file.closed:
             return
         self._file.close()

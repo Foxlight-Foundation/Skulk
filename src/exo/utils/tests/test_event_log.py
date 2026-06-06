@@ -289,11 +289,13 @@ def test_persistence_failure_degrades_without_losing_indices(log_dir: Path):
     log._file.close()  # next write raises ValueError... use a stub instead
 
     class _FullDisk:
+        closed = False
+
         def write(self, _data: bytes) -> int:
             raise OSError(28, "No space left on device")
 
         def close(self) -> None:
-            pass
+            self.closed = True
 
         def flush(self) -> None:
             pass
@@ -312,6 +314,14 @@ def test_persistence_failure_degrades_without_losing_indices(log_dir: Path):
     log.compact(2)
     assert len(log) == 3
     assert log.start_idx == 0
+
+    # Reads return empty without touching the dead file — the master's
+    # replay caller only catches ValueError, so a flush-time OSError here
+    # would kill the node through the side door.
+    assert list(log.read_range(0, len(log))) == []
+    assert list(log.read_all()) == []
+
+    log.close()  # must not raise nor archive the dirty tail
 
 
 def test_metadata_failure_counts_exactly_once(log_dir: Path):
@@ -332,3 +342,4 @@ def test_metadata_failure_counts_exactly_once(log_dir: Path):
     assert log._persistence_failed
     log.append(TestEvent())
     assert len(log) == 3
+    log.close()
