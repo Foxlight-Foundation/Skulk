@@ -149,14 +149,20 @@ class DiskEventLog:
         if self._persistence_failed:
             self._count += 1
             return
+        counted = False
         try:
             packed = _serialize_event(event)
             self._file.write(len(packed).to_bytes(_HEADER_SIZE, byteorder="big"))
             self._file.write(packed)
             self._count += 1
+            counted = True
             self._write_metadata()
         except OSError as error:
-            self._count += 1
+            # The count must advance EXACTLY once per append: a failure in
+            # _write_metadata (the observed ENOSPC site) arrives here with
+            # the increment already done.
+            if not counted:
+                self._count += 1
             self._persistence_failed = True
             logger.critical(
                 "Event-log persistence failed and is now DISABLED for this "

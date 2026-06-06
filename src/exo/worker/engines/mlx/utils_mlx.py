@@ -1228,7 +1228,7 @@ def fix_unmatched_think_end_tokens(
             "skipping unmatched think-end token fix"
         )
         return tokens
-    if not maybe_start_id or not maybe_end_id:
+    if maybe_start_id is None or maybe_end_id is None:
         return tokens
     think_start_id: int = maybe_start_id
     think_end_id: int = maybe_end_id

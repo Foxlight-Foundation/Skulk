@@ -312,3 +312,23 @@ def test_persistence_failure_degrades_without_losing_indices(log_dir: Path):
     log.compact(2)
     assert len(log) == 3
     assert log.start_idx == 0
+
+
+def test_metadata_failure_counts_exactly_once(log_dir: Path):
+    """ENOSPC at the _write_metadata site (the observed crash) arrives with
+    the count already incremented — the handler must not increment again
+    (PR #209 review: double-count would corrupt follower replay indices)."""
+    log = DiskEventLog(log_dir)
+    log.append(TestEvent())
+    assert len(log) == 1
+
+    def _fail_metadata() -> None:
+        raise OSError(28, "No space left on device")
+
+    log._write_metadata = _fail_metadata
+
+    log.append(TestEvent())  # record write succeeds, metadata fails
+    assert len(log) == 2  # exactly once, not twice
+    assert log._persistence_failed
+    log.append(TestEvent())
+    assert len(log) == 3
