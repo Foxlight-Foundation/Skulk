@@ -1,5 +1,6 @@
 import base64
 import contextlib
+import copy
 import hashlib
 import json
 import os
@@ -148,6 +149,7 @@ from exo.api.types.openai_responses import (
 from exo.connectivity.remote_access import RemoteAccessInfo, build_remote_access_info
 from exo.connectivity.tailscale import TailscaleStatus, query_tailscale_status
 from exo.master.image_store import ImageStore
+from exo.master.placement import PlacementInfoPendingError
 from exo.master.placement import place_instance as get_instance_placements
 from exo.shared.apply import apply
 from exo.shared.constants import (
@@ -277,6 +279,12 @@ class _HypercornServe(Protocol):
 serve = cast(_HypercornServe, hypercorn_asyncio.serve)
 
 _API_EVENT_LOG_DIR = EXO_EVENT_LOG_DIR / "api"
+
+# How long POST /place_instance waits for node memory info to finish
+# gossiping before giving up with 503. Covers the window between cluster
+# formation (identities present) and the first NodeGatheredInfo from every
+# node — observed to resolve within a few seconds on a LAN cluster.
+_PLACEMENT_INFO_WAIT_SECONDS = 15.0
 ONBOARDING_COMPLETE_FILE = EXO_CACHE_HOME / "onboarding_complete"
 
 
@@ -653,7 +661,13 @@ class API:
             summary="Quick-launch a model placement",
             description=(
                 "Place and launch a model with Skulk choosing a valid concrete placement "
-                "from the requested sharding, instance metadata, and minimum-node constraints."
+                "from the requested sharding, instance metadata, and minimum-node constraints. "
+                "The placement is validated against the current cluster state before the "
+                "command is forwarded: an impossible placement returns 400 with the specific "
+                "reason (no connected cycle, exclusions removed every candidate, a node cannot "
+                "fit its shard with runtime headroom, ...). If node memory info is still being "
+                "gathered (cluster just formed), the request waits up to 15 seconds for it "
+                "before returning 503 — retry shortly in that case."
             ),
         )(self.place_instance)
         self.app.get(
@@ -1200,6 +1214,46 @@ class API:
             min_nodes=payload.min_nodes,
             excluded_nodes=list(payload.excluded_nodes),
         )
+
+        # Dry-run the placement against this node's replicated state before
+        # forwarding the command. Without this, an impossible placement is
+        # acknowledged with "Command received", fails silently on the master,
+        # and the client only ever observes 404s on subsequent requests.
+        # PlacementInfoPendingError covers the cluster-startup window where
+        # cluster info is still gossiping (connection edges lag node
+        # identities, then memory info lags the edges) — placement would
+        # succeed seconds later, so wait it out rather than failing a
+        # placement that raced cluster formation. The dry-run uses a copy
+        # because place_instance normalizes single-node commands in place.
+        #
+        # While the API is paused (election/reset), self.state may be mid-
+        # rebuild — validating against it could produce a false 400. Gate the
+        # dry-run on the same unpause condition _send() uses.
+        while self.paused:
+            await self.paused_ev.wait()
+        deadline = time.monotonic() + _PLACEMENT_INFO_WAIT_SECONDS
+        while True:
+            try:
+                get_instance_placements(
+                    copy.deepcopy(command),
+                    topology=self.state.topology,
+                    current_instances=self.state.instances,
+                    node_memory=self.state.node_memory,
+                    node_network=self.state.node_network,
+                    download_status=self.state.downloads,
+                    excluded_nodes=set(command.excluded_nodes),
+                )
+                break
+            except PlacementInfoPendingError as exc:
+                if time.monotonic() >= deadline:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"{exc} (waited {_PLACEMENT_INFO_WAIT_SECONDS:.0f}s)",
+                    ) from exc
+                await anyio.sleep(1)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
         await self._send(command)
 
         return CreateInstanceResponse(

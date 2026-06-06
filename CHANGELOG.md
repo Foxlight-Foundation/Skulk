@@ -9,6 +9,26 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Multi-node placement is now reliable and placement failures are
+  visible.** Four compounding issues fixed in the placement path:
+  (1) memory admission is per node instead of summed across the cycle —
+  Tensor sharding splits weights evenly, so a 16+24 GB pair whose *sum*
+  covered the model could be admitted with the even split overloading the
+  smaller node; (2) admission requires runtime headroom
+  (weights x 1.05 + 256 MB per node) on top of raw weight bytes — an
+  exact weights-equal-free-memory fit previously produced a silent
+  thrash (observed: 12-token prefill in 1230 s) instead of a refusal;
+  (3) placing immediately after cluster formation no longer fails with a
+  false "insufficient memory" — cycles touching nodes whose memory info
+  has not been gossiped yet are now reported as info-pending, and
+  `POST /place_instance` waits up to 15 s for the info before returning
+  503; (4) impossible placements now fail loudly at the API with the
+  specific typed reason (400) instead of returning "Command received"
+  and silently failing on the master, leaving clients with unexplained
+  404s. The old catch-all "No cycles found with sufficient memory" error
+  (which fired for topology gaps, exclusions, startup races, AND real
+  shortfalls alike) is split into per-stage `PlacementError` messages
+  that include the per-node GB arithmetic.
 - **Production MTP no longer runs ~20-46x slower than plain decode.**
   `FAST_SYNCH_CLUSTER_DEFAULT = True` silently applied
   `MLX_METAL_FAST_SYNCH=1` to every MTP runner, collapsing the

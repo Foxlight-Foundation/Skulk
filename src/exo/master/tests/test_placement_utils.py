@@ -39,8 +39,8 @@ def test_filter_cycles_by_memory():
         source=node2_id, sink=node1_id, edge=create_socket_connection(2)
     )
 
-    node1_mem = create_node_memory(1000 * 1024)
-    node2_mem = create_node_memory(1000 * 1024)
+    node1_mem = create_node_memory(Memory.from_gb(8).in_bytes)
+    node2_mem = create_node_memory(Memory.from_gb(8).in_bytes)
     node_memory = {node1_id: node1_mem, node2_id: node2_mem}
 
     topology = Topology()
@@ -54,12 +54,16 @@ def test_filter_cycles_by_memory():
     assert len(cycles[0]) == 2
 
     # act
-    filtered_cycles = filter_cycles_by_memory(cycles, node_memory, Memory.from_bytes(1))
+    filtered_cycles, diagnostics = filter_cycles_by_memory(
+        cycles, node_memory, Memory.from_gb(4)
+    )
 
     # assert
     assert len(filtered_cycles) == 1
     assert len(filtered_cycles[0]) == 2
     assert set(n for n in filtered_cycles[0]) == {node1_id, node2_id}
+    assert diagnostics.pending_info_node_ids == []
+    assert diagnostics.rejection_reasons == []
 
 
 def test_filter_cycles_by_insufficient_memory():
@@ -73,8 +77,8 @@ def test_filter_cycles_by_insufficient_memory():
         source=node2_id, sink=node1_id, edge=create_socket_connection(2)
     )
 
-    node1_mem = create_node_memory(1000 * 1024)
-    node2_mem = create_node_memory(1000 * 1024)
+    node1_mem = create_node_memory(Memory.from_gb(8).in_bytes)
+    node2_mem = create_node_memory(Memory.from_gb(8).in_bytes)
     node_memory = {node1_id: node1_mem, node2_id: node2_mem}
 
     topology = Topology()
@@ -84,12 +88,14 @@ def test_filter_cycles_by_insufficient_memory():
     topology.add_connection(connection2)
 
     # act
-    filtered_cycles = filter_cycles_by_memory(
-        topology.get_cycles(), node_memory, Memory.from_kb(2001)
+    filtered_cycles, diagnostics = filter_cycles_by_memory(
+        topology.get_cycles(), node_memory, Memory.from_gb(17)
     )
 
     # assert
     assert len(filtered_cycles) == 0
+    assert diagnostics.rejection_reasons  # every cycle rejected with a reason
+    assert diagnostics.pending_info_node_ids == []
 
 
 def test_filter_multiple_cycles_by_memory():
@@ -110,9 +116,9 @@ def test_filter_multiple_cycles_by_memory():
         source=node_c_id, sink=node_b_id, edge=create_socket_connection(4)
     )
 
-    node_a_mem = create_node_memory(500 * 1024)
-    node_b_mem = create_node_memory(500 * 1024)
-    node_c_mem = create_node_memory(1000 * 1024)
+    node_a_mem = create_node_memory(Memory.from_gb(5).in_bytes)
+    node_b_mem = create_node_memory(Memory.from_gb(5).in_bytes)
+    node_c_mem = create_node_memory(Memory.from_gb(10).in_bytes)
     node_memory = {
         node_a_id: node_a_mem,
         node_b_id: node_b_mem,
@@ -131,7 +137,9 @@ def test_filter_multiple_cycles_by_memory():
     cycles = topology.get_cycles()
 
     # act
-    filtered_cycles = filter_cycles_by_memory(cycles, node_memory, Memory.from_kb(1500))
+    filtered_cycles, _diagnostics = filter_cycles_by_memory(
+        cycles, node_memory, Memory.from_gb(15)
+    )
 
     # assert
     assert len(filtered_cycles) == 1
@@ -141,6 +149,97 @@ def test_filter_multiple_cycles_by_memory():
         node_b_id,
         node_c_id,
     }
+
+
+def test_filter_cycles_tensor_rejects_uneven_pair_that_sums():
+    """Tensor sharding splits weights evenly, so a 16+24 GB pair whose SUM
+    covers the model must still be rejected when the even split overloads
+    the smaller node. The old sum-across-cycle check admitted exactly this
+    and produced the silent-thrash placements from the 2026-06-05 smoke."""
+    node_small = NodeId()
+    node_large = NodeId()
+    topology = Topology()
+    topology.add_node(node_small)
+    topology.add_node(node_large)
+    topology.add_connection(
+        Connection(source=node_small, sink=node_large, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=node_large, sink=node_small, edge=create_socket_connection(2))
+    )
+    node_memory = {
+        node_small: create_node_memory(Memory.from_gb(7).in_bytes),
+        node_large: create_node_memory(Memory.from_gb(14).in_bytes),
+    }
+    cycles = [c for c in topology.get_cycles() if len(c) == 2]
+
+    # 18 GB of weights: sums under 21 GB, but the 9 GB even split plus
+    # headroom does not fit the 7 GB node.
+    fitting, diagnostics = filter_cycles_by_memory(
+        cycles, node_memory, Memory.from_gb(18), Sharding.Tensor
+    )
+
+    assert fitting == []
+    assert len(diagnostics.rejection_reasons) == 1
+    assert str(node_small) in diagnostics.rejection_reasons[0]
+
+    # The same pair under Pipeline sharding allocates proportionally
+    # (6 GB / 12 GB shares) and fits.
+    fitting_pipeline, _ = filter_cycles_by_memory(
+        cycles, node_memory, Memory.from_gb(14), Sharding.Pipeline
+    )
+    assert len(fitting_pipeline) == 1
+
+
+def test_filter_cycles_reports_pending_node_info():
+    """A cycle touching a node with no memory info yet must be reported as
+    info-pending, not silently dropped: placing right after cluster
+    formation (identities gossiped, NodeGatheredInfo not yet) is a
+    retry-shortly condition, not a memory shortfall."""
+    node_known = NodeId()
+    node_pending = NodeId()
+    topology = Topology()
+    topology.add_node(node_known)
+    topology.add_node(node_pending)
+    topology.add_connection(
+        Connection(source=node_known, sink=node_pending, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=node_pending, sink=node_known, edge=create_socket_connection(2))
+    )
+    node_memory = {node_known: create_node_memory(Memory.from_gb(16).in_bytes)}
+    cycles = [c for c in topology.get_cycles() if len(c) == 2]
+
+    fitting, diagnostics = filter_cycles_by_memory(
+        cycles, node_memory, Memory.from_gb(4)
+    )
+
+    assert fitting == []
+    assert diagnostics.pending_info_node_ids == [node_pending]
+    assert diagnostics.rejection_reasons == []
+
+
+def test_filter_cycles_rejects_exact_fit_without_headroom():
+    """Available memory exactly equal to the weight bytes is a guaranteed
+    thrash (no room for KV cache, activations, or the runner); the filter
+    must demand runtime headroom on top of the weights."""
+    node_id = NodeId()
+    topology = Topology()
+    topology.add_node(node_id)
+    node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
+    cycles = topology.get_cycles()
+
+    fitting, diagnostics = filter_cycles_by_memory(
+        cycles, node_memory, Memory.from_gb(8)
+    )
+    assert fitting == []
+    assert diagnostics.rejection_reasons
+
+    # With ~25% slack over the weights the same node is admitted.
+    fitting_with_slack, _ = filter_cycles_by_memory(
+        cycles, node_memory, Memory.from_gb(6)
+    )
+    assert len(fitting_with_slack) == 1
 
 
 def test_get_smallest_cycles():

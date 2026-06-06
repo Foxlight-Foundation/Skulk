@@ -1,6 +1,8 @@
 from collections.abc import Generator, Mapping
+from typing import final
 
 from loguru import logger
+from pydantic import Field
 
 from exo.shared.models.model_cards import ModelCard
 from exo.shared.topology import Topology
@@ -16,25 +18,144 @@ from exo.shared.types.worker.shards import (
     ShardMetadata,
     TensorShardMetadata,
 )
+from exo.utils.pydantic_ext import CamelCaseModel
+
+PLACEMENT_MEMORY_OVERHEAD_FACTOR: float = 1.05
+"""Multiplier applied to a node's share of the model weights when judging fit.
+
+Weights are not the whole story: the runner also needs KV cache, activation
+workspace, MLX buffer cache, and the Python runtime itself (measured on
+Qwen3.5-9B-MLX-4bit: ~6.4 GB resident for 5.2 GB of weights). The factor is
+deliberately gentle: macOS digs deeper than the gossiped ram_available under
+real pressure (compressing and evicting the active set), and Skulk's whole
+purpose is running the largest model a cluster can hold — so this check only
+refuses placements that are guaranteed to thrash (the exact-fit class), not
+ones that merely run warm. A wired-aware capacity metric that can be stricter
+without over-refusing is tracked as follow-up work.
+"""
+
+PLACEMENT_MEMORY_OVERHEAD_FLOOR: Memory = Memory.from_mb(256)
+"""Flat per-node overhead added on top of the proportional factor.
+
+Covers the roughly model-size-independent costs (Python interpreter, MLX
+runtime, IPC buffers) that the multiplicative factor under-counts for small
+models."""
+
+
+@final
+class CycleMemoryDiagnostics(CamelCaseModel):
+    """Why candidate cycles were rejected by the memory filter.
+
+    Carried alongside the surviving cycles so the caller can raise an error
+    that names the actual cause instead of a generic "insufficient memory".
+    """
+
+    pending_info_node_ids: list[NodeId] = Field(default_factory=list)
+    """Nodes that appeared in candidate cycles but have no memory info yet.
+
+    This happens in the window between a node joining the topology (identity
+    gossiped) and its first NodeGatheredInfo event arriving — placing during
+    cluster startup lands here. It is a retry-shortly condition, not a
+    memory shortfall.
+    """
+
+    rejection_reasons: list[str] = Field(default_factory=list)
+    """One human-readable line per cycle rejected on real memory grounds."""
+
+
+def _per_node_required_memory(
+    cycle: Cycle,
+    node_memory: Mapping[NodeId, MemoryUsage],
+    required_memory: Memory,
+    sharding: Sharding,
+) -> dict[NodeId, Memory]:
+    """Estimate the weight bytes each node in the cycle must hold.
+
+    Tensor parallelism splits the weights evenly across ranks, so every node
+    carries ``required_memory / len(cycle)`` regardless of its capacity.
+    Pipeline parallelism allocates layers proportionally to each node's
+    available memory (see ``allocate_layers_proportionally``), so a node's
+    share scales with its fraction of the cycle's total available memory.
+    The continuous fraction is an estimate of the integer layer allocation:
+    the two can differ by up to one layer per node (a few percent of the
+    weights on realistic layer counts), which sits comfortably inside the
+    ``PLACEMENT_MEMORY_OVERHEAD_FACTOR`` margin applied on top.
+    """
+    if sharding == Sharding.Tensor:
+        even_share = required_memory / len(cycle.node_ids)
+        return {node_id: even_share for node_id in cycle.node_ids}
+    total_available = sum(
+        (node_memory[node_id].ram_available for node_id in cycle.node_ids),
+        start=Memory(),
+    )
+    if total_available.in_bytes == 0:
+        # Degenerate: no node reports any memory; assign everything everywhere
+        # so the fit check below rejects the cycle with a concrete reason.
+        return {node_id: required_memory for node_id in cycle.node_ids}
+    return {
+        node_id: required_memory
+        * (node_memory[node_id].ram_available / total_available)
+        for node_id in cycle.node_ids
+    }
 
 
 def filter_cycles_by_memory(
     cycles: list[Cycle],
     node_memory: Mapping[NodeId, MemoryUsage],
     required_memory: Memory,
-) -> list[Cycle]:
+    sharding: Sharding = Sharding.Pipeline,
+) -> tuple[list[Cycle], CycleMemoryDiagnostics]:
+    """Keep cycles whose every node can hold its shard with runtime headroom.
+
+    The fit test is per node, not summed across the cycle: a 16 GB + 24 GB
+    pair summing 21 GB of available memory cannot run a Tensor-sharded model
+    whose even split overloads the 16 GB node, and a sum check would happily
+    admit it. Each node must satisfy::
+
+        node_share * PLACEMENT_MEMORY_OVERHEAD_FACTOR
+            + PLACEMENT_MEMORY_OVERHEAD_FLOOR <= ram_available
+
+    Cycles touching nodes with no memory info at all (cluster still starting
+    up) are recorded in ``diagnostics.pending_info_node_ids`` instead of being
+    silently dropped — the caller distinguishes "retry shortly" from "does
+    not fit".
+
+    Returns the surviving cycles plus diagnostics describing every rejection.
+    """
+    diagnostics = CycleMemoryDiagnostics()
     filtered_cycles: list[Cycle] = []
     for cycle in cycles:
-        if not all(node in node_memory for node in cycle):
+        missing = [node for node in cycle.node_ids if node not in node_memory]
+        if missing:
+            for node_id in missing:
+                if node_id not in diagnostics.pending_info_node_ids:
+                    diagnostics.pending_info_node_ids.append(node_id)
             continue
 
-        total_mem = sum(
-            (node_memory[node_id].ram_available for node_id in cycle.node_ids),
-            start=Memory(),
+        node_shares = _per_node_required_memory(
+            cycle, node_memory, required_memory, sharding
         )
-        if total_mem >= required_memory:
-            filtered_cycles.append(cycle)
-    return filtered_cycles
+        overloaded: list[str] = []
+        for node_id, share in node_shares.items():
+            required_with_overhead = (
+                share * PLACEMENT_MEMORY_OVERHEAD_FACTOR
+                + PLACEMENT_MEMORY_OVERHEAD_FLOOR
+            )
+            available = node_memory[node_id].ram_available
+            if required_with_overhead > available:
+                overloaded.append(
+                    f"node {node_id} needs ~{required_with_overhead.in_gb:.1f}GB "
+                    f"({share.in_gb:.1f}GB weights + runtime headroom) "
+                    f"but has {available.in_gb:.1f}GB available"
+                )
+        if overloaded:
+            diagnostics.rejection_reasons.append(
+                f"cycle [{', '.join(str(n) for n in cycle.node_ids)}] "
+                f"({sharding.value} sharding): " + "; ".join(overloaded)
+            )
+            continue
+        filtered_cycles.append(cycle)
+    return filtered_cycles, diagnostics
 
 
 def get_smallest_cycles(

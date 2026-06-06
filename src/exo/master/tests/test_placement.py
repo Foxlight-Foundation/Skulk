@@ -1,6 +1,8 @@
 import pytest
 
 from exo.master.placement import (
+    PlacementError,
+    PlacementInfoPendingError,
     get_transition_events,
     place_instance,
 )
@@ -58,7 +60,7 @@ def instance() -> Instance:
 def model_card() -> ModelCard:
     return ModelCard(
         model_id=ModelId("test-model"),
-        storage_size=Memory.from_kb(1000),
+        storage_size=Memory.from_gb(1),
         n_layers=10,
         hidden_size=30,
         supports_tensor=True,
@@ -79,22 +81,24 @@ def place_instance_command(model_card: ModelCard) -> PlaceInstance:
 @pytest.mark.parametrize(
     "available_memory,total_layers,expected_layers",
     [
-        ((500, 500, 1000), 12, (3, 3, 6)),
-        ((500, 500, 500), 12, (4, 4, 4)),
-        ((312, 468, 1092), 12, (2, 3, 7)),
+        ((5.0, 5.0, 10.0), 12, (3, 3, 6)),
+        ((5.0, 5.0, 5.0), 12, (4, 4, 4)),
+        ((3.12, 4.68, 10.92), 12, (2, 3, 7)),
     ],
 )
 def test_get_instance_placements_create_instance(
-    available_memory: tuple[int, int, int],
+    available_memory: tuple[float, float, float],
     total_layers: int,
     expected_layers: tuple[int, int, int],
     model_card: ModelCard,
 ):
     # arrange
     model_card.n_layers = total_layers
-    model_card.storage_size = Memory.from_bytes(
-        sum(available_memory)
-    )  # make it exactly fit across all nodes
+    # 80% of the cycle's total memory: large enough that no 2-node cycle or
+    # singleton passes the per-node headroom check (forcing the 3-node
+    # placement this test asserts on), small enough that the 3-node cycle
+    # fits. The layer split itself only depends on the memory fractions.
+    model_card.storage_size = Memory.from_gb(sum(available_memory) * 0.8)
     topology = Topology()
 
     cic = place_instance_command(model_card)
@@ -123,9 +127,9 @@ def test_get_instance_placements_create_instance(
     )
 
     node_memory = {
-        node_id_a: create_node_memory(available_memory[0]),
-        node_id_b: create_node_memory(available_memory[1]),
-        node_id_c: create_node_memory(available_memory[2]),
+        node_id_a: create_node_memory(Memory.from_gb(available_memory[0]).in_bytes),
+        node_id_b: create_node_memory(Memory.from_gb(available_memory[1]).in_bytes),
+        node_id_c: create_node_memory(Memory.from_gb(available_memory[2]).in_bytes),
     }
     node_network = {
         node_id_a: create_node_network(),
@@ -169,43 +173,43 @@ def test_get_instance_placements_create_instance(
     assert shards_sorted[-1].end_layer == total_layers
 
 
-def test_get_instance_placements_one_node_exact_fit() -> None:
+def test_get_instance_placements_one_node_exact_fit_is_rejected() -> None:
+    """Weights exactly equal to available memory must be refused.
+
+    An exact fit leaves nothing for KV cache, activations, or the runner
+    itself — admitting it produces the silent-thrash failure observed in
+    the 2026-06-05 launch smoke (12-token prefill in 1230s). The per-node
+    headroom check turns that into an explicit placement error.
+    """
     topology = Topology()
     node_id = NodeId()
     topology.add_node(node_id)
-    node_memory = {node_id: create_node_memory(1000 * 1024)}
+    node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
     node_network = {node_id: create_node_network()}
     cic = place_instance_command(
         ModelCard(
             model_id=ModelId("test-model"),
-            storage_size=Memory.from_kb(1000),
+            storage_size=Memory.from_gb(8),
             n_layers=10,
             hidden_size=1000,
             supports_tensor=True,
             tasks=[ModelTask.TextGeneration],
         ),
     )
-    placements = place_instance(cic, topology, {}, node_memory, node_network)
-
-    assert len(placements) == 1
-    instance_id = list(placements.keys())[0]
-    instance = placements[instance_id]
-    assert instance.shard_assignments.model_id == "test-model"
-    assert len(instance.shard_assignments.node_to_runner) == 1
-    assert len(instance.shard_assignments.runner_to_shard) == 1
-    assert len(instance.shard_assignments.runner_to_shard) == 1
+    with pytest.raises(ValueError, match="No candidate cycle fits"):
+        place_instance(cic, topology, {}, node_memory, node_network)
 
 
 def test_get_instance_placements_one_node_fits_with_extra_memory() -> None:
     topology = Topology()
     node_id = NodeId()
     topology.add_node(node_id)
-    node_memory = {node_id: create_node_memory(1001 * 1024)}
+    node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
     node_network = {node_id: create_node_network()}
     cic = place_instance_command(
         ModelCard(
             model_id=ModelId("test-model"),
-            storage_size=Memory.from_kb(1000),
+            storage_size=Memory.from_gb(6),
             n_layers=10,
             hidden_size=1000,
             supports_tensor=True,
@@ -227,12 +231,12 @@ def test_get_instance_placements_one_node_not_fit() -> None:
     topology = Topology()
     node_id = NodeId()
     topology.add_node(node_id)
-    node_memory = {node_id: create_node_memory(1000 * 1024)}
+    node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
     node_network = {node_id: create_node_network()}
     cic = place_instance_command(
         model_card=ModelCard(
             model_id=ModelId("test-model"),
-            storage_size=Memory.from_kb(1001),
+            storage_size=Memory.from_gb(9),
             n_layers=10,
             hidden_size=1000,
             supports_tensor=True,
@@ -240,7 +244,7 @@ def test_get_instance_placements_one_node_not_fit() -> None:
         ),
     )
 
-    with pytest.raises(ValueError, match="No cycles found with sufficient memory"):
+    with pytest.raises(ValueError, match="No candidate cycle fits"):
         place_instance(cic, topology, {}, node_memory, node_network)
 
 
@@ -259,8 +263,8 @@ def _two_node_topology():
     topology.add_node(node_b)
     # Each node has enough memory to host the small model on its own.
     node_memory = {
-        node_a: create_node_memory(1000 * 1024),
-        node_b: create_node_memory(1000 * 1024),
+        node_a: create_node_memory(Memory.from_gb(8).in_bytes),
+        node_b: create_node_memory(Memory.from_gb(8).in_bytes),
     }
     node_network = {
         node_a: create_node_network(),
@@ -272,7 +276,7 @@ def _two_node_topology():
 def _small_model_card() -> ModelCard:
     return ModelCard(
         model_id=ModelId("test-model"),
-        storage_size=Memory.from_kb(500),
+        storage_size=Memory.from_mb(500),
         n_layers=10,
         hidden_size=1000,
         supports_tensor=True,
@@ -307,7 +311,7 @@ def test_excluding_all_candidate_nodes_fails_to_place() -> None:
     topology, node_a, node_b, node_memory, node_network = _two_node_topology()
     command = place_instance_command(_small_model_card())
 
-    with pytest.raises(ValueError, match="No cycles found with sufficient memory"):
+    with pytest.raises(ValueError, match="touch an excluded node"):
         place_instance(
             command,
             topology,
@@ -343,6 +347,58 @@ def test_empty_exclusion_set_preserves_default_behavior() -> None:
         next(iter(without_filter.values())).shard_assignments.model_id
         == next(iter(with_empty_filter.values())).shard_assignments.model_id
     )
+
+
+def test_min_nodes_above_cluster_size_is_a_hard_error() -> None:
+    """min_nodes greater than the number of known nodes can never succeed —
+    hard PlacementError, no retry semantics."""
+    topology, _node_a, _node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+    command.min_nodes = 3
+
+    with pytest.raises(PlacementError, match="min_nodes=3 is impossible"):
+        place_instance(command, topology, {}, node_memory, node_network)
+
+
+def test_unconnected_nodes_at_min_nodes_reports_info_pending() -> None:
+    """Enough nodes exist but no connecting edges yet: right after cluster
+    formation the connection edges lag node identities by a few gossip
+    rounds, so this must surface as info-pending (retry shortly), not as a
+    hard topology error — and never as the old 'insufficient memory' lie."""
+    topology = Topology()
+    node_a = NodeId()
+    node_b = NodeId()
+    topology.add_node(node_a)
+    topology.add_node(node_b)  # no connections gossiped yet
+    node_memory = {
+        node_a: create_node_memory(Memory.from_gb(8).in_bytes),
+        node_b: create_node_memory(Memory.from_gb(8).in_bytes),
+    }
+    node_network = {node_a: create_node_network(), node_b: create_node_network()}
+    command = place_instance_command(_small_model_card())
+    command.min_nodes = 2
+
+    with pytest.raises(PlacementInfoPendingError, match="retry shortly"):
+        place_instance(command, topology, {}, node_memory, node_network)
+
+
+def test_missing_node_memory_reports_info_pending() -> None:
+    """A connected pair where one node's memory info has not arrived yet is
+    the startup race observed on 2026-06-06: it must surface as
+    info-pending, not 'insufficient memory'."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    topology.add_connection(
+        Connection(source=node_a, sink=node_b, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=node_b, sink=node_a, edge=create_socket_connection(2))
+    )
+    command = place_instance_command(_small_model_card())
+    command.min_nodes = 2
+    del node_memory[node_b]
+
+    with pytest.raises(PlacementInfoPendingError, match="Memory info"):
+        place_instance(command, topology, {}, node_memory, node_network)
 
 
 def test_get_transition_events_no_change(instance: Instance):
@@ -393,7 +449,10 @@ def test_placement_selects_leaf_nodes(
     # arrange
     topology = Topology()
 
-    model_card.storage_size = Memory.from_bytes(1000)
+    # 3 GB: too big for any singleton under the headroom check (largest node
+    # has 3 GB available), so the planner must use a 2-node cycle — which is
+    # what lets this test observe the leaf-node preference.
+    model_card.storage_size = Memory.from_gb(3)
 
     node_id_a = NodeId()
     node_id_b = NodeId()
@@ -401,10 +460,10 @@ def test_placement_selects_leaf_nodes(
     node_id_d = NodeId()
 
     node_memory = {
-        node_id_a: create_node_memory(500),
-        node_id_b: create_node_memory(600),
-        node_id_c: create_node_memory(600),
-        node_id_d: create_node_memory(500),
+        node_id_a: create_node_memory(Memory.from_gb(2).in_bytes),
+        node_id_b: create_node_memory(Memory.from_gb(3).in_bytes),
+        node_id_c: create_node_memory(Memory.from_gb(3).in_bytes),
+        node_id_d: create_node_memory(Memory.from_gb(2).in_bytes),
     }
     node_network = {
         node_id_a: create_node_network(),
@@ -462,16 +521,16 @@ def test_tensor_rdma_backend_connectivity_matrix(
     # arrange
     topology = Topology()
     model_card.n_layers = 12
-    model_card.storage_size = Memory.from_bytes(1500)
+    model_card.storage_size = Memory.from_gb(1.5)
 
     node_a = NodeId()
     node_b = NodeId()
     node_c = NodeId()
 
     node_memory = {
-        node_a: create_node_memory(500),
-        node_b: create_node_memory(500),
-        node_c: create_node_memory(500),
+        node_a: create_node_memory(Memory.from_gb(1).in_bytes),
+        node_b: create_node_memory(Memory.from_gb(1).in_bytes),
+        node_c: create_node_memory(Memory.from_gb(1).in_bytes),
     }
 
     ethernet_interface = NetworkInterfaceInfo(
@@ -702,14 +761,14 @@ def test_placement_prefers_cycle_with_downloaded_model(
     """When two cycles are otherwise equal, prefer the one with the model already downloaded."""
     topology = Topology()
 
-    model_card.storage_size = Memory.from_bytes(500)
+    model_card.storage_size = Memory.from_mb(500)
 
     node_a = NodeId()
     node_b = NodeId()
 
     node_memory = {
-        node_a: create_node_memory(1000),
-        node_b: create_node_memory(1000),
+        node_a: create_node_memory(Memory.from_gb(2).in_bytes),
+        node_b: create_node_memory(Memory.from_gb(2).in_bytes),
     }
     node_network = {
         node_a: create_node_network(),
@@ -750,14 +809,14 @@ def test_placement_prefers_cycle_with_higher_download_progress(
     """When two cycles are otherwise equal, prefer the one with more download progress."""
     topology = Topology()
 
-    model_card.storage_size = Memory.from_bytes(1000)
+    model_card.storage_size = Memory.from_gb(1)
 
     node_a = NodeId()
     node_b = NodeId()
 
     node_memory = {
-        node_a: create_node_memory(1000),
-        node_b: create_node_memory(1000),
+        node_a: create_node_memory(Memory.from_gb(2).in_bytes),
+        node_b: create_node_memory(Memory.from_gb(2).in_bytes),
     }
     node_network = {
         node_a: create_node_network(),
@@ -822,15 +881,15 @@ def test_placement_does_not_prefer_cycle_with_failed_download(
     """A failed download should count as 0% — not preferred over a node with no download history."""
     topology = Topology()
 
-    model_card.storage_size = Memory.from_bytes(500)
+    model_card.storage_size = Memory.from_mb(500)
 
     node_a = NodeId()
     node_b = NodeId()
 
     # node_a has slightly more RAM so it would win on the RAM tiebreaker
     node_memory = {
-        node_a: create_node_memory(1001),
-        node_b: create_node_memory(1000),
+        node_a: create_node_memory(Memory.from_gb(2.001).in_bytes),
+        node_b: create_node_memory(Memory.from_gb(2).in_bytes),
     }
     node_network = {
         node_a: create_node_network(),
