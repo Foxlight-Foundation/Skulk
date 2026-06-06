@@ -191,6 +191,7 @@ Lives in `src/exo/api/main.py` (route registration in `API.__init__`).
 | `/place_instance` | POST | Place a model: master picks ranks. Takes `PlaceInstanceParams` (model id + placement preferences, optional `excluded_nodes: list[NodeId]` to exclude specific nodes from this placement); not interchangeable with `/instance`, which takes a fully-specified `CreateInstanceParams`. |
 | `/instance/{instance_id}` | GET / DELETE | Fetch / delete an instance |
 | `/instance/placement` | GET | Compute placement preview |
+| `/store/storage` | GET | Local node's storage breakdown: staged models (size, last-use, in-use incl. companions), event-log bytes, disk free. Staging eviction: `cleanup_on_deactivate` default true; not-in-use staged models kept newest-first up to `staging_keep_recent_gb` (40 GiB default), enforced at deactivate AND node startup (crash-orphan reconciliation); `src/exo/store/staging_eviction.py` |
 | `/instance/previews` | GET | List candidate placements |
 
 ### State / events

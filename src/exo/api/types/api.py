@@ -12,6 +12,7 @@ from exo.shared.types.memory import Memory
 from exo.shared.types.text_generation import ReasoningEffort
 from exo.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from exo.shared.types.worker.shards import Sharding, ShardMetadata
+from exo.store.staging_eviction import StagedModelInfo
 from exo.utils.pydantic_ext import CamelCaseModel
 
 FinishReason = Literal[
@@ -897,6 +898,29 @@ class PurgeStagingRequest(CamelCaseModel):
 class PurgeStagingResponse(CamelCaseModel):
     command_id: CommandId
     message: str
+
+
+class NodeStorageSummary(CamelCaseModel):
+    """Per-node storage breakdown for the local node.
+
+    Sizes are computed on demand by walking the relevant directories;
+    staged models include last-use times and whether a live instance
+    (or its companion repos) currently depends on them.
+    """
+
+    node_id: str
+    staging_root: str | None
+    """Resolved staging directory for this node, or None when the model
+    store / staging is not configured."""
+
+    staged_models: list[StagedModelInfo]
+    staged_total_bytes: int
+    event_log_bytes: int
+    """Total size of this node's event-log directory (active + archives)."""
+
+    disk_total_bytes: int
+    disk_free_bytes: int
+    """Capacity and free space of the volume holding the models directory."""
 
 
 TraceTaskKind = Literal["image", "text", "embedding"]

@@ -60,6 +60,10 @@ from exo.shared.types.worker.runners import RunnerId
 from exo.shared.types.worker.shards import ShardMetadata
 from exo.store.config import StagingNodeConfig
 from exo.store.model_store_client import ModelStoreClient
+from exo.store.staging_eviction import (
+    StagingEvictionReport,
+    enforce_staging_budget,
+)
 from exo.utils.channels import Receiver, Sender, channel
 from exo.utils.info_gatherer.info_gatherer import GatheredInfo, InfoGatherer
 from exo.utils.info_gatherer.net_profile import check_reachable
@@ -253,6 +257,7 @@ class Worker:
 
     async def run(self):
         logger.info("Starting Worker")
+        self._reconcile_staging_on_startup()
 
         info_send, info_recv = channel[GatheredInfo]()
         info_gatherer: InfoGatherer = InfoGatherer(info_send)
@@ -648,8 +653,36 @@ class Worker:
             ),
         )
 
+    def _models_in_use(self) -> frozenset[str]:
+        """Repo-form IDs of every model a live runner depends on.
+
+        Includes companion repos (MTP sidecar, assistant, split vision
+        weights) of active models: no instance names them directly, but
+        evicting one corrupts a live runner just the same — MLX loads
+        weights lazily.
+        """
+        in_use: set[str] = set()
+        for runner in self.runners.values():
+            card = runner.shard_metadata.model_card
+            in_use.add(str(card.model_id))
+            if card.vision and card.vision.weights_repo:
+                in_use.add(card.vision.weights_repo)
+            runtime = card.runtime
+            if runtime is not None:
+                if runtime.mtp_sidecar_repo:
+                    in_use.add(runtime.mtp_sidecar_repo)
+                if runtime.assistant_model_repo:
+                    in_use.add(runtime.assistant_model_repo)
+        return frozenset(in_use)
+
     async def _maybe_evict_shard(self, shard: ShardMetadata | None) -> None:
-        """Evict staged shard files after runner teardown if configured."""
+        """Hold the staging cache to its recent-use budget after teardown.
+
+        The torn-down model becomes an eviction candidate like any other
+        not-in-use staged copy; the grace budget decides what actually goes
+        (so repeated place/delete cycles of the same model do not re-pay
+        the staging copy every time).
+        """
         if (
             shard is None
             or self._store_client is None
@@ -657,34 +690,65 @@ class Worker:
             or not self._staging_config.cleanup_on_deactivate
         ):
             return
-        model_id = str(shard.model_card.model_id)
-        # Skip eviction if another runner for the same model is still active —
-        # MLX loads weights lazily, so tearing down a sibling's staged files
-        # would corrupt the live runner.
-        if any(
-            str(r.shard_metadata.model_card.model_id) == model_id
-            for r in self.runners.values()
-        ):
-            logger.debug(
-                f"Worker: skipping eviction for {model_id} — another runner is still active"
-            )
+        report = self._enforce_staging_budget()
+        if report is None:
             return
-        cache_path = Path(self._staging_config.node_cache_path).expanduser()
-        try:
-            await self._store_client.evict_shard(model_id, cache_path)
-            logger.info(f"Worker: evicted staged files for {model_id}")
-            # Reset download status so the dashboard no longer shows
-            # this model as downloaded on this node.
+        # Reset download status for evicted models so the dashboard no
+        # longer shows them as downloaded on this node, and the planner
+        # re-stages instead of assuming the files are still here.
+        if str(shard.model_card.model_id) in report.evicted_model_ids:
+            cache_path = Path(self._staging_config.node_cache_path).expanduser()
             pending = DownloadPending(
                 shard_metadata=shard,
                 node_id=self.node_id,
-                model_directory=str(cache_path / model_id.replace("/", "--")),
+                model_directory=str(
+                    cache_path / str(shard.model_card.model_id).replace("/", "--")
+                ),
             )
             await self.event_sender.send(
                 NodeDownloadProgress(download_progress=pending)
             )
+
+    def _enforce_staging_budget(self) -> StagingEvictionReport | None:
+        """Run one staging-budget enforcement pass (best-effort)."""
+        if self._staging_config is None or not self._staging_config.enabled:
+            return None
+        staging_root = Path(self._staging_config.node_cache_path).expanduser()
+        keep_recent_bytes = int(
+            self._staging_config.staging_keep_recent_gb * 1024**3
+        )
+        try:
+            return enforce_staging_budget(
+                staging_root,
+                keep_recent_bytes,
+                self._models_in_use(),
+            )
         except Exception as exc:
-            logger.warning(f"Worker: evict_shard failed for {model_id}: {exc}")
+            logger.warning(f"Worker: staging budget enforcement failed: {exc}")
+            return None
+
+    def _reconcile_staging_on_startup(self) -> None:
+        """Reconcile staging orphans left by a crashed or killed session.
+
+        A node that dies never runs the deactivate-time eviction, so its
+        staged copies survive forever without this. At startup nothing is
+        in use yet, so every staged model is a candidate and the grace
+        budget alone decides what survives — which is exactly the crash
+        recovery behavior we want: recent models stay warm for the
+        restart, the old tail goes.
+        """
+        if (
+            self._staging_config is None
+            or not self._staging_config.cleanup_on_deactivate
+        ):
+            return
+        report = self._enforce_staging_budget()
+        if report is not None and report.evicted_model_ids:
+            logger.info(
+                "Worker: startup staging reconciliation evicted "
+                f"{len(report.evicted_model_ids)} orphaned model(s) "
+                f"({report.evicted_bytes / 2**30:.1f} GiB)"
+            )
 
     async def _poll_connection_updates(self):
         while True:

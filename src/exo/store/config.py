@@ -56,7 +56,8 @@ Example ``exo.yaml``::
       staging:
         enabled: true
         node_cache_path: ~/.exo/staging
-        cleanup_on_deactivate: false
+        cleanup_on_deactivate: true       # evict staged copies on instance end
+        staging_keep_recent_gb: 40        # but keep this much recently-used data
 
       node_overrides:
         mac-studio-1:
@@ -144,16 +145,27 @@ class StagingNodeConfig(FrozenModel):
             where staged model files are written.  Each model occupies a
             subdirectory named ``<org>--<model>`` (e.g.
             ``mlx-community--Qwen3-30B-A3B-4bit``).
-        cleanup_on_deactivate: When ``True``, staged files are deleted when
-            the model instance is shut down, freeing local disk space at the
-            cost of making later placements cold again. The default keeps the
-            staged files so large models can be reused from local storage;
-            use the explicit staging-cache purge endpoint for cleanup.
+        cleanup_on_deactivate: When ``True`` (the default), staged copies
+            become eviction candidates when their model instance is shut
+            down, and the staging directory is held to the
+            ``staging_keep_recent_gb`` budget. Staged copies are cheap to
+            recreate from the LAN store, while local disk on small-disk
+            nodes is the scarce resource — unbounded staging filled two
+            nodes to 58-70 GB and killed one of them during the 2026-06-06
+            launch smoke. Set ``False`` to keep every staged copy and
+            manage cleanup manually via the purge endpoints.
+        staging_keep_recent_gb: Most-recently-used grace budget, in GiB.
+            Eviction never reduces the staging cache below this much of
+            recently used, not-in-use model data — so node crashes,
+            restarts, and repeated place/delete cycles of the same model
+            do not re-pay the staging copy every time. Set to ``0`` for
+            strict evict-on-deactivate.
     """
 
     enabled: bool = True
     node_cache_path: str = "~/.exo/staging"
-    cleanup_on_deactivate: bool = False
+    cleanup_on_deactivate: bool = True
+    staging_keep_recent_gb: float = 40.0
 
 
 @final

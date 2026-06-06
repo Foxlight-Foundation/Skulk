@@ -37,12 +37,18 @@ def test_node_matches_store_host_keeps_node_id_matching_exact() -> None:
     )
 
 
-def test_staging_cleanup_defaults_to_warm_cache() -> None:
+def test_staging_cleanup_defaults_to_budgeted_eviction() -> None:
+    """Eviction-on-deactivate with a recent-use grace budget is the default:
+    staged copies are cheap to recreate from the LAN store, local disk is
+    the scarce resource (two nodes filled to 58-70 GB in the launch smoke),
+    and the grace budget keeps crashes/restarts/repeat placements from
+    re-paying the staging copy (deliberate product decision, 2026-06-06)."""
     config = StagingNodeConfig()
 
     assert config.enabled
     assert config.node_cache_path == "~/.exo/staging"
-    assert not config.cleanup_on_deactivate
+    assert config.cleanup_on_deactivate
+    assert config.staging_keep_recent_gb == 40.0
 
 
 def test_resolve_node_staging_matches_local_hostname_alias(monkeypatch: pytest.MonkeyPatch) -> None:

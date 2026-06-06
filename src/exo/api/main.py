@@ -21,7 +21,7 @@ import httpx
 import hypercorn.asyncio as hypercorn_asyncio
 import psutil
 import yaml
-from anyio import BrokenResourceError
+from anyio import BrokenResourceError, to_thread
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -96,6 +96,7 @@ from exo.api.types import (
     ModalitiesCapabilitySection,
     ModelList,
     ModelListModel,
+    NodeStorageSummary,
     OpenUrlToolRequest,
     OpenUrlToolResponse,
     PlaceInstanceParams,
@@ -159,6 +160,7 @@ from exo.shared.constants import (
     EXO_IMAGE_CACHE_DIR,
     EXO_IMAGE_TRANSPORT_DEBUG,
     EXO_MAX_CHUNK_SIZE,
+    EXO_MODELS_DIR,
     EXO_TRACING_CACHE_DIR,
     preferred_env_value,
 )
@@ -242,7 +244,7 @@ from exo.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
 from exo.shared.types.worker.runners import RunnerId
 from exo.shared.types.worker.shards import Sharding
 from exo.shared.version import get_skulk_version, get_skulk_version_label
-from exo.store.config import resolve_config_path
+from exo.store.config import resolve_config_path, resolve_node_staging
 from exo.tools.web_search import default_browser_tool_provider
 from exo.utils.banner import print_startup_banner
 from exo.utils.channels import Receiver, Sender, channel
@@ -258,6 +260,7 @@ from exo.worker.engines.mlx.constants import (
 if TYPE_CHECKING:
     from exo.store.config import ExoConfig
     from exo.store.model_store_client import ModelStoreClient
+from exo.store.staging_eviction import list_staged_models
 
 JsonObject = dict[str, object]
 _DEFAULT_OPTIMIZER_CANDIDATE_BITS = [4, 8]
@@ -1146,6 +1149,18 @@ class API:
             summary="Purge staging caches",
             description="Broadcast a staging-cache purge request to nodes, optionally scoped to one model ID.",
         )(self.purge_staging_caches)
+        self.app.get(
+            "/store/storage",
+            tags=["Store"],
+            summary="Per-node storage breakdown (local node)",
+            description=(
+                "Return the local node's storage picture: every staged model with "
+                "its size, last-use time, and whether a live instance (or one of "
+                "its companion repos) currently depends on it, plus event-log "
+                "usage and free disk on the models volume. Cluster-wide views "
+                "should query each node's API."
+            ),
+        )(self.get_node_storage_summary)
         self.app.post(
             "/store/models/{model_id:path}/optimize",
             tags=["Store"],
@@ -3001,6 +3016,62 @@ class API:
             command_id=command.command_id,
             message=f"Purge staging command broadcast to all nodes{model_suffix}",
         )
+
+    def _store_models_in_use(self) -> frozenset[str]:
+        """Repo-form model IDs any live instance depends on, incl. companions."""
+        in_use: set[str] = set()
+        for instance in self.state.instances.values():
+            for shard in instance.shard_assignments.runner_to_shard.values():
+                card = shard.model_card
+                in_use.add(str(card.model_id))
+                if card.vision and card.vision.weights_repo:
+                    in_use.add(card.vision.weights_repo)
+                if card.runtime is not None:
+                    if card.runtime.mtp_sidecar_repo:
+                        in_use.add(card.runtime.mtp_sidecar_repo)
+                    if card.runtime.assistant_model_repo:
+                        in_use.add(card.runtime.assistant_model_repo)
+        return frozenset(in_use)
+
+    async def get_node_storage_summary(self) -> NodeStorageSummary:
+        """Compute the local node's storage breakdown.
+
+        Directory walks run in a worker thread — staged models are few large
+        files, but the event loop must not block on filesystem traversal.
+        """
+        staging_root: Path | None = None
+        if self._exo_config is not None and self._exo_config.model_store is not None:
+            staging = resolve_node_staging(
+                self._exo_config.model_store, str(self.node_id)
+            )
+            if staging.enabled:
+                staging_root = Path(staging.node_cache_path).expanduser()
+
+        in_use = self._store_models_in_use()
+
+        def _collect() -> NodeStorageSummary:
+            staged = (
+                list_staged_models(staging_root, in_use)
+                if staging_root is not None
+                else []
+            )
+            event_log_bytes = sum(
+                file_path.stat().st_size
+                for file_path in EXO_EVENT_LOG_DIR.rglob("*")
+                if file_path.is_file()
+            )
+            disk = shutil.disk_usage(EXO_MODELS_DIR)
+            return NodeStorageSummary(
+                node_id=str(self.node_id),
+                staging_root=str(staging_root) if staging_root is not None else None,
+                staged_models=staged,
+                staged_total_bytes=sum(info.size_bytes for info in staged),
+                event_log_bytes=event_log_bytes,
+                disk_total_bytes=disk.total,
+                disk_free_bytes=disk.free,
+            )
+
+        return await to_thread.run_sync(_collect)
 
     @staticmethod
     def _get_trace_path(task_id: str) -> Path:
