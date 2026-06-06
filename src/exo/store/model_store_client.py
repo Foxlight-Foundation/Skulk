@@ -754,10 +754,11 @@ class ModelStoreDownloader(ShardDownloader):
         staged base model would load and run with speculative decoding
         silently unavailable (launch smoke, 2026-06-06).
 
-        Companion failures are logged loudly but never fail the base load:
-        the runner treats missing companions as "run without speculation",
-        and a missing sidecar should not turn a loadable model into a
-        download error.
+        Companion criticality differs: split vision weights are
+        load-bearing, so their fetch failures fail the base load (a vision
+        model without them is broken). MTP sidecars and assistants are
+        best-effort — the runner degrades to run-without-speculation, so
+        their failures log loudly without failing a loadable base model.
         """
         path = await self._ensure_base_shard(shard, config_only)
         if not config_only:

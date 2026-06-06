@@ -17,8 +17,9 @@ This project records release notes here and mirrors public-facing notes in
   load and silently run without speculation (observed in the launch
   smoke). Every `ensure_shard` resolution now also ensures companions
   through the same store-first path (so sidecars are served from the
-  store when present), companion fetch failures log loudly without
-  failing the base load, and the previously triplicated companion
+  store when present), optional-companion fetch failures (MTP
+  sidecar / assistant) log loudly without failing the base load, while
+  split vision weights stay load-bearing, and the previously triplicated companion
   construction in the HF downloader is shared via
   `companion_download_specs`.
 - **A wedged warmup no longer silently disables a node.** A faulted

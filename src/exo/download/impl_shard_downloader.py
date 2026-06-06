@@ -121,22 +121,34 @@ class ResumableShardDownloader(ShardDownloader):
         # the moment it fires, and the planner dispatches model loads off
         # that state — so it must mean "everything the model needs is
         # here", not "the base is here and the sidecar is on its way".
-        # Companions are best-effort: the runtime treats a missing
-        # sidecar/assistant/vision repo as "run without that feature",
-        # so a transient fetch failure must not turn a loadable base
-        # model into a download error. Failures log loudly instead.
+        # Criticality differs per companion: split vision weights are
+        # load-bearing (their failure fails the base — a vision model
+        # without them is broken), while MTP sidecars and assistants are
+        # best-effort (the runtime degrades to run-without-speculation;
+        # failures log loudly instead).
         if not config_only and not self.offline:
             for companion_shard, allow, required in companion_download_specs(
                 shard.model_card
             ):
                 try:
-                    await download_shard(
+                    _, companion_progress = await download_shard(
                         companion_shard,
                         self.on_progress_wrapper,
                         max_parallel_downloads=self.max_parallel_downloads,
                         allow_patterns=allow,
                         skip_internet=self.offline,
                     )
+                    # download_shard converts repo-level fetch failures
+                    # (e.g. FileNotFoundError on the file list) into a
+                    # not_started result instead of raising — a required
+                    # companion must not slip through that hole.
+                    if required and companion_progress.status != "complete":
+                        raise RuntimeError(
+                            f"Required companion repo "
+                            f"{companion_shard.model_card.model_id} did not "
+                            f"download (status="
+                            f"{companion_progress.status!r})"
+                        )
                 except Exception as error:
                     if required:
                         # Split vision weights are load-bearing: a vision
