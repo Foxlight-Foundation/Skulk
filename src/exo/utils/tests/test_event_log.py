@@ -286,6 +286,7 @@ def test_persistence_failure_degrades_without_losing_indices(log_dir: Path):
     log.append(TestEvent())
     assert len(log) == 1
 
+    assert log._file is not None
     log._file.close()  # next write raises ValueError... use a stub instead
 
     class _FullDisk:
@@ -342,4 +343,116 @@ def test_metadata_failure_counts_exactly_once(log_dir: Path):
     assert log._persistence_failed
     log.append(TestEvent())
     assert len(log) == 3
+    log.close()
+
+
+def test_init_on_failing_disk_degrades_instead_of_crashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A full disk at construction time (the unguarded ENOSPC site that
+    killed a node in the 2026-06-06 smoke via the API event log) must yield
+    a degraded counting-only log, not an exception."""
+    import builtins
+
+    target = tmp_path / "event_log"
+    real_open = builtins.open
+
+    def _failing_open(file: object, *args: object, **kwargs: object) -> object:
+        if str(file).endswith("events.bin"):
+            raise OSError(28, "No space left on device")
+        return real_open(file, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(builtins, "open", _failing_open)
+    log = DiskEventLog(target)
+
+    # Counting-only from birth: indices stay coherent, reads are empty.
+    log.append(TestEvent())
+    log.append(TestEvent())
+    assert len(log) == 2
+    assert list(log.read_all()) == []
+    log.close()
+
+
+def test_compact_failure_degrades_instead_of_raising(log_dir: Path):
+    """ENOSPC during compaction's rewrite must degrade, not escape into the
+    master's snapshot path."""
+    import builtins
+
+    log = DiskEventLog(log_dir)
+    for _ in range(10):
+        log.append(TestEvent())
+
+    real_open = builtins.open
+
+    def _failing_open(file: object, *args: object, **kwargs: object) -> object:
+        if str(file).endswith("events.bin.tmp"):
+            raise OSError(28, "No space left on device")
+        return real_open(file, *args, **kwargs)  # type: ignore[arg-type]
+
+    import unittest.mock
+
+    with unittest.mock.patch("builtins.open", _failing_open):
+        log.compact(5)
+
+    # Logical range preserved; log keeps counting in degraded mode.
+    assert len(log) == 10
+    log.append(TestEvent())
+    assert len(log) == 11
+    assert list(log.read_all()) == []
+    log.close()
+
+
+def test_free_space_floor_triggers_degraded_mode(
+    log_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Dropping below the free-space floor proactively degrades the log
+    instead of running the disk to zero."""
+    import shutil as _shutil
+
+    import exo.utils.disk_event_log as del_module
+
+    log = DiskEventLog(log_dir)
+    monkeypatch.setattr(del_module, "_DISK_CHECK_INTERVAL_APPENDS", 2)
+
+    fake_usage = _shutil.disk_usage(log_dir)._replace(free=1)
+
+    def _fake_disk_usage(_path: Path) -> object:
+        return fake_usage
+
+    monkeypatch.setattr(del_module.shutil, "disk_usage", _fake_disk_usage)
+
+    log.append(TestEvent())
+    log.append(TestEvent())  # triggers the check
+
+    assert log._persistence_failed
+    # Indices keep advancing in degraded mode.
+    log.append(TestEvent())
+    assert len(log) == 3
+    log.close()
+
+
+def test_archive_total_bytes_budget(log_dir: Path, monkeypatch: pytest.MonkeyPatch):
+    """Archives are pruned to the byte budget, not just the count cap."""
+    import exo.utils.disk_event_log as del_module
+
+    monkeypatch.setattr(del_module, "_MAX_ARCHIVE_TOTAL_BYTES", 1)
+
+    for _session in range(3):
+        log = DiskEventLog(log_dir)
+        for _ in range(5):
+            log.append(TestEvent())
+        log.close()
+
+    archives = sorted(log_dir.glob("events.*.bin.zst"))
+    # With a 1-byte budget every archive beyond the newest is pruned; the
+    # loop never deletes the final remaining archive mid-iteration, so at
+    # most one survives.
+    assert len(archives) <= 1
+
+
+def test_active_size_bytes_tracks_appends(log_dir: Path):
+    log = DiskEventLog(log_dir)
+    assert log.active_size_bytes == 0
+    log.append(TestEvent())
+    assert log.active_size_bytes > 0
     log.close()

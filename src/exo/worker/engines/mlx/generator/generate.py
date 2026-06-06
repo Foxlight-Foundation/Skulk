@@ -2826,7 +2826,17 @@ def mlx_generate(
                         else None,
                     )
                 if _drafter is not None:
-                    logger.info("MTP speculative decoding enabled (D=1)")
+                    _card_draft_depth = (
+                        model_card.runtime.mtp_max_depth
+                        if model_card is not None
+                        and model_card.runtime is not None
+                        and model_card.runtime.mtp_max_depth is not None
+                        else 1
+                    )
+                    logger.info(
+                        "MTP speculative decoding enabled "
+                        f"(D={_card_draft_depth})"
+                    )
 
     # Gate the agreement on the model CARD declaring speculation — the card
     # is identical on every rank, so the collective count stays symmetric;

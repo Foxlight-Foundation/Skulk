@@ -9,6 +9,24 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Event logs can no longer eat the disk or kill nodes on a full one.**
+  The API-side event log — which records per-token chunk events and backs
+  only the `GET /events` diagnostic — had NO retention and grew for the
+  life of the session (54 MB in 9 idle hours on every node; the file a
+  node died writing during the launch smoke). It now ring-compacts past
+  256 MiB, keeping the most recent 20k events. Archive rotation is capped
+  by total bytes (1 GiB) in addition to count — five archives of
+  unbounded size defeated the count cap in practice (3.5 GB observed).
+  The remaining unguarded ENOSPC sites (`DiskEventLog.__init__` and
+  `compact()` — the former is exactly where a node died) now degrade to
+  the counting-only mode instead of crashing, and a proactive free-space
+  floor (2 GiB, checked every 1024 appends) degrades persistence BEFORE
+  the disk hits zero — a master on a full disk previously throttled the
+  whole cluster to ~0.5 tok/s before dying. Log noise that bloats piped
+  logs was also trimmed (per-minute download-coordinator path dumps), and
+  the speculative-decoding enable line now reports the card's actual
+  draft depth instead of a hardcoded "(D=1)".
+
 - **Multi-node placement is now reliable and placement failures are
   visible.** Four compounding issues fixed in the placement path:
   (1) memory admission is per node instead of summed across the cycle —
