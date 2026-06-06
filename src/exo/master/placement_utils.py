@@ -76,6 +76,10 @@ def _per_node_required_memory(
     Pipeline parallelism allocates layers proportionally to each node's
     available memory (see ``allocate_layers_proportionally``), so a node's
     share scales with its fraction of the cycle's total available memory.
+    The continuous fraction is an estimate of the integer layer allocation:
+    the two can differ by up to one layer per node (a few percent of the
+    weights on realistic layer counts), which sits comfortably inside the
+    ``PLACEMENT_MEMORY_OVERHEAD_FACTOR`` margin applied on top.
     """
     if sharding == Sharding.Tensor:
         even_share = required_memory / len(cycle.node_ids)

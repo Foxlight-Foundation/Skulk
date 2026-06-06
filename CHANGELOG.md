@@ -15,7 +15,7 @@ This project records release notes here and mirrors public-facing notes in
   Tensor sharding splits weights evenly, so a 16+24 GB pair whose *sum*
   covered the model could be admitted with the even split overloading the
   smaller node; (2) admission requires runtime headroom
-  (weights x 1.2 + 256 MB per node) on top of raw weight bytes — an
+  (weights x 1.05 + 256 MB per node) on top of raw weight bytes — an
   exact weights-equal-free-memory fit previously produced a silent
   thrash (observed: 12-token prefill in 1230 s) instead of a refusal;
   (3) placing immediately after cluster formation no longer fails with a

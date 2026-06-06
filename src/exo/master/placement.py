@@ -111,13 +111,15 @@ class PlacementError(ValueError):
 
 
 class PlacementInfoPendingError(PlacementError):
-    """Placement cannot be judged yet because node info is still arriving.
+    """Placement cannot be judged yet because cluster info is still arriving.
 
-    Raised when every otherwise-viable cycle touches a node whose memory
-    info has not been gossiped yet (the window between a node joining the
-    topology and its first NodeGatheredInfo event). This is a retry-shortly
-    condition — distinct from a real memory shortfall so callers can wait
-    instead of reporting a false "insufficient memory".
+    Covers both phases of the cluster-startup window: connection edges lag
+    node identities by a few gossip rounds (enough nodes exist but no
+    connected cycle is known yet), and per-node memory info lags the edges
+    (a cycle exists but a node's first NodeGatheredInfo event has not
+    arrived). Both are retry-shortly conditions — distinct from a real
+    topology gap or memory shortfall so callers can wait instead of
+    reporting a false error.
     """
 
 

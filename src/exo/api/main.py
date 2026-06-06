@@ -1219,11 +1219,18 @@ class API:
         # forwarding the command. Without this, an impossible placement is
         # acknowledged with "Command received", fails silently on the master,
         # and the client only ever observes 404s on subsequent requests.
-        # PlacementInfoPendingError is the cluster-startup window where node
-        # memory info has not been gossiped yet — placement would succeed
-        # seconds later, so wait it out rather than failing a placement that
-        # raced cluster formation. The dry-run uses a copy because
-        # place_instance normalizes single-node commands in place.
+        # PlacementInfoPendingError covers the cluster-startup window where
+        # cluster info is still gossiping (connection edges lag node
+        # identities, then memory info lags the edges) — placement would
+        # succeed seconds later, so wait it out rather than failing a
+        # placement that raced cluster formation. The dry-run uses a copy
+        # because place_instance normalizes single-node commands in place.
+        #
+        # While the API is paused (election/reset), self.state may be mid-
+        # rebuild — validating against it could produce a false 400. Gate the
+        # dry-run on the same unpause condition _send() uses.
+        while self.paused:
+            await self.paused_ev.wait()
         deadline = time.monotonic() + _PLACEMENT_INFO_WAIT_SECONDS
         while True:
             try:

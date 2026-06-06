@@ -595,9 +595,10 @@ silently failing on the master:
   exclusions removed every candidate, the model does not support Tensor
   sharding, or a node cannot fit its weight shard plus runtime headroom
   (the error names the node and the GB arithmetic).
-- **503** when node memory info is still being gossiped (a cluster that just
-  formed). The request internally waits up to 15 seconds for the info to
-  arrive before giving up — retry shortly on 503.
+- **503** when cluster info is still being gossiped (a cluster that just
+  formed): connection edges lag node identities by a few gossip rounds, and
+  per-node memory info lags the edges. The request internally waits up to
+  15 seconds for the info to arrive before giving up — retry shortly on 503.
 
 Memory fitting is checked **per node, not summed across the cycle**: Tensor
 sharding splits weights evenly, Pipeline allocates layers proportionally to
