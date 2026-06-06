@@ -3040,7 +3040,11 @@ class API:
         files, but the event loop must not block on filesystem traversal.
         """
         staging_root: Path | None = None
-        if self._exo_config is not None and self._exo_config.model_store is not None:
+        if (
+            self._exo_config is not None
+            and self._exo_config.model_store is not None
+            and self._exo_config.model_store.enabled
+        ):
             staging = resolve_node_staging(
                 self._exo_config.model_store, str(self.node_id)
             )
@@ -3055,11 +3059,13 @@ class API:
                 if staging_root is not None
                 else []
             )
-            event_log_bytes = sum(
-                file_path.stat().st_size
-                for file_path in EXO_EVENT_LOG_DIR.rglob("*")
-                if file_path.is_file()
-            )
+            event_log_bytes = 0
+            for file_path in EXO_EVENT_LOG_DIR.rglob("*"):
+                # Best-effort: archives rotate and files vanish mid-walk; a
+                # transient stat failure must not 500 the whole summary.
+                with contextlib.suppress(OSError):
+                    if file_path.is_file():
+                        event_log_bytes += file_path.stat().st_size
             disk = shutil.disk_usage(EXO_MODELS_DIR)
             return NodeStorageSummary(
                 node_id=str(self.node_id),

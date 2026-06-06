@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import anyio
-from anyio import BrokenResourceError, ClosedResourceError, fail_after
+from anyio import BrokenResourceError, ClosedResourceError, fail_after, to_thread
 from loguru import logger
 from PIL import Image
 
@@ -690,19 +690,48 @@ class Worker:
             or not self._staging_config.cleanup_on_deactivate
         ):
             return
-        report = self._enforce_staging_budget()
+        # The walk + rmtree are synchronous filesystem work on potentially
+        # tens of GB — run off the event loop so teardown doesn't stall
+        # other worker tasks.
+        report = await to_thread.run_sync(self._enforce_staging_budget)
         if report is None:
             return
-        # Reset download status for evicted models so the dashboard no
-        # longer shows them as downloaded on this node, and the planner
-        # re-stages instead of assuming the files are still here.
-        if str(shard.model_card.model_id) in report.evicted_model_ids:
-            cache_path = Path(self._staging_config.node_cache_path).expanduser()
+        await self._reset_download_state_for_evicted(report, shard)
+
+    async def _reset_download_state_for_evicted(
+        self, report: StagingEvictionReport, deactivated_shard: ShardMetadata
+    ) -> None:
+        """Reset download status for EVERY evicted model on this node.
+
+        The budget pass can evict models other than the one just torn down;
+        leaving them DownloadCompleted in master state would make the
+        planner skip re-staging and fail later loads. Shard metadata for
+        the other models comes from this node's own download-status state.
+        """
+        if self._staging_config is None:
+            return
+        cache_path = Path(self._staging_config.node_cache_path).expanduser()
+        own_downloads = {
+            str(progress.shard_metadata.model_card.model_id): progress.shard_metadata
+            for progress in self.state.downloads.get(self.node_id, [])
+        }
+        deactivated_model_id = str(deactivated_shard.model_card.model_id)
+        for evicted_model_id in report.evicted_model_ids:
+            shard_metadata = (
+                deactivated_shard
+                if evicted_model_id == deactivated_model_id
+                else own_downloads.get(evicted_model_id)
+            )
+            if shard_metadata is None:
+                # Never advertised as downloaded on this node — nothing to
+                # reset (e.g. a companion repo staged without its own
+                # download entry).
+                continue
             pending = DownloadPending(
-                shard_metadata=shard,
+                shard_metadata=shard_metadata,
                 node_id=self.node_id,
                 model_directory=str(
-                    cache_path / str(shard.model_card.model_id).replace("/", "--")
+                    cache_path / evicted_model_id.replace("/", "--")
                 ),
             )
             await self.event_sender.send(

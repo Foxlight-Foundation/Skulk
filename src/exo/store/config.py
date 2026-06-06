@@ -165,7 +165,7 @@ class StagingNodeConfig(FrozenModel):
     enabled: bool = True
     node_cache_path: str = "~/.exo/staging"
     cleanup_on_deactivate: bool = True
-    staging_keep_recent_gb: float = 40.0
+    staging_keep_recent_gb: float = Field(default=40.0, ge=0)
 
 
 @final
