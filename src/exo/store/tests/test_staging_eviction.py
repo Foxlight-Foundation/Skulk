@@ -114,3 +114,17 @@ def test_budget_counts_only_candidates_not_in_use_bytes(tmp_path: Path) -> None:
 
     assert report.evicted_model_ids == []
     assert report.retained_candidate_bytes == 50
+
+
+def test_store_host_direct_load_is_never_evicted(tmp_path: Path) -> None:
+    """SEV-5 guard (codex, #215): a store host whose node_cache_path IS the
+    canonical store directory must never run eviction there — the budget
+    pass would delete the cluster's only copy of every model beyond it.
+    Exercised at the worker layer via the path-equality guard; this test
+    pins the comparison semantics it relies on (expanduser + resolve)."""
+    store_dir = tmp_path / "store"
+    store_dir.mkdir()
+    alias = tmp_path / "alias" / ".." / "store"
+    (tmp_path / "alias").mkdir()
+
+    assert store_dir.resolve() == alias.resolve()

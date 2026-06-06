@@ -743,6 +743,25 @@ class Worker:
         if self._staging_config is None or not self._staging_config.enabled:
             return None
         staging_root = Path(self._staging_config.node_cache_path).expanduser()
+        # A store host configured for direct loading points node_cache_path
+        # at the CANONICAL store directory (a common override that was safe
+        # under the old no-cleanup default). Eviction there would delete the
+        # cluster's only copy of every model beyond the budget — refuse,
+        # whatever the config says (codex review on #215).
+        if self._store_client is not None:
+            local_store_path = self._store_client.local_store_path
+            if (
+                local_store_path is not None
+                and local_store_path.expanduser().resolve()
+                == staging_root.resolve()
+            ):
+                logger.warning(
+                    "Worker: staging eviction skipped — node_cache_path is "
+                    f"the canonical store directory ({staging_root}); the "
+                    "store is never evicted. Set a separate staging path if "
+                    "this node should have a managed staging cache."
+                )
+                return None
         keep_recent_bytes = int(
             self._staging_config.staging_keep_recent_gb * 1024**3
         )
