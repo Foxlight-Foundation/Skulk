@@ -920,7 +920,8 @@ class NodeStorageSummary(CamelCaseModel):
 
     disk_total_bytes: int
     disk_free_bytes: int
-    """Capacity and free space of the volume holding the models directory."""
+    """Capacity and free space of the volume holding the staging directory
+    (falls back to the models directory when staging is not configured)."""
 
 
 TraceTaskKind = Literal["image", "text", "embedding"]

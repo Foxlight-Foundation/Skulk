@@ -3073,11 +3073,17 @@ class API:
                 with contextlib.suppress(OSError):
                     if file_path.is_file():
                         event_log_bytes += file_path.stat().st_size
+            # Report the volume that staging actually lives on (it may be a
+            # different disk from the models dir — e.g. an external store
+            # volume); fall back to the models dir when staging is off.
+            disk_probe_path = (
+                staging_root if staging_root is not None else EXO_MODELS_DIR
+            )
             try:
-                disk = shutil.disk_usage(EXO_MODELS_DIR)
+                disk = shutil.disk_usage(disk_probe_path)
                 disk_total_bytes, disk_free_bytes = disk.total, disk.free
             except OSError:
-                # Fresh node where the models dir doesn't exist yet — the
+                # Fresh node where the directory doesn't exist yet — the
                 # summary is best-effort, report zeros rather than 500.
                 disk_total_bytes, disk_free_bytes = 0, 0
             return NodeStorageSummary(

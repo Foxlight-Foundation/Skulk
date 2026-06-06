@@ -261,9 +261,10 @@ class Worker:
 
         self.state: State = State()
         self.runners: dict[RunnerId, RunnerSupervisor] = {}
-        # Models evicted by startup reconciliation whose DownloadCompleted
-        # entries may still be replicating in; countered lazily by
-        # plan_step once state carries them. IDs stay in the pending set
+        # Staging DIRECTORY NAMES (forward-sanitized) of models evicted by
+        # startup reconciliation whose DownloadCompleted entries may still
+        # be replicating in; countered lazily by
+        # plan_step once state carries them. Names stay in the pending set
         # until the reset has APPLIED (state stops advertising the stale
         # entry) — discarding on send would reopen the plan gate while the
         # event is still round-tripping through the master.
@@ -884,7 +885,9 @@ class Worker:
         for progress in self.state.downloads.get(self.node_id, []):
             if (
                 isinstance(progress, DownloadCompleted)
-                and str(progress.shard_metadata.model_card.model_id)
+                and staging_directory_name(
+                    str(progress.shard_metadata.model_card.model_id)
+                )
                 in self._stale_downloads_pending_reset
             ):
                 return True
@@ -909,16 +912,17 @@ class Worker:
             if not isinstance(progress, DownloadCompleted):
                 continue
             model_id = str(progress.shard_metadata.model_card.model_id)
-            if model_id not in self._stale_downloads_pending_reset:
+            directory_name = staging_directory_name(model_id)
+            if directory_name not in self._stale_downloads_pending_reset:
                 continue
-            staged_dir = cache_path / model_id.replace("/", "--")
+            staged_dir = cache_path / directory_name
             if staged_dir.exists():
                 # Re-staged since eviction — state is truthful again.
-                self._stale_downloads_pending_reset.discard(model_id)
-                self._stale_resets_sent.discard(model_id)
+                self._stale_downloads_pending_reset.discard(directory_name)
+                self._stale_resets_sent.discard(directory_name)
                 continue
-            still_completed.add(model_id)
-            if model_id in self._stale_resets_sent:
+            still_completed.add(directory_name)
+            if directory_name in self._stale_resets_sent:
                 continue  # reset in flight; keep gating until it applies
             pending = DownloadPending(
                 shard_metadata=progress.shard_metadata,
@@ -928,17 +932,17 @@ class Worker:
             await self.event_sender.send(
                 NodeDownloadProgress(download_progress=pending)
             )
-            self._stale_resets_sent.add(model_id)
+            self._stale_resets_sent.add(directory_name)
             logger.info(
                 f"Worker: reset stale DownloadCompleted for {model_id} "
                 "(staged files were evicted at startup)"
             )
         # Anything we sent a reset for that state no longer advertises has
         # APPLIED — only then does it stop gating the planner.
-        for model_id in list(self._stale_resets_sent):
-            if model_id not in still_completed:
-                self._stale_downloads_pending_reset.discard(model_id)
-                self._stale_resets_sent.discard(model_id)
+        for directory_name in list(self._stale_resets_sent):
+            if directory_name not in still_completed:
+                self._stale_downloads_pending_reset.discard(directory_name)
+                self._stale_resets_sent.discard(directory_name)
         if not self._stale_downloads_pending_reset:
             self._stale_reset_wait_ticks = 0
 
@@ -967,11 +971,16 @@ class Worker:
             # The master may still hold DownloadCompleted entries for the
             # files we just deleted, but this runs BEFORE state replay —
             # there is no shard metadata to build the reset events from
-            # yet. Remember the IDs; plan_step counters the stale entries
-            # as soon as they appear in replicated state (the plan layer
-            # consults state.downloads, so leaving them would skip
-            # re-staging and fail a later load).
-            self._stale_downloads_pending_reset.update(report.evicted_model_ids)
+            # yet. Remember the DIRECTORY names (forward-sanitized; the
+            # report's repo-form ids are best-effort inverses and would be
+            # ambiguous for ids containing "--"); plan_step counters the
+            # stale entries as soon as they appear in replicated state
+            # (the plan layer consults state.downloads, so leaving them
+            # would skip re-staging and fail a later load).
+            self._stale_downloads_pending_reset.update(
+                staging_directory_name(model_id)
+                for model_id in report.evicted_model_ids
+            )
 
     async def _poll_connection_updates(self):
         while True:
