@@ -14,7 +14,12 @@ from exo.api.types import ImageEditsTaskParams
 from exo.download.download_utils import resolve_model_in_path
 from exo.shared.apply import apply
 from exo.shared.constants import EXO_IMAGE_TRANSPORT_DEBUG
-from exo.shared.models.model_cards import ModelId, add_to_card_cache, delete_custom_card
+from exo.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    add_to_card_cache,
+    delete_custom_card,
+)
 from exo.shared.types.chunks import InputImageChunk
 from exo.shared.types.commands import (
     ForwarderCommand,
@@ -55,7 +60,11 @@ from exo.shared.types.tasks import (
     TextGeneration,
 )
 from exo.shared.types.topology import Connection, SocketConnection
-from exo.shared.types.worker.downloads import DownloadCompleted, DownloadPending
+from exo.shared.types.worker.downloads import (
+    DownloadCompleted,
+    DownloadOngoing,
+    DownloadPending,
+)
 from exo.shared.types.worker.runners import RunnerId
 from exo.shared.types.worker.shards import ShardMetadata
 from exo.store.config import StagingNodeConfig
@@ -71,6 +80,13 @@ from exo.utils.keyed_backoff import KeyedBackoff
 from exo.utils.task_group import TaskGroup
 from exo.worker.plan import plan
 from exo.worker.runner.runner_supervisor import RunnerSupervisor
+
+_STALE_RESET_MAX_WAIT_TICKS = 300
+"""How many ~100ms planning ticks to hold planning while stale download
+resets round-trip through the master (~30s). The deadline exists so a
+masterless interval cannot freeze the worker forever — past it, planning
+resumes and the download coordinator's missing-directory self-heal covers
+the residual risk."""
 
 
 def _summarize_worker_task(task: Task) -> str:
@@ -247,6 +263,7 @@ class Worker:
         # entries may still be replicating in; countered lazily by
         # plan_step once state carries them.
         self._stale_downloads_pending_reset: set[str] = set()
+        self._stale_reset_wait_ticks: int = 0
         self._tg: TaskGroup = TaskGroup()
 
         self._system_id = SystemId()
@@ -341,6 +358,23 @@ class Worker:
             await anyio.sleep(0.1)
             if self._stale_downloads_pending_reset:
                 await self._reset_stale_downloads_from_state()
+                if self._state_still_advertises_evicted_downloads():
+                    # The DownloadPending resets round-trip through the
+                    # master before our replicated state drops the stale
+                    # DownloadCompleted entries; planning against the
+                    # stale state could dispatch a load straight at the
+                    # files we just deleted. Skip planning until the
+                    # resets land (bounded: see the deadline below).
+                    self._stale_reset_wait_ticks += 1
+                    if self._stale_reset_wait_ticks <= _STALE_RESET_MAX_WAIT_TICKS:
+                        continue
+                    logger.warning(
+                        "Worker: stale download resets have not applied "
+                        f"after {_STALE_RESET_MAX_WAIT_TICKS} planning "
+                        "ticks; resuming planning anyway (the coordinator "
+                        "self-heals missing files at download time)"
+                    )
+                    self._stale_downloads_pending_reset.clear()
             task: Task | None = plan(
                 self.node_id,
                 self.runners,
@@ -667,9 +701,7 @@ class Worker:
         evicting one corrupts a live runner just the same — MLX loads
         weights lazily.
         """
-        in_use: set[str] = set()
-        for runner in self.runners.values():
-            card = runner.shard_metadata.model_card
+        def _add_card(card: ModelCard) -> None:
             in_use.add(str(card.model_id))
             if card.vision and card.vision.weights_repo:
                 in_use.add(card.vision.weights_repo)
@@ -679,6 +711,17 @@ class Worker:
                     in_use.add(runtime.mtp_sidecar_repo)
                 if runtime.assistant_model_repo:
                     in_use.add(runtime.assistant_model_repo)
+
+        in_use: set[str] = set()
+        for runner in self.runners.values():
+            _add_card(runner.shard_metadata.model_card)
+        # A store-backed download in progress has already created its
+        # staging directory but no runner exists yet — a concurrent
+        # teardown's budget pass must not delete a directory that is
+        # actively being written.
+        for progress in self.state.downloads.get(self.node_id, []):
+            if isinstance(progress, DownloadOngoing):
+                _add_card(progress.shard_metadata.model_card)
         return frozenset(in_use)
 
     async def _maybe_evict_shard(self, shard: ShardMetadata | None) -> None:
@@ -780,6 +823,18 @@ class Worker:
         except Exception as exc:
             logger.warning(f"Worker: staging budget enforcement failed: {exc}")
             return None
+
+    def _state_still_advertises_evicted_downloads(self) -> bool:
+        """True while replicated state shows DownloadCompleted for a model
+        whose staged files the startup pass deleted."""
+        for progress in self.state.downloads.get(self.node_id, []):
+            if (
+                isinstance(progress, DownloadCompleted)
+                and str(progress.shard_metadata.model_card.model_id)
+                in self._stale_downloads_pending_reset
+            ):
+                return True
+        return False
 
     async def _reset_stale_downloads_from_state(self) -> None:
         """Counter stale DownloadCompleted entries for startup-evicted models.
