@@ -120,6 +120,28 @@ def _make_store_url(host: str, port: int, path: str) -> str:
     return f"http://{host}:{port}{path}"
 
 
+def _staged_directory_looks_complete(directory: Path) -> bool:
+    """Heuristic completeness check for a staged directory.
+
+    Accepts the three repo layouts the store serves: a full model repo
+    (index-based completeness, same probe the downloader uses), a
+    single-file companion model (config.json + model.safetensors), or an
+    MTP sidecar (mtp.safetensors). A directory with leftover ``.partial``
+    files is never complete.
+    """
+    from exo.download.download_utils import is_model_directory_complete
+
+    if any(directory.glob("*.partial")):
+        return False
+    if is_model_directory_complete(directory):
+        return True
+    if (directory / "config.json").is_file() and (
+        directory / "model.safetensors"
+    ).is_file():
+        return True
+    return (directory / "mtp.safetensors").is_file()
+
+
 @final
 class StoreHealthInfo:
     """Parsed response from ``GET /health`` on the store server.
@@ -838,11 +860,16 @@ class ModelStoreDownloader(ShardDownloader):
                     return direct_path
             return await self._inner.ensure_shard(shard, config_only)
 
-        # Fast path: if the model is already staged locally, skip the
-        # HTTP availability probe.  This keeps inference working when the store
-        # server is temporarily unreachable and avoids an unnecessary round-trip.
+        # Fast path: if the model is already staged locally AND the staged
+        # directory looks complete, skip the HTTP availability probe. This
+        # keeps inference working when the store server is temporarily
+        # unreachable and avoids an unnecessary round-trip. An interrupted
+        # staging leaves a partial directory (e.g. just config.json or a
+        # .partial file) — trusting any non-empty dir here would hand MLX a
+        # broken model, so incomplete dirs fall through to re-staging
+        # (which resumes partial files via HTTP Range).
         dest_path = _staging_dir(self._staging_config.node_cache_path, model_id)
-        if dest_path.exists() and any(dest_path.iterdir()):
+        if dest_path.exists() and _staged_directory_looks_complete(dest_path):
             logger.info(
                 f"ModelStoreDownloader: {model_id} already staged at {dest_path} — skipping availability probe"
             )

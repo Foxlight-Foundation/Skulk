@@ -130,6 +130,7 @@ async def test_already_staged_base_still_ensures_companion(tmp_path: Path) -> No
     """
     base_dir = tmp_path / "mlx-community--Qwen-test-9B-4bit"
     base_dir.mkdir(parents=True)
+    (base_dir / "config.json").write_text("{}")
     (base_dir / "model.safetensors").write_bytes(b"fake-weights")
 
     store = _RecordingStoreClient(available={_SIDECAR_REPO})
@@ -162,6 +163,7 @@ async def test_companion_failure_does_not_fail_base_load(tmp_path: Path) -> None
     """
     base_dir = tmp_path / "mlx-community--Qwen-test-9B-4bit"
     base_dir.mkdir(parents=True)
+    (base_dir / "config.json").write_text("{}")
     (base_dir / "model.safetensors").write_bytes(b"fake-weights")
 
     # Sidecar is reported available but staging it always fails, and the
@@ -197,6 +199,7 @@ async def test_terminal_progress_waits_for_companions(tmp_path: Path) -> None:
     run without speculation (codex review, #213)."""
     base_dir = tmp_path / "mlx-community--Qwen-test-9B-4bit"
     base_dir.mkdir(parents=True)
+    (base_dir / "config.json").write_text("{}")
     (base_dir / "model.safetensors").write_bytes(b"fake-weights")
 
     store = _RecordingStoreClient(available={_SIDECAR_REPO})
@@ -229,3 +232,20 @@ async def test_terminal_progress_waits_for_companions(tmp_path: Path) -> None:
     assert sidecar_staged < base_complete, (
         f"base completed before its sidecar staged: {ordering}"
     )
+
+
+@pytest.mark.anyio
+async def test_partial_staged_dir_is_restaged(tmp_path: Path) -> None:
+    """An interrupted staging (partial file present) must not satisfy the
+    fast path — the model gets re-staged (resume via Range) instead of
+    being handed to MLX broken (codex round 6 on #213)."""
+    base_dir = tmp_path / "mlx-community--Qwen-test-9B-4bit"
+    base_dir.mkdir(parents=True)
+    (base_dir / "model.safetensors.partial").write_bytes(b"half")
+
+    store = _RecordingStoreClient(available={_BASE_MODEL, _SIDECAR_REPO})
+    downloader = _downloader(store, tmp_path)
+
+    await downloader.ensure_shard(_shard_with_sidecar())
+
+    assert _BASE_MODEL in store.staged

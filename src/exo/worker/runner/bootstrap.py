@@ -165,7 +165,11 @@ def deadline_watchdog(
             "that hangs too, the machine needs a reboot to reset the Metal "
             "device queue."
         )
-        _release_metal_resources()
+        # Deliberately NO _release_metal_resources() here: mx.clear_cache()
+        # would touch the very Metal device this watchdog assumes is wedged
+        # and could block before the exit. Process exit reclaims all Metal
+        # allocations on its own (verified across every crash class,
+        # 2026-06-05).
         os._exit(1)
 
     action = on_timeout if on_timeout is not None else _default_timeout_action
