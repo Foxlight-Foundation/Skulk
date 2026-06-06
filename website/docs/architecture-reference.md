@@ -400,7 +400,7 @@ Selection logic: `src/exo/worker/engines/mlx/cache.py::make_kv_cache`. Some back
 | Var | What |
 |---|---|
 | `SKULK_HOME` / `EXO_HOME` | Override the base data directory used to derive `SKULK_DATA_HOME` (and from there `SKULK_MODELS_DIR`, `SKULK_CUSTOM_MODEL_CARDS_DIR`, `SKULK_EVENT_LOG_DIR`). Default base: XDG-derived `~/.local/share/skulk` on Linux; `~/.skulk` on non-Linux. See `src/exo/shared/constants.py:34-149`. |
-| `SKULK_FAST_SYNCH` / `EXO_FAST_SYNCH` | Force `MLX_METAL_FAST_SYNCH` on (`"on"`) or off (`"off"`); overrides per-model card |
+| `SKULK_FAST_SYNCH` / `EXO_FAST_SYNCH` | Force `MLX_METAL_FAST_SYNCH` on (`"on"`) or off (`"off"`); overrides per-model card. Resolution order: operator override → card `metal_fast_synch` pin → OFF for speculative-decoding cards (`mtp_heads` / `mtp_sidecar_repo` / `assistant_model_repo`; FAST_SYNCH collapses the MTP loop ~46x, measured 2026-06-06) → cluster default (ON) |
 | `SKULK_PIPELINE_EVAL_TIMEOUT_SECONDS` | Per-eval timeout in pipeline collectives (default 60s) |
 | `SKULK_MLX_HANG_DEBUG` / `EXO_MLX_HANG_DEBUG` | Emit periodic stack traces from stuck phases |
 | `SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS` | Interval for above (default 30s) |
