@@ -456,3 +456,22 @@ def test_active_size_bytes_tracks_appends(log_dir: Path):
     log.append(TestEvent())
     assert log.active_size_bytes > 0
     log.close()
+
+
+def test_append_after_compact_does_not_overwrite_tail(log_dir: Path):
+    """Regression: compact() reopened the active file with the cursor at 0,
+    so the next append overwrote the retained tail record by record. The
+    master's post-snapshot compaction always had this; the API log's ring
+    retention makes it fire constantly."""
+    log = DiskEventLog(log_dir)
+    for _ in range(10):
+        log.append(TestEvent())
+
+    log.compact(6)  # retain absolute indices [6, 10)
+    log.append(TestEvent())  # must append, not overwrite index 6
+
+    events = list(log.read_range(6, 11))
+    assert len(events) == 5
+    assert len(log) == 11
+    assert log.active_size_bytes > 0
+    log.close()

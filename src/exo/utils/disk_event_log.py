@@ -308,6 +308,11 @@ class DiskEventLog:
             self._file.close()
             replacement_path.replace(self._active_path)
             self._file = open(self._active_path, "r+b")  # noqa: SIM115
+            # r+b opens with the cursor at 0 — appending from there would
+            # OVERWRITE the retained tail record by record. Seek to EOF so
+            # appends extend the file (this also keeps active_size_bytes,
+            # which reads the cursor, truthful right after compaction).
+            self._file.seek(0, 2)
             self._base_idx = keep_from_idx
             self._count = len(retained_events)
             self._offset_cache.clear()
@@ -316,6 +321,11 @@ class DiskEventLog:
             # Index bookkeeping must stay coherent even when the rewrite
             # failed partway: keep the pre-compaction logical range (the
             # in-memory count is authoritative for future indices).
+            # Best-effort removal of the partial replacement file — on
+            # ENOSPC an orphaned tmp would keep eating the disk we just
+            # ran out of.
+            with contextlib.suppress(OSError):
+                (self._directory / "events.bin.tmp").unlink()
             self._enter_degraded_mode(f"compaction failed: {error}")
 
     def read_range(self, start: int, end: int) -> Iterator[Event]:
