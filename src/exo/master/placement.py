@@ -134,7 +134,7 @@ def place_instance(
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
     if not candidate_cycles:
-        known_nodes = len(topology.list_nodes())
+        known_nodes = sum(1 for _ in topology.list_nodes())
         if known_nodes >= command.min_nodes:
             # Enough nodes exist for this placement — they just aren't
             # bidirectionally connected (yet). Right after cluster formation
