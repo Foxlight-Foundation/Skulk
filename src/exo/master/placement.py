@@ -102,6 +102,25 @@ def _cycle_download_score(
     )
 
 
+class PlacementError(ValueError):
+    """Placement is impossible for the requested command and current state.
+
+    Subclasses ``ValueError`` so existing callers that catch ``ValueError``
+    (the API preview endpoint, the master command processor) keep working.
+    """
+
+
+class PlacementInfoPendingError(PlacementError):
+    """Placement cannot be judged yet because node info is still arriving.
+
+    Raised when every otherwise-viable cycle touches a node whose memory
+    info has not been gossiped yet (the window between a node joining the
+    topology and its first NodeGatheredInfo event). This is a retry-shortly
+    condition — distinct from a real memory shortfall so callers can wait
+    instead of reporting a false "insufficient memory".
+    """
+
+
 def place_instance(
     command: PlaceInstance,
     topology: Topology,
@@ -114,6 +133,12 @@ def place_instance(
 ) -> dict[InstanceId, Instance]:
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
+    if not candidate_cycles:
+        raise PlacementError(
+            f"No connected cycle of at least {command.min_nodes} node(s) exists "
+            f"in the topology ({len(cycles)} cycle(s) total). Multi-node "
+            "placement requires bidirectional connectivity between the nodes."
+        )
 
     # Drop any cycle that touches an operator-excluded node. Exclusion is the
     # operator's "don't pick this node for new placements" signal — already
@@ -127,6 +152,13 @@ def place_instance(
             for cycle in candidate_cycles
             if not (set(cycle.node_ids) & excluded_nodes)
         ]
+        if not candidate_cycles:
+            raise PlacementError(
+                f"All cycles of at least {command.min_nodes} node(s) touch an "
+                f"excluded node ({len(excluded_nodes)} node(s) excluded). "
+                "Check the excluded_nodes list — node IDs change when a "
+                "cluster session restarts."
+            )
 
     # Filter to cycles containing all required nodes (subset matching)
     if required_nodes:
@@ -135,15 +167,37 @@ def place_instance(
             for cycle in candidate_cycles
             if required_nodes.issubset(cycle.node_ids)
         ]
-    cycles_with_sufficient_memory = filter_cycles_by_memory(
-        candidate_cycles, node_memory, command.model_card.storage_size
+        if not candidate_cycles:
+            raise PlacementError(
+                "No candidate cycle contains all required nodes "
+                f"[{', '.join(str(n) for n in required_nodes)}]."
+            )
+    cycles_with_sufficient_memory, memory_diagnostics = filter_cycles_by_memory(
+        candidate_cycles,
+        node_memory,
+        command.model_card.storage_size,
+        command.sharding,
     )
     if len(cycles_with_sufficient_memory) == 0:
-        raise ValueError("No cycles found with sufficient memory")
+        if memory_diagnostics.pending_info_node_ids:
+            raise PlacementInfoPendingError(
+                "Memory info has not been gathered yet for node(s) "
+                f"[{', '.join(str(n) for n in memory_diagnostics.pending_info_node_ids)}] "
+                "— the cluster may still be starting up. Retry shortly."
+            )
+        detail = (
+            "; ".join(memory_diagnostics.rejection_reasons)
+            if memory_diagnostics.rejection_reasons
+            else "no candidate cycles to evaluate"
+        )
+        raise PlacementError(
+            f"No candidate cycle fits {command.model_card.model_id} "
+            f"({command.model_card.storage_size.in_gb:.1f}GB of weights): {detail}"
+        )
 
     if command.sharding == Sharding.Tensor:
         if not command.model_card.supports_tensor:
-            raise ValueError(
+            raise PlacementError(
                 f"Requested Tensor sharding but this model does not support tensor parallelism: {command.model_card.model_id}"
             )
         # TODO: the condition here for tensor parallel is not correct, but it works good enough for now.
@@ -155,7 +209,7 @@ def place_instance(
             and (kv_heads is None or kv_heads % len(cycle) == 0)
         ]
         if not cycles_with_sufficient_memory:
-            raise ValueError(
+            raise PlacementError(
                 f"No tensor sharding found for model with "
                 f"hidden_size={command.model_card.hidden_size}"
                 f"{f', num_key_value_heads={kv_heads}' if kv_heads is not None else ''}"
@@ -164,7 +218,7 @@ def place_instance(
     if command.sharding == Sharding.Pipeline and command.model_card.model_id == ModelId(
         "mlx-community/DeepSeek-V3.1-8bit"
     ):
-        raise ValueError(
+        raise PlacementError(
             "Pipeline parallelism is not supported for DeepSeek V3.1 (8-bit)"
         )
 
@@ -176,7 +230,7 @@ def place_instance(
 
     if command.instance_meta == InstanceMeta.MlxJaccl:
         if not smallest_rdma_cycles:
-            raise ValueError(
+            raise PlacementError(
                 "Requested RDMA (MlxJaccl) but no RDMA-connected cycles available"
             )
         smallest_cycles = smallest_rdma_cycles

@@ -140,7 +140,7 @@ Discriminated union at `src/exo/shared/types/commands.py`. Carried as `Forwarder
 
 | Command | What it requests | Master action |
 |---|---|---|
-| `PlaceInstance` | Spin up a model on the cluster. Optional `excluded_nodes: list[NodeId]` — planner treats those nodes as if absent for *this placement only*; already-running instances on them are not affected. | Pick ranks based on memory + topology (filtered by `excluded_nodes`); emit `InstanceCreated` |
+| `PlaceInstance` | Spin up a model on the cluster. Optional `excluded_nodes: list[NodeId]` — planner treats those nodes as if absent for *this placement only*; already-running instances on them are not affected. | Pick ranks based on memory + topology (filtered by `excluded_nodes`); emit `InstanceCreated`. Memory admission is per-node (Tensor = even split, Pipeline = proportional to available) times `PLACEMENT_MEMORY_OVERHEAD_FACTOR` (1.05) plus `PLACEMENT_MEMORY_OVERHEAD_FLOOR` (256 MB); failures raise typed `PlacementError`s, with `PlacementInfoPendingError` for the cluster-startup window where a node's memory info has not been gossiped yet. The API dry-runs placement before forwarding (400 on impossible, 503 after a 15s wait on pending info). |
 | `DeleteInstance` | Tear down a placed model | Emit `InstanceDeleted`; workers tear down runners |
 | `TaskFinished` | Mark a streaming task complete (sent by API on stream end) | Emit `TaskDeleted` (`TaskStatusUpdated(Complete)` is emitted earlier on the chunk path, not from `TaskFinished` directly) |
 | `TaskCancelled` | Cancel an in-flight command (sent by API on `/v1/cancel`) | Emit `TaskStatusUpdated(Cancelled)` |

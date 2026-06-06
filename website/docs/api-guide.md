@@ -585,7 +585,26 @@ curl -X POST http://localhost:52415/place_instance \
 | `sharding` | `Pipeline` or `Tensor` |
 | `instance_meta` | `MlxRing` or `MlxJaccl` |
 | `min_nodes` | Minimum nodes required for the placement |
-| `excluded_nodes` | Optional. Node IDs the master should treat as if absent when scoring this placement. Already-running instances on those nodes are unaffected — exclusion is per-placement, not cluster-wide. Default: `[]`. |
+| `excluded_nodes` | Optional. Node IDs the master should treat as if absent when scoring this placement. Already-running instances on those nodes are unaffected — exclusion is per-placement, not cluster-wide. Default: `[]`. Note: node IDs are per-session — they change when a cluster session restarts. |
+
+The placement is validated against the current cluster state **before** the
+command is forwarded, so an impossible placement fails at the API instead of
+silently failing on the master:
+
+- **400** with the specific reason: no connected cycle of `min_nodes` nodes,
+  exclusions removed every candidate, the model does not support Tensor
+  sharding, or a node cannot fit its weight shard plus runtime headroom
+  (the error names the node and the GB arithmetic).
+- **503** when node memory info is still being gossiped (a cluster that just
+  formed). The request internally waits up to 15 seconds for the info to
+  arrive before giving up — retry shortly on 503.
+
+Memory fitting is checked **per node, not summed across the cycle**: Tensor
+sharding splits weights evenly, Pipeline allocates layers proportionally to
+each node's available memory, and every node must hold its share times a
+runtime-overhead factor (KV cache, activations, runner) on top of the raw
+weight bytes. A model that exactly equals a node's free memory is rejected —
+that placement would thrash, not run.
 
 ### Preview valid placements
 
