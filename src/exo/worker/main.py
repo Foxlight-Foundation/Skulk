@@ -261,8 +261,12 @@ class Worker:
         self.runners: dict[RunnerId, RunnerSupervisor] = {}
         # Models evicted by startup reconciliation whose DownloadCompleted
         # entries may still be replicating in; countered lazily by
-        # plan_step once state carries them.
+        # plan_step once state carries them. IDs stay in the pending set
+        # until the reset has APPLIED (state stops advertising the stale
+        # entry) — discarding on send would reopen the plan gate while the
+        # event is still round-tripping through the master.
         self._stale_downloads_pending_reset: set[str] = set()
+        self._stale_resets_sent: set[str] = set()
         self._stale_reset_wait_ticks: int = 0
         self._tg: TaskGroup = TaskGroup()
 
@@ -847,8 +851,10 @@ class Worker:
         """
         if self._staging_config is None:
             self._stale_downloads_pending_reset.clear()
+            self._stale_resets_sent.clear()
             return
         cache_path = Path(self._staging_config.node_cache_path).expanduser()
+        still_completed: set[str] = set()
         for progress in self.state.downloads.get(self.node_id, []):
             if not isinstance(progress, DownloadCompleted):
                 continue
@@ -859,7 +865,11 @@ class Worker:
             if staged_dir.exists():
                 # Re-staged since eviction — state is truthful again.
                 self._stale_downloads_pending_reset.discard(model_id)
+                self._stale_resets_sent.discard(model_id)
                 continue
+            still_completed.add(model_id)
+            if model_id in self._stale_resets_sent:
+                continue  # reset in flight; keep gating until it applies
             pending = DownloadPending(
                 shard_metadata=progress.shard_metadata,
                 node_id=self.node_id,
@@ -868,11 +878,17 @@ class Worker:
             await self.event_sender.send(
                 NodeDownloadProgress(download_progress=pending)
             )
-            self._stale_downloads_pending_reset.discard(model_id)
+            self._stale_resets_sent.add(model_id)
             logger.info(
                 f"Worker: reset stale DownloadCompleted for {model_id} "
                 "(staged files were evicted at startup)"
             )
+        # Anything we sent a reset for that state no longer advertises has
+        # APPLIED — only then does it stop gating the planner.
+        for model_id in list(self._stale_resets_sent):
+            if model_id not in still_completed:
+                self._stale_downloads_pending_reset.discard(model_id)
+                self._stale_resets_sent.discard(model_id)
 
     def _reconcile_staging_on_startup(self) -> None:
         """Reconcile staging orphans left by a crashed or killed session.
