@@ -2808,9 +2808,13 @@ def mlx_generate(
             # token could slip through via an accepted draft. Until the
             # verify pass applies processors, MTP and processors are
             # mutually exclusive.
-            logger.info(
-                "MTP speculative decoding is incompatible with logits "
-                f"processors ({len(logits_processors)} active); skipping MTP"
+            logger.warning(
+                "Speculative decoding DISABLED for this request: "
+                f"{len(logits_processors)} logits processor(s) are active — "
+                "typically a repetition_penalty in the request (some client "
+                "libraries send one by default). Generation falls back to "
+                "plain decode; drop repetition_penalty/penalty parameters "
+                "from the request to keep speculative decoding engaged."
             )
         else:
             trunk_head = _get_trunk_and_head(model)
@@ -2826,7 +2830,17 @@ def mlx_generate(
                         else None,
                     )
                 if _drafter is not None:
-                    logger.info("MTP speculative decoding enabled (D=1)")
+                    _card_draft_depth = (
+                        model_card.runtime.mtp_max_depth
+                        if model_card is not None
+                        and model_card.runtime is not None
+                        and model_card.runtime.mtp_max_depth is not None
+                        else 1
+                    )
+                    logger.info(
+                        "MTP speculative decoding enabled "
+                        f"(D={_card_draft_depth})"
+                    )
 
     # Gate the agreement on the model CARD declaring speculation — the card
     # is identical on every rank, so the collective count stays symmetric;

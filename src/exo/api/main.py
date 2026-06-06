@@ -283,6 +283,16 @@ serve = cast(_HypercornServe, hypercorn_asyncio.serve)
 
 _API_EVENT_LOG_DIR = EXO_EVENT_LOG_DIR / "api"
 
+# Ring retention for the API event log. Unlike the master's log (compacted
+# after every snapshot), the API log had NO compaction and records per-token
+# ChunkGenerated events — it grew without bound for the whole session (54 MB
+# in 9 idle hours on every node; GBs/day under load; the file a node died
+# writing in the 2026-06-06 launch smoke). It only backs GET /events
+# diagnostics, so dropping the old tail is safe.
+_API_EVENT_LOG_MAX_ACTIVE_BYTES = 256 * 1024 * 1024
+_API_EVENT_LOG_COMPACT_KEEP_EVENTS = 20_000
+_API_EVENT_LOG_CHECK_INTERVAL_APPENDS = 4096
+
 # How long POST /place_instance waits for node memory info to finish
 # gossiping before giving up with 503. Covers the window between cluster
 # formation (identities present) and the first NodeGatheredInfo from every
@@ -504,6 +514,7 @@ class API:
     ) -> None:
         self.state = State()
         self._event_log = DiskEventLog(_API_EVENT_LOG_DIR) if enable_event_log else None
+        self._event_log_appends_since_retention_check = 0
         self._system_id = SystemId()
         self.command_sender = command_sender
         self.download_command_sender = download_command_sender
@@ -602,6 +613,7 @@ class API:
         if self._event_log is not None:
             self._event_log.close()
             self._event_log = DiskEventLog(_API_EVENT_LOG_DIR)
+            self._event_log_appends_since_retention_check = 0
         self.state = State()
         self._system_id = SystemId()
         self._text_generation_queues = {}
@@ -2861,6 +2873,33 @@ class API:
                 shutdown_trigger=ev.wait,
             )
 
+    def _maybe_compact_event_log(self) -> None:
+        """Ring retention for the diagnostics event log.
+
+        Every few thousand appends, check the active file size; past the
+        budget, compact away everything but the most recent tail. The log
+        only backs GET /events, so old history is droppable — and without
+        this it grows per generated token for the life of the session.
+        """
+        if self._event_log is None:
+            return
+        self._event_log_appends_since_retention_check += 1
+        if (
+            self._event_log_appends_since_retention_check
+            < _API_EVENT_LOG_CHECK_INTERVAL_APPENDS
+        ):
+            return
+        self._event_log_appends_since_retention_check = 0
+        if self._event_log.active_size_bytes <= _API_EVENT_LOG_MAX_ACTIVE_BYTES:
+            return
+        keep_from_idx = len(self._event_log) - _API_EVENT_LOG_COMPACT_KEEP_EVENTS
+        logger.info(
+            "API event log exceeded "
+            f"{_API_EVENT_LOG_MAX_ACTIVE_BYTES / 2**20:.0f} MiB; compacting "
+            f"to the most recent {_API_EVENT_LOG_COMPACT_KEEP_EVENTS} events"
+        )
+        self._event_log.compact(keep_from_idx)
+
     async def _apply_state(self):
         with self.event_receiver as events:
             async for i_event in events:
@@ -2870,6 +2909,7 @@ class API:
                     and not isinstance(event, StateSnapshotHydrated)
                 ):
                     self._event_log.append(event)
+                    self._maybe_compact_event_log()
                 self.state = apply(self.state, i_event)
 
                 if isinstance(event, ChunkGenerated):

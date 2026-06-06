@@ -27,6 +27,53 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Event logs can no longer eat the disk or kill nodes on a full one.**
+  The API-side event log — which records per-token chunk events and backs
+  only the `GET /events` diagnostic — had NO retention and grew for the
+  life of the session (54 MB in 9 idle hours on every node; the file a
+  node died writing during the launch smoke). It now ring-compacts past
+  256 MiB, keeping the most recent 20k events. Archive rotation is capped
+  by total bytes (1 GiB) in addition to count — five archives of
+  unbounded size defeated the count cap in practice (3.5 GB observed).
+  The remaining unguarded ENOSPC sites (`DiskEventLog.__init__` and
+  `compact()` — the former is exactly where a node died) now degrade to
+  the counting-only mode instead of crashing, and a proactive free-space
+  floor (2 GiB, checked every 1024 appends) degrades persistence BEFORE
+  the disk hits zero — a master on a full disk previously throttled the
+  whole cluster to ~0.5 tok/s before dying. Log noise that bloats piped
+  logs was also trimmed (per-minute download-coordinator path dumps), and
+  the speculative-decoding enable line now reports the card's actual
+  draft depth instead of a hardcoded "(D=1)".
+- **Speculative decoding now engages for models that were already on
+  disk.** Three of the model-store downloader's four resolution paths
+  (already-staged fast path, store staging, direct-from-store) returned
+  the base model without fetching the card's companion repos (MTP
+  sidecar / assistant model / vision weights) — a staged model would
+  load and silently run without speculation (observed in the launch
+  smoke). Every `ensure_shard` resolution now also ensures companions
+  through the same store-first path (so sidecars are served from the
+  store when present), optional-companion fetch failures (MTP
+  sidecar / assistant) log loudly without failing the base load, while
+  split vision weights stay load-bearing, and the previously triplicated companion
+  construction in the HF downloader is shared via
+  `companion_download_specs`.
+- **A wedged warmup no longer silently disables a node.** A faulted
+  Metal eval can park warmup forever at 0% CPU (uninterruptible from
+  Python); the runner then sat in `RunnerWarmingUp` indefinitely while
+  every API request queued and timed out with no surfaced error. Warmup
+  now runs under a hard deadline (default 300s,
+  `SKULK_WARMUP_DEADLINE_SECONDS`): on overrun the runner logs a
+  CRITICAL diagnosis (including the reboot-if-GPU-wedged guidance) and
+  exits, the supervisor reports `RunnerFailed`, and the node keeps
+  dispatching.
+- **Disabled speculation is no longer near-silent.** Requests carrying
+  logits processors (typically a `repetition_penalty` — some client
+  libraries send one by default) fall back to plain decode; that
+  fallback now logs a WARNING naming the cause and the fix instead of
+  an easy-to-miss INFO line. The gemma 4 E-series pipeline rejection
+  also explains itself in operator terms (place on a single node)
+  instead of internals-speak.
+
 - **Multi-node placement is now reliable and placement failures are
   visible.** Four compounding issues fixed in the placement path:
   (1) memory admission is per node instead of summed across the cycle —

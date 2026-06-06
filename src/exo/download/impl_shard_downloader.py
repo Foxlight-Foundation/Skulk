@@ -8,16 +8,15 @@ from loguru import logger
 
 from exo.download.download_utils import (
     RepoDownloadProgress,
+    companion_download_specs,
     download_shard,
 )
 from exo.download.shard_downloader import ShardDownloader
 from exo.shared.models.model_cards import (
     ModelCard,
     ModelId,
-    ModelTask,
     get_model_cards,
 )
-from exo.shared.types.memory import Memory
 from exo.shared.types.worker.shards import (
     PipelineShardMetadata,
     ShardMetadata,
@@ -117,6 +116,51 @@ class ResumableShardDownloader(ShardDownloader):
     ) -> Path:
         allow_patterns = ["config.json"] if config_only else None
 
+        # Companions download BEFORE the base on purpose: the base repo's
+        # "complete" progress event becomes cluster-visible download state
+        # the moment it fires, and the planner dispatches model loads off
+        # that state — so it must mean "everything the model needs is
+        # here", not "the base is here and the sidecar is on its way".
+        # Criticality differs per companion: split vision weights are
+        # load-bearing (their failure fails the base — a vision model
+        # without them is broken), while MTP sidecars and assistants are
+        # best-effort (the runtime degrades to run-without-speculation;
+        # failures log loudly instead).
+        if not config_only and not self.offline:
+            for companion_shard, allow, required in companion_download_specs(
+                shard.model_card
+            ):
+                try:
+                    _, companion_progress = await download_shard(
+                        companion_shard,
+                        self.on_progress_wrapper,
+                        max_parallel_downloads=self.max_parallel_downloads,
+                        allow_patterns=allow,
+                        skip_internet=self.offline,
+                    )
+                    # download_shard converts repo-level fetch failures
+                    # (e.g. FileNotFoundError on the file list) into a
+                    # not_started result instead of raising — a required
+                    # companion must not slip through that hole.
+                    if required and companion_progress.status != "complete":
+                        raise RuntimeError(
+                            f"Required companion repo "
+                            f"{companion_shard.model_card.model_id} did not "
+                            f"download (status="
+                            f"{companion_progress.status!r})"
+                        )
+                except Exception as error:
+                    if required:
+                        # Split vision weights are load-bearing: a vision
+                        # model without them is broken, not degraded.
+                        raise
+                    logger.warning(
+                        f"Companion repo {companion_shard.model_card.model_id} "
+                        f"for {shard.model_card.model_id} could not be fetched "
+                        f"({error}); speculative decoding that depends on it "
+                        "will be unavailable on this node."
+                    )
+
         target_dir, _ = await download_shard(
             shard,
             self.on_progress_wrapper,
@@ -124,101 +168,6 @@ class ResumableShardDownloader(ShardDownloader):
             allow_patterns=allow_patterns,
             skip_internet=self.offline,
         )
-
-        if (
-            not config_only
-            and not self.offline
-            and shard.model_card.vision
-            and shard.model_card.vision.weights_repo != str(shard.model_card.model_id)
-        ):
-            vision_repo = shard.model_card.vision.weights_repo
-            vision_card = ModelCard(
-                model_id=ModelId(vision_repo),
-                storage_size=Memory.from_bytes(0),
-                n_layers=1,
-                hidden_size=1,
-                supports_tensor=False,
-                tasks=[ModelTask.TextGeneration],
-            )
-            vision_shard = PipelineShardMetadata(
-                model_card=vision_card,
-                device_rank=0,
-                world_size=1,
-                start_layer=0,
-                end_layer=1,
-                n_layers=1,
-            )
-            await download_shard(
-                vision_shard,
-                self.on_progress_wrapper,
-                max_parallel_downloads=self.max_parallel_downloads,
-                allow_patterns=["*.safetensors", "config.json"],
-                skip_internet=self.offline,
-            )
-
-        if (
-            not config_only
-            and not self.offline
-            and shard.model_card.runtime
-            and shard.model_card.runtime.mtp_sidecar_repo
-        ):
-            mtp_repo = shard.model_card.runtime.mtp_sidecar_repo
-            mtp_card = ModelCard(
-                model_id=ModelId(mtp_repo),
-                storage_size=Memory.from_bytes(0),
-                n_layers=1,
-                hidden_size=1,
-                supports_tensor=False,
-                tasks=[ModelTask.TextGeneration],
-            )
-            mtp_shard = PipelineShardMetadata(
-                model_card=mtp_card,
-                device_rank=0,
-                world_size=1,
-                start_layer=0,
-                end_layer=1,
-                n_layers=1,
-            )
-            await download_shard(
-                mtp_shard,
-                self.on_progress_wrapper,
-                max_parallel_downloads=self.max_parallel_downloads,
-                allow_patterns=["mtp.safetensors", "config.json"],
-                skip_internet=self.offline,
-            )
-
-        if (
-            not config_only
-            and not self.offline
-            and shard.model_card.runtime
-            and shard.model_card.runtime.assistant_model_repo
-        ):
-            assistant_repo = shard.model_card.runtime.assistant_model_repo
-            assistant_card = ModelCard(
-                model_id=ModelId(assistant_repo),
-                storage_size=Memory.from_bytes(0),
-                n_layers=1,
-                hidden_size=1,
-                supports_tensor=False,
-                tasks=[ModelTask.TextGeneration],
-            )
-            assistant_shard = PipelineShardMetadata(
-                model_card=assistant_card,
-                device_rank=0,
-                world_size=1,
-                start_layer=0,
-                end_layer=1,
-                n_layers=1,
-            )
-            # The assistant is a small full model (config + a single
-            # safetensors), so pull the weights and config alongside the target.
-            await download_shard(
-                assistant_shard,
-                self.on_progress_wrapper,
-                max_parallel_downloads=self.max_parallel_downloads,
-                allow_patterns=["*.safetensors", "config.json"],
-                skip_internet=self.offline,
-            )
 
         return target_dir
 
@@ -271,40 +220,23 @@ class ResumableShardDownloader(ShardDownloader):
         # never fetched (phase-c spec gotcha, flagged on PR #185). Degrade
         # the reported status when a declared companion is missing on disk
         # so the download path runs and pulls it.
-        # Never degrade in offline mode: the companion cannot be fetched
-        # anyway, and load_mlx_items treats missing companions as optional —
-        # degrading would turn a perfectly loadable cached base into
-        # DownloadFailed on air-gapped nodes.
-        if (
-            progress.status == "complete"
-            and not self.offline
-            and self._missing_companion(shard)
+        # Offline mode degrades only for LOAD-BEARING companions (split
+        # vision weights): optional companions can never be fetched there
+        # and load_mlx_items degrades to run-without-speculation, so
+        # degrading for them would turn a perfectly loadable cached base
+        # into DownloadFailed on air-gapped nodes — but a vision model
+        # without its weights is broken and must not report complete.
+        if progress.status == "complete" and self._missing_companion(
+            shard, required_only=self.offline
         ):
             return progress.model_copy(update={"status": "in_progress"})
         return progress
 
     @staticmethod
-    def _missing_companion(shard: ShardMetadata) -> bool:
+    def _missing_companion(shard: ShardMetadata, required_only: bool = False) -> bool:
         """True when the card declares a companion repo absent from disk."""
-        from exo.download.download_utils import (
-            build_companion_model_path,
-            build_sidecar_path,
-        )
+        from exo.download.download_utils import model_companions_present_on_disk
 
-        runtime = shard.model_card.runtime
-        if runtime is None:
-            return False
-        if (
-            runtime.mtp_sidecar_repo
-            and runtime.mtp_heads
-            and build_sidecar_path(
-                ModelId(runtime.mtp_sidecar_repo), "mtp.safetensors"
-            )
-            is None
-        ):
-            return True
-        return bool(
-            runtime.assistant_model_repo
-            and build_companion_model_path(ModelId(runtime.assistant_model_repo))
-            is None
+        return not model_companions_present_on_disk(
+            shard.model_card, required_only=required_only
         )
