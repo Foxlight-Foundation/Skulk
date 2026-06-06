@@ -72,6 +72,7 @@ from exo.store.model_store_client import ModelStoreClient
 from exo.store.staging_eviction import (
     StagingEvictionReport,
     enforce_staging_budget,
+    staging_directory_name,
     touch_last_used,
 )
 from exo.utils.channels import Receiver, Sender, channel
@@ -779,16 +780,25 @@ class Worker:
         if self._staging_config is None:
             return
         cache_path = Path(self._staging_config.node_cache_path).expanduser()
+        # Keyed by forward-sanitized directory name: the report's model ids
+        # are best-effort inverses of directory names and can be ambiguous
+        # for ids containing "--" — sanitizing both sides forward makes the
+        # match exact.
         own_downloads = {
-            str(progress.shard_metadata.model_card.model_id): progress.shard_metadata
+            staging_directory_name(
+                str(progress.shard_metadata.model_card.model_id)
+            ): progress.shard_metadata
             for progress in self.state.downloads.get(self.node_id, [])
         }
-        deactivated_model_id = str(deactivated_shard.model_card.model_id)
+        deactivated_directory = staging_directory_name(
+            str(deactivated_shard.model_card.model_id)
+        )
         for evicted_model_id in report.evicted_model_ids:
+            evicted_directory = staging_directory_name(evicted_model_id)
             shard_metadata = (
                 deactivated_shard
-                if evicted_model_id == deactivated_model_id
-                else own_downloads.get(evicted_model_id)
+                if evicted_directory == deactivated_directory
+                else own_downloads.get(evicted_directory)
             )
             if shard_metadata is None:
                 # Never advertised as downloaded on this node — nothing to

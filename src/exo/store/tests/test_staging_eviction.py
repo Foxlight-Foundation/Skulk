@@ -84,9 +84,17 @@ def test_in_use_models_are_never_evicted(tmp_path: Path) -> None:
 
 
 def test_touch_last_used_refreshes_lru_position(tmp_path: Path) -> None:
-    """A model staged long ago but used just now must sort newest."""
-    old_dir = _stage_model(tmp_path, "org/stale", size_bytes=10, last_used_age_seconds=10)
-    _stage_model(tmp_path, "org/fresh", size_bytes=10, last_used_age_seconds=100)
+    """A model staged long ago but used just now must sort newest.
+
+    The genuinely OLD model (age 1000s) sorts behind the newer one until
+    touched — so a broken touch_last_used cannot pass this test."""
+    old_dir = _stage_model(
+        tmp_path, "org/stale", size_bytes=10, last_used_age_seconds=1000
+    )
+    _stage_model(tmp_path, "org/fresh", size_bytes=10, last_used_age_seconds=10)
+
+    staged_before = list_staged_models(tmp_path)
+    assert [info.model_id for info in staged_before] == ["org/fresh", "org/stale"]
 
     touch_last_used(old_dir)
     staged = list_staged_models(tmp_path)

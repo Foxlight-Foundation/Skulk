@@ -62,8 +62,19 @@ class StagedModelInfo(CamelCaseModel):
 
 
 def model_id_from_staging_directory_name(directory_name: str) -> str:
-    """Invert the ``org--name`` sanitization used for staging directories."""
+    """Best-effort inverse of the ``org--name`` directory sanitization.
+
+    Display/reporting only — the inverse is ambiguous when a repo name
+    itself contains ``--`` next to the separator, so MATCHING never uses
+    it: in-use checks compare forward-sanitized directory names instead
+    (see ``list_staged_models``).
+    """
     return directory_name.replace("--", "/", 1)
+
+
+def staging_directory_name(model_id: str) -> str:
+    """Forward sanitization for staging directory names (``org--name``)."""
+    return model_id.replace("/", "--")
 
 
 def touch_last_used(staged_model_directory: Path) -> None:
@@ -109,6 +120,12 @@ def list_staged_models(
     """
     if not staging_root.is_dir():
         return []
+    # In-use matching is by forward-sanitized DIRECTORY name: the inverse
+    # mapping is ambiguous for ids with "--" near the separator, and a
+    # mis-match here could evict a live model's files.
+    in_use_directory_names = {
+        staging_directory_name(model_id) for model_id in in_use_model_ids
+    }
     staged: list[StagedModelInfo] = []
     for entry in staging_root.iterdir():
         if not entry.is_dir():
@@ -120,7 +137,7 @@ def list_staged_models(
                 directory=str(entry),
                 size_bytes=_directory_size_bytes(entry),
                 last_used_epoch_seconds=_last_used_epoch_seconds(entry),
-                in_use=model_id in in_use_model_ids,
+                in_use=entry.name in in_use_directory_names,
             )
         )
     staged.sort(key=lambda info: info.last_used_epoch_seconds, reverse=True)
