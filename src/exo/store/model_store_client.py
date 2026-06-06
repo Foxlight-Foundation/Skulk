@@ -780,18 +780,22 @@ class ModelStoreDownloader(ShardDownloader):
         Companion cards are bare, so the recursion terminates after one
         level.
         """
-        for companion_shard, _allow_patterns in companion_download_specs(
+        for companion_shard, _allow_patterns, required in companion_download_specs(
             shard.model_card
         ):
             companion_id = companion_shard.model_card.model_id
             try:
                 await self.ensure_shard(companion_shard)
             except Exception as error:
+                if required:
+                    # Split vision weights are load-bearing: a vision model
+                    # without them is broken, not degraded.
+                    raise
                 logger.warning(
                     f"ModelStoreDownloader: companion repo {companion_id} for "
                     f"{shard.model_card.model_id} could not be fetched "
-                    f"({error}); speculative decoding / vision features that "
-                    "depend on it will be unavailable on this node."
+                    f"({error}); speculative decoding that depends on it "
+                    "will be unavailable on this node."
                 )
 
     async def _ensure_base_shard(

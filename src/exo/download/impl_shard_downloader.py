@@ -126,7 +126,9 @@ class ResumableShardDownloader(ShardDownloader):
         # so a transient fetch failure must not turn a loadable base
         # model into a download error. Failures log loudly instead.
         if not config_only and not self.offline:
-            for companion_shard, allow in companion_download_specs(shard.model_card):
+            for companion_shard, allow, required in companion_download_specs(
+                shard.model_card
+            ):
                 try:
                     await download_shard(
                         companion_shard,
@@ -136,11 +138,15 @@ class ResumableShardDownloader(ShardDownloader):
                         skip_internet=self.offline,
                     )
                 except Exception as error:
+                    if required:
+                        # Split vision weights are load-bearing: a vision
+                        # model without them is broken, not degraded.
+                        raise
                     logger.warning(
                         f"Companion repo {companion_shard.model_card.model_id} "
                         f"for {shard.model_card.model_id} could not be fetched "
-                        f"({error}); speculative decoding / vision features "
-                        "that depend on it will be unavailable on this node."
+                        f"({error}); speculative decoding that depends on it "
+                        "will be unavailable on this node."
                     )
 
         target_dir, _ = await download_shard(

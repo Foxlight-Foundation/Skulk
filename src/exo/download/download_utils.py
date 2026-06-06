@@ -179,7 +179,7 @@ def build_companion_model_path(model_id: ModelId) -> Path | None:
 
 def companion_download_specs(
     model_card: ModelCard,
-) -> list[tuple[PipelineShardMetadata, list[str]]]:
+) -> list[tuple[PipelineShardMetadata, list[str], bool]]:
     """Build download shards for every companion repo a model card declares.
 
     Companions are the artifacts a model needs beyond its own repo: a
@@ -190,9 +190,13 @@ def companion_download_specs(
     "model loads, speculative decoding silently unavailable" failure mode
     (launch smoke, 2026-06-06).
 
-    Returns ``(shard, allow_patterns)`` pairs; the shards carry bare model
-    cards (no ``runtime``/``vision`` sections), so recursively ensuring a
-    companion never yields further companions.
+    Returns ``(shard, allow_patterns, required)`` triples; the shards carry
+    bare model cards (no ``runtime``/``vision`` sections), so recursively
+    ensuring a companion never yields further companions. ``required``
+    distinguishes criticality: split vision weights are load-bearing (a
+    vision model without them is broken — fetch failures must fail the
+    base), while MTP sidecars and assistants degrade gracefully to
+    run-without-speculation (best-effort).
     """
     def _bare_shard(repo: str) -> PipelineShardMetadata:
         return PipelineShardMetadata(
@@ -211,12 +215,16 @@ def companion_download_specs(
             n_layers=1,
         )
 
-    specs: list[tuple[PipelineShardMetadata, list[str]]] = []
+    specs: list[tuple[PipelineShardMetadata, list[str], bool]] = []
     if model_card.vision and model_card.vision.weights_repo != str(
         model_card.model_id
     ):
         specs.append(
-            (_bare_shard(model_card.vision.weights_repo), ["*.safetensors", "config.json"])
+            (
+                _bare_shard(model_card.vision.weights_repo),
+                ["*.safetensors", "config.json"],
+                True,
+            )
         )
     runtime = model_card.runtime
     # The runner only loads the sidecar when mtp_heads is also set (see
@@ -224,7 +232,11 @@ def companion_download_specs(
     # bandwidth and produces misleading speculation warnings.
     if runtime and runtime.mtp_sidecar_repo and runtime.mtp_heads:
         specs.append(
-            (_bare_shard(runtime.mtp_sidecar_repo), ["mtp.safetensors", "config.json"])
+            (
+                _bare_shard(runtime.mtp_sidecar_repo),
+                ["mtp.safetensors", "config.json"],
+                False,
+            )
         )
     if runtime and runtime.assistant_model_repo:
         # The assistant is a small full model (config + a single
@@ -233,6 +245,7 @@ def companion_download_specs(
             (
                 _bare_shard(runtime.assistant_model_repo),
                 ["*.safetensors", "config.json"],
+                False,
             )
         )
     return specs
