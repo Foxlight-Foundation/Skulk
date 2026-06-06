@@ -138,6 +138,7 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `GET /store/models/{model_id}/download/status`
 - `DELETE /store/models/{model_id}`
 - `POST /store/purge-staging`
+- `GET /store/storage`
 - `POST /store/models/{model_id}/optimize`
 - `GET /store/models/{model_id}/optimize/status`
 - `GET /filesystem/browse`
@@ -558,6 +559,27 @@ Behavior note:
 
 - Skulk searches `mlx-community` first.
 - If that returns nothing, it falls back to a broader Hugging Face search.
+
+### Per-node storage breakdown
+
+**GET** `/store/storage`
+
+Returns the local node's storage picture: every staged model with its size,
+last-use time, and whether a live instance (or one of its companion repos —
+MTP sidecar, assistant, vision weights) currently depends on it, plus
+event-log usage and free disk on the models volume. Cluster-wide views query
+each node's API.
+
+```bash
+curl http://localhost:52415/store/storage
+```
+
+Staged copies are managed automatically when the model store is on: when an
+instance shuts down (and at node startup, which reconciles copies orphaned
+by a crash), not-in-use staged models are kept newest-first up to the
+`staging_keep_recent_gb` grace budget (default 40 GiB) and evicted beyond
+it. Set `cleanup_on_deactivate: false` in the staging config to keep every
+staged copy and manage cleanup manually via `POST /store/purge-staging`.
 
 ## Placement and Instance Management
 

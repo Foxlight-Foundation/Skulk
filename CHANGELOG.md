@@ -7,6 +7,24 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- **Staged model copies now have a lifecycle, and nodes can report their
+  storage.** With the model store on, staged copies previously survived
+  instance deletion and node crashes forever (58-70 GB piles; one node
+  died of a full disk in the launch smoke). `cleanup_on_deactivate` now
+  defaults to true with a recent-use grace budget
+  (`staging_keep_recent_gb`, default 40 GiB): when an instance shuts
+  down — and at node startup, which reconciles copies orphaned by a
+  crash — not-in-use staged models are kept newest-first by last use up
+  to the budget and evicted beyond it. In-use detection includes
+  companion repos (MTP sidecar / assistant / vision weights) of active
+  models, so eviction can never corrupt a live runner. The grace budget
+  is deliberate: node deaths, restarts, and repeated place/delete cycles
+  of the same model do not re-pay the staging copy. New
+  `GET /store/storage` returns the local node's breakdown: staged models
+  with size/last-use/in-use, event-log bytes, and disk free.
+
 ### Fixed
 
 - **Event logs can no longer eat the disk or kill nodes on a full one.**

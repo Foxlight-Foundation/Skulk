@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import anyio
-from anyio import BrokenResourceError, ClosedResourceError, fail_after
+from anyio import BrokenResourceError, ClosedResourceError, fail_after, to_thread
 from loguru import logger
 from PIL import Image
 
@@ -14,7 +14,12 @@ from exo.api.types import ImageEditsTaskParams
 from exo.download.download_utils import resolve_model_in_path
 from exo.shared.apply import apply
 from exo.shared.constants import EXO_IMAGE_TRANSPORT_DEBUG
-from exo.shared.models.model_cards import ModelId, add_to_card_cache, delete_custom_card
+from exo.shared.models.model_cards import (
+    ModelCard,
+    ModelId,
+    add_to_card_cache,
+    delete_custom_card,
+)
 from exo.shared.types.chunks import InputImageChunk
 from exo.shared.types.commands import (
     ForwarderCommand,
@@ -55,11 +60,21 @@ from exo.shared.types.tasks import (
     TextGeneration,
 )
 from exo.shared.types.topology import Connection, SocketConnection
-from exo.shared.types.worker.downloads import DownloadCompleted, DownloadPending
+from exo.shared.types.worker.downloads import (
+    DownloadCompleted,
+    DownloadOngoing,
+    DownloadPending,
+)
 from exo.shared.types.worker.runners import RunnerId
 from exo.shared.types.worker.shards import ShardMetadata
 from exo.store.config import StagingNodeConfig
 from exo.store.model_store_client import ModelStoreClient
+from exo.store.staging_eviction import (
+    StagingEvictionReport,
+    enforce_staging_budget,
+    staging_directory_name,
+    touch_last_used,
+)
 from exo.utils.channels import Receiver, Sender, channel
 from exo.utils.info_gatherer.info_gatherer import GatheredInfo, InfoGatherer
 from exo.utils.info_gatherer.net_profile import check_reachable
@@ -67,6 +82,13 @@ from exo.utils.keyed_backoff import KeyedBackoff
 from exo.utils.task_group import TaskGroup
 from exo.worker.plan import plan
 from exo.worker.runner.runner_supervisor import RunnerSupervisor
+
+_STALE_RESET_MAX_WAIT_TICKS = 300
+"""How many ~100ms planning ticks to hold planning while stale download
+resets round-trip through the master (~30s). The deadline exists so a
+masterless interval cannot freeze the worker forever — past it, planning
+resumes and the download coordinator's missing-directory self-heal covers
+the residual risk."""
 
 
 def _summarize_worker_task(task: Task) -> str:
@@ -239,6 +261,16 @@ class Worker:
 
         self.state: State = State()
         self.runners: dict[RunnerId, RunnerSupervisor] = {}
+        # Staging DIRECTORY NAMES (forward-sanitized) of models evicted by
+        # startup reconciliation whose DownloadCompleted entries may still
+        # be replicating in; countered lazily by
+        # plan_step once state carries them. Names stay in the pending set
+        # until the reset has APPLIED (state stops advertising the stale
+        # entry) — discarding on send would reopen the plan gate while the
+        # event is still round-tripping through the master.
+        self._stale_downloads_pending_reset: set[str] = set()
+        self._stale_resets_sent: set[str] = set()
+        self._stale_reset_wait_ticks: int = 0
         self._tg: TaskGroup = TaskGroup()
 
         self._system_id = SystemId()
@@ -253,6 +285,7 @@ class Worker:
 
     async def run(self):
         logger.info("Starting Worker")
+        self._reconcile_staging_on_startup()
 
         info_send, info_recv = channel[GatheredInfo]()
         info_gatherer: InfoGatherer = InfoGatherer(info_send)
@@ -330,6 +363,27 @@ class Worker:
     async def plan_step(self):
         while True:
             await anyio.sleep(0.1)
+            if self._stale_downloads_pending_reset:
+                await self._reset_stale_downloads_from_state()
+                if self._state_still_advertises_evicted_downloads():
+                    # The DownloadPending resets round-trip through the
+                    # master before our replicated state drops the stale
+                    # DownloadCompleted entries; planning against the
+                    # stale state could dispatch a load straight at the
+                    # files we just deleted. Skip planning until the
+                    # resets land (bounded: see the deadline below).
+                    self._stale_reset_wait_ticks += 1
+                    if self._stale_reset_wait_ticks <= _STALE_RESET_MAX_WAIT_TICKS:
+                        continue
+                    logger.warning(
+                        "Worker: stale download resets have not applied "
+                        f"after {_STALE_RESET_MAX_WAIT_TICKS} planning "
+                        "ticks; resuming planning anyway (the coordinator "
+                        "self-heals missing files at download time)"
+                    )
+                    self._stale_downloads_pending_reset.clear()
+                    self._stale_resets_sent.clear()
+                    self._stale_reset_wait_ticks = 0
             task: Task | None = plan(
                 self.node_id,
                 self.runners,
@@ -648,8 +702,45 @@ class Worker:
             ),
         )
 
+    def _models_in_use(self) -> frozenset[str]:
+        """Repo-form IDs of every model a live runner depends on.
+
+        Includes companion repos (MTP sidecar, assistant, split vision
+        weights) of active models: no instance names them directly, but
+        evicting one corrupts a live runner just the same — MLX loads
+        weights lazily.
+        """
+        def _add_card(card: ModelCard) -> None:
+            in_use.add(str(card.model_id))
+            if card.vision and card.vision.weights_repo:
+                in_use.add(card.vision.weights_repo)
+            runtime = card.runtime
+            if runtime is not None:
+                if runtime.mtp_sidecar_repo:
+                    in_use.add(runtime.mtp_sidecar_repo)
+                if runtime.assistant_model_repo:
+                    in_use.add(runtime.assistant_model_repo)
+
+        in_use: set[str] = set()
+        for runner in self.runners.values():
+            _add_card(runner.shard_metadata.model_card)
+        # A store-backed download in progress has already created its
+        # staging directory but no runner exists yet — a concurrent
+        # teardown's budget pass must not delete a directory that is
+        # actively being written.
+        for progress in self.state.downloads.get(self.node_id, []):
+            if isinstance(progress, DownloadOngoing):
+                _add_card(progress.shard_metadata.model_card)
+        return frozenset(in_use)
+
     async def _maybe_evict_shard(self, shard: ShardMetadata | None) -> None:
-        """Evict staged shard files after runner teardown if configured."""
+        """Hold the staging cache to its recent-use budget after teardown.
+
+        The torn-down model becomes an eviction candidate like any other
+        not-in-use staged copy; the grace budget decides what actually goes
+        (so repeated place/delete cycles of the same model do not re-pay
+        the staging copy every time).
+        """
         if (
             shard is None
             or self._store_client is None
@@ -657,34 +748,239 @@ class Worker:
             or not self._staging_config.cleanup_on_deactivate
         ):
             return
-        model_id = str(shard.model_card.model_id)
-        # Skip eviction if another runner for the same model is still active —
-        # MLX loads weights lazily, so tearing down a sibling's staged files
-        # would corrupt the live runner.
-        if any(
-            str(r.shard_metadata.model_card.model_id) == model_id
-            for r in self.runners.values()
-        ):
-            logger.debug(
-                f"Worker: skipping eviction for {model_id} — another runner is still active"
-            )
+        # The just-deactivated model was in use until this very moment —
+        # refresh its last-use marker (and its companions') BEFORE the
+        # budget pass, or a long-staged but heavily-used model sorts as
+        # old and gets evicted despite being the most recently used thing
+        # on the node (the downloader only touches markers when it runs,
+        # and reuse from an existing DownloadCompleted skips it).
+        self._touch_staged_model_and_companions(shard.model_card)
+        # The walk + rmtree are synchronous filesystem work on potentially
+        # tens of GB — run off the event loop so teardown doesn't stall
+        # other worker tasks. The in-use snapshot is taken HERE, on the
+        # loop thread: the threaded pass must not iterate self.runners /
+        # self.state while the loop mutates them.
+        models_in_use = self._models_in_use()
+        report = await to_thread.run_sync(
+            self._enforce_staging_budget, models_in_use
+        )
+        if report is None:
+            return
+        await self._reset_download_state_for_evicted(report, shard)
+
+    async def _reset_download_state_for_evicted(
+        self, report: StagingEvictionReport, deactivated_shard: ShardMetadata
+    ) -> None:
+        """Reset download status for EVERY evicted model on this node.
+
+        The budget pass can evict models other than the one just torn down;
+        leaving them DownloadCompleted in master state would make the
+        planner skip re-staging and fail later loads. Shard metadata for
+        the other models comes from this node's own download-status state.
+        """
+        if self._staging_config is None:
             return
         cache_path = Path(self._staging_config.node_cache_path).expanduser()
-        try:
-            await self._store_client.evict_shard(model_id, cache_path)
-            logger.info(f"Worker: evicted staged files for {model_id}")
-            # Reset download status so the dashboard no longer shows
-            # this model as downloaded on this node.
+        # Keyed by forward-sanitized directory name: the report's model ids
+        # are best-effort inverses of directory names and can be ambiguous
+        # for ids containing "--" — sanitizing both sides forward makes the
+        # match exact.
+        own_downloads = {
+            staging_directory_name(
+                str(progress.shard_metadata.model_card.model_id)
+            ): progress.shard_metadata
+            for progress in self.state.downloads.get(self.node_id, [])
+        }
+        deactivated_directory = staging_directory_name(
+            str(deactivated_shard.model_card.model_id)
+        )
+        for evicted_model_id in report.evicted_model_ids:
+            evicted_directory = staging_directory_name(evicted_model_id)
+            shard_metadata = (
+                deactivated_shard
+                if evicted_directory == deactivated_directory
+                else own_downloads.get(evicted_directory)
+            )
+            if shard_metadata is None:
+                # Never advertised as downloaded on this node — nothing to
+                # reset (e.g. a companion repo staged without its own
+                # download entry).
+                continue
             pending = DownloadPending(
-                shard_metadata=shard,
+                shard_metadata=shard_metadata,
                 node_id=self.node_id,
-                model_directory=str(cache_path / model_id.replace("/", "--")),
+                model_directory=str(
+                    cache_path / evicted_model_id.replace("/", "--")
+                ),
             )
             await self.event_sender.send(
                 NodeDownloadProgress(download_progress=pending)
             )
+
+    def _touch_staged_model_and_companions(self, card: ModelCard) -> None:
+        """Refresh .last_used for a model (and companions) just taken out of use."""
+        if self._staging_config is None:
+            return
+        cache_path = Path(self._staging_config.node_cache_path).expanduser()
+        model_ids = [str(card.model_id)]
+        if card.vision and card.vision.weights_repo:
+            model_ids.append(card.vision.weights_repo)
+        if card.runtime is not None:
+            if card.runtime.mtp_sidecar_repo:
+                model_ids.append(card.runtime.mtp_sidecar_repo)
+            if card.runtime.assistant_model_repo:
+                model_ids.append(card.runtime.assistant_model_repo)
+        for model_id in model_ids:
+            staged_dir = cache_path / model_id.replace("/", "--")
+            if staged_dir.is_dir():
+                touch_last_used(staged_dir)
+
+    def _enforce_staging_budget(
+        self, models_in_use: frozenset[str]
+    ) -> StagingEvictionReport | None:
+        """Run one staging-budget enforcement pass (best-effort).
+
+        ``models_in_use`` is snapshotted by the caller on the event-loop
+        thread — this method may run in a worker thread and must not touch
+        the loop's mutable structures.
+        """
+        if self._staging_config is None or not self._staging_config.enabled:
+            return None
+        staging_root = Path(self._staging_config.node_cache_path).expanduser()
+        # A store host configured for direct loading points node_cache_path
+        # at the CANONICAL store directory (a common override that was safe
+        # under the old no-cleanup default). Eviction there would delete the
+        # cluster's only copy of every model beyond the budget — refuse,
+        # whatever the config says (codex review on #215).
+        if self._store_client is not None:
+            local_store_path = self._store_client.local_store_path
+            if (
+                local_store_path is not None
+                and local_store_path.expanduser().resolve()
+                == staging_root.resolve()
+            ):
+                logger.warning(
+                    "Worker: staging eviction skipped — node_cache_path is "
+                    f"the canonical store directory ({staging_root}); the "
+                    "store is never evicted. Set a separate staging path if "
+                    "this node should have a managed staging cache."
+                )
+                return None
+        keep_recent_bytes = int(
+            self._staging_config.staging_keep_recent_gb * 1024**3
+        )
+        try:
+            return enforce_staging_budget(
+                staging_root,
+                keep_recent_bytes,
+                models_in_use,
+            )
         except Exception as exc:
-            logger.warning(f"Worker: evict_shard failed for {model_id}: {exc}")
+            logger.warning(f"Worker: staging budget enforcement failed: {exc}")
+            return None
+
+    def _state_still_advertises_evicted_downloads(self) -> bool:
+        """True while replicated state shows DownloadCompleted for a model
+        whose staged files the startup pass deleted."""
+        for progress in self.state.downloads.get(self.node_id, []):
+            if (
+                isinstance(progress, DownloadCompleted)
+                and staging_directory_name(
+                    str(progress.shard_metadata.model_card.model_id)
+                )
+                in self._stale_downloads_pending_reset
+            ):
+                return True
+        return False
+
+    async def _reset_stale_downloads_from_state(self) -> None:
+        """Counter stale DownloadCompleted entries for startup-evicted models.
+
+        Runs from plan_step while any evicted ID lacks its reset: once the
+        replicated state shows a DownloadCompleted for this node naming an
+        evicted model, emit DownloadPending with that entry's own shard
+        metadata so the planner re-stages instead of dispatching a load
+        against deleted files.
+        """
+        if self._staging_config is None:
+            self._stale_downloads_pending_reset.clear()
+            self._stale_resets_sent.clear()
+            return
+        cache_path = Path(self._staging_config.node_cache_path).expanduser()
+        still_completed: set[str] = set()
+        for progress in self.state.downloads.get(self.node_id, []):
+            if not isinstance(progress, DownloadCompleted):
+                continue
+            model_id = str(progress.shard_metadata.model_card.model_id)
+            directory_name = staging_directory_name(model_id)
+            if directory_name not in self._stale_downloads_pending_reset:
+                continue
+            staged_dir = cache_path / directory_name
+            if staged_dir.exists():
+                # Re-staged since eviction — state is truthful again.
+                self._stale_downloads_pending_reset.discard(directory_name)
+                self._stale_resets_sent.discard(directory_name)
+                continue
+            still_completed.add(directory_name)
+            if directory_name in self._stale_resets_sent:
+                continue  # reset in flight; keep gating until it applies
+            pending = DownloadPending(
+                shard_metadata=progress.shard_metadata,
+                node_id=self.node_id,
+                model_directory=str(staged_dir),
+            )
+            await self.event_sender.send(
+                NodeDownloadProgress(download_progress=pending)
+            )
+            self._stale_resets_sent.add(directory_name)
+            logger.info(
+                f"Worker: reset stale DownloadCompleted for {model_id} "
+                "(staged files were evicted at startup)"
+            )
+        # Anything we sent a reset for that state no longer advertises has
+        # APPLIED — only then does it stop gating the planner.
+        for directory_name in list(self._stale_resets_sent):
+            if directory_name not in still_completed:
+                self._stale_downloads_pending_reset.discard(directory_name)
+                self._stale_resets_sent.discard(directory_name)
+        if not self._stale_downloads_pending_reset:
+            self._stale_reset_wait_ticks = 0
+
+    def _reconcile_staging_on_startup(self) -> None:
+        """Reconcile staging orphans left by a crashed or killed session.
+
+        A node that dies never runs the deactivate-time eviction, so its
+        staged copies survive forever without this. At startup nothing is
+        in use yet, so every staged model is a candidate and the grace
+        budget alone decides what survives — which is exactly the crash
+        recovery behavior we want: recent models stay warm for the
+        restart, the old tail goes.
+        """
+        if (
+            self._staging_config is None
+            or not self._staging_config.cleanup_on_deactivate
+        ):
+            return
+        report = self._enforce_staging_budget(self._models_in_use())
+        if report is not None and report.evicted_model_ids:
+            logger.info(
+                "Worker: startup staging reconciliation evicted "
+                f"{len(report.evicted_model_ids)} orphaned model(s) "
+                f"({report.evicted_bytes / 2**30:.1f} GiB)"
+            )
+            # The master may still hold DownloadCompleted entries for the
+            # files we just deleted, but this runs BEFORE state replay —
+            # there is no shard metadata to build the reset events from
+            # yet. Remember the DIRECTORY names (forward-sanitized; the
+            # report's repo-form ids are best-effort inverses and would be
+            # ambiguous for ids containing "--"); plan_step counters the
+            # stale entries as soon as they appear in replicated state
+            # (the plan layer consults state.downloads, so leaving them
+            # would skip re-staging and fail a later load).
+            self._stale_downloads_pending_reset.update(
+                staging_directory_name(model_id)
+                for model_id in report.evicted_model_ids
+            )
 
     async def _poll_connection_updates(self):
         while True:

@@ -85,6 +85,7 @@ from exo.shared.types.memory import Memory
 from exo.shared.types.worker.downloads import RepoDownloadProgress
 from exo.shared.types.worker.shards import ShardMetadata
 from exo.store.config import StagingNodeConfig
+from exo.store.staging_eviction import touch_last_used
 
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB per read/write chunk
 _CONNECT_TIMEOUT = 10.0  # seconds — abort if store host unreachable
@@ -875,6 +876,7 @@ class ModelStoreDownloader(ShardDownloader):
             logger.info(
                 f"ModelStoreDownloader: {model_id} already staged at {dest_path} — skipping availability probe"
             )
+            touch_last_used(dest_path)
             return dest_path
 
         available = await self._store_client.is_model_available(model_id)
@@ -894,6 +896,7 @@ class ModelStoreDownloader(ShardDownloader):
                         total_bytes=total,
                     ),
                 )
+                touch_last_used(path)
                 return path
             except ModelNotInStoreError:
                 # Store index was stale — the file was reported present but
@@ -934,6 +937,7 @@ class ModelStoreDownloader(ShardDownloader):
                     total_bytes=total,
                 ),
             )
+            touch_last_used(path)
             return path
 
         raise ModelNotInStoreError(
