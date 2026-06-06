@@ -131,7 +131,7 @@ def _staged_directory_looks_complete(directory: Path) -> bool:
     """
     from exo.download.download_utils import is_model_directory_complete
 
-    if any(directory.glob("*.partial")):
+    if any(directory.rglob("*.partial")):
         return False
     if is_model_directory_complete(directory):
         return True
