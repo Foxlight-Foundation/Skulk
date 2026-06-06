@@ -14,6 +14,7 @@ from exo.download.download_utils import (
     RepoDownloadProgress,
     delete_model,
     map_repo_download_progress_to_download_progress_data,
+    model_companions_present_on_disk,
     resolve_model_in_path,
 )
 from exo.download.shard_downloader import ShardDownloader
@@ -366,8 +367,29 @@ class DownloadCoordinator:
                 )
                 return
 
-        # Check EXO_MODELS_PATH for pre-downloaded models
+        # Check EXO_MODELS_PATH for pre-downloaded models. A base model on
+        # disk does NOT make the download complete when the card declares a
+        # companion (MTP sidecar / assistant) that is missing — treating it
+        # as complete here bypassed ensure_shard entirely and loaded staged
+        # models with speculative decoding silently unavailable (codex
+        # review on the launch-smoke fix). Fall through to the download
+        # path instead so the companion gets fetched.
         found_path = resolve_model_in_path(model_id)
+        # In offline mode optional companions can never be fetched and the
+        # runner degrades to run-without-speculation, so only load-bearing
+        # companions (split vision weights) block the shortcut there —
+        # hiding a loadable base behind a doomed download would produce
+        # DownloadFailed for a usable model, but advertising a vision model
+        # without its weights would hand out a broken one.
+        if found_path is not None and not model_companions_present_on_disk(
+            shard.model_card, required_only=self.offline
+        ):
+            logger.info(
+                f"DownloadCoordinator: {model_id} base model is on disk at "
+                f"{found_path} but a declared companion repo is missing — "
+                "running the download path to fetch it"
+            )
+            found_path = None
         if found_path is not None:
             logger.info(
                 f"DownloadCoordinator: Model {model_id} found in EXO_MODELS_PATH at {found_path}"
@@ -630,6 +652,15 @@ class DownloadCoordinator:
                     ):
                         continue
                     found = resolve_model_in_path(mid)
+                    if found is not None and not model_companions_present_on_disk(
+                        card, required_only=self.offline
+                    ):
+                        # Same companion gate as _start_download: a staged
+                        # base missing a companion must not be advertised
+                        # as complete (offline nodes check only the
+                        # load-bearing vision weights — optional companions
+                        # can never arrive there).
+                        continue
                     if found is not None:
                         logger.info(
                             f"DownloadCoordinator: EXO_MODELS_PATH hit: {mid} -> {found}"

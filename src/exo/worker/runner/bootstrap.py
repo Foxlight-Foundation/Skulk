@@ -1,9 +1,11 @@
+import contextlib
 import gc
 import os
 import resource
 import signal
 import threading
 import time
+from collections.abc import Callable, Iterator
 
 import loguru
 
@@ -94,6 +96,96 @@ def resolve_metal_fast_synch(card_runtime: RuntimeCapabilityCardConfig | None) -
     if _card_declares_speculative_decoding(card_runtime):
         return False
     return FAST_SYNCH_CLUSTER_DEFAULT
+
+
+WARMUP_DEADLINE_SECONDS_DEFAULT: float = 300.0
+"""How long a runner may spend in warmup before it is declared wedged.
+
+Healthy warmups finish in seconds (kernel compile + a 1-token generation);
+five minutes is far beyond any legitimate cold start while still bounding
+the failure. The canonical wedge (launch smoke, 2026-06-05): a Metal fault
+leaves ``mx.eval`` parked in ``IOSurfaceSharedEvent`` forever at 0% CPU —
+uninterruptible from Python — and the runner sits in ``RunnerWarmingUp``
+silently blocking ALL task dispatch on the node. Override with
+``SKULK_WARMUP_DEADLINE_SECONDS``.
+"""
+
+
+def resolve_warmup_deadline_seconds() -> float:
+    """Resolve the warmup deadline, honoring the operator env override."""
+    raw = preferred_env_value(
+        "SKULK_WARMUP_DEADLINE_SECONDS", "EXO_WARMUP_DEADLINE_SECONDS"
+    )
+    if raw is not None:
+        try:
+            parsed = float(raw)
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            pass
+        logger.warning(
+            "Ignoring invalid warmup-deadline override "
+            f"(SKULK_WARMUP_DEADLINE_SECONDS / EXO_WARMUP_DEADLINE_SECONDS) "
+            f"value {raw!r}; using default "
+            f"{WARMUP_DEADLINE_SECONDS_DEFAULT:.0f}s"
+        )
+    return WARMUP_DEADLINE_SECONDS_DEFAULT
+
+
+@contextlib.contextmanager
+def deadline_watchdog(
+    seconds: float,
+    description: str,
+    on_timeout: Callable[[], None] | None = None,
+) -> Iterator[None]:
+    """Hard deadline for a block that may wedge uninterruptibly.
+
+    A wedged Metal eval blocks inside the driver at 0% CPU and cannot be
+    interrupted by signals or async timeouts — the only reliable escape is
+    process exit (the supervisor observes the death and reports
+    ``RunnerFailed``; Metal memory is reclaimed on exit). A daemon thread
+    waits out the deadline and, if the block has not finished, logs a
+    CRITICAL diagnosis and terminates the process via ``os._exit``.
+
+    Args:
+        seconds: Deadline for the wrapped block.
+        description: Human-readable name of the operation (appears in the
+            CRITICAL log line).
+        on_timeout: Test seam — replaces the default log-and-``os._exit``
+            action when provided.
+    """
+    finished = threading.Event()
+
+    def _default_timeout_action() -> None:
+        logger.critical(
+            f"{description} exceeded its {seconds:.0f}s deadline — the GPU "
+            "may be wedged (a faulted Metal eval blocks forever at 0% CPU). "
+            "Terminating this runner so the node can keep dispatching. If "
+            "runners keep dying here, test the GPU with a small matmul; if "
+            "that hangs too, the machine needs a reboot to reset the Metal "
+            "device queue."
+        )
+        # Deliberately NO _release_metal_resources() here: mx.clear_cache()
+        # would touch the very Metal device this watchdog assumes is wedged
+        # and could block before the exit. Process exit reclaims all Metal
+        # allocations on its own (verified across every crash class,
+        # 2026-06-05).
+        os._exit(1)
+
+    action = on_timeout if on_timeout is not None else _default_timeout_action
+
+    def _watch() -> None:
+        if not finished.wait(seconds):
+            action()
+
+    watcher = threading.Thread(
+        target=_watch, name="runner-deadline-watchdog", daemon=True
+    )
+    watcher.start()
+    try:
+        yield
+    finally:
+        finished.set()
 
 
 def _release_metal_resources() -> None:

@@ -79,7 +79,7 @@ import aiofiles.os as aios
 import aiohttp
 from loguru import logger
 
-from exo.download.download_utils import create_http_session
+from exo.download.download_utils import companion_download_specs, create_http_session
 from exo.download.shard_downloader import ShardDownloader
 from exo.shared.types.memory import Memory
 from exo.shared.types.worker.downloads import RepoDownloadProgress
@@ -118,6 +118,28 @@ def _staging_dir(node_cache_path: str, model_id: str) -> Path:
 
 def _make_store_url(host: str, port: int, path: str) -> str:
     return f"http://{host}:{port}{path}"
+
+
+def _staged_directory_looks_complete(directory: Path) -> bool:
+    """Heuristic completeness check for a staged directory.
+
+    Accepts the three repo layouts the store serves: a full model repo
+    (index-based completeness, same probe the downloader uses), a
+    single-file companion model (config.json + model.safetensors), or an
+    MTP sidecar (mtp.safetensors). A directory with leftover ``.partial``
+    files is never complete.
+    """
+    from exo.download.download_utils import is_model_directory_complete
+
+    if any(directory.rglob("*.partial")):
+        return False
+    if is_model_directory_complete(directory):
+        return True
+    if (directory / "config.json").is_file() and (
+        directory / "model.safetensors"
+    ).is_file():
+        return True
+    return (directory / "mtp.safetensors").is_file()
 
 
 @final
@@ -744,7 +766,65 @@ class ModelStoreDownloader(ShardDownloader):
     async def ensure_shard(
         self, shard: ShardMetadata, config_only: bool = False
     ) -> Path:
-        """Ensure the shard is available locally, staging from the store if needed.
+        """Ensure the shard AND its companion repos are available locally.
+
+        Resolves the base model via :meth:`_ensure_base_shard` (store-first
+        with optional HF fallback), then ensures every companion repo the
+        card declares (vision weights, MTP sidecar, assistant model) through
+        the same store-first path. Before this wrapper existed, three of the
+        four base-resolution paths returned without fetching companions — a
+        staged base model would load and run with speculative decoding
+        silently unavailable (launch smoke, 2026-06-06).
+
+        Companion criticality differs: split vision weights are
+        load-bearing, so their fetch failures fail the base load (a vision
+        model without them is broken). MTP sidecars and assistants are
+        best-effort — the runner degrades to run-without-speculation, so
+        their failures log loudly without failing a loadable base model.
+        """
+        path = await self._ensure_base_shard(shard, config_only)
+        if not config_only:
+            await self._ensure_companion_shards(shard)
+        # Terminal progress is emitted HERE, after companions: the
+        # "complete" status becomes cluster-visible DownloadCompleted state
+        # the moment it fires, and the planner dispatches LoadModel off
+        # that state — emitting it from the base-resolution paths let a
+        # runner load while a companion was still staging and run without
+        # speculation (codex review on #213).
+        await self._emit_progress(shard, status="complete")
+        return path
+
+    async def _ensure_companion_shards(self, shard: ShardMetadata) -> None:
+        """Ensure every companion repo declared by the shard's model card.
+
+        Recurses through :meth:`ensure_shard` so companions get the same
+        store-first resolution as base models (already staged → skip; in
+        store → stage; missing → store-host HF fetch / inner fallback).
+        Companion cards are bare, so the recursion terminates after one
+        level.
+        """
+        for companion_shard, _allow_patterns, required in companion_download_specs(
+            shard.model_card
+        ):
+            companion_id = companion_shard.model_card.model_id
+            try:
+                await self.ensure_shard(companion_shard)
+            except Exception as error:
+                if required:
+                    # Split vision weights are load-bearing: a vision model
+                    # without them is broken, not degraded.
+                    raise
+                logger.warning(
+                    f"ModelStoreDownloader: companion repo {companion_id} for "
+                    f"{shard.model_card.model_id} could not be fetched "
+                    f"({error}); speculative decoding that depends on it "
+                    "will be unavailable on this node."
+                )
+
+    async def _ensure_base_shard(
+        self, shard: ShardMetadata, config_only: bool = False
+    ) -> Path:
+        """Ensure the base model is available locally, staging from the store if needed.
 
         Resolution order:
 
@@ -773,23 +853,28 @@ class ModelStoreDownloader(ShardDownloader):
                 direct_path = self._store_client.local_store_path / _sanitize_model_id(
                     model_id
                 )
-                if direct_path.exists() and any(direct_path.iterdir()):
+                if direct_path.exists() and _staged_directory_looks_complete(
+                    direct_path
+                ):
                     logger.info(
                         f"ModelStoreDownloader: staging disabled — loading {model_id} directly from store at {direct_path}"
                     )
-                    await self._emit_progress(shard, status="complete")
                     return direct_path
             return await self._inner.ensure_shard(shard, config_only)
 
-        # Fast path: if the model is already staged locally, skip the
-        # HTTP availability probe.  This keeps inference working when the store
-        # server is temporarily unreachable and avoids an unnecessary round-trip.
+        # Fast path: if the model is already staged locally AND the staged
+        # directory looks complete, skip the HTTP availability probe. This
+        # keeps inference working when the store server is temporarily
+        # unreachable and avoids an unnecessary round-trip. An interrupted
+        # staging leaves a partial directory (e.g. just config.json or a
+        # .partial file) — trusting any non-empty dir here would hand MLX a
+        # broken model, so incomplete dirs fall through to re-staging
+        # (which resumes partial files via HTTP Range).
         dest_path = _staging_dir(self._staging_config.node_cache_path, model_id)
-        if dest_path.exists() and any(dest_path.iterdir()):
+        if dest_path.exists() and _staged_directory_looks_complete(dest_path):
             logger.info(
                 f"ModelStoreDownloader: {model_id} already staged at {dest_path} — skipping availability probe"
             )
-            await self._emit_progress(shard, status="complete")
             return dest_path
 
         available = await self._store_client.is_model_available(model_id)
@@ -809,7 +894,6 @@ class ModelStoreDownloader(ShardDownloader):
                         total_bytes=total,
                     ),
                 )
-                await self._emit_progress(shard, status="complete")
                 return path
             except ModelNotInStoreError:
                 # Store index was stale — the file was reported present but
@@ -850,7 +934,6 @@ class ModelStoreDownloader(ShardDownloader):
                     total_bytes=total,
                 ),
             )
-            await self._emit_progress(shard, status="complete")
             return path
 
         raise ModelNotInStoreError(
