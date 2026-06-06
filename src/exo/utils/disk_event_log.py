@@ -85,6 +85,9 @@ class DiskEventLog:
         self._offset_cache: OrderedDict[int, int] = OrderedDict()
         self._base_idx: int = 0
         self._count: int = 0
+        # Set on the first failed disk write (e.g. ENOSPC); the log then
+        # counts events without persisting so indices stay coherent.
+        self._persistence_failed: bool = False
 
         # Rotate stale active file from a previous session/crash
         if self._active_path.exists():
@@ -136,14 +139,39 @@ class DiskEventLog:
         self._cache_offset(target_idx, f.tell())
 
     def append(self, event: Event) -> None:
-        packed = _serialize_event(event)
-        self._file.write(len(packed).to_bytes(_HEADER_SIZE, byteorder="big"))
-        self._file.write(packed)
-        self._count += 1
-        self._write_metadata()
+        # Persistence failures (disk full being the canonical case) must
+        # NEVER take down the event processor: the in-memory state apply
+        # and the broadcast are the critical path, and event indices derive
+        # from len(self) — so the count keeps advancing even when the disk
+        # write fails, keeping follower replay indices coherent. The log
+        # degrades to in-memory-only with one CRITICAL line (launch E2E
+        # smoke 2026-06-05: ENOSPC in _write_metadata killed the node).
+        if self._persistence_failed:
+            self._count += 1
+            return
+        try:
+            packed = _serialize_event(event)
+            self._file.write(len(packed).to_bytes(_HEADER_SIZE, byteorder="big"))
+            self._file.write(packed)
+            self._count += 1
+            self._write_metadata()
+        except OSError as error:
+            self._count += 1
+            self._persistence_failed = True
+            logger.critical(
+                "Event-log persistence failed and is now DISABLED for this "
+                f"session ({error}); the node continues with in-memory state "
+                "only — follower replay from this node's disk log will be "
+                "unavailable. Free disk space and restart to restore "
+                "persistence."
+            )
 
     def compact(self, keep_from_idx: int) -> None:
         """Discard events before ``keep_from_idx`` while preserving absolute indices."""
+
+        if self._persistence_failed:
+            # Counting-only mode: there is no coherent disk tail to rebuild.
+            return
 
         absolute_end = len(self)
         keep_from_idx = max(keep_from_idx, self._base_idx)

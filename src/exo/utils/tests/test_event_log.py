@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 from pathlib import Path
 
 import pytest
@@ -274,3 +275,40 @@ def test_compact_keeps_active_log_when_retained_tail_is_corrupt(log_dir: Path):
     assert active_path.read_bytes() == corrupt_bytes
 
     log.close()
+
+
+def test_persistence_failure_degrades_without_losing_indices(log_dir: Path):
+    """ENOSPC (or any OSError) on append must not propagate — the canonical
+    failure killed a node during the 2026-06-05 launch E2E smoke. Indices
+    derive from len(log), so the count must keep advancing in the degraded
+    counting-only mode or follower replay indices would collide."""
+    log = DiskEventLog(log_dir)
+    log.append(TestEvent())
+    assert len(log) == 1
+
+    log._file.close()  # next write raises ValueError... use a stub instead
+
+    class _FullDisk:
+        def write(self, _data: bytes) -> int:
+            raise OSError(28, "No space left on device")
+
+        def close(self) -> None:
+            pass
+
+        def flush(self) -> None:
+            pass
+
+    log._file = _FullDisk()  # type: ignore[assignment]
+
+    log.append(TestEvent())  # must not raise
+    assert len(log) == 2
+    assert log._persistence_failed
+
+    # Subsequent appends count without touching the dead file.
+    log.append(TestEvent())
+    assert len(log) == 3
+
+    # Compaction is a no-op in counting-only mode (no coherent disk tail).
+    log.compact(2)
+    assert len(log) == 3
+    assert log.start_idx == 0
