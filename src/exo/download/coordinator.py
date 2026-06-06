@@ -375,8 +375,14 @@ class DownloadCoordinator:
         # review on the launch-smoke fix). Fall through to the download
         # path instead so the companion gets fetched.
         found_path = resolve_model_in_path(model_id)
-        if found_path is not None and not model_companions_present_on_disk(
-            shard.model_card
+        # In offline mode the companion can never be fetched, and the
+        # runner treats a missing companion as run-without-speculation —
+        # hiding a loadable base behind a doomed download would only
+        # produce DownloadFailed for a usable model.
+        if (
+            found_path is not None
+            and not self.offline
+            and not model_companions_present_on_disk(shard.model_card)
         ):
             logger.info(
                 f"DownloadCoordinator: {model_id} base model is on disk at "
@@ -646,12 +652,15 @@ class DownloadCoordinator:
                     ):
                         continue
                     found = resolve_model_in_path(mid)
-                    if found is not None and not model_companions_present_on_disk(
-                        card
+                    if (
+                        found is not None
+                        and not self.offline
+                        and not model_companions_present_on_disk(card)
                     ):
                         # Same companion gate as _start_download: a staged
                         # base missing its sidecar/assistant must not be
-                        # advertised as complete.
+                        # advertised as complete (offline nodes excepted —
+                        # the companion can never arrive there).
                         continue
                     if found is not None:
                         logger.info(

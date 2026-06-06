@@ -88,3 +88,50 @@ def test_sidecar_without_mtp_heads_is_not_required(models_dir: Path) -> None:
         RuntimeCapabilityCardConfig(mtp_heads=False, mtp_sidecar_repo=_SIDECAR_REPO)
     )
     assert model_companions_present_on_disk(card)
+
+
+def test_split_vision_repo_missing_blocks_completion(models_dir: Path) -> None:
+    """A vision card with a separate weights repo absent from disk must not
+    let the base short-circuit as complete (codex round 2 on #213)."""
+    from exo.shared.models.model_cards import VisionCardConfig
+
+    card = ModelCard(
+        model_id=ModelId("test-org/test-base"),
+        storage_size=Memory.from_bytes(0),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        vision=VisionCardConfig(
+            image_token_id=1,
+            model_type="test",
+            weights_repo="test-org/test-base-vision",
+        ),
+    )
+    assert not model_companions_present_on_disk(card)
+
+    # Present via the single-file companion layout -> complete.
+    vision_dir = models_dir / "test-org--test-base-vision"
+    vision_dir.mkdir(parents=True)
+    (vision_dir / "config.json").write_text("{}")
+    (vision_dir / "model.safetensors").write_bytes(b"fake")
+    assert model_companions_present_on_disk(card)
+
+
+def test_same_repo_vision_is_not_a_companion(models_dir: Path) -> None:
+    from exo.shared.models.model_cards import VisionCardConfig
+
+    card = ModelCard(
+        model_id=ModelId("test-org/test-base"),
+        storage_size=Memory.from_bytes(0),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        vision=VisionCardConfig(
+            image_token_id=1,
+            model_type="test",
+            weights_repo="test-org/test-base",
+        ),
+    )
+    assert model_companions_present_on_disk(card)

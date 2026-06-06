@@ -219,7 +219,10 @@ def companion_download_specs(
             (_bare_shard(model_card.vision.weights_repo), ["*.safetensors", "config.json"])
         )
     runtime = model_card.runtime
-    if runtime and runtime.mtp_sidecar_repo:
+    # The runner only loads the sidecar when mtp_heads is also set (see
+    # load_mlx_items); downloading one the runner will never load wastes
+    # bandwidth and produces misleading speculation warnings.
+    if runtime and runtime.mtp_sidecar_repo and runtime.mtp_heads:
         specs.append(
             (_bare_shard(runtime.mtp_sidecar_repo), ["mtp.safetensors", "config.json"])
         )
@@ -243,11 +246,22 @@ def model_companions_present_on_disk(model_card: ModelCard) -> bool:
     must NOT short-circuit the download path, or the model loads with
     speculative decoding silently unavailable (launch smoke, 2026-06-06).
 
-    Split vision repos are intentionally NOT checked here: there is no
-    reliable on-disk completeness probe for an arbitrary multi-file vision
-    repo, and a false "missing" from this function would make the
-    coordinator re-run the download path forever.
+    Split vision repos are probed with BOTH layout checks (the index-based
+    model-directory completeness used for bases, and the single-file
+    companion layout): a repo matching neither would cost one no-op verify
+    pass through the download path per session — the coordinator marks the
+    model complete after ensure_shard returns, so the gate cannot loop
+    within a session.
     """
+    if model_card.vision and model_card.vision.weights_repo != str(
+        model_card.model_id
+    ):
+        vision_repo = ModelId(model_card.vision.weights_repo)
+        if (
+            resolve_model_in_path(vision_repo) is None
+            and build_companion_model_path(vision_repo) is None
+        ):
+            return False
     runtime = model_card.runtime
     if runtime is None:
         return True
