@@ -26,6 +26,35 @@ This project records release notes here and mirrors public-facing notes in
   logs was also trimmed (per-minute download-coordinator path dumps), and
   the speculative-decoding enable line now reports the card's actual
   draft depth instead of a hardcoded "(D=1)".
+- **Speculative decoding now engages for models that were already on
+  disk.** Three of the model-store downloader's four resolution paths
+  (already-staged fast path, store staging, direct-from-store) returned
+  the base model without fetching the card's companion repos (MTP
+  sidecar / assistant model / vision weights) — a staged model would
+  load and silently run without speculation (observed in the launch
+  smoke). Every `ensure_shard` resolution now also ensures companions
+  through the same store-first path (so sidecars are served from the
+  store when present), optional-companion fetch failures (MTP
+  sidecar / assistant) log loudly without failing the base load, while
+  split vision weights stay load-bearing, and the previously triplicated companion
+  construction in the HF downloader is shared via
+  `companion_download_specs`.
+- **A wedged warmup no longer silently disables a node.** A faulted
+  Metal eval can park warmup forever at 0% CPU (uninterruptible from
+  Python); the runner then sat in `RunnerWarmingUp` indefinitely while
+  every API request queued and timed out with no surfaced error. Warmup
+  now runs under a hard deadline (default 300s,
+  `SKULK_WARMUP_DEADLINE_SECONDS`): on overrun the runner logs a
+  CRITICAL diagnosis (including the reboot-if-GPU-wedged guidance) and
+  exits, the supervisor reports `RunnerFailed`, and the node keeps
+  dispatching.
+- **Disabled speculation is no longer near-silent.** Requests carrying
+  logits processors (typically a `repetition_penalty` — some client
+  libraries send one by default) fall back to plain decode; that
+  fallback now logs a WARNING naming the cause and the fix instead of
+  an easy-to-miss INFO line. The gemma 4 E-series pipeline rejection
+  also explains itself in operator terms (place on a single node)
+  instead of internals-speak.
 
 - **Multi-node placement is now reliable and placement failures are
   visible.** Four compounding issues fixed in the placement path:

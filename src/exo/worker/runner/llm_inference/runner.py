@@ -70,7 +70,11 @@ from exo.worker.engines.mlx.utils_mlx import (
     load_mlx_items,
 )
 from exo.worker.engines.mlx.vision import VisionProcessor
-from exo.worker.runner.bootstrap import logger
+from exo.worker.runner.bootstrap import (
+    deadline_watchdog,
+    logger,
+    resolve_warmup_deadline_seconds,
+)
 from exo.worker.runner.diagnostics import record_runner_phase, runner_phase
 from exo.worker.runner.llm_inference.batch_generator import (
     BatchGenerator,
@@ -347,12 +351,24 @@ class Runner:
                         "or set it to 0 to restore synthetic warmup)"
                     )
                 else:
-                    with runner_phase(
-                        "warmup",
-                        detail="warmup_generator",
-                        task_id=task.task_id,
-                        attrs={"group_size": group_size},
-                        include_memory=True,
+                    # A wedged warmup (faulted Metal eval parked forever at
+                    # 0% CPU) used to leave the runner in RunnerWarmingUp
+                    # indefinitely, silently blocking ALL dispatch on the
+                    # node. The watchdog hard-exits the runner instead; the
+                    # supervisor reports RunnerFailed and the node keeps
+                    # working.
+                    with (
+                        deadline_watchdog(
+                            resolve_warmup_deadline_seconds(),
+                            f"Warmup of {self.model_id}",
+                        ),
+                        runner_phase(
+                            "warmup",
+                            detail="warmup_generator",
+                            task_id=task.task_id,
+                            attrs={"group_size": group_size},
+                            include_memory=True,
+                        ),
                     ):
                         warmup_generator.warmup()
 

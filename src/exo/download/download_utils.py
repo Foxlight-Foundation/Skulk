@@ -31,7 +31,7 @@ from exo.download.huggingface_utils import (
     get_hf_token,
 )
 from exo.shared.constants import EXO_MODELS_DIR
-from exo.shared.models.model_cards import ModelTask
+from exo.shared.models.model_cards import ModelCard, ModelTask
 from exo.shared.types.common import ModelId
 from exo.shared.types.memory import Memory
 from exo.shared.types.worker.downloads import (
@@ -41,7 +41,7 @@ from exo.shared.types.worker.downloads import (
     RepoDownloadProgress,
     RepoFileDownloadProgress,
 )
-from exo.shared.types.worker.shards import ShardMetadata
+from exo.shared.types.worker.shards import PipelineShardMetadata, ShardMetadata
 
 
 class HuggingFaceAuthenticationError(Exception):
@@ -175,6 +175,140 @@ def build_companion_model_path(model_id: ModelId) -> Path | None:
         ).is_file():
             return candidate
     return None
+
+
+def companion_download_specs(
+    model_card: ModelCard,
+) -> list[tuple[PipelineShardMetadata, list[str], bool]]:
+    """Build download shards for every companion repo a model card declares.
+
+    Companions are the artifacts a model needs beyond its own repo: a
+    separate vision-weights repo, an MTP sidecar (``mtp_sidecar_repo``), or
+    a speculative-decoding assistant model (``assistant_model_repo``).
+    Every downloader path that resolves a base model MUST also ensure its
+    companions — a base model present on disk without its companion is the
+    "model loads, speculative decoding silently unavailable" failure mode
+    (launch smoke, 2026-06-06).
+
+    Returns ``(shard, allow_patterns, required)`` triples; the shards carry
+    bare model cards (no ``runtime``/``vision`` sections), so recursively
+    ensuring a companion never yields further companions. ``required``
+    distinguishes criticality: split vision weights are load-bearing (a
+    vision model without them is broken — fetch failures must fail the
+    base), while MTP sidecars and assistants degrade gracefully to
+    run-without-speculation (best-effort).
+    """
+    def _bare_shard(repo: str) -> PipelineShardMetadata:
+        return PipelineShardMetadata(
+            model_card=ModelCard(
+                model_id=ModelId(repo),
+                storage_size=Memory.from_bytes(0),
+                n_layers=1,
+                hidden_size=1,
+                supports_tensor=False,
+                tasks=[ModelTask.TextGeneration],
+            ),
+            device_rank=0,
+            world_size=1,
+            start_layer=0,
+            end_layer=1,
+            n_layers=1,
+        )
+
+    specs: list[tuple[PipelineShardMetadata, list[str], bool]] = []
+    if model_card.vision and model_card.vision.weights_repo != str(
+        model_card.model_id
+    ):
+        specs.append(
+            (
+                _bare_shard(model_card.vision.weights_repo),
+                ["*.safetensors", "config.json"],
+                True,
+            )
+        )
+    runtime = model_card.runtime
+    # The runner only loads the sidecar when mtp_heads is also set (see
+    # load_mlx_items); downloading one the runner will never load wastes
+    # bandwidth and produces misleading speculation warnings.
+    if runtime and runtime.mtp_sidecar_repo and runtime.mtp_heads:
+        specs.append(
+            (
+                _bare_shard(runtime.mtp_sidecar_repo),
+                ["mtp.safetensors", "config.json"],
+                False,
+            )
+        )
+    if runtime and runtime.assistant_model_repo:
+        # The assistant is a small full model (config + a single
+        # safetensors), so pull the weights and config alongside the target.
+        specs.append(
+            (
+                _bare_shard(runtime.assistant_model_repo),
+                ["*.safetensors", "config.json"],
+                False,
+            )
+        )
+    return specs
+
+
+def model_companions_present_on_disk(
+    model_card: ModelCard, required_only: bool = False
+) -> bool:
+    """True when every *checkable* companion the card declares is on disk.
+
+    ``required_only`` restricts the check to load-bearing companions (split
+    vision weights) — used in offline mode, where optional companions can
+    never arrive (run-without-speculation is fine) but a vision model
+    without its weights is broken and must not be advertised complete.
+
+    Used to decide whether an already-on-disk base model can be treated as
+    download-complete: a staged base with a missing MTP sidecar or assistant
+    must NOT short-circuit the download path, or the model loads with
+    speculative decoding silently unavailable (launch smoke, 2026-06-06).
+
+    Split vision repos are probed with BOTH layout checks (the index-based
+    model-directory completeness used for bases, and the single-file
+    companion layout): a repo matching neither would cost one no-op verify
+    pass through the download path per session — the coordinator marks the
+    model complete after ensure_shard returns, so the gate cannot loop
+    within a session.
+    """
+    if model_card.vision and model_card.vision.weights_repo != str(
+        model_card.model_id
+    ):
+        vision_repo = ModelId(model_card.vision.weights_repo)
+        # Probe BOTH search roots: EXO_MODELS_PATH (staging/store) and
+        # EXO_MODELS_DIR (where download_shard writes) — a vision repo
+        # downloaded via HF lives only in the latter, and missing it here
+        # would degrade the cached base to in_progress forever.
+        import exo.shared.constants as _constants
+
+        vision_present = build_companion_model_path(vision_repo) is not None
+        if not vision_present:
+            normalized = vision_repo.normalize()
+            for search_dir in [*(_constants.EXO_MODELS_PATH or ()), EXO_MODELS_DIR]:
+                candidate = search_dir / normalized
+                if candidate.is_dir() and is_model_directory_complete(candidate):
+                    vision_present = True
+                    break
+        if not vision_present:
+            return False
+    if required_only:
+        return True
+    runtime = model_card.runtime
+    if runtime is None:
+        return True
+    if (
+        runtime.mtp_sidecar_repo
+        and runtime.mtp_heads
+        and build_sidecar_path(ModelId(runtime.mtp_sidecar_repo), "mtp.safetensors")
+        is None
+    ):
+        return False
+    return not (
+        runtime.assistant_model_repo
+        and build_companion_model_path(ModelId(runtime.assistant_model_repo)) is None
+    )
 
 
 def build_model_path(model_id: ModelId) -> Path:

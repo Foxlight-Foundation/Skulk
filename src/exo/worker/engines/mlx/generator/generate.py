@@ -2808,9 +2808,13 @@ def mlx_generate(
             # token could slip through via an accepted draft. Until the
             # verify pass applies processors, MTP and processors are
             # mutually exclusive.
-            logger.info(
-                "MTP speculative decoding is incompatible with logits "
-                f"processors ({len(logits_processors)} active); skipping MTP"
+            logger.warning(
+                "Speculative decoding DISABLED for this request: "
+                f"{len(logits_processors)} logits processor(s) are active — "
+                "typically a repetition_penalty in the request (some client "
+                "libraries send one by default). Generation falls back to "
+                "plain decode; drop repetition_penalty/penalty parameters "
+                "from the request to keep speculative decoding engaged."
             )
         else:
             trunk_head = _get_trunk_and_head(model)
