@@ -568,6 +568,7 @@ class DownloadCoordinator:
 
     async def _emit_existing_download_progress(self) -> None:
         hf_scan_done = False
+        models_path_logged = False
         while True:
             try:
                 # HF download status scan — only run once at startup to detect
@@ -637,11 +638,16 @@ class DownloadCoordinator:
                             NodeDownloadProgress(download_progress=status)
                         )
 
-                # Scan EXO_MODELS_PATH for pre-downloaded models (runs every cycle)
-                import exo.shared.constants as _dbg_constants
+                # Scan EXO_MODELS_PATH for pre-downloaded models (runs every
+                # cycle). Log the search path once — repeating the full tuple
+                # every 60s was pure log noise that bloated piped logs.
+                if not models_path_logged:
+                    import exo.shared.constants as _dbg_constants
 
-                _search_paths = _dbg_constants.EXO_MODELS_PATH
-                logger.debug(f"DownloadCoordinator: EXO_MODELS_PATH={_search_paths}")
+                    logger.debug(
+                        f"DownloadCoordinator: EXO_MODELS_PATH={_dbg_constants.EXO_MODELS_PATH}"
+                    )
+                    models_path_logged = True
                 for card in await get_model_cards():
                     mid = card.model_id
                     if mid in self.active_downloads:
@@ -685,9 +691,6 @@ class DownloadCoordinator:
                             NodeDownloadProgress(download_progress=path_completed)
                         )
 
-                logger.debug(
-                    "DownloadCoordinator: Done emitting existing download progress."
-                )
             except Exception as e:
                 logger.error(
                     f"DownloadCoordinator: Error emitting existing download progress: {e}"
