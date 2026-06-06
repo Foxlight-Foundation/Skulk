@@ -853,7 +853,9 @@ class ModelStoreDownloader(ShardDownloader):
                 direct_path = self._store_client.local_store_path / _sanitize_model_id(
                     model_id
                 )
-                if direct_path.exists() and any(direct_path.iterdir()):
+                if direct_path.exists() and _staged_directory_looks_complete(
+                    direct_path
+                ):
                     logger.info(
                         f"ModelStoreDownloader: staging disabled — loading {model_id} directly from store at {direct_path}"
                     )

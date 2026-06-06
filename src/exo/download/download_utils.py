@@ -251,8 +251,15 @@ def companion_download_specs(
     return specs
 
 
-def model_companions_present_on_disk(model_card: ModelCard) -> bool:
+def model_companions_present_on_disk(
+    model_card: ModelCard, required_only: bool = False
+) -> bool:
     """True when every *checkable* companion the card declares is on disk.
+
+    ``required_only`` restricts the check to load-bearing companions (split
+    vision weights) — used in offline mode, where optional companions can
+    never arrive (run-without-speculation is fine) but a vision model
+    without its weights is broken and must not be advertised complete.
 
     Used to decide whether an already-on-disk base model can be treated as
     download-complete: a staged base with a missing MTP sidecar or assistant
@@ -270,11 +277,24 @@ def model_companions_present_on_disk(model_card: ModelCard) -> bool:
         model_card.model_id
     ):
         vision_repo = ModelId(model_card.vision.weights_repo)
-        if (
-            resolve_model_in_path(vision_repo) is None
-            and build_companion_model_path(vision_repo) is None
-        ):
+        # Probe BOTH search roots: EXO_MODELS_PATH (staging/store) and
+        # EXO_MODELS_DIR (where download_shard writes) — a vision repo
+        # downloaded via HF lives only in the latter, and missing it here
+        # would degrade the cached base to in_progress forever.
+        import exo.shared.constants as _constants
+
+        vision_present = build_companion_model_path(vision_repo) is not None
+        if not vision_present:
+            normalized = vision_repo.normalize()
+            for search_dir in [*(_constants.EXO_MODELS_PATH or ()), EXO_MODELS_DIR]:
+                candidate = search_dir / normalized
+                if candidate.is_dir() and is_model_directory_complete(candidate):
+                    vision_present = True
+                    break
+        if not vision_present:
             return False
+    if required_only:
+        return True
     runtime = model_card.runtime
     if runtime is None:
         return True

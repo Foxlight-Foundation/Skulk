@@ -135,3 +135,74 @@ def test_same_repo_vision_is_not_a_companion(models_dir: Path) -> None:
         ),
     )
     assert model_companions_present_on_disk(card)
+
+
+def test_required_only_checks_vision_but_not_speculation(models_dir: Path) -> None:
+    """Offline mode: optional companions never block (they can't arrive),
+    but missing split-vision weights still do — a vision model without
+    them is broken, not degraded."""
+    from exo.shared.models.model_cards import VisionCardConfig
+
+    card = ModelCard(
+        model_id=ModelId("test-org/test-base"),
+        storage_size=Memory.from_bytes(0),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        vision=VisionCardConfig(
+            image_token_id=1,
+            model_type="test",
+            weights_repo="test-org/test-base-vision",
+        ),
+        runtime=RuntimeCapabilityCardConfig(
+            mtp_heads=True, mtp_sidecar_repo=_SIDECAR_REPO
+        ),
+    )
+    # Vision missing: blocked in both modes.
+    assert not model_companions_present_on_disk(card, required_only=True)
+    assert not model_companions_present_on_disk(card)
+
+    vision_dir = models_dir / "test-org--test-base-vision"
+    vision_dir.mkdir(parents=True)
+    (vision_dir / "config.json").write_text("{}")
+    (vision_dir / "model.safetensors").write_bytes(b"fake")
+
+    # Vision present, sidecar missing: required-only passes, full check blocks.
+    assert model_companions_present_on_disk(card, required_only=True)
+    assert not model_companions_present_on_disk(card)
+
+
+def test_vision_repo_found_in_models_dir(
+    models_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A vision repo downloaded via HF lives in EXO_MODELS_DIR, not on the
+    EXO_MODELS_PATH search path — the probe must find it there too, or
+    cached bases degrade to in_progress forever (Copilot round 7)."""
+    import exo.shared.constants as constants_module
+    from exo.shared.models.model_cards import VisionCardConfig
+
+    hf_dir = tmp_path / "hf_models"
+    hf_dir.mkdir()
+    monkeypatch.setattr(constants_module, "EXO_MODELS_PATH", ())
+    monkeypatch.setattr(download_utils_module, "EXO_MODELS_DIR", hf_dir)
+
+    vision_dir = hf_dir / "test-org--test-base-vision"
+    vision_dir.mkdir(parents=True)
+    (vision_dir / "config.json").write_text("{}")
+    (vision_dir / "model.safetensors").write_bytes(b"fake")
+
+    card = ModelCard(
+        model_id=ModelId("test-org/test-base"),
+        storage_size=Memory.from_bytes(0),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        vision=VisionCardConfig(
+            image_token_id=1,
+            model_type="test",
+            weights_repo="test-org/test-base-vision",
+        ),
+    )
+    assert model_companions_present_on_disk(card)
