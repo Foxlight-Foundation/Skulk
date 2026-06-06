@@ -72,6 +72,7 @@ from exo.store.model_store_client import ModelStoreClient
 from exo.store.staging_eviction import (
     StagingEvictionReport,
     enforce_staging_budget,
+    touch_last_used,
 )
 from exo.utils.channels import Receiver, Sender, channel
 from exo.utils.info_gatherer.info_gatherer import GatheredInfo, InfoGatherer
@@ -745,6 +746,13 @@ class Worker:
             or not self._staging_config.cleanup_on_deactivate
         ):
             return
+        # The just-deactivated model was in use until this very moment —
+        # refresh its last-use marker (and its companions') BEFORE the
+        # budget pass, or a long-staged but heavily-used model sorts as
+        # old and gets evicted despite being the most recently used thing
+        # on the node (the downloader only touches markers when it runs,
+        # and reuse from an existing DownloadCompleted skips it).
+        self._touch_staged_model_and_companions(shard.model_card)
         # The walk + rmtree are synchronous filesystem work on potentially
         # tens of GB — run off the event loop so teardown doesn't stall
         # other worker tasks. The in-use snapshot is taken HERE, on the
@@ -797,6 +805,24 @@ class Worker:
             await self.event_sender.send(
                 NodeDownloadProgress(download_progress=pending)
             )
+
+    def _touch_staged_model_and_companions(self, card: ModelCard) -> None:
+        """Refresh .last_used for a model (and companions) just taken out of use."""
+        if self._staging_config is None:
+            return
+        cache_path = Path(self._staging_config.node_cache_path).expanduser()
+        model_ids = [str(card.model_id)]
+        if card.vision and card.vision.weights_repo:
+            model_ids.append(card.vision.weights_repo)
+        if card.runtime is not None:
+            if card.runtime.mtp_sidecar_repo:
+                model_ids.append(card.runtime.mtp_sidecar_repo)
+            if card.runtime.assistant_model_repo:
+                model_ids.append(card.runtime.assistant_model_repo)
+        for model_id in model_ids:
+            staged_dir = cache_path / model_id.replace("/", "--")
+            if staged_dir.is_dir():
+                touch_last_used(staged_dir)
 
     def _enforce_staging_budget(
         self, models_in_use: frozenset[str]
