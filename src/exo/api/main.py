@@ -3081,7 +3081,7 @@ class API:
                 # summary is best-effort, report zeros rather than 500.
                 disk_total_bytes, disk_free_bytes = 0, 0
             return NodeStorageSummary(
-                node_id=str(self.node_id),
+                node_id=self.node_id,
                 staging_root=str(staging_root) if staging_root is not None else None,
                 staged_models=staged,
                 staged_total_bytes=sum(info.size_bytes for info in staged),

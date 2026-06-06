@@ -908,7 +908,7 @@ class NodeStorageSummary(CamelCaseModel):
     (or its companion repos) currently depends on them.
     """
 
-    node_id: str
+    node_id: NodeId
     staging_root: str | None
     """Resolved staging directory for this node, or None when the model
     store / staging is not configured."""

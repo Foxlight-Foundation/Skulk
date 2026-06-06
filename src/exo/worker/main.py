@@ -379,6 +379,8 @@ class Worker:
                         "self-heals missing files at download time)"
                     )
                     self._stale_downloads_pending_reset.clear()
+                    self._stale_resets_sent.clear()
+                    self._stale_reset_wait_ticks = 0
             task: Task | None = plan(
                 self.node_id,
                 self.runners,
@@ -745,8 +747,13 @@ class Worker:
             return
         # The walk + rmtree are synchronous filesystem work on potentially
         # tens of GB — run off the event loop so teardown doesn't stall
-        # other worker tasks.
-        report = await to_thread.run_sync(self._enforce_staging_budget)
+        # other worker tasks. The in-use snapshot is taken HERE, on the
+        # loop thread: the threaded pass must not iterate self.runners /
+        # self.state while the loop mutates them.
+        models_in_use = self._models_in_use()
+        report = await to_thread.run_sync(
+            self._enforce_staging_budget, models_in_use
+        )
         if report is None:
             return
         await self._reset_download_state_for_evicted(report, shard)
@@ -791,8 +798,15 @@ class Worker:
                 NodeDownloadProgress(download_progress=pending)
             )
 
-    def _enforce_staging_budget(self) -> StagingEvictionReport | None:
-        """Run one staging-budget enforcement pass (best-effort)."""
+    def _enforce_staging_budget(
+        self, models_in_use: frozenset[str]
+    ) -> StagingEvictionReport | None:
+        """Run one staging-budget enforcement pass (best-effort).
+
+        ``models_in_use`` is snapshotted by the caller on the event-loop
+        thread — this method may run in a worker thread and must not touch
+        the loop's mutable structures.
+        """
         if self._staging_config is None or not self._staging_config.enabled:
             return None
         staging_root = Path(self._staging_config.node_cache_path).expanduser()
@@ -822,7 +836,7 @@ class Worker:
             return enforce_staging_budget(
                 staging_root,
                 keep_recent_bytes,
-                self._models_in_use(),
+                models_in_use,
             )
         except Exception as exc:
             logger.warning(f"Worker: staging budget enforcement failed: {exc}")
@@ -889,6 +903,8 @@ class Worker:
             if model_id not in still_completed:
                 self._stale_downloads_pending_reset.discard(model_id)
                 self._stale_resets_sent.discard(model_id)
+        if not self._stale_downloads_pending_reset:
+            self._stale_reset_wait_ticks = 0
 
     def _reconcile_staging_on_startup(self) -> None:
         """Reconcile staging orphans left by a crashed or killed session.
@@ -905,7 +921,7 @@ class Worker:
             or not self._staging_config.cleanup_on_deactivate
         ):
             return
-        report = self._enforce_staging_budget()
+        report = self._enforce_staging_budget(self._models_in_use())
         if report is not None and report.evicted_model_ids:
             logger.info(
                 "Worker: startup staging reconciliation evicted "
