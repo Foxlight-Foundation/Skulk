@@ -220,21 +220,23 @@ class ResumableShardDownloader(ShardDownloader):
         # never fetched (phase-c spec gotcha, flagged on PR #185). Degrade
         # the reported status when a declared companion is missing on disk
         # so the download path runs and pulls it.
-        # Never degrade in offline mode: the companion cannot be fetched
-        # anyway, and load_mlx_items treats missing companions as optional —
-        # degrading would turn a perfectly loadable cached base into
-        # DownloadFailed on air-gapped nodes.
-        if (
-            progress.status == "complete"
-            and not self.offline
-            and self._missing_companion(shard)
+        # Offline mode degrades only for LOAD-BEARING companions (split
+        # vision weights): optional companions can never be fetched there
+        # and load_mlx_items degrades to run-without-speculation, so
+        # degrading for them would turn a perfectly loadable cached base
+        # into DownloadFailed on air-gapped nodes — but a vision model
+        # without its weights is broken and must not report complete.
+        if progress.status == "complete" and self._missing_companion(
+            shard, required_only=self.offline
         ):
             return progress.model_copy(update={"status": "in_progress"})
         return progress
 
     @staticmethod
-    def _missing_companion(shard: ShardMetadata) -> bool:
+    def _missing_companion(shard: ShardMetadata, required_only: bool = False) -> bool:
         """True when the card declares a companion repo absent from disk."""
         from exo.download.download_utils import model_companions_present_on_disk
 
-        return not model_companions_present_on_disk(shard.model_card)
+        return not model_companions_present_on_disk(
+            shard.model_card, required_only=required_only
+        )
