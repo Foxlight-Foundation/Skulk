@@ -1,6 +1,8 @@
 import pytest
 
 from exo.master.placement import (
+    PlacementError,
+    PlacementInfoPendingError,
     get_transition_events,
     place_instance,
 )
@@ -345,6 +347,58 @@ def test_empty_exclusion_set_preserves_default_behavior() -> None:
         next(iter(without_filter.values())).shard_assignments.model_id
         == next(iter(with_empty_filter.values())).shard_assignments.model_id
     )
+
+
+def test_min_nodes_above_cluster_size_is_a_hard_error() -> None:
+    """min_nodes greater than the number of known nodes can never succeed —
+    hard PlacementError, no retry semantics."""
+    topology, _node_a, _node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+    command.min_nodes = 3
+
+    with pytest.raises(PlacementError, match="min_nodes=3 is impossible"):
+        place_instance(command, topology, {}, node_memory, node_network)
+
+
+def test_unconnected_nodes_at_min_nodes_reports_info_pending() -> None:
+    """Enough nodes exist but no connecting edges yet: right after cluster
+    formation the connection edges lag node identities by a few gossip
+    rounds, so this must surface as info-pending (retry shortly), not as a
+    hard topology error — and never as the old 'insufficient memory' lie."""
+    topology = Topology()
+    node_a = NodeId()
+    node_b = NodeId()
+    topology.add_node(node_a)
+    topology.add_node(node_b)  # no connections gossiped yet
+    node_memory = {
+        node_a: create_node_memory(Memory.from_gb(8).in_bytes),
+        node_b: create_node_memory(Memory.from_gb(8).in_bytes),
+    }
+    node_network = {node_a: create_node_network(), node_b: create_node_network()}
+    command = place_instance_command(_small_model_card())
+    command.min_nodes = 2
+
+    with pytest.raises(PlacementInfoPendingError, match="retry shortly"):
+        place_instance(command, topology, {}, node_memory, node_network)
+
+
+def test_missing_node_memory_reports_info_pending() -> None:
+    """A connected pair where one node's memory info has not arrived yet is
+    the startup race observed on 2026-06-06: it must surface as
+    info-pending, not 'insufficient memory'."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    topology.add_connection(
+        Connection(source=node_a, sink=node_b, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=node_b, sink=node_a, edge=create_socket_connection(2))
+    )
+    command = place_instance_command(_small_model_card())
+    command.min_nodes = 2
+    del node_memory[node_b]
+
+    with pytest.raises(PlacementInfoPendingError, match="Memory info"):
+        place_instance(command, topology, {}, node_memory, node_network)
 
 
 def test_get_transition_events_no_change(instance: Instance):

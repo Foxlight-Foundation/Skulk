@@ -134,9 +134,23 @@ def place_instance(
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
     if not candidate_cycles:
+        known_nodes = len(topology.list_nodes())
+        if known_nodes >= command.min_nodes:
+            # Enough nodes exist for this placement — they just aren't
+            # bidirectionally connected (yet). Right after cluster formation
+            # the connection edges lag the node identities by a few gossip
+            # rounds, so this is usually a retry-shortly condition rather
+            # than a network problem.
+            raise PlacementInfoPendingError(
+                f"The topology knows {known_nodes} node(s) but none form a "
+                f"connected cycle of at least {command.min_nodes} node(s) yet. "
+                "Connection info may still be gossiping (typical right after "
+                "cluster formation) — retry shortly. If this persists, check "
+                "network connectivity between the nodes."
+            )
         raise PlacementError(
-            f"No connected cycle of at least {command.min_nodes} node(s) exists "
-            f"in the topology ({len(cycles)} cycle(s) total). Multi-node "
+            f"The topology has only {known_nodes} node(s); a placement with "
+            f"min_nodes={command.min_nodes} is impossible. Multi-node "
             "placement requires bidirectional connectivity between the nodes."
         )
 
