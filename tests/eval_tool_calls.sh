@@ -46,7 +46,7 @@ sleep 30
 echo "EXO loaded" 1>&2
 eval_runner="${hosts[0]}"
 mkdir -p "./bench/$commit"
-nix run .#exo-get-all-models-on-cluster -- "$eval_runner" | while IFS= read -r model; do
+nix run .#skulk-get-all-models-on-cluster -- "$eval_runner" | while IFS= read -r model; do
   echo "running eval for $model" 1>&2
   ssh -Tn -o BatchMode=yes -o ServerAliveInterval=30 "$eval_runner@$eval_runner" \
     "/nix/var/nix/profiles/default/bin/nix run github:Foxlight-Foundation/Skulk/$commit#skulk-eval-tool-calls -- --model $model --stdout" \

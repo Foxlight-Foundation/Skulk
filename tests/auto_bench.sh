@@ -48,7 +48,7 @@ sleep 30
 echo "EXO loaded" 1>&2
 bench_runner="${hosts[0]}"
 mkdir -p "./bench/$commit"
-nix run .#exo-get-all-models-on-cluster -- "$bench_runner" | while IFS= read -r model; do
+nix run .#skulk-get-all-models-on-cluster -- "$bench_runner" | while IFS= read -r model; do
   echo "running bench for $model" 1>&2
   ssh -Tn -o BatchMode=yes -o ServerAliveInterval=30 "$bench_runner@$bench_runner" "/nix/var/nix/profiles/default/bin/nix run github:Foxlight-Foundation/Skulk/$commit#skulk-bench -- --model $model --pp 128 4096 --tg 128 --stdout --skip-tensor-ring" >>"./bench/$commit/${model//\//--}.json"
   echo
