@@ -21,7 +21,7 @@ import httpx
 import hypercorn.asyncio as hypercorn_asyncio
 import psutil
 import yaml
-from anyio import BrokenResourceError, ClosedResourceError, to_thread
+from anyio import BrokenResourceError, ClosedResourceError, WouldBlock, to_thread
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -618,6 +618,7 @@ class API:
             self._event_log_appends_since_retention_check = 0
         self.state = State()
         self._system_id = SystemId()
+        self._fail_open_command_streams_for_session_reset()
         self._text_generation_queues = {}
         self._image_generation_queues = {}
         self._embedding_queues = {}
@@ -626,6 +627,43 @@ class API:
         self.event_receiver.close()
         self.event_receiver = event_receiver
         self._tg.start_soon(self._apply_state)
+
+    def _fail_open_command_streams_for_session_reset(self) -> None:
+        """Terminate every open command stream when the cluster session changes.
+
+        A new session (master failover) cannot carry the previous session's
+        tasks, so in-flight requests are unrecoverable — and the old queue
+        maps are about to be replaced, leaving their senders unreachable by
+        chunk dispatch, cancellation, AND the orphaned-task sweep (whose
+        TaskFailed can only reference the new session's state). Found by the
+        #223 verification drill: killing the MASTER mid-generation still hung
+        the client after the master-side sweep landed.
+
+        Best-effort error chunk (the consumer is normally parked on the
+        queue, so zero-buffer send_nowait delivers), then close — close alone
+        still ends the stream rather than hanging it.
+        """
+        error_message = (
+            "The cluster session changed (master failover) while this "
+            "request was in flight; please retry"
+        )
+        for queue_map in (
+            self._text_generation_queues,
+            self._image_generation_queues,
+            self._embedding_queues,
+        ):
+            for sender in list(queue_map.values()):
+                # The originating task is gone with the old session, so the
+                # true model id is unknowable here.
+                error_chunk = ErrorChunk(
+                    model=ModelId("unknown"), error_message=error_message
+                )
+                with contextlib.suppress(
+                    WouldBlock, BrokenResourceError, ClosedResourceError
+                ):
+                    sender.send_nowait(error_chunk)
+                with contextlib.suppress(ClosedResourceError):
+                    sender.close()
 
     def unpause(self, result_clock: int, master_node_id: NodeId | None = None):
         logger.info("Unpausing API")
