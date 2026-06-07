@@ -36,6 +36,7 @@ from exo.shared.models.model_cards import (
     PromptRendererType,
     ToolCallFormat,
     get_card,
+    multi_node_speculation_disabled,
 )
 from exo.worker.engines.mlx.constants import TRUST_REMOTE_CODE
 
@@ -708,6 +709,19 @@ def load_mlx_items(
     # (#201 Track 2b); don't pay assistant memory for speculation that
     # will never run, and on tight shard fits the eager load could OOM.
     single_node = group is None or group.size() <= 1
+    # Cards can forbid speculation on multi-node placements outright
+    # (measured slower than plain distributed decode — e.g. sharded MoE);
+    # skip the drafter weights entirely so no rank pays the memory.
+    speculation_blocked_for_placement = multi_node_speculation_disabled(
+        runtime, 1 if group is None else group.size()
+    )
+    if speculation_blocked_for_placement and runtime is not None:
+        logger.info(
+            "Speculative decoding disabled for this placement by the model "
+            f"card (speculative_multi_node=false, world_size={group.size() if group else 1}); "
+            "running plain distributed decode (single-node placements of "
+            "this model keep speculation)."
+        )
     # Assistants on pipeline placements load on the LAST rank only (#201
     # Track 2b): the assistant cross-attends the target's last
     # full-attention and sliding KV layers, which live in the final slice —
@@ -722,8 +736,13 @@ def load_mlx_items(
         single_node
         or isinstance(bound_shard, TensorShardMetadata)
         or is_last_pipeline_rank
-    )
-    if runtime and runtime.mtp_sidecar_repo and runtime.mtp_heads:
+    ) and not speculation_blocked_for_placement
+    if (
+        runtime
+        and runtime.mtp_sidecar_repo
+        and runtime.mtp_heads
+        and not speculation_blocked_for_placement
+    ):
         # Sidecar repos carry only mtp.safetensors (no config.json), so they
         # must be resolved with the sidecar resolver — build_model_path's
         # model-completeness check rejects their directories.
