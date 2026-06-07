@@ -135,6 +135,31 @@ def test_terminal_task_not_failed_again() -> None:
         assert orphaned_task_failure_events(state, frozenset()) == []
 
 
+def test_sweep_is_idempotent_after_apply() -> None:
+    """Applying the emitted TaskFailed must silence the next plan pass.
+
+    Review catch on #224: apply_task_failed originally stored only the error
+    fields without flipping task_status, so a task whose API never sent
+    TaskFinished (e.g. the API restarted) was re-failed every 10 seconds
+    forever — unbounded event-log growth.
+    """
+    from exo.shared.apply import apply_task_failed
+
+    instance_id = InstanceId()
+    task_id = TaskId()
+    state = _state({task_id: _text_task(task_id, instance_id)}, {})
+
+    events = orphaned_task_failure_events(state, frozenset())
+    assert len(events) == 1
+
+    state_after = apply_task_failed(events[0], state)
+    failed_task = state_after.tasks[task_id]
+    assert isinstance(failed_task, TextGenerationTask)
+    assert failed_task.task_status == TaskStatus.Failed
+    assert failed_task.error_type == "instance_lost"
+    assert orphaned_task_failure_events(state_after, frozenset()) == []
+
+
 def test_worker_lifecycle_task_not_failed() -> None:
     """Worker-emitted lifecycle tasks are reconciled by the worker's own plan
     loop; the master must not fail them from here."""

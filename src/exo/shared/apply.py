@@ -184,8 +184,16 @@ def apply_task_failed(event: TaskFailed, state: State) -> State:
         # maybe should raise
         return state
 
+    # Failed is terminal: the runner supervisor's terminal-status set and the
+    # master's orphaned-task sweep both rely on a failed task not being
+    # re-processed — without the status flip the sweep would re-emit
+    # TaskFailed for a lingering task every plan pass.
     updated_task = state.tasks[event.task_id].model_copy(
-        update={"error_type": event.error_type, "error_message": event.error_message}
+        update={
+            "task_status": TaskStatus.Failed,
+            "error_type": event.error_type,
+            "error_message": event.error_message,
+        }
     )
     new_tasks: Mapping[TaskId, Task] = {**state.tasks, event.task_id: updated_task}
     return state.model_copy(update={"tasks": new_tasks})
