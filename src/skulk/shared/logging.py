@@ -175,7 +175,7 @@ def _start_vector(ingest_url: str) -> bool:
         "SKULK_LOGGING_INGEST_URL": ingest_url,
         "SKULK_LOGGING_INGEST_URL": ingest_url,  # legacy compat for vector.yaml
         "SKULK_VECTOR_DATA_DIR": str(Path.home() / ".skulk" / "vector"),
-        "SKULK_VECTOR_DATA_DIR": str(Path.home() / ".skulk" / "vector"),  # legacy compat
+        "EXO_VECTOR_DATA_DIR": str(Path.home() / ".skulk" / "vector"),  # legacy compat
     }
 
     # Ensure the data dir exists
