@@ -4,7 +4,7 @@ This file provides guidance to AI coding agents when working with code in this r
 
 ## Project Overview
 
-exo is a distributed AI inference system that connects multiple devices into a cluster. It enables running large language models across multiple machines using MLX as the inference backend and libp2p for peer-to-peer networking.
+Skulk is a distributed AI inference system that connects multiple devices into one cluster. It runs large language models across machines using MLX as the inference backend and libp2p for peer-to-peer networking. Skulk began as a fork of exo and has substantially diverged.
 
 ## Build & Run Commands
 
@@ -97,7 +97,7 @@ If `nix fmt` changes any files, stage them before committing. The CI runs `nix f
 ## Architecture
 
 ### Node Composition
-A single exo `Node` (src/skulk/main.py) runs multiple components:
+A single Skulk `Node` (src/skulk/main.py) runs multiple components:
 - **Router**: libp2p-based pub/sub messaging via Rust bindings (skulk_pyo3_bindings)
 - **Worker**: Handles inference tasks, downloads models, manages runner processes
 - **Master**: Coordinates cluster state, places model instances across nodes
@@ -147,7 +147,7 @@ This capability spine is the source of truth for model-aware reasoning defaults,
 ### Logging & Observability
 Centralized logging uses a three-layer stack:
 - **Structured JSON stdout**: When `logging.enabled` is `true` and `logging.ingest_url` is set in `skulk.yaml` (or dashboard Settings), skulk emits one JSON object per line on stdout (alongside human-readable stderr). Settings sync to all nodes via gossipsub. Configured in `src/skulk/shared/logging.py`.
-- **Vector**: A local log shipper on each node reads exo's stdout and forwards to VictoriaLogs. Config at `deployment/logging/vector.yaml`.
+- **Vector**: A local log shipper on each node reads Skulk's stdout and forwards to VictoriaLogs. Config at `deployment/logging/vector.yaml`.
 - **VictoriaLogs + Grafana**: Central log storage and dashboards on the R720. Stack definition at `deployment/logging/docker-compose.yml`.
 
 ## Mandatory Workflow Rules
@@ -323,7 +323,7 @@ GitHub's API doesn't support direct image upload for PR comments. Workaround:
 
 2. **Post PR comment** referencing the raw image URL (uses permanent commit SHA so images survive deletion):
    ```bash
-   gh pr comment <PR_NUMBER> --body "![Screenshot](https://raw.githubusercontent.com/exo-explore/exo/${COMMIT_SHA}/screenshot.png)"
+   gh pr comment <PR_NUMBER> --body "![Screenshot](https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/${COMMIT_SHA}/screenshot.png)"
    ```
 
 3. **Remove the images** from the branch:

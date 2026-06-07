@@ -7,6 +7,22 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Changed
+
+- **The codebase is now Skulk all the way down (exo -> skulk rename).**
+  The Python package is `skulk`, the Rust bindings crate is
+  `skulk_pyo3_bindings`, the wire identity fields are
+  `skulkVersion`/`skulkCommit`, and environment variables use the
+  `SKULK_*` prefix. Backward compatibility is explicit: legacy `EXO_*`
+  environment variables are aliased at startup (an explicit `SKULK_*`
+  value always wins), the legacy `exo.yaml` config name is still
+  honored, a populated pre-rename `~/.exo/staging` directory keeps
+  being used when staging is unconfigured, and the dashboard migrates
+  saved favorites/recents once. The deprecated `uv run exo` alias is
+  removed — the command is `uv run skulk`. Upstream attribution (the
+  "forked from exo" acknowledgment and exo's license copyright) is
+  deliberately preserved.
+
 ### Fixed
 
 - **Requests no longer hang when a node dies mid-generation.** When an

@@ -248,7 +248,7 @@ Skulk supports shipping structured logs from all cluster nodes to a central [Vic
    ```
    (Vector is also available via `nix develop` if using the nix dev shell.)
 
-4. **Run exo piped through Vector**:
+4. **Run Skulk piped through Vector**:
    ```bash
    uv run skulk 2>/dev/tty | vector --config deployment/logging/vector.yaml
    ```

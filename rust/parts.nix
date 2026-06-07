@@ -40,7 +40,7 @@
       # Common arguments for all Rust builds
       commonArgs = {
         inherit src;
-        pname = "exo-rust";
+        pname = "skulk-rust";
         version = "0.0.1";
         strictDeps = true;
 

@@ -32,7 +32,7 @@ build-dashboard:
     npm run build
 
 package:
-    uv run pyinstaller packaging/pyinstaller/exo.spec
+    uv run pyinstaller packaging/pyinstaller/skulk.spec
 
 clean:
     rm -rf **/__pycache__

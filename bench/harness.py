@@ -460,7 +460,7 @@ def add_common_instance_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "--force-download",
         action="store_true",
-        help="If model not in /models, add it from HuggingFace via exo and download.",
+        help="If model not in /models, add it from HuggingFace via Skulk and download.",
     )
     ap.add_argument(
         "--max-nodes",

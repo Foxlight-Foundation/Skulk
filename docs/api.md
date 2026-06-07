@@ -758,7 +758,7 @@ Returns hostname, preferred IP, and node identity information used by the dashbo
 
 **POST** `/admin/restart?node_id=<optional node id>`
 
-Gracefully restart the exo process on this or a remote node. When `node_id` is omitted or matches the local node, replaces the current process image in-place via `os.execv` (same PID). When `node_id` targets a remote node, sends a `RestartNode` command via pub/sub.
+Gracefully restart the Skulk process on this or a remote node. When `node_id` is omitted or matches the local node, replaces the current process image in-place via `os.execv` (same PID). When `node_id` targets a remote node, sends a `RestartNode` command via pub/sub.
 
 - GPU/Metal memory is released when the process image is replaced
 - the node rejoins the cluster automatically on startup

@@ -1,9 +1,10 @@
 # gitingest
 digest.txt
 
-# cluster config (copy skulk.yaml.example or exo.yaml.example and edit)
+# cluster config (copy skulk.yaml.example and edit; legacy exo.yaml still honored)
 skulk.yaml
 exo.yaml
+.idea/
 
 # python
 **/__pycache__

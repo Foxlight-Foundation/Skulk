@@ -25,7 +25,7 @@ const defaultStoreConfig = (): StoreConfig => ({
   },
   staging: {
     enabled: true,
-    node_cache_path: '~/.exo/staging',
+    node_cache_path: '~/.skulk/staging',
     cleanup_on_deactivate: false,
   },
 });

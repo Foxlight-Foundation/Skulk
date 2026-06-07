@@ -17,8 +17,8 @@ prerelease-mode = "allow"
 
 [manifest]
 members = [
-    "exo-bench",
     "skulk",
+    "skulk-bench",
     "skulk-pyo3-bindings",
 ]
 
@@ -541,41 +541,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ad/d0/0c17a8e6e8dc7245f22dea860557c32bae50fc4d287ae030cb0e8ab8720f/evaluate-0.4.6.tar.gz", hash = "sha256:e07036ca12b3c24331f83ab787f21cc2dbf3631813a1631e63e40897c69a3f21", size = 65716, upload-time = "2025-09-18T13:06:30.581Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3e/af/3e990d8d4002bbc9342adb4facd59506e653da93b2417de0fa6027cb86b1/evaluate-0.4.6-py3-none-any.whl", hash = "sha256:bca85bc294f338377b7ac2f861e21c308b11b2a285f510d7d5394d5df437db29", size = 84069, upload-time = "2025-09-18T13:06:29.265Z" },
-]
-
-[[package]]
-name = "exo-bench"
-version = "0.1.0"
-source = { editable = "bench" }
-dependencies = [
-    { name = "datasets", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "httpx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "huggingface-hub", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "human-eval", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "jinja2", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "lm-eval", extra = ["api", "math"], marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "loguru", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "math-verify", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "numpy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "protobuf", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "tiktoken", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "transformers", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "datasets", specifier = ">=2.0.0" },
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "huggingface-hub", specifier = ">=0.33.4" },
-    { name = "human-eval", specifier = ">=1.0.3" },
-    { name = "jinja2", specifier = ">=3.1.0" },
-    { name = "lm-eval", extras = ["api", "math"], specifier = ">=0.4.0" },
-    { name = "loguru", specifier = ">=0.7.3" },
-    { name = "math-verify", specifier = ">=0.7.0" },
-    { name = "numpy", specifier = ">=1.24.0" },
-    { name = "protobuf", specifier = ">=5.29.0" },
-    { name = "tiktoken", specifier = ">=0.12.0" },
-    { name = "transformers", specifier = ">=5.0.0" },
 ]
 
 [[package]]
@@ -2965,6 +2930,41 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=1.0.0" },
     { name = "pytest-env" },
     { name = "ruff", specifier = ">=0.11.13" },
+]
+
+[[package]]
+name = "skulk-bench"
+version = "0.1.0"
+source = { editable = "bench" }
+dependencies = [
+    { name = "datasets", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "httpx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "huggingface-hub", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "human-eval", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "jinja2", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "lm-eval", extra = ["api", "math"], marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "loguru", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "math-verify", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "numpy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "protobuf", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "tiktoken", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "transformers", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "datasets", specifier = ">=2.0.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "huggingface-hub", specifier = ">=0.33.4" },
+    { name = "human-eval", specifier = ">=1.0.3" },
+    { name = "jinja2", specifier = ">=3.1.0" },
+    { name = "lm-eval", extras = ["api", "math"], specifier = ">=0.4.0" },
+    { name = "loguru", specifier = ">=0.7.3" },
+    { name = "math-verify", specifier = ">=0.7.0" },
+    { name = "numpy", specifier = ">=1.24.0" },
+    { name = "protobuf", specifier = ">=5.29.0" },
+    { name = "tiktoken", specifier = ">=0.12.0" },
+    { name = "transformers", specifier = ">=5.0.0" },
 ]
 
 [[package]]

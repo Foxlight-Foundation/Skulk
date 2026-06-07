@@ -6,8 +6,8 @@
   <img src="docs/imgs/skulk-logo-2.png" width="200" height="200" alt="Skulk logo">
 </div>
 
-Skulk is a fork of EXO for running AI models across one or more machines as a cluster.
-It keeps EXO's distributed inference foundation, then extends it with a central model store,
+Skulk runs AI models across one or more machines as a single cluster.
+It builds on the distributed inference foundation it inherited from exo (see [About exo](#about-exo)), adding a central model store,
 a more modern dashboard, richer API workflows, sophisticated cache quantization, support for more model families such as embeddings and TTS, and cluster-friendly configuration management.
 
 > Skulk is maintained by [Foxlight Foundation](https://github.com/foxlight-foundation) and forked from [exo](https://github.com/exo-explore/exo).
@@ -109,7 +109,7 @@ If you are brand new to Skulk, follow this order:
 2. Clone the repo.
 3. Build the dashboard.
 4. Run `uv sync`.
-5. Start Skulk with `uv run exo`.
+5. Start Skulk with `uv run skulk`.
 6. Open the dashboard at `http://localhost:52415`.
 7. Confirm your node or cluster appears in the topology view.
 8. Launch a model from the Model Store view, or place one through the API.
@@ -198,7 +198,7 @@ cd Skulk
 npm --prefix dashboard-react install
 npm --prefix dashboard-react run build
 uv sync
-uv run exo
+uv run skulk
 ```
 
 This starts the dashboard and API at `http://localhost:52415`.
@@ -257,7 +257,7 @@ Use this path when you want more than one machine in the cluster.
 
 1. Install Skulk on each node.
 2. Build the dashboard on each node if you are running from source.
-3. Start `uv run exo` on each machine.
+3. Start `uv run skulk` on each machine.
 4. Open the dashboard on one node and confirm the cluster topology looks correct.
 5. Use placement preview or the placement manager to launch a model.
 6. Send chat requests through the dashboard or API.
@@ -273,12 +273,12 @@ rebuild from event `0` may no longer be able to fully resync.
 Example:
 
 ```bash
-uv run exo --bootstrap-peers /ip4/192.168.1.20/tcp/5678/p2p/12D3KooW...
+uv run skulk --bootstrap-peers /ip4/192.168.1.20/tcp/5678/p2p/12D3KooW...
 ```
 
 ## Model Store
 
-The model store is one of Skulk's biggest additions over upstream EXO.
+The model store is one of Skulk's biggest additions over upstream exo.
 
 Without it, each node may download model data independently.
 With it, one node acts as the store host and the rest of the cluster stages from that machine over the LAN.
@@ -404,9 +404,9 @@ Remember: that model must already be placed and running.
 
 ## Configuration
 
-Skulk supports both environment variables and `exo.yaml`.
+Skulk supports both environment variables and `skulk.yaml` (the legacy `exo.yaml` name is still honored).
 
-`exo.yaml` is especially useful for:
+`skulk.yaml` is especially useful for:
 
 - `model_store`
 - `inference.kv_cache_backend`
@@ -416,7 +416,7 @@ The dashboard Settings UI can write and sync config for you.
 
 See:
 
-- [exo.yaml.example](exo.yaml.example)
+- [skulk.yaml.example](skulk.yaml.example)
 - [docs/model-store.md](docs/model-store.md)
 - [docs/kv-cache-backends.md](docs/kv-cache-backends.md)
 
@@ -438,10 +438,10 @@ Current common options:
 Examples:
 
 ```bash
-uv run exo --offline
-uv run exo --no-worker
-uv run exo --api-port 52416
-uv run exo --bootstrap-peers /ip4/192.168.1.20/tcp/5678/p2p/12D3KooW...
+uv run skulk --offline
+uv run skulk --no-worker
+uv run skulk --api-port 52416
+uv run skulk --bootstrap-peers /ip4/192.168.1.20/tcp/5678/p2p/12D3KooW...
 ```
 
 ## Environment Variables
@@ -469,9 +469,9 @@ uv run exo --bootstrap-peers /ip4/192.168.1.20/tcp/5678/p2p/12D3KooW...
 Examples:
 
 ```bash
-SKULK_OFFLINE=true uv run exo
-SKULK_ENABLE_IMAGE_MODELS=true uv run exo
-SKULK_KV_CACHE_BACKEND=optiq SKULK_OPTIQ_BITS=4 SKULK_OPTIQ_FP16_LAYERS=4 uv run exo
+SKULK_OFFLINE=true uv run skulk
+SKULK_ENABLE_IMAGE_MODELS=true uv run skulk
+SKULK_KV_CACHE_BACKEND=optiq SKULK_OPTIQ_BITS=4 SKULK_OPTIQ_FP16_LAYERS=4 uv run skulk
 ```
 
 ## RDMA on macOS
@@ -521,7 +521,7 @@ Important caveats:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) if you want to contribute code, docs, testing help, or design feedback.
 
-## About EXO
+## About exo
 
-EXO is the upstream distributed inference project that Skulk builds on top of.
+exo is the upstream distributed inference project Skulk was forked from; we keep this acknowledgment because Skulk still benefits from that foundation.
 Skulk keeps that foundation, then pushes further on model-store workflows, dashboard UX, and newcomer-friendly cluster operation.

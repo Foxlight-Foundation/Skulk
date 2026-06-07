@@ -1,6 +1,6 @@
 # type: ignore
 #!/usr/bin/env python3
-"""Tool-calling eval for exo's OpenAI-compatible API.
+"""Tool-calling eval for Skulk's OpenAI-compatible API.
 
 Tests whether models correctly:
 - Trigger tool calls when appropriate
@@ -8,7 +8,7 @@ Tests whether models correctly:
 - Handle multi-turn tool use (call -> result -> final answer)
 - Avoid calling tools when unnecessary
 
-Start exo with a model first, then run:
+Start Skulk with a model first, then run:
     uv run python tool_call_eval.py --model <model-id>
     uv run python tool_call_eval.py --model <model-id> --host 10.0.0.5 --port 52415
     uv run python tool_call_eval.py --model <model-id> --repeat 3
@@ -234,8 +234,8 @@ class PromptSizer:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        prog="exo-bench",
-        description="Benchmark exo model throughput across placement previews.",
+        prog="skulk-bench",
+        description="Benchmark Skulk model throughput across placement previews.",
     )
     add_common_instance_args(ap)
     ap.add_argument(
@@ -310,13 +310,13 @@ def main() -> int:
 
     tokenizer = load_tokenizer_for_bench(full_model_id)
     if tokenizer is None:
-        raise RuntimeError("[exo-bench] tokenizer load failed")
+        raise RuntimeError("[skulk-bench] tokenizer load failed")
 
     try:
         prompt_sizer = PromptSizer(tokenizer)
-        logger.debug(f"[exo-bench] loaded tokenizer: {full_model_id} for prompt sizer")
+        logger.debug(f"[skulk-bench] loaded tokenizer: {full_model_id} for prompt sizer")
     except Exception:
-        logger.error("[exo-bench] tokenizer usable but prompt sizing failed")
+        logger.error("[skulk-bench] tokenizer usable but prompt sizing failed")
         raise
 
     selected = settle_and_fetch_placements(
@@ -336,7 +336,7 @@ def main() -> int:
         reverse=True,
     )
 
-    logger.debug(f"exo-bench model: short_id={short_id} full_id={full_model_id}")
+    logger.debug(f"skulk-bench model: short_id={short_id} full_id={full_model_id}")
     logger.info(f"placements: {len(selected)}")
     for p in selected:
         logger.info(

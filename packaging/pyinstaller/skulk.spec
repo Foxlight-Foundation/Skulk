@@ -8,13 +8,13 @@ from PyInstaller.utils.hooks import collect_submodules
 
 PROJECT_ROOT = Path.cwd()
 SOURCE_ROOT = PROJECT_ROOT / "src"
-ENTRYPOINT = SOURCE_ROOT / "exo" / "__main__.py"
+ENTRYPOINT = SOURCE_ROOT / "skulk" / "__main__.py"
 DASHBOARD_DIR = PROJECT_ROOT / "dashboard" / "build"
 RESOURCES_DIR = PROJECT_ROOT / "resources"
-SKULK_SHARED_MODELS_DIR = SOURCE_ROOT / "exo" / "shared" / "models"
+SKULK_SHARED_MODELS_DIR = SOURCE_ROOT / "skulk" / "shared" / "models"
 
 if not ENTRYPOINT.is_file():
-    raise SystemExit(f"Unable to locate Exo entrypoint: {ENTRYPOINT}")
+    raise SystemExit(f"Unable to locate Skulk entrypoint: {ENTRYPOINT}")
 
 if not DASHBOARD_DIR.is_dir():
     raise SystemExit(f"Dashboard assets are missing: {DASHBOARD_DIR}")
@@ -64,7 +64,7 @@ DATAS: list[tuple[str, str]] = [
     (str(DASHBOARD_DIR), "dashboard"),
     (str(RESOURCES_DIR), "resources"),
     (str(MLX_LIB_DIR), "mlx/lib"),
-    (str(SKULK_SHARED_MODELS_DIR), "exo/shared/models"),
+    (str(SKULK_SHARED_MODELS_DIR), "skulk/shared/models"),
 ]
 
 MACMON_PATH = shutil.which("macmon")
@@ -98,7 +98,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="exo",
+    name="skulk",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -118,6 +118,6 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="exo",
+    name="skulk",
 )
 

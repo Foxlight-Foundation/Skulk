@@ -1,8 +1,8 @@
 # type: ignore
 #!/usr/bin/env python3
-"""Quality evaluation for exo — matches Artificial Analysis methodology.
+"""Quality evaluation for Skulk — matches Artificial Analysis methodology.
 
-Runs LLM benchmarks against exo's OpenAI-compatible API using the same
+Runs LLM benchmarks against Skulk's OpenAI-compatible API using the same
 prompts, temperature settings, and answer extraction as Artificial Analysis.
 
 Supported benchmarks:
@@ -17,9 +17,9 @@ Model configs in eval_configs/models.toml auto-detect reasoning/non-reasoning
 settings per model. Override with --reasoning / --no-reasoning.
 
 Usage:
-  uv run python exo_eval.py --model <model-id> --tasks gpqa_diamond
-  uv run python exo_eval.py --model <model-id> --tasks humaneval,livecodebench --limit 50
-  uv run python exo_eval.py --model <model-id> --tasks gpqa_diamond --compare-concurrency 1,4
+  uv run python skulk_eval.py --model <model-id> --tasks gpqa_diamond
+  uv run python skulk_eval.py --model <model-id> --tasks humaneval,livecodebench --limit 50
+  uv run python skulk_eval.py --model <model-id> --tasks gpqa_diamond --compare-concurrency 1,4
 
 References:
   https://artificialanalysis.ai/methodology/intelligence-benchmarking
@@ -1077,8 +1077,8 @@ def parse_int_list(values: list[str]) -> list[int]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        prog="exo-eval",
-        description="Quality evaluation for exo — matches Artificial Analysis methodology.",
+        prog="skulk-eval",
+        description="Quality evaluation for Skulk — matches Artificial Analysis methodology.",
     )
     add_common_instance_args(ap)
 
@@ -1153,7 +1153,7 @@ def main() -> int:
     ap.add_argument(
         "--skip-instance-setup",
         action="store_true",
-        help="Skip exo instance management (assumes model is already running).",
+        help="Skip Skulk instance management (assumes model is already running).",
     )
 
     args, _ = ap.parse_known_args()

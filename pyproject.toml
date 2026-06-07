@@ -73,7 +73,7 @@ members = ["rust/skulk_pyo3_bindings", "bench"]
 skulk_pyo3_bindings = { workspace = true }
 # Using official mlx — the RDMA fork (rltakashige/mlx-jaccl-fix-small-recv) doesn't
 # build on macOS 26 Metal SDK. The fork's only change is a DSB memory barrier for
-# Thunderbolt RDMA GPU coherence, which we don't need (exo uses libp2p, not RDMA).
+# Thunderbolt RDMA GPU coherence, which we don't need (Skulk uses libp2p, not RDMA).
 # mlx = { git = "https://github.com/rltakashige/mlx-jaccl-fix-small-recv.git", branch = "address-rdma-gpu-locks", marker = "sys_platform == 'darwin'" }
 # Foxlight-owned mlx-lm, reconciled onto upstream v0.31.3 (version 0.31.3.post1).
 # Pinned to the merge of Foxlight-Foundation/mlx-lm PR #1 (branch

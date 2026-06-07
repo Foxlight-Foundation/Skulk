@@ -7,12 +7,12 @@ const now = Date.now();
 
 const sampleMessages: ChatMessage[] = [
   {
-    id: '1', role: 'user', content: 'How do I set up distributed inference with exo?', timestamp: now - 60000,
+    id: '1', role: 'user', content: 'How do I set up distributed inference with Skulk?', timestamp: now - 60000,
     attachments: [{ id: 'a1', name: 'config.json', type: 'application/json' }],
   },
   {
     id: '2', role: 'assistant', timestamp: now - 55000,
-    content: `To set up distributed inference with **exo**, you need to:\n\n1. Install exo on all nodes:\n\`\`\`bash\npip install exo\n\`\`\`\n\n2. Start the cluster:\n\`\`\`bash\nexo --nodes kite1,kite2,kite3\n\`\`\`\n\nThe system will automatically discover nodes and distribute the model using pipeline parallelism.\n\n> **Note:** For best performance with multiple Apple Silicon devices, use Thunderbolt connections and tensor parallelism.`,
+    content: `To set up distributed inference with **Skulk**, you need to:\n\n1. Install Skulk on all nodes:\n\`\`\`bash\nuv sync\n\`\`\`\n\n2. Start the cluster:\n\`\`\`bash\nuv run skulk\n\`\`\`\n\nThe system will automatically discover nodes and distribute the model using pipeline parallelism.\n\n> **Note:** For best performance with multiple Apple Silicon devices, use Thunderbolt connections and tensor parallelism.`,
     ttftMs: 245, tps: 42.3,
     thinkingContent: 'The user wants to set up distributed inference. I should explain the basic setup steps and mention the key configuration options for Apple Silicon clusters.',
     tokens: [

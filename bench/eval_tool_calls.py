@@ -889,7 +889,7 @@ def _placement_sort_key(p: dict[str, Any]) -> tuple[int, int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Multi-API tool-calling eval for exo",
+        description="Multi-API tool-calling eval for Skulk",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
@@ -951,11 +951,11 @@ Examples:
     )
 
     log = sys.stderr if args.stdout else sys.stdout
-    exo = SkulkClient(args.host, args.port, timeout_s=args.timeout)
-    _short_id, full_model_id = resolve_model_short_id(exo, args.model)
+    client = SkulkClient(args.host, args.port, timeout_s=args.timeout)
+    _short_id, full_model_id = resolve_model_short_id(client, args.model)
 
     selected = settle_and_fetch_placements(
-        exo, full_model_id, args, settle_timeout=args.settle_timeout
+        client, full_model_id, args, settle_timeout=args.settle_timeout
     )
     if not selected:
         print("No valid placements matched your filters.", file=sys.stderr)
@@ -970,7 +970,7 @@ Examples:
 
     print("Planning phase: checking downloads...", file=log)
     run_planning_phase(
-        exo,
+        client,
         full_model_id,
         preview,
         args.danger_delete_downloads,
@@ -996,13 +996,13 @@ Examples:
     )
     print("=" * 72, file=log)
 
-    exo.request_json("POST", "/instance", body={"instance": instance})
+    client.request_json("POST", "/instance", body={"instance": instance})
     try:
-        wait_for_instance_ready(exo, instance_id)
+        wait_for_instance_ready(client, instance_id)
     except (RuntimeError, TimeoutError) as e:
         print(f"Failed to initialize placement: {e}", file=sys.stderr)
         with contextlib.suppress(SkulkHttpError):
-            exo.request_json("DELETE", f"/instance/{instance_id}")
+            client.request_json("DELETE", f"/instance/{instance_id}")
         sys.exit(1)
 
     time.sleep(1)
@@ -1046,11 +1046,11 @@ Examples:
                                 print(f"      ! {r.error}", file=log)
     finally:
         try:
-            exo.request_json("DELETE", f"/instance/{instance_id}")
+            client.request_json("DELETE", f"/instance/{instance_id}")
         except SkulkHttpError as e:
             if e.status != 404:
                 raise
-        wait_for_instance_gone(exo, instance_id)
+        wait_for_instance_gone(client, instance_id)
 
     # --- Summary ---
     print(f"\n{'=' * 72}", file=log)

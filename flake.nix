@@ -1,5 +1,5 @@
 {
-  description = "The development environment for Exo";
+  description = "The development environment for Skulk";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -81,7 +81,7 @@
             # Keep the flake runtime aligned with the uv-managed app runtime on macOS.
             # Nix provides the dev shell, formatter, and CI environment; uv remains the
             # source of truth for the packaged MLX wheel stack used by the app itself.
-            default = self'.packages.exo;
+            default = self'.packages.skulk;
           };
 
           devShells.default = with pkgs; pkgs.mkShell {

@@ -30,7 +30,7 @@ def write(s: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Model picker (same style as exo_eval)
+# Model picker (same style as skulk_eval)
 # ---------------------------------------------------------------------------
 
 
@@ -233,10 +233,10 @@ async def run_requests(print_stdout: bool = False) -> None:
 def main() -> None:
     global selected_model, BASE_URL
     parser = argparse.ArgumentParser(
-        description="Send parallel requests to an exo cluster"
+        description="Send parallel requests to a Skulk cluster"
     )
     parser.add_argument(
-        "--host", required=True, help="Hostname of the exo node (e.g. s1)"
+        "--host", required=True, help="Hostname of the Skulk node (e.g. s1)"
     )
     parser.add_argument("--port", type=int, default=52415, help="Port (default: 52415)")
     parser.add_argument(

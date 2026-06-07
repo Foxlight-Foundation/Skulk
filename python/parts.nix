@@ -15,18 +15,18 @@
 
       # Override overlay to inject Nix-built components that are specific to the
       # development environment.
-      exoOverlay = final: prev: {
+      skulkOverlay = final: prev: {
         # Replace workspace skulk_pyo3_bindings with Nix-built wheel.
         # Preserve passthru so mkVirtualEnv can resolve dependency groups.
         # Copy .pyi stub + py.typed marker so basedpyright can find the types.
-        exo-pyo3-bindings = pkgs.stdenv.mkDerivation {
-          pname = "exo-pyo3-bindings";
+        skulk-pyo3-bindings = pkgs.stdenv.mkDerivation {
+          pname = "skulk-pyo3-bindings";
           version = "0.1.0";
           src = self'.packages.skulk_pyo3_bindings;
           # Install from pre-built wheel
           nativeBuildInputs = [ final.pyprojectWheelHook ];
           dontStrip = true;
-          passthru = prev.exo-pyo3-bindings.passthru or { };
+          passthru = prev.skulk-pyo3-bindings.passthru or { };
           postInstall = ''
             local siteDir=$out/${final.python.sitePackages}/skulk_pyo3_bindings
             cp ${inputs.self}/rust/skulk_pyo3_bindings/skulk_pyo3_bindings.pyi $siteDir/
@@ -104,7 +104,7 @@
         lib.composeManyExtensions [
           inputs.pyproject-build-systems.overlays.default
           overlay
-          exoOverlay
+          skulkOverlay
           buildSystemsOverlay
           linuxOverlay
         ]
@@ -117,16 +117,16 @@
       ];
 
       # Exclude bench deps from main env (bench has its own benchVenv)
-      exoDeps = removeAttrs workspace.deps.default [ "exo-bench" ];
+      skulkDeps = removeAttrs workspace.deps.default [ "skulk-bench" ];
 
-      exoVenv = (pythonSet.mkVirtualEnv "exo-env" exoDeps).overrideAttrs {
+      skulkVenv = (pythonSet.mkVirtualEnv "skulk-env" skulkDeps).overrideAttrs {
         venvIgnoreCollisions = venvCollisionPaths;
       };
 
       # Virtual environment with dev dependencies for testing
-      testVenv = (pythonSet.mkVirtualEnv "exo-test-env" (
-        exoDeps // {
-          exo = [ "dev" ]; # Include pytest, pytest-asyncio, pytest-env
+      testVenv = (pythonSet.mkVirtualEnv "skulk-test-env" (
+        skulkDeps // {
+          skulk = [ "dev" ]; # Include pytest, pytest-asyncio, pytest-env
         }
       )).overrideAttrs {
         venvIgnoreCollisions = venvCollisionPaths;
@@ -134,7 +134,7 @@
 
       mkPythonScript = name: path: pkgs.writeShellApplication {
         inherit name;
-        runtimeInputs = [ exoVenv ];
+        runtimeInputs = [ skulkVenv ];
         runtimeEnv = {
           SKULK_DASHBOARD_DIR = self'.packages.dashboard;
           SKULK_RESOURCES_DIR = inputs.self + /resources;
@@ -142,8 +142,8 @@
         text = ''exec python ${path} "$@"'';
       };
 
-      benchVenv = pythonSet.mkVirtualEnv "exo-bench-env" {
-        exo-bench = [ ];
+      benchVenv = pythonSet.mkVirtualEnv "skulk-bench-env" {
+        skulk-bench = [ ];
       };
 
       mkBenchScript = name: path: pkgs.writeShellApplication {
@@ -158,7 +158,7 @@
         text = ''exec python ${path} "$@"'';
       };
 
-      exoPackage = pkgs.runCommand "exo"
+      skulkPackage = pkgs.runCommand "skulk"
         {
           nativeBuildInputs = [ pkgs.makeWrapper ];
         }
@@ -166,7 +166,7 @@
           mkdir -p $out/bin
 
           # Create wrapper script
-          makeWrapper ${exoVenv}/bin/exo $out/bin/exo \
+          makeWrapper ${skulkVenv}/bin/skulk $out/bin/skulk \
             --set SKULK_DASHBOARD_DIR ${self'.packages.dashboard} \
             --set SKULK_RESOURCES_DIR ${inputs.self + /resources} \
             ${lib.optionalString pkgs.stdenv.hostPlatform.isDarwin "--prefix PATH : ${pkgs.macmon}/bin"}
@@ -176,14 +176,14 @@
       # Python package only available on macOS (requires MLX/Metal)
       packages = lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin
         {
-          exo = exoPackage;
+          skulk = skulkPackage;
           # Test environment for running pytest outside of Nix sandbox (needs GPU access)
-          exo-test-env = testVenv;
+          skulk-test-env = testVenv;
         } // {
-        exo-bench = mkBenchScript "exo-bench" (inputs.self + /bench/exo_bench.py);
-        exo-eval = mkBenchScript "exo-eval" (inputs.self + /bench/exo_eval.py);
-        exo-eval-tool-calls = mkBenchScript "exo-eval-tool-calls" (inputs.self + /bench/eval_tool_calls.py);
-        exo-get-all-models-on-cluster = mkSimplePythonScript "exo-get-all-models-on-cluster" (inputs.self + /tests/get_all_models_on_cluster.py);
+        skulk-bench = mkBenchScript "skulk-bench" (inputs.self + /bench/skulk_bench.py);
+        skulk-eval = mkBenchScript "skulk-eval" (inputs.self + /bench/skulk_eval.py);
+        skulk-eval-tool-calls = mkBenchScript "skulk-eval-tool-calls" (inputs.self + /bench/eval_tool_calls.py);
+        skulk-get-all-models-on-cluster = mkSimplePythonScript "skulk-get-all-models-on-cluster" (inputs.self + /tests/get_all_models_on_cluster.py);
       };
 
       checks = {
