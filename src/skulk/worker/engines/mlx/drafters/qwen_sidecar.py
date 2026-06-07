@@ -88,7 +88,7 @@ def _attention_mask(x: mx.array, cache: KVCache) -> mx.array | str | None:
 class QwenSidecarDrafter:
     """Stateful Phase-2 MTP drafter for Qwen3.5-family sidecars.
 
-    Satisfies :class:`~exo.worker.engines.mlx.drafters.protocol.Drafter`.
+    Satisfies :class:`~skulk.worker.engines.mlx.drafters.protocol.Drafter`.
     Construct via :func:`build_qwen_sidecar_drafter`, never directly — the
     builder owns weight validation and family-fact resolution.
     """

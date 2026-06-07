@@ -117,7 +117,7 @@ def resolve_model_in_path(model_id: ModelId) -> Path | None:
     is only returned if ``is_model_directory_complete`` confirms all weight
     files are present.
 
-    Reads the search path dynamically from ``exo.shared.constants`` so that
+    Reads the search path dynamically from ``skulk.shared.constants`` so that
     paths added at runtime (e.g. by the model store) are picked up.
     """
     import skulk.shared.constants as _constants

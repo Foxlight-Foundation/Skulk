@@ -3,7 +3,7 @@
 The cluster is event-sourced and most "stale state" recovers naturally:
 
 * The event log uses per-record framing, so a partial-write at process death
-  is detected and dropped at replay (`exo.shared.event_log`).
+  is detected and dropped at replay (`skulk.shared.event_log`).
 * Runner subprocesses die with the parent, so MLX/Metal heap state is
   reclaimed by the kernel.
 * libp2p reconnects from scratch on every startup; there is no on-disk peer

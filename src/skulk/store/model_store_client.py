@@ -8,14 +8,14 @@ Overview
 This module contains two closely related classes:
 
 ``ModelStoreClient``
-    Knows how to talk to a :class:`~exo.store.model_store_server.ModelStoreServer`
+    Knows how to talk to a :class:`~skulk.store.model_store_server.ModelStoreServer`
     and copy model files to a node-local staging directory.  Used by both
     the :class:`ModelStoreDownloader` (download path) and the
-    :class:`~exo.worker.main.Worker` (eviction path).
+    :class:`~skulk.worker.main.Worker` (eviction path).
 
 ``ModelStoreDownloader``
-    A :class:`~exo.download.shard_downloader.ShardDownloader` implementation
-    that wraps EXO's standard ``ResumableShardDownloader`` and intercepts
+    A :class:`~skulk.download.shard_downloader.ShardDownloader` implementation
+    that wraps Skulk's standard ``ResumableShardDownloader`` and intercepts
     ``ensure_shard()`` to stage from the store instead of HuggingFace.  If
     the model is not yet in the store and ``allow_hf_fallback`` is ``True``,
     it falls through to the inner downloader transparently.
@@ -42,14 +42,14 @@ Store host optimisation
 When this node IS the store host (``local_store_path`` is set in the
 constructor), ``stage_shard()`` uses ``shutil.copy2()`` for a local
 filesystem copy instead of making an HTTP round-trip over loopback.  If
-``node_cache_path`` in ``exo.yaml`` is set to the same path as ``store_path``
+``node_cache_path`` in ``skulk.yaml`` is set to the same path as ``store_path``
 for the store host, ``shutil.copy2()`` still runs but is effectively a no-op
 (same inode, copy skipped by size check).
 
 Eviction
 --------
 When an inference instance is deactivated (``Shutdown`` task received by the
-:class:`~exo.worker.main.Worker`), the worker calls
+:class:`~skulk.worker.main.Worker`), the worker calls
 ``ModelStoreClient.evict_shard()`` to remove the staged files from the
 node-local cache.  The canonical copy in the store is **never touched**.
 Eviction is skipped if ``cleanup_on_deactivate`` is ``False`` for the node
@@ -102,7 +102,7 @@ class ModelNotInStoreError(Exception):
 
 
 def _sanitize_model_id(model_id: str) -> str:
-    """Convert a model ID to a safe directory name (matches EXO convention).
+    """Convert a model ID to a safe directory name (matches Skulk convention).
 
     ``"mlx-community/Qwen3-30B-A3B-4bit"`` → ``"mlx-community--Qwen3-30B-A3B-4bit"``
 
@@ -174,7 +174,7 @@ class ModelStoreClient:
 
     Args:
         store_host: Hostname or IP of the store host node.
-        store_port: Port of the :class:`~exo.store.model_store_server.ModelStoreServer`.
+        store_port: Port of the :class:`~skulk.store.model_store_server.ModelStoreServer`.
         local_store_path: Set to the store's root path when this node IS the
             store host.  Causes ``stage_shard()`` to use local file copies
             instead of HTTP.
@@ -701,7 +701,7 @@ class ModelStoreClient:
 class ModelStoreDownloader(ShardDownloader):
     """ShardDownloader that intercepts ``ensure_shard()`` to stage from the store.
 
-    This class wraps EXO's standard inner downloader (normally a
+    This class wraps Skulk's standard inner downloader (normally a
     ``SingletonShardDownloader`` wrapping a ``ResumableShardDownloader``) and
     overrides the download path:
 
@@ -720,7 +720,7 @@ class ModelStoreDownloader(ShardDownloader):
     Store-staged downloads emit a synthetic ``in_progress`` → ``complete``
     progress pair.
 
-    Wrapping pattern (mirrors how EXO wraps its own downloaders)::
+    Wrapping pattern (mirrors how Skulk wraps its own downloaders)::
 
         base = exo_shard_downloader(offline=args.offline)
         downloader = ModelStoreDownloader(

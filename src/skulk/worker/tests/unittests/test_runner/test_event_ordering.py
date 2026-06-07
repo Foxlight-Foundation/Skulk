@@ -137,10 +137,10 @@ def patch_out_mlx(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         mlx_model_output_parsers, "detect_thinking_prompt_suffix", make_nothin(False)
     )
-    monkeypatch.setattr(mlx_batch_generator, "SkulkBatchGenerator", FakeExoBatchGenerator)
+    monkeypatch.setattr(mlx_batch_generator, "SkulkBatchGenerator", FakeSkulkBatchGenerator)
 
 
-class FakeExoBatchGenerator:
+class FakeSkulkBatchGenerator:
     def __init__(self, *_args: object, **_kwargs: object) -> None:
         self._uid_counter = 0
         self._pending: dict[int, GenerationResponse] = {}

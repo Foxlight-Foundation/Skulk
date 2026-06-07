@@ -1384,7 +1384,7 @@ def _stream_generate_with_mtp(
     GDN) — committed-but-restored tokens ride at the front of the next
     verify forward instead of paying a dedicated replay pass — and plain
     trim for pure-KV models. Drafters stay behind the
-    :class:`~exo.worker.engines.mlx.drafters.protocol.Drafter` protocol,
+    :class:`~skulk.worker.engines.mlx.drafters.protocol.Drafter` protocol,
     and the pair-stream contract holds: ``draft()`` consumes the
     ``(h, b)`` pair, and the round's accepted drafts are observed as
     ``(v_h[:, :p], drafts[:p])`` so stateful drafters keep gapless

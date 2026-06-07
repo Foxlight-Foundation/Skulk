@@ -1,4 +1,4 @@
-"""Utility for restarting the current exo process in-place.
+"""Utility for restarting the current Skulk process in-place.
 
 Uses os.execv to replace the current process image with a fresh one.
 Because exec replaces the image within the same PID, Metal/GPU allocations are
@@ -64,11 +64,11 @@ def schedule_restart(delay: float = 1.0) -> bool:
 
         time.sleep(delay)
         try:
-            # Use `python -m exo` so restart works even when invoked via the
-            # `exo` console script (where sys.argv[0] is just "exo", not a
+            # Use `python -m skulk` so restart works even when invoked via the
+            # `skulk` console script (where sys.argv[0] is just "skulk", not a
             # valid Python file path). Preserve all original arguments.
             _mark_open_file_descriptors_close_on_exec()
-            os.execv(sys.executable, [sys.executable, "-m", "exo", *sys.argv[1:]])
+            os.execv(sys.executable, [sys.executable, "-m", "skulk", *sys.argv[1:]])
         except Exception as exc:
             # If we can't exec the replacement, keep the current process alive
             global _restart_scheduled

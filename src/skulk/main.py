@@ -310,7 +310,7 @@ class Node:
         er_send, er_recv = channel[ElectionResult]()
         election = Election(
             node_id,
-            # If someone manages to assemble 1 MILLION devices into an exo cluster then. well done. good job champ.
+            # If someone manages to assemble 1 MILLION devices into a Skulk cluster then. well done. good job champ.
             seniority=1_000_000 if args.force_master else 0,
             # nb: this DOES feedback right now. i have thoughts on how to address this,
             # but ultimately it seems not worth the complexity
@@ -777,7 +777,7 @@ class Args(CamelCaseModel):
 
     @classmethod
     def parse(cls) -> Self:
-        parser = argparse.ArgumentParser(prog="EXO")
+        parser = argparse.ArgumentParser(prog="skulk")
         default_verbosity = 0
         parser.add_argument(
             "-q",

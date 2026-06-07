@@ -4,17 +4,17 @@ ModelStoreServer — lightweight aiohttp HTTP file server for the store host.
 Role in the system
 ------------------
 ``ModelStoreServer`` runs only on the **store host** node.  It exposes the
-contents of the :class:`~exo.store.model_store.ModelStore` over HTTP so that
+contents of the :class:`~skulk.store.model_store.ModelStore` over HTTP so that
 worker nodes can discover available models and pull their assigned shards.
 
-The server is started as a long-running async task in :func:`exo.main.Node.run`
+The server is started as a long-running async task in :func:`skulk.main.Node.run`
 alongside all other node components.  It is never started on non-store-host
 nodes.
 
 Design decisions
 ----------------
 * **aiohttp** is used for the HTTP layer (already a transitive dependency via
-  EXO's download stack) rather than adding FastAPI/uvicorn overhead.
+  Skulk's download stack) rather than adding FastAPI/uvicorn overhead.
 * **Range request support** (HTTP 206 Partial Content) enables resumable
   transfers: if a worker's staging is interrupted, it resumes from the byte
   offset where it stopped rather than restarting the file from scratch.
@@ -36,7 +36,7 @@ All endpoints return JSON unless noted.
 
 ``GET /registry``
     Full store index as a JSON array of
-    :class:`~exo.store.model_store.StoreModelEntry` objects.  Useful for
+    :class:`~skulk.store.model_store.StoreModelEntry` objects.  Useful for
     management scripts and future dashboard integration.
 
 ``GET /models``
@@ -98,7 +98,7 @@ class ModelStoreServer:
         await server.stop()    # called on graceful shutdown
 
     In practice, :func:`start` is passed directly to the node's
-    :class:`~exo.utils.task_group.TaskGroup` and :func:`stop` is not called
+    :class:`~skulk.utils.task_group.TaskGroup` and :func:`stop` is not called
     explicitly — the task is cancelled when the task group shuts down.
     """
 
@@ -110,12 +110,12 @@ class ModelStoreServer:
     ) -> None:
         """
         Args:
-            store: The :class:`~exo.store.model_store.ModelStore` instance
+            store: The :class:`~skulk.store.model_store.ModelStore` instance
                 to serve files from.
             host: Bind address.  Defaults to ``"0.0.0.0"`` (all interfaces).
                 Set to ``"127.0.0.1"`` for localhost-only access (e.g. tests).
             port: TCP port to listen on.  Must match ``store_port`` in
-                ``exo.yaml`` so that worker nodes can reach this server.
+                ``skulk.yaml`` so that worker nodes can reach this server.
         """
         self._store = store
         self._host = host

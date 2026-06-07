@@ -37,7 +37,7 @@ class ModelListModel(BaseModel):
     id: str
     object: str = "model"
     created: int = Field(default_factory=lambda: int(time.time()))
-    owned_by: str = "exo"
+    owned_by: str = "skulk"
     # openwebui fields
     hugging_face_id: str = Field(default="")
     name: str = Field(default="")

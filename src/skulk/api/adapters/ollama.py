@@ -85,7 +85,7 @@ def ollama_request_to_text_generation(
     request: OllamaChatRequest,
     model_card: ModelCard | None = None,
 ) -> TextGenerationTaskParams:
-    """Convert Ollama chat request to exo's internal text generation format."""
+    """Convert Ollama chat request to Skulk's internal text generation format."""
     instructions: str | None = None
     input_messages: list[InputMessage] = []
     chat_template_messages: list[dict[str, Any]] = []
@@ -343,7 +343,7 @@ def ollama_generate_request_to_text_generation(
     request: OllamaGenerateRequest,
     model_card: ModelCard | None = None,
 ) -> TextGenerationTaskParams:
-    """Convert Ollama generate request to exo's internal text generation format."""
+    """Convert Ollama generate request to Skulk's internal text generation format."""
     chat_template_messages: list[dict[str, Any]] = []
     images: list[str] = []
     if request.system:

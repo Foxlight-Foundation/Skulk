@@ -130,7 +130,7 @@ class Election:
                 logger.debug(f"Election message received: {message}")
                 if message.proposed_session.master_node_id == self.node_id:
                     logger.debug("Dropping message from ourselves")
-                    # Drop messages from us (See exo.routing.router)
+                    # Drop messages from us (See skulk.routing.router)
                     continue
                 # If a new round is starting, we participate
                 if message.clock > self.clock:

@@ -5,16 +5,16 @@ ModelStore — centralized model registry and path resolution for the store host
 Role in the system
 ------------------
 ``ModelStore`` runs only on the **store host** node (the node whose hostname
-or node_id matches ``model_store.store_host`` in ``exo.yaml``).  Worker nodes
+or node_id matches ``model_store.store_host`` in ``skulk.yaml``).  Worker nodes
 never instantiate this class — they interact with the store exclusively via
-:class:`~exo.store.model_store_client.ModelStoreClient` over HTTP.
+:class:`~skulk.store.model_store_client.ModelStoreClient` over HTTP.
 
 Responsibilities
 ----------------
 * Maintain a persistent JSON registry (``{store_path}/registry.json``) that
   maps HuggingFace model IDs to store metadata (path, file list, size,
   timestamp).
-* Provide path resolution so :class:`~exo.store.model_store_server.ModelStoreServer`
+* Provide path resolution so :class:`~skulk.store.model_store_server.ModelStoreServer`
   can serve files without scanning the filesystem on every request.
 * Expose ``register_model()`` so external tools (and, in a future phase, the
   automatic HF-download hook) can add new models to the store.
@@ -136,7 +136,7 @@ class ModelStore:
         """
         Args:
             store_path: Absolute path to the model store root directory on the
-                store host.  This directory must be readable by the exo process
+                store host.  This directory must be readable by the Skulk process
                 and writable for registry updates.
         """
         self._store_path = store_path

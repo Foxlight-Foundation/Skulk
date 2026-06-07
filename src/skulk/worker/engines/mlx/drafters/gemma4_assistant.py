@@ -7,7 +7,7 @@ rather than embedded MTP heads. The assistant:
 - computes **no K/V of its own** — every layer cross-attends over the
   *target's* KV cache (the K/V of the target's last full-attention and last
   sliding-attention layers), which is why
-  :meth:`~exo.worker.engines.mlx.drafters.protocol.Drafter.begin_request`
+  :meth:`~skulk.worker.engines.mlx.drafters.protocol.Drafter.begin_request`
   receives the target cache handles;
 - is **trained for multi-step drafting**, unlike the one-step Qwen sidecar
   block whose chained acceptance craters past depth 1 (86.8% → 39.2%
@@ -121,7 +121,7 @@ def _extract_shared_kv(
 class Gemma4AssistantDrafter:
     """Stateful drafter wrapping mlx-vlm's ``Gemma4AssistantDraftModel``.
 
-    Satisfies :class:`~exo.worker.engines.mlx.drafters.protocol.Drafter`.
+    Satisfies :class:`~skulk.worker.engines.mlx.drafters.protocol.Drafter`.
     Construct via :func:`build_gemma4_assistant_drafter`.
     """
 

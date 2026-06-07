@@ -61,7 +61,7 @@ def extract_base64_from_data_url(data_url: str) -> str:
 
 
 async def fetch_image_url(url: str) -> str:
-    headers = {"User-Agent": "exo/1.0"}
+    headers = {"User-Agent": "skulk/1.0"}
     async with (
         create_http_session(timeout_profile="short") as session,
         session.get(url, headers=headers) as resp,

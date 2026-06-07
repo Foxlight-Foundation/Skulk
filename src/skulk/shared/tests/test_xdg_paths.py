@@ -9,7 +9,7 @@ from unittest import mock
 
 
 def _reload_constants_clean(env: dict[str, str], platform: str = "darwin"):
-    """Reload exo.shared.constants with a clean env and mocked dashboard paths.
+    """Reload skulk.shared.constants with a clean env and mocked dashboard paths.
 
     Mocks find_dashboard/find_resources so tests don't need built dashboard
     assets, then reloads constants to pick up the patched env/platform.

@@ -11,8 +11,8 @@ plans to support) several mechanisms with very different state needs:
   *target's* KV cache) — planned, see the gemma4-mtp initiative
 - Nemotron and future families — unknown shapes, deliberately unconstrained
 
-The generation loop in :mod:`exo.worker.engines.mlx.generator.generate` talks
-only to the :class:`~exo.worker.engines.mlx.drafters.protocol.Drafter`
+The generation loop in :mod:`skulk.worker.engines.mlx.generator.generate` talks
+only to the :class:`~skulk.worker.engines.mlx.drafters.protocol.Drafter`
 protocol; everything family-specific lives behind it. Family-specific *facts*
 (norm conventions, concat orders, key layouts) are declarative data resolved
 by :mod:`.builder` from layout-keyed defaults plus model-card overrides —

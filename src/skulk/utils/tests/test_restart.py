@@ -1,5 +1,5 @@
 # pyright: reportUnusedFunction=false, reportAny=false, reportPrivateUsage=false
-"""Tests for exo.utils.restart — process restart scheduling."""
+"""Tests for skulk.utils.restart — process restart scheduling."""
 
 from unittest.mock import MagicMock, patch
 
@@ -37,14 +37,14 @@ def test_schedule_restart_calls_execv() -> None:
         mock_execv.assert_called_once()
 
 
-def test_schedule_restart_uses_python_m_exo() -> None:
-    """Restart argv should use 'python -m exo' so console scripts work."""
+def test_schedule_restart_uses_python_m_skulk() -> None:
+    """Restart argv should use 'python -m skulk' so console scripts work."""
     _reset_restart_state()
 
     with (
         patch.object(restart.os, "execv") as mock_execv,
         patch.object(restart.sys, "executable", "/usr/bin/python3"),
-        patch.object(restart.sys, "argv", ["exo", "--port", "8080"]),
+        patch.object(restart.sys, "argv", ["skulk", "--port", "8080"]),
         patch.object(restart.threading, "Thread") as mock_thread_cls,
     ):
         mock_thread = MagicMock()
@@ -57,7 +57,7 @@ def test_schedule_restart_uses_python_m_exo() -> None:
 
         mock_execv.assert_called_once_with(
             "/usr/bin/python3",
-            ["/usr/bin/python3", "-m", "exo", "--port", "8080"],
+            ["/usr/bin/python3", "-m", "skulk", "--port", "8080"],
         )
 
 

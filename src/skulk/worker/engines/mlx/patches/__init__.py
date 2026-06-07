@@ -1,7 +1,7 @@
 """Runtime patches applied to mlx-lm before inference.
 
 These patches fix correctness and performance issues in upstream mlx-lm that
-haven't been merged yet, or that require exo-specific behaviour. Every patch
+haven't been merged yet, or that require Skulk-specific behaviour. Every patch
 is idempotent and applied once via :func:`apply_mlx_patches`.
 """
 

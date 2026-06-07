@@ -21,7 +21,7 @@ exo.yaml
 *.xcuserdatad/
 **/.DS_Store
 **/._*
-app/EXO/build/
+app/Skulk/build/
 dist/
 
 

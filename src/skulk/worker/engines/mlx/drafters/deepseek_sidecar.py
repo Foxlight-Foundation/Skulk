@@ -71,7 +71,7 @@ def _dequant_linear(
 class DeepseekSidecarDrafter:
     """Stateless projection-only MTP drafter for DeepSeek V3/R1 sidecars.
 
-    Satisfies :class:`~exo.worker.engines.mlx.drafters.protocol.Drafter`.
+    Satisfies :class:`~skulk.worker.engines.mlx.drafters.protocol.Drafter`.
     Construct via :func:`build_deepseek_sidecar_drafter`.
     """
 

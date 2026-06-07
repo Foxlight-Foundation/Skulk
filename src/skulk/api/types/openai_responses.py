@@ -3,7 +3,7 @@
 These types model the OpenAI Responses API request/response format.
 ResponsesRequest is the API-level wire type; for the canonical internal
 task params type used by the inference pipeline, see
-``exo.shared.types.text_generation.TextGenerationTaskParams``.
+``skulk.shared.types.text_generation.TextGenerationTaskParams``.
 """
 
 import time
@@ -117,34 +117,34 @@ class ResponsesRequest(BaseModel, frozen=True):
     metadata: dict[str, str] | None = None
     reasoning: Reasoning | None = None
 
-    # --- exo extensions (not in OpenAI Responses API spec) ---
+    # --- Skulk extensions (not in OpenAI Responses API spec) ---
     enable_thinking: bool | None = Field(
         default=None,
-        description="[exo extension] Boolean thinking toggle. Not part of the OpenAI Responses API.",
-        json_schema_extra={"x-exo-extension": True},
+        description="[Skulk extension] Boolean thinking toggle. Not part of the OpenAI Responses API.",
+        json_schema_extra={"x-skulk-extension": True},
     )
 
     top_k: int | None = Field(
         default=None,
-        description="[exo extension] Top-k sampling parameter. Not part of the OpenAI Responses API.",
-        json_schema_extra={"x-exo-extension": True},
+        description="[Skulk extension] Top-k sampling parameter. Not part of the OpenAI Responses API.",
+        json_schema_extra={"x-skulk-extension": True},
     )
     stop: str | list[str] | None = Field(
         default=None,
-        description="[exo extension] Stop sequence(s). Not part of the OpenAI Responses API.",
-        json_schema_extra={"x-exo-extension": True},
+        description="[Skulk extension] Stop sequence(s). Not part of the OpenAI Responses API.",
+        json_schema_extra={"x-skulk-extension": True},
     )
     seed: int | None = Field(
         default=None,
-        description="[exo extension] Seed for deterministic sampling. Not part of the OpenAI Responses API.",
-        json_schema_extra={"x-exo-extension": True},
+        description="[Skulk extension] Seed for deterministic sampling. Not part of the OpenAI Responses API.",
+        json_schema_extra={"x-skulk-extension": True},
     )
 
     # --- Internal fields (preserved during serialization, hidden from OpenAPI schema) ---
     chat_template_messages: list[dict[str, Any]] | None = Field(
         default=None,
         description="Internal: pre-formatted messages for tokenizer chat template. Not part of the OpenAI Responses API.",
-        json_schema_extra={"x-exo-internal": True},
+        json_schema_extra={"x-skulk-internal": True},
     )
 
 

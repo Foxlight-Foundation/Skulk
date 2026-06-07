@@ -1232,7 +1232,7 @@ class API:
             tags=["Admin"],
             summary="Restart a node",
             description=(
-                "Restart the exo process on this or a remote node. "
+                "Restart the Skulk process on this or a remote node. "
                 "Pass node_id query param to target a specific node. "
                 "Active inference is interrupted, and the process is replaced; "
                 "the node rejoins the cluster automatically on startup."
@@ -4976,7 +4976,7 @@ class API:
             )
 
     async def restart_node(self, node_id: NodeId | None = None) -> JSONResponse:
-        """Restart the exo process on this or a remote node.
+        """Restart the Skulk process on this or a remote node.
 
         If node_id is omitted or matches this node, replaces the current
         process image via os.execv (in-place restart, same PID). Otherwise,
