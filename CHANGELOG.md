@@ -7,6 +7,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- **A bare `repetition_penalty` no longer crashes the runner.** Requests
+  carrying `repetition_penalty` without `repetition_context_size` passed
+  the request's None straight into mlx-lm's processor builder, overriding
+  its default of 20; the penalty processor's `tokens[-None:]` slice then
+  raised and killed the runner on the first penalized request. Both call
+  sites now coerce None to the default. Found by the 2026-06-06
+  before/after benchmark matrix; applies to every model and every client
+  that sends a penalty alone (many do by default).
+
 ### Added
 
 - **Staged model copies now have a lifecycle, and nodes can report their
