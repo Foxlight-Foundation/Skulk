@@ -32,7 +32,7 @@ output_parser = "gemma4"
 # (slice boundaries cut K/V dependencies; rejected loudly) — at 5.5GB
 # this model never needs sharding.
 assistant_model_repo = "mlx-community/gemma-4-E2B-it-assistant-bf16"
-mtp_max_depth = 3
+mtp_max_depth = 2
 # Same FAST_SYNCH wedge guard as the other gemma4 cards.
 metal_fast_synch = false
 

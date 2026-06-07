@@ -33,7 +33,7 @@ output_parser = "gemma4"
 # artifact of the pre-cadence loop skipping post-correction drafts and is
 # retracted.
 assistant_model_repo = "mlx-community/gemma-4-E4B-it-assistant-bf16"
-mtp_max_depth = 3
+mtp_max_depth = 2
 # Same FAST_SYNCH wedge as the 26b card — GPU command queue stalls in the
 # pipeline-parallel inference path, kernel watchdog panics the box. Disable
 # until the upstream MLX issue is fixed or a cheap inference-side fence
