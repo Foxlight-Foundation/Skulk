@@ -172,9 +172,11 @@ hardware.
   FIFO order with no failures and no interleaving — but it means throughput
   does not currently scale with concurrent callers.
 - **Non-streaming errors return a truncated body.** A non-streaming request
-  that fails part-way through generation returns the partial text with a
-  `200` status rather than a clean error. For first-class mid-generation
-  error handling, use streaming requests, which surface error events.
+  that fails part-way through generation terminates promptly but returns an
+  empty or truncated body under a `200` status (the status line is already
+  on the wire when the failure lands) rather than a clean error document.
+  Treat an unparseable non-streaming body as a failure and retry — or use
+  streaming requests, which surface first-class error events.
 - **Greedy MTP output on Qwen GDN models is semantically greedy but not
   byte-identical** to the same model decoding without speculation. The text
   is a valid greedy generation; it may differ token-for-token from the
