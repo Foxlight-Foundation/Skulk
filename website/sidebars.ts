@@ -33,6 +33,7 @@ const sidebars: SidebarsConfig = {
         "model-store",
         "kv-cache-backends",
         "tracing",
+        "speculative-decoding",
         "model-cards",
         "model-capabilities",
         {
