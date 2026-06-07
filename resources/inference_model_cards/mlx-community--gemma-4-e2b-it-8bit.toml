@@ -26,13 +26,15 @@ tool_call_format = "gemma4"
 prompt_renderer = "gemma4"
 output_parser = "gemma4"
 # Companion drafter for speculative decoding (Gemma 4 assistant pattern).
-# Validated 2026-06-05 on M4/24GB under the bonus-driven cadence: depth 3
-# — 44% chained acceptance, 57.1 tok/s vs 36.7 vanilla (1.56x; depth 1:
-# 67%, 1.43x). KV-shared E-series models are NOT pipeline-shardable
-# (slice boundaries cut K/V dependencies; rejected loudly) — at 5.5GB
-# this model never needs sharding.
+# Depth swept 2026-06-07 on M4/24GB, production stack (3x200tok greedy,
+# medians): d1 46.9 / d2 54.0 / d3 45.1 tok/s vs 37.7 vanilla — depth 2
+# wins (+43%). Depth 3 over-drafts: the third verify column costs ~36%
+# of a forward (M4 quantized-matmul width cliff) but its declining
+# conditional acceptance returns less. KV-shared E-series models are
+# NOT pipeline-shardable (slice boundaries cut K/V dependencies;
+# rejected loudly) — at 5.5GB this model never needs sharding.
 assistant_model_repo = "mlx-community/gemma-4-E2B-it-assistant-bf16"
-mtp_max_depth = 3
+mtp_max_depth = 2
 # Same FAST_SYNCH wedge guard as the other gemma4 cards.
 metal_fast_synch = false
 
