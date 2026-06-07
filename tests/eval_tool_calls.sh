@@ -19,7 +19,7 @@ git branch -r --contains "$commit" | grep -qE '^\s*origin/' || {
 hosts=("$@")
 cleanup() {
   for host in "${hosts[@]}"; do
-    ssh -T -o BatchMode=yes "$host@$host" "pkill -f bin/exo" &
+    ssh -T -o BatchMode=yes "$host@$host" "pkill -f 'bin/(exo|skulk)'" &
   done
   sleep 1
   jobs -pr | xargs -r kill 2>/dev/null || true
@@ -28,12 +28,12 @@ trap 'cleanup' EXIT INT TERM
 
 for host; do
   ssh -T -o BatchMode=yes -o ServerAliveInterval=30 "$host@$host" \
-    "SKULK_LIBP2P_NAMESPACE=$commit /nix/var/nix/profiles/default/bin/nix build github:exo-explore/exo/$commit" &
+    "SKULK_LIBP2P_NAMESPACE=$commit /nix/var/nix/profiles/default/bin/nix build github:Foxlight-Foundation/Skulk/$commit" &
 done
 wait
 for host; do
   ssh -T -o BatchMode=yes -o ServerAliveInterval=30 "$host@$host" \
-    "SKULK_LIBP2P_NAMESPACE=$commit /nix/var/nix/profiles/default/bin/nix run github:exo-explore/exo/$commit" &>/dev/null &
+    "SKULK_LIBP2P_NAMESPACE=$commit /nix/var/nix/profiles/default/bin/nix run github:Foxlight-Foundation/Skulk/$commit" &>/dev/null &
 done
 
 for host; do
@@ -49,7 +49,7 @@ mkdir -p "./bench/$commit"
 nix run .#exo-get-all-models-on-cluster -- "$eval_runner" | while IFS= read -r model; do
   echo "running eval for $model" 1>&2
   ssh -Tn -o BatchMode=yes -o ServerAliveInterval=30 "$eval_runner@$eval_runner" \
-    "/nix/var/nix/profiles/default/bin/nix run github:exo-explore/exo/$commit#exo-eval-tool-calls -- --model $model --stdout" \
+    "/nix/var/nix/profiles/default/bin/nix run github:Foxlight-Foundation/Skulk/$commit#skulk-eval-tool-calls -- --model $model --stdout" \
     >>"./bench/$commit/${model//\//--}-eval.json"
   echo
 done

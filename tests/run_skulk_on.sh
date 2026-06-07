@@ -29,7 +29,7 @@ echo "Deploying $commit to $# hosts..."
 hosts=("$@")
 cleanup() {
   for host in "${hosts[@]}"; do
-    ssh -T -o BatchMode=yes "$host@$host" "pkill -f bin/exo" &
+    ssh -T -o BatchMode=yes "$host@$host" "pkill -f 'bin/(exo|skulk)'" &
   done
   wait
   jobs -pr | xargs -r kill 2>/dev/null || true

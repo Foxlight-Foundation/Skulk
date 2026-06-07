@@ -26,7 +26,7 @@ wait
 
 cleanup() {
   for host in "${hosts[@]}"; do
-    ssh -T -o BatchMode=yes "$host@$host" "pkill -f bin/exo" &
+    ssh -T -o BatchMode=yes "$host@$host" "pkill -f 'bin/(exo|skulk)'" &
   done
   sleep 1
   jobs -pr | xargs -r kill 2>/dev/null || true
