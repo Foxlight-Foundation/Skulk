@@ -15,15 +15,18 @@ format = "token_delimited"
 default_effort = "medium"
 disabled_effort = "none"
 
-# MTP speculative decoding re-validated 2026-06-05 on M4/24GB under the
-# bonus-driven cadence (deferred replay + quantize-on-load sidecar):
-# depth 2 — 82% acceptance, 10.5 tok/s vs ~5.4-6.0 vanilla (1.87x; depth 1
-# reference: 83%, 10.2 tok/s). Depth 2 still pays on models this size —
-# the trunk dominates the drafter's extra chain cost; the 9B stays at
-# depth 1 (Skulk #192 / PR #193 / bonus-driven cadence rework).
+# MTP speculative decoding. Depth swept 2026-06-07 on the production
+# 2-node pipeline (kite1+kite2, 3x200tok greedy, medians): d1 10.5 vs
+# d2 9.2 tok/s against a 6.3 vanilla baseline — depth 1 wins (+67%),
+# and d2's wide run-to-run spread (7.7-9.5) was the SSM deferred-replay
+# tax: GDN rejects restore a snapshot and ride the next verify, whose
+# extra columns cost ~36% of a forward past width 2 (M4 width cliff).
+# Same pattern as the 9B; the trunk size does not buy d2 back on GDN
+# hybrids. (The 2026-06-05 single-node probe-rig d2 advantage predates
+# the cliff measurement and is superseded.)
 [runtime]
 mtp_heads = true
-mtp_max_depth = 2
+mtp_max_depth = 1
 mtp_sidecar_repo = "FoxlightAI/qwen3-5-27b-mtp"
 
 [storage_size]
