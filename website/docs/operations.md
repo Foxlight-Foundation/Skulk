@@ -98,16 +98,27 @@ fleet view.
 
 ### Manual cleanup
 
-`POST /store/purge-staging` removes staged model artifacts from nodes
-without deleting the store copy itself.
+`POST /store/purge-staging` **broadcasts a purge to every node in the
+cluster**, removing staged model artifacts without deleting the store copy
+itself. The endpoint requires a JSON body; an empty object purges all
+not-in-use staged models, and an optional `modelId` narrows the purge to one
+model:
 
 ```bash
-curl -X POST http://localhost:52415/store/purge-staging
+# purge all not-in-use staged copies, cluster-wide
+curl -X POST http://localhost:52415/store/purge-staging \
+  -H "Content-Type: application/json" -d '{}'
+
+# purge one model's staged copies, cluster-wide
+curl -X POST http://localhost:52415/store/purge-staging \
+  -H "Content-Type: application/json" \
+  -d '{"modelId": "mlx-community/Qwen3.5-9B-MLX-4bit"}'
 ```
 
 Use this when you have set `cleanup_on_deactivate: false` and are managing
 staging by hand, or to reclaim space immediately rather than waiting for the
-next deactivation/startup trigger.
+next deactivation/startup trigger. Remember it acts on **all** nodes — for a
+single node's picture before and after, use that node's `GET /store/storage`.
 
 ## Placement Failures
 
