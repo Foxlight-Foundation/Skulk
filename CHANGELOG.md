@@ -25,7 +25,8 @@ This project records release notes here and mirrors public-facing notes in
   command-queue maps without closing the old streams — a guaranteed
   permanent hang that the orphaned-task sweep above structurally could
   not cover. The API now fails every open command stream at the session
-  boundary with a "cluster session changed, please retry" error.
+  boundary with an error explaining the session changed and asking the
+  client to retry.
   Verified end-to-end: clients receive the error within ~4–6 seconds of
   a node kill (master or worker rank), versus an indefinite hang before.
 
@@ -37,11 +38,12 @@ This project records release notes here and mirrors public-facing notes in
   37.7 → 54.0 tok/s (+43%, was +20% at depth 3), E4B-8bit 19.5 → 25.4
   (+30%) — and Qwen3.5-27B from depth 2 to depth 1 (6.3 → 10.5 tok/s on
   a 2-node pipeline, +67%; depth 2's run-to-run spread was the
-  GDN/SSM deferred-replay tax). Mechanism: on M4-class GPUs the verify
-  forward is free at width 2 and costs ~36% of a full forward per extra
-  column after — depth 2 is the last cheap verify width, so deeper
-  drafting over-spends on every model measured. Rule of thumb: gemma
-  assistant cards depth 2, Qwen GDN sidecar cards depth 1.
+  GDN/SSM deferred-replay tax). Mechanism: on M4-class GPUs verifying up
+  to 2 candidate tokens per step is effectively free, but each candidate
+  beyond width 2 costs ~36% of a full forward pass — so drafting deeper
+  than depth 2 over-spends on every model measured, and SSM-hybrid
+  models pay an additional replay tax even at depth 2. Rule of thumb:
+  gemma assistant cards depth 2, Qwen GDN sidecar cards depth 1.
 
 - **A bare `repetition_penalty` no longer crashes the runner.** Requests
   carrying `repetition_penalty` without `repetition_context_size` passed
