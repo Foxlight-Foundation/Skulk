@@ -1,4 +1,5 @@
 import copy
+from collections.abc import Set as AbstractSet
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
@@ -48,6 +49,7 @@ from exo.shared.types.events import (
     NodeTimedOut,
     TaskCreated,
     TaskDeleted,
+    TaskFailed,
     TaskStatusUpdated,
     TraceEventData,
     TracesCollected,
@@ -84,6 +86,78 @@ EVENT_LOG_REPLAY_BATCH_SIZE = 10_000
 SNAPSHOT_EVENT_CADENCE = 10_000
 REPLAY_TAIL_RETENTION_EVENTS = SNAPSHOT_EVENT_CADENCE
 JsonObject = dict[str, object]
+
+# API-facing task types: the ones whose loss strands an open HTTP request.
+# Worker lifecycle tasks (CreateRunner, LoadModel, ...) are reconciled by the
+# worker's own plan loop and must not be failed from here.
+_COMMAND_TASK_TYPES = (
+    TextGenerationTask,
+    ImageGenerationTask,
+    ImageEditsTask,
+    TextEmbeddingTask,
+)
+
+
+def instances_on_dead_nodes(
+    state: State,
+    connected_node_ids: AbstractSet[NodeId],
+    timed_out_node_ids: AbstractSet[NodeId],
+) -> set[InstanceId]:
+    """Instances with at least one shard on a disconnected or timed-out node.
+
+    Timed-out nodes matter even while still present in topology: NodeTimedOut
+    removes the node's instances AND their tasks from state in one apply, so
+    any TaskFailed for those tasks must be emitted before that event — a
+    later plan pass would no longer see them (#224 review catch).
+    """
+    dying: set[InstanceId] = set()
+    for instance_id, instance in state.instances.items():
+        for node_id in instance.shard_assignments.node_to_runner:
+            if node_id not in connected_node_ids or node_id in timed_out_node_ids:
+                dying.add(instance_id)
+                break
+    return dying
+
+
+def orphaned_task_failure_events(
+    state: State,
+    dying_instance_ids: AbstractSet[InstanceId],
+) -> list[TaskFailed]:
+    """Fail in-flight API tasks whose instance is gone or being torn down.
+
+    Without this, a node death mid-generation leaves the task in state
+    forever and the API's chunk queue never receives a terminal chunk — the
+    client request hangs until its own timeout (issue #223). The master is
+    the only component with the global view to declare these tasks dead.
+
+    Pure function of the master's current state so it can be tested without
+    channel plumbing; ``dying_instance_ids`` covers instances whose
+    InstanceDeleted was emitted in the same plan pass (state still lists
+    them until the event round-trips through indexing and apply).
+    """
+    events: list[TaskFailed] = []
+    for task_id, task in state.tasks.items():
+        if not isinstance(task, _COMMAND_TASK_TYPES):
+            continue
+        if task.task_status not in (TaskStatus.Pending, TaskStatus.Running):
+            continue
+        instance_gone = (
+            task.instance_id not in state.instances
+            or task.instance_id in dying_instance_ids
+        )
+        if not instance_gone:
+            continue
+        events.append(
+            TaskFailed(
+                task_id=task_id,
+                error_type="instance_lost",
+                error_message=(
+                    "The instance executing this request was lost "
+                    "(node disconnected or instance deleted)"
+                ),
+            )
+        )
+    return events
 
 
 class Master:
@@ -492,8 +566,34 @@ class Master:
     # These plan loops are the cracks showing in our event sourcing architecture - more things could be commands
     async def _plan(self) -> None:
         while True:
-            # kill broken instances
             connected_node_ids = set(self.state.topology.list_nodes())
+            now = datetime.now(tz=timezone.utc)
+            timed_out_node_ids = {
+                node_id
+                for node_id, time in self.state.last_seen.items()
+                if now - time > timedelta(seconds=30)
+            }
+            dying_instance_ids = instances_on_dead_nodes(
+                self.state, connected_node_ids, timed_out_node_ids
+            )
+
+            # Fail in-flight API tasks stranded by a dead or dying instance
+            # so open HTTP requests terminate with an error instead of
+            # hanging (#223). Emitted BEFORE InstanceDeleted/NodeTimedOut so
+            # TaskFailed indexes ahead of the applies that remove the task
+            # from state (NodeTimedOut deletes its instances' tasks
+            # outright). TaskFailed flips task_status to Failed on apply, so
+            # each task is emitted at most once across passes.
+            for task_failed in orphaned_task_failure_events(
+                self.state, dying_instance_ids
+            ):
+                logger.warning(
+                    f"Failing orphaned task {task_failed.task_id}: "
+                    f"{task_failed.error_message}"
+                )
+                await self.event_sender.send(task_failed)
+
+            # kill broken instances
             for instance_id, instance in self.state.instances.items():
                 for node_id in instance.shard_assignments.node_to_runner:
                     if node_id not in connected_node_ids:
@@ -503,11 +603,9 @@ class Master:
                         break
 
             # time out dead nodes
-            for node_id, time in self.state.last_seen.items():
-                now = datetime.now(tz=timezone.utc)
-                if now - time > timedelta(seconds=30):
-                    logger.info(f"Manually removing node {node_id} due to inactivity")
-                    await self.event_sender.send(NodeTimedOut(node_id=node_id))
+            for node_id in timed_out_node_ids:
+                logger.info(f"Manually removing node {node_id} due to inactivity")
+                await self.event_sender.send(NodeTimedOut(node_id=node_id))
 
             await anyio.sleep(10)
 

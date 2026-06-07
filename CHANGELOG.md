@@ -9,6 +9,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Requests no longer hang when a node dies mid-generation.** When an
+  instance was lost (node disconnect, crash, or deletion with a request
+  in flight), the master tore the instance down but left the task
+  orphaned — the API never received a terminal chunk, so the open HTTP
+  connection hung until the client's own timeout. The master's plan loop
+  now emits `TaskFailed` for in-flight API tasks whose instance is gone,
+  and the API turns that into a terminal error chunk: streaming
+  responses close with an error event, non-streaming requests return a
+  500. Found by the 2026-06-07 node-kill drill (#223).
+
 - **A bare `repetition_penalty` no longer crashes the runner.** Requests
   carrying `repetition_penalty` without `repetition_context_size` passed
   the request's None straight into mlx-lm's processor builder, overriding
