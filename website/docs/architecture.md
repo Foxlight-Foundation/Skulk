@@ -159,7 +159,7 @@ The planner's memory admission is per node, not summed across the candidate cycl
 Task failure is part of the same event flow. The master's plan loop — the
 same reconciliation pass that deletes instances on dead nodes — emits
 `TaskFailed` for any in-flight API task (text generation, image generation,
-embeddings) whose instance is gone or being torn down, computed before
+image edits, embeddings) whose instance is gone or being torn down, computed before
 `InstanceDeleted`/`NodeTimedOut` so the failure indexes ahead of the applies
 that remove the task from state. The API reacts by delivering a terminal
 error chunk into that command's stream: streaming responses close with an
@@ -219,7 +219,7 @@ The choice affects memory footprint and decode throughput. See [KV Cache Backend
 
 The model card's `runtime` section carries Skulk-specific behavior overrides, the most operationally significant being `metal_fast_synch`. Gemma 4 cards explicitly disable Metal FAST_SYNCH because it deadlocks the GPU command queue under multimodal pipeline-parallel load (the wedge that caused the kernel-panic incident in 2026-04). Cards that declare any speculative-decoding mechanism (`mtp_heads`, `mtp_sidecar_repo`, or `assistant_model_repo`) also default FAST_SYNCH off: the flag collapses the speculative loop's per-round small-eval pattern by ~46x while leaving vanilla decode unaffected (measured 2026-06-06, Qwen3.5-9B-4bit on M4). All other models use the cluster default. Operator overrides (`--fast-synch` / `--no-fast-synch`) and explicit card pins beat both defaults.
 
-The `runtime` section also carries `speculative_multi_node` (default true): set `false` on cards where multi-node speculation measures slower than plain sharded decode — fast-decoding MoE models are the known case (gemma-4-26B-A4B measured −7% on a 2-node pipeline while keeping ~2.2× single-node). The gate is evaluated rank-symmetrically from the card and world size, so every rank makes the identical speculate-or-not choice and the distributed collective schedule stays aligned. See [Model Cards](model-cards) for the full set of runtime knobs.
+The `runtime` section also carries `speculative_multi_node` (default unset, meaning no restriction — only an explicit `false` gates): set `false` on cards where multi-node speculation measures slower than plain sharded decode — fast-decoding MoE models are the known case (gemma-4-26B-A4B measured −7% on a 2-node pipeline while keeping ~2.2× single-node). The gate is evaluated rank-symmetrically from the card and world size, so every rank makes the identical speculate-or-not choice and the distributed collective schedule stays aligned. See [Model Cards](model-cards) for the full set of runtime knobs.
 
 ## Diagnostics and observability
 
