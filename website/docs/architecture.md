@@ -156,6 +156,23 @@ Operationally, the rule of thumb:
 
 The planner's memory admission is per node, not summed across the candidate cycle: Tensor sharding splits the weights evenly across ranks while Pipeline allocates layers proportionally to each node's available memory, and every node must fit its weight share times a runtime-overhead factor (KV cache, activations, MLX buffers, the runner process) plus a flat floor — an exact weights-equal-free-memory fit is rejected because it thrashes rather than runs. Placement failures are typed: a topology gap, an exclusion that removed every candidate, a per-node memory shortfall (with the arithmetic), and the not-an-error startup cases where cluster info simply has not finished gossiping (`PlacementInfoPendingError` — covers both phases: connection edges lagging node identities, and memory info lagging the edges) are all distinct, and `POST /place_instance` dry-runs the placement against replicated state so callers get the real reason as a 400/503 instead of an acknowledged command that silently fails on the master.
 
+Task failure is part of the same event flow. The master's plan loop — the
+same reconciliation pass that deletes instances on dead nodes — emits
+`TaskFailed` for any in-flight API task (text generation, image generation,
+embeddings) whose instance is gone or being torn down, computed before
+`InstanceDeleted`/`NodeTimedOut` so the failure indexes ahead of the applies
+that remove the task from state. The API reacts by delivering a terminal
+error chunk into that command's stream: streaming responses close with an
+error event, non-streaming requests fail instead of hanging. Two failure
+shapes bypass this flow and are handled at their own boundaries: operator
+instance deletion cancels in-flight tasks via `TaskStatusUpdated(Cancelled)`
+(the API terminates those streams too), and a master failover starts a new
+session that cannot carry the old session's tasks at all — so the API's
+session reset fails every still-open command stream directly before
+discarding its queue maps. Together these guarantee an open request is
+terminated within seconds of any node death rather than dangling until the
+client's own timeout.
+
 A snapshot-bootstrap rollout has one operational rule: once a master starts compacting old replay history after writing snapshots, older nodes that only know how to "replay from event 0" should be considered temporary guests during the rollout window. Upgrade all nodes before relying on bounded retention as the steady state.
 
 ## The inference engine
@@ -200,7 +217,9 @@ The choice affects memory footprint and decode throughput. See [KV Cache Backend
 
 ### Per-model runtime knobs
 
-The model card's `runtime` section carries Skulk-specific behavior overrides, the most operationally significant being `metal_fast_synch`. Gemma 4 cards explicitly disable Metal FAST_SYNCH because it deadlocks the GPU command queue under multimodal pipeline-parallel load (the wedge that caused the kernel-panic incident in 2026-04). Cards that declare any speculative-decoding mechanism (`mtp_heads`, `mtp_sidecar_repo`, or `assistant_model_repo`) also default FAST_SYNCH off: the flag collapses the speculative loop's per-round small-eval pattern by ~46x while leaving vanilla decode unaffected (measured 2026-06-06, Qwen3.5-9B-4bit on M4). All other models use the cluster default. Operator overrides (`--fast-synch` / `--no-fast-synch`) and explicit card pins beat both defaults. See [Model Cards](model-cards) for the full set of runtime knobs.
+The model card's `runtime` section carries Skulk-specific behavior overrides, the most operationally significant being `metal_fast_synch`. Gemma 4 cards explicitly disable Metal FAST_SYNCH because it deadlocks the GPU command queue under multimodal pipeline-parallel load (the wedge that caused the kernel-panic incident in 2026-04). Cards that declare any speculative-decoding mechanism (`mtp_heads`, `mtp_sidecar_repo`, or `assistant_model_repo`) also default FAST_SYNCH off: the flag collapses the speculative loop's per-round small-eval pattern by ~46x while leaving vanilla decode unaffected (measured 2026-06-06, Qwen3.5-9B-4bit on M4). All other models use the cluster default. Operator overrides (`--fast-synch` / `--no-fast-synch`) and explicit card pins beat both defaults.
+
+The `runtime` section also carries `speculative_multi_node` (default true): set `false` on cards where multi-node speculation measures slower than plain sharded decode — fast-decoding MoE models are the known case (gemma-4-26B-A4B measured −7% on a 2-node pipeline while keeping ~2.2× single-node). The gate is evaluated rank-symmetrically from the card and world size, so every rank makes the identical speculate-or-not choice and the distributed collective schedule stays aligned. See [Model Cards](model-cards) for the full set of runtime knobs.
 
 ## Diagnostics and observability
 
@@ -253,6 +272,8 @@ Three on-disk responsibilities:
 
 `src/exo/utils/disk_event_log.py` is an append-only log: the live file (`events.bin`) is uncompressed length-prefixed msgpack records (4-byte big-endian length + msgpack payload). When the log rotates or the master shuts down, the live file is zstd-compressed into a rotated archive (`events.*.bin.zst`); only the rotated archives are compressed, not the active write target. Every indexed event passes through here. Followers replay from this log on bootstrap. Snapshots can be written periodically; events older than a snapshot can be compacted (with a guarded rollout window, see "State and events" above).
 
+The log degrades rather than crashes when the disk fights back: any persistence failure (ENOSPC at init, append, or compaction) drops it into a counting-only mode where indices keep advancing — so follower replay coherence and event ordering survive — while nothing further is written. A proactive free-space floor (2 GiB, checked every 1024 appends) triggers the same degradation *before* the disk hits zero, and archive rotation is capped by total bytes (1 GiB) in addition to count, so the log can never be the thing that fills a node's disk.
+
 ### Model cache
 
 Models live under `SKULK_MODELS_DIR` — by default that resolves to `SKULK_DATA_HOME/models`, which is XDG-based on Linux (`~/.local/share/skulk/models`) and `~/.skulk/models` on macOS/Windows. `SKULK_HOME` (or `EXO_HOME`) overrides the base; `SKULK_MODELS_DIR` overrides the models path directly. See `src/exo/shared/constants.py:78-82`. The cache stores tokenizers, weights, processor configs, and metadata. Multiple nodes on the same physical machine share a cache; nodes on different machines each maintain their own.
@@ -262,6 +283,8 @@ Models live under `SKULK_MODELS_DIR` — by default that resolves to `SKULK_DATA
 For multi-node deployments with shared filesystems, a model store hosts canonical model artifacts on one machine. Other nodes stage from the store (rsync-like) rather than each downloading from Hugging Face independently. This is a config-driven feature; without a store, each node downloads independently. See [Model Store](model-store) for setup details.
 
 Staged copies have a lifecycle: by default (`cleanup_on_deactivate: true`), a staged model becomes an eviction candidate when no live runner uses it — including as a companion repo (MTP sidecar, assistant, split vision weights), which no instance names directly but which a live runner depends on just the same. Candidates are kept newest-first by last use up to the `staging_keep_recent_gb` grace budget (default 40 GiB) and deleted beyond it. The same budget enforcement runs at instance deactivation and at node startup — the startup pass is what reconciles copies orphaned by a crashed session, and the grace budget is why a crash-restart cycle keeps its recent models warm instead of re-staging everything. `GET /store/storage` reports the per-node breakdown.
+
+Companion repos follow a single download contract: `companion_download_specs()` (in `src/exo/download/download_utils.py`) enumerates a card's companions — MTP sidecar, assistant model, split vision weights — each flagged required or best-effort, and every model resolution path (fresh download, already-staged fast path, store staging, direct-from-store) ensures companions through it before reporting the model ready. Required companions (vision weights, which the model cannot load without) fail the resolution loudly; best-effort companions (sidecar, assistant) log and continue, so a missing drafter degrades to plain decode instead of blocking the model.
 
 ### Custom model cards
 
