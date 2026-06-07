@@ -19,6 +19,32 @@ This project records release notes here and mirrors public-facing notes in
   responses close with an error event, non-streaming requests return a
   500. Found by the 2026-06-07 node-kill drill (#223).
 
+- **Master failover no longer strands open requests.** Killing the
+  master mid-generation starts a new cluster session that cannot carry
+  the old session's tasks, and the API's session reset replaced its
+  command-queue maps without closing the old streams — a guaranteed
+  permanent hang that the orphaned-task sweep above structurally could
+  not cover. The API now fails every open command stream at the session
+  boundary with an error explaining the session changed and asking the
+  client to retry.
+  Verified end-to-end: clients receive the error within ~4–6 seconds of
+  a node kill (master or worker rank), versus an indefinite hang before.
+
+### Changed
+
+- **Speculative-decoding draft depths are now per-card measured optima.**
+  A production depth sweep (3×200-token greedy A/Bs per cell) moved the
+  gemma E-series assistant cards from depth 3 to depth 2 — E2B-8bit
+  37.7 → 54.0 tok/s (+43%, was +20% at depth 3), E4B-8bit 19.5 → 25.4
+  (+30%) — and Qwen3.5-27B from depth 2 to depth 1 (6.3 → 10.5 tok/s on
+  a 2-node pipeline, +67%; depth 2's run-to-run spread was the
+  GDN/SSM deferred-replay tax). Mechanism: on M4-class GPUs verifying up
+  to 2 candidate tokens per step is effectively free, but each candidate
+  beyond width 2 costs ~36% of a full forward pass — so drafting deeper
+  than depth 2 over-spends on every model measured, and SSM-hybrid
+  models pay an additional replay tax even at depth 2. Rule of thumb:
+  gemma assistant cards depth 2, Qwen GDN sidecar cards depth 1.
+
 - **A bare `repetition_penalty` no longer crashes the runner.** Requests
   carrying `repetition_penalty` without `repetition_context_size` passed
   the request's None straight into mlx-lm's processor builder, overriding
