@@ -233,6 +233,7 @@ from exo.shared.types.events import (
     Event,
     IndexedEvent,
     StateSnapshotHydrated,
+    TaskFailed,
     TracesMerged,
 )
 from exo.shared.types.memory import Memory
@@ -2935,8 +2936,49 @@ class API:
                             await queue.send(event.chunk)
                         except BrokenResourceError:
                             self._embedding_queues.pop(event.command_id, None)
+                if isinstance(event, TaskFailed):
+                    await self._terminate_failed_command_stream(event)
                 if isinstance(event, TracesMerged):
                     self._save_merged_trace(event)
+
+    async def _terminate_failed_command_stream(self, event: TaskFailed) -> None:
+        """Deliver a terminal ErrorChunk for a task the master declared dead.
+
+        Without this, a request whose instance died mid-generation never
+        receives a terminal chunk and the HTTP connection hangs until the
+        client's own timeout (#223). The chunk flows through the same
+        per-command queue as runner output, so streaming responses emit an
+        error chunk and close, and non-streaming handlers raise their
+        existing finish_reason == "error" path.
+        """
+        task = self.state.tasks.get(event.task_id)
+        if not isinstance(
+            task,
+            (
+                task_types.TextGeneration,
+                task_types.ImageGeneration,
+                task_types.ImageEdits,
+                task_types.TextEmbedding,
+            ),
+        ):
+            return
+        # Image task params carry the wire-form model string; the others are
+        # already ModelId.
+        error_chunk = ErrorChunk(
+            model=ModelId(task.task_params.model),
+            error_message=event.error_message
+            or "The instance executing this request was lost",
+        )
+        for queue_map in (
+            self._text_generation_queues,
+            self._image_generation_queues,
+            self._embedding_queues,
+        ):
+            if queue := queue_map.get(task.command_id):
+                try:
+                    await queue.send(error_chunk)
+                except BrokenResourceError:
+                    queue_map.pop(task.command_id, None)
 
     def _save_merged_trace(self, event: TracesMerged) -> None:
         traces = [
