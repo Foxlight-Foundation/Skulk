@@ -280,12 +280,14 @@ It applies to **new requests only** and does not retroactively trace
 in-flight work. Check the current state with `GET /v1/tracing`. Turn it back
 off by sending `{"enabled": false}`.
 
-Then send the request you want to investigate and fetch its trace by task ID
-(the chat completion's response id):
+Then send the request you want to investigate. Traces are keyed by the
+**master-created task ID, which is not the chat completion's response `id`**
+(that is the API command id) — so list the traces and pick yours by
+`createdAt` and `modelId`, then fetch its stats by the listed `taskId`:
 
 ```bash
-curl http://localhost:52415/v1/traces                       # list local traces
-curl http://localhost:52415/v1/traces/<task_id>/stats       # timing summary
+curl http://localhost:52415/v1/traces                       # list local traces (taskId, createdAt, modelId)
+curl http://localhost:52415/v1/traces/<task_id>/stats       # timing summary for one trace
 ```
 
 `GET /v1/traces*` reads artifacts stored on the current node;
