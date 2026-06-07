@@ -26,8 +26,12 @@ cheap "drafter" proposes a short run of likely next tokens, and the full
 model verifies all of them in a single forward pass, keeping the longest
 correct prefix. When the drafter guesses well, you get multiple tokens for
 roughly the cost of one — and because the verify step accepts or rejects
-against the real model, **the output is the same text the model would have
-produced on its own**. It is a pure speedup, not a quality trade-off.
+against the real model, **the output quality is the model's own**: greedy
+requests produce a valid greedy continuation, and sampled requests preserve
+the model's output distribution exactly. It is a pure speedup, not a
+quality trade-off. (On hybrid-state Qwen models the greedy text can differ
+token-for-token from a non-speculative run while remaining equally greedy —
+see Known Limitations.)
 
 Skulk runs speculative decoding on single-node, tensor-parallel, and
 pipeline (sharded) placements through one shared decode loop. You do not
@@ -73,11 +77,11 @@ Protocol: production API, greedy decoding, 200-token completions, median of
 |---|---|---|---|---|
 | gemma-4-E2B-8bit, single node | M4 24GB | 37.7 | 54.0 | **+43%** |
 | gemma-4-E4B-8bit, single node | M4 24GB | 19.5 | 25.4 | **+30%** |
-| Qwen3.5-9B-4bit, single node | M4 24GB | 21.3 | 28.8 | **+35%** |
+| Qwen3.5-9B-MLX-4bit, single node | M4 24GB | 21.3 | 28.8 | **+35%** |
 | gemma-4-12B-4bit, 2-node pipeline | 2× M4 16GB | 8.4 | 15.1 | **+81%** |
 | gemma-4-31B-4bit dense, 2-node pipeline | 2× M4 16GB | 5.3 | 7.35 | **+38%** |
 | Qwen3.5-27B-4bit dense, 2-node pipeline | 2× M4 16GB | 6.3 | 10.5 | **+67%** |
-| Qwen3.5-9B-4bit, 2-node tensor-parallel | 2× M4 16GB | 16.7 | 21.8 | **+31%** |
+| Qwen3.5-9B-MLX-4bit, 2-node tensor-parallel | 2× M4 16GB | 16.7 | 21.8 | **+31%** |
 
 These ratios hold up under longer generations and sampling. At 1000 tokens
 the 12B 2-node pipeline still measures +60% (8.3 → 13.3) and Qwen 9B single
@@ -166,11 +170,15 @@ hardware.
 
 ## Known Limitations
 
-- **Generation is sequential per cluster.** A cluster runs one generation at
-  a time; concurrent requests queue and run strictly first-in-first-out.
-  This is correct and stable — a 4-way concurrent test completed cleanly in
-  FIFO order with no failures and no interleaving — but it means throughput
-  does not currently scale with concurrent callers.
+- **Speculative decoding currently runs one generation at a time.** Models
+  with an active drafter use a sequential generator, so concurrent requests
+  to that model queue and run strictly first-in-first-out. (Gemma 4 models
+  use the sequential path regardless of speculation, so this applies to
+  every model in the table above; models outside these constraints batch
+  concurrent requests.) The queueing is correct and stable — a 4-way
+  concurrent test completed cleanly in FIFO order with no failures and no
+  interleaving — but it means throughput on these models does not currently
+  scale with concurrent callers.
 - **Non-streaming errors return a truncated body.** A non-streaming request
   that fails part-way through generation terminates promptly but returns an
   empty or truncated body under a `200` status (the status line is already
