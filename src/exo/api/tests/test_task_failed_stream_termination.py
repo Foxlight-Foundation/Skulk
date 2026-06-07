@@ -109,5 +109,37 @@ async def test_task_failed_with_closed_queue_drops_entry() -> None:
     assert command_id not in api._text_generation_queues
 
 
+async def test_session_reset_fails_open_streams() -> None:
+    """Master failover starts a new session that cannot carry the old
+    session's tasks; reset() used to replace the queue maps without closing
+    the old senders, leaving open requests unreachable by dispatch, cancel,
+    and the orphaned-task sweep — a guaranteed hang (#223 drill 2)."""
+    from anyio import EndOfStream
+
+    api = _make_api()
+    command_id = CommandId()
+    sender, receiver = channel[Any]()
+    api._text_generation_queues[command_id] = sender
+
+    api._fail_open_command_streams_for_session_reset()
+
+    chunk = receiver.receive_nowait()
+    assert isinstance(chunk, ErrorChunk)
+    assert "session changed" in chunk.error_message
+    with pytest.raises(EndOfStream):
+        receiver.receive_nowait()
+
+
+async def test_session_reset_with_already_closed_queue_is_silent() -> None:
+    api = _make_api()
+    command_id = CommandId()
+    sender, receiver = channel[Any]()
+    receiver.close()
+    sender.close()
+    api._text_generation_queues[command_id] = sender
+    # Must not raise despite the dead channel.
+    api._fail_open_command_streams_for_session_reset()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
