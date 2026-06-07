@@ -16,20 +16,20 @@
       # Override overlay to inject Nix-built components that are specific to the
       # development environment.
       exoOverlay = final: prev: {
-        # Replace workspace exo_pyo3_bindings with Nix-built wheel.
+        # Replace workspace skulk_pyo3_bindings with Nix-built wheel.
         # Preserve passthru so mkVirtualEnv can resolve dependency groups.
         # Copy .pyi stub + py.typed marker so basedpyright can find the types.
         exo-pyo3-bindings = pkgs.stdenv.mkDerivation {
           pname = "exo-pyo3-bindings";
           version = "0.1.0";
-          src = self'.packages.exo_pyo3_bindings;
+          src = self'.packages.skulk_pyo3_bindings;
           # Install from pre-built wheel
           nativeBuildInputs = [ final.pyprojectWheelHook ];
           dontStrip = true;
           passthru = prev.exo-pyo3-bindings.passthru or { };
           postInstall = ''
-            local siteDir=$out/${final.python.sitePackages}/exo_pyo3_bindings
-            cp ${inputs.self}/rust/exo_pyo3_bindings/exo_pyo3_bindings.pyi $siteDir/
+            local siteDir=$out/${final.python.sitePackages}/skulk_pyo3_bindings
+            cp ${inputs.self}/rust/skulk_pyo3_bindings/skulk_pyo3_bindings.pyi $siteDir/
             touch $siteDir/py.typed
           '';
         };
@@ -136,8 +136,8 @@
         inherit name;
         runtimeInputs = [ exoVenv ];
         runtimeEnv = {
-          EXO_DASHBOARD_DIR = self'.packages.dashboard;
-          EXO_RESOURCES_DIR = inputs.self + /resources;
+          SKULK_DASHBOARD_DIR = self'.packages.dashboard;
+          SKULK_RESOURCES_DIR = inputs.self + /resources;
         };
         text = ''exec python ${path} "$@"'';
       };
@@ -167,8 +167,8 @@
 
           # Create wrapper script
           makeWrapper ${exoVenv}/bin/exo $out/bin/exo \
-            --set EXO_DASHBOARD_DIR ${self'.packages.dashboard} \
-            --set EXO_RESOURCES_DIR ${inputs.self + /resources} \
+            --set SKULK_DASHBOARD_DIR ${self'.packages.dashboard} \
+            --set SKULK_RESOURCES_DIR ${inputs.self + /resources} \
             ${lib.optionalString pkgs.stdenv.hostPlatform.isDarwin "--prefix PATH : ${pkgs.macmon}/bin"}
         '';
     in

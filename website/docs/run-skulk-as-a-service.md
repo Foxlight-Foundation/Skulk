@@ -139,7 +139,7 @@ Common things to change:
 | `SKULK_AUTO_UPDATE` | `1` = auto-update on every boot, `0` = run whatever's already on disk | `1` |
 | `SKULK_VERBOSITY` | Verbosity flag passed to skulk. `-v` is normal verbose, `-vv` is debug, empty string is info-only | `-v` |
 | `SKULK_LIBP2P_NAMESPACE` | Cluster namespace — nodes only join clusters with the same value. Use a unique value per cluster | `foxlight-main` |
-| `EXO_LOGGING_INGEST_URL` | Where Vector ships logs (only relevant if you have the Vector agent installed) | the in-house VictoriaLogs endpoint |
+| `SKULK_LOGGING_INGEST_URL` | Where Vector ships logs (only relevant if you have the Vector agent installed) | the in-house VictoriaLogs endpoint |
 
 The env file you edit is **yours** — Skulk's `git pull` only updates the template at `deployment/install/skulk.env.example`. Diff against that template if you ever want to pick up a new default.
 
@@ -165,7 +165,7 @@ You only need this if you want centralized cluster-wide logs. To skip it:
 deployment/install/install-launchd.sh --no-vector
 ```
 
-To configure where logs are shipped, edit `EXO_LOGGING_INGEST_URL` in `~/.skulk/skulk.env` and restart the Vector agent:
+To configure where logs are shipped, edit `SKULK_LOGGING_INGEST_URL` in `~/.skulk/skulk.env` and restart the Vector agent:
 
 ```bash
 launchctl kickstart -k gui/$(id -u)/foundation.foxlight.skulk-vector
@@ -238,7 +238,7 @@ journalctl --user -u skulk -f | grep -i vector
 Common causes:
 
 - **`vector` is not installed.** Install it from [vector.dev](https://vector.dev/docs/setup/installation/) and restart the agent.
-- **`EXO_LOGGING_INGEST_URL` points at an unreachable host.** Vector buffers up to 512 MB on disk while the central store is down — once it comes back, the buffered logs ship automatically. If the URL is permanently wrong, edit `~/.skulk/skulk.env` and restart the agent.
+- **`SKULK_LOGGING_INGEST_URL` points at an unreachable host.** Vector buffers up to 512 MB on disk while the central store is down — once it comes back, the buffered logs ship automatically. If the URL is permanently wrong, edit `~/.skulk/skulk.env` and restart the agent.
 - **The Skulk JSON log stream isn't enabled.** Vector tails Skulk's stdout file, but that file only contains JSON if Skulk is configured to emit it. See [External logging](./external-logging.md) for the `skulk.yaml` settings.
 
 ### "It keeps crashing in a loop"

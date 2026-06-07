@@ -5,8 +5,8 @@ import { ModelBrowser } from '../models/ModelBrowser';
 import type { ModelInfo, HuggingFaceModel, DownloadAvailability } from '../../types/models';
 import { addToast } from '../../hooks/useToast';
 
-const FAVORITES_KEY = 'exo-favorite-models';
-const RECENTS_KEY = 'exo-recent-models';
+const FAVORITES_KEY = 'skulk-favorite-models';
+const RECENTS_KEY = 'skulk-recent-models';
 const MAX_RECENT_MODELS = 20;
 
 interface RecentEntry {

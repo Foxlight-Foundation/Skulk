@@ -290,7 +290,7 @@ This project records release notes here and mirrors public-facing notes in
   27B-class, 1 elsewhere).
 
 - Phase 2 MTP speculative decoding behind a modular `Drafter` protocol
-  (`src/exo/worker/engines/mlx/drafters/`). The generation loop now talks to
+  (`src/skulk/worker/engines/mlx/drafters/`). The generation loop now talks to
   a mechanism-agnostic drafter seam (`begin_request` / `observe` / `draft`)
   so Qwen sidecar heads, DeepSeek heads, and the planned Gemma 4 assistant
   drafter all plug into the same verify/accept/reject machinery. The

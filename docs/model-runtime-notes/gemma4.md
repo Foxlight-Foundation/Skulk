@@ -123,18 +123,18 @@ If any of the following reappear, Gemma 4 is probably off the trusted path:
 
 The current Gemma 4-specific behavior lives primarily in:
 
-- `src/exo/worker/engines/mlx/gemma4_prompt.py`
-- `src/exo/worker/engines/mlx/utils_mlx.py`
-- `src/exo/worker/engines/mlx/generator/generate.py`
-- `src/exo/worker/runner/llm_inference/runner.py`
-- `src/exo/worker/runner/llm_inference/model_output_parsers.py`
+- `src/skulk/worker/engines/mlx/gemma4_prompt.py`
+- `src/skulk/worker/engines/mlx/utils_mlx.py`
+- `src/skulk/worker/engines/mlx/generator/generate.py`
+- `src/skulk/worker/runner/llm_inference/runner.py`
+- `src/skulk/worker/runner/llm_inference/model_output_parsers.py`
 
 The focused regression tests live in:
 
-- `src/exo/worker/tests/unittests/test_mlx/test_gemma4_prompt.py`
-- `src/exo/worker/tests/unittests/test_mlx/test_prefill_path_selection.py`
-- `src/exo/worker/tests/unittests/test_mlx/test_warmup_request.py`
-- `src/exo/worker/tests/unittests/test_runner/test_turboquant_batch_guard.py`
+- `src/skulk/worker/tests/unittests/test_mlx/test_gemma4_prompt.py`
+- `src/skulk/worker/tests/unittests/test_mlx/test_prefill_path_selection.py`
+- `src/skulk/worker/tests/unittests/test_mlx/test_warmup_request.py`
+- `src/skulk/worker/tests/unittests/test_runner/test_turboquant_batch_guard.py`
 
 ## Open Questions
 

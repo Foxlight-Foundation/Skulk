@@ -48,7 +48,7 @@
   };
 
   nixConfig = {
-    extra-trusted-public-keys = "exo.cachix.org-1:okq7hl624TBeAR3kV+g39dUFSiaZgLRkLsFBCuJ2NZI=";
+    extra-trusted-public-keys = "skulk.cachix.org-1:okq7hl624TBeAR3kV+g39dUFSiaZgLRkLsFBCuJ2NZI=";
     extra-substituters = "https://exo.cachix.org";
   };
 

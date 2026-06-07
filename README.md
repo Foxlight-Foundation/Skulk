@@ -56,7 +56,7 @@ What's been added on top of the distributed-MLX baseline, and what each of these
 
 ### APIs
 
-- **Four wire formats, one pipeline.** OpenAI Chat Completions, OpenAI Responses, Claude Messages, and Ollama-compatible endpoints all converge on the same internal `Task`. Adapters live in `src/exo/api/adapters/`. **Why it matters:** clients pick the SDK they prefer; the cluster doesn't care.
+- **Four wire formats, one pipeline.** OpenAI Chat Completions, OpenAI Responses, Claude Messages, and Ollama-compatible endpoints all converge on the same internal `Task`. Adapters live in `src/skulk/api/adapters/`. **Why it matters:** clients pick the SDK they prefer; the cluster doesn't care.
 
 - **Auto-generated OpenAPI.** Routes carry `tags`, `summary`, and `description`; Pydantic field descriptions flow into the schema. The interactive API browser is built from the live spec. **Why it matters:** the API surface is programmable — generate clients, run contract tests, no doc drift.
 
@@ -262,7 +262,7 @@ Use this path when you want more than one machine in the cluster.
 5. Use placement preview or the placement manager to launch a model.
 6. Send chat requests through the dashboard or API.
 
-Skulk can discover peers automatically in many local setups. If you want a fixed cluster topology, use `--bootstrap-peers` or the `EXO_BOOTSTRAP_PEERS` environment variable.
+Skulk can discover peers automatically in many local setups. If you want a fixed cluster topology, use `--bootstrap-peers` or the `SKULK_BOOTSTRAP_PEERS` environment variable.
 
 If you are rolling out a version that uses snapshot bootstrap plus bounded
 master replay retention, plan to upgrade every node in the cluster.
@@ -448,30 +448,30 @@ uv run exo --bootstrap-peers /ip4/192.168.1.20/tcp/5678/p2p/12D3KooW...
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `EXO_MODELS_PATH` | Extra colon-separated search paths for local or shared models | None |
-| `EXO_MODELS_DIR` | Primary downloaded-model directory | platform-specific |
-| `EXO_OFFLINE` | Use only local or pre-staged models | `false` |
-| `EXO_ENABLE_IMAGE_MODELS` | Enable image model cards and image workflows | `false` |
-| `EXO_LIBP2P_NAMESPACE` | Custom namespace for cluster isolation | None |
-| `EXO_FAST_SYNCH` | Control MLX fast synch behavior | Auto |
-| `SKULK_TRACING_ENABLED` | Developer boot override for tracing. Prefer the dashboard traces toggle or `PUT /v1/tracing` for normal use. Legacy `EXO_TRACING_ENABLED` is still accepted. | `false` |
-| `EXO_KV_CACHE_BACKEND` | KV cache backend selection | `default` |
-| `EXO_KV_CACHE_BITS` | Bit width for `mlx_quantized` | None |
-| `EXO_TQ_K_BITS` | Key-cache bits for TurboQuant backends | `3` |
-| `EXO_TQ_V_BITS` | Value-cache bits for TurboQuant backends | `4` |
-| `EXO_TQ_FP16_LAYERS` | Edge FP16 layers for `turboquant_adaptive` | `4` |
-| `EXO_NO_BATCH` | Force sequential generation | `false` |
-| `EXO_OPTIQ_BITS` | Bit width for `optiq` | `4` |
-| `EXO_OPTIQ_FP16_LAYERS` | Edge FP16 layers for `optiq` | `4` |
-| `EXO_BOOTSTRAP_PEERS` | Comma-separated static peers to dial on startup | None |
+| `SKULK_MODELS_PATH` | Extra colon-separated search paths for local or shared models | None |
+| `SKULK_MODELS_DIR` | Primary downloaded-model directory | platform-specific |
+| `SKULK_OFFLINE` | Use only local or pre-staged models | `false` |
+| `SKULK_ENABLE_IMAGE_MODELS` | Enable image model cards and image workflows | `false` |
+| `SKULK_LIBP2P_NAMESPACE` | Custom namespace for cluster isolation | None |
+| `SKULK_FAST_SYNCH` | Control MLX fast synch behavior | Auto |
+| `SKULK_TRACING_ENABLED` | Developer boot override for tracing. Prefer the dashboard traces toggle or `PUT /v1/tracing` for normal use. Legacy `SKULK_TRACING_ENABLED` is still accepted. | `false` |
+| `SKULK_KV_CACHE_BACKEND` | KV cache backend selection | `default` |
+| `SKULK_KV_CACHE_BITS` | Bit width for `mlx_quantized` | None |
+| `SKULK_TQ_K_BITS` | Key-cache bits for TurboQuant backends | `3` |
+| `SKULK_TQ_V_BITS` | Value-cache bits for TurboQuant backends | `4` |
+| `SKULK_TQ_FP16_LAYERS` | Edge FP16 layers for `turboquant_adaptive` | `4` |
+| `SKULK_NO_BATCH` | Force sequential generation | `false` |
+| `SKULK_OPTIQ_BITS` | Bit width for `optiq` | `4` |
+| `SKULK_OPTIQ_FP16_LAYERS` | Edge FP16 layers for `optiq` | `4` |
+| `SKULK_BOOTSTRAP_PEERS` | Comma-separated static peers to dial on startup | None |
 | `HF_TOKEN` | Hugging Face token | None |
 
 Examples:
 
 ```bash
-EXO_OFFLINE=true uv run exo
-EXO_ENABLE_IMAGE_MODELS=true uv run exo
-EXO_KV_CACHE_BACKEND=optiq EXO_OPTIQ_BITS=4 EXO_OPTIQ_FP16_LAYERS=4 uv run exo
+SKULK_OFFLINE=true uv run exo
+SKULK_ENABLE_IMAGE_MODELS=true uv run exo
+SKULK_KV_CACHE_BACKEND=optiq SKULK_OPTIQ_BITS=4 SKULK_OPTIQ_FP16_LAYERS=4 uv run exo
 ```
 
 ## RDMA on macOS

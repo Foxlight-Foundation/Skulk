@@ -44,7 +44,7 @@ jobs:
 
       - name: Run tests
         env:
-          EXO_TESTS: "1"
-          EXO_DASHBOARD_DIR: ${{ github.workspace }}/dashboard-react/dist/
-          EXO_RESOURCES_DIR: ${{ github.workspace }}/resources
+          SKULK_TESTS: "1"
+          SKULK_DASHBOARD_DIR: ${{ github.workspace }}/dashboard-react/dist/
+          SKULK_RESOURCES_DIR: ${{ github.workspace }}/resources
         run: uv run pytest src -m "not slow" --import-mode=importlib

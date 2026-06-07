@@ -8,7 +8,7 @@
     <!-- Vector runs as its own agent, separate from skulk, so a slow
          downstream sink or a Vector crash can't backpressure or kill
          the inference process. The wrapper sources ~/.skulk/skulk.env
-         (same file as skulk) for EXO_LOGGING_INGEST_URL and friends,
+         (same file as skulk) for SKULK_LOGGING_INGEST_URL and friends,
          then execs `vector --config deployment/logging/vector-external.yaml`,
          which tails the skulk stdout log file.
 

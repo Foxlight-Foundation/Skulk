@@ -14,8 +14,8 @@ from typing import Any, Literal
 
 import httpx
 from harness import (
-    ExoClient,
-    ExoHttpError,
+    SkulkClient,
+    SkulkHttpError,
     add_common_instance_args,
     instance_id_from_instance,
     nodes_used_in_instance,
@@ -951,7 +951,7 @@ Examples:
     )
 
     log = sys.stderr if args.stdout else sys.stdout
-    exo = ExoClient(args.host, args.port, timeout_s=args.timeout)
+    exo = SkulkClient(args.host, args.port, timeout_s=args.timeout)
     _short_id, full_model_id = resolve_model_short_id(exo, args.model)
 
     selected = settle_and_fetch_placements(
@@ -1001,7 +1001,7 @@ Examples:
         wait_for_instance_ready(exo, instance_id)
     except (RuntimeError, TimeoutError) as e:
         print(f"Failed to initialize placement: {e}", file=sys.stderr)
-        with contextlib.suppress(ExoHttpError):
+        with contextlib.suppress(SkulkHttpError):
             exo.request_json("DELETE", f"/instance/{instance_id}")
         sys.exit(1)
 
@@ -1047,7 +1047,7 @@ Examples:
     finally:
         try:
             exo.request_json("DELETE", f"/instance/{instance_id}")
-        except ExoHttpError as e:
+        except SkulkHttpError as e:
             if e.status != 404:
                 raise
         wait_for_instance_gone(exo, instance_id)

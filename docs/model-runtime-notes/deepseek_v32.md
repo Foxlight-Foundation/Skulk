@@ -108,5 +108,5 @@ DeepSeek V3.2 issues usually reduce to one of two questions:
 Focused tests that currently exercise those contracts:
 
 - `tests/test_gemma_vision.py`
-- `src/exo/shared/tests/test_model_capabilities.py`
-- `src/exo/worker/tests/unittests/test_runner/test_finish_reason_sse.py`
+- `src/skulk/shared/tests/test_model_capabilities.py`
+- `src/skulk/worker/tests/unittests/test_runner/test_finish_reason_sse.py`

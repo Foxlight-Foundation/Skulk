@@ -67,7 +67,7 @@ Recommended default:
 
 After parity is good enough:
 
-1. Remove Svelte fallback from `src/exo/utils/dashboard_path.py`
+1. Remove Svelte fallback from `src/skulk/utils/dashboard_path.py`
 2. Remove `dashboard/parts.nix`
 3. Remove the `dashboard/` tree
 4. Remove docs and contributor references that describe Svelte as a fallback

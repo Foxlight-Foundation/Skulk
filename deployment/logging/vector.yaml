@@ -16,7 +16,7 @@
 #
 # Vector's disk buffer lives under data_dir (defaults to ~/.skulk/vector).
 
-data_dir: ${EXO_VECTOR_DATA_DIR:-${HOME}/.skulk/vector}
+data_dir: ${SKULK_VECTOR_DATA_DIR:-${HOME}/.skulk/vector}
 
 sources:
   skulk_stdout:
@@ -29,7 +29,7 @@ sinks:
     type: http
     inputs:
       - skulk_stdout
-    uri: ${EXO_LOGGING_INGEST_URL:-http://192.168.0.118:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts}
+    uri: ${SKULK_LOGGING_INGEST_URL:-http://192.168.0.118:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts}
     encoding:
       codec: json
     framing:

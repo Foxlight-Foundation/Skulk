@@ -175,7 +175,7 @@ Each node can emit structured JSON on stdout alongside the human-readable stderr
 
 The key pieces:
 
-- `src/exo/shared/logging.py` — loguru setup with a JSON stdout sink
+- `src/skulk/shared/logging.py` — loguru setup with a JSON stdout sink
 - `deployment/logging/vector.yaml` — Vector config (stdin → VictoriaLogs)
 - `deployment/logging/docker-compose.yml` — VictoriaLogs + Grafana stack
 - `skulk.yaml` `logging.enabled` + `logging.ingest_url` — enables the JSON sink (configurable via dashboard Settings, synced to all nodes)

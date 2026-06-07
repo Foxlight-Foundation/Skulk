@@ -81,11 +81,11 @@
       config = {
         packages = {
           # Python bindings wheel via maturin
-          exo_pyo3_bindings = craneLib.buildPackage (
+          skulk_pyo3_bindings = craneLib.buildPackage (
             commonArgs
             // {
               inherit cargoArtifacts;
-              pname = "exo_pyo3_bindings";
+              pname = "skulk_pyo3_bindings";
 
               nativeBuildInputs = commonArgs.nativeBuildInputs ++ [
                 pkgs.maturin
@@ -95,7 +95,7 @@
                 maturin build \
                   --release \
                   --manylinux off \
-                  --manifest-path rust/exo_pyo3_bindings/Cargo.toml \
+                  --manifest-path rust/skulk_pyo3_bindings/Cargo.toml \
                   --features "pyo3/extension-module,pyo3/experimental-async" \
                   --interpreter ${pkgs.python313}/bin/python \
                   --out dist

@@ -178,14 +178,14 @@ export function App() {
 
     // Version mismatch (error)
     const entries = Object.values(nodes).filter(
-      (n) => n.exo_commit && n.exo_commit !== 'Unknown' && n.exo_commit !== 'unknown',
+      (n) => n.skulk_commit && n.skulk_commit !== 'Unknown' && n.skulk_commit !== 'unknown',
     );
     if (entries.length >= 2) {
-      const commits = new Set(entries.map((n) => n.exo_commit));
+      const commits = new Set(entries.map((n) => n.skulk_commit));
       if (commits.size > 1) {
         const details = entries.map((n) => {
-          const ver = n.exo_version ?? '?';
-          const commit = n.exo_commit?.slice(0, 7);
+          const ver = n.skulk_version ?? '?';
+          const commit = n.skulk_commit?.slice(0, 7);
           return `${n.friendly_name ?? 'Unknown'} (${ver}${commit ? `-${commit}` : ''})`;
         }).join(', ');
         items.push({ level: 'error', message: `Version mismatch: ${details}. Update all nodes with git pull && uv sync.` });

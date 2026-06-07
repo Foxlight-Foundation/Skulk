@@ -43,8 +43,8 @@ from typing import Any
 
 import httpx
 from harness import (
-    ExoClient,
-    ExoHttpError,
+    SkulkClient,
+    SkulkHttpError,
     add_common_instance_args,
     instance_id_from_instance,
     nodes_used_in_instance,
@@ -1172,7 +1172,7 @@ def main() -> int:
             return 1
 
     # Instance management
-    client = ExoClient(args.host, args.port, timeout_s=args.timeout)
+    client = SkulkClient(args.host, args.port, timeout_s=args.timeout)
     instance_id: str | None = None
 
     if not args.skip_instance_setup:
@@ -1227,7 +1227,7 @@ def main() -> int:
             wait_for_instance_ready(client, instance_id)
         except (RuntimeError, TimeoutError) as e:
             logger.error(f"Failed to initialize: {e}")
-            with contextlib.suppress(ExoHttpError):
+            with contextlib.suppress(SkulkHttpError):
                 client.request_json("DELETE", f"/instance/{instance_id}")
             return 1
         time.sleep(1)
@@ -1363,7 +1363,7 @@ def main() -> int:
         if instance_id is not None:
             try:
                 client.request_json("DELETE", f"/instance/{instance_id}")
-            except ExoHttpError as e:
+            except SkulkHttpError as e:
                 if e.status != 404:
                     raise
             wait_for_instance_gone(client, instance_id)

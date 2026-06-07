@@ -11,7 +11,7 @@ SOURCE_ROOT = PROJECT_ROOT / "src"
 ENTRYPOINT = SOURCE_ROOT / "exo" / "__main__.py"
 DASHBOARD_DIR = PROJECT_ROOT / "dashboard" / "build"
 RESOURCES_DIR = PROJECT_ROOT / "resources"
-EXO_SHARED_MODELS_DIR = SOURCE_ROOT / "exo" / "shared" / "models"
+SKULK_SHARED_MODELS_DIR = SOURCE_ROOT / "exo" / "shared" / "models"
 
 if not ENTRYPOINT.is_file():
     raise SystemExit(f"Unable to locate Exo entrypoint: {ENTRYPOINT}")
@@ -22,8 +22,8 @@ if not DASHBOARD_DIR.is_dir():
 if not RESOURCES_DIR.is_dir():
     raise SystemExit(f"Resource assets are missing: {RESOURCES_DIR}")
 
-if not EXO_SHARED_MODELS_DIR.is_dir():
-    raise SystemExit(f"Shared model assets are missing: {EXO_SHARED_MODELS_DIR}")
+if not SKULK_SHARED_MODELS_DIR.is_dir():
+    raise SystemExit(f"Shared model assets are missing: {SKULK_SHARED_MODELS_DIR}")
 
 block_cipher = None
 
@@ -64,7 +64,7 @@ DATAS: list[tuple[str, str]] = [
     (str(DASHBOARD_DIR), "dashboard"),
     (str(RESOURCES_DIR), "resources"),
     (str(MLX_LIB_DIR), "mlx/lib"),
-    (str(EXO_SHARED_MODELS_DIR), "exo/shared/models"),
+    (str(SKULK_SHARED_MODELS_DIR), "exo/shared/models"),
 ]
 
 MACMON_PATH = shutil.which("macmon")

@@ -9,13 +9,13 @@ from hypercorn.asyncio import serve  # pyright: ignore[reportUnknownVariableType
 from loguru import logger
 from pydantic import BaseModel
 
-from exo.shared.constants import EXO_MODELS_DIR
-from exo.shared.models.model_cards import ModelCard, ModelId
-from exo.shared.types.chunks import TokenChunk
-from exo.shared.types.commands import CommandId
-from exo.shared.types.common import Host, NodeId
-from exo.shared.types.events import ChunkGenerated, Event, RunnerStatusUpdated
-from exo.shared.types.tasks import (
+from skulk.shared.constants import SKULK_MODELS_DIR
+from skulk.shared.models.model_cards import ModelCard, ModelId
+from skulk.shared.types.chunks import TokenChunk
+from skulk.shared.types.commands import CommandId
+from skulk.shared.types.common import Host, NodeId
+from skulk.shared.types.events import ChunkGenerated, Event, RunnerStatusUpdated
+from skulk.shared.types.tasks import (
     ConnectToGroup,
     LoadModel,
     Shutdown,
@@ -23,24 +23,24 @@ from exo.shared.types.tasks import (
     Task,
     TextGeneration,
 )
-from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
-from exo.shared.types.worker.instances import (
+from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
+from skulk.shared.types.worker.instances import (
     BoundInstance,
     Instance,
     InstanceId,
     MlxJacclInstance,
     MlxRingInstance,
 )
-from exo.shared.types.worker.runners import (
+from skulk.shared.types.worker.runners import (
     RunnerFailed,
     RunnerId,
     RunnerShutdown,
     ShardAssignments,
 )
-from exo.shared.types.worker.shards import PipelineShardMetadata, TensorShardMetadata
-from exo.utils.channels import channel, mp_channel
-from exo.utils.info_gatherer.info_gatherer import GatheredInfo, InfoGatherer
-from exo.worker.runner.bootstrap import entrypoint
+from skulk.shared.types.worker.shards import PipelineShardMetadata, TensorShardMetadata
+from skulk.utils.channels import channel, mp_channel
+from skulk.utils.info_gatherer.info_gatherer import GatheredInfo, InfoGatherer
+from skulk.worker.runner.bootstrap import entrypoint
 
 
 class Tests(BaseModel):
@@ -90,7 +90,7 @@ async def tb_detection():
 
 def list_models():
     sent = set[str]()
-    for path in EXO_MODELS_DIR.rglob("model-*.safetensors"):
+    for path in SKULK_MODELS_DIR.rglob("model-*.safetensors"):
         if "--" not in path.parent.name:
             continue
         name = path.parent.name.replace("--", "/")

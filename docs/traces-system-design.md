@@ -43,11 +43,11 @@ Today this tracing system is primarily wired into the distributed image pipeline
 
 Relevant code paths:
 
-- `src/exo/shared/tracing.py`
-- `src/exo/worker/engines/image/pipeline/runner.py`
-- `src/exo/worker/runner/image_models/runner.py`
-- `src/exo/master/main.py`
-- `src/exo/api/main.py`
+- `src/skulk/shared/tracing.py`
+- `src/skulk/worker/engines/image/pipeline/runner.py`
+- `src/skulk/worker/runner/image_models/runner.py`
+- `src/skulk/master/main.py`
+- `src/skulk/api/main.py`
 - `dashboard-react/src/components/pages/TracesPage.tsx`
 - `dashboard-react/src/components/pages/TraceDetailPage.tsx`
 
@@ -63,14 +63,14 @@ Important non-scope:
 Tracing is controlled by:
 
 - `SKULK_TRACING_ENABLED`
-- legacy alias `EXO_TRACING_ENABLED`
+- legacy alias `SKULK_TRACING_ENABLED`
 
-These resolve through `src/exo/shared/constants.py` and default to `false`.
+These resolve through `src/skulk/shared/constants.py` and default to `false`.
 
 Local trace files are written to:
 
 - `SKULK_TRACING_CACHE_DIR = SKULK_CACHE_HOME / "traces"`
-- legacy alias `EXO_TRACING_CACHE_DIR`
+- legacy alias `SKULK_TRACING_CACHE_DIR`
 
 Each saved artifact is named:
 
@@ -83,7 +83,7 @@ Perfetto or other Chrome-trace-compatible tooling.
 
 ### 1. Worker trace recorder
 
-`src/exo/shared/tracing.py` provides the trace data model and in-process buffer:
+`src/skulk/shared/tracing.py` provides the trace data model and in-process buffer:
 
 - `TraceEvent`
 - `trace(...)` context manager
@@ -98,7 +98,7 @@ nodes or across processes.
 
 ### 2. Image pipeline instrumentation
 
-`src/exo/worker/engines/image/pipeline/runner.py` is where the actual trace
+`src/skulk/worker/engines/image/pipeline/runner.py` is where the actual trace
 spans are recorded today.
 
 It wraps major parts of the diffusion/pipeline execution in nested
@@ -119,7 +119,7 @@ diffusion run so traces do not leak across image requests.
 
 ### 3. Image runner event emission
 
-`src/exo/worker/runner/image_models/runner.py` is responsible for turning the
+`src/skulk/worker/runner/image_models/runner.py` is responsible for turning the
 local buffer into cluster events.
 
 When tracing is enabled and the task completes or errors, the runner calls
@@ -134,7 +134,7 @@ This currently happens on image generation and image edit task paths.
 
 ### 4. Master merge coordinator
 
-`src/exo/master/main.py` handles distributed trace assembly.
+`src/skulk/master/main.py` handles distributed trace assembly.
 
 For `ImageGeneration` and `ImageEdits` commands, if tracing is enabled, the
 master records the set of expected device ranks for the selected instance in
@@ -155,7 +155,7 @@ Once all expected ranks have reported, `_merge_and_save_traces(...)`:
 
 ### 5. API persistence and serving
 
-`src/exo/api/main.py` listens to indexed events from the event router.
+`src/skulk/api/main.py` listens to indexed events from the event router.
 
 When it sees a `TracesMerged` event, it calls `_save_merged_trace(...)`, which:
 
@@ -276,7 +276,7 @@ So cross-node trace visibility is:
 
 ### In-memory trace event
 
-`src/exo/shared/tracing.py`
+`src/skulk/shared/tracing.py`
 
 - `TraceEvent(name, start_us, duration_us, rank, category)`
 
@@ -290,7 +290,7 @@ Fields:
 
 ### Wire format events
 
-`src/exo/shared/types/events.py`
+`src/skulk/shared/types/events.py`
 
 - `TraceEventData`
 - `TracesCollected(task_id, rank, traces)`
@@ -365,9 +365,9 @@ image pipeline, not on all inference paths.
 Evidence:
 
 - the actual `trace(...)` instrumentation lives in
-  `src/exo/worker/engines/image/pipeline/runner.py`
+  `src/skulk/worker/engines/image/pipeline/runner.py`
 - the worker trace-export hook is in
-  `src/exo/worker/runner/image_models/runner.py`
+  `src/skulk/worker/runner/image_models/runner.py`
 - the master only precomputes expected tracing ranks for `ImageGeneration` and
   `ImageEdits`
 
@@ -385,7 +385,7 @@ cluster state model.
 Specifically:
 
 - `TracesCollected` and `TracesMerged` are pass-through events in
-  `src/exo/shared/apply.py`
+  `src/skulk/shared/apply.py`
 - they advance `last_event_applied_idx`
 - they do not modify `State`
 

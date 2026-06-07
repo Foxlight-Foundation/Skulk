@@ -16,13 +16,13 @@ _SETTLE_MAX_BACKOFF_S = 60.0
 _SETTLE_BACKOFF_MULTIPLIER = 2.0
 
 
-class ExoHttpError(RuntimeError):
+class SkulkHttpError(RuntimeError):
     def __init__(self, status: int, reason: str, body_preview: str):
         super().__init__(f"HTTP {status} {reason}: {body_preview}")
         self.status = status
 
 
-class ExoClient:
+class SkulkClient:
     def __init__(self, host: str, port: int, timeout_s: float = 7200.0):
         self.host = host
         self.port = port
@@ -58,7 +58,7 @@ class ExoClient:
             text = raw.decode("utf-8", errors="replace") if raw else ""
 
             if resp.status >= 400:
-                raise ExoHttpError(resp.status, resp.reason, text[:300])
+                raise SkulkHttpError(resp.status, resp.reason, text[:300])
 
             if not text:
                 return None
@@ -112,7 +112,7 @@ def get_runner_failed_message(runner: dict[str, Any]) -> str | None:
 
 
 def wait_for_instance_ready(
-    client: ExoClient, instance_id: str, timeout: float = 24000.0
+    client: SkulkClient, instance_id: str, timeout: float = 24000.0
 ) -> None:
     start_time = time.time()
     instance_existed = False
@@ -150,14 +150,14 @@ def wait_for_instance_ready(
 
 
 def wait_for_instance_gone(
-    client: ExoClient, instance_id: str, timeout: float = 3.0
+    client: SkulkClient, instance_id: str, timeout: float = 3.0
 ) -> None:
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
             client.request_json("GET", f"/instance/{instance_id}")
             time.sleep(0.4)
-        except ExoHttpError as e:
+        except SkulkHttpError as e:
             if e.status == 404:
                 return
             raise
@@ -166,7 +166,7 @@ def wait_for_instance_gone(
 
 
 def resolve_model_short_id(
-    client: ExoClient, model_arg: str, *, force_download: bool = False
+    client: SkulkClient, model_arg: str, *, force_download: bool = False
 ) -> tuple[str, str]:
     models = client.request_json("GET", "/models") or {}
     data = models.get("data") or []
@@ -211,7 +211,7 @@ def sharding_filter(sharding: str, wanted: str) -> bool:
 
 
 def fetch_and_filter_placements(
-    client: ExoClient, full_model_id: str, args: argparse.Namespace
+    client: SkulkClient, full_model_id: str, args: argparse.Namespace
 ) -> list[dict[str, Any]]:
     previews_resp = client.request_json(
         "GET", "/instance/previews", params={"model_id": full_model_id}
@@ -271,7 +271,7 @@ def fetch_and_filter_placements(
 
 
 def settle_and_fetch_placements(
-    client: ExoClient,
+    client: SkulkClient,
     full_model_id: str,
     args: argparse.Namespace,
     settle_timeout: float = 0,
@@ -295,7 +295,7 @@ def settle_and_fetch_placements(
 
 
 def run_planning_phase(
-    client: ExoClient,
+    client: SkulkClient,
     full_model_id: str,
     preview: dict[str, Any],
     danger_delete: bool,
@@ -377,7 +377,7 @@ def run_planning_phase(
                 f"have {avail // (1024**3)}GB. Use --danger-delete-downloads to free space."
             )
 
-        # Delete from smallest to largest (skip read-only models from EXO_MODELS_PATH)
+        # Delete from smallest to largest (skip read-only models from SKULK_MODELS_PATH)
         completed = [
             (
                 unwrap_instance(p["DownloadCompleted"]["shardMetadata"])["modelCard"][
@@ -452,9 +452,9 @@ def run_planning_phase(
 
 
 def add_common_instance_args(ap: argparse.ArgumentParser) -> None:
-    ap.add_argument("--host", default=os.environ.get("EXO_HOST", "localhost"))
+    ap.add_argument("--host", default=os.environ.get("SKULK_HOST", "localhost"))
     ap.add_argument(
-        "--port", type=int, default=int(os.environ.get("EXO_PORT", "52415"))
+        "--port", type=int, default=int(os.environ.get("SKULK_PORT", "52415"))
     )
     ap.add_argument("--model", required=True, help="Model short id or huggingface id")
     ap.add_argument(

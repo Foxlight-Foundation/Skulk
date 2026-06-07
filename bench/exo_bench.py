@@ -30,8 +30,8 @@ from statistics import mean
 from typing import Any
 
 from harness import (
-    ExoClient,
-    ExoHttpError,
+    SkulkClient,
+    SkulkHttpError,
     add_common_instance_args,
     instance_id_from_instance,
     nodes_used_in_instance,
@@ -142,7 +142,7 @@ def parse_int_list(values: list[str]) -> list[int]:
 
 
 def run_one_completion(
-    client: ExoClient, model_id: str, pp_hint: int, tg: int, prompt_sizer: PromptSizer
+    client: SkulkClient, model_id: str, pp_hint: int, tg: int, prompt_sizer: PromptSizer
 ) -> tuple[dict[str, Any], int]:
     content, pp_tokens = prompt_sizer.build(pp_hint)
     payload: dict[str, Any] = {
@@ -303,7 +303,7 @@ def main() -> int:
     else:
         logger.info(f"pp/tg mode: tandem (zip) - {len(pp_list)} pairs")
 
-    client = ExoClient(args.host, args.port, timeout_s=args.timeout)
+    client = SkulkClient(args.host, args.port, timeout_s=args.timeout)
     short_id, full_model_id = resolve_model_short_id(
         client, args.model, force_download=args.force_download
     )
@@ -384,7 +384,7 @@ def main() -> int:
             wait_for_instance_ready(client, instance_id)
         except (RuntimeError, TimeoutError) as e:
             logger.error(f"Failed to initialize placement: {e}")
-            with contextlib.suppress(ExoHttpError):
+            with contextlib.suppress(SkulkHttpError):
                 client.request_json("DELETE", f"/instance/{instance_id}")
             continue
 
@@ -443,14 +443,14 @@ def main() -> int:
                             all_rows.append(row)
                         else:
                             # Concurrent: fire N requests in parallel
-                            # Each thread gets its own ExoClient (separate HTTP connection)
+                            # Each thread gets its own SkulkClient (separate HTTP connection)
                             batch_results: list[tuple[dict[str, Any], int]] = []
                             batch_errors = 0
 
                             def _run_concurrent(
                                 idx: int, *, _pp: int = pp, _tg: int = tg
                             ) -> tuple[dict[str, Any], int]:
-                                c = ExoClient(
+                                c = SkulkClient(
                                     args.host, args.port, timeout_s=args.timeout
                                 )
                                 return run_one_completion(
@@ -531,7 +531,7 @@ def main() -> int:
         finally:
             try:
                 client.request_json("DELETE", f"/instance/{instance_id}")
-            except ExoHttpError as e:
+            except SkulkHttpError as e:
                 if e.status != 404:
                     raise
             wait_for_instance_gone(client, instance_id)
