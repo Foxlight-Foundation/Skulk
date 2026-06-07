@@ -98,6 +98,27 @@ _COMMAND_TASK_TYPES = (
 )
 
 
+def instances_on_dead_nodes(
+    state: State,
+    connected_node_ids: AbstractSet[NodeId],
+    timed_out_node_ids: AbstractSet[NodeId],
+) -> set[InstanceId]:
+    """Instances with at least one shard on a disconnected or timed-out node.
+
+    Timed-out nodes matter even while still present in topology: NodeTimedOut
+    removes the node's instances AND their tasks from state in one apply, so
+    any TaskFailed for those tasks must be emitted before that event — a
+    later plan pass would no longer see them (#224 review catch).
+    """
+    dying: set[InstanceId] = set()
+    for instance_id, instance in state.instances.items():
+        for node_id in instance.shard_assignments.node_to_runner:
+            if node_id not in connected_node_ids or node_id in timed_out_node_ids:
+                dying.add(instance_id)
+                break
+    return dying
+
+
 def orphaned_task_failure_events(
     state: State,
     dying_instance_ids: AbstractSet[InstanceId],
@@ -545,22 +566,24 @@ class Master:
     # These plan loops are the cracks showing in our event sourcing architecture - more things could be commands
     async def _plan(self) -> None:
         while True:
-            # kill broken instances
             connected_node_ids = set(self.state.topology.list_nodes())
-            dying_instance_ids: set[InstanceId] = set()
-            for instance_id, instance in self.state.instances.items():
-                for node_id in instance.shard_assignments.node_to_runner:
-                    if node_id not in connected_node_ids:
-                        dying_instance_ids.add(instance_id)
-                        await self.event_sender.send(
-                            InstanceDeleted(instance_id=instance_id)
-                        )
-                        break
+            now = datetime.now(tz=timezone.utc)
+            timed_out_node_ids = {
+                node_id
+                for node_id, time in self.state.last_seen.items()
+                if now - time > timedelta(seconds=30)
+            }
+            dying_instance_ids = instances_on_dead_nodes(
+                self.state, connected_node_ids, timed_out_node_ids
+            )
 
-            # Fail in-flight API tasks stranded by a dead or deleted instance
+            # Fail in-flight API tasks stranded by a dead or dying instance
             # so open HTTP requests terminate with an error instead of
-            # hanging (#223). TaskFailed flips task_status to Failed on
-            # apply, so each task is emitted at most once across passes.
+            # hanging (#223). Emitted BEFORE InstanceDeleted/NodeTimedOut so
+            # TaskFailed indexes ahead of the applies that remove the task
+            # from state (NodeTimedOut deletes its instances' tasks
+            # outright). TaskFailed flips task_status to Failed on apply, so
+            # each task is emitted at most once across passes.
             for task_failed in orphaned_task_failure_events(
                 self.state, dying_instance_ids
             ):
@@ -570,12 +593,19 @@ class Master:
                 )
                 await self.event_sender.send(task_failed)
 
+            # kill broken instances
+            for instance_id, instance in self.state.instances.items():
+                for node_id in instance.shard_assignments.node_to_runner:
+                    if node_id not in connected_node_ids:
+                        await self.event_sender.send(
+                            InstanceDeleted(instance_id=instance_id)
+                        )
+                        break
+
             # time out dead nodes
-            for node_id, time in self.state.last_seen.items():
-                now = datetime.now(tz=timezone.utc)
-                if now - time > timedelta(seconds=30):
-                    logger.info(f"Manually removing node {node_id} due to inactivity")
-                    await self.event_sender.send(NodeTimedOut(node_id=node_id))
+            for node_id in timed_out_node_ids:
+                logger.info(f"Manually removing node {node_id} due to inactivity")
+                await self.event_sender.send(NodeTimedOut(node_id=node_id))
 
             await anyio.sleep(10)
 

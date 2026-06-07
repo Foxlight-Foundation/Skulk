@@ -7,7 +7,7 @@ master-side half of the fix: it declares in-flight API tasks dead when their
 instance is gone (or being torn down in the same plan pass).
 """
 
-from exo.master.main import orphaned_task_failure_events
+from exo.master.main import instances_on_dead_nodes, orphaned_task_failure_events
 from exo.shared.models.model_cards import ModelCard, ModelTask
 from exo.shared.types.common import CommandId, ModelId, NodeId
 from exo.shared.types.memory import Memory
@@ -133,6 +133,28 @@ def test_terminal_task_not_failed_again() -> None:
             {task_id: _text_task(task_id, instance_id, status=terminal)}, {}
         )
         assert orphaned_task_failure_events(state, frozenset()) == []
+
+
+def test_instance_on_timed_out_node_is_dying() -> None:
+    """A node can exceed its last_seen timeout while still present in
+    topology (wedged process, live TCP). NodeTimedOut removes the node's
+    instances AND their tasks in one apply, so the sweep must treat those
+    instances as dying in the same pass — a later pass can no longer see
+    the tasks (#224 review catch)."""
+    instance_id = InstanceId()
+    node_id = NodeId("test-node")  # matches _instance's node
+    state = _state({}, {instance_id: _instance(instance_id)})
+
+    # connected and not timed out -> healthy
+    assert (
+        instances_on_dead_nodes(state, frozenset({node_id}), frozenset()) == set()
+    )
+    # connected but timed out -> dying
+    assert instances_on_dead_nodes(
+        state, frozenset({node_id}), frozenset({node_id})
+    ) == {instance_id}
+    # disconnected -> dying
+    assert instances_on_dead_nodes(state, frozenset(), frozenset()) == {instance_id}
 
 
 def test_sweep_is_idempotent_after_apply() -> None:

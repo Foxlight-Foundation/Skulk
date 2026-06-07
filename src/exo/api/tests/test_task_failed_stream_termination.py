@@ -14,7 +14,6 @@ import pytest
 from exo.api.main import API
 from exo.shared.types.chunks import ErrorChunk
 from exo.shared.types.common import CommandId, ModelId
-from exo.shared.types.events import TaskFailed
 from exo.shared.types.state import State
 from exo.shared.types.tasks import TaskId, TaskStatus
 from exo.shared.types.tasks import TextGeneration as TextGenerationTask
@@ -55,13 +54,7 @@ async def test_task_failed_delivers_error_chunk() -> None:
     sender, receiver = channel[Any]()
     api._text_generation_queues[command_id] = sender
 
-    await api._terminate_failed_command_stream(
-        TaskFailed(
-            task_id=task.task_id,
-            error_type="instance_lost",
-            error_message="instance gone",
-        )
-    )
+    await api._terminate_command_stream(task.task_id, "instance gone")
 
     chunk = receiver.receive_nowait()
     assert isinstance(chunk, ErrorChunk)
@@ -74,9 +67,30 @@ async def test_task_failed_for_unknown_task_is_ignored() -> None:
     api = _make_api()
     api.state = State()
     # No queues registered, no task in state — must not raise.
-    await api._terminate_failed_command_stream(
-        TaskFailed(task_id=TaskId(), error_type="x", error_message="y")
+    await api._terminate_command_stream(TaskId(), "y")
+
+
+async def test_cancelled_status_delivers_error_chunk() -> None:
+    """Operator instance deletion cancels in-flight tasks via
+    TaskStatusUpdated(Cancelled); those requests must terminate too (#224
+    review catch)."""
+    api = _make_api()
+    command_id = CommandId()
+    task = _failed_task(command_id).model_copy(
+        update={"task_status": TaskStatus.Cancelled}
     )
+    api.state = State().model_copy(update={"tasks": {task.task_id: task}})
+
+    sender, receiver = channel[Any]()
+    api._text_generation_queues[command_id] = sender
+
+    await api._terminate_command_stream(
+        task.task_id, "The request was cancelled because its instance was deleted"
+    )
+
+    chunk = receiver.receive_nowait()
+    assert isinstance(chunk, ErrorChunk)
+    assert "cancelled" in chunk.error_message
 
 
 async def test_task_failed_with_closed_queue_drops_entry() -> None:
@@ -91,9 +105,7 @@ async def test_task_failed_with_closed_queue_drops_entry() -> None:
     receiver.close()
     api._text_generation_queues[command_id] = sender
 
-    await api._terminate_failed_command_stream(
-        TaskFailed(task_id=task.task_id, error_type="x", error_message="y")
-    )
+    await api._terminate_command_stream(task.task_id, "y")
     assert command_id not in api._text_generation_queues
 
 

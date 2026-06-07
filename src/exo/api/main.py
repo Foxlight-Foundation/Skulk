@@ -21,7 +21,7 @@ import httpx
 import hypercorn.asyncio as hypercorn_asyncio
 import psutil
 import yaml
-from anyio import BrokenResourceError, to_thread
+from anyio import BrokenResourceError, ClosedResourceError, to_thread
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -234,6 +234,7 @@ from exo.shared.types.events import (
     IndexedEvent,
     StateSnapshotHydrated,
     TaskFailed,
+    TaskStatusUpdated,
     TracesMerged,
 )
 from exo.shared.types.memory import Memory
@@ -2937,11 +2938,31 @@ class API:
                         except BrokenResourceError:
                             self._embedding_queues.pop(event.command_id, None)
                 if isinstance(event, TaskFailed):
-                    await self._terminate_failed_command_stream(event)
+                    await self._terminate_command_stream(
+                        event.task_id,
+                        event.error_message
+                        or "The instance executing this request was lost",
+                    )
+                if (
+                    isinstance(event, TaskStatusUpdated)
+                    and event.task_status == task_types.TaskStatus.Cancelled
+                ):
+                    # Operator-initiated instance deletion cancels in-flight
+                    # tasks (get_transition_events); without a terminal chunk
+                    # those requests would hang exactly like node-death ones.
+                    # Client-initiated cancels already closed their queue, so
+                    # this is a no-op for them.
+                    await self._terminate_command_stream(
+                        event.task_id,
+                        "The request was cancelled because its instance "
+                        "was deleted",
+                    )
                 if isinstance(event, TracesMerged):
                     self._save_merged_trace(event)
 
-    async def _terminate_failed_command_stream(self, event: TaskFailed) -> None:
+    async def _terminate_command_stream(
+        self, task_id: task_types.TaskId, error_message: str
+    ) -> None:
         """Deliver a terminal ErrorChunk for a task the master declared dead.
 
         Without this, a request whose instance died mid-generation never
@@ -2951,7 +2972,7 @@ class API:
         error chunk and close, and non-streaming handlers raise their
         existing finish_reason == "error" path.
         """
-        task = self.state.tasks.get(event.task_id)
+        task = self.state.tasks.get(task_id)
         if not isinstance(
             task,
             (
@@ -2966,8 +2987,7 @@ class API:
         # already ModelId.
         error_chunk = ErrorChunk(
             model=ModelId(task.task_params.model),
-            error_message=event.error_message
-            or "The instance executing this request was lost",
+            error_message=error_message,
         )
         for queue_map in (
             self._text_generation_queues,
@@ -2977,7 +2997,7 @@ class API:
             if queue := queue_map.get(task.command_id):
                 try:
                     await queue.send(error_chunk)
-                except BrokenResourceError:
+                except (BrokenResourceError, ClosedResourceError):
                     queue_map.pop(task.command_id, None)
 
     def _save_merged_trace(self, event: TracesMerged) -> None:
