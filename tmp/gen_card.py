@@ -1,5 +1,5 @@
 """
-Generates inference model cards for EXO.
+Generates inference model cards for Skulk.
 Usage:
     uv run tmp/gen_card.py mlx-community/my_cool_model-8bit [repo-id/model-id-2] [...]
 

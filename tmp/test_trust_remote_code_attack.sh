@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Test that models added via API get trust_remote_code=false
-# Run this against a running exo instance.
+# Run this against a running Skulk instance.
 # Usage: ./test_trust_remote_code_attack.sh [host:port]
 
 set -uo pipefail
 
 HOST="${1:-localhost:52415}"
 MODEL_ID="KevTheHermit/security-testing"
-CUSTOM_CARDS_DIR="$HOME/.exo/custom_model_cards"
+CUSTOM_CARDS_DIR="$HOME/.skulk/custom_model_cards"
 CARD_FILE="$CUSTOM_CARDS_DIR/KevTheHermit--security-testing.toml"
 
 echo "=== Test: trust_remote_code attack via API ==="
