@@ -8,14 +8,16 @@ from importlib.metadata import PackageNotFoundError, version
 def get_skulk_version() -> str:
     """Return the installed Skulk package version.
 
-    The Python package is still published under the legacy `exo` distribution
-    name for compatibility, but the returned version represents the Skulk app
-    version shown in the UI and node metadata.
+    The distribution is named ``skulk`` since the 2026-06 rename; the
+    legacy ``exo`` distribution name is probed as a fallback for
+    not-yet-resynced environments.
     """
-    try:
-        return version("exo")
-    except PackageNotFoundError:
-        return "unknown"
+    for distribution_name in ("skulk", "exo"):
+        try:
+            return version(distribution_name)
+        except PackageNotFoundError:
+            continue
+    return "unknown"
 
 
 def get_skulk_version_label() -> str:
