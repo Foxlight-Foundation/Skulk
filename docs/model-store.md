@@ -2,7 +2,7 @@
 
 # Skulk Model Store
 
-The model store is one of the biggest additions Skulk makes on top of upstream EXO.
+The model store is one of the biggest additions Skulk makes on top of upstream exo.
 
 In a normal cluster without a model store, each node may need to download model data for itself.
 With the model store enabled, one node becomes the shared store host and other nodes stage from it over the LAN.

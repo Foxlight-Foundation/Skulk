@@ -8,8 +8,8 @@ export interface RawNodeIdentity {
   friendlyName?: string;
   osVersion?: string;
   osBuildVersion?: string;
-  exoVersion?: string;
-  exoCommit?: string;
+  skulkVersion?: string;
+  skulkCommit?: string;
 }
 
 export interface RawMemoryUsage {

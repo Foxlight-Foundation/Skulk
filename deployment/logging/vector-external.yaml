@@ -15,15 +15,15 @@
 # `deployment/logging/vector.yaml`.
 #
 # Operator-tunable env vars (in ~/.skulk/skulk.env or your shell):
-#   EXO_LOGGING_INGEST_URL   Where to ship logs (defaults to the in-house
+#   SKULK_LOGGING_INGEST_URL   Where to ship logs (defaults to the in-house
 #                            VictoriaLogs endpoint on the R720).
-#   EXO_VECTOR_DATA_DIR      Where Vector keeps its on-disk buffer and
+#   SKULK_VECTOR_DATA_DIR      Where Vector keeps its on-disk buffer and
 #                            file-position checkpoints (so it resumes
 #                            cleanly after a restart).
 #   SKULK_LOG_FILE           Override the source file path. Defaults to
 #                            ~/.skulk/logs/skulk.stdout.log.
 
-data_dir: ${EXO_VECTOR_DATA_DIR:-${HOME}/.skulk/vector}
+data_dir: ${SKULK_VECTOR_DATA_DIR:-${HOME}/.skulk/vector}
 
 sources:
   skulk_log:
@@ -60,7 +60,7 @@ sinks:
     type: http
     inputs:
       - parse_json
-    uri: ${EXO_LOGGING_INGEST_URL:-http://192.168.0.118:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts}
+    uri: ${SKULK_LOGGING_INGEST_URL:-http://192.168.0.118:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts}
     encoding:
       codec: json
     framing:

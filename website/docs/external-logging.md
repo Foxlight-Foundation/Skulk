@@ -124,7 +124,7 @@ On every node that's running Skulk:
 3. **Tell the shipper where to ship.** Edit `~/.skulk/skulk.env` and set:
 
    ```bash
-   EXO_LOGGING_INGEST_URL=http://<central-host>:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts
+   SKULK_LOGGING_INGEST_URL=http://<central-host>:9428/insert/jsonline?_stream_fields=node_id,component&_msg_field=msg&_time_field=ts
    ```
 
    On Linux, also set `logging.enabled: true` and `logging.ingest_url: <same-url>` in `skulk.yaml` so Skulk knows to spawn its in-process Vector subprocess.
@@ -186,7 +186,7 @@ Each line shipped by Skulk looks like this:
   "level": "INFO",
   "node_id": "laptop-1",
   "component": "worker",
-  "module": "exo.worker.runner",
+  "module": "skulk.worker.runner",
   "function": "spawn",
   "line": 142,
   "msg": "spawned runner for shard 0/4 of mlx-community/Qwen3-30B"
@@ -202,8 +202,8 @@ All knobs live in `~/.skulk/skulk.env` and are picked up by both the Skulk and V
 | Env var | What it does | Default |
 | --- | --- | --- |
 | `SKULK_LOGGING_EXTERNAL` | `1` = Skulk writes JSON to stdout for the external Vector agent. `0` = Skulk spawns its own internal Vector subprocess (only useful if you ran the installer with `--no-vector`) | `1` |
-| `EXO_LOGGING_INGEST_URL` | Where Vector POSTs logs | the in-house R720 endpoint |
-| `EXO_VECTOR_DATA_DIR` | Where Vector keeps its disk buffer and file checkpoints | `~/.skulk/vector` |
+| `SKULK_LOGGING_INGEST_URL` | Where Vector POSTs logs | the in-house R720 endpoint |
+| `SKULK_VECTOR_DATA_DIR` | Where Vector keeps its disk buffer and file checkpoints | `~/.skulk/vector` |
 | `SKULK_LOG_FILE` | Override the source file Vector tails | `~/.skulk/logs/skulk.stdout.log` |
 
 After editing, restart the relevant agents (the table in the [service guide](./run-skulk-as-a-service.md#day-to-day-operations) has the commands).
@@ -241,7 +241,7 @@ The wrapper sets `SKULK_LOGGING_EXTERNAL=1` by default, which tells Skulk to emi
 
 This is the design working as intended. When the central store is unreachable, Vector buffers up to 512 MB per node on disk. When connectivity returns, it drains the buffer at full speed. You'll see a temporary spike in CPU and network use until the backlog clears.
 
-To monitor backlog: `du -sh ~/.skulk/vector/` (or wherever `EXO_VECTOR_DATA_DIR` points).
+To monitor backlog: `du -sh ~/.skulk/vector/` (or wherever `SKULK_VECTOR_DATA_DIR` points).
 
 ### "VictoriaLogs is full / disk pressure on the central host"
 
@@ -282,7 +282,7 @@ Or re-run the installer with `--no-vector`.
 For ad-hoc runs without the LaunchAgent, run Vector by hand. There are two configs depending on which mode you're iterating on:
 
 ```bash
-# Make sure ~/.skulk/skulk.env is sourced so EXO_LOGGING_INGEST_URL is set
+# Make sure ~/.skulk/skulk.env is sourced so SKULK_LOGGING_INGEST_URL is set
 source ~/.skulk/skulk.env
 
 # External mode (file-tail config used by the macOS LaunchAgent)

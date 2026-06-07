@@ -8,4 +8,4 @@ assignees: ''
 
 <!-- Please use a clear, descriptive title above -->
 
-Describe what you'd like to see added to EXO.
+Describe what you'd like to see added to Skulk.

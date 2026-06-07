@@ -1,0 +1,598 @@
+import json
+from enum import Enum
+from typing import Annotated, Any, Literal
+
+import aiofiles
+import aiofiles.os as aios
+import tomlkit
+from anyio import Path, open_file
+from huggingface_hub import model_info
+from loguru import logger
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    Field,
+    PositiveInt,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
+from tomlkit.exceptions import TOMLKitError
+
+from skulk.shared.constants import (
+    RESOURCES_DIR,
+    SKULK_CUSTOM_MODEL_CARDS_DIR,
+    SKULK_ENABLE_IMAGE_MODELS,
+    SKULK_MODELS_DIRS,
+)
+from skulk.shared.types.common import ModelId
+from skulk.shared.types.memory import Memory
+from skulk.shared.types.text_generation import ReasoningEffort
+from skulk.utils.pydantic_ext import CamelCaseModel
+
+# kinda ugly...
+# TODO: load search path from config.toml
+_custom_cards_dir = Path(str(SKULK_CUSTOM_MODEL_CARDS_DIR))
+_BUILTIN_CARD_DIRS = [
+    Path(RESOURCES_DIR) / "inference_model_cards",
+    Path(RESOURCES_DIR) / "image_model_cards",
+    Path(RESOURCES_DIR) / "embedding_model_cards",
+]
+
+_card_cache: dict[ModelId, "ModelCard"] = {}
+
+
+def _detect_vision_from_config(model_id: ModelId) -> "VisionCardConfig | None":
+    normalized = model_id.normalize()
+    for model_dir in [d / normalized for d in SKULK_MODELS_DIRS]:
+        config_path = model_dir / "config.json"
+        if not config_path.exists():
+            continue
+        try:
+            with open(config_path) as f:
+                raw = json.load(f)  # type: ignore
+            return ConfigData.model_validate(
+                raw, context={"model_id": str(model_id)}
+            ).vision
+        except Exception:
+            continue
+    return None
+
+
+async def _load_cards_from_dir(directory: Path, *, is_custom: bool) -> None:
+    """Load all TOML model cards from a directory into the cache."""
+    async for toml_file in directory.rglob("*.toml"):
+        try:
+            card = await ModelCard.load_from_path(toml_file)
+            if is_custom:
+                card = card.model_copy(update={"is_custom": True})
+            if card.vision is None:
+                vision = _detect_vision_from_config(card.model_id)
+                if vision is not None:
+                    card = card.model_copy(update={"vision": vision})
+            if card.model_id not in _card_cache:
+                _card_cache[card.model_id] = card
+        except (ValidationError, TOMLKitError):
+            pass
+
+
+async def _refresh_card_cache() -> None:
+    for path in _BUILTIN_CARD_DIRS:
+        await _load_cards_from_dir(path, is_custom=False)
+    await _load_cards_from_dir(_custom_cards_dir, is_custom=True)
+
+
+def _is_image_card(card: "ModelCard") -> bool:
+    return any(t in (ModelTask.TextToImage, ModelTask.ImageToImage) for t in card.tasks)
+
+
+def get_card(model_id: ModelId) -> "ModelCard | None":
+    """Look up a single model card from the cache by ID."""
+    return _card_cache.get(model_id)
+
+
+async def get_model_cards() -> list["ModelCard"]:
+    if len(_card_cache) == 0:
+        await _refresh_card_cache()
+    if SKULK_ENABLE_IMAGE_MODELS:
+        return list(_card_cache.values())
+    return [c for c in _card_cache.values() if not _is_image_card(c)]
+
+
+class ModelTask(str, Enum):
+    TextGeneration = "TextGeneration"
+    TextToImage = "TextToImage"
+    ImageToImage = "ImageToImage"
+    TextEmbedding = "TextEmbedding"
+
+
+class ComponentInfo(CamelCaseModel):
+    component_name: str
+    component_path: str
+    storage_size: Memory
+    n_layers: PositiveInt | None = None
+    can_shard: bool
+    safetensors_index_filename: str | None = None
+
+
+class VisionCardConfig(CamelCaseModel):
+    """Vision configuration attached to a model card for VLM support.
+
+    Populated from the ``[vision]`` section of a TOML model card or
+    auto-detected from ``config.json`` during card creation."""
+
+    image_token_id: int
+    model_type: str
+    weights_repo: str = ""
+    image_token: str | None = None
+    processor_repo: str | None = None
+    boi_token_id: int | None = None
+    eoi_token_id: int | None = None
+
+
+def multi_node_speculation_disabled(
+    runtime: "RuntimeCapabilityCardConfig | None", world_size: int
+) -> bool:
+    """True when the card forbids speculation for this placement size.
+
+    Shared by the runner's drafter-load gate and the generation loop's
+    distributed-agreement gate so both make the identical, rank-symmetric
+    decision from the card alone.
+    """
+    return (
+        world_size > 1
+        and runtime is not None
+        and runtime.speculative_multi_node is False
+    )
+
+
+class ReasoningFormat(str, Enum):
+    """Reasoning marker formats used by model families."""
+
+    None_ = "none"
+    TokenDelimited = "token_delimited"
+    ChannelDelimited = "channel_delimited"
+
+
+class PromptRendererType(str, Enum):
+    """Prompt renderer strategies supported by the runtime."""
+
+    Tokenizer = "tokenizer"
+    Gemma4 = "gemma4"
+    Dsml = "dsml"
+
+
+class OutputParserType(str, Enum):
+    """Output parser strategies supported by the runtime."""
+
+    Generic = "generic"
+    Gemma4 = "gemma4"
+    GptOss = "gpt_oss"
+    DeepseekV32 = "deepseek_v32"
+
+
+class ToolCallFormat(str, Enum):
+    """Tool-call output formats emitted by model families."""
+
+    Generic = "generic"
+    Gemma4 = "gemma4"
+    GptOss = "gpt_oss"
+    Dsml = "dsml"
+
+
+class BuiltinToolType(str, Enum):
+    """Builtin tool contracts that Skulk can advertise to model families."""
+
+    WebSearch = "web_search"
+    OpenUrl = "open_url"
+    ExtractPage = "extract_page"
+
+
+class ReasoningCardConfig(CamelCaseModel):
+    """Optional advanced reasoning capability declarations for a model card."""
+
+    supports_toggle: bool | None = None
+    supports_budget: bool | None = None
+    format: ReasoningFormat | None = None
+    default_effort: ReasoningEffort | None = None
+    disabled_effort: ReasoningEffort | None = None
+
+    @field_validator("format", mode="before")
+    @classmethod
+    def _validate_format(
+        cls, value: str | ReasoningFormat | None
+    ) -> ReasoningFormat | None:
+        if value is None or isinstance(value, ReasoningFormat):
+            return value
+        return ReasoningFormat(value)
+
+
+class ModalitiesCardConfig(CamelCaseModel):
+    """Optional advanced modality declarations for a model card."""
+
+    supports_audio_input: bool | None = None
+    supports_native_multimodal: bool | None = None
+
+
+class ToolingCardConfig(CamelCaseModel):
+    """Optional tool-calling behavior declarations for a model card."""
+
+    supports_tool_calling: bool | None = None
+    tool_call_format: ToolCallFormat | None = None
+    builtin_tools: list[BuiltinToolType] | None = None
+
+    @field_validator("tool_call_format", mode="before")
+    @classmethod
+    def _validate_tool_call_format(
+        cls, value: str | ToolCallFormat | None
+    ) -> ToolCallFormat | None:
+        if value is None or isinstance(value, ToolCallFormat):
+            return value
+        return ToolCallFormat(value)
+
+    @field_validator("builtin_tools", mode="before")
+    @classmethod
+    def _validate_builtin_tools(
+        cls,
+        value: list[str | BuiltinToolType] | None,
+    ) -> list[BuiltinToolType] | None:
+        if value is None:
+            return value
+        return [
+            item if isinstance(item, BuiltinToolType) else BuiltinToolType(item)
+            for item in value
+        ]
+
+
+class RuntimeCapabilityCardConfig(CamelCaseModel):
+    """Optional runtime behavior hints for a model card."""
+
+    prompt_renderer: PromptRendererType | None = None
+    output_parser: OutputParserType | None = None
+    metal_fast_synch: bool | None = None
+    """Per-model override for the MLX ``MLX_METAL_FAST_SYNCH`` flag.
+
+    ``None`` means "no opinion" — fall through to the cluster default
+    selected by the runner. Set explicitly to ``False`` for models that
+    deadlock under FAST_SYNCH on the ring backend (e.g. gemma-4 with
+    multimodal load: the Metal command queue wedges in
+    ``pipeline_last_eval_output``, transitively starves WindowServer,
+    and trips the macOS kernel watchdog into a panic). Set explicitly
+    to ``True`` for models that have been measured to benefit and are
+    known to be safe under the deployment's collective backend.
+    """
+    mtp_heads: bool | None = None
+    """True when native MTP prediction heads are available via sidecar.
+
+    Set alongside ``mtp_sidecar_repo``. When false or absent, the runner
+    skips sidecar loading and uses standard autoregressive generation.
+    """
+    mtp_max_depth: int | None = None
+    """Maximum draft depth the MTP heads support.
+
+    Start at 1 for Apple Silicon. Deeper values can be evaluated via
+    profiling but are unlikely to amortize on Metal due to near-linear
+    verify-pass scaling.
+    """
+    mtp_sidecar_repo: str | None = None
+    """Hugging Face repo ID containing the published ``mtp.safetensors`` sidecar.
+
+    Example: ``"FoxlightAI/qwen3-5-7b-instruct-mtp-q4k"``
+    The sidecar is downloaded alongside the base model weights and loaded
+    into the runner for speculative decoding. Produced by SWP.
+    """
+    mtp_norm_convention: Literal["zero_centered", "actual_scale"] | None = None
+    """How the sidecar stores its RMSNorm weights.
+
+    ``"zero_centered"`` means deviation-from-1 (the raw Qwen3.5 checkpoint
+    convention — the runner applies a +1.0 shift at load, mirroring what
+    mlx-lm's ``sanitize()`` does for trunk weights). ``"actual_scale"`` means
+    the stored value is the scale itself (DeepSeek convention). ``None``
+    falls through to the family default keyed off the detected sidecar
+    layout. Override per card when a publisher changes conventions — getting
+    this wrong measured 0% draft acceptance on Qwen3.5-2B (issue #192).
+    """
+    mtp_concat_order: Literal["embed_first", "hidden_first"] | None = None
+    """Concatenation order of the MTP fc projection input.
+
+    ``"embed_first"`` = ``fc(concat([enorm(embed(t_next)), hnorm(h)]))`` —
+    verified for Qwen3.5 (72.4% offline agreement, issue #192).
+    ``"hidden_first"`` is the inherited DeepSeek assumption (unverified).
+    ``None`` falls through to the family default keyed off the detected
+    sidecar layout.
+    """
+    speculative_multi_node: bool | None = None
+    """Whether speculation may run on multi-node placements of this model.
+
+    ``None`` (default) places no restriction. Set ``False`` for models
+    where multi-node speculation is measured SLOWER than plain distributed
+    decode: the 2026-06-06 benchmark matrix found gemma-4-26B-A4B (MoE)
+    at 30.2 tok/s plain vs 28.2 with MTP on a 2-node pipeline (-7%), while
+    single-node MTP on the same model measures 2.2x — fast sharded MoE
+    decode plus modest acceptance makes the per-round draft+verify
+    overhead net negative. Single-node speculation is unaffected by this
+    knob. The decision is card-driven so every rank makes the same
+    speculate-or-not choice (the distributed agreement collective requires
+    rank symmetry).
+    """
+
+    assistant_model_repo: str | None = None
+    """Hugging Face repo ID of a companion *assistant* (drafter) model.
+
+    Gemma 4 does speculative decoding differently from the Qwen3/DeepSeek
+    ``mtp.*`` heads: instead of embedded prediction heads, it pairs the target
+    with a separate small ``gemma4_assistant`` model (e.g.
+    ``"mlx-community/gemma-4-26B-A4B-it-assistant-bf16"``) that cross-attends
+    over the target's KV cache. When set, the assistant repo is downloaded
+    alongside the base model. Mutually exclusive with the ``mtp_*`` fields.
+
+    NOTE: consuming the assistant for speculative generation requires the
+    ``gemma4_assistant`` drafter from mlx-vlm >= 0.5.0 and is not yet wired into
+    the runner — declaring it here only pre-downloads it. See the Gemma 4 MTP
+    initiative in the foxlight-docs hub (Phase C).
+    """
+
+    @field_validator("prompt_renderer", mode="before")
+    @classmethod
+    def _validate_prompt_renderer(
+        cls, value: str | PromptRendererType | None
+    ) -> PromptRendererType | None:
+        if value is None or isinstance(value, PromptRendererType):
+            return value
+        return PromptRendererType(value)
+
+    @field_validator("output_parser", mode="before")
+    @classmethod
+    def _validate_output_parser(
+        cls, value: str | OutputParserType | None
+    ) -> OutputParserType | None:
+        if value is None or isinstance(value, OutputParserType):
+            return value
+        return OutputParserType(value)
+
+
+class ModelCard(CamelCaseModel):
+    model_id: ModelId
+    storage_size: Memory
+    n_layers: PositiveInt
+    hidden_size: PositiveInt
+    supports_tensor: bool
+    num_key_value_heads: PositiveInt | None = None
+    tasks: list[ModelTask]
+    components: list[ComponentInfo] | None = None
+    family: str = ""
+    quantization: str = ""
+    base_model: str = ""
+    capabilities: list[str] = []
+    context_length: int = 0
+    uses_cfg: bool = False
+    trust_remote_code: bool = True
+    is_custom: bool = False
+    vision: VisionCardConfig | None = None
+    reasoning: ReasoningCardConfig | None = None
+    modalities: ModalitiesCardConfig | None = None
+    tooling: ToolingCardConfig | None = None
+    runtime: RuntimeCapabilityCardConfig | None = None
+
+    @model_validator(mode="after")
+    def _fill_vision_weights_repo(self) -> "ModelCard":
+        if self.vision is not None and not self.vision.weights_repo:
+            object.__setattr__(
+                self,
+                "vision",
+                self.vision.model_copy(update={"weights_repo": str(self.model_id)}),
+            )
+        return self
+
+    @field_validator("tasks", mode="before")
+    @classmethod
+    def _validate_tasks(cls, v: list[str | ModelTask]) -> list[ModelTask]:
+        return [item if isinstance(item, ModelTask) else ModelTask(item) for item in v]
+
+    async def save(self, path: Path) -> None:
+        async with await open_file(path, "w") as f:
+            py = self.model_dump(exclude_none=True, exclude={"is_custom"})
+            data = tomlkit.dumps(py)  # pyright: ignore[reportUnknownMemberType]
+            await f.write(data)
+
+    async def save_to_custom_dir(self) -> None:
+        await aios.makedirs(str(_custom_cards_dir), exist_ok=True)
+        await self.save(_custom_cards_dir / (self.model_id.normalize() + ".toml"))
+
+    @staticmethod
+    async def load_from_path(path: Path) -> "ModelCard":
+        async with await open_file(path, "r") as f:
+            py = tomlkit.loads(await f.read())
+            return ModelCard.model_validate(py)
+
+    # Is it okay that model card.load defaults to network access if the card doesn't exist? do we want to be more explicit here?
+    @staticmethod
+    async def load(model_id: ModelId) -> "ModelCard":
+        if model_id not in _card_cache:
+            await _refresh_card_cache()
+        if (mc := _card_cache.get(model_id)) is not None:
+            return mc
+
+        mc = await ModelCard.fetch_from_hf(model_id)
+        await mc.save_to_custom_dir()
+        _card_cache[model_id] = mc
+        return mc
+
+    @staticmethod
+    async def fetch_from_hf(model_id: ModelId) -> "ModelCard":
+        """Fetches storage size and number of layers for a Hugging Face model, returns Pydantic ModelMeta.
+
+        This is a pure fetch — it does NOT save to disk or update the cache.
+        Persistence is handled by the event-sourcing layer (worker event handler).
+        """
+        # TODO: failure if files do not exist
+        config_data = await fetch_config_data(model_id)
+        num_layers = config_data.layer_count
+        mem_size_bytes = await fetch_safetensors_size(model_id)
+
+        return ModelCard(
+            model_id=ModelId(model_id),
+            storage_size=mem_size_bytes,
+            n_layers=num_layers,
+            hidden_size=config_data.hidden_size or 0,
+            supports_tensor=config_data.supports_tensor,
+            num_key_value_heads=config_data.num_key_value_heads,
+            context_length=config_data.max_position_embeddings or 0,
+            tasks=[ModelTask.TextGeneration],
+            trust_remote_code=True,
+            is_custom=True,
+            vision=config_data.vision,
+        )
+
+
+def add_to_card_cache(card: "ModelCard") -> None:
+    """Add or update a model card in the in-memory cache."""
+    _card_cache[card.model_id] = card
+
+
+async def delete_custom_card(model_id: ModelId) -> bool:
+    """Delete a user-added custom model card. Returns True if deleted."""
+    card_path = _custom_cards_dir / (ModelId(model_id).normalize() + ".toml")
+    if await card_path.exists():
+        await card_path.unlink()
+        _card_cache.pop(model_id, None)
+        return True
+    return False
+
+
+class ConfigData(BaseModel):
+    model_config = {"extra": "ignore"}  # Allow unknown fields
+
+    architectures: list[str] | None = None
+    hidden_size: Annotated[int, Field(ge=0)] | None = None
+    num_key_value_heads: PositiveInt | None = None
+    layer_count: int = Field(
+        validation_alias=AliasChoices(
+            "num_hidden_layers",
+            "num_layers",
+            "n_layer",
+            "n_layers",
+            "num_decoder_layers",
+            "decoder_layers",
+        )
+    )
+    max_position_embeddings: int | None = None
+    vision: VisionCardConfig | None = None
+
+    @property
+    def supports_tensor(self) -> bool:
+        return self.architectures in [
+            ["Glm4MoeLiteForCausalLM"],
+            ["GlmMoeDsaForCausalLM"],
+            ["DeepseekV32ForCausalLM"],
+            ["DeepseekV3ForCausalLM"],
+            ["Qwen3NextForCausalLM"],
+            ["Qwen3MoeForCausalLM"],
+            ["Qwen3_5MoeForConditionalGeneration"],
+            ["Qwen3_5ForConditionalGeneration"],
+            ["MiniMaxM2ForCausalLM"],
+            ["LlamaForCausalLM"],
+            ["GptOssForCausalLM"],
+            ["Step3p5ForCausalLM"],
+            ["NemotronHForCausalLM"],
+        ]
+
+    @model_validator(mode="before")
+    @classmethod
+    def defer_to_text_config(cls, data: dict[str, Any], info: ValidationInfo):
+        text_config = data.get("text_config")
+        if text_config is not None:
+            for field in [
+                "architectures",
+                "hidden_size",
+                "num_key_value_heads",
+                "num_hidden_layers",
+                "num_layers",
+                "n_layer",
+                "n_layers",
+                "num_decoder_layers",
+                "decoder_layers",
+                "max_position_embeddings",
+            ]:
+                if (val := text_config.get(field)) is not None:  # pyright: ignore[reportAny]
+                    data[field] = val
+
+        vision_config = data.get("vision_config")
+        image_token_id = data.get("image_token_id")
+        if vision_config is not None and image_token_id is not None:
+            # Prefer top-level model_type (e.g. "gemma4") over
+            # vision_config.model_type (e.g. "gemma4_vision") — the top-level
+            # value matches the mlx_vlm.models.{model_type} import path.
+            model_type = str(
+                data.get("model_type", vision_config.get("model_type", ""))  # pyright: ignore[reportAny]
+            )
+            assert info.context is not None
+
+            boi = data.get("boi_token_id")
+            eoi = data.get("eoi_token_id")
+            data["vision"] = VisionCardConfig(
+                image_token_id=int(image_token_id),  # pyright: ignore[reportAny]
+                model_type=model_type,
+                weights_repo=info.context["model_id"],  # type: ignore
+                boi_token_id=int(boi) if boi is not None else None,  # pyright: ignore[reportAny]
+                eoi_token_id=int(eoi) if eoi is not None else None,  # pyright: ignore[reportAny]
+            )
+
+        return data
+
+
+async def fetch_config_data(model_id: ModelId) -> ConfigData:
+    """Downloads and parses config.json for a model."""
+    from skulk.download.download_utils import (
+        download_file_with_retry,
+        ensure_models_dir,
+    )
+
+    target_dir = (await ensure_models_dir()) / model_id.normalize()
+    await aios.makedirs(target_dir, exist_ok=True)
+    config_path = await download_file_with_retry(
+        model_id,
+        "main",
+        "config.json",
+        target_dir,
+        lambda curr_bytes, total_bytes, is_renamed: logger.debug(
+            f"Downloading config.json for {model_id}: {curr_bytes}/{total_bytes} ({is_renamed=})"
+        ),
+    )
+    async with aiofiles.open(config_path, "r") as f:
+        return ConfigData.model_validate_json(
+            await f.read(), context={"model_id": str(model_id)}
+        )
+
+
+async def fetch_safetensors_size(model_id: ModelId) -> Memory:
+    """Gets model size from safetensors index or falls back to HF API."""
+    from skulk.download.download_utils import (
+        download_file_with_retry,
+        ensure_models_dir,
+    )
+    from skulk.shared.types.worker.downloads import ModelSafetensorsIndex
+
+    target_dir = (await ensure_models_dir()) / model_id.normalize()
+    await aios.makedirs(target_dir, exist_ok=True)
+    index_path = await download_file_with_retry(
+        model_id,
+        "main",
+        "model.safetensors.index.json",
+        target_dir,
+        lambda curr_bytes, total_bytes, is_renamed: logger.debug(
+            f"Downloading model.safetensors.index.json for {model_id}: {curr_bytes}/{total_bytes} ({is_renamed=})"
+        ),
+    )
+    async with aiofiles.open(index_path, "r") as f:
+        index_data = ModelSafetensorsIndex.model_validate_json(await f.read())
+
+    metadata = index_data.metadata
+    if metadata is not None:
+        return Memory.from_bytes(metadata.total_size)
+
+    info = model_info(model_id)
+    if info.safetensors is None:
+        raise ValueError(f"No safetensors info found for {model_id}")
+    return Memory.from_bytes(info.safetensors.total)

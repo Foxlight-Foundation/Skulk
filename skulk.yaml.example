@@ -55,7 +55,7 @@ model_store:
     # Example worker with a fast local NVMe cache:
     # mac-mini-2:
     #   staging:
-    #     node_cache_path: /Volumes/FastNVMe/exo-staging
+    #     node_cache_path: /Volumes/FastNVMe/skulk-staging
     #     cleanup_on_deactivate: false
 
 inference:

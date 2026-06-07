@@ -87,8 +87,8 @@ function buildDebugContent(
   const rdmaColor = nodeInfo.rdma_enabled
     ? (nodeInfo.rdma_interfaces_present === false ? theme.colors.warning : theme.colors.healthy)
     : theme.colors.textMuted;
-  const version = nodeInfo.exo_version && nodeInfo.exo_version !== 'Unknown'
-    ? `v${nodeInfo.exo_version}${nodeInfo.exo_commit && nodeInfo.exo_commit !== 'Unknown' ? ` (${nodeInfo.exo_commit})` : ''}`
+  const version = nodeInfo.skulk_version && nodeInfo.skulk_version !== 'Unknown'
+    ? `v${nodeInfo.skulk_version}${nodeInfo.skulk_commit && nodeInfo.skulk_commit !== 'Unknown' ? ` (${nodeInfo.skulk_commit})` : ''}`
     : '';
 
   return (

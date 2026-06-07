@@ -7,7 +7,7 @@
 # (see deployment/logging/vector.yaml) and ships JSON to VictoriaLogs.
 #
 # Operators customize behavior by editing ~/.skulk/skulk.env (the same
-# file Skulk uses; EXO_LOGGING_INGEST_URL and EXO_VECTOR_DATA_DIR are
+# file Skulk uses; SKULK_LOGGING_INGEST_URL and SKULK_VECTOR_DATA_DIR are
 # the relevant knobs).
 
 set -u

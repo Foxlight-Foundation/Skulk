@@ -1,7 +1,7 @@
 [project]
-name = "exo"
+name = "skulk"
 version = "1.1.0"
-description = "Exo"
+description = "Skulk — distributed MLX inference across Apple Silicon clusters"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -15,7 +15,7 @@ dependencies = [
   "huggingface-hub>=1.8.0",
   "psutil>=7.0.0",
   "loguru>=0.7.3",
-  "exo_pyo3_bindings",                            # rust bindings
+  "skulk_pyo3_bindings",                            # rust bindings
   "anyio==4.11.0",
   "mlx==0.31.2; sys_platform == 'darwin'",
   "mlx[cpu]==0.30.6; sys_platform == 'linux'",
@@ -40,8 +40,7 @@ dependencies = [
 ]
 
 [project.scripts]
-skulk = "exo.main:main"
-exo = "exo.main:main"  # deprecated alias — use `uv run skulk`
+skulk = "skulk.main:main"
 
 # dependencies only required for development
 [dependency-groups]
@@ -68,13 +67,13 @@ dev = [
 ###
 
 [tool.uv.workspace]
-members = ["rust/exo_pyo3_bindings", "bench"]
+members = ["rust/skulk_pyo3_bindings", "bench"]
 
 [tool.uv.sources]
-exo_pyo3_bindings = { workspace = true }
+skulk_pyo3_bindings = { workspace = true }
 # Using official mlx — the RDMA fork (rltakashige/mlx-jaccl-fix-small-recv) doesn't
 # build on macOS 26 Metal SDK. The fork's only change is a DSB memory barrier for
-# Thunderbolt RDMA GPU coherence, which we don't need (exo uses libp2p, not RDMA).
+# Thunderbolt RDMA GPU coherence, which we don't need (Skulk uses libp2p, not RDMA).
 # mlx = { git = "https://github.com/rltakashige/mlx-jaccl-fix-small-recv.git", branch = "address-rdma-gpu-locks", marker = "sys_platform == 'darwin'" }
 # Foxlight-owned mlx-lm, reconciled onto upstream v0.31.3 (version 0.31.3.post1).
 # Pinned to the merge of Foxlight-Foundation/mlx-lm PR #1 (branch
@@ -147,7 +146,7 @@ extra-build-dependencies = { "miniaudio" = ["setuptools", "cffi", "pycparser"] }
 extend-exclude = [
   "shared/protobufs/**",
   "*mlx_typings/**",
-  "rust/exo_pyo3_bindings/**",
+  "rust/skulk_pyo3_bindings/**",
   "bench/vendor/**",
 ]
 
@@ -158,6 +157,6 @@ extend-select = ["I", "N", "B", "A", "PIE", "SIM"]
 pythonpath = "."
 asyncio_mode = "auto"
 markers = ["slow: marks tests as slow (deselected by default)"]
-env = ["SKULK_TESTS=1", "EXO_TESTS=1"]
+env = ["SKULK_TESTS=1", "SKULK_TESTS=1"]
 addopts = "-m 'not slow' --ignore=tests/start_distributed_test.py"
 filterwarnings = ["ignore:builtin type Swig:DeprecationWarning"]

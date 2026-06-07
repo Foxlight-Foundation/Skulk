@@ -12,8 +12,8 @@ import mlx.core as mx
 import mlx.nn as nn
 from PIL import Image
 
-from exo.shared.constants import RESOURCES_DIR
-from exo.shared.models.model_cards import (
+from skulk.shared.constants import RESOURCES_DIR
+from skulk.shared.models.model_cards import (
     ModelCard,
     ModelTask,
     OutputParserType,
@@ -23,13 +23,13 @@ from exo.shared.models.model_cards import (
     ToolCallFormat,
     VisionCardConfig,
 )
-from exo.shared.types.common import ModelId
-from exo.shared.types.memory import Memory
-from exo.shared.types.text_generation import InputMessage, TextGenerationTaskParams
-from exo.worker.engines.mlx import vision as vision_module
-from exo.worker.engines.mlx.gemma4_prompt import render_gemma4_prompt
-from exo.worker.engines.mlx.utils_mlx import apply_chat_template
-from exo.worker.engines.mlx.vision import _find_media_regions, _format_vlm_messages
+from skulk.shared.types.common import ModelId
+from skulk.shared.types.memory import Memory
+from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
+from skulk.worker.engines.mlx import vision as vision_module
+from skulk.worker.engines.mlx.gemma4_prompt import render_gemma4_prompt
+from skulk.worker.engines.mlx.utils_mlx import apply_chat_template
+from skulk.worker.engines.mlx.vision import _find_media_regions, _format_vlm_messages
 
 
 def _fake_b64_image() -> str:
@@ -180,7 +180,7 @@ class TestModelTypePriority:
     """Auto-detection should prefer top-level model_type over vision_config.model_type."""
 
     def test_top_level_preferred(self):
-        from exo.shared.models.model_cards import ConfigData
+        from skulk.shared.models.model_cards import ConfigData
 
         data = {
             "model_type": "gemma3n",
@@ -194,7 +194,7 @@ class TestModelTypePriority:
         assert result.vision.model_type == "gemma3n"
 
     def test_falls_back_to_vision_config(self):
-        from exo.shared.models.model_cards import ConfigData
+        from skulk.shared.models.model_cards import ConfigData
 
         data = {
             "num_hidden_layers": 30,
@@ -322,7 +322,7 @@ class TestGemma4ReferencePromptRenderer:
         assert "hello there" in prompt
 
     def test_build_vision_prompt_uses_reference_renderer_for_gemma4(self):
-        from exo.worker.engines.mlx.vision import build_vision_prompt
+        from skulk.worker.engines.mlx.vision import build_vision_prompt
 
         class _Tokenizer:
             def apply_chat_template(self, *args, **kwargs):
@@ -358,12 +358,12 @@ class TestGemma4ReferencePromptRenderer:
     def test_process_native_forwards_gemma4_model_type_to_prompt_builder(
         self, monkeypatch, tmp_path
     ):
-        from exo.shared.models.model_cards import VisionCardConfig
-        from exo.worker.engines.mlx.vision import VisionProcessor
+        from skulk.shared.models.model_cards import VisionCardConfig
+        from skulk.worker.engines.mlx.vision import VisionProcessor
 
         (tmp_path / "config.json").write_text("{}", encoding="utf-8")
         monkeypatch.setattr(
-            "exo.worker.engines.mlx.vision.build_model_path",
+            "skulk.worker.engines.mlx.vision.build_model_path",
             lambda _model_id: tmp_path,
         )
 
@@ -408,11 +408,11 @@ class TestGemma4ReferencePromptRenderer:
             )
 
         monkeypatch.setattr(
-            "exo.worker.engines.mlx.vision._build_vision_prompt_with_debug",
+            "skulk.worker.engines.mlx.vision._build_vision_prompt_with_debug",
             _fake_build_vision_prompt,
         )
         monkeypatch.setattr(
-            "exo.worker.engines.mlx.vision._find_media_regions",
+            "skulk.worker.engines.mlx.vision._find_media_regions",
             lambda *args, **kwargs: [],
         )
 
@@ -440,7 +440,7 @@ class TestLoadProjectorWeights:
     """_load_projector_weights should handle both quantized and unquantized."""
 
     def test_unquantized_loads_normally(self):
-        from exo.worker.engines.mlx.vision import _load_projector_weights
+        from skulk.worker.engines.mlx.vision import _load_projector_weights
 
         proj = nn.Linear(8, 4, bias=False)
         weight = mx.ones((4, 8))
@@ -450,7 +450,7 @@ class TestLoadProjectorWeights:
         assert proj.weight.shape == (4, 8)
 
     def test_quantized_applies_nn_quantize(self):
-        from exo.worker.engines.mlx.vision import _load_projector_weights
+        from skulk.worker.engines.mlx.vision import _load_projector_weights
 
         # Create a quantized state dict by quantizing a reference module.
         ref = nn.Linear(64, 32, bias=False)
@@ -477,7 +477,7 @@ class TestHasNativeVision:
     """has_native_vision should detect models with built-in vision support."""
 
     def test_model_with_vision_tower_and_embed_vision(self):
-        from exo.worker.engines.mlx.vision import has_native_vision
+        from skulk.worker.engines.mlx.vision import has_native_vision
 
         class _FakeInner(nn.Module):
             def __init__(self):
@@ -493,7 +493,7 @@ class TestHasNativeVision:
         assert has_native_vision(_FakeWrapper()) is True
 
     def test_model_without_vision_tower(self):
-        from exo.worker.engines.mlx.vision import has_native_vision
+        from skulk.worker.engines.mlx.vision import has_native_vision
 
         class _Plain(nn.Module):
             def __init__(self):
@@ -503,7 +503,7 @@ class TestHasNativeVision:
         assert has_native_vision(_Plain()) is False
 
     def test_model_with_only_vision_tower(self):
-        from exo.worker.engines.mlx.vision import has_native_vision
+        from skulk.worker.engines.mlx.vision import has_native_vision
 
         class _Partial(nn.Module):
             def __init__(self):
@@ -517,7 +517,7 @@ class TestMlxVlmProcessorFallback:
     """Gemma 4 fallback processor loading should preserve MLX-VLM config."""
 
     def test_prefers_processor_from_pretrained(self):
-        from exo.worker.engines.mlx.vision import (
+        from skulk.worker.engines.mlx.vision import (
             _load_mlx_vlm_image_processor_from_pretrained,
         )
 
@@ -542,7 +542,7 @@ class TestGemma4NativeProcessorBudget:
     """Gemma 4 processor budget should stay at reference unless overridden."""
 
     def test_image_only_prompt_keeps_reference_budget_by_default(self):
-        from exo.worker.engines.mlx.vision import _gemma4_native_processor_kwargs
+        from skulk.worker.engines.mlx.vision import _gemma4_native_processor_kwargs
 
         messages = [{"role": "user", "content": [{"type": "image"}]}]
         processor = SimpleNamespace(max_soft_tokens=280)
@@ -552,9 +552,9 @@ class TestGemma4NativeProcessorBudget:
         assert result == {}
 
     def test_image_only_prompt_respects_env_override(self, monkeypatch):
-        from exo.worker.engines.mlx.vision import _gemma4_native_processor_kwargs
+        from skulk.worker.engines.mlx.vision import _gemma4_native_processor_kwargs
 
-        monkeypatch.setenv("EXO_GEMMA4_IMAGE_ONLY_MAX_SOFT_TOKENS", "320")
+        monkeypatch.setenv("SKULK_GEMMA4_IMAGE_ONLY_MAX_SOFT_TOKENS", "320")
         messages = [{"role": "user", "content": [{"type": "image"}]}]
         processor = SimpleNamespace(max_soft_tokens=280)
 
@@ -563,7 +563,7 @@ class TestGemma4NativeProcessorBudget:
         assert result == {"max_soft_tokens": 320}
 
     def test_text_and_image_prompt_keeps_reference_budget_by_default(self):
-        from exo.worker.engines.mlx.vision import _gemma4_native_processor_kwargs
+        from skulk.worker.engines.mlx.vision import _gemma4_native_processor_kwargs
 
         messages = [
             {
@@ -581,7 +581,7 @@ class TestGemma4NativeProcessorBudget:
         assert result == {}
 
     def test_text_only_prompt_keeps_existing_budget(self):
-        from exo.worker.engines.mlx.vision import _gemma4_native_processor_kwargs
+        from skulk.worker.engines.mlx.vision import _gemma4_native_processor_kwargs
 
         messages = [{"role": "user", "content": "Describe this text prompt"}]
         processor = SimpleNamespace(max_soft_tokens=280)
@@ -595,7 +595,7 @@ class TestGemma4DynamicVisionPooling:
     """Gemma 4 native vision should pool using the actual processed image size."""
 
     def test_patch_positions_expand_past_default_max_patches(self):
-        from exo.worker.engines.mlx.utils_mlx import (
+        from skulk.worker.engines.mlx.utils_mlx import (
             _gemma4_patch_positions_and_padding,
         )
 
@@ -612,7 +612,7 @@ class TestGemma4DynamicVisionPooling:
         assert bool(mx.any(padding_positions).item()) is False
 
     def test_output_length_matches_processed_wide_image(self):
-        from exo.worker.engines.mlx.utils_mlx import (
+        from skulk.worker.engines.mlx.utils_mlx import (
             _gemma4_output_length_for_pixel_values,
         )
 
@@ -627,7 +627,7 @@ class TestGemma4DynamicVisionPooling:
         assert result == 276
 
     def test_dynamic_wrapper_passes_output_length_to_pooler(self):
-        from exo.worker.engines.mlx.utils_mlx import _Gemma4DynamicVisionTower
+        from skulk.worker.engines.mlx.utils_mlx import _Gemma4DynamicVisionTower
 
         class _FakePatchEmbedder(nn.Module):
             def __call__(

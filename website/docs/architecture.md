@@ -118,14 +118,14 @@ sequenceDiagram
 
 The eleven steps in detail:
 
-1. **HTTP arrival.** Request hits FastAPI on any node's port (default 52415). The adapter for the wire format (OpenAI / Ollama / Claude / Responses) lives in `src/exo/api/adapters/`.
-2. **Normalization.** The adapter transforms the wire-format payload into an internal `Task` (`src/exo/shared/types/tasks.py`).
-3. **Capability resolution.** The API resolves the request against the bound `ModelCard` and computes a `ResolvedCapabilityProfile` (`src/exo/shared/models/capabilities.py`). This decides prompt rendering, output parsing, tool-call format, reasoning format, vision handling, and a few MLX runtime knobs.
+1. **HTTP arrival.** Request hits FastAPI on any node's port (default 52415). The adapter for the wire format (OpenAI / Ollama / Claude / Responses) lives in `src/skulk/api/adapters/`.
+2. **Normalization.** The adapter transforms the wire-format payload into an internal `Task` (`src/skulk/shared/types/tasks.py`).
+3. **Capability resolution.** The API resolves the request against the bound `ModelCard` and computes a `ResolvedCapabilityProfile` (`src/skulk/shared/models/capabilities.py`). This decides prompt rendering, output parsing, tool-call format, reasoning format, vision handling, and a few MLX runtime knobs.
 4. **Runner discovery.** The API resolves the request against running instances via `_resolve_and_validate_text_model`. If no instance is currently placed for the model, the API returns HTTP 404 — placement is **not** automatic on chat requests; operators must call `/instance` or `/place_instance` first to spin up the model. Once an instance exists, the API issues a command on the `COMMANDS` topic that the master indexes.
-5. **Worker dispatch and runner acknowledgement.** Each rank's worker forwards the `Task` over an `mp.Queue` to its runner subprocess. The runner emits `TaskAcknowledged` on its outgoing event channel (see `src/exo/worker/runner/llm_inference/runner.py:223`); the worker forwards that to `LOCAL_EVENTS`, the master indexes it, and it is republished on `GLOBAL_EVENTS` so every node observes the same acknowledged-state transition.
+5. **Worker dispatch and runner acknowledgement.** Each rank's worker forwards the `Task` over an `mp.Queue` to its runner subprocess. The runner emits `TaskAcknowledged` on its outgoing event channel (see `src/skulk/worker/runner/llm_inference/runner.py:223`); the worker forwards that to `LOCAL_EVENTS`, the master indexes it, and it is republished on `GLOBAL_EVENTS` so every node observes the same acknowledged-state transition.
 6. **Prompt rendering.** The runner renders the chat history into tokens. Family-specific renderers (e.g., Gemma 4's `<|turn>` template, DeepSeek's DSML) handle the format. Vision preprocessing happens here for multimodal requests.
 7. **Distributed prefill.** Pipeline-parallel models split the layer stack across ranks. Each rank computes its slice's prefill, sends activations to the next rank via `mx.distributed.send`, and barriers synchronize phase transitions. Tensor-parallel models do per-layer collectives within a rank.
-8. **Decode loop.** Per token, the runner runs forward through its layer slice, exchanges activations with peers, samples (or accepts an injected token from speculative decoding), and emits the resulting chunk. Speculative decoding runs on single-node, tensor-parallel, and pipeline placements via one rank-symmetric loop (every rank sees identical logits — pipeline's decode-mode all_gather replicates the final hidden, embed/norm/head are never sharded — and per-request seeding aligns sampled draws). Assistant-style drafters that cross-attend the target's KV draft on the last pipeline rank — the only rank holding the KV layers they attend — and broadcast their drafts through one fixed-shape collective per round; such drafters declare `reads_target_cache` so the loop keeps the target cache fully committed before every draft. It is mechanism-agnostic: the loop owns verification, accept/reject, and cache reconciliation, and talks to a `Drafter` protocol (`src/exo/worker/engines/mlx/drafters/`) behind which family-specific draft mechanisms live — Qwen3.5 sidecar MTP heads (fc projection + the sidecar's transformer block with a private KV cache, quantized on load to match the target), DeepSeek projection-only heads, and the Gemma 4 assistant model (a chain-trained companion that cross-attends the target's KV cache). Family facts (sidecar norm conventions, fc concat orders, hidden-state convention) are declarative data resolved from layout-keyed defaults plus model-card overrides, never constants in drafter code. The loop guarantees drafters a gapless, exactly-once stream of committed `(hidden, next-token)` pairs so stateful drafters keep positional history aligned with the target sequence. Rounds are *bonus-driven*: the loop carries an emitted-but-unforwarded bonus token, drafts up to the card's `mtp_max_depth` candidates from the bonus position, verifies `[bonus, drafts]` in a single K+1-token forward — the round's only target forward — commits the longest matching prefix, and samples the next bonus from the first non-matching row (the correction on a partial reject, the free next token on a full accept); the next round drafts from that position, so post-correction drafts — statistically the easiest — are never skipped. Cache reconciliation on a reject prefers the model's native `rollback_speculative_cache` (gemma4), else restores an SSM snapshot and *defers* the committed prefix to ride at the front of the next verify forward (extra verify width is effectively free on memory-bound decode), else plainly trims pure-KV caches. Depth is a per-model tuning knob set by measurement on the carded artifact. At temperature > 0, acceptance switches to Leviathan-Chen probability-ratio rejection sampling over the effective sampler distributions (with residual resampling on reject), preserving the output distribution exactly while keeping the speedup; depth is forced to 1 under sampling.
+8. **Decode loop.** Per token, the runner runs forward through its layer slice, exchanges activations with peers, samples (or accepts an injected token from speculative decoding), and emits the resulting chunk. Speculative decoding runs on single-node, tensor-parallel, and pipeline placements via one rank-symmetric loop (every rank sees identical logits — pipeline's decode-mode all_gather replicates the final hidden, embed/norm/head are never sharded — and per-request seeding aligns sampled draws). Assistant-style drafters that cross-attend the target's KV draft on the last pipeline rank — the only rank holding the KV layers they attend — and broadcast their drafts through one fixed-shape collective per round; such drafters declare `reads_target_cache` so the loop keeps the target cache fully committed before every draft. It is mechanism-agnostic: the loop owns verification, accept/reject, and cache reconciliation, and talks to a `Drafter` protocol (`src/skulk/worker/engines/mlx/drafters/`) behind which family-specific draft mechanisms live — Qwen3.5 sidecar MTP heads (fc projection + the sidecar's transformer block with a private KV cache, quantized on load to match the target), DeepSeek projection-only heads, and the Gemma 4 assistant model (a chain-trained companion that cross-attends the target's KV cache). Family facts (sidecar norm conventions, fc concat orders, hidden-state convention) are declarative data resolved from layout-keyed defaults plus model-card overrides, never constants in drafter code. The loop guarantees drafters a gapless, exactly-once stream of committed `(hidden, next-token)` pairs so stateful drafters keep positional history aligned with the target sequence. Rounds are *bonus-driven*: the loop carries an emitted-but-unforwarded bonus token, drafts up to the card's `mtp_max_depth` candidates from the bonus position, verifies `[bonus, drafts]` in a single K+1-token forward — the round's only target forward — commits the longest matching prefix, and samples the next bonus from the first non-matching row (the correction on a partial reject, the free next token on a full accept); the next round drafts from that position, so post-correction drafts — statistically the easiest — are never skipped. Cache reconciliation on a reject prefers the model's native `rollback_speculative_cache` (gemma4), else restores an SSM snapshot and *defers* the committed prefix to ride at the front of the next verify forward (extra verify width is effectively free on memory-bound decode), else plainly trims pure-KV caches. Depth is a per-model tuning knob set by measurement on the carded artifact. At temperature > 0, acceptance switches to Leviathan-Chen probability-ratio rejection sampling over the effective sampler distributions (with residual resampling on reject), preserving the output distribution exactly while keeping the speedup; depth is forced to 1 under sampling.
 9. **Chunk fan-out.** The runner emits `ChunkGenerated` events; the master indexes them; subscribers (the API queue for the originating request) receive them.
 10. **SSE serialization.** The API's adapter for the wire format converts each chunk to its on-the-wire shape (`data: {...}\n\n`) and yields it on the SSE stream.
 11. **Termination.** A chunk with `finish_reason != None` sends `data: [DONE]\n\n` and closes the stream. (As of writing, the stream-termination correctness work in #42 is hardening this against cancel races and silent worker failures — see the issue for current state.)
@@ -136,8 +136,8 @@ For non-streaming responses the same flow happens but the API accumulates chunks
 
 Skulk is event-sourced because distributed clusters need a clear notion of "what has the cluster agreed has happened." The mechanics:
 
-- **State** (`src/exo/shared/types/state.py`) is a Pydantic model treated as immutable by convention — `apply()` returns a new `State` rather than mutating in place, even though the model is not declared `frozen=True`. It carries everything every node needs: topology, instances, runners, downloads, tracing flags, network stats, and so on.
-- **`apply()`** (`src/exo/shared/apply.py`) is a pure function: `(State, IndexedEvent) -> State`. Given the same events in the same order, every node lands on byte-identical state.
+- **State** (`src/skulk/shared/types/state.py`) is a Pydantic model treated as immutable by convention — `apply()` returns a new `State` rather than mutating in place, even though the model is not declared `frozen=True`. It carries everything every node needs: topology, instances, runners, downloads, tracing flags, network stats, and so on.
+- **`apply()`** (`src/skulk/shared/apply.py`) is a pure function: `(State, IndexedEvent) -> State`. Given the same events in the same order, every node lands on byte-identical state.
 - **The master indexes events.** Every event arrives at the master via `LOCAL_EVENTS`, gets a monotonically increasing index, gets persisted to the disk event log, and gets republished on `GLOBAL_EVENTS`.
 - **Followers replay.** A new node bootstraps by requesting the current state snapshot, applying it, then replaying retained events at indices after the snapshot's high-water mark.
 
@@ -194,7 +194,7 @@ The `mx.eval` + `mx.distributed.send` discipline is load-bearing — it's where 
 
 ### Tensor parallelism
 
-Within a rank, individual operations (attention, MLP) can be sharded across devices/contexts via per-family `*ShardingStrategy` classes (Llama, DeepSeek, Qwen, GLM, MiniMax, GPT-OSS, Step3.5, NemotronH; see `src/exo/worker/engines/mlx/auto_parallel.py`). The strategy picks shard dimensions for `q_proj`, `k_proj`, `v_proj`, `o_proj`, MLP gates, and so on. Today the strategies are dispatched via an `isinstance` chain; the ongoing modular-engine work (#130) is moving these to per-family adapters.
+Within a rank, individual operations (attention, MLP) can be sharded across devices/contexts via per-family `*ShardingStrategy` classes (Llama, DeepSeek, Qwen, GLM, MiniMax, GPT-OSS, Step3.5, NemotronH; see `src/skulk/worker/engines/mlx/auto_parallel.py`). The strategy picks shard dimensions for `q_proj`, `k_proj`, `v_proj`, `o_proj`, MLP gates, and so on. Today the strategies are dispatched via an `isinstance` chain; the ongoing modular-engine work (#130) is moving these to per-family adapters.
 
 ### Family-specific behavior
 
@@ -211,7 +211,7 @@ Skulk supports multiple KV cache backends, selectable per-cluster via config:
 - `turboquant` / `turboquant_adaptive` — random-orthogonal-rotation + scalar quant
 - `optiq` — rotated-space attention trick, decode-time perf benefit
 
-(RotorQuant is a research backend tracked under PR #103 and is not yet in the merged backend set; check `src/exo/worker/engines/mlx/constants.py` for the current valid values.)
+(RotorQuant is a research backend tracked under PR #103 and is not yet in the merged backend set; check `src/skulk/worker/engines/mlx/constants.py` for the current valid values.)
 
 The choice affects memory footprint and decode throughput. See [KV Cache Backends](kv-cache-backends) for the operator-facing trade-offs.
 
@@ -239,7 +239,7 @@ The cross-rank stitched view at `/v1/diagnostics/cluster/timeline` merges every 
 
 Tracing is off by default. The dashboard's tracing toggle (or `PUT /v1/tracing`) flips a cluster-wide flag for *new* requests. Each traced task accumulates `TraceEvent`s on the runner; on completion the runner emits `TracesCollected`; the master merges traces from every rank and publishes `TracesMerged`; the API persists the merged trace to disk and exposes it via `/v1/traces/{task_id}`.
 
-Saved trace files accumulate under `SKULK_CACHE_HOME/traces/`. An hourly janitor task in the API (`prune_old_trace_files` in `src/exo/api/main.py`) drops files older than `tracing.retention_days` from `skulk.yaml` (default 3 days). Setting `retention_days: 0` disables pruning entirely. The first sweep runs 60 seconds after API startup; janitor failures are logged but never crash the API loop.
+Saved trace files accumulate under `SKULK_CACHE_HOME/traces/`. An hourly janitor task in the API (`prune_old_trace_files` in `src/skulk/api/main.py`) drops files older than `tracing.retention_days` from `skulk.yaml` (default 3 days). Setting `retention_days: 0` disables pruning entirely. The first sweep runs 60 seconds after API startup; janitor failures are logged but never crash the API loop.
 
 Traces are intended for targeted debugging — turn on, reproduce, inspect, turn off. Permanent always-on tracing isn't the right tool; centralized logging (Vector → VictoriaLogs → Grafana) is the always-on observability surface.
 
@@ -247,7 +247,7 @@ Traces are intended for targeted debugging — turn on, reproduce, inspect, turn
 
 Each node can emit structured JSON on stdout alongside the human-readable stderr output. A local Vector agent reads stdout and ships logs to VictoriaLogs. Grafana queries VictoriaLogs for cluster-wide log search. Configuration:
 
-- `src/exo/shared/logging.py` — loguru setup with the JSON stdout sink
+- `src/skulk/shared/logging.py` — loguru setup with the JSON stdout sink
 - `deployment/logging/vector.yaml` — Vector config (stdin → VictoriaLogs)
 - `deployment/logging/docker-compose.yml` — VictoriaLogs + Grafana stack
 - `skulk.yaml` `logging.enabled` + `logging.ingest_url` — opt-in; configurable via dashboard Settings; synced cluster-wide
@@ -270,13 +270,13 @@ Three on-disk responsibilities:
 
 ### Event log
 
-`src/exo/utils/disk_event_log.py` is an append-only log: the live file (`events.bin`) is uncompressed length-prefixed msgpack records (4-byte big-endian length + msgpack payload). When the log rotates or the master shuts down, the live file is zstd-compressed into a rotated archive (`events.*.bin.zst`); only the rotated archives are compressed, not the active write target. Every indexed event passes through here. Followers replay from this log on bootstrap. Snapshots can be written periodically; events older than a snapshot can be compacted (with a guarded rollout window, see "State and events" above).
+`src/skulk/utils/disk_event_log.py` is an append-only log: the live file (`events.bin`) is uncompressed length-prefixed msgpack records (4-byte big-endian length + msgpack payload). When the log rotates or the master shuts down, the live file is zstd-compressed into a rotated archive (`events.*.bin.zst`); only the rotated archives are compressed, not the active write target. Every indexed event passes through here. Followers replay from this log on bootstrap. Snapshots can be written periodically; events older than a snapshot can be compacted (with a guarded rollout window, see "State and events" above).
 
 The log degrades rather than crashes when the disk fights back: any persistence failure (ENOSPC at init, append, or compaction) drops it into a counting-only mode where indices keep advancing — so follower replay coherence and event ordering survive — while nothing further is written. A proactive free-space floor (2 GiB, checked every 1024 appends) triggers the same degradation *before* the disk hits zero, and archive rotation is capped by total bytes (1 GiB) in addition to count, so the log can never be the thing that fills a node's disk.
 
 ### Model cache
 
-Models live under `SKULK_MODELS_DIR` — by default that resolves to `SKULK_DATA_HOME/models`, which is XDG-based on Linux (`~/.local/share/skulk/models`) and `~/.skulk/models` on macOS/Windows. `SKULK_HOME` (or `EXO_HOME`) overrides the base; `SKULK_MODELS_DIR` overrides the models path directly. See `src/exo/shared/constants.py:78-82`. The cache stores tokenizers, weights, processor configs, and metadata. Multiple nodes on the same physical machine share a cache; nodes on different machines each maintain their own.
+Models live under `SKULK_MODELS_DIR` — by default that resolves to `SKULK_DATA_HOME/models`, which is XDG-based on Linux (`~/.local/share/skulk/models`) and `~/.skulk/models` on macOS/Windows. `SKULK_HOME` (or `SKULK_HOME`) overrides the base; `SKULK_MODELS_DIR` overrides the models path directly. See `src/skulk/shared/constants.py:78-82`. The cache stores tokenizers, weights, processor configs, and metadata. Multiple nodes on the same physical machine share a cache; nodes on different machines each maintain their own.
 
 ### Model store (optional)
 
@@ -284,7 +284,7 @@ For multi-node deployments with shared filesystems, a model store hosts canonica
 
 Staged copies have a lifecycle: by default (`cleanup_on_deactivate: true`), a staged model becomes an eviction candidate when no live runner uses it — including as a companion repo (MTP sidecar, assistant, split vision weights), which no instance names directly but which a live runner depends on just the same. Candidates are kept newest-first by last use up to the `staging_keep_recent_gb` grace budget (default 40 GiB) and deleted beyond it. The same budget enforcement runs at instance deactivation and at node startup — the startup pass is what reconciles copies orphaned by a crashed session, and the grace budget is why a crash-restart cycle keeps its recent models warm instead of re-staging everything. `GET /store/storage` reports the per-node breakdown.
 
-Companion repos follow a single download contract: `companion_download_specs()` (in `src/exo/download/download_utils.py`) enumerates a card's companions — MTP sidecar, assistant model, split vision weights — each flagged required or best-effort, and every model resolution path (fresh download, already-staged fast path, store staging, direct-from-store) ensures companions through it before reporting the model ready. Required companions (vision weights, which the model cannot load without) fail the resolution loudly; best-effort companions (sidecar, assistant) log and continue, so a missing drafter degrades to plain decode instead of blocking the model.
+Companion repos follow a single download contract: `companion_download_specs()` (in `src/skulk/download/download_utils.py`) enumerates a card's companions — MTP sidecar, assistant model, split vision weights — each flagged required or best-effort, and every model resolution path (fresh download, already-staged fast path, store staging, direct-from-store) ensures companions through it before reporting the model ready. Required companions (vision weights, which the model cannot load without) fail the resolution loudly; best-effort companions (sidecar, assistant) log and continue, so a missing drafter degrades to plain decode instead of blocking the model.
 
 ### Custom model cards
 
@@ -304,7 +304,7 @@ Skulk-native             → adapter → internal text / image / embedding Task
 
 This is why one placed model can be accessed through several compatibility formats simultaneously — the underlying execution path doesn't care which adapter normalized the input.
 
-The adapters live in `src/exo/api/adapters/`. Each one handles request normalization (incoming) and chunk serialization (outgoing) for its wire format. The internal Task and Chunk types are the integration boundary.
+The adapters live in `src/skulk/api/adapters/`. Each one handles request normalization (incoming) and chunk serialization (outgoing) for its wire format. The internal Task and Chunk types are the integration boundary.
 
 ## The dashboard
 
@@ -343,7 +343,7 @@ The shape of Skulk reflects deliberate trade-offs. Knowing which ones helps expl
 A rough file map for orientation:
 
 ```
-src/exo/
+src/skulk/
 ├── api/                # FastAPI app, adapters (OpenAI / Ollama / Claude / Responses / Skulk-native)
 ├── master/             # event indexing, placement, snapshot publishing
 ├── worker/
@@ -373,7 +373,7 @@ docs/                   # operator guides, design docs, this file
 website/                # Docusaurus site that publishes the docs
 resources/
 └── inference_model_cards/  # built-in TOML model cards (gemma-4, qwen, etc.)
-rust/                   # Rust crates: networking (libp2p), exo_pyo3_bindings, system_custodian
+rust/                   # Rust crates: networking (libp2p), skulk_pyo3_bindings, system_custodian
 ```
 
 ## Glossary

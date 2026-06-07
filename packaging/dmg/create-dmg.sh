@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# create-dmg.sh — Build a polished macOS DMG installer for EXO
+# create-dmg.sh — Build a polished macOS DMG installer for Skulk
 #
 # Usage:
 #   ./packaging/dmg/create-dmg.sh <app-path> <output-dmg> [volume-name]
 #
 # Example:
-#   ./packaging/dmg/create-dmg.sh output/EXO.app EXO-1.0.0.dmg "EXO"
+#   ./packaging/dmg/create-dmg.sh output/Skulk.app Skulk-1.0.0.dmg "Skulk"
 #
 # Creates a DMG with:
 #   - Custom background image with drag-to-Applications arrow
@@ -15,7 +15,7 @@ set -euo pipefail
 
 APP_PATH="${1:?Usage: create-dmg.sh <app-path> <output-dmg> [volume-name]}"
 OUTPUT_DMG="${2:?Usage: create-dmg.sh <app-path> <output-dmg> [volume-name]}"
-VOLUME_NAME="${3:-EXO}"
+VOLUME_NAME="${3:-Skulk}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BACKGROUND_SCRIPT="${SCRIPT_DIR}/generate-background.py"

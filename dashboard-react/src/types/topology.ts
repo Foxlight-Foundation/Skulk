@@ -40,8 +40,8 @@ export interface NodeInfo {
   friendly_name?: string;
   os_version?: string;
   os_build_version?: string;
-  exo_version?: string;
-  exo_commit?: string;
+  skulk_version?: string;
+  skulk_commit?: string;
   thunderbolt_bridge?: boolean;
   rdma_enabled?: boolean;
   rdma_interfaces_present?: boolean;

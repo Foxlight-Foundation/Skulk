@@ -11,7 +11,7 @@ const meta: Meta<typeof ImageLightbox> = {
 export default meta;
 type Story = StoryObj<typeof ImageLightbox>;
 
-const SAMPLE_IMAGE = 'https://picsum.photos/seed/exo/1200/800';
+const SAMPLE_IMAGE = 'https://picsum.photos/seed/skulk/1200/800';
 
 export const Open: Story = {
   args: { src: SAMPLE_IMAGE, onClose: () => {} },

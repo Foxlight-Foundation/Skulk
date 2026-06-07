@@ -906,26 +906,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "exo_pyo3_bindings"
-version = "0.0.1"
-dependencies = [
- "delegate",
- "env_logger",
- "extend",
- "futures-lite",
- "libp2p",
- "log",
- "networking",
- "pin-project",
- "pyo3",
- "pyo3-async-runtimes",
- "pyo3-log",
- "pyo3-stub-gen",
- "tokio",
- "util",
-]
-
-[[package]]
 name = "extend"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4004,6 +3984,26 @@ name = "siphasher"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56199f7ddabf13fe5074ce809e7d3f42b42ae711800501b5b16ea82ad029c39d"
+
+[[package]]
+name = "skulk_pyo3_bindings"
+version = "0.0.1"
+dependencies = [
+ "delegate",
+ "env_logger",
+ "extend",
+ "futures-lite",
+ "libp2p",
+ "log",
+ "networking",
+ "pin-project",
+ "pyo3",
+ "pyo3-async-runtimes",
+ "pyo3-log",
+ "pyo3-stub-gen",
+ "tokio",
+ "util",
+]
 
 [[package]]
 name = "slab"

@@ -23,15 +23,15 @@ export function ClusterWarnings({ topology }: ClusterWarningsProps) {
   const versionMismatch = useMemo<VersionEntry[] | null>(() => {
     if (!nodes) return null;
     const entries = Object.values(nodes).filter(
-      (n) => n.exo_commit && n.exo_commit !== 'Unknown' && n.exo_commit !== 'unknown',
+      (n) => n.skulk_commit && n.skulk_commit !== 'Unknown' && n.skulk_commit !== 'unknown',
     );
     if (entries.length < 2) return null;
-    const commits = new Set(entries.map((n) => n.exo_commit));
+    const commits = new Set(entries.map((n) => n.skulk_commit));
     if (commits.size <= 1) return null;
     return entries.map((n) => ({
       friendlyName: n.friendly_name ?? 'Unknown',
-      version: n.exo_version ?? 'Unknown',
-      commit: n.exo_commit!,
+      version: n.skulk_version ?? 'Unknown',
+      commit: n.skulk_commit!,
     }));
   }, [nodes]);
 

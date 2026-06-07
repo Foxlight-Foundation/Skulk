@@ -15,39 +15,39 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 ### Master
 
 - **Role:** elects + acts as cluster coordinator; indexes events; plans instance placements; publishes snapshots
-- **Lives in:** `src/exo/master/main.py`
-- **Owns:** the authoritative event log (via `DiskEventLog`); the indexer that assigns monotonic indices to events; the placement planner. Master identity itself lives outside the master process — each node tracks the current master independently via the election protocol (`src/exo/shared/election.py`); the `_master_node_id` cache is held on the API side at `src/exo/api/main.py:461`.
+- **Lives in:** `src/skulk/master/main.py`
+- **Owns:** the authoritative event log (via `DiskEventLog`); the indexer that assigns monotonic indices to events; the placement planner. Master identity itself lives outside the master process — each node tracks the current master independently via the election protocol (`src/skulk/shared/election.py`); the `_master_node_id` cache is held on the API side at `src/skulk/api/main.py:461`.
 - **Communicates via:** `LOCAL_EVENTS` (consumes), `GLOBAL_EVENTS` (publishes indexed events), `COMMANDS` (consumes), `STATE_SYNC_MESSAGES` (publishes snapshots)
-- **Election:** `src/exo/shared/election.py` — bully algorithm; a single master at a time
+- **Election:** `src/skulk/shared/election.py` — bully algorithm; a single master at a time
 - **Failover:** re-election picks a new master; the new master initializes fresh state (`State(...)` at `master/main.py:106`) — `Master.__init__` does not rehydrate from the disk event log or snapshot store. Continuity comes from (a) followers retaining their own `State` (each node applies `GLOBAL_EVENTS` independently), and (b) the new master's event indexer continuing from the disk log's existing length so new event indices don't collide with the prior tail. Snapshot bootstrap for new followers is a separate path (`StateSnapshotStore` + `STATE_SYNC_MESSAGES`).
 
 ### Worker
 
 - **Role:** receives indexed events, applies them locally, downloads model weights, spawns + supervises runner subprocesses, dispatches tasks
-- **Lives in:** `src/exo/worker/main.py`; planning at `src/exo/worker/plan.py`
+- **Lives in:** `src/skulk/worker/main.py`; planning at `src/skulk/worker/plan.py`
 - **Owns:** local view of `State` (derived); per-model `RunnerSupervisor` instances
 - **Communicates via:** `GLOBAL_EVENTS` (consumes), `LOCAL_EVENTS` (publishes via `event_router.py`), `DOWNLOAD_COMMANDS` (publishes; e.g. shard-download requests at `worker/main.py:392`)
 
 ### RunnerSupervisor
 
 - **Role:** parent-side lifecycle for one runner subprocess; signal handling; flight recorder buffer; SIGTERM/SIGKILL cleanup chain
-- **Lives in:** `src/exo/worker/runner/runner_supervisor.py`
+- **Lives in:** `src/skulk/worker/runner/runner_supervisor.py`
 - **Spawns:** `mp.Process(target=entrypoint, daemon=True)` with the runner subtype's main loop
 - **Cleanup chain:** `join(5s)` → `terminate()` (SIGTERM) → `join(5s)` → `kill()` (SIGKILL); plus parent-pid watchdog inside the subprocess for reparenting (SIGKILL of agent)
 
 ### Runner subprocess
 
 - **Role:** owns one MLX model; serves inference tasks for it; participates in distributed collectives with peer runners across ranks
-- **Entrypoint:** `src/exo/worker/runner/bootstrap.py::entrypoint`
+- **Entrypoint:** `src/skulk/worker/runner/bootstrap.py::entrypoint`
 - **Subtypes:**
-  - `src/exo/worker/runner/llm_inference/runner.py` — text generation
-  - `src/exo/worker/runner/embeddings/runner.py` — embeddings
-  - `src/exo/worker/runner/image_models/runner.py` — image generation
+  - `src/skulk/worker/runner/llm_inference/runner.py` — text generation
+  - `src/skulk/worker/runner/embeddings/runner.py` — embeddings
+  - `src/skulk/worker/runner/image_models/runner.py` — image generation
 - **Communicates via:** `mp.Queue` from worker (incoming tasks); `mp.Queue` to worker (outgoing events); `mlx.distributed` collectives with peer runners
 
 ### Drafters (speculative decoding)
 
-`src/exo/worker/engines/mlx/drafters/`. The loop is rank-symmetric and runs on single-node, tensor-parallel, AND pipeline placements (#201 Tracks 1-2b): TP collectives and pipeline's decode-mode all_gather both hand every rank identical full-vocab logits (embed/norm/head are replicated on pipeline shards), and the per-request seed aligns sampled draws — validated by greedy byte-parity and seeded-sampled trace parity on localhost and two-node hardware. A per-request `all_sum` agreement keeps speculation symmetric when a rank's drafter is unavailable; mid-request drafter failures abort loudly on multi-rank placements instead of silently forking the collective schedule. Assistant drafters (gemma4) cross-attend the target's KV: on pipeline they draft on the LAST rank only (which owns the KV layers they attend) and fan drafts out via one fixed-shape `all_sum` per round (`_exchange_drafts`; the drafter's effective distribution rides along under sampling, and drafting-rank draws use explicit per-round keys so the shared RNG stream stays aligned). Cross-attending drafters declare `reads_target_cache = True` and the loop keeps the target cache fully committed before every draft (no deferred replay) — and they must hold the LIVE cache sequence, since reject-restores replace rotating entries in the loop's list. Forces `SequentialGenerator`. Greedy requests use argmax-prefix acceptance; temperature > 0 uses Leviathan-Chen probability-ratio acceptance over the effective sampler distributions (`src/exo/worker/engines/mlx/generator/speculative_sampling.py`, depth forced to 1). Draft depth comes from the card's `mtp_max_depth` (default 1). Rounds are *bonus-driven*: the loop carries an emitted-but-unforwarded bonus token, verifies `[bonus, drafts]` in one K+1-token forward (the round's only target forward), commits the longest matching prefix, samples the next bonus from the first non-matching row, and drafts the very next round from the correction position.
+`src/skulk/worker/engines/mlx/drafters/`. The loop is rank-symmetric and runs on single-node, tensor-parallel, AND pipeline placements (#201 Tracks 1-2b): TP collectives and pipeline's decode-mode all_gather both hand every rank identical full-vocab logits (embed/norm/head are replicated on pipeline shards), and the per-request seed aligns sampled draws — validated by greedy byte-parity and seeded-sampled trace parity on localhost and two-node hardware. A per-request `all_sum` agreement keeps speculation symmetric when a rank's drafter is unavailable; mid-request drafter failures abort loudly on multi-rank placements instead of silently forking the collective schedule. Assistant drafters (gemma4) cross-attend the target's KV: on pipeline they draft on the LAST rank only (which owns the KV layers they attend) and fan drafts out via one fixed-shape `all_sum` per round (`_exchange_drafts`; the drafter's effective distribution rides along under sampling, and drafting-rank draws use explicit per-round keys so the shared RNG stream stays aligned). Cross-attending drafters declare `reads_target_cache = True` and the loop keeps the target cache fully committed before every draft (no deferred replay) — and they must hold the LIVE cache sequence, since reject-restores replace rotating entries in the loop's list. Forces `SequentialGenerator`. Greedy requests use argmax-prefix acceptance; temperature > 0 uses Leviathan-Chen probability-ratio acceptance over the effective sampler distributions (`src/skulk/worker/engines/mlx/generator/speculative_sampling.py`, depth forced to 1). Draft depth comes from the card's `mtp_max_depth` (default 1). Rounds are *bonus-driven*: the loop carries an emitted-but-unforwarded bonus token, verifies `[bonus, drafts]` in one K+1-token forward (the round's only target forward), commits the longest matching prefix, samples the next bonus from the first non-matching row, and drafts the very next round from the correction position.
 
 - **Protocol:** `protocol.py::Drafter` — `begin_request(prompt_cache)` / `observe(hiddens, next_tokens)` / `draft(hidden, next_token, depth=1) -> (K, vocab) logits`. The generation loop owns verify/accept/reject and cache reconciliation — preferring the model's native `rollback_speculative_cache` (gemma4), else SSM snapshot/restore with *deferred replay* (restored-but-committed tokens ride at the front of the next verify forward; capped, flushed at stream end), else plain KV trim. Drafters own only their private state. The loop feeds every committed position's `(hidden, next token)` pair exactly once, in order (the pair-stream contract); the hidden convention is per-family (pre-final-norm for qwen-shaped trunks, post-norm for gemma4).
 - **Builder:** `builder.py::build_drafter(model, mtp_weights, runtime)` — detects sidecar key layout, resolves family facts (norm convention, fc concat order) from layout-keyed defaults with model-card `runtime` overrides, and quantizes the sidecar block + fc to the target's `(group_size, bits)` on load (bf16 targets keep bf16 sidecars).
@@ -60,21 +60,21 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 ### Router (libp2p)
 
 - **Role:** transport for all inter-node communication
-- **Lives in:** `src/exo/routing/` (Python wrapper); `rust/networking/` + `rust/exo_pyo3_bindings/` (Rust libp2p impl + PyO3 bindings)
+- **Lives in:** `src/skulk/routing/` (Python wrapper); `rust/networking/` + `rust/skulk_pyo3_bindings/` (Rust libp2p impl + PyO3 bindings)
 - **Topics:** see "Pubsub topics" below
 - **Discovery:** mDNS by default; `--bootstrap-peers` multiaddrs for explicit static peers
 
 ### Election
 
 - **Role:** picks the cluster master via the bully algorithm
-- **Lives in:** `src/exo/shared/election.py`
+- **Lives in:** `src/skulk/shared/election.py`
 - **Communicates via:** `ELECTION_MESSAGES` topic
 - **Triggers:** node startup, lost master heartbeat, explicit master abdication
 
 ### API
 
 - **Role:** HTTP entry point; FastAPI app; OpenAI / Ollama / Claude / Responses / Skulk-native adapters; serves dashboard
-- **Lives in:** `src/exo/api/main.py`; adapters at `src/exo/api/adapters/`
+- **Lives in:** `src/skulk/api/main.py`; adapters at `src/skulk/api/adapters/`
 - **Default port:** 52415
 - **Mounts:** dashboard at `/`; OpenAPI at `/api/openapi.json`
 - **Background tasks:** `_apply_state` (consumes `GLOBAL_EVENTS` and persists merged traces), `_pause_on_new_election`, `_cleanup_expired_images` (image-store TTL), `_prune_old_traces` (hourly trace janitor backed by `prune_old_trace_files`; retention via `tracing.retention_days`)
@@ -90,15 +90,15 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ### Storage
 
-- **Event log:** `src/exo/utils/disk_event_log.py` — append-only length-prefixed msgpack records (`events.bin`, uncompressed live); rotated archives are zstd-compressed (`events.*.bin.zst`) on rotation/close. Disk is treated as bounded: archives are capped by count (5) AND total bytes (1 GiB); any persistence failure (ENOSPC at init, append, or compaction) drops the log into a degraded counting-only mode with one CRITICAL line — indices keep advancing so follower replay coherence survives — and a proactive free-space floor (2 GiB, checked every 1024 appends) degrades BEFORE the disk hits zero. The API-side log (`event_log/api/`, backs `GET /events` diagnostics only and records per-token chunk events) additionally ring-compacts: past 256 MiB of active file it keeps only the most recent 20k events.
+- **Event log:** `src/skulk/utils/disk_event_log.py` — append-only length-prefixed msgpack records (`events.bin`, uncompressed live); rotated archives are zstd-compressed (`events.*.bin.zst`) on rotation/close. Disk is treated as bounded: archives are capped by count (5) AND total bytes (1 GiB); any persistence failure (ENOSPC at init, append, or compaction) drops the log into a degraded counting-only mode with one CRITICAL line — indices keep advancing so follower replay coherence survives — and a proactive free-space floor (2 GiB, checked every 1024 appends) degrades BEFORE the disk hits zero. The API-side log (`event_log/api/`, backs `GET /events` diagnostics only and records per-token chunk events) additionally ring-compacts: past 256 MiB of active file it keeps only the most recent 20k events.
 - **Model cache:** `SKULK_MODELS_DIR` (default `SKULK_DATA_HOME/models`; on Linux that's `~/.local/share/skulk/models` via XDG, on macOS/Windows it's `~/.skulk/models`); `SKULK_HOME` and `SKULK_MODELS_DIR` env overrides apply
 - **Custom cards:** `SKULK_CUSTOM_MODEL_CARDS_DIR` (default `SKULK_DATA_HOME/custom_model_cards`) as TOML
 - **Built-in cards:** `resources/inference_model_cards/` as TOML
-- **Optional model store:** shared host with rsync-style staging — `src/exo/store/`
+- **Optional model store:** shared host with rsync-style staging — `src/skulk/store/`
 
 ## Pubsub topics
 
-Defined in `src/exo/routing/topics.py`.
+Defined in `src/skulk/routing/topics.py`.
 
 | Topic | Wire payload type | Inner payload | Publisher | Consumer |
 |---|---|---|---|---|
@@ -112,7 +112,7 @@ Defined in `src/exo/routing/topics.py`.
 
 ## Events
 
-Discriminated union at `src/exo/shared/types/events.py`. Selected events:
+Discriminated union at `src/skulk/shared/types/events.py`. Selected events:
 
 | Event | Emitted when | Applied by |
 |---|---|---|
@@ -129,7 +129,7 @@ Discriminated union at `src/exo/shared/types/events.py`. Selected events:
 | `TracesMerged` | Master merges + persists a complete trace | API (writes to disk) |
 | `TracingStateChanged` | Cluster tracing toggle changes | All nodes |
 
-Apply function: `src/exo/shared/apply.py::apply` — pure `(State, IndexedEvent) -> State`.
+Apply function: `src/skulk/shared/apply.py::apply` — pure `(State, IndexedEvent) -> State`.
 
 ## Commands
 
@@ -137,7 +137,7 @@ Two distinct command unions on two distinct topics:
 
 ### COMMANDS topic — `Command` union
 
-Discriminated union at `src/exo/shared/types/commands.py`. Carried as `ForwarderCommand` over the `COMMANDS` pubsub topic.
+Discriminated union at `src/skulk/shared/types/commands.py`. Carried as `ForwarderCommand` over the `COMMANDS` pubsub topic.
 
 | Command | What it requests | Master action |
 |---|---|---|
@@ -151,20 +151,20 @@ Discriminated union at `src/exo/shared/types/commands.py`. Carried as `Forwarder
 
 ### DOWNLOAD_COMMANDS topic — `DownloadCommand` union
 
-Discriminated union at `src/exo/shared/types/commands.py`. Carried as `ForwarderDownloadCommand` over the `DOWNLOAD_COMMANDS` pubsub topic. Used for cluster-wide config sync and model-store coordination — separated from the main command channel because these are typically larger payloads and have different retry semantics.
+Discriminated union at `src/skulk/shared/types/commands.py`. Carried as `ForwarderDownloadCommand` over the `DOWNLOAD_COMMANDS` pubsub topic. Used for cluster-wide config sync and model-store coordination — separated from the main command channel because these are typically larger payloads and have different retry semantics.
 
 | Command | What it requests |
 |---|---|
 | `SyncConfig` | Broadcast cluster config (`auth.api_keys` and `hf_token` stripped); followers observe and persist locally |
-| Model store ops | Download / staging coordination commands (see `src/exo/store/`) |
+| Model store ops | Download / staging coordination commands (see `src/skulk/store/`) |
 
 ### Tasks (not commands)
 
-Note `CancelTask` is a **task** (`src/exo/shared/types/tasks.py`), not a command. Tasks are work units the runner executes; commands are imperative requests to the master. Cooperative task cancellation is implemented as a `CancelTask` task delivered to the runner over the `mp.Queue`.
+Note `CancelTask` is a **task** (`src/skulk/shared/types/tasks.py`), not a command. Tasks are work units the runner executes; commands are imperative requests to the master. Cooperative task cancellation is implemented as a `CancelTask` task delivered to the runner over the `mp.Queue`.
 
 ## API endpoints
 
-Lives in `src/exo/api/main.py` (route registration in `API.__init__`).
+Lives in `src/skulk/api/main.py` (route registration in `API.__init__`).
 
 ### Inference
 
@@ -192,7 +192,7 @@ Lives in `src/exo/api/main.py` (route registration in `API.__init__`).
 | `/place_instance` | POST | Place a model: master picks ranks. Takes `PlaceInstanceParams` (model id + placement preferences, optional `excluded_nodes: list[NodeId]` to exclude specific nodes from this placement); not interchangeable with `/instance`, which takes a fully-specified `CreateInstanceParams`. |
 | `/instance/{instance_id}` | GET / DELETE | Fetch / delete an instance |
 | `/instance/placement` | GET | Compute placement preview |
-| `/store/storage` | GET | Local node's storage breakdown: staged models (size, last-use, in-use incl. companions), event-log bytes, disk free. Staging eviction: `cleanup_on_deactivate` default true; not-in-use staged models kept newest-first up to `staging_keep_recent_gb` (40 GiB default), enforced at deactivate AND node startup (crash-orphan reconciliation); `src/exo/store/staging_eviction.py`. Companion repos (MTP sidecar / assistant / split vision weights) resolve through `companion_download_specs()` (`src/exo/download/download_utils.py`) on every resolution path — required companions (vision) fail the load loudly, best-effort companions (sidecar/assistant) log and degrade to plain decode. |
+| `/store/storage` | GET | Local node's storage breakdown: staged models (size, last-use, in-use incl. companions), event-log bytes, disk free. Staging eviction: `cleanup_on_deactivate` default true; not-in-use staged models kept newest-first up to `staging_keep_recent_gb` (40 GiB default), enforced at deactivate AND node startup (crash-orphan reconciliation); `src/skulk/store/staging_eviction.py`. Companion repos (MTP sidecar / assistant / split vision weights) resolve through `companion_download_specs()` (`src/skulk/download/download_utils.py`) on every resolution path — required companions (vision) fail the load loudly, best-effort companions (sidecar/assistant) log and degrade to plain decode. |
 | `/instance/previews` | GET | List candidate placements |
 
 ### State / events
@@ -257,7 +257,7 @@ Lives in `src/exo/api/main.py` (route registration in `API.__init__`).
 
 ### Tasks
 
-`src/exo/shared/types/tasks.py`. Discriminated union of:
+`src/skulk/shared/types/tasks.py`. Discriminated union of:
 
 - `TextGeneration` — chat / responses / messages / ollama-chat
 - `TextEmbedding` — embeddings
@@ -267,7 +267,7 @@ Lives in `src/exo/api/main.py` (route registration in `API.__init__`).
 
 ### Chunks
 
-`src/exo/shared/types/chunks.py`. Per-token output:
+`src/skulk/shared/types/chunks.py`. Per-token output:
 
 - `TokenChunk` — text / tool / token-level metadata
 - `ToolCallChunk` — tool calls
@@ -278,7 +278,7 @@ Lives in `src/exo/api/main.py` (route registration in `API.__init__`).
 
 ### State
 
-`src/exo/shared/types/state.py`. Treated as immutable by convention (replaced wholesale by `apply()` rather than mutated in place); the model itself is not declared `frozen=True` on `model_config`, so direct mutation is technically possible but considered a bug at every call site.
+`src/skulk/shared/types/state.py`. Treated as immutable by convention (replaced wholesale by `apply()` rather than mutated in place); the model itself is not declared `frozen=True` on `model_config`, so direct mutation is technically possible but considered a bug at every call site.
 
 - `instances: Mapping[InstanceId, Instance]` — placed model instances (each carries shard assignments + per-runner state)
 - `runners: Mapping[RunnerId, RunnerStatus]` — per-runner status union
@@ -291,11 +291,11 @@ Lives in `src/exo/api/main.py` (route registration in `API.__init__`).
 - `node_identities`, `node_memory`, `node_disk`, `node_system`, `node_network`, `node_thunderbolt`, `node_thunderbolt_bridge`, `node_rdma_ctl: Mapping[NodeId, *]` — granular per-node telemetry that updates at independent frequencies
 - `thunderbolt_bridge_cycles: Sequence[Sequence[NodeId]]` — detected Thunderbolt-bridge cycles where every node has it enabled (>2 nodes)
 
-Note: there is no `master_node_id` field on `State`. Master identity lives outside the event-sourced state — each node tracks the current master independently via the election protocol (`src/exo/shared/election.py`). `placements` is also not a field; placement information is derived from `instances` (each `Instance` has its own shard assignments).
+Note: there is no `master_node_id` field on `State`. Master identity lives outside the event-sourced state — each node tracks the current master independently via the election protocol (`src/skulk/shared/election.py`). `placements` is also not a field; placement information is derived from `instances` (each `Instance` has its own shard assignments).
 
 ### Diagnostics
 
-`src/exo/shared/types/diagnostics.py`. Major models:
+`src/skulk/shared/types/diagnostics.py`. Major models:
 
 - `NodeDiagnostics` — runtime + identity + resources + processes + supervisor_runners + placements + warnings
 - `RunnerSupervisorDiagnostics` — flight_recorder, status, phase, MLX memory, in_progress_tasks, milestones
@@ -307,7 +307,7 @@ Note: there is no `master_node_id` field on `State`. Master identity lives outsi
 
 ### Model card
 
-`src/exo/shared/models/model_cards.py::ModelCard`. Fields:
+`src/skulk/shared/models/model_cards.py::ModelCard`. Fields:
 
 - `model_id`, `family`, `quantization`, `base_model`, `n_layers`, `hidden_size`, `num_key_value_heads`
 - `tasks: list[ModelTask]` — what task types this model serves
@@ -321,7 +321,7 @@ Note: there is no `master_node_id` field on `State`. Master identity lives outsi
 
 ### Capability profile
 
-`src/exo/shared/models/capabilities.py::ResolvedCapabilityProfile`. Computed at request time from card + tokenizer + task params:
+`src/skulk/shared/models/capabilities.py::ResolvedCapabilityProfile`. Computed at request time from card + tokenizer + task params:
 
 - `family` (string)
 - `supports_thinking`, `supports_thinking_toggle`, `supports_thinking_budget`
@@ -336,7 +336,7 @@ Note: there is no `master_node_id` field on `State`. Master identity lives outsi
 
 ## Pipeline-parallel sharding strategies
 
-Family-specific in `src/exo/worker/engines/mlx/auto_parallel.py`. Each is a class implementing `TensorParallelShardingStrategy`. Dispatched at lines 830-905 via `isinstance(model, X)` chain (consolidation tracked under #130):
+Family-specific in `src/skulk/worker/engines/mlx/auto_parallel.py`. Each is a class implementing `TensorParallelShardingStrategy`. Dispatched at lines 830-905 via `isinstance(model, X)` chain (consolidation tracked under #130):
 
 | Strategy | Applies to | Lines |
 |---|---|---|
@@ -378,9 +378,9 @@ Selectable per-cluster via `inference.kv_cache_backend` config or `SKULK_KV_CACH
 | `turboquant_adaptive` | TurboQuant with FP16 edges | Slightly better quality |
 | `optiq` | Rotated-space attention trick | Decode-time perf benefit; falls back to default for incompatible head dims |
 
-RotorQuant (block rotations + deferred quant) is research and lives in PR #103; it is not yet in the merged backend set. Verify the current valid values against `src/exo/worker/engines/mlx/constants.py`.
+RotorQuant (block rotations + deferred quant) is research and lives in PR #103; it is not yet in the merged backend set. Verify the current valid values against `src/skulk/worker/engines/mlx/constants.py`.
 
-Selection logic: `src/exo/worker/engines/mlx/cache.py::make_kv_cache`. Some backends fall back to `default` for incompatible models (e.g., `optiq` for non-divisible head_dim).
+Selection logic: `src/skulk/worker/engines/mlx/cache.py::make_kv_cache`. Some backends fall back to `default` for incompatible models (e.g., `optiq` for non-divisible head_dim).
 
 ## Configuration knobs
 
@@ -397,25 +397,25 @@ Selection logic: `src/exo/worker/engines/mlx/cache.py::make_kv_cache`. Some back
 
 ### Environment variables
 
-`SKULK_*` is preferred; `EXO_*` accepted as legacy. Migration tracked under #110.
+`SKULK_*` is preferred; `SKULK_*` accepted as legacy. Migration tracked under #110.
 
 | Var | What |
 |---|---|
-| `SKULK_HOME` / `EXO_HOME` | Override the base data directory used to derive `SKULK_DATA_HOME` (and from there `SKULK_MODELS_DIR`, `SKULK_CUSTOM_MODEL_CARDS_DIR`, `SKULK_EVENT_LOG_DIR`). Default base: XDG-derived `~/.local/share/skulk` on Linux; `~/.skulk` on non-Linux. See `src/exo/shared/constants.py:34-149`. |
-| `SKULK_FAST_SYNCH` / `EXO_FAST_SYNCH` | Force `MLX_METAL_FAST_SYNCH` on (`"on"`) or off (`"off"`); overrides per-model card. Resolution order: operator override → card `metal_fast_synch` pin → OFF for speculative-decoding cards (`mtp_heads` / `mtp_sidecar_repo` / `assistant_model_repo`; FAST_SYNCH collapses the MTP loop ~46x, measured 2026-06-06) → cluster default (ON) |
+| `SKULK_HOME` / `SKULK_HOME` | Override the base data directory used to derive `SKULK_DATA_HOME` (and from there `SKULK_MODELS_DIR`, `SKULK_CUSTOM_MODEL_CARDS_DIR`, `SKULK_EVENT_LOG_DIR`). Default base: XDG-derived `~/.local/share/skulk` on Linux; `~/.skulk` on non-Linux. See `src/skulk/shared/constants.py:34-149`. |
+| `SKULK_FAST_SYNCH` / `SKULK_FAST_SYNCH` | Force `MLX_METAL_FAST_SYNCH` on (`"on"`) or off (`"off"`); overrides per-model card. Resolution order: operator override → card `metal_fast_synch` pin → OFF for speculative-decoding cards (`mtp_heads` / `mtp_sidecar_repo` / `assistant_model_repo`; FAST_SYNCH collapses the MTP loop ~46x, measured 2026-06-06) → cluster default (ON) |
 | `SKULK_PIPELINE_EVAL_TIMEOUT_SECONDS` | Per-eval timeout in pipeline collectives (default 60s) |
-| `SKULK_WARMUP_DEADLINE_SECONDS` / `EXO_WARMUP_DEADLINE_SECONDS` | Hard deadline for runner warmup (default 300s). A wedged Metal eval parks warmup forever at 0% CPU and silently blocks all dispatch; the watchdog hard-exits the runner instead (supervisor reports RunnerFailed, node keeps working) |
-| `SKULK_MLX_HANG_DEBUG` / `EXO_MLX_HANG_DEBUG` | Emit periodic stack traces from stuck phases |
+| `SKULK_WARMUP_DEADLINE_SECONDS` / `SKULK_WARMUP_DEADLINE_SECONDS` | Hard deadline for runner warmup (default 300s). A wedged Metal eval parks warmup forever at 0% CPU and silently blocks all dispatch; the watchdog hard-exits the runner instead (supervisor reports RunnerFailed, node keeps working) |
+| `SKULK_MLX_HANG_DEBUG` / `SKULK_MLX_HANG_DEBUG` | Emit periodic stack traces from stuck phases |
 | `SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS` | Interval for above (default 30s) |
-| `SKULK_MAX_OUTPUT_TOKENS` / `EXO_MAX_TOKENS` | Default `max_tokens` (cluster default 4096; `DEFAULT_MAX_OUTPUT_TOKENS` constant) |
-| `SKULK_NO_BATCH` / `EXO_NO_BATCH` | Disable continuous batching |
-| `SKULK_KV_CACHE_BACKEND` / `EXO_KV_CACHE_BACKEND` | KV cache backend selection (overrides config) |
-| `SKULK_LIBP2P_NAMESPACE` / `EXO_LIBP2P_NAMESPACE` | libp2p namespace for cluster isolation |
+| `SKULK_MAX_OUTPUT_TOKENS` / `SKULK_MAX_TOKENS` | Default `max_tokens` (cluster default 4096; `DEFAULT_MAX_OUTPUT_TOKENS` constant) |
+| `SKULK_NO_BATCH` / `SKULK_NO_BATCH` | Disable continuous batching |
+| `SKULK_KV_CACHE_BACKEND` / `SKULK_KV_CACHE_BACKEND` | KV cache backend selection (overrides config) |
+| `SKULK_LIBP2P_NAMESPACE` / `SKULK_LIBP2P_NAMESPACE` | libp2p namespace for cluster isolation |
 | `SKULK_SKIP_LLM_WARMUP` | Skip warmup synthesis (single-node debug only) |
 | `SKULK_IMAGE_TRANSPORT_DEBUG` | Verbose logging in image-transport pipeline |
-| `EXO_VISION_DEBUG_SAVE_DIR` | Save debug image artifacts |
-| `EXO_NATIVE_VISION_REFERENCE_PATH` | Force native-vision reference path (Gemma 4) |
-| `EXO_OFFLINE` | Run without internet checks (no model fetching) |
+| `SKULK_VISION_DEBUG_SAVE_DIR` | Save debug image artifacts |
+| `SKULK_NATIVE_VISION_REFERENCE_PATH` | Force native-vision reference path (Gemma 4) |
+| `SKULK_OFFLINE` | Run without internet checks (no model fetching) |
 | `SKULK_TEST_DISTRIBUTED_MODEL` | Tests only: force the distributed/prefix-cache slow-test model (`gpt-oss-20b` or `llama-3.2-1b`); default auto-selects by Metal working-set size |
 | `MLX_METAL_FAST_SYNCH` | Set by Skulk based on resolved card preference; not for direct operator use |
 | `MLX_HOSTFILE`, `MLX_RANK`, `MLX_RING_VERBOSE`, `MLX_IBV_DEVICES`, `MLX_JACCL_COORDINATOR` | MLX upstream env vars; auto-set by Skulk during distributed init |
@@ -439,7 +439,7 @@ Selection logic: `src/exo/worker/engines/mlx/cache.py::make_kv_cache`. Some back
 
 ### Flight recorder
 
-- **Lives at:** `src/exo/worker/runner/runner_supervisor.py` (the bounded buffer); emit helpers at `src/exo/worker/runner/diagnostics.py`
+- **Lives at:** `src/skulk/worker/runner/runner_supervisor.py` (the bounded buffer); emit helpers at `src/skulk/worker/runner/diagnostics.py`
 - **Capacity:** last 128 entries per runner
 - **Always-on; local-only.** Not gossiped, but exposed via `/v1/diagnostics/*`
 - **Emission helpers:**
@@ -448,7 +448,7 @@ Selection logic: `src/exo/worker/engines/mlx/cache.py::make_kv_cache`. Some back
 
 ### Trace sessions
 
-- **Lives at:** `src/exo/shared/tracing.py`
+- **Lives at:** `src/skulk/shared/tracing.py`
 - **API:**
   - `begin_trace_session(task_id, rank, node_id, model_id, task_kind, tags)` — create
   - `record_trace_marker(name, rank, task_id, attrs)` — emit one event
@@ -460,20 +460,20 @@ Selection logic: `src/exo/worker/engines/mlx/cache.py::make_kv_cache`. Some back
 
 ### MLX memory snapshot
 
-- **Lives at:** `src/exo/worker/runner/diagnostics.py::capture_mlx_memory_snapshot`
+- **Lives at:** `src/skulk/worker/runner/diagnostics.py::capture_mlx_memory_snapshot`
 - **Returns:** `MlxMemorySnapshot { active, cache, peak, wiredLimit, source }`
 - **Best-effort:** returns None if MLX isn't loaded or the snapshot fails
 
 ### Process sampling (macOS only)
 
-- **Lives at:** `src/exo/api/main.py::_collect_process_samples`
+- **Lives at:** `src/skulk/api/main.py::_collect_process_samples`
 - **Wraps:** `sample <pid> <duration>`, `vmmap -summary <pid>`, `footprint -p <pid>`
 - **Per-command timeout:** ~5-8s
 - **Returns:** `list[DiagnosticProcessSample]` with `ok`, `stdout`, `stderr`, `error`
 
 ### Per-eval timeout
 
-- **Lives at:** `src/exo/worker/engines/mlx/auto_parallel.py::eval_with_timeout`
+- **Lives at:** `src/skulk/worker/engines/mlx/auto_parallel.py::eval_with_timeout`
 - **Wraps:** any `mx.eval(...)` call with a daemon-thread watchdog
 - **Default timeout:** 60s (`pipeline_eval_timeout_seconds()`, configurable via `SKULK_PIPELINE_EVAL_TIMEOUT_SECONDS`)
 - **On timeout:** emits `pipeline_eval_timeout` flight-recorder event, then `os._exit(1)`
@@ -481,7 +481,7 @@ Selection logic: `src/exo/worker/engines/mlx/cache.py::make_kv_cache`. Some back
 
 ### Parent-pid watchdog
 
-- **Lives at:** `src/exo/worker/runner/bootstrap.py::_install_parent_death_watchdog`
+- **Lives at:** `src/skulk/worker/runner/bootstrap.py::_install_parent_death_watchdog`
 - **Mechanism:** daemon thread inside runner that polls `os.getppid()`; on reparenting, calls `mx.clear_cache()` + `gc.collect()` + `os._exit(1)`
 - **Why:** SIGKILL of the agent leaves daemon `mp.Process` runners orphaned holding GPU memory. The watchdog detects the reparent and self-exits
 
@@ -489,7 +489,7 @@ Selection logic: `src/exo/worker/engines/mlx/cache.py::make_kv_cache`. Some back
 
 Local Vector → VictoriaLogs → Grafana. Configuration:
 
-- `src/exo/shared/logging.py` — loguru JSON sink to stdout
+- `src/skulk/shared/logging.py` — loguru JSON sink to stdout
 - `deployment/logging/vector.yaml` — Vector pipeline (stdin → VictoriaLogs)
 - `deployment/logging/docker-compose.yml` — VictoriaLogs + Grafana stack
 - `skulk.yaml` `logging.enabled` + `logging.ingest_url` — opt-in; cluster-synced
@@ -497,7 +497,7 @@ Local Vector → VictoriaLogs → Grafana. Configuration:
 ## File map quick reference
 
 ```
-src/exo/
+src/skulk/
 ├── api/                # FastAPI app + adapters
 │   ├── main.py         # routes, app construction, fan-out helpers
 │   ├── adapters/       # OpenAI, Ollama, Claude, Responses, Skulk-native

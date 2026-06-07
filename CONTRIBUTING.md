@@ -44,7 +44,7 @@ development tooling and validation, not as a hidden alternate MLX runtime.
 Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard), and the codebase is actively evolving.
 
 ### Key directories:
-- `src/exo/` — Python backend (inference, API, store, worker, routing)
+- `src/skulk/` — Python backend (inference, API, store, worker, routing)
 - `dashboard-react/` — React dashboard (Skulk UI)
 - `rust/` — Rust components (networking, libp2p, PyO3 bindings)
 - `resources/inference_model_cards/` — Model metadata TOML files
@@ -71,11 +71,11 @@ This starts a Vite dev server on port 3000 with hot reload. The dev server proxi
 
 ### Backend
 
-- `src/exo/api/main.py` — FastAPI server (OpenAI, Claude, Ollama API compatibility)
-- `src/exo/master/` — Master node (placement, election, event sourcing)
-- `src/exo/worker/` — Worker node (inference, runner management, download coordination)
-- `src/exo/store/` — Model store (registry, downloads, config, model optimizer)
-- `src/exo/shared/` — Shared types, constants, topology
+- `src/skulk/api/main.py` — FastAPI server (OpenAI, Claude, Ollama API compatibility)
+- `src/skulk/master/` — Master node (placement, election, event sourcing)
+- `src/skulk/worker/` — Worker node (inference, runner management, download coordination)
+- `src/skulk/store/` — Model store (registry, downloads, config, model optimizer)
+- `src/skulk/shared/` — Shared types, constants, topology
 - `website/docs/` — Docusaurus documentation source, including API guide and model-capability docs
 
 ## Development Guidelines
@@ -248,7 +248,7 @@ Skulk supports shipping structured logs from all cluster nodes to a central [Vic
    ```
    (Vector is also available via `nix develop` if using the nix dev shell.)
 
-4. **Run exo piped through Vector**:
+4. **Run Skulk piped through Vector**:
    ```bash
    uv run skulk 2>/dev/tty | vector --config deployment/logging/vector.yaml
    ```

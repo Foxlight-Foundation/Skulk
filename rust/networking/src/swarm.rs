@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 ///       this be passed in as a parameter? What about rapidly changing versions in debug builds?
 ///       this is all VERY very hard to figure out and needs to be mulled over as a team.
 pub const NETWORK_VERSION: &[u8] = b"v0.0.1";
-pub const OVERRIDE_VERSION_ENV_VAR: &str = "EXO_LIBP2P_NAMESPACE";
+pub const OVERRIDE_VERSION_ENV_VAR: &str = "SKULK_LIBP2P_NAMESPACE";
 
 // Uses oneshot senders to emulate function calling apis while avoiding requiring unique ownership
 // of the Swarm.

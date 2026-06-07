@@ -1,4 +1,4 @@
-# EXO Cluster Logging Stack
+# Skulk Cluster Logging Stack
 # Deploy as a Portainer stack on the R720 — single file, no external mounts.
 #
 # VictoriaLogs: log ingestion & storage (port 9428)

@@ -17,9 +17,9 @@ prerelease-mode = "allow"
 
 [manifest]
 members = [
-    "exo",
-    "exo-bench",
-    "exo-pyo3-bindings",
+    "skulk",
+    "skulk-bench",
+    "skulk-pyo3-bindings",
 ]
 
 [[package]]
@@ -541,155 +541,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ad/d0/0c17a8e6e8dc7245f22dea860557c32bae50fc4d287ae030cb0e8ab8720f/evaluate-0.4.6.tar.gz", hash = "sha256:e07036ca12b3c24331f83ab787f21cc2dbf3631813a1631e63e40897c69a3f21", size = 65716, upload-time = "2025-09-18T13:06:30.581Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3e/af/3e990d8d4002bbc9342adb4facd59506e653da93b2417de0fa6027cb86b1/evaluate-0.4.6-py3-none-any.whl", hash = "sha256:bca85bc294f338377b7ac2f861e21c308b11b2a285f510d7d5394d5df437db29", size = 84069, upload-time = "2025-09-18T13:06:29.265Z" },
-]
-
-[[package]]
-name = "exo"
-version = "1.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "aiofiles", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "aiohttp", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "anyio", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "ddgs", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "exo-pyo3-bindings", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "fastapi", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "filelock", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "httpx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "huggingface-hub", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "hypercorn", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "loguru", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "mflux", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "mlx", version = "0.30.6", source = { registry = "https://pypi.org/simple" }, extra = ["cpu"], marker = "sys_platform == 'linux'" },
-    { name = "mlx", version = "0.31.2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
-    { name = "mlx-lm", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "mlx-optiq", extra = ["convert"], marker = "sys_platform == 'darwin'" },
-    { name = "mlx-vlm", marker = "sys_platform == 'darwin'" },
-    { name = "msgspec", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "openai-harmony", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "psutil", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pydantic", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "python-multipart", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pyyaml", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "rustworkx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "tiktoken", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "tomlkit", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "transformers", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "types-aiofiles", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "types-pyyaml", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "zstandard", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "basedpyright", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "httpx2", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pyinstaller", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pytest", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pytest-asyncio", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pytest-env", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "ruff", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiofiles", specifier = ">=24.1.0" },
-    { name = "aiohttp", specifier = ">=3.12.14" },
-    { name = "anyio", specifier = "==4.11.0" },
-    { name = "ddgs", specifier = ">=9.6.1" },
-    { name = "exo-pyo3-bindings", editable = "rust/exo_pyo3_bindings" },
-    { name = "fastapi", specifier = ">=0.116.1" },
-    { name = "filelock", specifier = ">=3.18.0" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "huggingface-hub", specifier = ">=1.8.0" },
-    { name = "hypercorn", specifier = ">=0.18.0" },
-    { name = "loguru", specifier = ">=0.7.3" },
-    { name = "mflux", specifier = ">=0.16.9" },
-    { name = "mlx", marker = "sys_platform == 'darwin'", specifier = "==0.31.2" },
-    { name = "mlx", extras = ["cpu"], marker = "sys_platform == 'linux'", specifier = "==0.30.6" },
-    { name = "mlx-lm", git = "https://github.com/Foxlight-Foundation/mlx-lm?rev=e2f7ddcd31ec7d5214447a8d3206af0d2bff6e35" },
-    { name = "mlx-optiq", extras = ["convert"], marker = "sys_platform == 'darwin'" },
-    { name = "mlx-vlm", marker = "sys_platform == 'darwin'", specifier = "==0.6.1" },
-    { name = "msgspec", specifier = ">=0.19.0" },
-    { name = "openai-harmony", specifier = ">=0.0.8" },
-    { name = "psutil", specifier = ">=7.0.0" },
-    { name = "pydantic", specifier = ">=2.11.7" },
-    { name = "python-multipart", specifier = ">=0.0.21" },
-    { name = "pyyaml", specifier = ">=6.0.2" },
-    { name = "rustworkx", specifier = ">=0.17.1" },
-    { name = "tiktoken", specifier = ">=0.12.0" },
-    { name = "tomlkit", specifier = ">=0.14.0" },
-    { name = "transformers", specifier = ">=5.5.0,<6.0.0" },
-    { name = "types-aiofiles", specifier = ">=24.1.0.20250708" },
-    { name = "types-pyyaml", specifier = ">=6.0.12" },
-    { name = "zstandard", specifier = ">=0.23.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "basedpyright", specifier = ">=1.29.0" },
-    { name = "httpx2", specifier = ">=2.0" },
-    { name = "pyinstaller", specifier = ">=6.17.0" },
-    { name = "pytest", specifier = ">=8.4.0" },
-    { name = "pytest-asyncio", specifier = ">=1.0.0" },
-    { name = "pytest-env" },
-    { name = "ruff", specifier = ">=0.11.13" },
-]
-
-[[package]]
-name = "exo-bench"
-version = "0.1.0"
-source = { editable = "bench" }
-dependencies = [
-    { name = "datasets", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "httpx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "huggingface-hub", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "human-eval", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "jinja2", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "lm-eval", extra = ["api", "math"], marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "loguru", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "math-verify", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "numpy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "protobuf", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "tiktoken", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "transformers", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "datasets", specifier = ">=2.0.0" },
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "huggingface-hub", specifier = ">=0.33.4" },
-    { name = "human-eval", specifier = ">=1.0.3" },
-    { name = "jinja2", specifier = ">=3.1.0" },
-    { name = "lm-eval", extras = ["api", "math"], specifier = ">=0.4.0" },
-    { name = "loguru", specifier = ">=0.7.3" },
-    { name = "math-verify", specifier = ">=0.7.0" },
-    { name = "numpy", specifier = ">=1.24.0" },
-    { name = "protobuf", specifier = ">=5.29.0" },
-    { name = "tiktoken", specifier = ">=0.12.0" },
-    { name = "transformers", specifier = ">=5.0.0" },
-]
-
-[[package]]
-name = "exo-pyo3-bindings"
-version = "0.2.1"
-source = { editable = "rust/exo_pyo3_bindings" }
-
-[package.dev-dependencies]
-dev = [
-    { name = "exo-pyo3-bindings", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pytest", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-    { name = "pytest-asyncio", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
-]
-
-[package.metadata]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "exo-pyo3-bindings", editable = "rust/exo_pyo3_bindings" },
-    { name = "pytest", specifier = ">=8.4.0" },
-    { name = "pytest-asyncio", specifier = ">=1.0.0" },
 ]
 
 [[package]]
@@ -2986,6 +2837,155 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "skulk"
+version = "1.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "aiofiles", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "aiohttp", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "anyio", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "ddgs", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "fastapi", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "filelock", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "httpx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "huggingface-hub", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "hypercorn", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "loguru", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "mflux", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "mlx", version = "0.30.6", source = { registry = "https://pypi.org/simple" }, extra = ["cpu"], marker = "sys_platform == 'linux'" },
+    { name = "mlx", version = "0.31.2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
+    { name = "mlx-lm", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "mlx-optiq", extra = ["convert"], marker = "sys_platform == 'darwin'" },
+    { name = "mlx-vlm", marker = "sys_platform == 'darwin'" },
+    { name = "msgspec", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "openai-harmony", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "psutil", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pydantic", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "python-multipart", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pyyaml", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "rustworkx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "skulk-pyo3-bindings", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "tiktoken", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "tomlkit", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "transformers", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "types-aiofiles", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "types-pyyaml", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "zstandard", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "basedpyright", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "httpx2", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pyinstaller", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pytest", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pytest-asyncio", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pytest-env", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "ruff", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiofiles", specifier = ">=24.1.0" },
+    { name = "aiohttp", specifier = ">=3.12.14" },
+    { name = "anyio", specifier = "==4.11.0" },
+    { name = "ddgs", specifier = ">=9.6.1" },
+    { name = "fastapi", specifier = ">=0.116.1" },
+    { name = "filelock", specifier = ">=3.18.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "huggingface-hub", specifier = ">=1.8.0" },
+    { name = "hypercorn", specifier = ">=0.18.0" },
+    { name = "loguru", specifier = ">=0.7.3" },
+    { name = "mflux", specifier = ">=0.16.9" },
+    { name = "mlx", marker = "sys_platform == 'darwin'", specifier = "==0.31.2" },
+    { name = "mlx", extras = ["cpu"], marker = "sys_platform == 'linux'", specifier = "==0.30.6" },
+    { name = "mlx-lm", git = "https://github.com/Foxlight-Foundation/mlx-lm?rev=e2f7ddcd31ec7d5214447a8d3206af0d2bff6e35" },
+    { name = "mlx-optiq", extras = ["convert"], marker = "sys_platform == 'darwin'" },
+    { name = "mlx-vlm", marker = "sys_platform == 'darwin'", specifier = "==0.6.1" },
+    { name = "msgspec", specifier = ">=0.19.0" },
+    { name = "openai-harmony", specifier = ">=0.0.8" },
+    { name = "psutil", specifier = ">=7.0.0" },
+    { name = "pydantic", specifier = ">=2.11.7" },
+    { name = "python-multipart", specifier = ">=0.0.21" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "rustworkx", specifier = ">=0.17.1" },
+    { name = "skulk-pyo3-bindings", editable = "rust/skulk_pyo3_bindings" },
+    { name = "tiktoken", specifier = ">=0.12.0" },
+    { name = "tomlkit", specifier = ">=0.14.0" },
+    { name = "transformers", specifier = ">=5.5.0,<6.0.0" },
+    { name = "types-aiofiles", specifier = ">=24.1.0.20250708" },
+    { name = "types-pyyaml", specifier = ">=6.0.12" },
+    { name = "zstandard", specifier = ">=0.23.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "basedpyright", specifier = ">=1.29.0" },
+    { name = "httpx2", specifier = ">=2.0" },
+    { name = "pyinstaller", specifier = ">=6.17.0" },
+    { name = "pytest", specifier = ">=8.4.0" },
+    { name = "pytest-asyncio", specifier = ">=1.0.0" },
+    { name = "pytest-env" },
+    { name = "ruff", specifier = ">=0.11.13" },
+]
+
+[[package]]
+name = "skulk-bench"
+version = "0.1.0"
+source = { editable = "bench" }
+dependencies = [
+    { name = "datasets", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "httpx", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "huggingface-hub", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "human-eval", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "jinja2", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "lm-eval", extra = ["api", "math"], marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "loguru", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "math-verify", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "numpy", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "protobuf", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "tiktoken", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "transformers", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "datasets", specifier = ">=2.0.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "huggingface-hub", specifier = ">=0.33.4" },
+    { name = "human-eval", specifier = ">=1.0.3" },
+    { name = "jinja2", specifier = ">=3.1.0" },
+    { name = "lm-eval", extras = ["api", "math"], specifier = ">=0.4.0" },
+    { name = "loguru", specifier = ">=0.7.3" },
+    { name = "math-verify", specifier = ">=0.7.0" },
+    { name = "numpy", specifier = ">=1.24.0" },
+    { name = "protobuf", specifier = ">=5.29.0" },
+    { name = "tiktoken", specifier = ">=0.12.0" },
+    { name = "transformers", specifier = ">=5.0.0" },
+]
+
+[[package]]
+name = "skulk-pyo3-bindings"
+version = "0.2.1"
+source = { editable = "rust/skulk_pyo3_bindings" }
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "pytest-asyncio", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "skulk-pyo3-bindings", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+]
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.4.0" },
+    { name = "pytest-asyncio", specifier = ">=1.0.0" },
+    { name = "skulk-pyo3-bindings", editable = "rust/skulk_pyo3_bindings" },
 ]
 
 [[package]]

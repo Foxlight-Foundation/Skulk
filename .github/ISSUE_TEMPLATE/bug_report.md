@@ -28,7 +28,7 @@ A clear and concise description of what actually happened.
 ## Environment
 
 - macOS Version:
-- EXO Version:
+- Skulk Version:
 - Hardware:
   - Device 1: (e.g., MacBook Pro M1 Max, 32GB RAM)
   - Device 2: (e.g., Mac Mini M2, 16GB RAM)

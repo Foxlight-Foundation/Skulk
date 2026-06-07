@@ -5,11 +5,11 @@ import os
 import shutil
 from pathlib import Path
 
-os.environ.setdefault("EXO_HOME", ".skulk-docs-home")
+os.environ.setdefault("SKULK_HOME", ".skulk-docs-home")
 
-from exo.api.main import API
-from exo.shared.types.common import NodeId
-from exo.utils.channels import channel
+from skulk.api.main import API
+from skulk.shared.types.common import NodeId
+from skulk.utils.channels import channel
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REDOC_BUNDLE_SOURCE = (

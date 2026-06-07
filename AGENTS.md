@@ -4,7 +4,7 @@ This file provides guidance to AI coding agents when working with code in this r
 
 ## Project Overview
 
-exo is a distributed AI inference system that connects multiple devices into a cluster. It enables running large language models across multiple machines using MLX as the inference backend and libp2p for peer-to-peer networking.
+Skulk is a distributed AI inference system that connects multiple devices into one cluster. It runs large language models across machines using MLX as the inference backend and libp2p for peer-to-peer networking. Skulk began as a fork of exo and has substantially diverged.
 
 ## Build & Run Commands
 
@@ -28,10 +28,10 @@ uv run pytest
 uv run pytest -m ""
 
 # Run a specific test file
-uv run pytest src/exo/shared/tests/test_election.py
+uv run pytest src/skulk/shared/tests/test_election.py
 
 # Run a specific test function
-uv run pytest src/exo/shared/tests/test_election.py::test_function_name
+uv run pytest src/skulk/shared/tests/test_election.py::test_function_name
 
 # Type checking (strict mode)
 uv run basedpyright
@@ -97,15 +97,15 @@ If `nix fmt` changes any files, stage them before committing. The CI runs `nix f
 ## Architecture
 
 ### Node Composition
-A single exo `Node` (src/exo/main.py) runs multiple components:
-- **Router**: libp2p-based pub/sub messaging via Rust bindings (exo_pyo3_bindings)
+A single Skulk `Node` (src/skulk/main.py) runs multiple components:
+- **Router**: libp2p-based pub/sub messaging via Rust bindings (skulk_pyo3_bindings)
 - **Worker**: Handles inference tasks, downloads models, manages runner processes
 - **Master**: Coordinates cluster state, places model instances across nodes
 - **Election**: Bully algorithm for master election
 - **API**: FastAPI server for OpenAI-compatible chat completions
 
 ### Message Flow
-Components communicate via typed pub/sub topics (src/exo/routing/topics.py):
+Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `GLOBAL_EVENTS`: Master broadcasts indexed events to all workers
 - `LOCAL_EVENTS`: Workers send events to master for indexing
 - `COMMANDS`: Workers/API send commands to master
@@ -114,24 +114,24 @@ Components communicate via typed pub/sub topics (src/exo/routing/topics.py):
 
 ### Event Sourcing
 The system uses event sourcing for state management:
-- `State` (src/exo/shared/types/state.py): Immutable state object
-- `apply()` (src/exo/shared/apply.py): Pure function that applies events to state
+- `State` (src/skulk/shared/types/state.py): Immutable state object
+- `apply()` (src/skulk/shared/apply.py): Pure function that applies events to state
 - Master indexes events and broadcasts; workers apply indexed events
 
 ### Key Type Hierarchy
-- `src/exo/shared/types/`: Pydantic models for all shared types
+- `src/skulk/shared/types/`: Pydantic models for all shared types
   - `events.py`: Event types (discriminated union)
   - `commands.py`: Command types
   - `tasks.py`: Task types for worker execution
   - `state.py`: Cluster state model
-- `src/exo/shared/models/`: persisted model metadata and capability resolution
+- `src/skulk/shared/models/`: persisted model metadata and capability resolution
   - `model_cards.py`: declarative model cards, including optional advanced capability sections
   - `capabilities.py`: normalized runtime capability profiles derived from model cards plus conservative family defaults
 
 ### Rust Components
 Rust code in `rust/` provides:
 - `networking`: libp2p networking (gossipsub, peer discovery)
-- `exo_pyo3_bindings`: PyO3 bindings exposing Rust to Python
+- `skulk_pyo3_bindings`: PyO3 bindings exposing Rust to Python
 - `system_custodian`: System-level operations
 
 ### Dashboard
@@ -146,8 +146,8 @@ This capability spine is the source of truth for model-aware reasoning defaults,
 
 ### Logging & Observability
 Centralized logging uses a three-layer stack:
-- **Structured JSON stdout**: When `logging.enabled` is `true` and `logging.ingest_url` is set in `skulk.yaml` (or dashboard Settings), skulk emits one JSON object per line on stdout (alongside human-readable stderr). Settings sync to all nodes via gossipsub. Configured in `src/exo/shared/logging.py`.
-- **Vector**: A local log shipper on each node reads exo's stdout and forwards to VictoriaLogs. Config at `deployment/logging/vector.yaml`.
+- **Structured JSON stdout**: When `logging.enabled` is `true` and `logging.ingest_url` is set in `skulk.yaml` (or dashboard Settings), skulk emits one JSON object per line on stdout (alongside human-readable stderr). Settings sync to all nodes via gossipsub. Configured in `src/skulk/shared/logging.py`.
+- **Vector**: A local log shipper on each node reads Skulk's stdout and forwards to VictoriaLogs. Config at `deployment/logging/vector.yaml`.
 - **VictoriaLogs + Grafana**: Central log storage and dashboards on the R720. Stack definition at `deployment/logging/docker-compose.yml`.
 
 ## Mandatory Workflow Rules
@@ -257,7 +257,7 @@ severity 4 or 5 comments remain:
 
 ## Testing
 
-Tests use pytest-asyncio with `asyncio_mode = "auto"`. Tests are in `tests/` subdirectories alongside the code they test. The `SKULK_TESTS=1` env var (fallback: `EXO_TESTS=1`) is set during tests.
+Tests use pytest-asyncio with `asyncio_mode = "auto"`. Tests are in `tests/` subdirectories alongside the code they test. The `SKULK_TESTS=1` env var (fallback: `SKULK_TESTS=1`) is set during tests.
 
 ## Dashboard UI Testing & Screenshots
 
@@ -292,7 +292,7 @@ const { chromium } = require('playwright');
 
   // Inject test data into localStorage if needed (e.g., recent models)
   await page.evaluate(() => {
-    localStorage.setItem('exo-recent-models', JSON.stringify([
+    localStorage.setItem('skulk-recent-models', JSON.stringify([
       { modelId: 'mlx-community/Qwen3-30B-A3B-4bit', launchedAt: Date.now() },
     ]));
   });
@@ -323,7 +323,7 @@ GitHub's API doesn't support direct image upload for PR comments. Workaround:
 
 2. **Post PR comment** referencing the raw image URL (uses permanent commit SHA so images survive deletion):
    ```bash
-   gh pr comment <PR_NUMBER> --body "![Screenshot](https://raw.githubusercontent.com/exo-explore/exo/${COMMIT_SHA}/screenshot.png)"
+   gh pr comment <PR_NUMBER> --body "![Screenshot](https://raw.githubusercontent.com/Foxlight-Foundation/Skulk/${COMMIT_SHA}/screenshot.png)"
    ```
 
 3. **Remove the images** from the branch:
