@@ -40,6 +40,19 @@ class MemoryUsage(CamelCaseModel):
         )
 
 
+def read_wired_memory_bytes() -> int | None:
+    """OS-level wired (unpageable) memory in use, or None where unavailable.
+
+    Kept OFF the gossiped ``MemoryUsage`` (which rides ``NodeGatheredInfo``
+    events under ``extra=forbid`` — adding a field there breaks old nodes in
+    a mixed-version rollout). Read locally on the diagnostics path only, where
+    it powers leaked-wired detection (Skulk#239). psutil exposes ``wired`` on
+    macOS only.
+    """
+    wired: object = getattr(psutil.virtual_memory(), "wired", None)
+    return int(wired) if isinstance(wired, (int, float)) else None
+
+
 class DiskUsage(CamelCaseModel):
     """Disk space usage for the models directory."""
 

@@ -243,7 +243,7 @@ from skulk.shared.types.events import (
     TracesMerged,
 )
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.profiling import MemoryUsage
+from skulk.shared.types.profiling import MemoryUsage, read_wired_memory_bytes
 from skulk.shared.types.state import State
 from skulk.shared.types.text_generation import TextGenerationTaskParams
 from skulk.shared.types.worker.downloads import DownloadCompleted
@@ -306,6 +306,42 @@ _API_EVENT_LOG_CHECK_INTERVAL_APPENDS = 4096
 # node — observed to resolve within a few seconds on a LAN cluster.
 _PLACEMENT_INFO_WAIT_SECONDS = 15.0
 ONBOARDING_COMPLETE_FILE = SKULK_CACHE_HOME / "onboarding_complete"
+
+# A node with no live runners should sit near its idle wired baseline
+# (~2GB on the M4 kites). Wired well above that with nothing running means
+# memory leaked from an abnormal Metal termination (warmup-wedge SIGKILL,
+# GPU-timeout abort) that only a reboot reclaims (Skulk#239). The threshold
+# is a generous floor over the idle baseline; the signal is the leak, not a
+# precise number.
+_LEAKED_WIRED_THRESHOLD_BYTES = 5 * 1024 * 1024 * 1024
+
+
+def _leaked_wired_warning(
+    wired: "Memory | None",
+    supervisor_runners: "Sequence[RunnerSupervisorDiagnostics]",
+) -> str | None:
+    """Flag likely-leaked wired memory: high wired with no live runners.
+
+    Returns a human-readable warning, or None. macOS-only in practice (wired
+    is None elsewhere). Mirrors the test-side preflight
+    (tests/preflight_mem.sh): a poisoned node otherwise surfaces only as
+    unexplained placement 400s and decode GPU-timeouts (Skulk#236), so this
+    gives operators the actual cause — reboot to reclaim.
+    """
+    if wired is None:
+        return None
+    if any(runner.process_alive for runner in supervisor_runners):
+        return None
+    wired_bytes = wired.in_bytes
+    if wired_bytes <= _LEAKED_WIRED_THRESHOLD_BYTES:
+        return None
+    return (
+        f"Likely leaked wired memory: {wired_bytes / 2**30:.1f} GB wired with "
+        "no live runners. An abnormal Metal termination (warmup wedge or GPU "
+        "timeout) can leave wired memory the OS only reclaims on reboot, "
+        "causing false 'insufficient memory' placements and decode timeouts. "
+        "Reboot this node to reclaim it."
+    )
 
 
 def prune_old_trace_files(directory: Path, retention_days: int, now: float) -> int:
@@ -3882,12 +3918,19 @@ class API:
         """Build local resource diagnostics from gathered state and psutil."""
 
         current_memory = None
+        current_wired = None
         with contextlib.suppress(Exception):
             current_memory = MemoryUsage.from_psutil(override_memory=None)
+        with contextlib.suppress(Exception):
+            wired_bytes = read_wired_memory_bytes()
+            current_wired = (
+                Memory.from_bytes(wired_bytes) if wired_bytes is not None else None
+            )
 
         return NodeResourceDiagnostics(
             gathered_memory=self.state.node_memory.get(self.node_id),
             current_memory=current_memory,
+            current_wired=current_wired,
             disk=self.state.node_disk.get(self.node_id),
             system=self.state.node_system.get(self.node_id),
             network=self.state.node_network.get(self.node_id),
@@ -3898,17 +3941,21 @@ class API:
 
         supervisor_runners = self._collect_runner_supervisor_diagnostics()
         placements = self._placement_diagnostics()
+        resources = self._resource_diagnostics()
         warnings = {
             warning for placement in placements for warning in placement.warnings
         }
         warnings.update(
             self._augment_runner_divergence_warnings(placements, supervisor_runners)
         )
+        leak = _leaked_wired_warning(resources.current_wired, supervisor_runners)
+        if leak is not None:
+            warnings.add(leak)
         return NodeDiagnostics(
             generated_at=datetime.now(tz=timezone.utc).isoformat(),
             runtime=self._runtime_diagnostics(),
             identity=self.state.node_identities.get(self.node_id),
-            resources=self._resource_diagnostics(),
+            resources=resources,
             processes=self._collect_process_diagnostics(supervisor_runners),
             supervisor_runners=supervisor_runners,
             placements=placements,
