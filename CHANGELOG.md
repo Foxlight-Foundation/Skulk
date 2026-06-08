@@ -61,6 +61,15 @@ This project records release notes here and mirrors public-facing notes in
   models pay an additional replay tax even at depth 2. Rule of thumb:
   gemma assistant cards depth 2, Qwen GDN sidecar cards depth 1.
 
+- **Empty `messages` (and non-positive `max_tokens`) are rejected with
+  400 instead of crashing the runner.** An empty message array was
+  accepted, then `apply_chat_template([])` raised `IndexError` inside the
+  runner — taking down the process serving that instance. A single
+  renderability guard at the shared text-generation dispatch chokepoint
+  (covering chat, Claude, Ollama, and Responses wire formats) now returns
+  400 before the request reaches a runner. Found by the post-rename
+  torture battery (#233).
+
 - **A bare `repetition_penalty` no longer crashes the runner.** Requests
   carrying `repetition_penalty` without `repetition_context_size` passed
   the request's None straight into mlx-lm's processor builder, overriding

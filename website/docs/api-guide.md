@@ -172,6 +172,11 @@ For the full interactive reference with request/response schemas, see the [API R
 This is the main chat-generation endpoint for both text-only and multimodal
 models.
 
+Requests are validated before dispatch: an empty `messages` array or a
+non-positive `max_tokens` returns **400 Bad Request** rather than being
+accepted and failing during generation. (This applies across the Claude,
+Ollama, and Responses wire formats too, which share the same dispatch path.)
+
 ### OpenAI Python SDK Example
 
 ```python

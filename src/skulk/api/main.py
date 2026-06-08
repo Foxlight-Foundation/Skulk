@@ -355,6 +355,34 @@ def _text_image_hash_cache_enabled() -> bool:
     )
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
+
+def validate_renderable_text_generation(
+    task_params: TextGenerationTaskParams,
+) -> None:
+    """Reject text-generation requests the runner cannot render.
+
+    Raises ``HTTPException(400)`` so malformed input fails at the API instead
+    of reaching the runner. An empty message set produced an empty prompt
+    that crashed the runner inside ``apply_chat_template`` with an IndexError
+    (#233); a non-positive ``max_tokens`` would request zero/negative output.
+    Both are caught here, the single dispatch chokepoint shared by every wire
+    format, so no adapter can route un-renderable work to a runner.
+    """
+    if not task_params.input and not task_params.chat_template_messages:
+        raise HTTPException(
+            status_code=400,
+            detail="messages must not be empty",
+        )
+    if (
+        task_params.max_output_tokens is not None
+        and task_params.max_output_tokens <= 0
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="max_tokens must be a positive integer",
+        )
+
+
 API_TAGS_METADATA = [
     {
         "name": "Compatibility APIs",
@@ -1701,6 +1729,12 @@ class API:
     async def _send_text_generation_with_images(
         self, task_params: TextGenerationTaskParams
     ) -> TextGeneration:
+        # Single dispatch chokepoint for every text-generation wire format
+        # (chat, claude, ollama, responses, bench) — reject un-renderable
+        # requests here so malformed input is a clean 400 instead of an
+        # IndexError that crashes the runner (#233; empty messages reached
+        # apply_chat_template([]) -> list index out of range).
+        validate_renderable_text_generation(task_params)
         images = task_params.images
         if not images:
             command = TextGeneration(task_params=task_params)
