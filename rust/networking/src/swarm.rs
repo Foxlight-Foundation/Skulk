@@ -164,39 +164,17 @@ pub fn create_swarm(
     // optional comma list of local source IPs to bind before connecting. Logs
     // the source the OS picks (unbound) and which explicit sources can route.
     if let Ok(probe) = std::env::var("SKULK_DIAL_PROBE") {
-        if let Ok(addr) = probe.parse::<std::net::SocketAddr>() {
-            use socket2::{Domain, Protocol, Socket, Type};
-            // unbound (what skulk does today)
+        for dest in probe.split(',').filter(|s| !s.is_empty()) {
+            let Ok(addr) = dest.parse::<std::net::SocketAddr>() else {
+                continue;
+            };
             match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3)) {
-                Ok(s) => log::warn!("DIAL_PROBE unbound {addr} OK local={:?}", s.local_addr()),
+                Ok(s) => log::warn!("DIAL_PROBE {addr} OK local={:?}", s.local_addr()),
                 Err(e) => log::warn!(
-                    "DIAL_PROBE unbound {addr} FAIL kind={:?} os={:?}",
+                    "DIAL_PROBE {addr} FAIL kind={:?} os={:?}",
                     e.kind(),
                     e.raw_os_error()
                 ),
-            }
-            // each candidate source IP, bound before connect
-            for src in std::env::var("SKULK_DIAL_PROBE_SRC")
-                .unwrap_or_default()
-                .split(',')
-                .filter(|s| !s.is_empty())
-            {
-                let Ok(src_ip) = src.parse::<std::net::IpAddr>() else {
-                    continue;
-                };
-                let r = (|| -> std::io::Result<()> {
-                    let sock = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
-                    sock.bind(&std::net::SocketAddr::new(src_ip, 0).into())?;
-                    sock.connect(&addr.into())
-                })();
-                match r {
-                    Ok(()) => log::warn!("DIAL_PROBE src {src_ip} -> {addr} OK"),
-                    Err(e) => log::warn!(
-                        "DIAL_PROBE src {src_ip} -> {addr} FAIL kind={:?} os={:?}",
-                        e.kind(),
-                        e.raw_os_error()
-                    ),
-                }
             }
         }
     }
