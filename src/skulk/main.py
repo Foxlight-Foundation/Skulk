@@ -724,9 +724,25 @@ def main():
         # cluster needs no hand-maintained IP list — just `enabled: true`. Each
         # peer is dialed on this node's libp2p port; non-Skulk tailnet peers
         # fail the private-network handshake and are harmlessly ignored.
-        _auto_peers = [
-            f"/ip4/{ip}/tcp/{args.libp2p_port}" for ip in _ts_status.peer_ips
-        ]
+        #
+        # Auto-discovery needs a fixed, known port to build the peer multiaddrs.
+        # With --libp2p-port 0 (OS-assigned) the listen port differs per node and
+        # is unknown to peers, so an auto-built /tcp/0 address could never be
+        # dialed. Skip auto-discovery in that case and tell the operator how to
+        # make it work, rather than silently producing dead /tcp/0 peers.
+        if args.libp2p_port == 0:
+            _auto_peers: list[str] = []
+            if _ts_status.peer_ips:
+                logger.warning(
+                    "Tailscale auto-discovery is enabled but --libp2p-port is 0 "
+                    "(OS-assigned); auto-discovered peers need a fixed port and were "
+                    "skipped. Set --libp2p-port / SKULK_LIBP2P_PORT (default 52416) or "
+                    "list connectivity.tailscale.bootstrap_peers explicitly."
+                )
+        else:
+            _auto_peers = [
+                f"/ip4/{ip}/tcp/{args.libp2p_port}" for ip in _ts_status.peer_ips
+            ]
         # Merge auto-discovered + config-listed peers, de-duplicating against
         # CLI/existing peers and each other while preserving order.
         _seen = set(args.bootstrap_peers)

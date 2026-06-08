@@ -103,6 +103,6 @@ LOCAL_NETWORK_DENIED_MESSAGE = (
     "cluster will not form over Ethernet/Thunderbolt (a Tailscale overlay, if "
     "present, is exempt and still works). Grant access: System Settings → "
     "Privacy & Security → Local Network → enable the app you launched Skulk "
-    "from (e.g. Terminal), then restart Skulk. See "
-    "website/docs/thunderbolt-clustering.md for details."
+    "from (e.g. Terminal), then restart Skulk. See the Thunderbolt clustering "
+    "guide in the Skulk documentation for details."
 )
