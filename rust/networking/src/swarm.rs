@@ -158,6 +158,27 @@ pub fn create_swarm(
         .filter_map(|s| s.parse().ok())
         .collect();
 
+    // TEMP DIAGNOSTIC: probe a plain blocking connect from inside skulk's own
+    // process, to isolate the EHOSTUNREACH-on-dial bug (which reproduces only
+    // inside skulk, never with a standalone socket). Logs the local source
+    // address the OS picks. Gated on SKULK_DIAL_PROBE=<ip:port>.
+    if let Ok(probe) = std::env::var("SKULK_DIAL_PROBE") {
+        if let Ok(addr) = probe.parse::<std::net::SocketAddr>() {
+            match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3)) {
+                Ok(stream) => log::warn!(
+                    "DIAL_PROBE connect {addr} OK local_addr={:?} peer_addr={:?}",
+                    stream.local_addr(),
+                    stream.peer_addr()
+                ),
+                Err(e) => log::warn!(
+                    "DIAL_PROBE connect {addr} FAILED kind={:?} os_errno={:?}",
+                    e.kind(),
+                    e.raw_os_error()
+                ),
+            }
+        }
+    }
+
     let mut swarm = SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
         .with_other_transport(tcp_transport)?
