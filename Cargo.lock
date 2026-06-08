@@ -4002,6 +4002,7 @@ dependencies = [
  "pyo3-log",
  "pyo3-stub-gen",
  "tokio",
+ "tracing-subscriber",
  "util",
 ]
 

@@ -125,7 +125,17 @@ impl Behaviour {
 
     fn dial(&mut self, peer_id: PeerId, addr: Multiaddr) {
         self.pending_events.push_back(ToSwarm::Dial {
-            opts: DialOpts::peer_id(peer_id).addresses(vec![addr]).build(),
+            // `allocate_new_port()` => PortUse::New: dial from a fresh ephemeral
+            // port instead of reusing (and binding to) a listen-socket address.
+            // On multi-interface hosts (Thunderbolt link-local, Tailscale utun,
+            // LAN) the default PortUse::Reuse binds the dial to a wrong/dead
+            // local source and connect() returns EHOSTUNREACH ("No route to
+            // host") even though OS routing to the peer is fine. A fresh port
+            // lets the kernel route-table pick the correct source interface.
+            opts: DialOpts::peer_id(peer_id)
+                .addresses(vec![addr])
+                .allocate_new_port()
+                .build(),
         })
     }
 
@@ -373,7 +383,13 @@ impl NetworkBehaviour for Behaviour {
             // dial bootstrap peers (for environments where mDNS is unavailable)
             for addr in &self.bootstrap_peers {
                 self.pending_events.push_back(ToSwarm::Dial {
-                    opts: DialOpts::unknown_peer_id().address(addr.clone()).build(),
+                    // allocate_new_port(): see `dial()` above — avoids the
+                    // PortUse::Reuse source-binding that yields EHOSTUNREACH on
+                    // multi-interface hosts.
+                    opts: DialOpts::unknown_peer_id()
+                        .address(addr.clone())
+                        .allocate_new_port()
+                        .build(),
                 })
             }
             self.retry_delay.reset(RETRY_CONNECT_INTERVAL) // reset timeout

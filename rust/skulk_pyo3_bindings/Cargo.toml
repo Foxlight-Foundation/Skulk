@@ -60,6 +60,10 @@ util = { workspace = true }
 # Tracing
 log = { workspace = true }
 env_logger = "0.11"
+# TEMP DIAGNOSTIC (debug/libp2p-cluster-discovery): surface libp2p's internal
+# `tracing` events (dial/transport level) which pyo3_log does not bridge.
+# Gated on RUST_LOG at runtime so production is unaffected.
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 
 # Networking
 libp2p = { workspace = true, features = ["full"] }

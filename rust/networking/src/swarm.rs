@@ -138,6 +138,48 @@ fn filter_swarm_event(event: SwarmEvent<BehaviourEvent>) -> Option<FromSwarm> {
             peer_id,
             ..
         })) => Some(FromSwarm::Expired { peer_id }),
+        // TEMP DIAGNOSTIC (cluster post-reboot peering): the swarm-level
+        // connection lifecycle is otherwise swallowed silently, so dial
+        // failures are invisible. Log them via `log::` (bridged to Python by
+        // pyo3_log) to find why LAN bootstrap peers never hold a session.
+        SwarmEvent::OutgoingConnectionError {
+            peer_id, error, ..
+        } => {
+            log::warn!("libp2p OutgoingConnectionError peer={peer_id:?} error={error}");
+            None
+        }
+        SwarmEvent::IncomingConnectionError {
+            local_addr,
+            send_back_addr,
+            error,
+            ..
+        } => {
+            log::warn!(
+                "libp2p IncomingConnectionError local={local_addr} from={send_back_addr} error={error}"
+            );
+            None
+        }
+        SwarmEvent::ConnectionEstablished {
+            peer_id,
+            num_established,
+            ..
+        } => {
+            log::warn!(
+                "libp2p ConnectionEstablished peer={peer_id} num_established={num_established}"
+            );
+            None
+        }
+        SwarmEvent::ConnectionClosed {
+            peer_id,
+            num_established,
+            cause,
+            ..
+        } => {
+            log::warn!(
+                "libp2p ConnectionClosed peer={peer_id} remaining={num_established} cause={cause:?}"
+            );
+            None
+        }
         _ => None,
     }
 }

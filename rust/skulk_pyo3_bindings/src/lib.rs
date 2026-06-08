@@ -155,6 +155,16 @@ pub(crate) mod ext {
 fn main_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // install logger
     pyo3_log::init();
+    // TEMP DIAGNOSTIC (debug/libp2p-cluster-discovery): when RUST_LOG is set,
+    // also install a tracing subscriber writing to stderr so libp2p's internal
+    // `tracing` events (e.g. libp2p_tcp "dialing address", transport errors)
+    // are visible — pyo3_log only bridges the `log` crate, not `tracing`.
+    if std::env::var_os("RUST_LOG").is_some() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
     pyo3_async_runtimes::tokio::init(builder);
