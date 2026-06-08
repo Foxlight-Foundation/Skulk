@@ -60,10 +60,21 @@ Click **Allow**. If you missed it (or are running over SSH and never saw it):
 Skulk detects this denial at startup and logs a warning telling you to grant
 access, so you are never left guessing.
 
+> **The grant follows the launching app.** macOS attributes Local Network
+> access to the app a process is launched *from*. Run Skulk from the **Terminal
+> you granted** (i.e. `uv run skulk` in that Terminal) and it inherits the
+> grant. A process **detached** from that Terminal — `nohup … &`, or some
+> background/service launchers that reparent it — is attributed separately and
+> may be denied even though the foreground command works. If you run Skulk
+> detached or as a background service and see the denial warning, grant Local
+> Network to that launcher too (see [Run as a service](./run-skulk-as-a-service)).
+
 > **Headless / SSH-only nodes:** macOS cannot show the Local Network prompt to
 > an SSH session, and there is no command-line way to grant the permission. Use
 > Screen Sharing (or a directly-attached display) once to enable Local Network
-> for Terminal in System Settings; the grant then persists across reboots.
+> for Terminal in System Settings; the grant then persists across reboots. Run
+> Skulk in a foreground/attached Terminal session (e.g. via `tmux`/`screen` on
+> the console) rather than a detached `nohup … &`, so it inherits that grant.
 > Alternatively, run the cluster over [Tailscale](./tailscale-clustering.md),
 > whose overlay interface is exempt from Local Network Privacy.
 
