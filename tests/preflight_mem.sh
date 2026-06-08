@@ -11,12 +11,16 @@
 # baseline (~2GB wired on the M4 kites). Wired above the threshold with zero
 # live runners == leaked memory; reboot to reclaim.
 #
-# The gate FAILS CLOSED: an unreachable node, an unreadable field, or a
-# parse failure flags the node rather than passing it — a gate that cannot
-# verify a node must not green-light it.
+# Fail-closed policy: an unreachable node or unreadable wired memory always
+# flags. When wired is OVER the threshold, anything that prevents confirming
+# the node is actively serving (diagnostics unreachable / not a NodeDiagnostics
+# payload) also flags — a high-wired node we can't clear must not be
+# green-lit. Wired BELOW the threshold is safe regardless of runner state.
 #
 # Usage: tests/preflight_mem.sh [node1 node2 ...]   (default: kite1 kite2 kite3)
-# Workstation-side: it SSHes each node (the kites can't ssh each other).
+# Node args are ssh targets: bare aliases (kite1) resolve per-node users via
+# ~/.ssh/config; pass user@host explicitly if you have no alias. Runs on the
+# workstation and SSHes each node (the kites can't ssh each other).
 set -uo pipefail
 NODES=("$@"); (( ${#NODES[@]} )) || NODES=(kite1 kite2 kite3)
 THRESHOLD_GB=5                     # idle baseline ~2GB; poisoned observed 13.2GB
@@ -40,8 +44,11 @@ for n in "${NODES[@]}"; do
     diag=$(curl -s --max-time 5 http://localhost:'"$API_PORT"'/v1/diagnostics/node)
     runners=$(printf "%s" "$diag" | python3 -c "import json,sys
 try:
-  rs=json.load(sys.stdin).get(\"supervisorRunners\",[])
-  print(sum(1 for r in rs if r.get(\"processAlive\")))
+  d=json.load(sys.stdin)
+  # Must be a real NodeDiagnostics payload; an error JSON (e.g. FastAPI
+  # {\"detail\":...} on 404) lacks supervisorRunners and is NOT a verified 0.
+  if not isinstance(d, dict) or \"supervisorRunners\" not in d: print(\"NA\")
+  else: print(sum(1 for r in d[\"supervisorRunners\"] if r.get(\"processAlive\")))
 except Exception: print(\"NA\")" 2>/dev/null || echo NA)
     echo "$ps $wp $runners"
   ' 2>/dev/null) || { echo "FAIL     $n: unreachable — cannot verify, failing preflight"; flagged=1; continue; }
@@ -76,7 +83,9 @@ except Exception: print(\"NA\")" 2>/dev/null || echo NA)
 done
 
 if [ "$flagged" = 1 ]; then
-  echo "PREFLIGHT FAIL: reboot flagged node(s) (osascript -e 'tell app \"System Events\" to restart') and re-run."
+  echo "PREFLIGHT FAIL: reboot each flagged node, then re-run. From this"
+  echo "workstation: ssh <node> 'osascript -e \"tell app \\\"System Events\\\" to restart\"'"
+  echo "(run remotely per node — NOT locally, which would reboot this workstation)."
   exit 1
 fi
 echo "PREFLIGHT OK: no leaked memory detected."
