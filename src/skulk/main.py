@@ -14,6 +14,10 @@ from pydantic import PositiveInt
 
 import skulk.routing.topics as topics
 from skulk.api.main import API
+from skulk.connectivity.local_network import (
+    LOCAL_NETWORK_DENIED_MESSAGE,
+    check_local_network_access,
+)
 from skulk.connectivity.tailscale import query_tailscale_status
 from skulk.download.coordinator import DownloadCoordinator
 from skulk.download.impl_shard_downloader import exo_shard_downloader
@@ -726,6 +730,12 @@ def main():
                 logger.info(
                     f"Tailscale: added {len(_extra)} bootstrap peer(s) from config"
                 )
+
+    # macOS Local Network Privacy: a denied process silently fails to reach LAN
+    # / Thunderbolt peers (EHOSTUNREACH), so cluster discovery never forms.
+    # Detect it early and tell the operator how to grant access.
+    if check_local_network_access() == "blocked":
+        logger.warning(LOCAL_NETWORK_DENIED_MESSAGE)
 
     if args.offline:
         logger.info("Running in OFFLINE mode — no internet checks, local models only")
