@@ -368,18 +368,21 @@ def validate_renderable_text_generation(
     Both are caught here, the single dispatch chokepoint shared by every wire
     format, so no adapter can route un-renderable work to a runner.
     """
-    # Mirror the runner's renderability test (utils_mlx builds
+    # Mirror the runner's renderability test EXACTLY (utils_mlx builds
     # formatted_messages): pre-formatted chat_template_messages or
-    # instructions render as-is, but the runner DROPS empty-content input
-    # messages before templating, so an empty resulting list crashes
-    # apply_chat_template with an IndexError. The chat adapter substitutes a
-    # single blank message for an empty `messages` array, which the runner
-    # then filters back to nothing — so "input is non-empty" is not a
-    # sufficient check; there must be actual content.
+    # instructions render as-is, but the runner drops input messages whose
+    # content is falsy (`if not msg.content: continue`) before templating,
+    # so an empty resulting list crashes apply_chat_template with an
+    # IndexError. The chat adapter substitutes a single empty-string
+    # message for an empty `messages` array, which the runner then filters
+    # back to nothing — so "input is non-empty" is not a sufficient check.
+    # Use the SAME truthiness test as the runner (not `.strip()`): a
+    # whitespace-only message is truthy and the runner renders it, so the
+    # guard must not reject inputs the runner can handle.
     has_renderable = (
         bool(task_params.chat_template_messages)
         or bool(task_params.instructions)
-        or any(msg.content.strip() for msg in task_params.input)
+        or any(msg.content for msg in task_params.input)
     )
     if not has_renderable:
         raise HTTPException(
