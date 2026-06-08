@@ -1,10 +1,9 @@
-# pyright: reportPrivateUsage=false
+# pyright: reportPrivateUsage=false, reportAny=false
 """Tests for macOS Local Network Privacy detection."""
 
 from __future__ import annotations
 
 import errno
-import socket
 from unittest import mock
 
 from skulk.connectivity import local_network
