@@ -14,6 +14,10 @@ from pydantic import PositiveInt
 
 import skulk.routing.topics as topics
 from skulk.api.main import API
+from skulk.connectivity.local_network import (
+    LOCAL_NETWORK_DENIED_MESSAGE,
+    check_local_network_access,
+)
 from skulk.connectivity.tailscale import query_tailscale_status
 from skulk.download.coordinator import DownloadCoordinator
 from skulk.download.impl_shard_downloader import exo_shard_downloader
@@ -716,16 +720,36 @@ def main():
             logger.warning(
                 "Tailscale connectivity configured but tailscaled is not running"
             )
-        if _ts_config.bootstrap_peers:
-            _seen = set(args.bootstrap_peers)
-            _extra = [p for p in _ts_config.bootstrap_peers if p not in _seen]
-            if _extra:
-                args = args.model_copy(
-                    update={"bootstrap_peers": args.bootstrap_peers + _extra}
-                )
-                logger.info(
-                    f"Tailscale: added {len(_extra)} bootstrap peer(s) from config"
-                )
+        # Auto-discover tailnet peers as bootstrap addresses so a Tailscale
+        # cluster needs no hand-maintained IP list — just `enabled: true`. Each
+        # peer is dialed on this node's libp2p port; non-Skulk tailnet peers
+        # fail the private-network handshake and are harmlessly ignored.
+        _auto_peers = [
+            f"/ip4/{ip}/tcp/{args.libp2p_port}" for ip in _ts_status.peer_ips
+        ]
+        # Merge auto-discovered + config-listed peers, de-duplicating against
+        # CLI/existing peers and each other while preserving order.
+        _seen = set(args.bootstrap_peers)
+        _extra: list[str] = []
+        for _peer in _auto_peers + list(_ts_config.bootstrap_peers):
+            if _peer not in _seen:
+                _seen.add(_peer)
+                _extra.append(_peer)
+        if _extra:
+            args = args.model_copy(
+                update={"bootstrap_peers": args.bootstrap_peers + _extra}
+            )
+            logger.info(
+                f"Tailscale: added {len(_extra)} bootstrap peer(s) "
+                f"({len(_auto_peers)} auto-discovered, "
+                f"{len(_ts_config.bootstrap_peers)} from config)"
+            )
+
+    # macOS Local Network Privacy: a denied process silently fails to reach LAN
+    # / Thunderbolt peers (EHOSTUNREACH), so cluster discovery never forms.
+    # Detect it early and tell the operator how to grant access.
+    if check_local_network_access() == "blocked":
+        logger.warning(LOCAL_NETWORK_DENIED_MESSAGE)
 
     if args.offline:
         logger.info("Running in OFFLINE mode — no internet checks, local models only")
@@ -843,9 +867,15 @@ class Args(CamelCaseModel):
         parser.add_argument(
             "--libp2p-port",
             type=int,
-            default=0,
+            # Default to a fixed, well-known port rather than an OS-assigned one
+            # so that bootstrap-peer multiaddrs (Tailscale, cross-subnet) have a
+            # predictable port to dial — a user can write
+            # /ip4/<peer>/tcp/52416 without first inspecting each node's random
+            # port. mDNS discovery advertises the real port either way, so this
+            # is harmless on a single local network. Pass 0 for OS-assigned.
+            default=int(os.getenv("SKULK_LIBP2P_PORT", "52416")),
             dest="libp2p_port",
-            help="Fixed TCP port for libp2p to listen on (0 = OS-assigned).",
+            help="Fixed TCP port for libp2p to listen on (default 52416; 0 = OS-assigned; env: SKULK_LIBP2P_PORT).",
         )
         fast_synch_group = parser.add_mutually_exclusive_group()
         fast_synch_group.add_argument(
