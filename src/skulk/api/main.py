@@ -307,6 +307,42 @@ _API_EVENT_LOG_CHECK_INTERVAL_APPENDS = 4096
 _PLACEMENT_INFO_WAIT_SECONDS = 15.0
 ONBOARDING_COMPLETE_FILE = SKULK_CACHE_HOME / "onboarding_complete"
 
+# A node with no live runners should sit near its idle wired baseline
+# (~2GB on the M4 kites). Wired well above that with nothing running means
+# memory leaked from an abnormal Metal termination (warmup-wedge SIGKILL,
+# GPU-timeout abort) that only a reboot reclaims (Skulk#239). The threshold
+# is a generous floor over the idle baseline; the signal is the leak, not a
+# precise number.
+_LEAKED_WIRED_THRESHOLD_BYTES = 5 * 1024 * 1024 * 1024
+
+
+def _leaked_wired_warning(
+    current_memory: "MemoryUsage | None",
+    supervisor_runners: "Sequence[RunnerSupervisorDiagnostics]",
+) -> str | None:
+    """Flag likely-leaked wired memory: high wired with no live runners.
+
+    Returns a human-readable warning, or None. macOS-only in practice (wired
+    is None elsewhere). Mirrors the test-side preflight
+    (tests/preflight_mem.sh): a poisoned node otherwise surfaces only as
+    unexplained placement 400s and decode GPU-timeouts (Skulk#236), so this
+    gives operators the actual cause — reboot to reclaim.
+    """
+    if current_memory is None or current_memory.wired is None:
+        return None
+    if any(runner.process_alive for runner in supervisor_runners):
+        return None
+    wired_bytes = current_memory.wired.in_bytes
+    if wired_bytes <= _LEAKED_WIRED_THRESHOLD_BYTES:
+        return None
+    return (
+        f"Likely leaked wired memory: {wired_bytes / 2**30:.1f} GB wired with "
+        "no live runners. An abnormal Metal termination (warmup wedge or GPU "
+        "timeout) can leave wired memory the OS only reclaims on reboot, "
+        "causing false 'insufficient memory' placements and decode timeouts. "
+        "Reboot this node to reclaim it."
+    )
+
 
 def prune_old_trace_files(directory: Path, retention_days: int, now: float) -> int:
     """Delete saved trace files in *directory* whose mtime is older than the
@@ -3898,17 +3934,21 @@ class API:
 
         supervisor_runners = self._collect_runner_supervisor_diagnostics()
         placements = self._placement_diagnostics()
+        resources = self._resource_diagnostics()
         warnings = {
             warning for placement in placements for warning in placement.warnings
         }
         warnings.update(
             self._augment_runner_divergence_warnings(placements, supervisor_runners)
         )
+        leak = _leaked_wired_warning(resources.current_memory, supervisor_runners)
+        if leak is not None:
+            warnings.add(leak)
         return NodeDiagnostics(
             generated_at=datetime.now(tz=timezone.utc).isoformat(),
             runtime=self._runtime_diagnostics(),
             identity=self.state.node_identities.get(self.node_id),
-            resources=self._resource_diagnostics(),
+            resources=resources,
             processes=self._collect_process_diagnostics(supervisor_runners),
             supervisor_runners=supervisor_runners,
             placements=placements,
