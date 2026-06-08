@@ -57,3 +57,21 @@ def test_missing_self_returns_nones() -> None:
     assert status.hostname is None
     assert status.dns_name is None
     assert status.tailnet is None
+
+
+def test_peer_ips_collected_from_peer_map() -> None:
+    raw: dict[str, Any] = {
+        "BackendState": "Running",
+        "Self": {"TailscaleIPs": ["100.64.0.1"]},
+        "Peer": {
+            "keyA": {"TailscaleIPs": ["100.64.0.2", "fd7a::2"]},
+            "keyB": {"TailscaleIPs": ["100.64.0.3"]},
+        },
+    }
+    status = parse_status_json(raw)
+    assert status.peer_ips == ("100.64.0.2", "100.64.0.3")
+
+
+def test_peer_ips_empty_when_no_peers() -> None:
+    raw: dict[str, Any] = {"BackendState": "Running", "Self": {}}
+    assert parse_status_json(raw).peer_ips == ()

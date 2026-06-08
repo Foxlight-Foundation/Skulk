@@ -720,16 +720,30 @@ def main():
             logger.warning(
                 "Tailscale connectivity configured but tailscaled is not running"
             )
-        if _ts_config.bootstrap_peers:
-            _seen = set(args.bootstrap_peers)
-            _extra = [p for p in _ts_config.bootstrap_peers if p not in _seen]
-            if _extra:
-                args = args.model_copy(
-                    update={"bootstrap_peers": args.bootstrap_peers + _extra}
-                )
-                logger.info(
-                    f"Tailscale: added {len(_extra)} bootstrap peer(s) from config"
-                )
+        # Auto-discover tailnet peers as bootstrap addresses so a Tailscale
+        # cluster needs no hand-maintained IP list — just `enabled: true`. Each
+        # peer is dialed on this node's libp2p port; non-Skulk tailnet peers
+        # fail the private-network handshake and are harmlessly ignored.
+        _auto_peers = [
+            f"/ip4/{ip}/tcp/{args.libp2p_port}" for ip in _ts_status.peer_ips
+        ]
+        # Merge auto-discovered + config-listed peers, de-duplicating against
+        # CLI/existing peers and each other while preserving order.
+        _seen = set(args.bootstrap_peers)
+        _extra: list[str] = []
+        for _peer in _auto_peers + list(_ts_config.bootstrap_peers):
+            if _peer not in _seen:
+                _seen.add(_peer)
+                _extra.append(_peer)
+        if _extra:
+            args = args.model_copy(
+                update={"bootstrap_peers": args.bootstrap_peers + _extra}
+            )
+            logger.info(
+                f"Tailscale: added {len(_extra)} bootstrap peer(s) "
+                f"({len(_auto_peers)} auto-discovered, "
+                f"{len(_ts_config.bootstrap_peers)} from config)"
+            )
 
     # macOS Local Network Privacy: a denied process silently fails to reach LAN
     # / Thunderbolt peers (EHOSTUNREACH), so cluster discovery never forms.

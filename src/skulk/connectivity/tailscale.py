@@ -38,6 +38,10 @@ class TailscaleStatus(FrozenModel):
             ``tailnet-abc.ts.net``.  ``None`` when dns_name is absent or
             cannot be parsed.
         version: The tailscale client version string.
+        peer_ips: The Tailscale IPv4 (``100.x``) addresses of all other nodes
+            in the tailnet. Used to auto-populate libp2p bootstrap peers so a
+            Tailscale cluster needs no hand-maintained IP list — non-Skulk peers
+            simply fail the private-network handshake and are ignored.
     """
 
     running: bool = Field(description="True when tailscaled reports BackendState == 'Running'.")
@@ -46,6 +50,9 @@ class TailscaleStatus(FrozenModel):
     dns_name: str | None = Field(default=None, description="Fully-qualified Tailscale MagicDNS name.")
     tailnet: str | None = Field(default=None, description="Tailnet name derived from dns_name.")
     version: str | None = Field(default=None, description="Tailscale client version string.")
+    peer_ips: tuple[str, ...] = Field(
+        default=(), description="Tailscale IPv4 addresses (100.x) of other tailnet nodes."
+    )
 
 
 def parse_status_json(raw: dict[str, Any]) -> TailscaleStatus:
@@ -76,6 +83,17 @@ def parse_status_json(raw: dict[str, Any]) -> TailscaleStatus:
 
     version: str | None = raw.get("Version") or None
 
+    # Collect every peer's first Tailscale IPv4 (100.x) address. The "Peer" map
+    # is keyed by node public key; each value carries that peer's TailscaleIPs.
+    peers: dict[str, Any] = raw.get("Peer") or {}
+    peer_ips: list[str] = []
+    for key in peers:
+        peer: dict[str, Any] = peers.get(key) or {}
+        ips: list[str] = peer.get("TailscaleIPs") or []
+        peer_ip = next((ip for ip in ips if ip.startswith("100.")), None)
+        if peer_ip is not None:
+            peer_ips.append(peer_ip)
+
     return TailscaleStatus(
         running=running,
         self_ip=self_ip,
@@ -83,6 +101,7 @@ def parse_status_json(raw: dict[str, Any]) -> TailscaleStatus:
         dns_name=dns_name,
         tailnet=tailnet,
         version=version,
+        peer_ips=tuple(peer_ips),
     )
 
 
