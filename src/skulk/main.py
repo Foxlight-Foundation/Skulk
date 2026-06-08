@@ -853,9 +853,15 @@ class Args(CamelCaseModel):
         parser.add_argument(
             "--libp2p-port",
             type=int,
-            default=0,
+            # Default to a fixed, well-known port rather than an OS-assigned one
+            # so that bootstrap-peer multiaddrs (Tailscale, cross-subnet) have a
+            # predictable port to dial — a user can write
+            # /ip4/<peer>/tcp/52416 without first inspecting each node's random
+            # port. mDNS discovery advertises the real port either way, so this
+            # is harmless on a single local network. Pass 0 for OS-assigned.
+            default=int(os.getenv("SKULK_LIBP2P_PORT", "52416")),
             dest="libp2p_port",
-            help="Fixed TCP port for libp2p to listen on (0 = OS-assigned).",
+            help="Fixed TCP port for libp2p to listen on (default 52416; 0 = OS-assigned; env: SKULK_LIBP2P_PORT).",
         )
         fast_synch_group = parser.add_mutually_exclusive_group()
         fast_synch_group.add_argument(
