@@ -158,23 +158,45 @@ pub fn create_swarm(
         .filter_map(|s| s.parse().ok())
         .collect();
 
-    // TEMP DIAGNOSTIC: probe a plain blocking connect from inside skulk's own
-    // process, to isolate the EHOSTUNREACH-on-dial bug (which reproduces only
-    // inside skulk, never with a standalone socket). Logs the local source
-    // address the OS picks. Gated on SKULK_DIAL_PROBE=<ip:port>.
+    // TEMP DIAGNOSTIC: probe blocking connects from inside skulk's own process,
+    // to isolate the EHOSTUNREACH-on-dial bug (reproduces only inside skulk).
+    // SKULK_DIAL_PROBE=<ip:port> is the destination; SKULK_DIAL_PROBE_SRC is an
+    // optional comma list of local source IPs to bind before connecting. Logs
+    // the source the OS picks (unbound) and which explicit sources can route.
     if let Ok(probe) = std::env::var("SKULK_DIAL_PROBE") {
         if let Ok(addr) = probe.parse::<std::net::SocketAddr>() {
+            use socket2::{Domain, Protocol, Socket, Type};
+            // unbound (what skulk does today)
             match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3)) {
-                Ok(stream) => log::warn!(
-                    "DIAL_PROBE connect {addr} OK local_addr={:?} peer_addr={:?}",
-                    stream.local_addr(),
-                    stream.peer_addr()
-                ),
+                Ok(s) => log::warn!("DIAL_PROBE unbound {addr} OK local={:?}", s.local_addr()),
                 Err(e) => log::warn!(
-                    "DIAL_PROBE connect {addr} FAILED kind={:?} os_errno={:?}",
+                    "DIAL_PROBE unbound {addr} FAIL kind={:?} os={:?}",
                     e.kind(),
                     e.raw_os_error()
                 ),
+            }
+            // each candidate source IP, bound before connect
+            for src in std::env::var("SKULK_DIAL_PROBE_SRC")
+                .unwrap_or_default()
+                .split(',')
+                .filter(|s| !s.is_empty())
+            {
+                let Ok(src_ip) = src.parse::<std::net::IpAddr>() else {
+                    continue;
+                };
+                let r = (|| -> std::io::Result<()> {
+                    let sock = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+                    sock.bind(&std::net::SocketAddr::new(src_ip, 0).into())?;
+                    sock.connect(&addr.into())
+                })();
+                match r {
+                    Ok(()) => log::warn!("DIAL_PROBE src {src_ip} -> {addr} OK"),
+                    Err(e) => log::warn!(
+                        "DIAL_PROBE src {src_ip} -> {addr} FAIL kind={:?} os={:?}",
+                        e.kind(),
+                        e.raw_os_error()
+                    ),
+                }
             }
         }
     }

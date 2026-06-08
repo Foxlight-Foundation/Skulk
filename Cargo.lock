@@ -2771,6 +2771,7 @@ dependencies = [
  "libp2p",
  "log",
  "pin-project",
+ "socket2 0.5.10",
  "tokio",
  "tracing-subscriber",
  "util",

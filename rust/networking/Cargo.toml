@@ -15,6 +15,8 @@ workspace = true
 [dependencies]
 # datastructures
 either = { workspace = true }
+# TEMP DIAGNOSTIC (feature/thunderbolt-clustering): source-bind dial probe
+socket2 = { version = "0.5", features = ["all"] }
 
 # macro dependencies
 extend = { workspace = true }
