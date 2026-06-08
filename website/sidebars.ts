@@ -22,6 +22,7 @@ const sidebars: SidebarsConfig = {
       items: [
         "api-guide",
         "build-and-runtime",
+        "thunderbolt-clustering",
         "run-skulk-as-a-service",
         "external-logging",
         {
