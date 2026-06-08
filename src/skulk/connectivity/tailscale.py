@@ -11,12 +11,40 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shutil
 from typing import Any, final
 
 from loguru import logger
 from pydantic import Field
 
 from skulk.utils.pydantic_ext import FrozenModel
+
+# Common locations of the `tailscale` CLI. We resolve the binary explicitly
+# rather than relying on PATH, because Skulk is frequently launched from a
+# context with a minimal PATH (launchd agent, ssh, systemd) that does not
+# include /usr/local/bin where the standalone macOS installer puts it.
+_TAILSCALE_BINARY_CANDIDATES = (
+    "/usr/local/bin/tailscale",
+    "/opt/homebrew/bin/tailscale",
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    "/usr/bin/tailscale",  # common on Linux
+)
+
+
+def _resolve_tailscale_binary() -> str | None:
+    """Return a path to the ``tailscale`` CLI, or ``None`` if not found.
+
+    Prefers a PATH lookup (honours a user's custom install) and falls back to
+    well-known install locations.
+    """
+    found = shutil.which("tailscale")
+    if found:
+        return found
+    return next(
+        (path for path in _TAILSCALE_BINARY_CANDIDATES if os.access(path, os.X_OK)),
+        None,
+    )
 
 
 @final
@@ -115,10 +143,15 @@ async def query_tailscale_status() -> TailscaleStatus:
 
     _not_running = TailscaleStatus(running=False)
 
+    binary = _resolve_tailscale_binary()
+    if binary is None:
+        logger.debug("tailscale binary not found; Tailscale not installed")
+        return _not_running
+
     try:
         process = await asyncio.wait_for(
             asyncio.create_subprocess_exec(
-                "tailscale",
+                binary,
                 "status",
                 "--json",
                 stdout=asyncio.subprocess.PIPE,
