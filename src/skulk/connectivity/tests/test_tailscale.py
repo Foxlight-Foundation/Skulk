@@ -69,9 +69,9 @@ def test_peer_ips_collected_from_peer_map() -> None:
         },
     }
     status = parse_status_json(raw)
-    assert status.peer_ips == ("100.64.0.2", "100.64.0.3")
+    assert status.peer_ips == ["100.64.0.2", "100.64.0.3"]
 
 
 def test_peer_ips_empty_when_no_peers() -> None:
     raw: dict[str, Any] = {"BackendState": "Running", "Self": {}}
-    assert parse_status_json(raw).peer_ips == ()
+    assert parse_status_json(raw).peer_ips == []

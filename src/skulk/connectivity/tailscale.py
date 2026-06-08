@@ -78,8 +78,9 @@ class TailscaleStatus(FrozenModel):
     dns_name: str | None = Field(default=None, description="Fully-qualified Tailscale MagicDNS name.")
     tailnet: str | None = Field(default=None, description="Tailnet name derived from dns_name.")
     version: str | None = Field(default=None, description="Tailscale client version string.")
-    peer_ips: tuple[str, ...] = Field(
-        default=(), description="Tailscale IPv4 addresses (100.x) of other tailnet nodes."
+    peer_ips: list[str] = Field(
+        default_factory=list,
+        description="Tailscale IPv4 addresses (100.x) of other tailnet nodes.",
     )
 
 
@@ -129,7 +130,7 @@ def parse_status_json(raw: dict[str, Any]) -> TailscaleStatus:
         dns_name=dns_name,
         tailnet=tailnet,
         version=version,
-        peer_ips=tuple(peer_ips),
+        peer_ips=peer_ips,
     )
 
 
