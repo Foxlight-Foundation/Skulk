@@ -1,4 +1,3 @@
-# pyright: reportPrivateUsage=false
 """Tests for the text-generation renderability guard (#233).
 
 An empty ``messages`` array was accepted with 200 and then crashed the

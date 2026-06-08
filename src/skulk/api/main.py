@@ -371,7 +371,10 @@ def validate_renderable_text_generation(
     if not task_params.input and not task_params.chat_template_messages:
         raise HTTPException(
             status_code=400,
-            detail="messages must not be empty",
+            detail=(
+                "the request has no messages to generate from "
+                "(messages / input must not be empty)"
+            ),
         )
     if (
         task_params.max_output_tokens is not None
@@ -379,7 +382,9 @@ def validate_renderable_text_generation(
     ):
         raise HTTPException(
             status_code=400,
-            detail="max_tokens must be a positive integer",
+            detail=(
+                "max_tokens (max_output_tokens) must be a positive integer"
+            ),
         )
 
 
