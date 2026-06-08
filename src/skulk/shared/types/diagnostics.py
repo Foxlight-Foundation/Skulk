@@ -525,6 +525,15 @@ class NodeResourceDiagnostics(CamelCaseModel):
         default=None,
         description="Live memory reading from the API process.",
     )
+    current_wired: Memory | None = Field(
+        default=None,
+        description=(
+            "Live OS-level wired (unpageable) memory in use (macOS only). "
+            "Read locally on this endpoint — deliberately NOT on the gossiped "
+            "MemoryUsage, whose schema rides extra=forbid events — to detect "
+            "leaked wired memory after an abnormal Metal termination (#239)."
+        ),
+    )
     disk: DiskUsage | None = Field(
         default=None,
         description="Last event-sourced disk reading for this node.",

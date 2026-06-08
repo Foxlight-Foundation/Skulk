@@ -297,8 +297,9 @@ Note: there is no `master_node_id` field on `State`. Master identity lives outsi
 
 `src/skulk/shared/types/diagnostics.py`. Major models:
 
-- `NodeDiagnostics` — runtime + identity + resources + processes + supervisor_runners + placements + warnings. `warnings` includes a **leaked-wired-memory** alert (`_leaked_wired_warning` in `api/main.py`): emitted when `resources.current_memory.wired` exceeds ~5GB with zero `process_alive` runners — the signature of wired memory leaked by an abnormal Metal termination that only a reboot reclaims (#239). Server-side counterpart of `tests/preflight_mem.sh`.
-- `MemoryUsage` — ram_total, ram_available, swap_total, swap_available, **wired** (OS-level wired in use; macOS-only via psutil — MLX's own accounting can't see leaked wired)
+- `NodeDiagnostics` — runtime + identity + resources + processes + supervisor_runners + placements + warnings. `warnings` includes a **leaked-wired-memory** alert (`_leaked_wired_warning` in `src/skulk/api/main.py`): emitted when `resources.current_wired` exceeds ~5GB with zero `process_alive` runners — the signature of wired memory leaked by an abnormal Metal termination that only a reboot reclaims (#239). Server-side counterpart of `tests/preflight_mem.sh`.
+- `NodeResourceDiagnostics` — gathered_memory, current_memory, **current_wired** (OS-level wired in use; macOS-only via `read_wired_memory_bytes`/psutil — MLX's own accounting can't see leaked wired), disk, system, network. `current_wired` is read locally on the diagnostics path and deliberately kept OFF the gossiped `MemoryUsage` so the `NodeGatheredInfo` event wire format is unchanged across a mixed-version rollout.
+- `MemoryUsage` — ram_total, ram_available, swap_total, swap_available
 - `RunnerSupervisorDiagnostics` — flight_recorder, status, phase, MLX memory, in_progress_tasks, milestones
 - `RunnerFlightRecorderEntry` — at, phase, event, detail, attrs, context, mlxMemory
 - `MlxMemorySnapshot` — active, cache, peak, wired_limit (MLX's configured limit, not OS wired usage)

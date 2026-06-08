@@ -243,7 +243,7 @@ from skulk.shared.types.events import (
     TracesMerged,
 )
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.profiling import MemoryUsage
+from skulk.shared.types.profiling import MemoryUsage, read_wired_memory_bytes
 from skulk.shared.types.state import State
 from skulk.shared.types.text_generation import TextGenerationTaskParams
 from skulk.shared.types.worker.downloads import DownloadCompleted
@@ -317,7 +317,7 @@ _LEAKED_WIRED_THRESHOLD_BYTES = 5 * 1024 * 1024 * 1024
 
 
 def _leaked_wired_warning(
-    current_memory: "MemoryUsage | None",
+    wired: "Memory | None",
     supervisor_runners: "Sequence[RunnerSupervisorDiagnostics]",
 ) -> str | None:
     """Flag likely-leaked wired memory: high wired with no live runners.
@@ -328,11 +328,11 @@ def _leaked_wired_warning(
     unexplained placement 400s and decode GPU-timeouts (Skulk#236), so this
     gives operators the actual cause — reboot to reclaim.
     """
-    if current_memory is None or current_memory.wired is None:
+    if wired is None:
         return None
     if any(runner.process_alive for runner in supervisor_runners):
         return None
-    wired_bytes = current_memory.wired.in_bytes
+    wired_bytes = wired.in_bytes
     if wired_bytes <= _LEAKED_WIRED_THRESHOLD_BYTES:
         return None
     return (
@@ -3918,12 +3918,19 @@ class API:
         """Build local resource diagnostics from gathered state and psutil."""
 
         current_memory = None
+        current_wired = None
         with contextlib.suppress(Exception):
             current_memory = MemoryUsage.from_psutil(override_memory=None)
+        with contextlib.suppress(Exception):
+            wired_bytes = read_wired_memory_bytes()
+            current_wired = (
+                Memory.from_bytes(wired_bytes) if wired_bytes is not None else None
+            )
 
         return NodeResourceDiagnostics(
             gathered_memory=self.state.node_memory.get(self.node_id),
             current_memory=current_memory,
+            current_wired=current_wired,
             disk=self.state.node_disk.get(self.node_id),
             system=self.state.node_system.get(self.node_id),
             network=self.state.node_network.get(self.node_id),
@@ -3941,7 +3948,7 @@ class API:
         warnings.update(
             self._augment_runner_divergence_warnings(placements, supervisor_runners)
         )
-        leak = _leaked_wired_warning(resources.current_memory, supervisor_runners)
+        leak = _leaked_wired_warning(resources.current_wired, supervisor_runners)
         if leak is not None:
             warnings.add(leak)
         return NodeDiagnostics(
