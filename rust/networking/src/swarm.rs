@@ -206,7 +206,17 @@ pub fn create_swarm(
         .with_behaviour(|keypair| Behaviour::new(keypair, parsed_bootstrap_peers))?
         .build();
 
-    swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{listen_port}").parse()?)?;
+    // Default: listen on all interfaces. But on a host with degraded
+    // Thunderbolt (link-local 169.254 only) + Tailscale, libp2p registers every
+    // interface for port reuse, and outbound dials get sourced from a
+    // link-local interface that cannot route to a LAN peer => EHOSTUNREACH.
+    // TEMP DIAGNOSTIC (debug/libp2p-cluster-discovery): SKULK_LIBP2P_LISTEN_IP
+    // overrides the bind address so we can listen on a single real interface
+    // (e.g. en0's LAN IP) and confirm that keeps the link-locals out of the
+    // dial-source pool.
+    let listen_ip =
+        std::env::var("SKULK_LIBP2P_LISTEN_IP").unwrap_or_else(|_| "0.0.0.0".to_string());
+    swarm.listen_on(format!("/ip4/{listen_ip}/tcp/{listen_port}").parse()?)?;
     Ok(Swarm { swarm, from_client })
 }
 
