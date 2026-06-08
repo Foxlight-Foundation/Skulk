@@ -39,7 +39,7 @@ def test_empty_messages_rejected() -> None:
     with pytest.raises(HTTPException) as exc:
         validate_renderable_text_generation(_params(input=[]))
     assert exc.value.status_code == 400
-    assert "messages" in str(exc.value.detail).lower()
+    assert "content" in str(exc.value.detail).lower()
 
 
 def test_empty_input_and_empty_template_rejected() -> None:
@@ -48,6 +48,36 @@ def test_empty_input_and_empty_template_rejected() -> None:
             _params(input=[], chat_template_messages=[])
         )
     assert exc.value.status_code == 400
+
+
+def test_blank_content_message_rejected() -> None:
+    # The chat adapter substitutes [InputMessage(role="user", content="")]
+    # for an empty `messages` array; the runner filters blank content back
+    # to an empty list and crashes. The guard must catch this masked case,
+    # not just a literally-empty input list (#233 — the bug the first fix
+    # missed because `input` looked non-empty).
+    with pytest.raises(HTTPException) as exc:
+        validate_renderable_text_generation(
+            _params(input=[InputMessage(role="user", content="")])
+        )
+    assert exc.value.status_code == 400
+
+
+def test_whitespace_only_content_passes() -> None:
+    # The guard mirrors the runner's filter exactly (`if not msg.content`):
+    # whitespace-only content is truthy, so the runner renders it and the
+    # guard must NOT reject it — being stricter than the runner would 400
+    # inputs the runner can handle (review catch on PR #235).
+    validate_renderable_text_generation(
+        _params(input=[InputMessage(role="user", content="   \n\t ")])
+    )
+
+
+def test_instructions_only_request_passes() -> None:
+    # A system-only request renders fine (instructions become a system turn).
+    validate_renderable_text_generation(
+        _params(input=[InputMessage(role="user", content="")], instructions="be brief")
+    )
 
 
 def test_zero_max_tokens_rejected() -> None:
