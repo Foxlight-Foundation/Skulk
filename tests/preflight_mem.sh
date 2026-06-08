@@ -30,7 +30,13 @@ for n in "${NODES[@]}"; do
     wp=$(vm_stat | awk "/wired/{gsub(/[^0-9]/,\"\",\$NF); print \$NF}")
     runners=$(curl -s --max-time 5 http://localhost:'"$API_PORT"'/v1/diagnostics/node \
       | python3 -c "import json,sys
-try: print(len(json.load(sys.stdin).get(\"supervisorRunners\",[])))
+try:
+  rs=json.load(sys.stdin).get(\"supervisorRunners\",[])
+  # Only LIVE subprocesses hold memory. supervisorRunners retains entries
+  # for crashed/killed runners (processAlive=false) — counting those would
+  # read a poisoned node (its runners warmup-killed) as OK, the exact
+  # false negative this gate must avoid.
+  print(sum(1 for r in rs if r.get(\"processAlive\")))
 except Exception: print(0)" 2>/dev/null || echo 0)
     echo "$ps $wp $runners"
   ' 2>/dev/null) || { echo "FAIL $n: unreachable — cannot verify, failing preflight"; flagged=1; continue; }
