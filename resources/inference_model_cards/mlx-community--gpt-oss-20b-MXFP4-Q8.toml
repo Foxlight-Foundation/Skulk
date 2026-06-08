@@ -29,5 +29,5 @@ output_parser = "gpt_oss"
 # command-queue stall, same as the gemma4 cards). Verified 2026-06-07:
 # with the flag off, single-node warmup clears in ~8s and the model
 # serves correct harmony output; left on, warmup hits the 300s deadline
-# and the runner is killed. (Skulk#236)
+# and the runner is killed. (#236)
 metal_fast_synch = false
