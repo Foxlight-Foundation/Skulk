@@ -95,7 +95,11 @@ function transformTopology(
       mactop_info: {
         memory: { ram_usage: ramUsage, ram_total: ramTotal },
         temp: sys?.temp != null ? { gpu_temp_avg: Math.max(30, sys.temp) } : undefined,
-        gpu_usage: sys?.gpuUsage != null && sys.gpuUsage > 0 ? [0, sys.gpuUsage] : undefined,
+        // `sys.gpuUsage` is a 0–100 percent; MactopInfo.gpu_usage[1] (and the
+        // stories) carry a 0–1 fraction that ClusterNode re-multiplies by 100.
+        // Divide here so the GPU bar isn't rendered 100× too high.
+        gpu_usage:
+          sys?.gpuUsage != null && sys.gpuUsage > 0 ? [0, sys.gpuUsage / 100] : undefined,
         sys_power: sys?.sysPower,
       },
       last_mactop_update: Date.now() / 1000,

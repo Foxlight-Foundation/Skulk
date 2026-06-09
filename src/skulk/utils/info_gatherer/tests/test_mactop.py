@@ -1,4 +1,7 @@
-from skulk.utils.info_gatherer.mactop import MactopMetrics
+from pydantic import TypeAdapter
+
+from skulk.utils.info_gatherer.info_gatherer import GatheredInfo
+from skulk.utils.info_gatherer.mactop import MacmonMetrics, MactopMetrics
 
 # A representative `mactop --headless --format json` line (trimmed; real output
 # also carries net_disk, gpu_metrics, core_usages, tflops_* — all ignored).
@@ -42,3 +45,22 @@ def test_ignores_unknown_fields():
     noisy = _SAMPLE[:-1] + ',"some_future_field":{"nested":1}}'
     m = MactopMetrics.from_raw_json(noisy)
     assert m.system_profile.gpu_usage == 8.66
+
+
+def test_old_macmon_event_still_decodes():
+    # Rolling-upgrade back-compat: NodeGatheredInfo.info is gossiped/replayed, so
+    # a node on the new build must still decode the `{"MacmonMetrics": ...}` tag
+    # emitted by macOS workers still on the pre-mactop build, onto the same
+    # normalized system_profile/memory shape (no telemetry gap mid-upgrade).
+    mactop = MactopMetrics.from_raw_json(_SAMPLE)
+    macmon = MacmonMetrics(
+        system_profile=mactop.system_profile, memory=mactop.memory
+    )
+    wire = macmon.model_dump_json()
+    assert '"MacmonMetrics"' in wire  # TaggedModel keys by class name
+
+    adapter: TypeAdapter[GatheredInfo] = TypeAdapter(GatheredInfo)
+    decoded = adapter.validate_json(wire)
+    assert isinstance(decoded, MacmonMetrics)
+    assert decoded.system_profile.gpu_usage == 8.66
+    assert decoded.memory.ram_total.in_bytes == 17179869184

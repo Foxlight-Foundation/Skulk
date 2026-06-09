@@ -27,7 +27,15 @@ This project records release notes here and mirrors public-facing notes in
   the nix dev shell + package wrapper (`pkgs.mactop`), and the PyInstaller
   bundle. When mactop is absent the gatherer still falls back to psutil for
   memory. (mactop's reported `available` RAM equals `total − used`, the same
-  figure macmon derived, so placement margins are unchanged.)
+  figure macmon derived, so placement margins are unchanged.) The gossiped
+  `NodeGatheredInfo` event keeps a decode-only `MacmonMetrics` shim so a
+  newly-upgraded node still applies telemetry from macOS workers on the
+  pre-mactop build during a rolling upgrade. A blank or unparseable line from
+  mactop is now skipped rather than tearing down and respawning the subprocess.
+- **Topology GPU bar no longer renders 100× too high.** The dashboard treated
+  `SystemPerformanceProfile.gpuUsage` (a 0–100 percent) as a 0–1 fraction and
+  re-multiplied it by 100, so e.g. 8.66% GPU showed as 866%. It is now
+  converted to a fraction when populating the node's monitoring snapshot.
 
 ### Changed
 

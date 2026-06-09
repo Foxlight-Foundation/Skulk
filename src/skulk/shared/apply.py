@@ -45,6 +45,7 @@ from skulk.shared.types.worker.downloads import DownloadProgress
 from skulk.shared.types.worker.instances import Instance, InstanceId
 from skulk.shared.types.worker.runners import RunnerId, RunnerShutdown, RunnerStatus
 from skulk.utils.info_gatherer.info_gatherer import (
+    MacmonMetrics,
     MacThunderboltConnections,
     MacThunderboltIdentifiers,
     MactopMetrics,
@@ -339,7 +340,9 @@ def apply_node_gathered_info(event: NodeGatheredInfo, state: State) -> State:
     }
 
     match info:
-        case MactopMetrics():
+        # MacmonMetrics is a decode-only shim for rolling upgrades; it carries
+        # the same normalized system_profile/memory shape as MactopMetrics.
+        case MactopMetrics() | MacmonMetrics():
             update["node_system"] = {
                 **state.node_system,
                 event.node_id: info.system_profile,

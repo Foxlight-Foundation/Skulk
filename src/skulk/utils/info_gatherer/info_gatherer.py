@@ -31,7 +31,7 @@ from skulk.utils.channels import Sender
 from skulk.utils.pydantic_ext import TaggedModel
 from skulk.utils.task_group import TaskGroup
 
-from .mactop import MactopMetrics
+from .mactop import MacmonMetrics, MactopMetrics
 from .system_info import (
     get_friendly_name,
     get_model_and_chip,
@@ -398,6 +398,9 @@ async def _gather_iface_map() -> dict[str, str] | None:
 
 GatheredInfo = (
     MactopMetrics
+    # Decode-only: lets a newly-upgraded node still apply telemetry from macOS
+    # workers on a pre-mactop build during a rolling upgrade (see MacmonMetrics).
+    | MacmonMetrics
     | MemoryUsage
     | NodeNetworkInterfaces
     | MacThunderboltIdentifiers
@@ -615,12 +618,23 @@ class InfoGatherer:
                         return
                     stream = BufferedByteReceiveStream(p.stdout)
                     while True:
+                        # Only the read is timeout-guarded; parsing/sending are
+                        # not I/O against mactop.
                         with fail_after(read_timeout):
                             data = await stream.receive_until(
                                 delimiter=b"\n", max_bytes=64 * 1024
                             )
-                            text = data.decode("utf-8", errors="replace").strip()
+                        text = data.decode("utf-8", errors="replace").strip()
+                        # A blank or partial line (e.g. mactop startup/shutdown)
+                        # must not tear down the whole subprocess — skip it and
+                        # keep reading so telemetry doesn't flap.
+                        if not text:
+                            continue
+                        try:
                             metrics = MactopMetrics.from_raw_json(text)
+                        except ValidationError as e:
+                            logger.warning(f"Skipping unparseable mactop line: {e}")
+                            continue
                         await self.info_sender.send(metrics)
             except TimeoutError:
                 logger.warning(

@@ -79,3 +79,22 @@ class MactopMetrics(TaggedModel):
     @classmethod
     def from_raw_json(cls, json: str) -> Self:
         return cls.from_raw(RawMactopMetrics.model_validate_json(json))
+
+
+class MacmonMetrics(TaggedModel):
+    """Read-only decode shim for the former macmon telemetry event.
+
+    macmon no longer runs (its IOGPUFamily polling crashed MLX — see
+    ``RawMactopMetrics``), but ``NodeGatheredInfo.info`` is gossiped over the
+    wire and replayed from the retained session tail. During a rolling upgrade,
+    macOS workers still on the old build keep publishing ``{"MacmonMetrics": …}``
+    events; without a matching union member a newly-upgraded master/consumer
+    would reject them and silently lose those nodes' memory/system telemetry
+    until every node restarts together. The normalized on-wire shape is
+    identical to :class:`MactopMetrics` (``system_profile`` + ``memory``), so we
+    keep this tag decodable and apply it on the same path. Safe to delete once
+    no node can still be running a macmon-era build.
+    """
+
+    system_profile: SystemPerformanceProfile
+    memory: MemoryUsage
