@@ -92,13 +92,17 @@ function transformTopology(
       },
       network_interfaces: networkInterfaces,
       ip_to_interface: ipToInterface,
-      macmon_info: {
+      mactop_info: {
         memory: { ram_usage: ramUsage, ram_total: ramTotal },
         temp: sys?.temp != null ? { gpu_temp_avg: Math.max(30, sys.temp) } : undefined,
-        gpu_usage: sys?.gpuUsage != null && sys.gpuUsage > 0 ? [0, sys.gpuUsage] : undefined,
+        // `sys.gpuUsage` is a 0–100 percent; MactopInfo.gpu_usage[1] (and the
+        // stories) carry a 0–1 fraction that ClusterNode re-multiplies by 100.
+        // Divide here so the GPU bar isn't rendered 100× too high.
+        gpu_usage:
+          sys?.gpuUsage != null && sys.gpuUsage > 0 ? [0, sys.gpuUsage / 100] : undefined,
         sys_power: sys?.sysPower,
       },
-      last_macmon_update: Date.now() / 1000,
+      last_mactop_update: Date.now() / 1000,
       friendly_name: identity?.friendlyName,
       os_version: identity?.osVersion,
       os_build_version: identity?.osBuildVersion,
@@ -188,10 +192,10 @@ function ensureLocalNodePresent(
         },
         network_interfaces: [],
         ip_to_interface: {},
-        macmon_info: {
+        mactop_info: {
           memory: { ram_usage: 0, ram_total: 0 },
         },
-        last_macmon_update: Date.now() / 1000,
+        last_mactop_update: Date.now() / 1000,
         friendly_name: localIdentity?.friendlyName ?? 'Local node (syncing)',
         os_version: localIdentity?.osVersion,
         os_build_version: localIdentity?.osBuildVersion,

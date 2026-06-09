@@ -1,18 +1,18 @@
 /** Memory sample returned by the topology polling layer. */
-export interface MacmonMemory {
+export interface MactopMemory {
   ram_usage: number;
   ram_total: number;
 }
 
 /** Temperature sample returned by the topology polling layer. */
-export interface MacmonTemp {
+export interface MactopTemp {
   gpu_temp_avg: number;
 }
 
 /** Node monitoring snapshot consumed by dashboard topology components. */
-export interface MacmonInfo {
-  memory?: MacmonMemory;
-  temp?: MacmonTemp;
+export interface MactopInfo {
+  memory?: MactopMemory;
+  temp?: MactopTemp;
   gpu_usage?: [number, number];
   sys_power?: number;
 }
@@ -35,8 +35,8 @@ export interface NodeInfo {
   system_info?: SystemInfo;
   network_interfaces?: NetworkInterfaceInfo[];
   ip_to_interface?: Record<string, string>;
-  macmon_info?: MacmonInfo;
-  last_macmon_update: number;
+  mactop_info?: MactopInfo;
+  last_mactop_update: number;
   friendly_name?: string;
   os_version?: string;
   os_build_version?: string;

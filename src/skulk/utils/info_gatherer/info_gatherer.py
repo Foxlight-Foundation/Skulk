@@ -4,8 +4,7 @@ import sys
 import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from subprocess import CalledProcessError
-from typing import Self, cast
+from typing import Self
 
 import anyio
 from anyio import fail_after, open_process, to_thread
@@ -31,7 +30,7 @@ from skulk.utils.channels import Sender
 from skulk.utils.pydantic_ext import TaggedModel
 from skulk.utils.task_group import TaskGroup
 
-from .macmon import MacmonMetrics
+from .mactop import MacmonMetrics, MactopMetrics
 from .system_info import (
     get_friendly_name,
     get_model_and_chip,
@@ -397,7 +396,10 @@ async def _gather_iface_map() -> dict[str, str] | None:
 
 
 GatheredInfo = (
-    MacmonMetrics
+    MactopMetrics
+    # Decode-only: lets a newly-upgraded node still apply telemetry from macOS
+    # workers on a pre-mactop build during a rolling upgrade (see MacmonMetrics).
+    | MacmonMetrics
     | MemoryUsage
     | NodeNetworkInterfaces
     | MacThunderboltIdentifiers
@@ -418,7 +420,7 @@ class InfoGatherer:
     misc_poll_interval: float | None = 60
     system_profiler_interval: float | None = 5 if IS_DARWIN else None
     memory_poll_rate: float | None = None if IS_DARWIN else 1
-    macmon_interval: float | None = 1 if IS_DARWIN else None
+    mactop_interval: float | None = 1 if IS_DARWIN else None
     thunderbolt_bridge_poll_interval: float | None = 10 if IS_DARWIN else None
     static_info_poll_interval: float | None = 60
     rdma_ctl_poll_interval: float | None = 10 if IS_DARWIN else None
@@ -428,12 +430,14 @@ class InfoGatherer:
     async def run(self):
         async with self._tg as tg:
             if IS_DARWIN:
-                if (macmon_path := shutil.which("macmon")) is not None:
-                    tg.start_soon(self._monitor_macmon, macmon_path)
+                if (mactop_path := shutil.which("mactop")) is not None:
+                    tg.start_soon(self._monitor_mactop, mactop_path)
                 else:
-                    # macmon not installed — fall back to psutil for memory
+                    # mactop not installed — fall back to psutil for memory.
+                    # (mactop replaced macmon, whose IOGPUFamily GPU polling
+                    # crashed/hung MLX inference — see mactop.py / exo#2088.)
                     logger.warning(
-                        "macmon not found, falling back to psutil for memory monitoring"
+                        "mactop not found, falling back to psutil for memory monitoring"
                     )
                     self.memory_poll_rate = 1
                 tg.start_soon(self._monitor_system_profiler_thunderbolt_data)
@@ -583,51 +587,69 @@ class InfoGatherer:
                 logger.warning(f"Error gathering disk usage: {e}")
             await anyio.sleep(self.disk_poll_interval)
 
-    async def _monitor_macmon(self, macmon_path: str):
-        if self.macmon_interval is None:
+    async def _monitor_mactop(self, mactop_path: str):
+        if self.mactop_interval is None:
             return
-        # macmon pipe --interval [interval in ms]
-        # Timeout: if macmon produces no output for this many seconds, restart it.
-        # macmon writes every macmon_interval seconds, so 10x that is generous.
-        read_timeout = max(self.macmon_interval * 10, 30)
+        # `mactop --headless --format json --interval <ms> --count 0` streams one
+        # JSON object per line, forever. mactop reads Apple's IOReport/SMC
+        # counters (NOT the IOGPUFamily command-buffer interface that macmon
+        # used), so it is safe to sample concurrently with active MLX inference
+        # — see mactop.py for the macmon crash mechanism it avoids.
+        # Timeout: if mactop produces no output for this long, restart it
+        # (10x the interval is generous; mactop writes every interval seconds).
+        read_timeout = max(self.mactop_interval * 10, 30)
         while True:
             try:
                 async with await open_process(
                     [
-                        macmon_path,
-                        "pipe",
+                        mactop_path,
+                        "--headless",
+                        "--format",
+                        "json",
                         "--interval",
-                        str(self.macmon_interval * 1000),
+                        str(int(self.mactop_interval * 1000)),
+                        "--count",
+                        "0",
                     ]
                 ) as p:
                     if not p.stdout:
-                        logger.critical("MacMon closed stdout")
+                        logger.critical("mactop closed stdout")
                         return
                     stream = BufferedByteReceiveStream(p.stdout)
                     while True:
+                        # Only the read is timeout-guarded; parsing/sending are
+                        # not I/O against mactop.
                         with fail_after(read_timeout):
+                            # 1 MiB/line: receive_until raises if the newline is
+                            # not found within max_bytes, which the outer handler
+                            # turns into a respawn — so the cap must clear the
+                            # largest plausible sample. mactop's optional arrays
+                            # (top-N processes, per-volume disk, Thunderbolt, net)
+                            # can push one JSON line well past tens of KiB; 1 MiB
+                            # is far above any real sample while still bounding a
+                            # pathological/never-terminating stream.
                             data = await stream.receive_until(
-                                delimiter=b"\n", max_bytes=8 * 1024
+                                delimiter=b"\n", max_bytes=1024 * 1024
                             )
-                            text = data.decode("utf-8", errors="replace").strip()
-                            metrics = MacmonMetrics.from_raw_json(text)
+                        text = data.decode("utf-8", errors="replace").strip()
+                        # A blank or partial line (e.g. mactop startup/shutdown)
+                        # must not tear down the whole subprocess — skip it and
+                        # keep reading so telemetry doesn't flap.
+                        if not text:
+                            continue
+                        try:
+                            metrics = MactopMetrics.from_raw_json(text)
+                        except ValidationError as e:
+                            logger.warning(f"Skipping unparseable mactop line: {e}")
+                            continue
                         await self.info_sender.send(metrics)
             except TimeoutError:
                 logger.warning(
-                    f"MacMon produced no output for {read_timeout}s, restarting"
-                )
-            except CalledProcessError as e:
-                stderr_msg = "no stderr"
-                stderr_output = cast(bytes | str | None, e.stderr)
-                if stderr_output is not None:
-                    stderr_msg = (
-                        stderr_output.decode()
-                        if isinstance(stderr_output, bytes)
-                        else str(stderr_output)
-                    )
-                logger.warning(
-                    f"MacMon failed with return code {e.returncode}: {stderr_msg}"
+                    f"mactop produced no output for {read_timeout}s, restarting"
                 )
             except Exception as e:
-                logger.warning(f"Error in macmon monitor: {e}")
-            await anyio.sleep(self.macmon_interval)
+                # anyio's open_process()/async-with does not raise
+                # CalledProcessError (no check=True semantics); mactop dying just
+                # closes stdout, surfacing here as EndOfStream. Respawn either way.
+                logger.warning(f"Error in mactop monitor: {e}")
+            await anyio.sleep(self.mactop_interval)

@@ -325,7 +325,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
   const totalClusterMemoryBytes = useMemo(() => {
     if (!topology?.nodes) return 0;
     return Object.values(topology.nodes).reduce((sum, node) => {
-      const mem = node.macmon_info?.memory;
+      const mem = node.mactop_info?.memory;
       if (!mem) return sum;
       const available = mem.ram_total - mem.ram_usage;
       return sum + Math.max(available, 0);
@@ -381,7 +381,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
 
       const cardNodes: ClusterCardNode[] = nodeIds.map((nid) => {
         const nodeInfo = topology?.nodes[nid];
-        const mem = nodeInfo?.macmon_info?.memory;
+        const mem = nodeInfo?.mactop_info?.memory;
         const pct = mem && mem.ram_total > 0
           ? Math.round((mem.ram_usage / mem.ram_total) * 100)
           : 0;

@@ -48,8 +48,8 @@
   };
 
   nixConfig = {
-    extra-trusted-public-keys = "exo.cachix.org-1:okq7hl624TBeAR3kV+g39dUFSiaZgLRkLsFBCuJ2NZI=";
-    extra-substituters = "https://exo.cachix.org";
+    extra-trusted-public-keys = "foxlight.cachix.org-1:P6i/DsS8LTGVBe0Z5OD7mQo1jQH/SU6yEx7B1UndR9g=";
+    extra-substituters = "https://foxlight.cachix.org";
   };
 
   outputs =
@@ -119,7 +119,7 @@
                 unixtools.ifconfig
               ]
               ++ lib.optionals stdenv.isDarwin [
-                macmon
+                mactop
               ];
 
             OPENSSL_NO_VENDOR = "1";

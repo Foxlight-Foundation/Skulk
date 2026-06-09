@@ -15,13 +15,13 @@ function node(
 ): NodeInfo {
   return {
     system_info: { model_id: model, chip: 'M4 Max', memory: ramTotal },
-    macmon_info: {
+    mactop_info: {
       memory: { ram_usage: ramUsed, ram_total: ramTotal },
       temp: { gpu_temp_avg: temp },
       gpu_usage: [0, gpuPct / 100],
       sys_power: power,
     },
-    last_macmon_update: Date.now(),
+    last_mactop_update: Date.now(),
     friendly_name: name,
   };
 }
