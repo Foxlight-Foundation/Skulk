@@ -6,7 +6,7 @@ let
     message = ''
       The Metal Toolchain NAR must be available.
 
-      If you have cachix configured for exo.cachix.org (the legacy cache name), this should be automatic.
+      If you have cachix configured for foxlight.cachix.org, this should be automatic.
 
       Otherwise:
         1. Install Xcode 26+ from the App Store
