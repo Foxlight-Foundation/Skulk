@@ -621,8 +621,16 @@ class InfoGatherer:
                         # Only the read is timeout-guarded; parsing/sending are
                         # not I/O against mactop.
                         with fail_after(read_timeout):
+                            # 1 MiB/line: receive_until raises if the newline is
+                            # not found within max_bytes, which the outer handler
+                            # turns into a respawn — so the cap must clear the
+                            # largest plausible sample. mactop's optional arrays
+                            # (top-N processes, per-volume disk, Thunderbolt, net)
+                            # can push one JSON line well past tens of KiB; 1 MiB
+                            # is far above any real sample while still bounding a
+                            # pathological/never-terminating stream.
                             data = await stream.receive_until(
-                                delimiter=b"\n", max_bytes=64 * 1024
+                                delimiter=b"\n", max_bytes=1024 * 1024
                             )
                         text = data.decode("utf-8", errors="replace").strip()
                         # A blank or partial line (e.g. mactop startup/shutdown)
