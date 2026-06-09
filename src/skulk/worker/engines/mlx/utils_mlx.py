@@ -699,15 +699,13 @@ def load_mlx_items(
 
     mtp_weights: dict[str, mx.array] | None = None
     runtime = bound_instance.bound_shard.model_card.runtime
-    # Sidecar speculation runs everywhere (#201 Tracks 1-2a): the MTP loop
-    # is rank-symmetric on TP (identical logits from collectives) and on
-    # pipeline (decode-mode all_gather hands every rank the final hidden;
-    # embed/norm/head are replicated), with per-request RNG seeding
-    # aligning sampled decisions. Assistant drafters cross-attend the
-    # TARGET's KV cache, which a pipeline shard only holds for its own
-    # layers — they stay single-node/TP pending the last-rank protocol
-    # (#201 Track 2b); don't pay assistant memory for speculation that
-    # will never run, and on tight shard fits the eager load could OOM.
+    # Multi-node speculation drafts on ONE rank (the last) and fans both the
+    # draft tokens and the accept decision out via fixed-shape collectives
+    # (#254): rank-symmetric drafting relied on every rank reproducing
+    # bit-identical decisions, which heterogeneous chips (M5 vs M4 GEMM
+    # kernels, NAX reduced precision) violate — desynced ranks abandon the
+    # pipeline collectives and SIGABRT in the Metal completion block. Only
+    # the decider rank pays drafter memory; other ranks receive decisions.
     single_node = group is None or group.size() <= 1
     # Cards can forbid speculation on multi-node placements outright
     # (measured slower than plain distributed decode — e.g. sharded MoE);
@@ -737,11 +735,21 @@ def load_mlx_items(
         or isinstance(bound_shard, TensorShardMetadata)
         or is_last_pipeline_rank
     ) and not speculation_blocked_for_placement
+    # Sidecars on multi-node placements likewise load on the decider (last)
+    # rank only (#254): drafts and accept decisions are broadcast, so other
+    # ranks never draft and must not pay sidecar memory. The decider is
+    # rank-symmetric (device_rank == world_size - 1 from the shard
+    # assignment every rank holds), so the per-request drafter-agreement
+    # collective settles at exactly one ready drafter.
+    is_decider_rank = bound_shard.device_rank == bound_shard.world_size - 1
+    sidecar_placement_ok = (
+        single_node or is_decider_rank
+    ) and not speculation_blocked_for_placement
     if (
         runtime
         and runtime.mtp_sidecar_repo
         and runtime.mtp_heads
-        and not speculation_blocked_for_placement
+        and sidecar_placement_ok
     ):
         # Sidecar repos carry only mtp.safetensors (no config.json), so they
         # must be resolved with the sidecar resolver — build_model_path's
@@ -757,6 +765,18 @@ def load_mlx_items(
                 f"MTP sidecar repo {runtime.mtp_sidecar_repo!r} not downloaded; "
                 "running without MTP"
             )
+    elif (
+        runtime
+        and runtime.mtp_sidecar_repo
+        and runtime.mtp_heads
+        and not speculation_blocked_for_placement
+    ):
+        logger.info(
+            "MTP sidecar declared; this rank "
+            f"({bound_shard.device_rank}/{bound_shard.world_size}) skips the "
+            "sidecar load — drafting runs on the decider (last) rank only and "
+            "drafts + accept decisions arrive via the per-round exchange (#254)"
+        )
     assistant_model: object | None = None
     if runtime and runtime.assistant_model_repo and assistant_placement_ok:
         # Gemma 4 assistant drafter (gemma4-mtp Phase C). Same placement

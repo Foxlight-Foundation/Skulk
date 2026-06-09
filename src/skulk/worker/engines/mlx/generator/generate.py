@@ -1035,6 +1035,7 @@ def _stream_generate_without_lookahead(
     prompt_cache: KVCacheType,
     kv_group_size: int | None,
     kv_bits: int | None,
+    group: "mx.distributed.Group | None" = None,
 ) -> Generator[MlxGenerationResponse, None, None]:
     """Generate tokens sequentially without scheduling a decode lookahead.
 
@@ -1043,6 +1044,14 @@ def _stream_generate_without_lookahead(
     forward can leave Skulk's pipeline send/recv wrappers waiting on different
     collectives across ranks. Pipeline decode favors boring one-step-at-a-time
     execution over speculative throughput.
+
+    On multi-node placements (``group`` with size > 1) the sampled token is
+    decided by the LAST rank and broadcast each step (#254): every rank holds
+    identical-shape logits after the decode all_gather, but the per-rank head
+    recompute diverges on heterogeneous chips — per-rank sampling would
+    silently feed DIFFERENT next tokens into each rank's cache slice and
+    desync the pipeline. One tiny fixed-shape ``all_sum`` per step keeps the
+    committed stream identical everywhere.
     """
     if len(prompt) == 0:
         raise ValueError("Decode requires at least one prompt token")
@@ -1075,7 +1084,13 @@ def _stream_generate_without_lookahead(
     finish_reason = "length"
     generated_count = 0
 
+    # Multi-node: the last rank decides each token; receivers never sample.
+    token_decider = group is None or group.size() <= 1 or (
+        group.rank() == group.size() - 1
+    )
+
     for token_index in range(max_tokens):
+        sampled: mx.array | None = None
         with mx.stream(generation_stream):
             logits = model(input_tokens[None], cache=prompt_cache)
             logits = logits[:, -1, :]
@@ -1091,9 +1106,27 @@ def _stream_generate_without_lookahead(
             logprobs = logits.astype(mx.float32) - mx.logsumexp(
                 logits.astype(mx.float32), keepdims=True
             )
-            sampled = sampler(logprobs)
-            mx.eval(sampled, logprobs)
+            if token_decider:
+                sampled = sampler(logprobs)
+                mx.eval(sampled, logprobs)
+            else:
+                # Receivers force the forward (their slice of the pipeline
+                # collectives must execute in step with the decider's) but
+                # take the token from the broadcast below.
+                mx.eval(logprobs)
 
+        if group is not None and group.size() > 1:
+            token_payload = (
+                mx.array([float(int(sampled.item()))], dtype=mx.float32)
+                if sampled is not None
+                else mx.zeros((1,), dtype=mx.float32)
+            )
+            decided = _broadcast_via_all_sum(
+                group, token_payload, detail="pipeline_token_decision"
+            )
+            sampled = decided.astype(mx.int32)
+
+        assert sampled is not None  # decider sampled, or broadcast assigned
         last_token = int(sampled.item())
         last_logprobs = logprobs.squeeze(0)
         generated_count = token_index + 1
@@ -1356,6 +1389,7 @@ def _stream_generate_with_mtp(
     sampling: SamplingParams | None = None,
     fail_loud_on_drafter_error: bool = False,
     draft_group: "mx.distributed.Group | None" = None,
+    draft_group_reads_target_cache: bool = True,
 ) -> Generator[MlxGenerationResponse, None, None]:
     """Speculative decode loop: bonus-driven rounds via a Drafter.
 
@@ -1390,25 +1424,34 @@ def _stream_generate_with_mtp(
     ``(v_h[:, :p], drafts[:p])`` so stateful drafters keep gapless
     positional history.
 
-    This path is rank-symmetric and used for single-node, tensor-parallel,
-    and pipeline inference alike — distributed ranks run it in validated
-    lockstep (#201 Tracks 1-2a): TP collectives and pipeline's decode-mode
-    all_gather both give every rank identical logits, and per-request RNG
-    seeding aligns every sampled accept/reject decision. Sidecar drafters
-    are rank-local (replicated embed/head, zero collectives).
+    Multi-node placements use an EXPLICIT lockstep protocol (#254): pass
+    ``draft_group`` and exactly one rank — the decider, the one whose
+    *drafter* is non-None — makes every speculative decision; fixed-shape
+    collectives land those decisions on every rank. Per round the decider
+    drafts and broadcasts the draft tokens (and, under sampling, its
+    effective distribution) via one ``all_sum``, then after the verify
+    forward computes the accept length and the next bonus token and
+    broadcasts those via a second tiny ``all_sum``. Receiving ranks never
+    draft, never sample, and never compare logits — they apply the
+    broadcast decisions to their own cache slices. This deliberately does
+    NOT rely on cross-rank numerical determinism: heterogeneous chips
+    (e.g. M5 vs M4 GEMM kernels, NAX reduced-precision B>=2 matmuls)
+    produce divergent per-rank logits, and the previous rank-symmetric
+    design desynced on exactly that — ranks committed different token
+    counts, abandoned each other's pipeline collectives, and SIGABRT'd in
+    the Metal completion block (#252).
 
-    Assistant drafters (gemma4) cross-attend the target's KV cache, which a
-    pipeline shard only holds for its own layers — under pipeline they run
-    on the LAST rank only (#201 Track 2b: the last full-attention and
-    sliding KV layers live there by construction, and the post-norm hidden
-    is already all-gathered to every rank). Pass ``draft_group`` to enable
-    the distributed-draft exchange: the drafting rank (non-None *drafter*)
-    drafts locally and every rank joins one fixed-shape ``all_sum`` per
-    round that lands the draft tokens (and, under sampling, the drafter's
-    effective distribution) everywhere — keeping the collective schedule
-    symmetric while only one rank pays the draft. Drafting-rank sampled
-    draws use an explicit per-round key so the shared global RNG stream
-    stays aligned across ranks.
+    Assistant drafters (gemma4) cross-attend the target's KV cache, which
+    a pipeline shard only holds for its own layers — the decider is the
+    LAST rank, where those layers live by construction (#201 Track 2b).
+    Sidecar drafters draft from the all-gathered trunk hidden and use the
+    same decider seat. ``draft_group_reads_target_cache`` tells the
+    receiving ranks (whose *drafter* is None) whether the decider's
+    drafter cross-attends the target cache — it drives the deferred-replay
+    flush policy and must be card-derived so every rank agrees.
+
+    Single-node (``draft_group=None``) behavior is unchanged: the local
+    rank drafts, verifies, and decides with zero collectives.
     """
     if len(prompt) == 0:
         raise ValueError("MTP decode requires at least one prompt token")
@@ -1457,10 +1500,14 @@ def _stream_generate_with_mtp(
     pending_replay: list[int] = []
     # Cross-attending drafters read the TARGET's cache when drafting, so
     # deferral starves them of the newest committed tokens. Derived
-    # rank-invariantly: distributed-draft mode is assistant-only, and on
-    # local/TP placements every rank builds the same drafter object.
-    drafter_reads_target_cache = draft_group is not None or bool(
-        getattr(drafter, "reads_target_cache", False)
+    # rank-invariantly: in distributed mode receiving ranks hold no drafter
+    # to inspect, so the dispatcher passes the CARD's answer (assistant ->
+    # True, sidecar -> False) and every rank flushes identically; on local
+    # placements the drafter object itself answers.
+    drafter_reads_target_cache = (
+        draft_group_reads_target_cache
+        if draft_group is not None
+        else bool(getattr(drafter, "reads_target_cache", False))
     )
     # Per-request seed component for the drafting rank's explicit draw
     # keys. Drawn from the SEEDED global stream on EVERY rank (one
@@ -1579,7 +1626,27 @@ def _stream_generate_with_mtp(
     # non-drafting ranks size their zero contribution from here.
     vocab_size = int(first_lp.shape[0])
 
-    bonus, bonus_lp = _sample_row(first_lp)
+    if draft_group is not None:
+        # First decision of the request: the per-rank head_fn recompute can
+        # diverge across heterogeneous chips, so even this very first sample
+        # is the decider's to make (#254). Receivers report their local
+        # logprob row (rank-local numeric noise; tokens are what must agree).
+        if drafter is not None:
+            bonus, bonus_lp = _sample_row(first_lp)
+            first_payload = mx.array([float(bonus)], dtype=mx.float32)
+        else:
+            bonus_lp = first_lp
+            first_payload = mx.zeros((1,), dtype=mx.float32)
+        bonus = int(
+            cast(
+                "float",
+                _broadcast_via_all_sum(
+                    draft_group, first_payload, detail="mtp_first_bonus"
+                )[0].item(),
+            )
+        )
+    else:
+        bonus, bonus_lp = _sample_row(first_lp)
     # EOS never enters the detokenizer (matching the non-MTP decode paths
     # and the accepted-draft emit below) — its decoded special-token text
     # must not leak into the terminal segment.
@@ -1699,30 +1766,75 @@ def _stream_generate_with_mtp(
             v_lp = v_logits[0].astype(mx.float32)
             v_lp = v_lp - mx.logsumexp(v_lp, axis=-1, keepdims=True)
 
-        if sampling.is_greedy:
-            verify_sampled = sampler(v_lp)  # (K+1,)
-            mx.eval(v_h, verify_sampled)
-            target_ints = [int(t) for t in cast("list[int]", verify_sampled.tolist())]
-            prefix_len = 0
-            while (
-                prefix_len < chain_len
-                and draft_toks[prefix_len] == target_ints[prefix_len]
-            ):
-                prefix_len += 1
-            # Row prefix_len yields the next bonus: the correction on a
-            # partial reject, the free next token on a full accept. (With
-            # processors active the row is re-sampled through them below.)
-            raw_bonus_next = target_ints[prefix_len] if not logits_processors else None
-        else:
+        def _decide_locally(
+            v_lp: mx.array,
+            v_h: mx.array,
+            chain_len: int,
+            draft_toks: list[int],
+            draft_probs: mx.array | None,
+        ) -> tuple[int, int | None]:
+            """Accept length + next-bonus token from THIS rank's verify logits.
+
+            Single-node runs this directly; in distributed mode only the
+            decider runs it and broadcasts the outcome (#254) — receiving
+            ranks must never compare logits or draw RNG, because their
+            per-rank head_fn recompute diverges on heterogeneous chips.
+            """
+            if sampling.is_greedy:
+                verify_sampled = sampler(v_lp)  # (K+1,)
+                mx.eval(v_h, verify_sampled)
+                target_ints = [
+                    int(t) for t in cast("list[int]", verify_sampled.tolist())
+                ]
+                prefix = 0
+                while (
+                    prefix < chain_len and draft_toks[prefix] == target_ints[prefix]
+                ):
+                    prefix += 1
+                # Row prefix yields the next bonus: the correction on a
+                # partial reject, the free next token on a full accept. (With
+                # processors active the row is re-sampled through them below.)
+                return prefix, (
+                    target_ints[prefix] if not logits_processors else None
+                )
             assert draft_probs is not None and chain_len == 1
             verify_probs = warp_to_probs(v_lp[0], sampling)
             mx.eval(v_h, verify_probs)
             if ratio_accept(draft_toks[0], draft_probs, verify_probs):
-                prefix_len = 1
-                raw_bonus_next = None  # sampled from row 1 below
+                return 1, None  # sampled from row 1 below
+            return 0, residual_sample(draft_probs, verify_probs)
+
+        if draft_group is None:
+            prefix_len, raw_bonus_next = _decide_locally(
+                v_lp, v_h, chain_len, draft_toks, draft_probs
+            )
+        else:
+            # Decider decides; everyone receives. The decider resolves the
+            # next bonus to a concrete token at decision time (receivers
+            # cannot sample), so the broadcast carries the complete round
+            # outcome: [prefix_len, bonus_token]. MTP excludes logits
+            # processors at dispatch, so resolving the bonus here (vs after
+            # the emits) reads the identical logprob row.
+            assert not logits_processors
+            if drafter is not None:
+                prefix_len, raw_bonus_next = _decide_locally(
+                    v_lp, v_h, chain_len, draft_toks, draft_probs
+                )
+                if raw_bonus_next is None:
+                    raw_bonus_next, _ = _sample_row(v_lp[prefix_len])
+                decision_payload = mx.array(
+                    [float(prefix_len), float(raw_bonus_next)], dtype=mx.float32
+                )
             else:
-                prefix_len = 0
-                raw_bonus_next = residual_sample(draft_probs, verify_probs)
+                # Receivers still force the verify forward so their slice of
+                # the pipeline collectives executes in step with the decider.
+                mx.eval(v_h)
+                decision_payload = mx.zeros((2,), dtype=mx.float32)
+            decision = _broadcast_via_all_sum(
+                draft_group, decision_payload, detail="mtp_accept_decision"
+            )
+            prefix_len = int(cast("float", decision[0].item()))
+            raw_bonus_next = int(cast("float", decision[1].item()))
         attempted_drafts += chain_len
         accepted += prefix_len
         # Consumers usually abandon this generator mid-stream and the public
@@ -2809,7 +2921,21 @@ def mlx_generate(
         and _has_pipeline_communication_layer(model)
         and not multi_node_speculation_disabled(model_card.runtime, group.size())
     )
-    if _speculation_assets or _pipeline_assistant_mode:
+    # Sidecar speculation on multi-node placements likewise drafts on the
+    # decider (last) rank only, with drafts AND accept decisions broadcast
+    # (#254) — receiving ranks hold no sidecar assets but must resolve
+    # trunk/head and join the per-round exchange, so the mode is derived
+    # from the rank-invariant card declaration, not local assets.
+    _distributed_sidecar_mode = (
+        model_card is not None
+        and model_card.runtime is not None
+        and model_card.runtime.mtp_sidecar_repo is not None
+        and model_card.runtime.mtp_heads
+        and group is not None
+        and group.size() > 1
+        and not multi_node_speculation_disabled(model_card.runtime, group.size())
+    )
+    if _speculation_assets or _pipeline_assistant_mode or _distributed_sidecar_mode:
         if logits_processors:
             # Accepted draft tokens are committed from RAW verifier logits —
             # logits processors (repetition penalty, bench EOS ban) are only
@@ -2893,19 +3019,25 @@ def mlx_generate(
             ),
         )
         ready_count = int(drafter_ready.item())
-        if _pipeline_assistant_mode:
-            # Last-rank drafting: exactly ONE rank should hold the
-            # assistant; every rank joins the per-round draft exchange.
+        if _pipeline_assistant_mode or _distributed_sidecar_mode:
+            # Decider-rank drafting (#254): exactly ONE rank holds the
+            # drafter; every rank joins the per-round draft + accept
+            # exchanges, so decisions never depend on cross-rank numerical
+            # determinism (heterogeneous chips diverge — see #252).
             _distributed_drafts_ok = ready_count == 1 and _trunk_fn is not None
             if not _distributed_drafts_ok:
                 if _drafter is not None or ready_count > 0:
                     logger.warning(
-                        "Assistant speculation disabled for this request: "
+                        "Distributed speculation disabled for this request: "
                         f"{ready_count} rank(s) hold a drafter (expected "
-                        "exactly 1 on the last pipeline rank)"
+                        "exactly 1 on the decider rank)"
                     )
                 _drafter = None
         elif _drafter is not None and ready_count != group.size():
+            # Legacy rank-symmetric path (assistant on TP placements):
+            # every rank drafts locally and lockstep is implicit. Safe only
+            # on homogeneous chips; pipeline + sidecar use the explicit
+            # decider protocol above.
             logger.warning(
                 f"Speculation disabled for this request: only {ready_count}/"
                 f"{group.size()} ranks have a working drafter"
@@ -2925,12 +3057,11 @@ def mlx_generate(
     ):
         if _drafter is not None or _distributed_drafts_ok:
             # The MTP loop is rank-symmetric and runs on single-node, TP,
-            # and pipeline placements alike (#201 Tracks 1-2a): pipeline
-            # decode all-gathers the final hidden to every rank and
-            # embed/norm/head are replicated, so every rank sees identical
-            # logits and the per-request seed aligns sampled draws.
-            # Assistant drafters on pipeline draft on the last rank only
-            # and fan drafts out via the per-round exchange (Track 2b).
+            # and pipeline placements alike. Multi-node placements run the
+            # explicit decider protocol (#254): the decider rank drafts and
+            # decides; drafts and accept decisions arrive on every other
+            # rank via fixed-shape per-round collectives, so correctness
+            # never depends on cross-rank numerical determinism (#252).
             assert _trunk_fn is not None and _head_fn is not None
             token_generator = _stream_generate_with_mtp(
                 model=model,
@@ -2959,6 +3090,11 @@ def mlx_generate(
                 # pipeline eval watchdogs).
                 fail_loud_on_drafter_error=group is not None and group.size() > 1,
                 draft_group=group if _distributed_drafts_ok else None,
+                # Card-derived (rank-invariant): receivers hold no drafter
+                # object to inspect, and the replay-flush policy must agree
+                # on every rank. Assistants cross-attend the target cache;
+                # sidecars draft from trunk hiddens and keep free deferral.
+                draft_group_reads_target_cache=_pipeline_assistant_mode,
             )
         elif group is not None and _has_pipeline_communication_layer(model):
             logger.info(
@@ -2974,6 +3110,9 @@ def mlx_generate(
                 prompt_cache=caches,
                 kv_group_size=KV_GROUP_SIZE,
                 kv_bits=KV_BITS,
+                # Last rank decides each token, broadcast per step (#254):
+                # per-rank sampling silently desyncs heterogeneous chips.
+                group=group,
             )
         else:
             token_generator = stream_generate(
