@@ -80,11 +80,11 @@ What's been added on top of the distributed-MLX baseline, and what each of these
 - [uv](https://github.com/astral-sh/uv)
 - [node](https://github.com/nodejs/node)
 - [rustup](https://rustup.rs/)
-- `macmon` for Apple Silicon monitoring
+- `mactop` for Apple Silicon monitoring
 - [Nix](https://nixos.org/download/) for `nix fmt`, `nix flake check`, and the repo dev shell
 
 ```bash
-brew install uv macmon node
+brew install uv mactop node
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup toolchain install nightly
 ```

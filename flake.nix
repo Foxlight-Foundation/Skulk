@@ -119,7 +119,7 @@
                 unixtools.ifconfig
               ]
               ++ lib.optionals stdenv.isDarwin [
-                macmon
+                mactop
               ];
 
             OPENSSL_NO_VENDOR = "1";

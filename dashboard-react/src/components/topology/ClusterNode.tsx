@@ -147,14 +147,14 @@ export function ClusterNode({
   const barGap = 6;
 
   // RAM metrics
-  const ramUsed = nodeInfo.macmon_info?.memory?.ram_usage ?? 0;
-  const ramTotal = nodeInfo.macmon_info?.memory?.ram_total ?? 0;
+  const ramUsed = nodeInfo.mactop_info?.memory?.ram_usage ?? 0;
+  const ramTotal = nodeInfo.mactop_info?.memory?.ram_total ?? 0;
   const ramPercent = ramTotal > 0 ? (ramUsed / ramTotal) * 100 : 0;
 
   // GPU metrics
-  const gpuPercent = (nodeInfo.macmon_info?.gpu_usage?.[1] ?? 0) * 100;
-  const gpuTemp = nodeInfo.macmon_info?.temp?.gpu_temp_avg ?? NaN;
-  const sysPower = nodeInfo.macmon_info?.sys_power ?? null;
+  const gpuPercent = (nodeInfo.mactop_info?.gpu_usage?.[1] ?? 0) * 100;
+  const gpuTemp = nodeInfo.mactop_info?.temp?.gpu_temp_avg ?? NaN;
+  const sysPower = nodeInfo.mactop_info?.sys_power ?? null;
 
   // Display name
   const name = nodeInfo.friendly_name ?? nodeId.slice(-8);

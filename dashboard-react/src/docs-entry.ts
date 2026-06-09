@@ -20,9 +20,9 @@ export type {
 } from './types/models';
 export type {
   DeviceModel,
-  MacmonMemory,
-  MacmonInfo,
-  MacmonTemp,
+  MactopMemory,
+  MactopInfo,
+  MactopTemp,
   NetworkInterfaceInfo,
   NodeInfo,
   SystemInfo,

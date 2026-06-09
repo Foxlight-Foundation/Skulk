@@ -7,6 +7,28 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- **macOS node telemetry no longer crashes MLX inference (macmon → mactop).**
+  Skulk's `InfoGatherer` spawned `macmon` at 1 Hz for hardware metrics on every
+  macOS node. macmon reads the GPU via IOKit/IOGPUFamily — the same interface
+  Metal uses for command-buffer completion — so sampling it concurrently with
+  an in-flight MLX command buffer put the GPU into an error state that
+  `mlx::core::gpu::check_error` threw inside the Metal completion-dispatch
+  block: either an uncaught `abort()` (SIGABRT) or a silent GPU hang. On macOS
+  the wedged GPU then starved WindowServer past its watchdog and **rebooted the
+  node**. (Confirmed upstream as exo-explore/exo#2088 / #1823.) Replaced macmon
+  with [`mactop`](https://github.com/metaspartan/mactop), which reads Apple's
+  IOReport/SMC counters (not IOGPUFamily), needs no root, emits newline-
+  delimited JSON (`--headless --format json`), and exposes a superset of the
+  metrics (GPU util %, power breakdown, temps, DRAM bandwidth, system RAM).
+  Validated on M4 hardware running sustained MLX inference with zero crashes.
+  Provisioning moved with it: `README`/`CONTRIBUTING` (`brew install mactop`),
+  the nix dev shell + package wrapper (`pkgs.mactop`), and the PyInstaller
+  bundle. When mactop is absent the gatherer still falls back to psutil for
+  memory. (mactop's reported `available` RAM equals `total − used`, the same
+  figure macmon derived, so placement margins are unchanged.)
+
 ### Changed
 
 - **The codebase is now Skulk all the way down (exo -> skulk rename).**

@@ -14,13 +14,13 @@ function makeNode(overrides: Partial<NodeInfo> & { model_id?: string } = {}): No
   const { model_id = 'Mac Studio', ...rest } = overrides;
   return {
     system_info: { model_id, chip: 'M4 Max', memory: 24 * GB },
-    macmon_info: {
+    mactop_info: {
       memory: { ram_usage: 15.4 * GB, ram_total: 24 * GB },
       temp: { gpu_temp_avg: 39 },
       gpu_usage: [0, 0.15],
       sys_power: 11,
     },
-    last_macmon_update: Date.now(),
+    last_mactop_update: Date.now(),
     friendly_name: 'kite3',
     ...rest,
   };
@@ -55,7 +55,7 @@ export const MacBookPro: Story = {
     nodeInfo: makeNode({
       model_id: 'MacBook Pro',
       friendly_name: 'macbook-dev',
-      macmon_info: {
+      mactop_info: {
         memory: { ram_usage: 28 * GB, ram_total: 36 * GB },
         temp: { gpu_temp_avg: 55 },
         gpu_usage: [0, 0.55],
@@ -74,7 +74,7 @@ export const MacMini: Story = {
     nodeInfo: makeNode({
       model_id: 'Mac Mini',
       friendly_name: 'mini-server',
-      macmon_info: {
+      mactop_info: {
         memory: { ram_usage: 12 * GB, ram_total: 16 * GB },
         temp: { gpu_temp_avg: 45 },
         gpu_usage: [0, 0.30],
@@ -93,7 +93,7 @@ export const UnknownDevice: Story = {
     nodeInfo: makeNode({
       model_id: undefined,
       friendly_name: 'linux-box',
-      macmon_info: {
+      mactop_info: {
         memory: { ram_usage: 50 * GB, ram_total: 64 * GB },
         temp: { gpu_temp_avg: 70 },
         gpu_usage: [0, 0.80],
@@ -112,7 +112,7 @@ export const HotNode: Story = {
     nodeId: 'hot001',
     nodeInfo: makeNode({
       friendly_name: 'overloaded',
-      macmon_info: {
+      mactop_info: {
         memory: { ram_usage: 22 * GB, ram_total: 24 * GB },
         temp: { gpu_temp_avg: 82 },
         gpu_usage: [0, 0.95],
@@ -131,7 +131,7 @@ export const NoTelemetry: Story = {
     nodeId: 'nodata',
     nodeInfo: {
       system_info: { model_id: 'Mac Studio' },
-      last_macmon_update: 0,
+      last_mactop_update: 0,
       friendly_name: 'offline',
     },
     x: 200,
@@ -165,7 +165,7 @@ export const MultipleNodes: Story = {
         nodeInfo={makeNode({
           model_id: 'MacBook Pro',
           friendly_name: 'node-b',
-          macmon_info: {
+          mactop_info: {
             memory: { ram_usage: 28 * GB, ram_total: 36 * GB },
             temp: { gpu_temp_avg: 60 },
             gpu_usage: [0, 0.65],
