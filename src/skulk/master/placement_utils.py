@@ -74,27 +74,35 @@ def _per_node_required_memory(
     Tensor parallelism splits the weights evenly across ranks, so every node
     carries ``required_memory / len(cycle)`` regardless of its capacity.
     Pipeline parallelism allocates layers proportionally to each node's
-    available memory (see ``allocate_layers_proportionally``), so a node's
-    share scales with its fraction of the cycle's total available memory.
+    usable memory (see ``allocate_layers_proportionally``), so a node's
+    share scales with its fraction of the cycle's total usable memory.
     The continuous fraction is an estimate of the integer layer allocation:
     the two can differ by up to one layer per node (a few percent of the
     weights on realistic layer counts), which sits comfortably inside the
     ``PLACEMENT_MEMORY_OVERHEAD_FACTOR`` margin applied on top.
+
+    Both the split here and the per-node admission below weigh by
+    ``_node_usable_memory`` (capped at the Metal working-set ceiling), not raw
+    ``ram_available``. Splitting by raw available while admitting against the
+    cap over-weights a node whose free RAM exceeds its GPU ceiling (e.g. a
+    16 GB node with 15 GB free but a ~12 GB cap), pushing its share past the
+    cap and rejecting cycles that would fit if sized by usable memory — exactly
+    the heterogeneous clusters this check is meant to support.
     """
     if sharding == Sharding.Tensor:
         even_share = required_memory / len(cycle.node_ids)
         return {node_id: even_share for node_id in cycle.node_ids}
-    total_available = sum(
-        (node_memory[node_id].ram_available for node_id in cycle.node_ids),
+    total_usable = sum(
+        (_node_usable_memory(node_memory[node_id]) for node_id in cycle.node_ids),
         start=Memory(),
     )
-    if total_available.in_bytes == 0:
+    if total_usable.in_bytes == 0:
         # Degenerate: no node reports any memory; assign everything everywhere
         # so the fit check below rejects the cycle with a concrete reason.
         return {node_id: required_memory for node_id in cycle.node_ids}
     return {
         node_id: required_memory
-        * (node_memory[node_id].ram_available / total_available)
+        * (_node_usable_memory(node_memory[node_id]) / total_usable)
         for node_id in cycle.node_ids
     }
 
@@ -235,12 +243,16 @@ def _compute_total_memory(
     node_ids: list[NodeId],
     node_memory: Mapping[NodeId, MemoryUsage],
 ) -> Memory:
+    # Weigh by usable (working-set-capped) memory, matching the admission check
+    # in filter_cycles_by_memory: splitting by raw ram_available while admitting
+    # against the cap over-weights nodes whose free RAM exceeds their GPU
+    # ceiling and produces shards that don't fit.
     total_memory = sum(
-        (node_memory[node_id].ram_available for node_id in node_ids),
+        (_node_usable_memory(node_memory[node_id]) for node_id in node_ids),
         start=Memory(),
     )
     if total_memory.in_bytes == 0:
-        raise ValueError("Cannot create shard assignments: total available memory is 0")
+        raise ValueError("Cannot create shard assignments: total usable memory is 0")
     return total_memory
 
 
@@ -253,7 +265,8 @@ def _allocate_and_validate_layers(
     layer_allocations = allocate_layers_proportionally(
         total_layers=model_card.n_layers,
         memory_fractions=[
-            node_memory[node_id].ram_available / total_memory for node_id in node_ids
+            _node_usable_memory(node_memory[node_id]) / total_memory
+            for node_id in node_ids
         ],
     )
 
@@ -262,12 +275,13 @@ def _allocate_and_validate_layers(
     for i, node_id in enumerate(node_ids):
         node_layers = layer_allocations[i]
         required_memory = (total_storage * node_layers) // total_layers
-        available_memory = node_memory[node_id].ram_available
-        if required_memory > available_memory:
+        usable_memory = _node_usable_memory(node_memory[node_id])
+        if required_memory > usable_memory:
             raise ValueError(
                 f"Node {i} ({node_id}) has insufficient memory: "
                 f"requires {required_memory.in_gb:.2f} GB for {node_layers} layers, "
-                f"but only has {available_memory.in_gb:.2f} GB available"
+                f"but can only use {usable_memory.in_gb:.2f} GB "
+                f"({GPU_WORKING_SET_FRACTION:.0%} of RAM cap)"
             )
 
     return layer_allocations

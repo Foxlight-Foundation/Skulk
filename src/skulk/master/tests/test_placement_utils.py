@@ -123,6 +123,56 @@ def test_filter_cycles_by_insufficient_memory():
     assert diagnostics.pending_info_node_ids == []
 
 
+def test_heterogeneous_pipeline_split_weighs_by_usable_not_raw_available():
+    """A heterogeneous cycle that fits must not be rejected by over-weighting.
+
+    The pipeline split and the per-node admission must both weigh by
+    ``_node_usable_memory`` (capped at GPU_WORKING_SET_FRACTION * ram_total),
+    not raw ``ram_available``. Otherwise a node whose free RAM exceeds its GPU
+    ceiling gets a share larger than it can wire, and a placement that would
+    fit is rejected.
+
+    Concrete pair (model = 15 GB weights, no KV):
+      - small: 16 GB RAM, 15 GB free  -> usable cap 12 GB
+      - large: 64 GB RAM,  9 GB free  -> usable cap  9 GB
+    Splitting by raw available (15 / 24) assigns the small node ~9.4 GB, which
+    with the 1.30x overhead needs ~12.4 GB > its 12 GB cap -> wrongly rejected.
+    Splitting by usable (12 / 21) assigns it ~8.6 GB (~11.4 GB with overhead),
+    and both nodes fit -> admitted. This is exactly the mixed-memory cluster
+    the memory-aware placement is meant to support.
+    """
+    node_small = NodeId()
+    node_large = NodeId()
+    topology = Topology()
+    topology.add_node(node_small)
+    topology.add_node(node_large)
+    topology.add_connection(
+        Connection(source=node_small, sink=node_large, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=node_large, sink=node_small, edge=create_socket_connection(2))
+    )
+
+    node_memory = {
+        node_small: create_node_memory(
+            Memory.from_gb(15).in_bytes, ram_total=Memory.from_gb(16).in_bytes
+        ),
+        node_large: create_node_memory(
+            Memory.from_gb(9).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+    }
+
+    cycles = [c for c in topology.get_cycles() if len(c) == 2]
+    assert len(cycles) == 1
+
+    filtered_cycles, diagnostics = filter_cycles_by_memory(
+        cycles, node_memory, _card(15), sharding=Sharding.Pipeline
+    )
+
+    assert len(filtered_cycles) == 1, diagnostics.rejection_reasons
+    assert diagnostics.rejection_reasons == []
+
+
 def test_filter_multiple_cycles_by_memory():
     # arrange
     node_a_id = NodeId()
