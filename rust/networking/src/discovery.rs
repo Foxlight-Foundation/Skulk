@@ -106,6 +106,14 @@ pub struct Behaviour {
     mdns_discovered: HashMap<PeerId, BTreeSet<Multiaddr>>,
     bootstrap_peers: Vec<Multiaddr>,
 
+    // Remote IPs we currently hold at least one connection to, ref-counted by
+    // connection. Bootstrap peers are dialed by address (no peer id, so libp2p
+    // cannot dedup them); without this, the periodic retry opens a *new*
+    // connection to each bootstrap peer every interval and never stops, leaking
+    // sockets unboundedly. We skip re-dialing a bootstrap address whose IP is
+    // already connected, and resume once it drops.
+    connected_ips: HashMap<IpAddr, usize>,
+
     retry_delay: Delay, // retry interval
 
     // pending events to emmit => waker-backed Deque to control polling
@@ -118,6 +126,7 @@ impl Behaviour {
             managed: managed::Behaviour::new(keypair)?,
             mdns_discovered: HashMap::new(),
             bootstrap_peers,
+            connected_ips: HashMap::new(),
             retry_delay: Delay::new(RETRY_CONNECT_INTERVAL),
             pending_events: WakerDeque::new(),
         })
@@ -179,6 +188,10 @@ impl Behaviour {
         remote_ip: IpAddr,
         remote_tcp_port: u16,
     ) {
+        // track the connected IP so the retry loop stops re-dialing a bootstrap
+        // peer we already reached (see `connected_ips`)
+        *self.connected_ips.entry(remote_ip).or_insert(0) += 1;
+
         // send out connected event
         self.pending_events
             .push_back(ToSwarm::GenerateEvent(Event::ConnectionEstablished {
@@ -196,6 +209,15 @@ impl Behaviour {
         remote_ip: IpAddr,
         remote_tcp_port: u16,
     ) {
+        // drop the IP from the connected set once its last connection closes, so
+        // the retry loop will dial that bootstrap peer again
+        if let Some(count) = self.connected_ips.get_mut(&remote_ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.connected_ips.remove(&remote_ip);
+            }
+        }
+
         // send out disconnected event
         self.pending_events
             .push_back(ToSwarm::GenerateEvent(Event::ConnectionClosed {
@@ -370,10 +392,23 @@ impl NetworkBehaviour for Behaviour {
                     self.dial(p, ma)
                 }
             }
-            // dial bootstrap peers (for environments where mDNS is unavailable)
-            for addr in &self.bootstrap_peers {
+            // dial bootstrap peers (for environments where mDNS is unavailable),
+            // skipping any whose IP we already hold a connection to — bootstrap
+            // dials carry no peer id and so cannot be deduped by libp2p, so this
+            // guard is what prevents the retry loop from leaking a new socket to
+            // each bootstrap peer every interval.
+            let bootstrap_to_dial: Vec<Multiaddr> = self
+                .bootstrap_peers
+                .iter()
+                .filter(|addr| match addr.try_to_tcp_addr() {
+                    Some((ip, _)) => !self.connected_ips.contains_key(&ip),
+                    None => true,
+                })
+                .cloned()
+                .collect();
+            for addr in bootstrap_to_dial {
                 self.pending_events.push_back(ToSwarm::Dial {
-                    opts: DialOpts::unknown_peer_id().address(addr.clone()).build(),
+                    opts: DialOpts::unknown_peer_id().address(addr).build(),
                 })
             }
             self.retry_delay.reset(RETRY_CONNECT_INTERVAL) // reset timeout

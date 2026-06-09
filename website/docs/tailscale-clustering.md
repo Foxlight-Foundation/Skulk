@@ -26,40 +26,43 @@ On **every node** that will join the cluster:
 
 ## Setup
 
-### 1. Collect every node's Tailscale IP
+### 1. Enable Tailscale connectivity on every node
 
-On each machine:
+Add this to `skulk.yaml` on **every** node — the same three lines everywhere, no per-node IPs to manage:
 
-```bash
-tailscale ip -4
+```yaml
+connectivity:
+  tailscale:
+    enabled: true
 ```
 
-Write down the IP for every node in the cluster.
+With this set, each node queries its local tailnet and **auto-discovers every
+other node's `100.x` address as a bootstrap peer** — there is no list to
+maintain. Nodes are dialed on Skulk's libp2p port (default `52416`); peers that
+aren't running Skulk simply fail Skulk's private-network handshake and are
+ignored. When a node's Tailscale IP changes, discovery picks up the new one on
+the next restart with no config edit.
 
-### 2. Edit `skulk.yaml` on every node
+:::tip Local Network permission not needed over Tailscale
+The Tailscale overlay (a `utun` interface) is exempt from macOS Local Network
+Privacy, so — unlike a plain LAN/Thunderbolt cluster — you do **not** need to
+grant Local Network access for a Tailscale cluster to form. See
+[Thunderbolt clustering](thunderbolt-clustering) for the local-network case.
+:::
 
-Add a `connectivity` section listing the **other** nodes' Tailscale IPs. You don't list yourself — only peers.
+### 2. (Optional) Pin specific peers
 
-**Node A** (`100.101.102.101`) — lists B and C:
+Auto-discovery is enough for most setups. If you want to pin specific bootstrap
+addresses anyway — for example to dial a node on a non-default port, or to seed
+peers from outside the tailnet — list them explicitly; they are merged with the
+auto-discovered set:
 
 ```yaml
 connectivity:
   tailscale:
     enabled: true
     bootstrap_peers:
-      - /ip4/100.101.102.102/tcp/52416   # Node B
-      - /ip4/100.101.102.103/tcp/52416   # Node C
-```
-
-**Node B** (`100.101.102.102`) — lists A and C:
-
-```yaml
-connectivity:
-  tailscale:
-    enabled: true
-    bootstrap_peers:
-      - /ip4/100.101.102.101/tcp/52416   # Node A
-      - /ip4/100.101.102.103/tcp/52416   # Node C
+      - /ip4/100.101.102.103/tcp/52416   # pinned peer
 ```
 
 Port `52416` is Skulk's default libp2p port. If you changed it with `--libp2p-port`, use that port instead.

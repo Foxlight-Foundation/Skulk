@@ -11,12 +11,40 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shutil
 from typing import Any, final
 
 from loguru import logger
 from pydantic import Field
 
 from skulk.utils.pydantic_ext import FrozenModel
+
+# Common locations of the `tailscale` CLI. We resolve the binary explicitly
+# rather than relying on PATH, because Skulk is frequently launched from a
+# context with a minimal PATH (launchd agent, ssh, systemd) that does not
+# include /usr/local/bin where the standalone macOS installer puts it.
+_TAILSCALE_BINARY_CANDIDATES = (
+    "/usr/local/bin/tailscale",
+    "/opt/homebrew/bin/tailscale",
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    "/usr/bin/tailscale",  # common on Linux
+)
+
+
+def _resolve_tailscale_binary() -> str | None:
+    """Return a path to the ``tailscale`` CLI, or ``None`` if not found.
+
+    Prefers a PATH lookup (honours a user's custom install) and falls back to
+    well-known install locations.
+    """
+    found = shutil.which("tailscale")
+    if found:
+        return found
+    return next(
+        (path for path in _TAILSCALE_BINARY_CANDIDATES if os.access(path, os.X_OK)),
+        None,
+    )
 
 
 @final
@@ -38,6 +66,10 @@ class TailscaleStatus(FrozenModel):
             ``tailnet-abc.ts.net``.  ``None`` when dns_name is absent or
             cannot be parsed.
         version: The tailscale client version string.
+        peer_ips: The Tailscale IPv4 (``100.x``) addresses of all other nodes
+            in the tailnet. Used to auto-populate libp2p bootstrap peers so a
+            Tailscale cluster needs no hand-maintained IP list — non-Skulk peers
+            simply fail the private-network handshake and are ignored.
     """
 
     running: bool = Field(description="True when tailscaled reports BackendState == 'Running'.")
@@ -46,6 +78,10 @@ class TailscaleStatus(FrozenModel):
     dns_name: str | None = Field(default=None, description="Fully-qualified Tailscale MagicDNS name.")
     tailnet: str | None = Field(default=None, description="Tailnet name derived from dns_name.")
     version: str | None = Field(default=None, description="Tailscale client version string.")
+    peer_ips: list[str] = Field(
+        default_factory=list,
+        description="Tailscale IPv4 addresses (100.x) of other tailnet nodes.",
+    )
 
 
 def parse_status_json(raw: dict[str, Any]) -> TailscaleStatus:
@@ -76,6 +112,17 @@ def parse_status_json(raw: dict[str, Any]) -> TailscaleStatus:
 
     version: str | None = raw.get("Version") or None
 
+    # Collect every peer's first Tailscale IPv4 (100.x) address. The "Peer" map
+    # is keyed by node public key; each value carries that peer's TailscaleIPs.
+    peers: dict[str, Any] = raw.get("Peer") or {}
+    peer_ips: list[str] = []
+    for key in peers:
+        peer: dict[str, Any] = peers.get(key) or {}
+        ips: list[str] = peer.get("TailscaleIPs") or []
+        peer_ip = next((ip for ip in ips if ip.startswith("100.")), None)
+        if peer_ip is not None:
+            peer_ips.append(peer_ip)
+
     return TailscaleStatus(
         running=running,
         self_ip=self_ip,
@@ -83,6 +130,7 @@ def parse_status_json(raw: dict[str, Any]) -> TailscaleStatus:
         dns_name=dns_name,
         tailnet=tailnet,
         version=version,
+        peer_ips=peer_ips,
     )
 
 
@@ -96,10 +144,15 @@ async def query_tailscale_status() -> TailscaleStatus:
 
     _not_running = TailscaleStatus(running=False)
 
+    binary = _resolve_tailscale_binary()
+    if binary is None:
+        logger.debug("tailscale binary not found; Tailscale not installed")
+        return _not_running
+
     try:
         process = await asyncio.wait_for(
             asyncio.create_subprocess_exec(
-                "tailscale",
+                binary,
                 "status",
                 "--json",
                 stdout=asyncio.subprocess.PIPE,
