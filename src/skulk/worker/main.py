@@ -348,10 +348,14 @@ class Worker:
 
         Sends ``DeleteInstance`` to the master so the doomed instance stops
         being reconciled into fresh runners — each relaunch risks another
-        leak-on-abort. Clears the local failure record.
+        leak-on-abort. The crash window is deliberately NOT cleared: the trip is
+        edge-triggered, so leaving the failure history in place keeps the latch
+        set and suppresses re-tripping (and duplicate ``DeleteInstance``) while
+        the instance lingers in replicated state before the deletion lands.
+        ``InstanceId``s are unique, so the stale entry can never collide with a
+        future instance.
         """
         logger.error(f"Worker: giving up on instance {instance_id}: {reason}")
-        self._crash_breaker.clear(instance_id)
         await self.command_sender.send(
             ForwarderCommand(
                 origin=self._system_id,
@@ -460,6 +464,12 @@ class Worker:
                     self._stale_downloads_pending_reset.clear()
                     self._stale_resets_sent.clear()
                     self._stale_reset_wait_ticks = 0
+            # Bound the crash breaker's memory: drop entries for instances that
+            # no longer exist. We deliberately don't clear on give-up (that would
+            # let a lingering instance re-trip and re-send DeleteInstance), so
+            # this is where dead-instance keys are reclaimed.
+            self._crash_breaker.retain(self.state.instances)
+
             task: Task | None = plan(
                 self.node_id,
                 self.runners,

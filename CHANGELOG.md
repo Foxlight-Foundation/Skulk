@@ -9,6 +9,18 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Crash circuit breaker now trips once per crash loop, not once per failure.**
+  `CrashWindow.record()` is edge-triggered: it returns `True` only when the
+  in-window failure count *crosses* the threshold and stays latched (returning
+  `False`) until the window drains below it, and `_give_up_on_instance` no
+  longer clears the window. Previously the trip was level-triggered and the
+  window was cleared on give-up, so a doomed instance lingering in replicated
+  state before its `DeleteInstance` landed could re-accumulate and re-trip,
+  emitting duplicate `DeleteInstance` commands and "giving up on instance" logs.
+  `InstanceId`s are unique, so the retained failure history can never collide
+  with a future instance, and the worker reclaims breaker entries for deleted
+  instances each planning tick (`CrashWindow.retain`) so the history can't grow
+  unbounded. (Follow-up to #243.)
 - **Oversized model placements no longer brick a node.** Placing a model whose
   shard does not fit a node's memory previously passed an over-optimistic
   admission check (1.05x weights against gossiped `ram_available` only),
