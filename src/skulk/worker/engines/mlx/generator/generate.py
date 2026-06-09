@@ -1826,9 +1826,13 @@ def _stream_generate_with_mtp(
                     [float(prefix_len), float(raw_bonus_next)], dtype=mx.float32
                 )
             else:
-                # Receivers still force the verify forward so their slice of
-                # the pipeline collectives executes in step with the decider.
-                mx.eval(v_h)
+                # Receivers force the verify forward THROUGH the head so every
+                # collective executes in step with the decider: evaluating
+                # v_lp transitively forces v_h (the trunk's pipeline
+                # send/recv/all_gather) AND head_fn — which on TP placements
+                # shards the lm_head and carries its own collectives that the
+                # decider's local eval would otherwise wait on forever.
+                mx.eval(v_lp)
                 decision_payload = mx.zeros((2,), dtype=mx.float32)
             decision = _broadcast_via_all_sum(
                 draft_group, decision_payload, detail="mtp_accept_decision"

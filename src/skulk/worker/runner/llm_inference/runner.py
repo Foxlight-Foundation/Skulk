@@ -768,8 +768,12 @@ class Builder:
         # speculation symmetrically and may batch.
         _runtime = self.model_card.runtime if self.model_card is not None else None
         _world_size = 1 if self.group is None else self.group.size()
+        # Rank symmetry only matters when there ARE peer ranks: single-rank
+        # runners keep the asset-derived decision (a card-declared sidecar
+        # whose download failed should still be allowed to batch).
         card_declares_speculation = (
-            _runtime is not None
+            _world_size > 1
+            and _runtime is not None
             and (
                 (_runtime.mtp_sidecar_repo is not None and _runtime.mtp_heads)
                 or _runtime.assistant_model_repo is not None
