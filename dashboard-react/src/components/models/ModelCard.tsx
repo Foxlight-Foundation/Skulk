@@ -120,8 +120,8 @@ function computePlacement(
 
   const placementNodes: PlacementNode[] = ids.map((id, i) => {
     const info = nodes[id];
-    const totalBytes = info.macmon_info?.memory?.ram_total ?? info.system_info?.memory ?? 0;
-    const usedBytes = info.macmon_info?.memory?.ram_usage ?? 0;
+    const totalBytes = info.mactop_info?.memory?.ram_total ?? info.system_info?.memory ?? 0;
+    const usedBytes = info.mactop_info?.memory?.ram_usage ?? 0;
     const totalGB = totalBytes / GB;
     const usedGB = Math.max(totalBytes - (totalBytes - usedBytes), 0) / GB;
     const deltaBytes = memDelta[id] ?? 0;

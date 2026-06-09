@@ -13,9 +13,9 @@ To run Skulk from source:
   ```bash
   brew install uv
   ```
-- [macmon](https://github.com/vladkens/macmon) (for hardware monitoring on Apple Silicon)
+- [mactop](https://github.com/metaspartan/mactop) (for hardware monitoring on Apple Silicon)
   ```bash
-  brew install macmon
+  brew install mactop
   ```
 - [node](https://github.com/nodejs/node) (for building the dashboard)
   ```bash

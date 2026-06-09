@@ -8,20 +8,20 @@ const GB = 1024 * 1024 * 1024;
 const nodes: Record<string, NodeInfo> = {
   'node-a': {
     system_info: { model_id: 'Mac Studio', chip: 'M4 Max', memory: 64 * GB },
-    macmon_info: { memory: { ram_usage: 22 * GB, ram_total: 64 * GB }, temp: { gpu_temp_avg: 40 }, gpu_usage: [0, 0.1], sys_power: 15 },
-    last_macmon_update: Date.now(),
+    mactop_info: { memory: { ram_usage: 22 * GB, ram_total: 64 * GB }, temp: { gpu_temp_avg: 40 }, gpu_usage: [0, 0.1], sys_power: 15 },
+    last_mactop_update: Date.now(),
     friendly_name: 'kite3',
   },
   'node-b': {
     system_info: { model_id: 'Mac Mini', chip: 'M4', memory: 16 * GB },
-    macmon_info: { memory: { ram_usage: 9 * GB, ram_total: 16 * GB }, temp: { gpu_temp_avg: 37 }, gpu_usage: [0, 0.05], sys_power: 9 },
-    last_macmon_update: Date.now(),
+    mactop_info: { memory: { ram_usage: 9 * GB, ram_total: 16 * GB }, temp: { gpu_temp_avg: 37 }, gpu_usage: [0, 0.05], sys_power: 9 },
+    last_mactop_update: Date.now(),
     friendly_name: 'kite1',
   },
   'node-c': {
     system_info: { model_id: 'MacBook Pro', chip: 'M4 Pro', memory: 36 * GB },
-    macmon_info: { memory: { ram_usage: 15 * GB, ram_total: 36 * GB }, temp: { gpu_temp_avg: 45 }, gpu_usage: [0, 0.2], sys_power: 20 },
-    last_macmon_update: Date.now(),
+    mactop_info: { memory: { ram_usage: 15 * GB, ram_total: 36 * GB }, temp: { gpu_temp_avg: 45 }, gpu_usage: [0, 0.2], sys_power: 20 },
+    last_mactop_update: Date.now(),
     friendly_name: 'macbook-dev',
   },
 };

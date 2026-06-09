@@ -169,7 +169,7 @@
           makeWrapper ${skulkVenv}/bin/skulk $out/bin/skulk \
             --set SKULK_DASHBOARD_DIR ${self'.packages.dashboard} \
             --set SKULK_RESOURCES_DIR ${inputs.self + /resources} \
-            ${lib.optionalString pkgs.stdenv.hostPlatform.isDarwin "--prefix PATH : ${pkgs.macmon}/bin"}
+            ${lib.optionalString pkgs.stdenv.hostPlatform.isDarwin "--prefix PATH : ${pkgs.mactop}/bin"}
         '';
     in
     {
