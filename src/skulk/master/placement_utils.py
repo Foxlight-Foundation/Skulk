@@ -4,6 +4,21 @@ from typing import final
 from loguru import logger
 from pydantic import Field
 
+from skulk.shared.models.memory_estimate import (
+    GPU_WORKING_SET_FRACTION,
+)
+from skulk.shared.models.memory_estimate import (
+    KV_CONTEXT_BUDGET_TOKENS as PLACEMENT_KV_CONTEXT_BUDGET_TOKENS,
+)
+from skulk.shared.models.memory_estimate import (
+    MEMORY_OVERHEAD_FACTOR as PLACEMENT_MEMORY_OVERHEAD_FACTOR,
+)
+from skulk.shared.models.memory_estimate import (
+    MEMORY_OVERHEAD_FLOOR as PLACEMENT_MEMORY_OVERHEAD_FLOOR,
+)
+from skulk.shared.models.memory_estimate import (
+    estimate_kv_cache_bytes as _estimate_kv_cache_bytes,
+)
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.topology import Topology
 from skulk.shared.types.common import Host, NodeId
@@ -20,26 +35,11 @@ from skulk.shared.types.worker.shards import (
 )
 from skulk.utils.pydantic_ext import CamelCaseModel
 
-PLACEMENT_MEMORY_OVERHEAD_FACTOR: float = 1.05
-"""Multiplier applied to a node's share of the model weights when judging fit.
-
-Weights are not the whole story: the runner also needs KV cache, activation
-workspace, MLX buffer cache, and the Python runtime itself (measured on
-Qwen3.5-9B-MLX-4bit: ~6.4 GB resident for 5.2 GB of weights). The factor is
-deliberately gentle: macOS digs deeper than the gossiped ram_available under
-real pressure (compressing and evicting the active set), and Skulk's whole
-purpose is running the largest model a cluster can hold — so this check only
-refuses placements that are guaranteed to thrash (the exact-fit class), not
-ones that merely run warm. A wired-aware capacity metric that can be stricter
-without over-refusing is tracked as follow-up work.
-"""
-
-PLACEMENT_MEMORY_OVERHEAD_FLOOR: Memory = Memory.from_mb(256)
-"""Flat per-node overhead added on top of the proportional factor.
-
-Covers the roughly model-size-independent costs (Python interpreter, MLX
-runtime, IPC buffers) that the multiplicative factor under-counts for small
-models."""
+# Memory-fit constants (overhead factor/floor, GPU working-set fraction, KV
+# context budget) and the KV-cache estimator are imported above under the
+# historical ``PLACEMENT_*`` / ``_estimate_kv_cache_bytes`` names. They live in
+# skulk.shared.models.memory_estimate so this placement fit-check and the
+# worker's local pre-spawn OOM guard share one source of truth.
 
 
 @final
@@ -74,36 +74,57 @@ def _per_node_required_memory(
     Tensor parallelism splits the weights evenly across ranks, so every node
     carries ``required_memory / len(cycle)`` regardless of its capacity.
     Pipeline parallelism allocates layers proportionally to each node's
-    available memory (see ``allocate_layers_proportionally``), so a node's
-    share scales with its fraction of the cycle's total available memory.
+    usable memory (see ``allocate_layers_proportionally``), so a node's
+    share scales with its fraction of the cycle's total usable memory.
     The continuous fraction is an estimate of the integer layer allocation:
     the two can differ by up to one layer per node (a few percent of the
     weights on realistic layer counts), which sits comfortably inside the
     ``PLACEMENT_MEMORY_OVERHEAD_FACTOR`` margin applied on top.
+
+    Both the split here and the per-node admission below weigh by
+    ``_node_usable_memory`` (capped at the Metal working-set ceiling), not raw
+    ``ram_available``. Splitting by raw available while admitting against the
+    cap over-weights a node whose free RAM exceeds its GPU ceiling (e.g. a
+    16 GB node with 15 GB free but a ~12 GB cap), pushing its share past the
+    cap and rejecting cycles that would fit if sized by usable memory — exactly
+    the heterogeneous clusters this check is meant to support.
     """
     if sharding == Sharding.Tensor:
         even_share = required_memory / len(cycle.node_ids)
         return {node_id: even_share for node_id in cycle.node_ids}
-    total_available = sum(
-        (node_memory[node_id].ram_available for node_id in cycle.node_ids),
+    total_usable = sum(
+        (_node_usable_memory(node_memory[node_id]) for node_id in cycle.node_ids),
         start=Memory(),
     )
-    if total_available.in_bytes == 0:
+    if total_usable.in_bytes == 0:
         # Degenerate: no node reports any memory; assign everything everywhere
         # so the fit check below rejects the cycle with a concrete reason.
         return {node_id: required_memory for node_id in cycle.node_ids}
     return {
         node_id: required_memory
-        * (node_memory[node_id].ram_available / total_available)
+        * (_node_usable_memory(node_memory[node_id]) / total_usable)
         for node_id in cycle.node_ids
     }
+
+
+def _node_usable_memory(memory: MemoryUsage) -> Memory:
+    """Memory a node can actually dedicate to a shard.
+
+    Capped at the Metal GPU working-set ceiling (``GPU_WORKING_SET_FRACTION`` of
+    total RAM): gossiped ``ram_available`` can exceed what the GPU is allowed to
+    wire, so a shard that fits "available" RAM can still abort on the GPU
+    working-set wall.
+    """
+    ceiling = memory.ram_total * GPU_WORKING_SET_FRACTION
+    return min(memory.ram_available, ceiling)
 
 
 def filter_cycles_by_memory(
     cycles: list[Cycle],
     node_memory: Mapping[NodeId, MemoryUsage],
-    required_memory: Memory,
+    model_card: ModelCard,
     sharding: Sharding = Sharding.Pipeline,
+    context_budget: int = PLACEMENT_KV_CONTEXT_BUDGET_TOKENS,
 ) -> tuple[list[Cycle], CycleMemoryDiagnostics]:
     """Keep cycles whose every node can hold its shard with runtime headroom.
 
@@ -112,8 +133,14 @@ def filter_cycles_by_memory(
     whose even split overloads the 16 GB node, and a sum check would happily
     admit it. Each node must satisfy::
 
-        node_share * PLACEMENT_MEMORY_OVERHEAD_FACTOR
-            + PLACEMENT_MEMORY_OVERHEAD_FLOOR <= ram_available
+        weights_share * PLACEMENT_MEMORY_OVERHEAD_FACTOR
+            + kv_share + PLACEMENT_MEMORY_OVERHEAD_FLOOR
+            <= min(ram_available, GPU_WORKING_SET_FRACTION * ram_total)
+
+    ``kv_share`` reserves KV cache for ``context_budget`` tokens. It scales with
+    a node's shard exactly as the weights do (per-layer for pipeline, per-rank
+    for tensor), so it is derived from the node's weight share rather than
+    recomputing the split.
 
     Cycles touching nodes with no memory info at all (cluster still starting
     up) are recorded in ``diagnostics.pending_info_node_ids`` instead of being
@@ -124,6 +151,13 @@ def filter_cycles_by_memory(
     """
     diagnostics = CycleMemoryDiagnostics()
     filtered_cycles: list[Cycle] = []
+    required_memory = model_card.storage_size
+    total_kv = _estimate_kv_cache_bytes(model_card, model_card.n_layers, context_budget)
+    kv_ratio = (
+        total_kv.in_bytes / required_memory.in_bytes
+        if required_memory.in_bytes
+        else 0.0
+    )
     for cycle in cycles:
         missing = [node for node in cycle.node_ids if node not in node_memory]
         if missing:
@@ -137,16 +171,20 @@ def filter_cycles_by_memory(
         )
         overloaded: list[str] = []
         for node_id, share in node_shares.items():
+            kv_share = share * kv_ratio
             required_with_overhead = (
                 share * PLACEMENT_MEMORY_OVERHEAD_FACTOR
+                + kv_share
                 + PLACEMENT_MEMORY_OVERHEAD_FLOOR
             )
-            available = node_memory[node_id].ram_available
+            available = _node_usable_memory(node_memory[node_id])
             if required_with_overhead > available:
                 overloaded.append(
                     f"node {node_id} needs ~{required_with_overhead.in_gb:.1f}GB "
-                    f"({share.in_gb:.1f}GB weights + runtime headroom) "
-                    f"but has {available.in_gb:.1f}GB available"
+                    f"({share.in_gb:.1f}GB weights + {kv_share.in_gb:.1f}GB "
+                    f"KV@{context_budget}tok + runtime headroom) but can use "
+                    f"{available.in_gb:.1f}GB (min of available and "
+                    f"{GPU_WORKING_SET_FRACTION:.0%} of RAM)"
                 )
         if overloaded:
             diagnostics.rejection_reasons.append(
@@ -205,12 +243,16 @@ def _compute_total_memory(
     node_ids: list[NodeId],
     node_memory: Mapping[NodeId, MemoryUsage],
 ) -> Memory:
+    # Weigh by usable (working-set-capped) memory, matching the admission check
+    # in filter_cycles_by_memory: splitting by raw ram_available while admitting
+    # against the cap over-weights nodes whose free RAM exceeds their GPU
+    # ceiling and produces shards that don't fit.
     total_memory = sum(
-        (node_memory[node_id].ram_available for node_id in node_ids),
+        (_node_usable_memory(node_memory[node_id]) for node_id in node_ids),
         start=Memory(),
     )
     if total_memory.in_bytes == 0:
-        raise ValueError("Cannot create shard assignments: total available memory is 0")
+        raise ValueError("Cannot create shard assignments: total usable memory is 0")
     return total_memory
 
 
@@ -223,7 +265,8 @@ def _allocate_and_validate_layers(
     layer_allocations = allocate_layers_proportionally(
         total_layers=model_card.n_layers,
         memory_fractions=[
-            node_memory[node_id].ram_available / total_memory for node_id in node_ids
+            _node_usable_memory(node_memory[node_id]) / total_memory
+            for node_id in node_ids
         ],
     )
 
@@ -232,12 +275,13 @@ def _allocate_and_validate_layers(
     for i, node_id in enumerate(node_ids):
         node_layers = layer_allocations[i]
         required_memory = (total_storage * node_layers) // total_layers
-        available_memory = node_memory[node_id].ram_available
-        if required_memory > available_memory:
+        usable_memory = _node_usable_memory(node_memory[node_id])
+        if required_memory > usable_memory:
             raise ValueError(
                 f"Node {i} ({node_id}) has insufficient memory: "
                 f"requires {required_memory.in_gb:.2f} GB for {node_layers} layers, "
-                f"but only has {available_memory.in_gb:.2f} GB available"
+                f"but can only use {usable_memory.in_gb:.2f} GB "
+                f"({GPU_WORKING_SET_FRACTION:.0%} of RAM cap)"
             )
 
     return layer_allocations

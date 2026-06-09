@@ -191,7 +191,7 @@ def place_instance(
     cycles_with_sufficient_memory, memory_diagnostics = filter_cycles_by_memory(
         candidate_cycles,
         node_memory,
-        command.model_card.storage_size,
+        command.model_card,
         command.sharding,
     )
     if len(cycles_with_sufficient_memory) == 0:

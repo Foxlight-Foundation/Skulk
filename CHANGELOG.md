@@ -9,6 +9,22 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Oversized model placements no longer brick a node.** Placing a model whose
+  shard does not fit a node's memory previously passed an over-optimistic
+  admission check (1.05x weights against gossiped `ram_available` only),
+  OOM-aborted during load, and orphaned wired GPU memory reclaimable only by
+  reboot — then the worker relaunched the doomed runner every ~1.5s with no
+  backoff, compounding the leak (the GLM-4.7-Flash incident). Three changes
+  harden this: (1) placement estimates a realistic footprint — weights x 1.30,
+  an explicit KV-cache reservation for an 8192-token planning budget, and a
+  per-node cap at the Metal GPU working-set ceiling (~75% of RAM) — and shards
+  proportionally to fit heterogeneous clusters rather than refusing what fits;
+  (2) the worker refuses a shard that won't fit *local, current* memory before
+  spawning the runner, failing cleanly instead of OOM-aborting; (3) a crash
+  circuit breaker gives up after 3 runner failures within 60s and deletes the
+  instance instead of looping. Estimation lives in one shared module
+  (`skulk.shared.models.memory_estimate`) used by both the master admission
+  check and the worker guard so the two never disagree.
 - **macOS node telemetry no longer crashes MLX inference (macmon → mactop).**
   Skulk's `InfoGatherer` spawned `macmon` at 1 Hz for hardware metrics on every
   macOS node. macmon reads the GPU via IOKit/IOGPUFamily — the same interface

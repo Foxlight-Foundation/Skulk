@@ -94,11 +94,12 @@ def test_get_instance_placements_create_instance(
 ):
     # arrange
     model_card.n_layers = total_layers
-    # 80% of the cycle's total memory: large enough that no 2-node cycle or
+    # 65% of the cycle's total memory: large enough that no 2-node cycle or
     # singleton passes the per-node headroom check (forcing the 3-node
     # placement this test asserts on), small enough that the 3-node cycle
-    # fits. The layer split itself only depends on the memory fractions.
-    model_card.storage_size = Memory.from_gb(sum(available_memory) * 0.8)
+    # fits under the 1.30x weight-overhead factor. The layer split itself only
+    # depends on the memory fractions, not this size.
+    model_card.storage_size = Memory.from_gb(sum(available_memory) * 0.65)
     topology = Topology()
 
     cic = place_instance_command(model_card)
@@ -209,7 +210,7 @@ def test_get_instance_placements_one_node_fits_with_extra_memory() -> None:
     cic = place_instance_command(
         ModelCard(
             model_id=ModelId("test-model"),
-            storage_size=Memory.from_gb(6),
+            storage_size=Memory.from_gb(5),
             n_layers=10,
             hidden_size=1000,
             supports_tensor=True,

@@ -14,6 +14,10 @@ from skulk.api.types import ImageEditsTaskParams
 from skulk.download.download_utils import resolve_model_in_path
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
+from skulk.shared.models.memory_estimate import (
+    estimate_shard_footprint,
+    gpu_working_set_ceiling,
+)
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -22,6 +26,7 @@ from skulk.shared.models.model_cards import (
 )
 from skulk.shared.types.chunks import InputImageChunk
 from skulk.shared.types.commands import (
+    DeleteInstance,
     ForwarderCommand,
     ForwarderDownloadCommand,
     StartDownload,
@@ -45,6 +50,7 @@ from skulk.shared.types.events import (
     TopologyEdgeDeleted,
 )
 from skulk.shared.types.multiaddr import Multiaddr
+from skulk.shared.types.profiling import MemoryUsage
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import (
     CancelTask,
@@ -65,8 +71,9 @@ from skulk.shared.types.worker.downloads import (
     DownloadOngoing,
     DownloadPending,
 )
+from skulk.shared.types.worker.instances import InstanceId
 from skulk.shared.types.worker.runners import RunnerId
-from skulk.shared.types.worker.shards import ShardMetadata
+from skulk.shared.types.worker.shards import ShardMetadata, TensorShardMetadata
 from skulk.store.config import StagingNodeConfig
 from skulk.store.model_store_client import ModelStoreClient
 from skulk.store.staging_eviction import (
@@ -76,6 +83,7 @@ from skulk.store.staging_eviction import (
     touch_last_used,
 )
 from skulk.utils.channels import Receiver, Sender, channel
+from skulk.utils.crash_window import CrashWindow
 from skulk.utils.info_gatherer.info_gatherer import GatheredInfo, InfoGatherer
 from skulk.utils.info_gatherer.net_profile import check_reachable
 from skulk.utils.keyed_backoff import KeyedBackoff
@@ -89,6 +97,14 @@ resets round-trip through the master (~30s). The deadline exists so a
 masterless interval cannot freeze the worker forever — past it, planning
 resumes and the download coordinator's missing-directory self-heal covers
 the residual risk."""
+
+
+_RUNNER_CRASH_THRESHOLD = 3
+"""Runner failures (crashes + local fit-refusals) for one instance within
+``_RUNNER_CRASH_WINDOW_SECONDS`` before the worker gives up and deletes it."""
+
+_RUNNER_CRASH_WINDOW_SECONDS = 60.0
+"""Rolling window for ``_RUNNER_CRASH_THRESHOLD`` (see CrashWindow)."""
 
 
 def _summarize_worker_task(task: Task) -> str:
@@ -116,9 +132,7 @@ def _summarize_worker_task(task: Task) -> str:
         )
     if isinstance(task, Shutdown):
         return (
-            "Shutdown("
-            f"instance_id={task.instance_id!r}, "
-            f"runner_id={task.runner_id!r})"
+            f"Shutdown(instance_id={task.instance_id!r}, runner_id={task.runner_id!r})"
         )
     if isinstance(task, LoadModel):
         return f"LoadModel(instance_id={task.instance_id!r})"
@@ -281,7 +295,69 @@ class Worker:
         self.image_cache: dict[str, str] = {}
 
         self._download_backoff: KeyedBackoff[ModelId] = KeyedBackoff(base=0.5, cap=10.0)
+        # Crash circuit breaker: stop relaunching an instance whose runner keeps
+        # failing (e.g. OOM on load). Each abnormal Metal termination can leak
+        # wired GPU memory reclaimable only by reboot, so an unbounded relaunch
+        # loop compounds the damage (the GLM-4.7-Flash incident, 2026-06-08).
+        self._crash_breaker: CrashWindow[InstanceId] = CrashWindow(
+            _RUNNER_CRASH_THRESHOLD, _RUNNER_CRASH_WINDOW_SECONDS
+        )
         self._stopped: anyio.Event = anyio.Event()
+
+    def _shard_memory_fraction(self, shard: ShardMetadata) -> float:
+        """Fraction of a model's memory this node's shard holds.
+
+        Weights and KV both scale by this single fraction (see
+        ``estimate_shard_footprint``). Tensor parallelism splits every weight
+        matrix and KV head by ``world_size``; pipeline/CFG hold a contiguous
+        layer range.
+        """
+        if isinstance(shard, TensorShardMetadata):
+            return 1.0 / shard.world_size if shard.world_size > 0 else 1.0
+        if shard.n_layers > 0:
+            return (shard.end_layer - shard.start_layer) / shard.n_layers
+        return 1.0 / shard.world_size if shard.world_size > 0 else 1.0
+
+    def _local_shard_fit_error(self, shard: ShardMetadata) -> str | None:
+        """Reason this node cannot hold ``shard``, or ``None`` if it fits.
+
+        Last-resort guard using *local, current* memory (psutil available capped
+        at the Metal GPU working-set ceiling), not the master's gossiped view.
+        Refusing here fails the placement cleanly instead of letting the runner
+        OOM-abort, which on an abnormal Metal termination leaks wired GPU memory
+        reclaimable only by reboot (the GLM-4.7-Flash class, 2026-06-08).
+        """
+        footprint = estimate_shard_footprint(
+            shard.model_card, self._shard_memory_fraction(shard)
+        )
+        local = MemoryUsage.from_psutil(override_memory=None)
+        usable = min(local.ram_available, gpu_working_set_ceiling(local.ram_total))
+        if footprint > usable:
+            return (
+                f"Refusing to load a shard of {shard.model_card.model_id} on "
+                f"{self.node_id}: ~{footprint.in_gb:.1f}GB needed but only "
+                f"~{usable.in_gb:.1f}GB usable locally "
+                f"({local.ram_available.in_gb:.1f}GB free, capped at the GPU "
+                "working-set ceiling). Refusing before load to avoid an OOM "
+                "abort that leaks GPU memory."
+            )
+        return None
+
+    async def _give_up_on_instance(self, instance_id: InstanceId, reason: str) -> None:
+        """Tear down a repeatedly-failing instance instead of relaunching it.
+
+        Sends ``DeleteInstance`` to the master so the doomed instance stops
+        being reconciled into fresh runners — each relaunch risks another
+        leak-on-abort. Clears the local failure record.
+        """
+        logger.error(f"Worker: giving up on instance {instance_id}: {reason}")
+        self._crash_breaker.clear(instance_id)
+        await self.command_sender.send(
+            ForwarderCommand(
+                origin=self._system_id,
+                command=DeleteInstance(instance_id=instance_id),
+            )
+        )
 
     async def run(self):
         logger.info("Starting Worker")
@@ -410,12 +486,25 @@ class Worker:
             # lets not kill the worker if a runner is unresponsive
             match task:
                 case CreateRunner():
-                    self._create_supervisor(task)
-                    await self.event_sender.send(
-                        TaskStatusUpdated(
-                            task_id=task.task_id, task_status=TaskStatus.Complete
-                        )
+                    fit_error = self._local_shard_fit_error(
+                        task.bound_instance.bound_shard
                     )
+                    if fit_error is not None:
+                        logger.error(fit_error)
+                        await self.event_sender.send(
+                            TaskStatusUpdated(
+                                task_id=task.task_id, task_status=TaskStatus.Failed
+                            )
+                        )
+                        if self._crash_breaker.record(task.instance_id):
+                            await self._give_up_on_instance(task.instance_id, fit_error)
+                    else:
+                        self._create_supervisor(task)
+                        await self.event_sender.send(
+                            TaskStatusUpdated(
+                                task_id=task.task_id, task_status=TaskStatus.Complete
+                            )
+                        )
                 case DownloadModel(shard_metadata=shard):
                     model_id = shard.model_card.model_id
                     self._download_backoff.record_attempt(model_id)
@@ -478,10 +567,22 @@ class Worker:
                         runner.shutdown()
                         if instance_deleted:
                             await self._maybe_evict_shard(shard_for_eviction)
+                        elif self._crash_breaker.record(task.instance_id):
+                            # Runner keeps crashing (e.g. OOM on load). Give up
+                            # rather than relaunching into another leak-on-abort.
+                            await self._give_up_on_instance(
+                                task.instance_id,
+                                f"runner for "
+                                f"{shard_for_eviction.model_card.model_id} crashed "
+                                f"{_RUNNER_CRASH_THRESHOLD}x within "
+                                f"{_RUNNER_CRASH_WINDOW_SECONDS:.0f}s "
+                                "(likely insufficient memory)",
+                            )
                         else:
-                            # Runner crashed but instance still exists — reset
-                            # download status so the planner re-stages the model
-                            # instead of assuming it's still on disk.
+                            # Runner crashed but instance still exists and the
+                            # breaker has not tripped — reset download status so
+                            # the planner re-stages the model instead of assuming
+                            # it's still on disk, and retry.
                             logger.info(
                                 f"Worker: resetting download status for "
                                 f"{shard_for_eviction.model_card.model_id} after runner crash"
@@ -513,7 +614,9 @@ class Worker:
                         f"Assembled input image from {len(chunks)} chunks, "
                         f"total size: {len(assembled)} bytes"
                     )
-                    _log_image_payload_debug("Worker assembled image edit", 0, assembled)
+                    _log_image_payload_debug(
+                        "Worker assembled image edit", 0, assembled
+                    )
                     # Create modified task with assembled image data
                     modified_task = ImageEdits(
                         task_id=task.task_id,
@@ -624,6 +727,23 @@ class Worker:
         if (instance := self.state.instances.get(task.instance_id)) is not None:
             runner_id = instance.shard_assignments.node_to_runner[self.node_id]
             shard = instance.shard(runner_id)
+            if isinstance(task, LoadModel) and shard is not None:
+                # Re-check fit at load dispatch. The CreateRunner guard runs
+                # before download and before any concurrently-placed instance
+                # has loaded, so this is the last accurate point — current free
+                # memory now reflects those other loads — to refuse before the
+                # runner allocates and risks an OOM-abort that leaks GPU memory.
+                fit_error = self._local_shard_fit_error(shard)
+                if fit_error is not None:
+                    logger.error(fit_error)
+                    await self.event_sender.send(
+                        TaskStatusUpdated(
+                            task_id=task.task_id, task_status=TaskStatus.Failed
+                        )
+                    )
+                    if self._crash_breaker.record(task.instance_id):
+                        await self._give_up_on_instance(task.instance_id, fit_error)
+                    return
             logger.info(
                 "Dispatching worker task "
                 f"({_summarize_worker_task(task)}, "
@@ -710,6 +830,7 @@ class Worker:
         evicting one corrupts a live runner just the same — MLX loads
         weights lazily.
         """
+
         def _add_card(card: ModelCard) -> None:
             in_use.add(str(card.model_id))
             if card.vision and card.vision.weights_repo:
@@ -761,9 +882,7 @@ class Worker:
         # loop thread: the threaded pass must not iterate self.runners /
         # self.state while the loop mutates them.
         models_in_use = self._models_in_use()
-        report = await to_thread.run_sync(
-            self._enforce_staging_budget, models_in_use
-        )
+        report = await to_thread.run_sync(self._enforce_staging_budget, models_in_use)
         if report is None:
             return
         await self._reset_download_state_for_evicted(report, shard)
@@ -809,9 +928,7 @@ class Worker:
             pending = DownloadPending(
                 shard_metadata=shard_metadata,
                 node_id=self.node_id,
-                model_directory=str(
-                    cache_path / evicted_model_id.replace("/", "--")
-                ),
+                model_directory=str(cache_path / evicted_model_id.replace("/", "--")),
             )
             await self.event_sender.send(
                 NodeDownloadProgress(download_progress=pending)
@@ -856,8 +973,7 @@ class Worker:
             local_store_path = self._store_client.local_store_path
             if (
                 local_store_path is not None
-                and local_store_path.expanduser().resolve()
-                == staging_root.resolve()
+                and local_store_path.expanduser().resolve() == staging_root.resolve()
             ):
                 logger.warning(
                     "Worker: staging eviction skipped — node_cache_path is "
@@ -866,9 +982,7 @@ class Worker:
                     "this node should have a managed staging cache."
                 )
                 return None
-        keep_recent_bytes = int(
-            self._staging_config.staging_keep_recent_gb * 1024**3
-        )
+        keep_recent_bytes = int(self._staging_config.staging_keep_recent_gb * 1024**3)
         try:
             return enforce_staging_budget(
                 staging_root,
