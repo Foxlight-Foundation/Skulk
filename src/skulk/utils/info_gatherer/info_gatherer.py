@@ -4,8 +4,7 @@ import sys
 import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from subprocess import CalledProcessError
-from typing import Self, cast
+from typing import Self
 
 import anyio
 from anyio import fail_after, open_process, to_thread
@@ -648,18 +647,9 @@ class InfoGatherer:
                 logger.warning(
                     f"mactop produced no output for {read_timeout}s, restarting"
                 )
-            except CalledProcessError as e:
-                stderr_msg = "no stderr"
-                stderr_output = cast(bytes | str | None, e.stderr)
-                if stderr_output is not None:
-                    stderr_msg = (
-                        stderr_output.decode()
-                        if isinstance(stderr_output, bytes)
-                        else str(stderr_output)
-                    )
-                logger.warning(
-                    f"mactop failed with return code {e.returncode}: {stderr_msg}"
-                )
             except Exception as e:
+                # anyio's open_process()/async-with does not raise
+                # CalledProcessError (no check=True semantics); mactop dying just
+                # closes stdout, surfacing here as EndOfStream. Respawn either way.
                 logger.warning(f"Error in mactop monitor: {e}")
             await anyio.sleep(self.mactop_interval)
