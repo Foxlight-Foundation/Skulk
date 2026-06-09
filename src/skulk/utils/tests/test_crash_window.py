@@ -46,6 +46,33 @@ def test_latch_releases_after_window_drains_then_retrips():
     assert breaker.record("a") is True  # fresh count 2 -> trips again
 
 
+def test_threshold_one_trips_each_time_after_window_drains():
+    # threshold == 1 is the edge case for latch release: every isolated failure
+    # (outside the prior window) must re-trip, but a burst still trips only once.
+    clock = _FakeClock()
+    breaker: CrashWindow[str] = CrashWindow(1, 60.0, clock=clock)
+    assert breaker.record("a") is True  # 1st failure -> trips
+    assert breaker.record("a") is False  # same instant, still latched
+    clock.now = 100.0  # prior failure aged out
+    assert breaker.record("a") is True  # fresh isolated failure -> trips again
+
+
+def test_fresh_crossing_after_partial_drain_retrips():
+    # threshold=3, failures at t=0,1,2 trip at t=2. At t=60.5 the t=0 stamp has
+    # aged out, so the pruned count is 2 (< threshold) and the latch must release
+    # BEFORE the new failure brings the count back to 3 — a genuine fresh edge.
+    clock = _FakeClock()
+    breaker: CrashWindow[str] = CrashWindow(3, 60.0, clock=clock)
+    clock.now = 0.0
+    assert breaker.record("a") is False
+    clock.now = 1.0
+    assert breaker.record("a") is False
+    clock.now = 2.0
+    assert breaker.record("a") is True  # trips
+    clock.now = 60.5  # t=0 now outside the 60s window; t=1,t=2 remain (count 2)
+    assert breaker.record("a") is True  # 2 -> 3 is a fresh crossing
+
+
 def test_failures_outside_window_are_forgotten():
     clock = _FakeClock()
     breaker: CrashWindow[str] = CrashWindow(3, 60.0, clock=clock)
@@ -72,6 +99,21 @@ def test_clear_resets_a_key():
     breaker.record("a")
     breaker.clear("a")
     assert breaker.record("a") is False  # count restarted at 1
+
+
+def test_retain_drops_dead_keys_and_keeps_live_ones():
+    clock = _FakeClock()
+    breaker: CrashWindow[str] = CrashWindow(2, 60.0, clock=clock)
+    breaker.record("live")
+    breaker.record("live")  # trips -> latched
+    breaker.record("dead")  # one failure recorded for a key about to disappear
+
+    breaker.retain({"live"})  # "dead" is no longer a live key
+
+    # "dead" was fully forgotten: it starts counting from scratch.
+    assert breaker.record("dead") is False
+    # "live" kept both its history and its latch (still tripped, no re-fire).
+    assert breaker.record("live") is False
 
 
 def test_threshold_must_be_positive():

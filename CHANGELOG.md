@@ -18,7 +18,9 @@ This project records release notes here and mirrors public-facing notes in
   state before its `DeleteInstance` landed could re-accumulate and re-trip,
   emitting duplicate `DeleteInstance` commands and "giving up on instance" logs.
   `InstanceId`s are unique, so the retained failure history can never collide
-  with a future instance. (Follow-up to #243.)
+  with a future instance, and the worker reclaims breaker entries for deleted
+  instances each planning tick (`CrashWindow.retain`) so the history can't grow
+  unbounded. (Follow-up to #243.)
 - **Oversized model placements no longer brick a node.** Placing a model whose
   shard does not fit a node's memory previously passed an over-optimistic
   admission check (1.05x weights against gossiped `ram_available` only),

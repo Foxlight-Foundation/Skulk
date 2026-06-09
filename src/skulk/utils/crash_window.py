@@ -8,7 +8,7 @@ fails once an hour never trips — only a tight crash loop does.
 """
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Container
 from typing import Generic, TypeVar
 
 K = TypeVar("K")
@@ -62,19 +62,39 @@ class CrashWindow(Generic[K]):
             for stamp in self._failures.get(key, [])
             if now - stamp < self._window_seconds
         ]
+        # Release the latch based on the PRUNED, pre-append count: if the prior
+        # loop has drained below the threshold, the next failure starts a fresh
+        # loop and must be allowed to re-cross. Deciding this before appending is
+        # what makes the edge detection correct for every threshold — including
+        # threshold == 1, where appending first would keep the count permanently
+        # at/above the threshold and the latch could never release.
+        if len(recent) < self._threshold:
+            self._tripped.discard(key)
         recent.append(now)
         self._failures[key] = recent
-        if len(recent) >= self._threshold:
-            if key in self._tripped:
-                return False  # already tripped this loop; edge already fired
+        # Edge: this failure crosses into tripped territory and we are not
+        # already latched from the current loop.
+        if len(recent) >= self._threshold and key not in self._tripped:
             self._tripped.add(key)
             return True
-        # Window drained below threshold — release the latch so a fresh loop
-        # (threshold failures within a new window) can trip again.
-        self._tripped.discard(key)
         return False
 
     def clear(self, key: K) -> None:
         """Forget all recorded failures and the trip latch for ``key``."""
         self._failures.pop(key, None)
         self._tripped.discard(key)
+
+    def retain(self, live_keys: Container[K]) -> None:
+        """Drop tracked failures/latches for keys not in ``live_keys``.
+
+        A key's timestamps are pruned only when that key is recorded again, so
+        keys for entities that fail a few times and then disappear would
+        otherwise linger forever. A caller that knows the current live key set
+        (e.g. the worker's live instance ids) calls this periodically to bound
+        growth. ``_tripped`` is a subset of the ``_failures`` keys, so iterating
+        the latter is sufficient.
+        """
+        dead = [key for key in self._failures if key not in live_keys]
+        for key in dead:
+            self._failures.pop(key, None)
+            self._tripped.discard(key)

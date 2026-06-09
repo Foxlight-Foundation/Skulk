@@ -464,6 +464,12 @@ class Worker:
                     self._stale_downloads_pending_reset.clear()
                     self._stale_resets_sent.clear()
                     self._stale_reset_wait_ticks = 0
+            # Bound the crash breaker's memory: drop entries for instances that
+            # no longer exist. We deliberately don't clear on give-up (that would
+            # let a lingering instance re-trip and re-send DeleteInstance), so
+            # this is where dead-instance keys are reclaimed.
+            self._crash_breaker.retain(self.state.instances)
+
             task: Task | None = plan(
                 self.node_id,
                 self.runners,
