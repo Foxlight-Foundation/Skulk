@@ -33,9 +33,12 @@ the multiplicative factor under-counts for small shards."""
 GPU_WORKING_SET_FRACTION: float = 0.75
 """Fraction of a node's *total* RAM usable as the Metal GPU working set on
 Apple Silicon. ``mx.device_info()["max_recommended_working_set_size"]`` measured
-11.84 GB on a 16 GB M-series box (0.74); 0.75 tracks it. Placement derives the
-ceiling from gossiped ``ram_total`` (it cannot gossip the exact value under
-``extra=forbid``); the worker uses the exact device value locally."""
+11.84 GB on a 16 GB M-series box (0.74); 0.75 tracks it. Both the master
+placement check and the worker's local guard derive the ceiling from
+``ram_total`` via ``gpu_working_set_ceiling`` (placement cannot gossip the exact
+``max_recommended_working_set_size`` under ``extra=forbid``, and keeping the
+worker on the same heuristic makes the two checks agree); the worker's advantage
+is using *current local* ``ram_available`` rather than the gossiped value."""
 
 KV_CONTEXT_BUDGET_TOKENS: int = 8192
 """Per-sequence context length reserved for KV cache during the fit check.

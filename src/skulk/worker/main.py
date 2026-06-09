@@ -727,6 +727,23 @@ class Worker:
         if (instance := self.state.instances.get(task.instance_id)) is not None:
             runner_id = instance.shard_assignments.node_to_runner[self.node_id]
             shard = instance.shard(runner_id)
+            if isinstance(task, LoadModel) and shard is not None:
+                # Re-check fit at load dispatch. The CreateRunner guard runs
+                # before download and before any concurrently-placed instance
+                # has loaded, so this is the last accurate point — current free
+                # memory now reflects those other loads — to refuse before the
+                # runner allocates and risks an OOM-abort that leaks GPU memory.
+                fit_error = self._local_shard_fit_error(shard)
+                if fit_error is not None:
+                    logger.error(fit_error)
+                    await self.event_sender.send(
+                        TaskStatusUpdated(
+                            task_id=task.task_id, task_status=TaskStatus.Failed
+                        )
+                    )
+                    if self._crash_breaker.record(task.instance_id):
+                        await self._give_up_on_instance(task.instance_id, fit_error)
+                    return
             logger.info(
                 "Dispatching worker task "
                 f"({_summarize_worker_task(task)}, "
