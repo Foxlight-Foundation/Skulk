@@ -28,6 +28,31 @@ from skulk.shared.types.worker.shards import (
 )
 
 
+def _card(
+    storage_gb: float,
+    *,
+    kv_heads: int | None = None,
+    n_layers: int = 1,
+    context_length: int = 0,
+) -> ModelCard:
+    """Minimal ModelCard for memory-filter tests.
+
+    Defaults to no KV heads so the KV reservation is zero and the
+    weight-overhead path is exercised in isolation; pass ``kv_heads`` /
+    ``n_layers`` / ``context_length`` to drive the KV term.
+    """
+    return ModelCard(
+        model_id=ModelId("test-model"),
+        storage_size=Memory.from_gb(storage_gb),
+        n_layers=n_layers,
+        hidden_size=1000,
+        supports_tensor=True,
+        num_key_value_heads=kv_heads,
+        context_length=context_length,
+        tasks=[ModelTask.TextGeneration],
+    )
+
+
 def test_filter_cycles_by_memory():
     # arrange
     node1_id = NodeId()
@@ -55,7 +80,7 @@ def test_filter_cycles_by_memory():
 
     # act
     filtered_cycles, diagnostics = filter_cycles_by_memory(
-        cycles, node_memory, Memory.from_gb(4)
+        cycles, node_memory, _card(4)
     )
 
     # assert
@@ -89,7 +114,7 @@ def test_filter_cycles_by_insufficient_memory():
 
     # act
     filtered_cycles, diagnostics = filter_cycles_by_memory(
-        topology.get_cycles(), node_memory, Memory.from_gb(17)
+        topology.get_cycles(), node_memory, _card(17)
     )
 
     # assert
@@ -138,7 +163,7 @@ def test_filter_multiple_cycles_by_memory():
 
     # act
     filtered_cycles, _diagnostics = filter_cycles_by_memory(
-        cycles, node_memory, Memory.from_gb(15)
+        cycles, node_memory, _card(12)
     )
 
     # assert
@@ -176,7 +201,7 @@ def test_filter_cycles_tensor_rejects_uneven_pair_that_sums():
     # 18 GB of weights: sums under 21 GB, but the 9 GB even split plus
     # headroom does not fit the 7 GB node.
     fitting, diagnostics = filter_cycles_by_memory(
-        cycles, node_memory, Memory.from_gb(18), Sharding.Tensor
+        cycles, node_memory, _card(18), Sharding.Tensor
     )
 
     assert fitting == []
@@ -186,7 +211,7 @@ def test_filter_cycles_tensor_rejects_uneven_pair_that_sums():
     # The same pair under Pipeline sharding allocates proportionally
     # (6 GB / 12 GB shares) and fits.
     fitting_pipeline, _ = filter_cycles_by_memory(
-        cycles, node_memory, Memory.from_gb(14), Sharding.Pipeline
+        cycles, node_memory, _card(14), Sharding.Pipeline
     )
     assert len(fitting_pipeline) == 1
 
@@ -202,17 +227,19 @@ def test_filter_cycles_reports_pending_node_info():
     topology.add_node(node_known)
     topology.add_node(node_pending)
     topology.add_connection(
-        Connection(source=node_known, sink=node_pending, edge=create_socket_connection(1))
+        Connection(
+            source=node_known, sink=node_pending, edge=create_socket_connection(1)
+        )
     )
     topology.add_connection(
-        Connection(source=node_pending, sink=node_known, edge=create_socket_connection(2))
+        Connection(
+            source=node_pending, sink=node_known, edge=create_socket_connection(2)
+        )
     )
     node_memory = {node_known: create_node_memory(Memory.from_gb(16).in_bytes)}
     cycles = [c for c in topology.get_cycles() if len(c) == 2]
 
-    fitting, diagnostics = filter_cycles_by_memory(
-        cycles, node_memory, Memory.from_gb(4)
-    )
+    fitting, diagnostics = filter_cycles_by_memory(cycles, node_memory, _card(4))
 
     assert fitting == []
     assert diagnostics.pending_info_node_ids == [node_pending]
@@ -229,17 +256,70 @@ def test_filter_cycles_rejects_exact_fit_without_headroom():
     node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
     cycles = topology.get_cycles()
 
-    fitting, diagnostics = filter_cycles_by_memory(
-        cycles, node_memory, Memory.from_gb(8)
-    )
+    fitting, diagnostics = filter_cycles_by_memory(cycles, node_memory, _card(8))
     assert fitting == []
     assert diagnostics.rejection_reasons
 
-    # With ~25% slack over the weights the same node is admitted.
-    fitting_with_slack, _ = filter_cycles_by_memory(
-        cycles, node_memory, Memory.from_gb(6)
-    )
+    # A 5 GB model on the 8 GB node clears the 1.30x weight-overhead wall
+    # (5 * 1.30 + 0.25 floor = ~6.8 GB <= 8 GB), so it is admitted.
+    fitting_with_slack, _ = filter_cycles_by_memory(cycles, node_memory, _card(5))
     assert len(fitting_with_slack) == 1
+
+
+def test_filter_cycles_respects_gpu_working_set_ceiling():
+    """A node can report generous ram_available yet still abort if the shard
+    exceeds Metal's GPU working set (~0.75 * ram_total). The filter caps usable
+    memory at that ceiling, so a shard that fits 'available' RAM but not the GPU
+    budget is rejected — the GLM-4.7-Flash failure class (2026-06-08)."""
+    node_id = NodeId()
+    topology = Topology()
+    topology.add_node(node_id)
+    # 14 GB free out of 16 GB total -> GPU ceiling = 0.75 * 16 = 12 GB.
+    node_memory = {
+        node_id: create_node_memory(
+            Memory.from_gb(14).in_bytes, ram_total=Memory.from_gb(16).in_bytes
+        )
+    }
+    cycles = topology.get_cycles()
+
+    # 10 GB weights: 10 * 1.30 + floor ~= 13.3 GB. Fits the 14 GB available but
+    # exceeds the 12 GB GPU ceiling -> rejected.
+    rejected, diagnostics = filter_cycles_by_memory(cycles, node_memory, _card(10))
+    assert rejected == []
+    assert diagnostics.rejection_reasons
+
+    # 8 GB weights: 8 * 1.30 + floor ~= 10.7 GB, under the 12 GB ceiling -> fits.
+    fitting, _ = filter_cycles_by_memory(cycles, node_memory, _card(8))
+    assert len(fitting) == 1
+
+
+def test_filter_cycles_reserves_kv_cache():
+    """The KV-cache reservation must count against capacity: a model whose
+    weights alone fit can be rejected once KV for the planning context budget is
+    added on top."""
+    node_id = NodeId()
+    topology = Topology()
+    topology.add_node(node_id)
+    # 12 GB available, ram_total high enough the GPU ceiling does not bind.
+    node_memory = {
+        node_id: create_node_memory(
+            Memory.from_gb(12).in_bytes, ram_total=Memory.from_gb(48).in_bytes
+        )
+    }
+    cycles = topology.get_cycles()
+
+    # 8 GB weights alone: 8 * 1.30 + floor ~= 10.7 GB <= 12 GB -> fits.
+    fitting, _ = filter_cycles_by_memory(cycles, node_memory, _card(8))
+    assert len(fitting) == 1
+
+    # Same weights, but reserving KV for 32k tokens (32 layers, 8 KV heads)
+    # adds several GB and pushes it over 12 GB -> rejected.
+    kv_card = _card(8, kv_heads=8, n_layers=32)
+    rejected, diagnostics = filter_cycles_by_memory(
+        cycles, node_memory, kv_card, context_budget=32768
+    )
+    assert rejected == []
+    assert "KV@32768tok" in diagnostics.rejection_reasons[0]
 
 
 def test_get_smallest_cycles():

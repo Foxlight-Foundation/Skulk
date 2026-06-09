@@ -7,9 +7,12 @@ from skulk.shared.types.profiling import (
 from skulk.shared.types.topology import RDMAConnection, SocketConnection
 
 
-def create_node_memory(memory: int) -> MemoryUsage:
+def create_node_memory(memory: int, ram_total: int | None = None) -> MemoryUsage:
+    # ram_total defaults to 2x available so the placement GPU working-set
+    # ceiling (GPU_WORKING_SET_FRACTION * ram_total) stays above ram_available
+    # and does not bind. Pass ram_total explicitly to exercise that ceiling.
     return MemoryUsage.from_bytes(
-        ram_total=1000,
+        ram_total=ram_total if ram_total is not None else memory * 2,
         ram_available=memory,
         swap_total=1000,
         swap_available=1000,

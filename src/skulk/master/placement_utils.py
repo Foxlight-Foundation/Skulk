@@ -4,6 +4,21 @@ from typing import final
 from loguru import logger
 from pydantic import Field
 
+from skulk.shared.models.memory_estimate import (
+    GPU_WORKING_SET_FRACTION,
+)
+from skulk.shared.models.memory_estimate import (
+    KV_CONTEXT_BUDGET_TOKENS as PLACEMENT_KV_CONTEXT_BUDGET_TOKENS,
+)
+from skulk.shared.models.memory_estimate import (
+    MEMORY_OVERHEAD_FACTOR as PLACEMENT_MEMORY_OVERHEAD_FACTOR,
+)
+from skulk.shared.models.memory_estimate import (
+    MEMORY_OVERHEAD_FLOOR as PLACEMENT_MEMORY_OVERHEAD_FLOOR,
+)
+from skulk.shared.models.memory_estimate import (
+    estimate_kv_cache_bytes as _estimate_kv_cache_bytes,
+)
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.topology import Topology
 from skulk.shared.types.common import Host, NodeId
@@ -20,26 +35,11 @@ from skulk.shared.types.worker.shards import (
 )
 from skulk.utils.pydantic_ext import CamelCaseModel
 
-PLACEMENT_MEMORY_OVERHEAD_FACTOR: float = 1.05
-"""Multiplier applied to a node's share of the model weights when judging fit.
-
-Weights are not the whole story: the runner also needs KV cache, activation
-workspace, MLX buffer cache, and the Python runtime itself (measured on
-Qwen3.5-9B-MLX-4bit: ~6.4 GB resident for 5.2 GB of weights). The factor is
-deliberately gentle: macOS digs deeper than the gossiped ram_available under
-real pressure (compressing and evicting the active set), and Skulk's whole
-purpose is running the largest model a cluster can hold — so this check only
-refuses placements that are guaranteed to thrash (the exact-fit class), not
-ones that merely run warm. A wired-aware capacity metric that can be stricter
-without over-refusing is tracked as follow-up work.
-"""
-
-PLACEMENT_MEMORY_OVERHEAD_FLOOR: Memory = Memory.from_mb(256)
-"""Flat per-node overhead added on top of the proportional factor.
-
-Covers the roughly model-size-independent costs (Python interpreter, MLX
-runtime, IPC buffers) that the multiplicative factor under-counts for small
-models."""
+# Memory-fit constants (overhead factor/floor, GPU working-set fraction, KV
+# context budget) and the KV-cache estimator are imported above under the
+# historical ``PLACEMENT_*`` / ``_estimate_kv_cache_bytes`` names. They live in
+# skulk.shared.models.memory_estimate so this placement fit-check and the
+# worker's local pre-spawn OOM guard share one source of truth.
 
 
 @final
@@ -99,11 +99,24 @@ def _per_node_required_memory(
     }
 
 
+def _node_usable_memory(memory: MemoryUsage) -> Memory:
+    """Memory a node can actually dedicate to a shard.
+
+    Capped at the Metal GPU working-set ceiling (``GPU_WORKING_SET_FRACTION`` of
+    total RAM): gossiped ``ram_available`` can exceed what the GPU is allowed to
+    wire, so a shard that fits "available" RAM can still abort on the GPU
+    working-set wall.
+    """
+    ceiling = memory.ram_total * GPU_WORKING_SET_FRACTION
+    return min(memory.ram_available, ceiling)
+
+
 def filter_cycles_by_memory(
     cycles: list[Cycle],
     node_memory: Mapping[NodeId, MemoryUsage],
-    required_memory: Memory,
+    model_card: ModelCard,
     sharding: Sharding = Sharding.Pipeline,
+    context_budget: int = PLACEMENT_KV_CONTEXT_BUDGET_TOKENS,
 ) -> tuple[list[Cycle], CycleMemoryDiagnostics]:
     """Keep cycles whose every node can hold its shard with runtime headroom.
 
@@ -112,8 +125,14 @@ def filter_cycles_by_memory(
     whose even split overloads the 16 GB node, and a sum check would happily
     admit it. Each node must satisfy::
 
-        node_share * PLACEMENT_MEMORY_OVERHEAD_FACTOR
-            + PLACEMENT_MEMORY_OVERHEAD_FLOOR <= ram_available
+        weights_share * PLACEMENT_MEMORY_OVERHEAD_FACTOR
+            + kv_share + PLACEMENT_MEMORY_OVERHEAD_FLOOR
+            <= min(ram_available, GPU_WORKING_SET_FRACTION * ram_total)
+
+    ``kv_share`` reserves KV cache for ``context_budget`` tokens. It scales with
+    a node's shard exactly as the weights do (per-layer for pipeline, per-rank
+    for tensor), so it is derived from the node's weight share rather than
+    recomputing the split.
 
     Cycles touching nodes with no memory info at all (cluster still starting
     up) are recorded in ``diagnostics.pending_info_node_ids`` instead of being
@@ -124,6 +143,13 @@ def filter_cycles_by_memory(
     """
     diagnostics = CycleMemoryDiagnostics()
     filtered_cycles: list[Cycle] = []
+    required_memory = model_card.storage_size
+    total_kv = _estimate_kv_cache_bytes(model_card, model_card.n_layers, context_budget)
+    kv_ratio = (
+        total_kv.in_bytes / required_memory.in_bytes
+        if required_memory.in_bytes
+        else 0.0
+    )
     for cycle in cycles:
         missing = [node for node in cycle.node_ids if node not in node_memory]
         if missing:
@@ -137,16 +163,20 @@ def filter_cycles_by_memory(
         )
         overloaded: list[str] = []
         for node_id, share in node_shares.items():
+            kv_share = share * kv_ratio
             required_with_overhead = (
                 share * PLACEMENT_MEMORY_OVERHEAD_FACTOR
+                + kv_share
                 + PLACEMENT_MEMORY_OVERHEAD_FLOOR
             )
-            available = node_memory[node_id].ram_available
+            available = _node_usable_memory(node_memory[node_id])
             if required_with_overhead > available:
                 overloaded.append(
                     f"node {node_id} needs ~{required_with_overhead.in_gb:.1f}GB "
-                    f"({share.in_gb:.1f}GB weights + runtime headroom) "
-                    f"but has {available.in_gb:.1f}GB available"
+                    f"({share.in_gb:.1f}GB weights + {kv_share.in_gb:.1f}GB "
+                    f"KV@{context_budget}tok + runtime headroom) but can use "
+                    f"{available.in_gb:.1f}GB (min of available and "
+                    f"{GPU_WORKING_SET_FRACTION:.0%} of RAM)"
                 )
         if overloaded:
             diagnostics.rejection_reasons.append(
