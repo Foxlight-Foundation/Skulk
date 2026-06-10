@@ -21,6 +21,21 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Placement no longer refuses models whose weights sit in the macOS file
+  cache (cache-deflated availability).** The gossiped `ram_available` came
+  from mactop's `available` (free + inactive + speculative), which counts
+  reclaimable file cache as *used* — so immediately after downloading a model,
+  availability was deflated by roughly the model's full size and placement
+  refused fits that run comfortably (observed on a 24 GB node: 11.6 GB of
+  just-downloaded weights in cache dropped "available" to ~12 GB while
+  ~14.6 GB was genuinely wireable). On macOS, `ram_available` is now the
+  GPU-wireable figure `total − wired − anonymous − compressor`, taken from a
+  `vm_stat` snapshot alongside each telemetry sample; macOS reclaims file
+  cache the moment Metal wires pages, so this is what a runner can actually
+  use. The metric deliberately does not credit compression of idle anonymous
+  memory, preserving the conservative posture of the oversized-placement OOM
+  hardening (#243). Value-only change to the gossiped figure — the wire shape
+  is unchanged, so mixed-version clusters interoperate.
 - **Dashboard deep links and browser refresh no longer 404.** The dashboard is
   a SPA that restores its active view from the URL path, but the API served
   `index.html` only at `/` — refreshing on `/chat` (or following a shared link
