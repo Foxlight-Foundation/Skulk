@@ -1,4 +1,5 @@
 import copy
+import time
 from collections.abc import Set as AbstractSet
 from datetime import datetime, timedelta, timezone
 from typing import cast
@@ -47,6 +48,7 @@ from skulk.shared.types.events import (
     LocalForwarderEvent,
     NodeGatheredInfo,
     NodeTimedOut,
+    StateSnapshotHydrated,
     TaskCreated,
     TaskDeleted,
     TaskFailed,
@@ -85,6 +87,20 @@ from skulk.utils.task_group import TaskGroup
 EVENT_LOG_REPLAY_BATCH_SIZE = 10_000
 SNAPSHOT_EVENT_CADENCE = 10_000
 REPLAY_TAIL_RETENTION_EVENTS = SNAPSHOT_EVENT_CADENCE
+
+TOPOLOGY_SETTLE_GRACE_SECONDS = 60.0
+"""How long after master start the plan loop trusts topology for pruning.
+
+A new session's topology starts empty and is rebuilt from live gossip:
+worker connection probes re-emit edges on a 10s cycle, plus router/mDNS
+events. A failover-seeded master (#273) carries instances from the prior
+session but deliberately NOT the prior topology (a dead node's out-edges
+would persist forever — only their source node ever deletes them), so for
+the first moments every carried instance's nodes look "disconnected".
+Pruning during that window would delete the very placements the seed
+preserved. 60s comfortably covers several probe cycles; the dead master's
+instances are still pruned — just one minute later, once absence reflects
+real liveness rather than an unsettled view."""
 JsonObject = dict[str, object]
 
 # API-facing task types: the ones whose loss strands an open HTTP request.
@@ -174,10 +190,28 @@ class Master:
         state_sync_sender: Sender[StateSyncMessage],
         download_command_sender: Sender[ForwarderDownloadCommand],
         snapshot_event_cadence: int = SNAPSHOT_EVENT_CADENCE,
+        initial_state: State | None = None,
     ):
         self.node_id = node_id
         self.session_id = session_id
+        # A promoted master seeds its session from the node's prior
+        # replicated state (shared/session_carryover.py) so placements
+        # survive failover (#273) — previously every new session started
+        # empty, the empty snapshot propagated, and every worker shut down
+        # its healthy runners (a full serving outage from one master
+        # restart). The seed is indexed as the FIRST EVENT of the new
+        # session in run() (see _index_seed_event) rather than assigned
+        # here: a pre-seeded snapshot at idx -1 is indistinguishable from
+        # "fresh empty state" to the event router, which deliberately skips
+        # hydration for idx < 0 — making the seed an ordinary logged event
+        # gives every consumer exactly one delivery path. A genuinely fresh
+        # node (cold start, or a rebooted node winning election before ever
+        # hydrating) passes None and starts empty exactly as before — a
+        # stale-boot winner cannot resurrect a cluster view it does not
+        # have.
+        self._seed_state = initial_state
         self.state = State(tracing_enabled=SKULK_TRACING_ENABLED)
+        self._started_monotonic = time.monotonic()
         self._tg: TaskGroup = TaskGroup()
         self.command_task_mapping: dict[CommandId, TaskId] = {}
         self.command_receiver = command_receiver
@@ -218,10 +252,41 @@ class Master:
             for shard in selected_instance.shard_assignments.runner_to_shard.values()
         }
 
+    async def _index_seed_event(self) -> None:
+        """Index the failover seed as the first event of this session (#273).
+
+        Making the carried state an ordinary logged ``StateSnapshotHydrated``
+        event gives every consumer exactly one delivery path: followers that
+        snapshot-bootstrap after this point receive it inside the snapshot;
+        followers that bootstrapped against the momentarily-empty state (the
+        promotion race — including this node's own worker) receive it as the
+        live event at index 0 and apply it like any other event. A seeded
+        snapshot at idx ``-1`` instead looked identical to "fresh empty
+        state", which the event router deliberately skips hydrating — the
+        first live deployment of the seed lost it to exactly that race on
+        the promoted node while a later-bootstrapping follower kept it.
+        """
+        if self._seed_state is None:
+            return
+        idx = len(self._event_log)
+        seed = self._seed_state.model_copy(update={"last_event_applied_idx": idx})
+        # Release the pre-index reference so the seed's object graph can be
+        # collected as state evolves past it.
+        self._seed_state = None
+        indexed = IndexedEvent(event=StateSnapshotHydrated(state=seed), idx=idx)
+        self.state = apply(self.state, indexed)
+        self._event_log.append(indexed.event)
+        await self._send_event(indexed)
+        logger.info(
+            f"Indexed failover seed as event {idx}: "
+            f"{len(seed.instances)} carried instance(s)"
+        )
+
     async def run(self):
         logger.info("Starting Master")
 
         try:
+            await self._index_seed_event()
             async with self._tg as tg:
                 tg.start_soon(self._event_processor)
                 tg.start_soon(self._command_processor)
@@ -568,13 +633,39 @@ class Master:
         while True:
             connected_node_ids = set(self.state.topology.list_nodes())
             now = datetime.now(tz=timezone.utc)
-            timed_out_node_ids = {
-                node_id
-                for node_id, time in self.state.last_seen.items()
-                if now - time > timedelta(seconds=30)
-            }
-            dying_instance_ids = instances_on_dead_nodes(
-                self.state, connected_node_ids, timed_out_node_ids
+            # ALL liveness-based action is suppressed while this session's
+            # topology is still settling (#273): a failover-seeded master
+            # carries instances but rebuilds topology and last_seen from
+            # live gossip, so for the first probe cycles every carried node
+            # looks "disconnected" — acting on that view would delete
+            # exactly the placements the seed preserved. The suppression
+            # must cover timed_out_node_ids too, not just the instance
+            # pruning: NodeTimedOut's apply removes the node's instances
+            # AND their tasks outright, and the TaskFailed-before-removal
+            # invariant (#223/#224) is only upheld when the corresponding
+            # dying_instance_ids pass ran in the same tick — a NodeTimedOut
+            # emitted during the grace would strand in-flight API requests
+            # without a terminal chunk (review catch on #274). After the
+            # grace, absence means absence and cleanup proceeds normally.
+            topology_settled = (
+                time.monotonic() - self._started_monotonic
+                >= TOPOLOGY_SETTLE_GRACE_SECONDS
+            )
+            timed_out_node_ids: set[NodeId] = (
+                {
+                    node_id
+                    for node_id, last_seen_at in self.state.last_seen.items()
+                    if now - last_seen_at > timedelta(seconds=30)
+                }
+                if topology_settled
+                else set()
+            )
+            dying_instance_ids: set[InstanceId] = (
+                instances_on_dead_nodes(
+                    self.state, connected_node_ids, timed_out_node_ids
+                )
+                if topology_settled
+                else set()
             )
 
             # Fail in-flight API tasks stranded by a dead or dying instance
@@ -593,14 +684,16 @@ class Master:
                 )
                 await self.event_sender.send(task_failed)
 
-            # kill broken instances
-            for instance_id, instance in self.state.instances.items():
-                for node_id in instance.shard_assignments.node_to_runner:
-                    if node_id not in connected_node_ids:
-                        await self.event_sender.send(
-                            InstanceDeleted(instance_id=instance_id)
-                        )
-                        break
+            # kill broken instances (suppressed during the topology-settle
+            # grace, same rationale as dying_instance_ids above)
+            if topology_settled:
+                for instance_id, instance in self.state.instances.items():
+                    for node_id in instance.shard_assignments.node_to_runner:
+                        if node_id not in connected_node_ids:
+                            await self.event_sender.send(
+                                InstanceDeleted(instance_id=instance_id)
+                            )
+                            break
 
             # time out dead nodes
             for node_id in timed_out_node_ids:
@@ -689,6 +782,11 @@ class Master:
                     continue
 
                 config_yaml = self._load_state_sync_config_yaml()
+                logger.info(
+                    f"Serving state snapshot to {message.requester}: "
+                    f"{len(self.state.instances)} instance(s), "
+                    f"last_event_applied_idx={self.state.last_event_applied_idx}"
+                )
                 await self.state_sync_sender.send(
                     StateSyncMessage(
                         kind="response",

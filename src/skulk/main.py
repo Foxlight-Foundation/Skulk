@@ -31,6 +31,7 @@ from skulk.shared.logging import (
     logger_cleanup,
     logger_setup,
 )
+from skulk.shared.session_carryover import seed_state_for_new_session
 from skulk.shared.types.commands import ForwarderDownloadCommand, SyncConfig
 from skulk.shared.types.common import NodeId, SessionId, SystemId
 from skulk.shared.types.state_sync import StateSyncMessage
@@ -520,9 +521,24 @@ class Node:
                     and self.master is None
                 ):
                     logger.info("Node elected Master - promoting self")
+                    # Seed the new session from this node's replicated view
+                    # (captured before the worker below is torn down and
+                    # re-created): placements survive master failover (#273)
+                    # instead of every worker reconciling its healthy runners
+                    # away against an empty snapshot. apply() replaces the
+                    # worker's state wholesale (immutable convention), so the
+                    # reference read here is a consistent snapshot.
+                    prior_state = (
+                        self.worker.state if self.worker is not None else None
+                    )
                     self.master = Master(
                         self.node_id,
                         result.session_id,
+                        initial_state=(
+                            seed_state_for_new_session(prior_state)
+                            if prior_state is not None
+                            else None
+                        ),
                         event_sender=self.event_router.sender(),
                         global_event_sender=self.router.sender(topics.GLOBAL_EVENTS),
                         local_event_receiver=self.router.receiver(topics.LOCAL_EVENTS),
