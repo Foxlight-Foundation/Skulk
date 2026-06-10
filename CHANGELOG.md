@@ -7,6 +7,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- **Nemotron models no longer wedge the GPU at warmup.** NemotronH (hybrid
+  Mamba/SSM, e.g. Nemotron-Nano-9B-v2) deterministically wedged
+  `BatchGenerator`'s warmup prefill into a faulted Metal eval —
+  FAST_SYNCH-independent, while the same model runs cleanly under
+  `SequentialGenerator` and under bare mlx-lm (bisected live on the 4-node
+  matrix, #259). Each wedge-exit additionally leaks ~5GB of wired GPU memory.
+  The nemotron family now forces `SequentialGenerator` (the same pattern
+  gemma4 uses) until the BatchGenerator interaction is root-caused.
+
 ### Added
 
 - **The dashboard now shows speculative-decoding status per instance.** Active
