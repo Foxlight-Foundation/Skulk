@@ -9,6 +9,25 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **A stalled distributed group can no longer hang an instance forever, and
+  ring transport selection follows operator intent (#265).** Two changes:
+  (1) `mx.distributed.init` now runs under a hard deadline (default 120s,
+  `SKULK_GROUP_CONNECT_DEADLINE_SECONDS`) — the ring backend with
+  `strict=True` blocks indefinitely when a neighbor socket fails its
+  post-TCP rank handshake, which left a 4-node placement looping request
+  timeouts and cancels for 30+ minutes with no recovery; expiry now exits
+  the runner via the wedge path, the worker gives the instance up on the
+  first failure, and the fresh placement mints a new ring port (also
+  clearing stale-socket handshake collisions from same-port retries).
+  (2) VPN/overlay addresses (Tailscale CGNAT `100.64/10` and
+  `fd7a:115c:a1e0::/48`, detected by address since utun interfaces gossip
+  as "unknown") now rank strictly last in ring transport selection —
+  Tailscale exists for external reachability and may be DERP-relayed (a
+  ring link between two machines on the same switch was observed riding
+  the Dallas relay); a pair with any Thunderbolt/LAN candidate never
+  selects the overlay, while genuinely cross-network pairs still work.
+  First test coverage for `get_mlx_ring_hosts_by_node` and the transport
+  ranking.
 - **The Thunderbolt interface label survives classification (#222).** The
   hardware-port parser set "thunderbolt" from the port header, then the
   device-line branch unconditionally rewrote every en2+ device to
