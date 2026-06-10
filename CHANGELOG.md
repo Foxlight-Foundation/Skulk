@@ -11,7 +11,8 @@ This project records release notes here and mirrors public-facing notes in
 
 - **The dashboard now shows speculative-decoding status per instance.** Active
   instances with an MTP sidecar or assistant drafter display an `MTP D{n}`
-  badge (with the drafter kind and depth in a hover tooltip) (draft depth from the card's `mtp_max_depth`) next to the status badge.
+  badge next to the status badge — depth from the card's `mtp_max_depth`,
+  with the drafter kind spelled out in a hover tooltip.
   The status is derived from the model card's runtime section already present
   in cluster state — the rank-invariant source of truth for whether drafting
   engages (#254) — so no new wire data is needed. Cards that block multi-node
