@@ -72,7 +72,7 @@ from skulk.shared.types.worker.downloads import (
     DownloadPending,
 )
 from skulk.shared.types.worker.instances import InstanceId
-from skulk.shared.types.worker.runners import RunnerId
+from skulk.shared.types.worker.runners import RunnerFailed, RunnerId, RunnerStatus
 from skulk.shared.types.worker.shards import ShardMetadata, TensorShardMetadata
 from skulk.store.config import StagingNodeConfig
 from skulk.store.model_store_client import ModelStoreClient
@@ -89,6 +89,7 @@ from skulk.utils.info_gatherer.net_profile import check_reachable
 from skulk.utils.keyed_backoff import KeyedBackoff
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.plan import plan
+from skulk.worker.runner.bootstrap import WEDGE_FAILURE_MARKER
 from skulk.worker.runner.runner_supervisor import RunnerSupervisor
 
 _STALE_RESET_MAX_WAIT_TICKS = 300
@@ -105,6 +106,21 @@ _RUNNER_CRASH_THRESHOLD = 3
 
 _RUNNER_CRASH_WINDOW_SECONDS = 60.0
 """Rolling window for ``_RUNNER_CRASH_THRESHOLD`` (see CrashWindow)."""
+
+
+def _runner_failed_wedged(status: RunnerStatus | None) -> bool:
+    """Whether a dead runner's last gossiped status marks a GPU wedge.
+
+    The supervisor embeds ``WEDGE_FAILURE_MARKER`` in the failure message
+    when the runner exited with the deadline watchdog's ``WEDGE_EXIT_CODE``.
+    Wedge deaths must never be retried: each wedge-exit leaks wired GPU
+    memory that only a reboot reclaims (measured 2026-06-09, ~5GB/attempt).
+    """
+    return (
+        isinstance(status, RunnerFailed)
+        and status.error_message is not None
+        and WEDGE_FAILURE_MARKER in status.error_message
+    )
 
 
 def _summarize_worker_task(task: Task) -> str:
@@ -577,6 +593,24 @@ class Worker:
                         runner.shutdown()
                         if instance_deleted:
                             await self._maybe_evict_shard(shard_for_eviction)
+                        elif _runner_failed_wedged(self.state.runners.get(runner_id)):
+                            # GPU-wedge deaths are never retried: the wedge is
+                            # deterministic for the model that triggered it, and
+                            # each wedge-exit leaks ~a shard of wired GPU memory
+                            # that only a reboot reclaims (measured 2026-06-09:
+                            # two retries cost a 24GB node ~10GB). Latch the
+                            # breaker too so a lingering instance can't re-trip.
+                            self._crash_breaker.record(task.instance_id)
+                            await self._give_up_on_instance(
+                                task.instance_id,
+                                f"runner for "
+                                f"{shard_for_eviction.model_card.model_id} died "
+                                "with a suspected GPU wedge "
+                                f"({WEDGE_FAILURE_MARKER}); not retrying — each "
+                                "wedge attempt leaks wired GPU memory. If this "
+                                "node's available memory dropped, a reboot is "
+                                "the only way to reclaim it.",
+                            )
                         elif self._crash_breaker.record(task.instance_id):
                             # Runner keeps crashing (e.g. OOM on load). Give up
                             # rather than relaunching into another leak-on-abort.
