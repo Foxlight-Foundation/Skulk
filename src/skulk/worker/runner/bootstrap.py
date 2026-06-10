@@ -128,6 +128,28 @@ silently blocking ALL task dispatch on the node. Override with
 ``SKULK_WARMUP_DEADLINE_SECONDS``.
 """
 
+WEDGE_EXIT_CODE: int = 86
+"""Exit code the deadline watchdog uses for a suspected GPU wedge.
+
+Distinct from generic failures so the supervisor can mark the death as a
+wedge (see ``WEDGE_FAILURE_MARKER``) and the worker can refuse to retry:
+exiting while the main thread is parked inside a faulted Metal eval does
+NOT reliably reclaim wired GPU memory (measured live 2026-06-09 on an M4 —
+each wedge-exit left ~5GB wired behind, recoverable only by reboot), so
+every relaunch of a wedging model leaks another shard's worth of wired
+memory until the node dies.
+"""
+
+WEDGE_FAILURE_MARKER: str = "gpu-wedge-deadline"
+"""Substring the supervisor embeds in ``RunnerFailed.error_message`` for
+wedge-class deaths.
+
+The worker matches on this marker to give the instance up immediately
+instead of relaunching. A string marker (rather than a new RunnerStatus
+field) keeps the gossiped status type wire-compatible with older nodes
+during rolling upgrades.
+"""
+
 
 def resolve_warmup_deadline_seconds() -> float:
     """Resolve the warmup deadline, honoring the operator env override."""
@@ -185,10 +207,15 @@ def deadline_watchdog(
         )
         # Deliberately NO _release_metal_resources() here: mx.clear_cache()
         # would touch the very Metal device this watchdog assumes is wedged
-        # and could block before the exit. Process exit reclaims all Metal
-        # allocations on its own (verified across every crash class,
-        # 2026-06-05).
-        os._exit(1)
+        # and could block before the exit.
+        #
+        # WARNING: unlike every other crash class (verified 2026-06-05),
+        # exiting out of a faulted Metal eval does NOT reliably reclaim wired
+        # GPU memory — measured live 2026-06-09: each wedge-exit left ~5GB
+        # wired behind, recoverable only by reboot. The distinct exit code
+        # lets the supervisor mark this as a wedge so the worker gives the
+        # instance up instead of relaunching into another leak.
+        os._exit(WEDGE_EXIT_CODE)
 
     action = on_timeout if on_timeout is not None else _default_timeout_action
 

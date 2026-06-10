@@ -58,7 +58,11 @@ from skulk.shared.types.worker.runners import (
 from skulk.shared.types.worker.shards import ShardMetadata
 from skulk.utils.channels import MpReceiver, MpSender, Sender, mp_channel
 from skulk.utils.task_group import TaskGroup
-from skulk.worker.runner.bootstrap import entrypoint
+from skulk.worker.runner.bootstrap import (
+    WEDGE_EXIT_CODE,
+    WEDGE_FAILURE_MARKER,
+    entrypoint,
+)
 
 PREFILL_TIMEOUT_SECONDS = 60
 DECODE_TIMEOUT_SECONDS = 5
@@ -391,6 +395,15 @@ class RunnerSupervisor:
                 cause = f"signal={sig} ({signal.strsignal(sig)})"
             except Exception:
                 cause = f"signal={sig}"
+        elif rc == WEDGE_EXIT_CODE:
+            # The deadline watchdog declared a GPU wedge and hard-exited.
+            # Mark it so the worker gives the instance up instead of
+            # relaunching: a wedge-exit leaks wired GPU memory (~one shard
+            # per attempt, reboot-only recovery), so retries kill the node.
+            cause = (
+                f"{WEDGE_FAILURE_MARKER}: deadline watchdog declared a GPU "
+                "wedge (faulted Metal eval); wired memory may have leaked"
+            )
         else:
             cause = f"exitcode={rc}"
 

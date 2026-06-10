@@ -9,6 +9,20 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **GPU-wedge runner deaths are no longer retried (wired-memory leak).**
+  Contrary to every other crash class, a runner hard-exited by the warmup
+  deadline watchdog while its main thread is parked in a faulted Metal eval
+  does NOT get its wired GPU memory reclaimed on exit — measured live
+  (4-node matrix testing, 2026-06-09): each wedge-exit left ~5GB wired
+  behind, recoverable only by reboot, and two automatic retries cost a 24GB
+  node ~10GB. Worse, wedges take ~300s each so the 3-failures-in-60s crash
+  breaker never trips — unattended, the relaunch loop leaks the node to
+  death. The watchdog now exits with a distinct code (`WEDGE_EXIT_CODE`),
+  the supervisor marks the failure (`gpu-wedge-deadline` in the runner's
+  failure message — a string marker keeps the gossiped status type
+  wire-compatible during rolling upgrades), and the worker gives the
+  instance up on the FIRST wedge death with a log that names the leak and
+  the reboot remedy.
 - **`MLX_METAL_FAST_SYNCH` now defaults OFF cluster-wide.** The old ON default
   had no measured upside (vanilla dense decode: 20.8 tok/s off vs 20.7 on) and
   a catastrophic failure mode for any model without a curated card pin:
