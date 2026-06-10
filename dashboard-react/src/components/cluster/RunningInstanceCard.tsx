@@ -1,6 +1,7 @@
 import styled, { keyframes, css, useTheme } from 'styled-components';
 import { FiExternalLink } from 'react-icons/fi';
 import { BsChatDotsFill } from 'react-icons/bs';
+import { InfoTooltip } from '../common/InfoTooltip';
 import type { Theme } from '../../theme';
 
 /* ── Types ────────────────────────────────────────────── */
@@ -26,6 +27,10 @@ export interface RunningInstanceCardProps {
   onDelete?: () => void;
   onChat?: () => void;
   isEmbedding?: boolean;
+  /** Speculative-decoding status from the model card's runtime section:
+   *  shown as a badge when the card declares an MTP sidecar or assistant
+   *  drafter and the placement allows it (#254). */
+  speculation?: { kind: 'sidecar' | 'assistant'; depth: number };
   className?: string;
 }
 
@@ -259,6 +264,7 @@ export function RunningInstanceCard({
   onDelete,
   onChat,
   isEmbedding,
+  speculation,
   className,
 }: RunningInstanceCardProps) {
   const theme = useTheme() as Theme;
@@ -285,6 +291,19 @@ export function RunningInstanceCard({
       <MetaRow>
         <span>{sharding} &middot; {formatInstanceType(instanceType)}</span>
         <StatusBadge $color={cfg.color}>{cfg.label}</StatusBadge>
+        {speculation && (
+          <InfoTooltip
+            content={
+              `Speculative decoding active: ` +
+              `${speculation.kind === 'assistant' ? 'assistant drafter' : 'MTP sidecar'}, ` +
+              `draft depth ${speculation.depth}`
+            }
+          >
+            <StatusBadge $color={theme.colors.accent}>
+              MTP D{speculation.depth}
+            </StatusBadge>
+          </InfoTooltip>
+        )}
       </MetaRow>
 
       {link && (

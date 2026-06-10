@@ -22,6 +22,19 @@ export const Ready: Story = {
   },
 };
 
+export const ReadyWithSpeculation: Story = {
+  args: {
+    instanceId: '4ea190d5-abcd-1234-ef56-789012345678',
+    modelId: 'mlx-community/Qwen3.5-9B-MLX-4bit',
+    sharding: 'Pipeline',
+    instanceType: 'MlxRing',
+    nodeName: 'kite3 + Kite Dev',
+    status: 'ready',
+    speculation: { kind: 'sidecar', depth: 1 },
+    onDelete: () => {},
+  },
+};
+
 export const Running: Story = {
   args: {
     instanceId: '7fb301c2-1111-2222-3333-444455556666',

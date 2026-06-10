@@ -317,6 +317,7 @@ export function App() {
       const runnerToShard = sa?.runnerToShard;
       let sharding: 'Pipeline' | 'Tensor' = 'Pipeline';
       let isEmbedding = false;
+      let speculation: InstanceCardData['speculation'];
       if (runnerToShard) {
         const firstShard = Object.values(runnerToShard)[0];
         if (firstShard && 'TensorShardMetadata' in firstShard) {
@@ -327,6 +328,31 @@ export function App() {
         const mc = (shardInner?.modelCard ?? shardInner?.model_card) as Record<string, unknown> | undefined;
         const tasks = mc?.tasks as string[] | undefined;
         if (tasks?.includes('TextEmbedding')) isEmbedding = true;
+
+        // Speculative-decoding status comes from the card's runtime section —
+        // the card is the rank-invariant source of truth for whether drafting
+        // engages (#254), so the badge needs no extra wire data. A card that
+        // blocks multi-node speculation shows no badge on multi-node
+        // placements (it runs plain distributed decode there). Like the
+        // modelCard read above, accept both camelCase and snake_case keys.
+        const rt = mc?.runtime as Record<string, unknown> | undefined | null;
+        const rtKey = (camel: string, snake: string): unknown =>
+          rt?.[camel] ?? rt?.[snake];
+        const declaresSidecar =
+          !!rtKey('mtpSidecarRepo', 'mtp_sidecar_repo') &&
+          !!rtKey('mtpHeads', 'mtp_heads');
+        const declaresAssistant = !!rtKey('assistantModelRepo', 'assistant_model_repo');
+        const worldSize = runnerIds.length;
+        const blockedForPlacement =
+          rtKey('speculativeMultiNode', 'speculative_multi_node') === false &&
+          worldSize > 1;
+        if ((declaresSidecar || declaresAssistant) && !blockedForPlacement) {
+          const depth = rtKey('mtpMaxDepth', 'mtp_max_depth');
+          speculation = {
+            kind: declaresAssistant ? 'assistant' : 'sidecar',
+            depth: typeof depth === 'number' ? depth : 1,
+          };
+        }
       }
 
       // Derive status from runners
@@ -348,6 +374,7 @@ export function App() {
         statusMessage: derived.message,
         loadProgress: derived.progress,
         isEmbedding,
+        speculation,
       });
     }
     return cards;
