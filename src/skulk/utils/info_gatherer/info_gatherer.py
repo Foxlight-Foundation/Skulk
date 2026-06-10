@@ -517,9 +517,13 @@ class InfoGatherer:
             consumer_gone, other = exception_group.split(
                 (ClosedResourceError, BrokenResourceError)
             )
+            if consumer_gone is None:
+                # Nothing channel-related in the group — re-raise it exactly
+                # as it arrived (a `from` link here would point the group's
+                # __cause__ at itself).
+                raise
             if other is not None:
                 raise other from exception_group
-            assert consumer_gone is not None
             logger.info(
                 "InfoGatherer stopped: telemetry consumer closed its channel "
                 "(worker shutdown/replacement); the replacement worker's "
