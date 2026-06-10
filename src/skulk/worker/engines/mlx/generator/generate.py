@@ -2930,6 +2930,14 @@ def mlx_generate(
     # (#254) — receiving ranks hold no sidecar assets but must resolve
     # trunk/head and join the per-round exchange, so the mode is derived
     # from the rank-invariant card declaration, not local assets.
+    # PIPELINE-only, like assistants (#263): on Tensor placements the
+    # decider's "local" draft heads through the TP-sharded lm_head — an
+    # all-rank collective the idle receivers never join, so a lone TP
+    # decider GPU-times-out mid-draft. Tensor placements instead load the
+    # sidecar on EVERY rank (see sidecar_load_eligible) and draft
+    # rank-symmetrically through the legacy path below (the drafter
+    # agreement requires ready_count == group.size() there), keeping the
+    # collective schedule identical on all ranks.
     _distributed_sidecar_mode = (
         model_card is not None
         and model_card.runtime is not None
@@ -2937,6 +2945,7 @@ def mlx_generate(
         and model_card.runtime.mtp_heads
         and group is not None
         and group.size() > 1
+        and _has_pipeline_communication_layer(model)
         and not multi_node_speculation_disabled(model_card.runtime, group.size())
     )
     if _speculation_assets or _pipeline_assistant_mode or _distributed_sidecar_mode:
