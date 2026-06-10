@@ -1,4 +1,5 @@
 import copy
+import time
 from collections.abc import Set as AbstractSet
 from datetime import datetime, timedelta, timezone
 from typing import cast
@@ -85,6 +86,20 @@ from skulk.utils.task_group import TaskGroup
 EVENT_LOG_REPLAY_BATCH_SIZE = 10_000
 SNAPSHOT_EVENT_CADENCE = 10_000
 REPLAY_TAIL_RETENTION_EVENTS = SNAPSHOT_EVENT_CADENCE
+
+TOPOLOGY_SETTLE_GRACE_SECONDS = 60.0
+"""How long after master start the plan loop trusts topology for pruning.
+
+A new session's topology starts empty and is rebuilt from live gossip:
+worker connection probes re-emit edges on a 10s cycle, plus router/mDNS
+events. A failover-seeded master (#273) carries instances from the prior
+session but deliberately NOT the prior topology (a dead node's out-edges
+would persist forever — only their source node ever deletes them), so for
+the first moments every carried instance's nodes look "disconnected".
+Pruning during that window would delete the very placements the seed
+preserved. 60s comfortably covers several probe cycles; the dead master's
+instances are still pruned — just one minute later, once absence reflects
+real liveness rather than an unsettled view."""
 JsonObject = dict[str, object]
 
 # API-facing task types: the ones whose loss strands an open HTTP request.
@@ -174,10 +189,25 @@ class Master:
         state_sync_sender: Sender[StateSyncMessage],
         download_command_sender: Sender[ForwarderDownloadCommand],
         snapshot_event_cadence: int = SNAPSHOT_EVENT_CADENCE,
+        initial_state: State | None = None,
     ):
         self.node_id = node_id
         self.session_id = session_id
-        self.state = State(tracing_enabled=SKULK_TRACING_ENABLED)
+        # A promoted master seeds its session from the node's prior
+        # replicated state (shared/session_carryover.py) so placements
+        # survive failover (#273) — previously every new session started
+        # empty, the empty snapshot propagated, and every worker shut down
+        # its healthy runners (a full serving outage from one master
+        # restart). A genuinely fresh node (cold start, or a rebooted node
+        # winning election before ever hydrating) passes None and starts
+        # empty exactly as before — a stale-boot winner cannot resurrect a
+        # cluster view it does not have.
+        self.state = (
+            initial_state
+            if initial_state is not None
+            else State(tracing_enabled=SKULK_TRACING_ENABLED)
+        )
+        self._started_monotonic = time.monotonic()
         self._tg: TaskGroup = TaskGroup()
         self.command_task_mapping: dict[CommandId, TaskId] = {}
         self.command_receiver = command_receiver
@@ -570,11 +600,26 @@ class Master:
             now = datetime.now(tz=timezone.utc)
             timed_out_node_ids = {
                 node_id
-                for node_id, time in self.state.last_seen.items()
-                if now - time > timedelta(seconds=30)
+                for node_id, last_seen_at in self.state.last_seen.items()
+                if now - last_seen_at > timedelta(seconds=30)
             }
-            dying_instance_ids = instances_on_dead_nodes(
-                self.state, connected_node_ids, timed_out_node_ids
+            # Liveness-based pruning is suppressed while this session's
+            # topology is still settling (#273): a failover-seeded master
+            # carries instances but rebuilds topology from live gossip, so
+            # for the first probe cycles every carried node looks
+            # "disconnected" — pruning then would delete exactly the
+            # placements the seed preserved. After the grace, absence means
+            # absence and the dead master's instances are cleaned normally.
+            topology_settled = (
+                time.monotonic() - self._started_monotonic
+                >= TOPOLOGY_SETTLE_GRACE_SECONDS
+            )
+            dying_instance_ids: set[InstanceId] = (
+                instances_on_dead_nodes(
+                    self.state, connected_node_ids, timed_out_node_ids
+                )
+                if topology_settled
+                else set()
             )
 
             # Fail in-flight API tasks stranded by a dead or dying instance
@@ -593,14 +638,16 @@ class Master:
                 )
                 await self.event_sender.send(task_failed)
 
-            # kill broken instances
-            for instance_id, instance in self.state.instances.items():
-                for node_id in instance.shard_assignments.node_to_runner:
-                    if node_id not in connected_node_ids:
-                        await self.event_sender.send(
-                            InstanceDeleted(instance_id=instance_id)
-                        )
-                        break
+            # kill broken instances (suppressed during the topology-settle
+            # grace, same rationale as dying_instance_ids above)
+            if topology_settled:
+                for instance_id, instance in self.state.instances.items():
+                    for node_id in instance.shard_assignments.node_to_runner:
+                        if node_id not in connected_node_ids:
+                            await self.event_sender.send(
+                                InstanceDeleted(instance_id=instance_id)
+                            )
+                            break
 
             # time out dead nodes
             for node_id in timed_out_node_ids:

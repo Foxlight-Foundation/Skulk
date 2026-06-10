@@ -9,6 +9,26 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Instance placements survive master failover (#273).** A newly-elected
+  master previously always started its session from an empty state: the
+  empty snapshot propagated to every follower, each worker's plan loop saw
+  no instances and shut down its healthy runners, and every placed model
+  silently became a 404 until an operator re-placed it — a full serving
+  outage from a single master restart (found live when a churn test
+  happened to bounce the master). The promoted node now seeds the new
+  session from its prior replicated state: instances, downloads, node info,
+  and the tracing flag carry over, while in-flight tasks, runner statuses,
+  topology, and liveness timestamps are deliberately dropped (they are
+  session-scoped or must come from live gossip — a carried topology would
+  keep a dead node's edges forever). Workers re-create runners for the
+  carried instances through the ordinary plan loop, so serving resumes
+  after a model-reload-sized gap with no operator action. The master's
+  liveness-based instance pruning is suppressed for a 60-second
+  topology-settle grace after promotion so carried instances aren't deleted
+  while connection gossip is still rebuilding the topology; instances whose
+  ranks lived on the dead master are pruned normally after the grace. A
+  freshly-booted election winner seeds empty, exactly as before.
+
 - **A stalled distributed group can no longer hang an instance forever, and
   ring transport selection follows operator intent (#265).** Two changes:
   (1) `mx.distributed.init` now runs under a hard deadline (default 120s,

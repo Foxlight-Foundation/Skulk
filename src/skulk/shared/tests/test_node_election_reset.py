@@ -53,6 +53,10 @@ class _OldEventRouter:
 class _OldWorker:
     def __init__(self, events: list[str]) -> None:
         self._events = events
+        # The promotion path reads the outgoing worker's replicated state to
+        # seed the new master's session (#273) — the stub carries the same
+        # contract as the real Worker.
+        self.state = State()
 
     async def shutdown(self) -> None:
         self._events.append("old_worker.shutdown")
