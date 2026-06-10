@@ -56,20 +56,25 @@ async def get_friendly_name() -> str:
     return process.stdout.decode("utf-8", errors="replace").strip() or hostname
 
 
-async def _get_interface_types_from_networksetup() -> dict[str, InterfaceType]:
-    """Parse networksetup -listallhardwareports to get interface types."""
-    if sys.platform != "darwin":
-        return {}
+def parse_hardware_port_types(listing: str) -> dict[str, InterfaceType]:
+    """Classify devices from ``networksetup -listallhardwareports`` output.
 
-    try:
-        result = await run_process(["networksetup", "-listallhardwareports"])
-    except CalledProcessError:
-        return {}
-
+    Pure parser (the subprocess lives at the caller). The port-name header
+    gives the specific class; the device line applies one downgrade: an enX
+    device beyond en0/en1 with a GENERIC "Ethernet" port name may be a USB
+    dongle rather than built-in ethernet, so only that ambiguous case becomes
+    ``maybe_ethernet``. A port the header classified specifically
+    ("Thunderbolt N" → thunderbolt, "Wi-Fi" → wifi) keeps its label — Mac
+    Thunderbolt ports are always en2+, so the previous unconditional
+    downgrade meant "thunderbolt" could never survive on macOS and the ring's
+    TB-first transport priority was dead code (#222). Unclassified enX ports
+    (e.g. "iPhone USB") stay "unknown" (lowest priority) instead of being
+    promoted to maybe_ethernet.
+    """
     types: dict[str, InterfaceType] = {}
     current_type: InterfaceType = "unknown"
 
-    for line in result.stdout.decode().splitlines():
+    for line in listing.splitlines():
         if line.startswith("Hardware Port:"):
             port_name = line.split(":", 1)[1].strip()
             if "Wi-Fi" in port_name:
@@ -82,12 +87,29 @@ async def _get_interface_types_from_networksetup() -> dict[str, InterfaceType]:
                 current_type = "unknown"
         elif line.startswith("Device:"):
             device = line.split(":", 1)[1].strip()
-            # enX is ethernet adapters or thunderbolt - these must be deprioritised
-            if device.startswith("en") and device not in ["en0", "en1"]:
-                current_type = "maybe_ethernet"
-            types[device] = current_type
+            device_type = current_type
+            if (
+                device.startswith("en")
+                and device not in ("en0", "en1")
+                and current_type == "ethernet"
+            ):
+                device_type = "maybe_ethernet"
+            types[device] = device_type
 
     return types
+
+
+async def _get_interface_types_from_networksetup() -> dict[str, InterfaceType]:
+    """Parse networksetup -listallhardwareports to get interface types."""
+    if sys.platform != "darwin":
+        return {}
+
+    try:
+        result = await run_process(["networksetup", "-listallhardwareports"])
+    except CalledProcessError:
+        return {}
+
+    return parse_hardware_port_types(result.stdout.decode())
 
 
 async def get_network_interfaces() -> list[NetworkInterfaceInfo]:
