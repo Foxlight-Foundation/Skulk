@@ -13,6 +13,10 @@ export interface InstanceCardData {
   statusMessage?: string;
   loadProgress?: number;
   isEmbedding?: boolean;
+  /** Speculative-decoding status derived from the model card's runtime
+   *  section: present when the card declares an MTP sidecar or assistant
+   *  drafter and the placement allows it (#254). */
+  speculation?: { kind: 'sidecar' | 'assistant'; depth: number };
 }
 
 export interface InstancePanelProps {

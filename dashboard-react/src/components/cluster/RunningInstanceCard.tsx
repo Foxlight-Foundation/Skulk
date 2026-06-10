@@ -26,6 +26,10 @@ export interface RunningInstanceCardProps {
   onDelete?: () => void;
   onChat?: () => void;
   isEmbedding?: boolean;
+  /** Speculative-decoding status from the model card's runtime section:
+   *  shown as a badge when the card declares an MTP sidecar or assistant
+   *  drafter and the placement allows it (#254). */
+  speculation?: { kind: 'sidecar' | 'assistant'; depth: number };
   className?: string;
 }
 
@@ -259,6 +263,7 @@ export function RunningInstanceCard({
   onDelete,
   onChat,
   isEmbedding,
+  speculation,
   className,
 }: RunningInstanceCardProps) {
   const theme = useTheme() as Theme;
@@ -285,6 +290,18 @@ export function RunningInstanceCard({
       <MetaRow>
         <span>{sharding} &middot; {formatInstanceType(instanceType)}</span>
         <StatusBadge $color={cfg.color}>{cfg.label}</StatusBadge>
+        {speculation && (
+          <StatusBadge
+            $color={theme.colors.accent}
+            title={
+              `Speculative decoding active: ` +
+              `${speculation.kind === 'assistant' ? 'assistant drafter' : 'MTP sidecar'}, ` +
+              `draft depth ${speculation.depth}`
+            }
+          >
+            ⚡ MTP D{speculation.depth}
+          </StatusBadge>
+        )}
       </MetaRow>
 
       {link && (

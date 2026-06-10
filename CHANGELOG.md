@@ -7,8 +7,25 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- **The dashboard now shows speculative-decoding status per instance.** Active
+  instances with an MTP sidecar or assistant drafter display a `⚡ MTP D{n}`
+  badge (draft depth from the card's `mtp_max_depth`) next to the status badge.
+  The status is derived from the model card's runtime section already present
+  in cluster state — the rank-invariant source of truth for whether drafting
+  engages (#254) — so no new wire data is needed. Cards that block multi-node
+  speculation (`speculative_multi_node=false`) show no badge on multi-node
+  placements, matching the runtime behavior.
+
 ### Fixed
 
+- **Dashboard deep links and browser refresh no longer 404.** The dashboard is
+  a SPA that restores its active view from the URL path, but the API served
+  `index.html` only at `/` — refreshing on `/chat` (or following a shared link
+  to `/cluster`, `/model-store`, `/operator`) returned a bare
+  `{"detail":"Not Found"}`. The API now serves the SPA shell for the four
+  client routes (kept in sync with the dashboard's `NavRoute`).
 - **Multi-node speculative decoding no longer crashes on heterogeneous
   clusters (explicit cross-rank lockstep, #252/#254).** Distributed MTP kept
   ranks in sync by *assuming* every rank independently recomputed bit-identical

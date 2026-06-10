@@ -653,6 +653,20 @@ class API:
         self._setup_routes()
 
         if mount_dashboard:
+            # The dashboard is a SPA that restores its active view from the
+            # URL path (App.tsx reads location.pathname), so deep links and
+            # browser refreshes hit these paths directly. StaticFiles only
+            # serves index.html at "/" — without an explicit fallback,
+            # refreshing on /chat lands on a bare {"detail":"Not Found"}.
+            # Keep this list in sync with NavRoute in
+            # dashboard-react/src/components/layout/HeaderNav.tsx.
+            async def _spa_index() -> FileResponse:
+                """Serve the dashboard SPA shell for client-routed paths."""
+                return FileResponse(os.path.join(DASHBOARD_DIR, "index.html"))
+
+            for _spa_route in ("/cluster", "/model-store", "/chat", "/operator"):
+                self.app.get(_spa_route, include_in_schema=False)(_spa_index)
+
             self.app.mount(
                 "/",
                 StaticFiles(

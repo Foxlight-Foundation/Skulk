@@ -317,6 +317,7 @@ export function App() {
       const runnerToShard = sa?.runnerToShard;
       let sharding: 'Pipeline' | 'Tensor' = 'Pipeline';
       let isEmbedding = false;
+      let speculation: InstanceCardData['speculation'];
       if (runnerToShard) {
         const firstShard = Object.values(runnerToShard)[0];
         if (firstShard && 'TensorShardMetadata' in firstShard) {
@@ -327,6 +328,24 @@ export function App() {
         const mc = (shardInner?.modelCard ?? shardInner?.model_card) as Record<string, unknown> | undefined;
         const tasks = mc?.tasks as string[] | undefined;
         if (tasks?.includes('TextEmbedding')) isEmbedding = true;
+
+        // Speculative-decoding status comes from the card's runtime section —
+        // the card is the rank-invariant source of truth for whether drafting
+        // engages (#254), so the badge needs no extra wire data. A card that
+        // blocks multi-node speculation shows no badge on multi-node
+        // placements (it runs plain distributed decode there).
+        const rt = mc?.runtime as Record<string, unknown> | undefined | null;
+        const declaresSidecar = !!rt?.mtpSidecarRepo && !!rt?.mtpHeads;
+        const declaresAssistant = !!rt?.assistantModelRepo;
+        const worldSize = runnerIds.length;
+        const blockedForPlacement =
+          rt?.speculativeMultiNode === false && worldSize > 1;
+        if ((declaresSidecar || declaresAssistant) && !blockedForPlacement) {
+          speculation = {
+            kind: declaresAssistant ? 'assistant' : 'sidecar',
+            depth: typeof rt?.mtpMaxDepth === 'number' ? rt.mtpMaxDepth : 1,
+          };
+        }
       }
 
       // Derive status from runners
@@ -348,6 +367,7 @@ export function App() {
         statusMessage: derived.message,
         loadProgress: derived.progress,
         isEmbedding,
+        speculation,
       });
     }
     return cards;
