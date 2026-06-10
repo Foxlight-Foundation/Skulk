@@ -664,8 +664,12 @@ class API:
                 """Serve the dashboard SPA shell for client-routed paths."""
                 return FileResponse(os.path.join(DASHBOARD_DIR, "index.html"))
 
+            # Both slash forms: the StaticFiles mount at "/" swallows
+            # unmatched paths before FastAPI's redirect-slashes logic can
+            # normalize "/chat/" to "/chat".
             for _spa_route in ("/cluster", "/model-store", "/chat", "/operator"):
                 self.app.get(_spa_route, include_in_schema=False)(_spa_index)
+                self.app.get(f"{_spa_route}/", include_in_schema=False)(_spa_index)
 
             self.app.mount(
                 "/",

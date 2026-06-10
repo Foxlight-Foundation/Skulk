@@ -54,7 +54,9 @@ def _client_with_dashboard(dashboard_dir: Path) -> Iterator[TestClient]:
 
 def test_spa_client_routes_serve_the_app_shell(tmp_path: Path) -> None:
     with _client_with_dashboard(tmp_path) as client:
-        for route in SPA_ROUTES:
+        # Both slash forms: the StaticFiles mount at "/" swallows unmatched
+        # paths before FastAPI's redirect-slashes logic can normalize.
+        for route in [*SPA_ROUTES, *(f"{r}/" for r in SPA_ROUTES)]:
             response = client.get(route)
             assert response.status_code == 200, route
             assert response.headers["content-type"].startswith("text/html"), route
