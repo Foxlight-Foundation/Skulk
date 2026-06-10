@@ -1,9 +1,12 @@
+import re
 import shutil
+import subprocess
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal, Self
+from typing import Literal, Self, final
 
 import psutil
+from pydantic import BaseModel
 
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.thunderbolt import ThunderboltIdentifier
@@ -38,6 +41,119 @@ class MemoryUsage(CamelCaseModel):
             swap_total=sm.total,
             swap_available=sm.free,
         )
+
+    @classmethod
+    def from_local_gpu_wireable(cls) -> Self:
+        """Local snapshot with ``ram_available`` as the GPU-wireable figure.
+
+        ``total − wired − anonymous − compressor`` from a vm_stat snapshot —
+        the same metric the telemetry path gossips for placement admission, so
+        the master's check and the worker's local pre-spawn guard agree on
+        what "available" means. psutil's ``available`` (free + inactive)
+        counts reclaimable file cache as used and is kept only as the fallback
+        when vm_stat fails.
+        """
+        categories = read_mach_memory_categories()
+        return cls.from_psutil(
+            override_memory=None
+            if categories is None
+            else gpu_wireable_memory_bytes(
+                int(psutil.virtual_memory().total), categories
+            )
+        )
+
+
+@final
+class MachMemoryCategories(BaseModel, frozen=True, strict=True):
+    """One consistent snapshot of macOS Mach page-category counters.
+
+    Sourced from ``vm_stat`` (one ``host_statistics64`` snapshot), which is the
+    only stock interface exposing all three of wired, anonymous, and compressor
+    occupancy together — psutil lacks compressor occupancy and the ``vm.*``
+    sysctls lack wired/compressor, and mixing sources tears the snapshot.
+    """
+
+    wired_bytes: int
+    """Unpageable memory (kernel + GPU-wired). Never reclaimable."""
+
+    anonymous_bytes: int
+    """Resident anonymous (non-file-backed) pages — process heaps. Disjoint
+    from wired in Mach accounting; reclaimable only via compression/swap."""
+
+    compressor_bytes: int
+    """Physical pages holding compressed memory. Resident until decompressed
+    or swapped; counting them avoids overstating availability on a box
+    already under memory pressure."""
+
+
+_VM_STAT_PAGE_SIZE_PATTERN = re.compile(r"page size of (\d+) bytes")
+_VM_STAT_COUNTER_PATTERN = re.compile(r"^(.+?):\s+(\d+)\.?\s*$", re.MULTILINE)
+
+
+def parse_vm_stat_output(text: str) -> MachMemoryCategories | None:
+    """Parse ``vm_stat`` output into a :class:`MachMemoryCategories` snapshot.
+
+    Pure function (the subprocess lives at the caller). Returns ``None`` when
+    the expected header or counters are missing, so a changed/foreign format
+    degrades to "no snapshot" rather than a wrong number.
+    """
+    page_size_match = _VM_STAT_PAGE_SIZE_PATTERN.search(text)
+    if page_size_match is None:
+        return None
+    page_size = int(page_size_match.group(1))
+    counters = {
+        match.group(1).strip(): int(match.group(2))
+        for match in _VM_STAT_COUNTER_PATTERN.finditer(text)
+    }
+    try:
+        return MachMemoryCategories(
+            wired_bytes=counters["Pages wired down"] * page_size,
+            anonymous_bytes=counters["Anonymous pages"] * page_size,
+            compressor_bytes=counters["Pages occupied by compressor"] * page_size,
+        )
+    except KeyError:
+        return None
+
+
+def gpu_wireable_memory_bytes(
+    ram_total_bytes: int, categories: MachMemoryCategories
+) -> int:
+    """Memory the GPU could wire without fighting resident working sets.
+
+    ``total − wired − anonymous − compressor``: everything else (free,
+    file-backed cache, purgeable) is reclaimed by macOS the moment Metal wires
+    pages. The naive ``free + inactive + speculative`` figure that mactop (and
+    macmon before it) reports counts reclaimable file cache as *used* — after a
+    model download, ~weights-sized cache deflates it by the model's full size
+    and placement refuses fits that run comfortably (observed on a 24 GB node:
+    11.6 GB of just-downloaded weights in cache dropped "available" to 12 GB
+    while 14.6 GB was genuinely wireable). Deliberately does NOT credit
+    compression of idle anonymous memory — that would re-introduce the
+    oversized-placement OOM class that the 1.30 overhead factor guards against.
+    """
+    return max(
+        0,
+        ram_total_bytes
+        - categories.wired_bytes
+        - categories.anonymous_bytes
+        - categories.compressor_bytes,
+    )
+
+
+def read_mach_memory_categories() -> MachMemoryCategories | None:
+    """One synchronous ``vm_stat`` snapshot, or ``None`` on any failure.
+
+    For rare, latency-tolerant call sites (the worker's pre-spawn fit guard);
+    the telemetry loop has its own anyio-based reader so the 1 Hz sample
+    cadence never blocks the event loop.
+    """
+    try:
+        result = subprocess.run(["vm_stat"], capture_output=True, check=False)
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return parse_vm_stat_output(result.stdout.decode("utf-8", errors="replace"))
 
 
 def read_wired_memory_bytes() -> int | None:
