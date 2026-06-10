@@ -72,8 +72,10 @@ from skulk.worker.engines.mlx.utils_mlx import (
 )
 from skulk.worker.engines.mlx.vision import VisionProcessor
 from skulk.worker.runner.bootstrap import (
+    GROUP_CONNECT_STALL_DIAGNOSIS,
     deadline_watchdog,
     logger,
+    resolve_group_connect_deadline_seconds,
     resolve_warmup_deadline_seconds,
 )
 from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
@@ -250,11 +252,25 @@ class Runner:
                 self.update_status(RunnerConnecting())
                 self.acknowledge_task(task)
 
-                with runner_phase(
-                    "connect_group",
-                    detail="initialize_mlx",
-                    task_id=task.task_id,
-                    include_memory=True,
+                # Ring init with strict=True blocks FOREVER when a neighbor
+                # socket fails the post-TCP rank handshake (#265) — without
+                # this deadline the instance never becomes ready and the
+                # cluster loops request-timeout/cancel indefinitely. Expiry
+                # exits via the wedge path: the worker gives the instance up
+                # on the first failure (#260) and a fresh placement mints a
+                # new ring port, which also clears stale-socket collisions.
+                with (
+                    deadline_watchdog(
+                        resolve_group_connect_deadline_seconds(),
+                        f"Group connect for {self.model_id}",
+                        diagnosis=GROUP_CONNECT_STALL_DIAGNOSIS,
+                    ),
+                    runner_phase(
+                        "connect_group",
+                        detail="initialize_mlx",
+                        task_id=task.task_id,
+                        include_memory=True,
+                    ),
                 ):
                     self.generator.group = initialize_mlx(self.bound_instance)
 
