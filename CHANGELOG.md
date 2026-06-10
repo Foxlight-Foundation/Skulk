@@ -9,6 +9,24 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Multi-node speculative decoding no longer crashes on heterogeneous
+  clusters (explicit cross-rank lockstep, #252/#254).** Distributed MTP kept
+  ranks in sync by *assuming* every rank independently recomputed bit-identical
+  accept/reject decisions from its own logits. Heterogeneous chips break that
+  assumption (M5 vs M4 GEMM kernels differ; M5 additionally runs reduced-
+  precision B≥2 matmuls), so mixed-chip pipelines desynced: ranks committed
+  different token counts, fell out of the collective schedule, and one rank
+  SIGABRT'd inside the Metal command-buffer completion block while the other
+  waited on a `MTLSharedEvent` forever. The protocol is now explicit: the
+  decider (last) rank alone holds the drafter, drafts, and decides; draft
+  tokens and the per-round accept outcome (`[prefix_len, bonus_token]`) are
+  broadcast via fixed-shape `all_sum` collectives, and receiving ranks apply
+  the broadcast decisions to their own cache slices without ever sampling or
+  comparing logits. The same applies to the request's first sampled token, and
+  the non-MTP pipeline fallback broadcasts each step's token the same way (its
+  per-rank sampling silently desynced heterogeneous ranks). Sidecar drafter
+  weights now load only on the decider rank (matching assistants), saving
+  drafter memory on every other rank.
 - **Crash circuit breaker now trips once per crash loop, not once per failure.**
   `CrashWindow.record()` is edge-triggered: it returns `True` only when the
   in-window failure count *crosses* the threshold and stays latched (returning

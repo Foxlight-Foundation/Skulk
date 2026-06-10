@@ -1544,3 +1544,296 @@ class TestQuantizeOnLoad:
         assert drafter is not None
         assert isinstance(drafter._fc, nn.Linear)
         assert not isinstance(drafter._fc, nn.QuantizedLinear)
+
+
+# ---------------------------------------------------------------------------
+# #254 — explicit cross-rank lockstep: decider decides, receivers obey
+# ---------------------------------------------------------------------------
+
+
+class _BroadcastRecorder:
+    """Stands in for ``_broadcast_via_all_sum`` on the decider rank.
+
+    Records every (detail, payload) and returns the payload unchanged —
+    exactly what the real all_sum returns to the sender when every other
+    rank contributes zeros.
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, list[float]]] = []
+
+    def __call__(
+        self, group: object, payload: mx.array, *, detail: str
+    ) -> mx.array:
+        self.sent.append(
+            (detail, [float(x) for x in cast("list[float]", payload.tolist())])
+        )
+        return payload
+
+
+class _BroadcastReplayer:
+    """Stands in for ``_broadcast_via_all_sum`` on a receiving rank.
+
+    Replays the decider's recorded payloads in order, asserting the
+    collective schedule matches (same detail tags, same shapes) — a
+    receiver that fell out of lockstep would consume the wrong payload.
+    """
+
+    def __init__(self, sent: list[tuple[str, list[float]]]) -> None:
+        self._queue = list(sent)
+
+    def __call__(
+        self, group: object, payload: mx.array, *, detail: str
+    ) -> mx.array:
+        assert self._queue, f"receiver joined unexpected collective {detail!r}"
+        expected_detail, values = self._queue.pop(0)
+        assert detail == expected_detail, (
+            f"collective schedule diverged: receiver={detail!r} "
+            f"decider={expected_detail!r}"
+        )
+        assert payload.shape == (len(values),)
+        return mx.array(values, dtype=mx.float32)
+
+
+class TestDistributedLockstep:
+    """The #254 protocol: tokens come from broadcasts, never local logits.
+
+    Simulates heterogeneous chips by giving the receiving rank a head_fn
+    that produces DIFFERENT tokens than the decider's — under the old
+    implicit-lockstep design the receiver would commit its own divergent
+    stream (the #252 desync); under the explicit protocol it must emit
+    exactly the decider's tokens.
+    """
+
+    def _run_rank(
+        self,
+        *,
+        is_decider: bool,
+        main_token_ids: list[int],
+        draft_token_id: int,
+        broadcast_fn: Callable[..., mx.array],
+        monkeypatch: pytest.MonkeyPatch,
+        max_tokens: int = 6,
+    ) -> list[int]:
+        from skulk.worker.engines.mlx.generator import generate as generate_module
+
+        model, tokenizer, drafter, trunk_fn, head_fn, cache = (
+            _build_fake_stream_env(
+                main_token_ids=main_token_ids,
+                draft_token_id=draft_token_id,
+            )
+        )
+        monkeypatch.setattr(
+            generate_module, "_broadcast_via_all_sum", broadcast_fn
+        )
+        outputs = list(
+            generate_module._stream_generate_with_mtp(
+                model=model,
+                tokenizer=tokenizer,
+                drafter=drafter if is_decider else None,
+                trunk_fn=trunk_fn,
+                head_fn=head_fn,
+                prompt=mx.array([1, 2, 3]),
+                max_tokens=max_tokens,
+                sampler=lambda lp: mx.argmax(lp, axis=-1),
+                logits_processors=[],
+                prompt_cache=cache,
+                kv_group_size=None,
+                kv_bits=None,
+                depth=1,
+                fail_loud_on_drafter_error=True,
+                draft_group=cast(
+                    "mx.distributed.Group", cast(object, MagicMock())
+                ),
+                draft_group_reads_target_cache=False,
+            )
+        )
+        return [r.token for r in outputs]
+
+    def test_receiver_with_divergent_logits_emits_decider_tokens(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        recorder = _BroadcastRecorder()
+        decider_tokens = self._run_rank(
+            is_decider=True,
+            main_token_ids=[5] * 16,
+            draft_token_id=5,
+            broadcast_fn=recorder,
+            monkeypatch=monkeypatch,
+        )
+        # The receiver's head produces 7s — if it decided locally it would
+        # emit a completely different stream.
+        receiver_tokens = self._run_rank(
+            is_decider=False,
+            main_token_ids=[7] * 16,
+            draft_token_id=5,
+            broadcast_fn=_BroadcastReplayer(recorder.sent),
+            monkeypatch=monkeypatch,
+        )
+        assert receiver_tokens == decider_tokens
+        assert all(t == 5 for t in decider_tokens)
+
+    def test_decider_broadcasts_complete_round_outcome(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        recorder = _BroadcastRecorder()
+        self._run_rank(
+            is_decider=True,
+            main_token_ids=[5] * 16,
+            draft_token_id=5,
+            broadcast_fn=recorder,
+            monkeypatch=monkeypatch,
+        )
+        details = [detail for detail, _ in recorder.sent]
+        # First decision of the request, then alternating draft/accept
+        # rounds — the fixed schedule every rank must share.
+        assert details[0] == "mtp_first_bonus"
+        assert details[1:3] == ["mtp_draft_exchange", "mtp_accept_decision"]
+        first_bonus = recorder.sent[0][1]
+        assert first_bonus == [5.0]
+        accept_payloads = [
+            values for detail, values in recorder.sent
+            if detail == "mtp_accept_decision"
+        ]
+        # [prefix_len, bonus_token]: draft 5 matches target 5 -> accept 1.
+        assert accept_payloads[0] == [1.0, 5.0]
+
+    def test_receiver_never_calls_drafter_hooks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        recorder = _BroadcastRecorder()
+        self._run_rank(
+            is_decider=True,
+            main_token_ids=[5] * 16,
+            draft_token_id=5,
+            broadcast_fn=recorder,
+            monkeypatch=monkeypatch,
+        )
+        from skulk.worker.engines.mlx.generator import generate as generate_module
+
+        model, tokenizer, drafter, trunk_fn, head_fn, cache = (
+            _build_fake_stream_env(main_token_ids=[7] * 16, draft_token_id=5)
+        )
+        monkeypatch.setattr(
+            generate_module,
+            "_broadcast_via_all_sum",
+            _BroadcastReplayer(recorder.sent),
+        )
+        list(
+            generate_module._stream_generate_with_mtp(
+                model=model,
+                tokenizer=tokenizer,
+                drafter=None,  # receiver holds no drafter at all
+                trunk_fn=trunk_fn,
+                head_fn=head_fn,
+                prompt=mx.array([1, 2, 3]),
+                max_tokens=6,
+                sampler=lambda lp: mx.argmax(lp, axis=-1),
+                logits_processors=[],
+                prompt_cache=cache,
+                kv_group_size=None,
+                kv_bits=None,
+                depth=1,
+                fail_loud_on_drafter_error=True,
+                draft_group=cast(
+                    "mx.distributed.Group", cast(object, MagicMock())
+                ),
+                draft_group_reads_target_cache=False,
+            )
+        )
+        # The locally-built (unused) fake drafter saw no traffic: receivers
+        # never draft, observe, or begin requests.
+        assert drafter.begin_request_count == 0
+        assert drafter.draft_calls == []
+        assert drafter.observe_calls == []
+
+
+class TestPipelineFallbackLockstep:
+    """#254 for the non-MTP pipeline fallback: per-step token broadcast."""
+
+    def _run_rank(
+        self,
+        *,
+        rank: int,
+        size: int,
+        main_token_ids: list[int],
+        broadcast_fn: Callable[..., mx.array],
+        monkeypatch: pytest.MonkeyPatch,
+        max_tokens: int = 5,
+    ) -> list[int]:
+        from mlx_lm.tokenizer_utils import TokenizerWrapper
+
+        from skulk.shared.types.mlx import Model
+        from skulk.worker.engines.mlx.generator import generate as generate_module
+
+        _iter = iter(main_token_ids)
+
+        def fake_model(tokens: mx.array, cache: object = None) -> mx.array:
+            seq_len = tokens.shape[1] if tokens.ndim == 2 else 1
+            try:
+                tok = next(_iter)
+            except StopIteration:
+                tok = 0
+            return mx.where(
+                mx.arange(VOCAB)[None, None, :] == tok,
+                mx.array(100.0),
+                mx.zeros((1, seq_len, VOCAB)),
+            )
+
+        tokenizer = MagicMock(spec=TokenizerWrapper)
+        detokenizer = MagicMock()
+        detokenizer.last_segment = "hi"
+        tokenizer.detokenizer = detokenizer
+        tokenizer.eos_token_ids = []
+
+        group = MagicMock()
+        group.rank = MagicMock(return_value=rank)
+        group.size = MagicMock(return_value=size)
+        monkeypatch.setattr(
+            generate_module, "_broadcast_via_all_sum", broadcast_fn
+        )
+
+        class _FakeCache:
+            def __init__(self) -> None:
+                self.state: list[object] = []
+                self.offset = 0
+
+        outputs = list(
+            generate_module._stream_generate_without_lookahead(
+                model=cast("Model", cast(object, fake_model)),
+                tokenizer=tokenizer,
+                prompt=mx.array([1, 2, 3]),
+                max_tokens=max_tokens,
+                sampler=lambda lp: mx.argmax(lp, axis=-1),
+                logits_processors=[],
+                prompt_cache=cast("list[object]", [_FakeCache()]),
+                kv_group_size=None,
+                kv_bits=None,
+                group=cast("mx.distributed.Group", cast(object, group)),
+            )
+        )
+        return [r.token for r in outputs]
+
+    def test_receiver_with_divergent_logits_emits_decider_tokens(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        recorder = _BroadcastRecorder()
+        decider_tokens = self._run_rank(
+            rank=1,
+            size=2,
+            main_token_ids=[5] * 8,
+            broadcast_fn=recorder,
+            monkeypatch=monkeypatch,
+        )
+        receiver_tokens = self._run_rank(
+            rank=0,
+            size=2,
+            main_token_ids=[7] * 8,
+            broadcast_fn=_BroadcastReplayer(recorder.sent),
+            monkeypatch=monkeypatch,
+        )
+        assert receiver_tokens == decider_tokens
+        assert all(t == 5 for t in decider_tokens)
+        assert all(
+            detail == "pipeline_token_decision" for detail, _ in recorder.sent
+        )

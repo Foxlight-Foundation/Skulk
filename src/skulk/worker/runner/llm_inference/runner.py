@@ -12,6 +12,7 @@ from skulk.shared.models.capabilities import is_gemma4_family
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelTask,
+    multi_node_speculation_disabled,
 )
 from skulk.shared.tracing import (
     begin_trace_session,
@@ -758,8 +759,31 @@ class Builder:
         force_sequential_for_gemma4 = is_gemma4_family(
             self.model_card, model_id=self.model_id
         )
+        # CARD-derived, never asset-derived: on multi-node placements only the
+        # decider rank loads drafter weights (#254), so keying this off local
+        # assets would put the decider on SequentialGenerator and every other
+        # rank on BatchGenerator — divergent prefill splits and collective
+        # schedules that wedge the pipeline (GPU timeout). The card is
+        # identical on every rank; a placement-blocked card (#217) skips
+        # speculation symmetrically and may batch.
+        _runtime = self.model_card.runtime if self.model_card is not None else None
+        _world_size = 1 if self.group is None else self.group.size()
+        # Rank symmetry only matters when there ARE peer ranks: single-rank
+        # runners keep the asset-derived decision (a card-declared sidecar
+        # whose download failed should still be allowed to batch).
+        card_declares_speculation = (
+            _world_size > 1
+            and _runtime is not None
+            and (
+                (_runtime.mtp_sidecar_repo is not None and _runtime.mtp_heads)
+                or _runtime.assistant_model_repo is not None
+            )
+            and not multi_node_speculation_disabled(_runtime, _world_size)
+        )
         force_sequential_for_mtp = (
-            self.mtp_weights is not None or self.assistant_model is not None
+            card_declares_speculation
+            or self.mtp_weights is not None
+            or self.assistant_model is not None
         )
         no_batch_requested = os.environ.get("SKULK_NO_BATCH") or os.environ.get(
             "SKULK_NO_BATCH"
