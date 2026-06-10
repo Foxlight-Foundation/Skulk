@@ -13,6 +13,10 @@ from skulk.shared.topology import Topology
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.profiling import MemoryUsage, NodeIdentity
 from skulk.shared.types.state import State
+from skulk.shared.types.worker.downloads import (
+    DownloadCompleted,
+    DownloadOngoing,
+)
 
 
 def _prior_state() -> tuple[State, NodeId]:
@@ -50,6 +54,52 @@ def test_carries_durable_facts():
     assert seed.tracing_enabled is True
     assert seed.node_identities[node].friendly_name == "kite-test"
     assert seed.node_memory[node].ram_available.in_bytes == 8 * 2**30
+
+
+def test_carries_only_completed_downloads():
+    # Ongoing/pending/failed downloads belong to the old session's restarted
+    # coordinator — carrying DownloadOngoing would make the new planner
+    # treat the download as in-hand and never re-issue it, stranding a
+    # mid-download placement forever.
+    from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+    from skulk.shared.types.memory import Memory
+    from skulk.shared.types.worker.downloads import DownloadProgressData
+    from skulk.shared.types.worker.shards import PipelineShardMetadata
+
+    node = NodeId()
+    shard = PipelineShardMetadata(
+        model_card=ModelCard(
+            model_id=ModelId("test-org/test-model"),
+            storage_size=Memory.from_bytes(1_000_000),
+            n_layers=2,
+            hidden_size=64,
+            supports_tensor=False,
+            tasks=[ModelTask.TextGeneration],
+        ),
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=2,
+        n_layers=2,
+    )
+    completed = DownloadCompleted(node_id=node, shard_metadata=shard, total=Memory())
+    ongoing = DownloadOngoing(
+        node_id=node,
+        shard_metadata=shard,
+        download_progress=DownloadProgressData(
+            total=Memory(),
+            downloaded=Memory(),
+            downloaded_this_session=Memory(),
+            completed_files=0,
+            total_files=1,
+            speed=0.0,
+            eta_ms=0,
+            files={},
+        ),
+    )
+    prior = State(downloads={node: [completed, ongoing]})
+    seed = seed_state_for_new_session(prior)
+    assert list(seed.downloads[node]) == [completed]
 
 
 def test_drops_session_scoped_state():
