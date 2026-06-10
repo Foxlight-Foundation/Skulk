@@ -21,6 +21,20 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Tensor-parallel placements of sidecar-MTP models no longer crash on the
+  first request (#263).** The decider-only sidecar load introduced with the
+  explicit lockstep protocol (#254) regressed tensor placements: draft
+  logits go through the TP-sharded lm_head, an all-rank collective the idle
+  receiver ranks never join, so the lone TP decider GPU-timed-out inside its
+  first draft round and SIGABRT'd in the Metal completion block while the
+  receivers hung to the eval watchdog. Deterministic on a homogeneous M4
+  pair (plain TP decode on the same instance worked; only the speculative
+  path wedged). Tensor placements now load the sidecar on every rank and
+  draft rank-symmetrically — the same envelope assistants use on TP and the
+  configuration the published +31% TP benchmark measured — while the
+  decider protocol remains in force for pipeline placements. The drafter
+  agreement still disables speculation symmetrically if any TP rank fails
+  to produce a working drafter.
 - **Dashboard deep links and browser refresh no longer 404.** The dashboard is
   a SPA that restores its active view from the URL path, but the API served
   `index.html` only at `/` — refreshing on `/chat` (or following a shared link
