@@ -9,6 +9,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **The Thunderbolt interface label survives classification (#222).** The
+  hardware-port parser set "thunderbolt" from the port header, then the
+  device-line branch unconditionally rewrote every en2+ device to
+  `maybe_ethernet` — and Mac Thunderbolt ports are always en2+, so the
+  thunderbolt label could never exist on macOS and the ring's TB-first
+  transport priority was dead code (it worked only because maybe_ethernet
+  happened to outrank ethernet). The downgrade now applies only to the
+  genuinely ambiguous case (a generic "Ethernet Adapter" port on en2+, which
+  may be a USB dongle); specifically-classified ports keep their labels, and
+  unclassified ports (e.g. an iPhone tether) stay at lowest priority instead
+  of being promoted.
 - **Peer churn can no longer crash healthy bystander nodes (#266).** When a
   master transition replaced the worker, the telemetry forwarder exited first
   (its event stream closes), and the InfoGatherer's next send raced into the
