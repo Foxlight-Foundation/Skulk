@@ -1,3 +1,4 @@
+import ipaddress
 from collections.abc import Generator, Mapping
 from typing import final
 
@@ -501,6 +502,52 @@ def _find_connection_ip(
             yield connection.sink_multiaddr.ip_address
 
 
+def _is_vpn_address(ip: str) -> bool:
+    """Whether an address belongs to a VPN/overlay network (Tailscale).
+
+    Detected by ADDRESS, not by the gossiped interface label: utun
+    interfaces never appear in ``networksetup`` output so their gossiped
+    type is "unknown", and adding a new ``InterfaceType`` literal would
+    break old nodes decoding gossiped ``NetworkInterfaceInfo`` in a
+    mixed-version rollout. Tailscale assigns from CGNAT ``100.64.0.0/10``
+    (IPv4) and ``fd7a:115c:a1e0::/48`` (IPv6).
+    """
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv4Address):
+        return address in ipaddress.IPv4Network("100.64.0.0/10")
+    return address in ipaddress.IPv6Network("fd7a:115c:a1e0::/48")
+
+
+# Transport ranking for ring placements: VPN/overlay addresses are the LAST
+# resort, below even "unknown" — Tailscale exists for reaching a node from
+# OUTSIDE its local network and may be DERP-relayed (observed live: a
+# kite-pair ring link riding the Dallas relay between two machines on the
+# same switch). A pair whose only observed path is the overlay (genuinely
+# cross-network placement) still works; a pair with any TB/LAN candidate
+# never selects it (#265).
+_RING_TRANSPORT_PRIORITY: dict[str, int] = {
+    "thunderbolt": 0,
+    "maybe_ethernet": 1,
+    "ethernet": 2,
+    "wifi": 3,
+    "unknown": 4,
+    "vpn": 5,
+}
+
+# RDMA/jaccl coordinator preference (control plane, not the data path).
+_JACCL_TRANSPORT_PRIORITY: dict[str, int] = {
+    "ethernet": 0,
+    "wifi": 1,
+    "unknown": 2,
+    "maybe_ethernet": 3,
+    "thunderbolt": 4,
+    "vpn": 5,
+}
+
+
 def _find_ip_prioritised(
     node_id: NodeId,
     other_node_id: NodeId,
@@ -508,9 +555,14 @@ def _find_ip_prioritised(
     node_network: Mapping[NodeId, NodeNetworkInfo],
     ring: bool,
 ) -> str | None:
-    """Find an IP address between nodes with prioritization.
+    """Find an IP address between nodes with transport prioritization.
 
-    Priority: ethernet > wifi > unknown > thunderbolt
+    Candidates are the OBSERVED libp2p connections between the pair, ranked
+    by the sink node's gossiped interface type — ring placements prefer the
+    fastest local interconnect (TB first), and VPN/overlay addresses rank
+    strictly last regardless of gossiped label (see ``_is_vpn_address``).
+
+    TODO: Profile and get actual connection speeds.
     """
     ips = list(_find_connection_ip(node_id, other_node_id, cycle_digraph))
     if not ips:
@@ -519,28 +571,14 @@ def _find_ip_prioritised(
     ip_to_type = {
         iface.ip_address: iface.interface_type for iface in other_network.interfaces
     }
+    priority = _RING_TRANSPORT_PRIORITY if ring else _JACCL_TRANSPORT_PRIORITY
 
-    # Ring should prioritise fastest connection. As a best-effort, we prioritise TB.
-    # TODO: Profile and get actual connection speeds.
-    if ring:
-        priority = {
-            "thunderbolt": 0,
-            "maybe_ethernet": 1,
-            "ethernet": 2,
-            "wifi": 3,
-            "unknown": 4,
-        }
+    def transport_rank(ip: str) -> int:
+        if _is_vpn_address(ip):
+            return priority["vpn"]
+        return priority.get(ip_to_type.get(ip, "unknown"), priority["unknown"])
 
-    # RDMA prefers ethernet coordinator
-    else:
-        priority = {
-            "ethernet": 0,
-            "wifi": 1,
-            "unknown": 2,
-            "maybe_ethernet": 3,
-            "thunderbolt": 4,
-        }
-    return min(ips, key=lambda ip: priority.get(ip_to_type.get(ip, "unknown"), 2))
+    return min(ips, key=transport_rank)
 
 
 def get_mlx_ring_hosts_by_node(

@@ -151,6 +151,53 @@ during rolling upgrades.
 """
 
 
+GROUP_CONNECT_DEADLINE_SECONDS_DEFAULT: float = 120.0
+"""Deadline for distributed group formation (``mx.distributed.init``).
+
+The ring backend with ``strict=True`` blocks FOREVER when any of its four
+neighbor sockets fails the post-TCP rank-identity handshake — observed live
+(#265): a 4-node ring sat with all links ESTABLISHED while every rank looped
+connect retries, and the cluster spent 30+ minutes in a probe-timeout/
+CancelTask loop with no recovery. Healthy group formation completes in
+seconds even over slow paths; 120s is generous. On expiry the runner exits
+via the wedge path, the worker gives the instance up on the first failure
+(#260), and a fresh placement mints a NEW ephemeral port — which also clears
+the stale-socket handshake collisions that same-port retries can hit.
+Override with SKULK_GROUP_CONNECT_DEADLINE_SECONDS.
+"""
+
+
+def resolve_group_connect_deadline_seconds() -> float:
+    """Resolve the group-connect deadline, honoring the operator override."""
+    raw = preferred_env_value(
+        "SKULK_GROUP_CONNECT_DEADLINE_SECONDS", "EXO_GROUP_CONNECT_DEADLINE_SECONDS"
+    )
+    if raw is not None:
+        try:
+            parsed = float(raw)
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            pass
+        logger.warning(
+            "Ignoring invalid group-connect deadline override "
+            f"(SKULK_GROUP_CONNECT_DEADLINE_SECONDS) value {raw!r}; using "
+            f"default {GROUP_CONNECT_DEADLINE_SECONDS_DEFAULT:.0f}s"
+        )
+    return GROUP_CONNECT_DEADLINE_SECONDS_DEFAULT
+
+
+GROUP_CONNECT_STALL_DIAGNOSIS: str = (
+    "the distributed group never formed (ring init blocks forever when a "
+    "neighbor socket fails the rank handshake — stale peer from a prior "
+    "attempt, unreachable advertised address, or a dropped link). "
+    "Terminating this runner so the instance fails cleanly instead of "
+    "looping request timeouts; a fresh placement gets a new ring port."
+)
+"""Diagnosis for a group-connect stall — a NETWORK condition, not a GPU
+wedge, so the watchdog's default Metal guidance would mislead operators."""
+
+
 def resolve_warmup_deadline_seconds() -> float:
     """Resolve the warmup deadline, honoring the operator env override."""
     raw = preferred_env_value(
@@ -172,11 +219,36 @@ def resolve_warmup_deadline_seconds() -> float:
     return WARMUP_DEADLINE_SECONDS_DEFAULT
 
 
+def deadline_message(
+    description: str, seconds: float, diagnosis: str | None = None
+) -> str:
+    """Build the CRITICAL line the deadline watchdog logs before exiting.
+
+    Pure so the operator-facing text is testable (the default timeout action
+    itself ends in ``os._exit``). ``diagnosis`` defaults to the GPU-wedge
+    guidance; non-Metal call sites (group connect, #265) supply their own so
+    the log doesn't send operators chasing the wrong subsystem.
+    """
+    explanation = (
+        diagnosis
+        if diagnosis is not None
+        else (
+            "the GPU may be wedged (a faulted Metal eval blocks forever at "
+            "0% CPU). Terminating this runner so the node can keep "
+            "dispatching. If runners keep dying here, test the GPU with a "
+            "small matmul; if that hangs too, the machine needs a reboot to "
+            "reset the Metal device queue."
+        )
+    )
+    return f"{description} exceeded its {seconds:.0f}s deadline — {explanation}"
+
+
 @contextlib.contextmanager
 def deadline_watchdog(
     seconds: float,
     description: str,
     on_timeout: Callable[[], None] | None = None,
+    diagnosis: str | None = None,
 ) -> Iterator[None]:
     """Hard deadline for a block that may wedge uninterruptibly.
 
@@ -193,18 +265,15 @@ def deadline_watchdog(
             CRITICAL log line).
         on_timeout: Test seam — replaces the default log-and-``os._exit``
             action when provided.
+        diagnosis: Operator-facing explanation appended to the CRITICAL log
+            line. Defaults to the GPU-wedge guidance; non-Metal call sites
+            (group connect, #265) supply their own so the log doesn't send
+            operators chasing the wrong subsystem.
     """
     finished = threading.Event()
 
     def _default_timeout_action() -> None:
-        logger.critical(
-            f"{description} exceeded its {seconds:.0f}s deadline — the GPU "
-            "may be wedged (a faulted Metal eval blocks forever at 0% CPU). "
-            "Terminating this runner so the node can keep dispatching. If "
-            "runners keep dying here, test the GPU with a small matmul; if "
-            "that hangs too, the machine needs a reboot to reset the Metal "
-            "device queue."
-        )
+        logger.critical(deadline_message(description, seconds, diagnosis))
         # Deliberately NO _release_metal_resources() here: mx.clear_cache()
         # would touch the very Metal device this watchdog assumes is wedged
         # and could block before the exit.
