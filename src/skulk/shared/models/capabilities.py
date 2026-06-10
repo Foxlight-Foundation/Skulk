@@ -115,6 +115,22 @@ def is_gemma4_family(
     )
 
 
+def is_nemotron_family(
+    card: ModelCard | None = None,
+    model_id: ModelId | None = None,
+) -> bool:
+    """Return whether the model is in the NVIDIA Nemotron (NemotronH) family.
+
+    At least one of ``card`` or ``model_id`` should be provided; the card's
+    resolved ``family`` (from the ``NemotronHForCausalLM`` architecture) is
+    preferred, with a model-id substring fallback for uncarded repos.
+    """
+    if card is not None and card.family == "nemotron":
+        return True
+    target_id = (card.model_id if card is not None else None) or model_id
+    return target_id is not None and "nemotron" in str(target_id).lower()
+
+
 def _is_deepseek_v32_family(profile_family: str, normalized_model_id: str) -> bool:
     return (
         "deepseek-v3.2" in normalized_model_id

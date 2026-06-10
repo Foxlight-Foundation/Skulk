@@ -8,7 +8,7 @@ import mlx.core as mx
 from anyio import WouldBlock
 from mlx_lm.tokenizer_utils import TokenizerWrapper
 
-from skulk.shared.models.capabilities import is_gemma4_family
+from skulk.shared.models.capabilities import is_gemma4_family, is_nemotron_family
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelTask,
@@ -759,6 +759,15 @@ class Builder:
         force_sequential_for_gemma4 = is_gemma4_family(
             self.model_card, model_id=self.model_id
         )
+        # NemotronH (hybrid Mamba/SSM) wedges BatchGenerator's warmup prefill
+        # into a faulted Metal eval (deterministic, FAST_SYNCH-independent;
+        # 2026-06-09 4-node matrix, #259) — and a wedge-exit leaks wired GPU
+        # memory. The same model runs cleanly under SequentialGenerator and
+        # under bare mlx_lm, so force Sequential until the BatchGenerator
+        # interaction is root-caused.
+        force_sequential_for_nemotron = is_nemotron_family(
+            self.model_card, model_id=self.model_id
+        )
         # CARD-derived, never asset-derived: on multi-node placements only the
         # decider rank loads drafter weights (#254), so keying this off local
         # assets would put the decider on SequentialGenerator and every other
@@ -792,6 +801,7 @@ class Builder:
             no_batch_requested
             or force_sequential_for_kv_backend
             or force_sequential_for_gemma4
+            or force_sequential_for_nemotron
             or force_sequential_for_mtp
         ):
             if force_sequential_for_kv_backend and not no_batch_requested:
@@ -807,6 +817,12 @@ class Builder:
                     "mode yet; forcing SequentialGenerator"
                 )
                 logger.info("using SequentialGenerator (model_family=gemma4)")
+            elif force_sequential_for_nemotron and not no_batch_requested:
+                logger.warning(
+                    "NemotronH wedges BatchGenerator warmup (faulted Metal "
+                    "eval, #259); forcing SequentialGenerator"
+                )
+                logger.info("using SequentialGenerator (model_family=nemotron)")
             elif force_sequential_for_mtp and not no_batch_requested:
                 logger.info("MTP speculative decoding requires SequentialGenerator; forcing (mtp_heads=true)")
             else:
