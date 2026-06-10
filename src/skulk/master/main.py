@@ -270,6 +270,9 @@ class Master:
             return
         idx = len(self._event_log)
         seed = self._seed_state.model_copy(update={"last_event_applied_idx": idx})
+        # Release the pre-index reference so the seed's object graph can be
+        # collected as state evolves past it.
+        self._seed_state = None
         indexed = IndexedEvent(event=StateSnapshotHydrated(state=seed), idx=idx)
         self.state = apply(self.state, indexed)
         self._event_log.append(indexed.event)
@@ -630,21 +633,32 @@ class Master:
         while True:
             connected_node_ids = set(self.state.topology.list_nodes())
             now = datetime.now(tz=timezone.utc)
-            timed_out_node_ids = {
-                node_id
-                for node_id, last_seen_at in self.state.last_seen.items()
-                if now - last_seen_at > timedelta(seconds=30)
-            }
-            # Liveness-based pruning is suppressed while this session's
+            # ALL liveness-based action is suppressed while this session's
             # topology is still settling (#273): a failover-seeded master
-            # carries instances but rebuilds topology from live gossip, so
-            # for the first probe cycles every carried node looks
-            # "disconnected" — pruning then would delete exactly the
-            # placements the seed preserved. After the grace, absence means
-            # absence and the dead master's instances are cleaned normally.
+            # carries instances but rebuilds topology and last_seen from
+            # live gossip, so for the first probe cycles every carried node
+            # looks "disconnected" — acting on that view would delete
+            # exactly the placements the seed preserved. The suppression
+            # must cover timed_out_node_ids too, not just the instance
+            # pruning: NodeTimedOut's apply removes the node's instances
+            # AND their tasks outright, and the TaskFailed-before-removal
+            # invariant (#223/#224) is only upheld when the corresponding
+            # dying_instance_ids pass ran in the same tick — a NodeTimedOut
+            # emitted during the grace would strand in-flight API requests
+            # without a terminal chunk (review catch on #274). After the
+            # grace, absence means absence and cleanup proceeds normally.
             topology_settled = (
                 time.monotonic() - self._started_monotonic
                 >= TOPOLOGY_SETTLE_GRACE_SECONDS
+            )
+            timed_out_node_ids: set[NodeId] = (
+                {
+                    node_id
+                    for node_id, last_seen_at in self.state.last_seen.items()
+                    if now - last_seen_at > timedelta(seconds=30)
+                }
+                if topology_settled
+                else set()
             )
             dying_instance_ids: set[InstanceId] = (
                 instances_on_dead_nodes(
