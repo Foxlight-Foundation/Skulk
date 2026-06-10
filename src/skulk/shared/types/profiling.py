@@ -1,5 +1,6 @@
 import re
 import shutil
+import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal, Self, final
@@ -39,6 +40,26 @@ class MemoryUsage(CamelCaseModel):
             ram_available=vm.available if override_memory is None else override_memory,
             swap_total=sm.total,
             swap_available=sm.free,
+        )
+
+    @classmethod
+    def from_local_gpu_wireable(cls) -> Self:
+        """Local snapshot with ``ram_available`` as the GPU-wireable figure.
+
+        ``total − wired − anonymous − compressor`` from a vm_stat snapshot —
+        the same metric the telemetry path gossips for placement admission, so
+        the master's check and the worker's local pre-spawn guard agree on
+        what "available" means. psutil's ``available`` (free + inactive)
+        counts reclaimable file cache as used and is kept only as the fallback
+        when vm_stat fails.
+        """
+        categories = read_mach_memory_categories()
+        return cls.from_psutil(
+            override_memory=None
+            if categories is None
+            else gpu_wireable_memory_bytes(
+                int(psutil.virtual_memory().total), categories
+            )
         )
 
 
@@ -117,6 +138,22 @@ def gpu_wireable_memory_bytes(
         - categories.anonymous_bytes
         - categories.compressor_bytes,
     )
+
+
+def read_mach_memory_categories() -> MachMemoryCategories | None:
+    """One synchronous ``vm_stat`` snapshot, or ``None`` on any failure.
+
+    For rare, latency-tolerant call sites (the worker's pre-spawn fit guard);
+    the telemetry loop has its own anyio-based reader so the 1 Hz sample
+    cadence never blocks the event loop.
+    """
+    try:
+        result = subprocess.run(["vm_stat"], capture_output=True, check=False)
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return parse_vm_stat_output(result.stdout.decode("utf-8", errors="replace"))
 
 
 def read_wired_memory_bytes() -> int | None:

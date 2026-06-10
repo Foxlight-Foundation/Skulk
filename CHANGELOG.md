@@ -34,8 +34,11 @@ This project records release notes here and mirrors public-facing notes in
   cache the moment Metal wires pages, so this is what a runner can actually
   use. The metric deliberately does not credit compression of idle anonymous
   memory, preserving the conservative posture of the oversized-placement OOM
-  hardening (#243). Value-only change to the gossiped figure — the wire shape
-  is unchanged, so mixed-version clusters interoperate.
+  hardening (#243). The worker's local pre-spawn fit guard judges with the
+  same metric (it previously used psutil's free + inactive, which would veto
+  the very placement the master had just correctly admitted). Value-only
+  change to the gossiped figure — the wire shape is unchanged, so
+  mixed-version clusters interoperate.
 - **Dashboard deep links and browser refresh no longer 404.** The dashboard is
   a SPA that restores its active view from the URL path, but the API served
   `index.html` only at `/` — refreshing on `/chat` (or following a shared link

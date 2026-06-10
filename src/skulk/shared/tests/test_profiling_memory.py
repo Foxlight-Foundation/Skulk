@@ -8,8 +8,12 @@ by the model's full size). These tests pin the ``vm_stat`` parser and the
 sample.
 """
 
+import pytest
+
+from skulk.shared.types import profiling
 from skulk.shared.types.profiling import (
     MachMemoryCategories,
+    MemoryUsage,
     gpu_wireable_memory_bytes,
     parse_vm_stat_output,
 )
@@ -99,3 +103,40 @@ def test_missing_counter_returns_none():
 
 def test_empty_output_returns_none():
     assert parse_vm_stat_output("") is None
+
+
+def test_local_gpu_wireable_uses_snapshot(monkeypatch: pytest.MonkeyPatch):
+    # The worker's pre-spawn fit guard must judge availability with the same
+    # GPU-wireable metric the master admits on — psutil's cache-deflated
+    # figure would veto placements the master just correctly admitted.
+    categories = MachMemoryCategories(
+        wired_bytes=2 * 2**30,
+        anonymous_bytes=4 * 2**30,
+        compressor_bytes=1 * 2**30,
+    )
+    monkeypatch.setattr(
+        profiling, "read_mach_memory_categories", lambda: categories
+    )
+    usage = MemoryUsage.from_local_gpu_wireable()
+    expected = usage.ram_total.in_bytes - (2 + 4 + 1) * 2**30
+    assert usage.ram_available.in_bytes == max(0, expected)
+
+
+def test_local_gpu_wireable_falls_back_to_psutil(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(profiling, "read_mach_memory_categories", lambda: None)
+    captured: list[int | None] = []
+    stub = MemoryUsage.from_bytes(
+        ram_total=16 * 2**30,
+        ram_available=8 * 2**30,
+        swap_total=0,
+        swap_available=0,
+    )
+
+    def capturing_from_psutil(*, override_memory: int | None) -> MemoryUsage:
+        captured.append(override_memory)
+        return stub
+
+    monkeypatch.setattr(MemoryUsage, "from_psutil", capturing_from_psutil)
+    assert MemoryUsage.from_local_gpu_wireable() == stub
+    # No snapshot → no override: the plain psutil figure is kept.
+    assert captured == [None]
