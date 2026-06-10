@@ -20,6 +20,16 @@ This project records release notes here and mirrors public-facing notes in
   may be a USB dongle); specifically-classified ports keep their labels, and
   unclassified ports (e.g. an iPhone tether) stay at lowest priority instead
   of being promoted.
+- **Peer churn can no longer crash healthy bystander nodes (#266).** When a
+  master transition replaced the worker, the telemetry forwarder exited first
+  (its event stream closes), and the InfoGatherer's next send raced into the
+  closed channel — the unhandled `BrokenResourceError` took the entire
+  process down (observed twice in one night, once on the cluster hub). A
+  closed/broken telemetry channel is now treated as the stop signal it is:
+  the gatherer exits cleanly (the replacement worker brings a fresh one), and
+  the per-monitor `except Exception` blocks — which exist to survive flaky
+  *gathering* — explicitly re-raise channel closure instead of swallowing it
+  and spinning on a dead channel.
 
 - **GPU-wedge runner deaths are no longer retried (wired-memory leak).**
   Contrary to every other crash class, a runner hard-exited by the warmup

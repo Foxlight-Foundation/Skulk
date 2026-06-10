@@ -7,7 +7,13 @@ from dataclasses import dataclass, field
 from typing import Self
 
 import anyio
-from anyio import fail_after, open_process, to_thread
+from anyio import (
+    BrokenResourceError,
+    ClosedResourceError,
+    fail_after,
+    open_process,
+    to_thread,
+)
 from anyio.streams.buffered import BufferedByteReceiveStream
 from loguru import logger
 from pydantic import ValidationError
@@ -471,30 +477,58 @@ class InfoGatherer:
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
 
     async def run(self):
-        async with self._tg as tg:
-            if IS_DARWIN:
-                if (mactop_path := shutil.which("mactop")) is not None:
-                    tg.start_soon(self._monitor_mactop, mactop_path)
-                else:
-                    # mactop not installed — fall back to psutil for memory.
-                    # (mactop replaced macmon, whose IOGPUFamily GPU polling
-                    # crashed/hung MLX inference — see mactop.py / exo#2088.)
-                    logger.warning(
-                        "mactop not found, falling back to psutil for memory monitoring"
-                    )
-                    self.memory_poll_rate = 1
-                tg.start_soon(self._monitor_system_profiler_thunderbolt_data)
-                tg.start_soon(self._monitor_thunderbolt_bridge_status)
-                tg.start_soon(self._monitor_rdma_ctl_status)
-            tg.start_soon(self._watch_system_info)
-            tg.start_soon(self._monitor_memory_usage)
-            tg.start_soon(self._monitor_misc)
-            tg.start_soon(self._monitor_static_info)
-            tg.start_soon(self._monitor_disk_usage)
+        try:
+            async with self._tg as tg:
+                if IS_DARWIN:
+                    if (mactop_path := shutil.which("mactop")) is not None:
+                        tg.start_soon(self._monitor_mactop, mactop_path)
+                    else:
+                        # mactop not installed — fall back to psutil for memory.
+                        # (mactop replaced macmon, whose IOGPUFamily GPU polling
+                        # crashed/hung MLX inference — see mactop.py / exo#2088.)
+                        logger.warning(
+                            "mactop not found, falling back to psutil for "
+                            "memory monitoring"
+                        )
+                        self.memory_poll_rate = 1
+                    tg.start_soon(self._monitor_system_profiler_thunderbolt_data)
+                    tg.start_soon(self._monitor_thunderbolt_bridge_status)
+                    tg.start_soon(self._monitor_rdma_ctl_status)
+                tg.start_soon(self._watch_system_info)
+                tg.start_soon(self._monitor_memory_usage)
+                tg.start_soon(self._monitor_misc)
+                tg.start_soon(self._monitor_static_info)
+                tg.start_soon(self._monitor_disk_usage)
 
-            nc = await NodeConfig.gather()
-            if nc is not None:
-                await self.info_sender.send(nc)
+                nc = await NodeConfig.gather()
+                if nc is not None:
+                    await self.info_sender.send(nc)
+        except BaseExceptionGroup as exception_group:
+            # A closed/broken info channel means our consumer is gone — the
+            # worker is shutting down or being replaced on a master
+            # transition (main.py tears down the old Worker and builds a
+            # fresh one with a fresh gatherer). That is a stop signal, not a
+            # fault: crashing here took down whole healthy nodes when a PEER
+            # restarted (#266 — the consumer's forwarder exits first when
+            # the event stream closes, and the next telemetry send raced
+            # into the closed channel). anyio folds body and child-task
+            # exceptions into one group, so this covers every send site.
+            # Any non-channel exception still propagates.
+            consumer_gone, other = exception_group.split(
+                (ClosedResourceError, BrokenResourceError)
+            )
+            if consumer_gone is None:
+                # Nothing channel-related in the group — re-raise it exactly
+                # as it arrived (a `from` link here would point the group's
+                # __cause__ at itself).
+                raise
+            if other is not None:
+                raise other from exception_group
+            logger.info(
+                "InfoGatherer stopped: telemetry consumer closed its channel "
+                "(worker shutdown/replacement); the replacement worker's "
+                "gatherer owns telemetry from here"
+            )
 
     def shutdown(self):
         self._tg.cancel_tasks()
@@ -506,6 +540,12 @@ class InfoGatherer:
             try:
                 with fail_after(30):
                     await self.info_sender.send(await StaticNodeInformation.gather())
+            except (ClosedResourceError, BrokenResourceError):
+                # Consumer gone (worker shutdown/replacement): a stop signal,
+                # not a gathering fault — must escape this per-iteration
+                # catch-all or the loop spins on a dead channel (#266).
+                # run() converts it into a clean stop.
+                raise
             except Exception as e:
                 logger.warning(f"Error gathering static node info: {e}")
             await anyio.sleep(self.static_info_poll_interval)
@@ -517,6 +557,12 @@ class InfoGatherer:
             try:
                 with fail_after(10):
                     await self.info_sender.send(await MiscData.gather())
+            except (ClosedResourceError, BrokenResourceError):
+                # Consumer gone (worker shutdown/replacement): a stop signal,
+                # not a gathering fault — must escape this per-iteration
+                # catch-all or the loop spins on a dead channel (#266).
+                # run() converts it into a clean stop.
+                raise
             except Exception as e:
                 logger.warning(f"Error gathering misc data: {e}")
             await anyio.sleep(self.misc_poll_interval)
@@ -560,6 +606,12 @@ class InfoGatherer:
                         else []
                     )
                     await self.info_sender.send(MacThunderboltConnections(conns=conns))
+            except (ClosedResourceError, BrokenResourceError):
+                # Consumer gone (worker shutdown/replacement): a stop signal,
+                # not a gathering fault — must escape this per-iteration
+                # catch-all or the loop spins on a dead channel (#266).
+                # run() converts it into a clean stop.
+                raise
             except Exception as e:
                 logger.warning(f"Error gathering Thunderbolt data: {e}")
             await anyio.sleep(self.system_profiler_interval)
@@ -578,6 +630,12 @@ class InfoGatherer:
                 await self.info_sender.send(
                     MemoryUsage.from_psutil(override_memory=override_memory)
                 )
+            except (ClosedResourceError, BrokenResourceError):
+                # Consumer gone (worker shutdown/replacement): a stop signal,
+                # not a gathering fault — must escape this per-iteration
+                # catch-all or the loop spins on a dead channel (#266).
+                # run() converts it into a clean stop.
+                raise
             except Exception as e:
                 logger.warning(f"Error gathering memory usage: {e}")
             await anyio.sleep(self.memory_poll_rate)
@@ -590,6 +648,12 @@ class InfoGatherer:
                 with fail_after(10):
                     nics = await get_network_interfaces()
                     await self.info_sender.send(NodeNetworkInterfaces(ifaces=nics))
+            except (ClosedResourceError, BrokenResourceError):
+                # Consumer gone (worker shutdown/replacement): a stop signal,
+                # not a gathering fault — must escape this per-iteration
+                # catch-all or the loop spins on a dead channel (#266).
+                # run() converts it into a clean stop.
+                raise
             except Exception as e:
                 logger.warning(f"Error gathering network interfaces: {e}")
             await anyio.sleep(self.interface_watcher_interval)
@@ -603,6 +667,12 @@ class InfoGatherer:
                     curr = await ThunderboltBridgeInfo.gather()
                     if curr is not None:
                         await self.info_sender.send(curr)
+            except (ClosedResourceError, BrokenResourceError):
+                # Consumer gone (worker shutdown/replacement): a stop signal,
+                # not a gathering fault — must escape this per-iteration
+                # catch-all or the loop spins on a dead channel (#266).
+                # run() converts it into a clean stop.
+                raise
             except Exception as e:
                 logger.warning(f"Error gathering Thunderbolt Bridge status: {e}")
             await anyio.sleep(self.thunderbolt_bridge_poll_interval)
@@ -615,6 +685,12 @@ class InfoGatherer:
                 curr = await RdmaCtlStatus.gather()
                 if curr is not None:
                     await self.info_sender.send(curr)
+            except (ClosedResourceError, BrokenResourceError):
+                # Consumer gone (worker shutdown/replacement): a stop signal,
+                # not a gathering fault — must escape this per-iteration
+                # catch-all or the loop spins on a dead channel (#266).
+                # run() converts it into a clean stop.
+                raise
             except Exception as e:
                 logger.warning(f"Error gathering RDMA ctl status: {e}")
             await anyio.sleep(self.rdma_ctl_poll_interval)
@@ -626,6 +702,12 @@ class InfoGatherer:
             try:
                 with fail_after(5):
                     await self.info_sender.send(await NodeDiskUsage.gather())
+            except (ClosedResourceError, BrokenResourceError):
+                # Consumer gone (worker shutdown/replacement): a stop signal,
+                # not a gathering fault — must escape this per-iteration
+                # catch-all or the loop spins on a dead channel (#266).
+                # run() converts it into a clean stop.
+                raise
             except Exception as e:
                 logger.warning(f"Error gathering disk usage: {e}")
             await anyio.sleep(self.disk_poll_interval)
@@ -698,6 +780,12 @@ class InfoGatherer:
                 logger.warning(
                     f"mactop produced no output for {read_timeout}s, restarting"
                 )
+            except (ClosedResourceError, BrokenResourceError):
+                # Consumer gone (worker shutdown/replacement): a stop signal,
+                # not a gathering fault — must escape this per-iteration
+                # catch-all or the loop spins on a dead channel (#266).
+                # run() converts it into a clean stop.
+                raise
             except Exception as e:
                 # anyio's open_process()/async-with does not raise
                 # CalledProcessError (no check=True semantics); mactop dying just
