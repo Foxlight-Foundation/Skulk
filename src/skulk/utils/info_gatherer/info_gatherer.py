@@ -16,9 +16,11 @@ from skulk.shared.constants import SKULK_CONFIG_FILE, SKULK_MODELS_DIR
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
     DiskUsage,
+    MachMemoryCategories,
     MemoryUsage,
     NetworkInterfaceInfo,
     ThunderboltBridgeStatus,
+    parse_vm_stat_output,
 )
 from skulk.shared.types.thunderbolt import (
     ThunderboltConnection,
@@ -40,6 +42,47 @@ from .system_info import (
 )
 
 IS_DARWIN = sys.platform == "darwin"
+
+
+_vm_stat_failure_logged = False
+
+
+async def _read_mach_memory_categories() -> MachMemoryCategories | None:
+    """One ``vm_stat`` snapshot of Mach page categories, or ``None`` on failure.
+
+    Runs once per mactop sample (1 s cadence); ``vm_stat`` is a single
+    ``host_statistics64`` call, a few milliseconds. Failures (binary missing,
+    non-zero exit, format drift) degrade to ``None`` so telemetry falls back to
+    mactop's raw availability instead of flapping — logged once, not at the
+    sample cadence.
+    """
+    global _vm_stat_failure_logged
+    try:
+        result = await anyio.run_process(["vm_stat"], check=False)
+    except OSError as error:
+        if not _vm_stat_failure_logged:
+            _vm_stat_failure_logged = True
+            logger.warning(
+                f"vm_stat unavailable; placement availability falls back to "
+                f"mactop's cache-deflated figure: {error}"
+            )
+        return None
+    if result.returncode != 0:
+        if not _vm_stat_failure_logged:
+            _vm_stat_failure_logged = True
+            logger.warning(
+                f"vm_stat exited {result.returncode}; placement availability "
+                f"falls back to mactop's cache-deflated figure"
+            )
+        return None
+    categories = parse_vm_stat_output(result.stdout.decode("utf-8", errors="replace"))
+    if categories is None and not _vm_stat_failure_logged:
+        _vm_stat_failure_logged = True
+        logger.warning(
+            "vm_stat output did not match the expected format; placement "
+            "availability falls back to mactop's cache-deflated figure"
+        )
+    return categories
 
 
 async def _get_thunderbolt_devices() -> set[str] | None:
@@ -637,8 +680,16 @@ class InfoGatherer:
                         # keep reading so telemetry doesn't flap.
                         if not text:
                             continue
+                        # A vm_stat snapshot taken alongside the mactop sample
+                        # corrects ram_available to the GPU-wireable figure —
+                        # mactop's own "available" counts reclaimable file
+                        # cache as used (see mactop.py). None on failure keeps
+                        # the raw mactop figure rather than dropping the sample.
+                        mach_categories = await _read_mach_memory_categories()
                         try:
-                            metrics = MactopMetrics.from_raw_json(text)
+                            metrics = MactopMetrics.from_raw_json(
+                                text, mach_categories
+                            )
                         except ValidationError as e:
                             logger.warning(f"Skipping unparseable mactop line: {e}")
                             continue

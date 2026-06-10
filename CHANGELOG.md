@@ -23,6 +23,18 @@ This project records release notes here and mirrors public-facing notes in
   wire-compatible during rolling upgrades), and the worker gives the
   instance up on the FIRST wedge death with a log that names the leak and
   the reboot remedy.
+- **`MLX_METAL_FAST_SYNCH` now defaults OFF cluster-wide.** The old ON default
+  had no measured upside (vanilla dense decode: 20.8 tok/s off vs 20.7 on) and
+  a catastrophic failure mode for any model without a curated card pin:
+  hybrid-SSM models wedge at warmup under the flag — gpt-oss hit the 300s
+  warmup deadline (#236, card-pinned off on 2026-06-07) and NemotronH-9B did
+  exactly the same (#259) — and the resulting deadline kill mid-GPU-work leaks
+  ~5GB of wired memory per attempt and degrades the node until reboot. With
+  the flag off, Nemotron-Nano-9B warms in seconds and decodes at 19+ tok/s.
+  All NemotronH/Nemotron-3-hybrid and gpt-oss cards also carry an explicit
+  `runtime.metal_fast_synch = false` pin now, and any model that measurably
+  benefits from FAST_SYNCH can pin it on per card; the operator override
+  (`--fast-synch`/`--no-fast-synch`) is unchanged.
 
 ### Added
 
@@ -38,6 +50,24 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Placement no longer refuses models whose weights sit in the macOS file
+  cache (cache-deflated availability).** The gossiped `ram_available` came
+  from mactop's `available` (free + inactive + speculative), which counts
+  reclaimable file cache as *used* — so immediately after downloading a model,
+  availability was deflated by roughly the model's full size and placement
+  refused fits that run comfortably (observed on a 24 GB node: 11.6 GB of
+  just-downloaded weights in cache dropped "available" to ~12 GB while
+  ~14.6 GB was genuinely wireable). On macOS, `ram_available` is now the
+  GPU-wireable figure `total − wired − anonymous − compressor`, taken from a
+  `vm_stat` snapshot alongside each telemetry sample; macOS reclaims file
+  cache the moment Metal wires pages, so this is what a runner can actually
+  use. The metric deliberately does not credit compression of idle anonymous
+  memory, preserving the conservative posture of the oversized-placement OOM
+  hardening (#243). The worker's local pre-spawn fit guard judges with the
+  same metric (it previously used psutil's free + inactive, which would veto
+  the very placement the master had just correctly admitted). Value-only
+  change to the gossiped figure — the wire shape is unchanged, so
+  mixed-version clusters interoperate.
 - **Dashboard deep links and browser refresh no longer 404.** The dashboard is
   a SPA that restores its active view from the URL path, but the API served
   `index.html` only at `/` — refreshing on `/chat` (or following a shared link

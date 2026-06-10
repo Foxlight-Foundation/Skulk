@@ -1,5 +1,6 @@
 from pydantic import TypeAdapter
 
+from skulk.shared.types.profiling import MachMemoryCategories
 from skulk.utils.info_gatherer.info_gatherer import GatheredInfo
 from skulk.utils.info_gatherer.mactop import MacmonMetrics, MactopMetrics
 
@@ -33,11 +34,44 @@ def test_parses_system_profile():
 def test_parses_memory():
     m = MactopMetrics.from_raw_json(_SAMPLE)
     assert m.memory.ram_total.in_bytes == 17179869184
-    # mactop reports `available` directly; empirically it equals total - used
-    # (same figure macmon computed), so placement margins are unchanged.
+    # Without a Mach page-category snapshot, mactop's raw `available` (which
+    # counts reclaimable file cache as used) is kept as the fallback.
     assert m.memory.ram_available.in_bytes == 9492299776
     assert m.memory.swap_total.in_bytes == 2147483648
     assert m.memory.swap_available.in_bytes == (2147483648 - 536870912)
+
+
+def test_mach_snapshot_overrides_cache_deflated_available():
+    # The placement-facing fix: with a vm_stat snapshot, ram_available is the
+    # GPU-wireable figure (total − wired − anonymous − compressor), which does
+    # not count reclaimable file cache as used the way mactop's raw figure
+    # does. Numbers shaped like the observed kite incident: a just-downloaded
+    # model's file cache deflated mactop's `available` to ~9.5 GB while far
+    # more was genuinely wireable.
+    categories = MachMemoryCategories(
+        wired_bytes=2_000_000_000,
+        anonymous_bytes=3_000_000_000,
+        compressor_bytes=500_000_000,
+    )
+    m = MactopMetrics.from_raw_json(_SAMPLE, categories)
+    assert m.memory.ram_available.in_bytes == (
+        17179869184 - 2_000_000_000 - 3_000_000_000 - 500_000_000
+    )
+    # The rest of the memory block still comes from mactop.
+    assert m.memory.ram_total.in_bytes == 17179869184
+    assert m.memory.swap_available.in_bytes == (2147483648 - 536870912)
+
+
+def test_mach_snapshot_never_yields_negative_available():
+    # Pathological counters (e.g. anonymous + wired exceeding total mid-churn)
+    # clamp to zero rather than gossiping a negative availability.
+    categories = MachMemoryCategories(
+        wired_bytes=17_179_869_184,
+        anonymous_bytes=17_179_869_184,
+        compressor_bytes=0,
+    )
+    m = MactopMetrics.from_raw_json(_SAMPLE, categories)
+    assert m.memory.ram_available.in_bytes == 0
 
 
 def test_ignores_unknown_fields():

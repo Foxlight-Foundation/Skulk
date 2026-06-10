@@ -360,25 +360,31 @@ class Worker:
     def _local_shard_fit_error(self, shard: ShardMetadata) -> str | None:
         """Reason this node cannot hold ``shard``, or ``None`` if it fits.
 
-        Last-resort guard using *local, current* memory (psutil available capped
-        at the Metal GPU working-set ceiling), not the master's gossiped view.
-        Refusing here fails the placement cleanly instead of letting the runner
-        OOM-abort, which on an abnormal Metal termination leaks wired GPU memory
-        reclaimable only by reboot (the GLM-4.7-Flash class, 2026-06-08).
+        Last-resort guard using *local, current* memory, not the master's
+        gossiped view. Availability is the same GPU-wireable figure the master
+        admits on (``total − wired − anonymous − compressor`` from a vm_stat
+        snapshot, capped at the Metal GPU working-set ceiling) — psutil's
+        ``available`` counts reclaimable file cache as used, so right after a
+        model download it would veto the very placement the master just
+        correctly admitted. Falls back to psutil when vm_stat fails. Refusing
+        here fails the placement cleanly instead of letting the runner
+        OOM-abort, which on an abnormal Metal termination leaks wired GPU
+        memory reclaimable only by reboot (the GLM-4.7-Flash class,
+        2026-06-08).
         """
         footprint = estimate_shard_footprint(
             shard.model_card, self._shard_memory_fraction(shard)
         )
-        local = MemoryUsage.from_psutil(override_memory=None)
+        local = MemoryUsage.from_local_gpu_wireable()
         usable = min(local.ram_available, gpu_working_set_ceiling(local.ram_total))
         if footprint > usable:
             return (
                 f"Refusing to load a shard of {shard.model_card.model_id} on "
                 f"{self.node_id}: ~{footprint.in_gb:.1f}GB needed but only "
                 f"~{usable.in_gb:.1f}GB usable locally "
-                f"({local.ram_available.in_gb:.1f}GB free, capped at the GPU "
-                "working-set ceiling). Refusing before load to avoid an OOM "
-                "abort that leaks GPU memory."
+                f"({local.ram_available.in_gb:.1f}GB GPU-wireable, capped at "
+                "the GPU working-set ceiling). Refusing before load to avoid "
+                "an OOM abort that leaks GPU memory."
             )
         return None
 
