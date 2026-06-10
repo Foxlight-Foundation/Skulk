@@ -539,6 +539,41 @@ def load_model(model_path: Path, **kwargs: object) -> tuple[nn.Module, object]:
             ) from e
 
 
+def sidecar_load_eligible(
+    bound_shard: ShardMetadata,
+    *,
+    single_node: bool,
+    speculation_blocked: bool,
+) -> bool:
+    """Whether this rank may load MTP sidecar weights for its placement.
+
+    Single-node placements always draft locally. Multi-node PIPELINE
+    placements load on the decider (last) rank only — drafts and accept
+    decisions are broadcast (#254), so other ranks never draft and must not
+    pay sidecar memory. Multi-rank TENSOR placements load on EVERY rank
+    (#263): draft logits go through the TP-sharded lm_head, so a
+    "decider-local" draft issues all-rank collectives that idle receivers
+    never join — the decider GPU-times-out inside its first draft round and
+    SIGABRTs in the Metal completion block. Rank-symmetric drafting (every
+    rank drafts, lockstep implicit — the same envelope assistants use on
+    TP, and the measured +31% TP configuration) keeps the collective
+    schedule identical instead; it relies on bit-identical per-rank logits,
+    which TP placements already require in practice. A card that blocks
+    multi-node speculation (``speculative_multi_node=false``) loads no
+    sidecar on any multi-node rank.
+    """
+    if speculation_blocked:
+        return False
+    if single_node:
+        return True
+    if isinstance(bound_shard, TensorShardMetadata):
+        return True
+    return (
+        isinstance(bound_shard, PipelineShardMetadata)
+        and bound_shard.device_rank == bound_shard.world_size - 1
+    )
+
+
 def get_weights_size(model_shard_meta: ShardMetadata) -> Memory:
     return Memory.from_float_kb(
         (model_shard_meta.end_layer - model_shard_meta.start_layer)
@@ -735,16 +770,14 @@ def load_mlx_items(
         or isinstance(bound_shard, TensorShardMetadata)
         or is_last_pipeline_rank
     ) and not speculation_blocked_for_placement
-    # Sidecars on multi-node placements likewise load on the decider (last)
-    # rank only (#254): drafts and accept decisions are broadcast, so other
-    # ranks never draft and must not pay sidecar memory. The decider is
-    # rank-symmetric (device_rank == world_size - 1 from the shard
-    # assignment every rank holds), so the per-request drafter-agreement
-    # collective settles at exactly one ready drafter.
-    is_decider_rank = bound_shard.device_rank == bound_shard.world_size - 1
-    sidecar_placement_ok = (
-        single_node or is_decider_rank
-    ) and not speculation_blocked_for_placement
+    # Sidecar load envelope: pipeline loads on the decider rank only (#254);
+    # tensor loads on every rank for rank-symmetric drafting (#263) — full
+    # rationale on sidecar_load_eligible.
+    sidecar_placement_ok = sidecar_load_eligible(
+        bound_shard,
+        single_node=single_node,
+        speculation_blocked=speculation_blocked_for_placement,
+    )
     if (
         runtime
         and runtime.mtp_sidecar_repo
@@ -772,7 +805,7 @@ def load_mlx_items(
         and not speculation_blocked_for_placement
     ):
         logger.info(
-            "MTP sidecar declared; this rank "
+            "MTP sidecar declared; this pipeline rank "
             f"({bound_shard.device_rank}/{bound_shard.world_size}) skips the "
             "sidecar load — drafting runs on the decider (last) rank only and "
             "drafts + accept decisions arrive via the per-round exchange (#254)"
