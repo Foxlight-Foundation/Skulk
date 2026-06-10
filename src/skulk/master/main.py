@@ -208,6 +208,11 @@ class Master:
             else State(tracing_enabled=SKULK_TRACING_ENABLED)
         )
         self._started_monotonic = time.monotonic()
+        logger.info(
+            f"Master session {session_id.election_clock} starting with "
+            f"{len(self.state.instances)} carried instance(s) "
+            f"({'seeded from prior replicated state' if initial_state is not None else 'fresh state'})"
+        )
         self._tg: TaskGroup = TaskGroup()
         self.command_task_mapping: dict[CommandId, TaskId] = {}
         self.command_receiver = command_receiver
@@ -736,6 +741,11 @@ class Master:
                     continue
 
                 config_yaml = self._load_state_sync_config_yaml()
+                logger.info(
+                    f"Serving state snapshot to {message.requester}: "
+                    f"{len(self.state.instances)} instance(s), "
+                    f"last_event_applied_idx={self.state.last_event_applied_idx}"
+                )
                 await self.state_sync_sender.send(
                     StateSyncMessage(
                         kind="response",
