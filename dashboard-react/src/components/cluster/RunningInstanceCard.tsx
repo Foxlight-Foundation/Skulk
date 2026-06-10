@@ -1,6 +1,7 @@
 import styled, { keyframes, css, useTheme } from 'styled-components';
 import { FiExternalLink } from 'react-icons/fi';
 import { BsChatDotsFill } from 'react-icons/bs';
+import { InfoTooltip } from '../common/InfoTooltip';
 import type { Theme } from '../../theme';
 
 /* ── Types ────────────────────────────────────────────── */
@@ -291,16 +292,17 @@ export function RunningInstanceCard({
         <span>{sharding} &middot; {formatInstanceType(instanceType)}</span>
         <StatusBadge $color={cfg.color}>{cfg.label}</StatusBadge>
         {speculation && (
-          <StatusBadge
-            $color={theme.colors.accent}
-            title={
+          <InfoTooltip
+            content={
               `Speculative decoding active: ` +
               `${speculation.kind === 'assistant' ? 'assistant drafter' : 'MTP sidecar'}, ` +
               `draft depth ${speculation.depth}`
             }
           >
-            ⚡ MTP D{speculation.depth}
-          </StatusBadge>
+            <StatusBadge $color={theme.colors.accent}>
+              MTP D{speculation.depth}
+            </StatusBadge>
+          </InfoTooltip>
         )}
       </MetaRow>
 
