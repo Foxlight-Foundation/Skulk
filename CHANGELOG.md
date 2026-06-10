@@ -7,6 +7,21 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- **`MLX_METAL_FAST_SYNCH` now defaults OFF cluster-wide.** The old ON default
+  had no measured upside (vanilla dense decode: 20.8 tok/s off vs 20.7 on) and
+  a catastrophic failure mode for any model without a curated card pin:
+  hybrid-SSM models wedge at warmup under the flag — gpt-oss hit the 300s
+  warmup deadline (#236, card-pinned off on 2026-06-07) and NemotronH-9B did
+  exactly the same (#259) — and the resulting deadline kill mid-GPU-work leaks
+  ~5GB of wired memory per attempt and degrades the node until reboot. With
+  the flag off, Nemotron-Nano-9B warms in seconds and decodes at 19+ tok/s.
+  All NemotronH/Nemotron-3-hybrid and gpt-oss cards also carry an explicit
+  `runtime.metal_fast_synch = false` pin now, and any model that measurably
+  benefits from FAST_SYNCH can pin it on per card; the operator override
+  (`--fast-synch`/`--no-fast-synch`) is unchanged.
+
 ### Added
 
 - **The dashboard now shows speculative-decoding status per instance.** Active

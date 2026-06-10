@@ -15,5 +15,8 @@ format = "token_delimited"
 default_effort = "medium"
 disabled_effort = "none"
 
+[runtime]
+metal_fast_synch = false
+
 [storage_size]
 in_bytes = 5002791936
