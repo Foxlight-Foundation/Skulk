@@ -57,3 +57,56 @@ def test_supervisor_maps_wedge_exit_code_to_marker() -> None:
     else:
         cause = f"exitcode={rc}"
     assert _runner_failed_wedged(RunnerFailed(error_message=f"Terminated ({cause})"))
+
+
+def test_wedged_live_instances_sweep() -> None:
+    """The planning-tick sweep catches LOCAL wedge deaths (single-node case).
+
+    plan._kill_runner never emits Shutdown for a locally failed runner while
+    its instance lives, so the sweep is the only path that frees a
+    single-node placement from a wedged-dead runner.
+    """
+    from types import SimpleNamespace
+    from typing import cast
+
+    from skulk.worker.main import (
+        _wedged_live_instances,  # pyright: ignore[reportPrivateUsage] — unit under test
+    )
+
+    def supervisor(instance_id: str, model_id: str, status: object):
+        return SimpleNamespace(
+            bound_instance=SimpleNamespace(
+                instance=SimpleNamespace(instance_id=instance_id)
+            ),
+            shard_metadata=SimpleNamespace(
+                model_card=SimpleNamespace(model_id=model_id)
+            ),
+            status=status,
+        )
+
+    wedged = RunnerFailed(
+        error_message=f"Terminated ({WEDGE_FAILURE_MARKER}: ...)"
+    )
+    ordinary = RunnerFailed(error_message="Terminated (signal=6)")
+    runners = cast(
+        "dict[object, object]",
+        {
+            "r-wedged-live": supervisor("inst-a", "model-a", wedged),
+            "r-wedged-deleted": supervisor("inst-gone", "model-b", wedged),
+            "r-ordinary-failure": supervisor("inst-c", "model-c", ordinary),
+            "r-healthy": supervisor("inst-d", "model-d", RunnerReady()),
+        },
+    )
+
+    from skulk.shared.types.worker.instances import InstanceId
+    from skulk.shared.types.worker.runners import RunnerId
+    from skulk.worker.runner.runner_supervisor import RunnerSupervisor
+
+    result = _wedged_live_instances(
+        cast("dict[RunnerId, RunnerSupervisor]", cast(object, runners)),
+        cast("set[InstanceId]", {"inst-a", "inst-c", "inst-d"}),
+    )
+    # Only the wedge-marked runner whose instance still lives is reported:
+    # deleted instances follow the normal Shutdown cleanup, ordinary failures
+    # keep the 3-in-60s breaker semantics, healthy runners are untouched.
+    assert result == [("inst-a", "model-a")]

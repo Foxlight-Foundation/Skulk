@@ -2,6 +2,7 @@ import base64
 import hashlib
 import io
 from collections import defaultdict
+from collections.abc import Container, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -106,6 +107,28 @@ _RUNNER_CRASH_THRESHOLD = 3
 
 _RUNNER_CRASH_WINDOW_SECONDS = 60.0
 """Rolling window for ``_RUNNER_CRASH_THRESHOLD`` (see CrashWindow)."""
+
+
+def _wedged_live_instances(
+    runners: Mapping[RunnerId, "RunnerSupervisor"],
+    live_instances: Container[InstanceId],
+) -> list[tuple[InstanceId, ModelId]]:
+    """Local supervisors whose runner died wedge-marked while the instance lives.
+
+    These never get a planner ``Shutdown`` (``plan._kill_runner`` only fires
+    when the instance is gone or a PEER failed), so the worker must give the
+    instance up directly on observation — otherwise a single-node wedge
+    strands a dead runner behind a live instance forever.
+    """
+    return [
+        (
+            supervisor.bound_instance.instance.instance_id,
+            supervisor.shard_metadata.model_card.model_id,
+        )
+        for supervisor in runners.values()
+        if supervisor.bound_instance.instance.instance_id in live_instances
+        and _runner_failed_wedged(supervisor.status)
+    ]
 
 
 def _runner_failed_wedged(status: RunnerStatus | None) -> bool:
@@ -485,6 +508,22 @@ class Worker:
             # let a lingering instance re-trip and re-send DeleteInstance), so
             # this is where dead-instance keys are reclaimed.
             self._crash_breaker.retain(self.state.instances)
+
+            # Wedge-marked LOCAL runner deaths give their instance up here, on
+            # observation (see _wedged_live_instances). The breaker's
+            # edge-latch makes each fire exactly once per instance per loop.
+            for _wedge_iid, _wedge_model in _wedged_live_instances(
+                self.runners, self.state.instances
+            ):
+                if self._crash_breaker.record(_wedge_iid):
+                    await self._give_up_on_instance(
+                        _wedge_iid,
+                        f"runner for {_wedge_model} died with a suspected GPU "
+                        f"wedge ({WEDGE_FAILURE_MARKER}); not retrying — each "
+                        "wedge attempt leaks wired GPU memory. If this node's "
+                        "available memory dropped, a reboot is the only way "
+                        "to reclaim it.",
+                    )
 
             task: Task | None = plan(
                 self.node_id,
