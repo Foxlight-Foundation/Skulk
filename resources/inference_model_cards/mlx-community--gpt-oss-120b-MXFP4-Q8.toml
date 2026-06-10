@@ -23,4 +23,5 @@ builtin_tools = ["web_search", "open_url", "extract_page"]
 tool_call_format = "gpt_oss"
 
 [runtime]
+metal_fast_synch = false
 output_parser = "gpt_oss"
