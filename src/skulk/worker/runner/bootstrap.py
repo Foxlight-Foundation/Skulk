@@ -31,12 +31,26 @@ logger: "loguru.Logger" = loguru.logger
 shutdown_requested: bool = False
 
 
-FAST_SYNCH_CLUSTER_DEFAULT: bool = True
+FAST_SYNCH_CLUSTER_DEFAULT: bool = False
 """Cluster-wide default for ``MLX_METAL_FAST_SYNCH`` when neither the operator
-nor the model card has expressed a preference. Currently True for backwards
-compatibility with existing deployments. Flipping this default is tracked
-under the env-var → typed-config migration; do not flip without measuring
-the perf delta on a representative workload first."""
+nor the model card has expressed a preference.
+
+OFF as of 2026-06-10. The old True default ("backwards compatibility") had no
+measured upside and a catastrophic failure mode for uncarded models:
+
+- Vanilla dense decode is unaffected by the flag (measured 2026-06-06,
+  Qwen3.5-9B-4bit on M4: 20.8 tok/s off vs 20.7 on).
+- Speculative-decoding loops collapse 46x under the flag (same measurement;
+  the spec-card rule below already forced those off).
+- Hybrid-SSM models WEDGE at warmup under the flag: gpt-oss hit the 300s
+  warmup deadline (#236, card-pinned off 2026-06-07) and NemotronH-9B did
+  the same (#259, 2026-06-10 — off, warmup completes in seconds and decode
+  runs 19+ tok/s; on, the deadline kill additionally leaks ~5GB of wired
+  GPU memory and degrades the node until reboot).
+
+Every model that benefits measurably from FAST_SYNCH can pin
+``runtime.metal_fast_synch = true`` on its card; the per-model card pin and
+the operator override both outrank this default."""
 
 
 def _card_declares_speculative_decoding(
@@ -79,7 +93,8 @@ def resolve_metal_fast_synch(card_runtime: RuntimeCapabilityCardConfig | None) -
        The per-round pattern of small evals across streams that
        speculative decoding requires is exactly the shape FAST_SYNCH's
        completion-signal path pathologizes.
-    4. **Cluster default.** ``FAST_SYNCH_CLUSTER_DEFAULT`` (True today).
+    4. **Cluster default.** ``FAST_SYNCH_CLUSTER_DEFAULT`` (False — see its
+       docstring for the 2026-06-10 rationale and measurements).
 
     Returns ``True`` when ``MLX_METAL_FAST_SYNCH`` should be ``"1"``.
     """

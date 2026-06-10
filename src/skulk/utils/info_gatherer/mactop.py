@@ -2,7 +2,12 @@ from typing import Self
 
 from pydantic import BaseModel
 
-from skulk.shared.types.profiling import MemoryUsage, SystemPerformanceProfile
+from skulk.shared.types.profiling import (
+    MachMemoryCategories,
+    MemoryUsage,
+    SystemPerformanceProfile,
+    gpu_wireable_memory_bytes,
+)
 from skulk.utils.pydantic_ext import TaggedModel
 
 
@@ -16,9 +21,13 @@ class _SocMetrics(BaseModel, extra="ignore"):
 class _MemoryMetrics(BaseModel, extra="ignore"):
     """Memory block from mactop.
 
-    ``available`` is reported directly; empirically it equals ``total - used``
-    (the same figure macmon derived), so placement fit margins are unchanged by
-    the swap.
+    ``available`` is ``free + inactive + speculative`` (empirically
+    ``total - used``, the same figure macmon derived). That counts reclaimable
+    file cache as used, so after a model download "available" is deflated by
+    roughly the model's size and placement refuses fits that run comfortably.
+    :meth:`MactopMetrics.from_raw` therefore prefers a GPU-wireable figure
+    derived from Mach page categories when the caller supplies a snapshot,
+    keeping this raw field only as the fallback.
     """
 
     total: int
@@ -59,7 +68,26 @@ class MactopMetrics(TaggedModel):
     memory: MemoryUsage
 
     @classmethod
-    def from_raw(cls, raw: RawMactopMetrics) -> Self:
+    def from_raw(
+        cls,
+        raw: RawMactopMetrics,
+        mach_categories: MachMemoryCategories | None = None,
+    ) -> Self:
+        """Normalize a raw mactop sample, correcting ``ram_available``.
+
+        When ``mach_categories`` (a vm_stat snapshot taken alongside the
+        sample) is provided, ``ram_available`` becomes the GPU-wireable figure
+        ``total − wired − anonymous − compressor`` instead of mactop's
+        cache-deflated ``available`` — a value-only change, so the gossiped
+        ``MemoryUsage`` shape (``extra=forbid`` on the wire) is untouched and
+        mixed-version clusters keep interoperating. Without a snapshot (vm_stat
+        missing/unparseable) the raw mactop figure is kept.
+        """
+        ram_available = (
+            raw.memory.available
+            if mach_categories is None
+            else gpu_wireable_memory_bytes(raw.memory.total, mach_categories)
+        )
         return cls(
             system_profile=SystemPerformanceProfile(
                 gpu_usage=raw.gpu_usage,
@@ -70,15 +98,21 @@ class MactopMetrics(TaggedModel):
             ),
             memory=MemoryUsage.from_bytes(
                 ram_total=raw.memory.total,
-                ram_available=raw.memory.available,
+                ram_available=ram_available,
                 swap_total=raw.memory.swap_total,
                 swap_available=(raw.memory.swap_total - raw.memory.swap_used),
             ),
         )
 
     @classmethod
-    def from_raw_json(cls, json: str) -> Self:
-        return cls.from_raw(RawMactopMetrics.model_validate_json(json))
+    def from_raw_json(
+        cls,
+        json: str,
+        mach_categories: MachMemoryCategories | None = None,
+    ) -> Self:
+        """Parse one mactop JSON line; see :meth:`from_raw` for the
+        ``mach_categories`` availability correction."""
+        return cls.from_raw(RawMactopMetrics.model_validate_json(json), mach_categories)
 
 
 class MacmonMetrics(TaggedModel):
