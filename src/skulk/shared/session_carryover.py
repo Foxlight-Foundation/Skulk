@@ -44,9 +44,11 @@ def seed_state_for_new_session(prior: State) -> State:
       router's connection gossip, not a snapshot that still shows the dead
       master as connected; a stale edge here would delay dead-node instance
       cleanup or admit placements onto a corpse.
-    - ``last_event_applied_idx`` — the new session's event log starts at the
-      beginning; followers hydrate this seed via the ordinary snapshot
-      bootstrap and replay from index 0.
+    - ``last_event_applied_idx`` — the master indexes this seed as the FIRST
+      EVENT of the new session (a logged ``StateSnapshotHydrated``), setting
+      the index at that point; followers receive it inside the snapshot if
+      they bootstrap later, or as live event 0 if they bootstrapped against
+      the momentarily-empty pre-seed state (the promotion race).
     """
     return State(
         instances=prior.instances,

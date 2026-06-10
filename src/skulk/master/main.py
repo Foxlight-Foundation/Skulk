@@ -48,6 +48,7 @@ from skulk.shared.types.events import (
     LocalForwarderEvent,
     NodeGatheredInfo,
     NodeTimedOut,
+    StateSnapshotHydrated,
     TaskCreated,
     TaskDeleted,
     TaskFailed,
@@ -198,21 +199,19 @@ class Master:
         # survive failover (#273) — previously every new session started
         # empty, the empty snapshot propagated, and every worker shut down
         # its healthy runners (a full serving outage from one master
-        # restart). A genuinely fresh node (cold start, or a rebooted node
-        # winning election before ever hydrating) passes None and starts
-        # empty exactly as before — a stale-boot winner cannot resurrect a
-        # cluster view it does not have.
-        self.state = (
-            initial_state
-            if initial_state is not None
-            else State(tracing_enabled=SKULK_TRACING_ENABLED)
-        )
+        # restart). The seed is indexed as the FIRST EVENT of the new
+        # session in run() (see _index_seed_event) rather than assigned
+        # here: a pre-seeded snapshot at idx -1 is indistinguishable from
+        # "fresh empty state" to the event router, which deliberately skips
+        # hydration for idx < 0 — making the seed an ordinary logged event
+        # gives every consumer exactly one delivery path. A genuinely fresh
+        # node (cold start, or a rebooted node winning election before ever
+        # hydrating) passes None and starts empty exactly as before — a
+        # stale-boot winner cannot resurrect a cluster view it does not
+        # have.
+        self._seed_state = initial_state
+        self.state = State(tracing_enabled=SKULK_TRACING_ENABLED)
         self._started_monotonic = time.monotonic()
-        logger.info(
-            f"Master session {session_id.election_clock} starting with "
-            f"{len(self.state.instances)} carried instance(s) "
-            f"({'seeded from prior replicated state' if initial_state is not None else 'fresh state'})"
-        )
         self._tg: TaskGroup = TaskGroup()
         self.command_task_mapping: dict[CommandId, TaskId] = {}
         self.command_receiver = command_receiver
@@ -253,10 +252,38 @@ class Master:
             for shard in selected_instance.shard_assignments.runner_to_shard.values()
         }
 
+    async def _index_seed_event(self) -> None:
+        """Index the failover seed as the first event of this session (#273).
+
+        Making the carried state an ordinary logged ``StateSnapshotHydrated``
+        event gives every consumer exactly one delivery path: followers that
+        snapshot-bootstrap after this point receive it inside the snapshot;
+        followers that bootstrapped against the momentarily-empty state (the
+        promotion race — including this node's own worker) receive it as the
+        live event at index 0 and apply it like any other event. A seeded
+        snapshot at idx ``-1`` instead looked identical to "fresh empty
+        state", which the event router deliberately skips hydrating — the
+        first live deployment of the seed lost it to exactly that race on
+        the promoted node while a later-bootstrapping follower kept it.
+        """
+        if self._seed_state is None:
+            return
+        idx = len(self._event_log)
+        seed = self._seed_state.model_copy(update={"last_event_applied_idx": idx})
+        indexed = IndexedEvent(event=StateSnapshotHydrated(state=seed), idx=idx)
+        self.state = apply(self.state, indexed)
+        self._event_log.append(indexed.event)
+        await self._send_event(indexed)
+        logger.info(
+            f"Indexed failover seed as event {idx}: "
+            f"{len(seed.instances)} carried instance(s)"
+        )
+
     async def run(self):
         logger.info("Starting Master")
 
         try:
+            await self._index_seed_event()
             async with self._tg as tg:
                 tg.start_soon(self._event_processor)
                 tg.start_soon(self._command_processor)
