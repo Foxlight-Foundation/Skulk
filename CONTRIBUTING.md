@@ -283,6 +283,28 @@ The React dashboard has Storybook stories for key components:
 cd dashboard-react && npx storybook dev -p 6007
 ```
 
+## Licensing and File Headers
+
+Skulk is licensed under the Apache License, Version 2.0 (see `LICENSE`). The
+project began as a fork of exo, and the upstream attribution lives in the
+`NOTICE` file as Apache 2.0 intends; do not remove or edit the exo entry
+there.
+
+Header conventions:
+
+- New files authored for Skulk carry a Foxlight Foundation copyright header
+  in the file's comment style, for example
+  `<!-- Copyright 2025 Foxlight Foundation -->` or
+  `# Copyright 2025 Foxlight Foundation`.
+- Substantive modifications to files inherited from exo should add a
+  `Modifications Copyright 2025-2026 Foxlight Foundation` line beneath any
+  existing upstream header rather than replacing it. Where inherited files
+  have no header, the repository-level `NOTICE` and git history carry the
+  attribution.
+- Contributions are accepted under Apache 2.0 (inbound = outbound). By
+  submitting a pull request you license your contribution under the same
+  terms.
+
 ## Submitting Changes
 
 1. Fork the repository
