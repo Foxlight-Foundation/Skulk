@@ -223,7 +223,7 @@ The normal dashboard flow is: confirm topology, launch a model, wait for it to b
 <p align="center">
   <img src="docs/imgs/dash-1.png" alt="Skulk dashboard cluster view: a four-node topology serving a Gemma 4 MoE placement" width="80%" />
 </p>
-<p align="center"><em>Start here: confirm the node or cluster looks healthy in the cluster view. Shown: a Gemma 4 MoE placed across all four nodes of a live cluster, with per-node memory, GPU, and temperature at a glance.</em></p>
+<p align="center"><em>Start here: confirm the node or cluster looks healthy in the cluster view. Shown: a Gemma 4 MoE placed across all four nodes of a live cluster alongside a single-node Qwen instance running speculative decoding (the MTP D1 badge), with per-node memory, GPU, and temperature at a glance.</em></p>
 
 <p align="center">
   <img src="docs/imgs/dash-2.png" alt="Skulk dashboard model store with the active instance panel" width="80%" />
