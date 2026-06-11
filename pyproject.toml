@@ -1,6 +1,6 @@
 [project]
 name = "skulk"
-version = "1.1.0"
+version = "1.2.0"
 description = "Skulk — distributed MLX inference across Apple Silicon clusters"
 readme = "README.md"
 requires-python = ">=3.13"
