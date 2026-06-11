@@ -3,16 +3,35 @@
 <!-- Copyright 2025 Foxlight Foundation -->
 
 <div align="center">
+
+[![Version](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2FFoxlight-Foundation%2FSkulk%2Fmain%2Fpyproject.toml&query=%24.project.version&prefix=v&label=version&color=blue&style=flat-square)](https://foxlight-foundation.github.io/Skulk/release-notes/1.2.0/)
+[![Tests](https://img.shields.io/github/actions/workflow/status/Foxlight-Foundation/Skulk/pipeline.yml?branch=main&label=tests&style=flat-square&logo=github)](https://github.com/Foxlight-Foundation/Skulk/actions/workflows/pipeline.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-4c72b0?style=flat-square)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/Foxlight-Foundation/Skulk?style=flat-square&logo=github&label=stars&color=dfb317)](https://github.com/Foxlight-Foundation/Skulk/stargazers)
+
+[![Documentation](https://img.shields.io/badge/docs-documentation-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/)
+[![Build & Runtime Paths](https://img.shields.io/badge/docs-build_%26_runtime-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/build-and-runtime/)
+[![Release Notes](https://img.shields.io/badge/release_notes-v1.2.0-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/release-notes/1.2.0/)
+[![Architecture](https://img.shields.io/badge/docs-architecture-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/architecture/)
+
   <img src="docs/imgs/skulk-logo-2.png" width="200" height="200" alt="Skulk logo">
 </div>
 
-Skulk runs AI models across one or more machines as a single cluster.
-It builds on the distributed inference foundation it inherited from exo (see [About exo](#about-exo)), adding a central model store,
-a more modern dashboard, richer API workflows, sophisticated cache quantization, support for more model families such as embeddings and TTS, and cluster-friendly configuration management.
-
-> Skulk is maintained by [Foxlight Foundation](https://github.com/foxlight-foundation) and forked from [exo](https://github.com/exo-explore/exo).
-
-**[Documentation](https://foxlight-foundation.github.io/Skulk/)** · **[Build And Runtime Paths](https://foxlight-foundation.github.io/Skulk/build-and-runtime/)** · **[Release Notes](https://foxlight-foundation.github.io/Skulk/release-notes/1.0.2/)** · **[Architecture](https://foxlight-foundation.github.io/Skulk/architecture/)**
+Skulk, maintained by the [Foxlight Foundation](https://github.com/foxlight-foundation), runs AI
+models across one or more machines as a single cluster: point it at a few Apple Silicon boxes and
+it pools their memory and GPUs behind one OpenAI-compatible endpoint. It builds on the distributed
+inference foundations provided by exo and goes well beyond them. Production-grade speculative
+decoding delivers measured 1.16–2.2× speedups — including across nodes, on mixed hardware. A
+real-time React dashboard gives you a central model store, a placement manager with live cluster
+preview, chat, and deep observability (cross-rank trace waterfalls, cluster timelines, centralized
+logging). Four API wire formats — OpenAI Chat Completions and Responses, Claude Messages, and
+Ollama — converge on one pipeline with continuous batching, selectable KV-cache quantization
+backends, and rational context-length control that returns a clean error instead of letting a
+long request OOM a node mid-stream. And the stability story is earned, not asserted: placements
+survive master failover, crash loops trip a breaker instead of leaking GPU memory, oversized
+placements are refused before they wedge a machine, and the whole thing runs as a supervised
+service — validated by deliberately killing masters, bouncing nodes, and storming the cluster
+until it stopped breaking.
 
 ## Why Skulk
 
