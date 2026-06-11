@@ -54,7 +54,6 @@ const sidebars: SidebarsConfig = {
         },
         "architecture",
         "architecture-reference",
-        "runtime-plane-separation",
       ],
     },
   ],
