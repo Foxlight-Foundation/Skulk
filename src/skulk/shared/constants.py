@@ -173,3 +173,11 @@ SKULK_MAX_CONCURRENT_REQUESTS = int(
     _env("SKULK_MAX_CONCURRENT_REQUESTS", "EXO_MAX_CONCURRENT_REQUESTS", "8") or "8"
 )
 
+
+# Wire-safe marker for context-length admission rejections. The runner embeds
+# this as a prefix in ``ErrorChunk.error_message`` / ``TaskFailed.error_message``
+# (both are plain strings shared across mixed-version clusters, so a new
+# structured field would break old nodes' ``extra=forbid`` validation); the API
+# adapters parse the prefix to surface an OpenAI-style ``context_length_exceeded``
+# invalid-request error instead of a generic 500.
+CONTEXT_LENGTH_EXCEEDED_PREFIX = "context_length_exceeded:"

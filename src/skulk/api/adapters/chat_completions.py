@@ -25,7 +25,10 @@ from skulk.api.types import (
     Usage,
 )
 from skulk.download.download_utils import create_http_session
-from skulk.shared.constants import preferred_env_value
+from skulk.shared.constants import (
+    CONTEXT_LENGTH_EXCEEDED_PREFIX,
+    preferred_env_value,
+)
 from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.types.chunks import (
@@ -51,6 +54,33 @@ def _thinking_stream_debug_enabled() -> bool:
     if value is None:
         return False
     return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def error_chunk_response(error_message: str | None) -> ErrorResponse:
+    """Map a runner ``ErrorChunk`` message to an OpenAI-style error envelope.
+
+    Context-admission rejections (#145) arrive as plain strings carrying the
+    ``CONTEXT_LENGTH_EXCEEDED_PREFIX`` sentinel (the chunk types are shared
+    across mixed-version clusters, so a structured field is not wire-safe);
+    they map to an ``invalid_request_error`` with code 400. Everything else
+    keeps the historical 500 internal-error shape.
+    """
+    message = error_message or "Internal server error"
+    if message.startswith(CONTEXT_LENGTH_EXCEEDED_PREFIX):
+        return ErrorResponse(
+            error=ErrorInfo(
+                message=message,
+                type="invalid_request_error",
+                code=400,
+            )
+        )
+    return ErrorResponse(
+        error=ErrorInfo(
+            message=message,
+            type="InternalServerError",
+            code=500,
+        )
+    )
 
 
 def extract_base64_from_data_url(data_url: str) -> str:
@@ -263,13 +293,7 @@ async def generate_chat_stream(
                 yield f": prefill_progress {chunk.model_dump_json()}\n\n"
 
             case ErrorChunk():
-                error_response = ErrorResponse(
-                    error=ErrorInfo(
-                        message=chunk.error_message or "Internal server error",
-                        type="InternalServerError",
-                        code=500,
-                    )
-                )
+                error_response = error_chunk_response(chunk.error_message)
                 yield f"data: {error_response.model_dump_json()}\n\n"
                 yield "data: [DONE]\n\n"
                 return
@@ -385,6 +409,12 @@ async def collect_chat_response(
                 finish_reason = chunk.finish_reason
 
     if error_message is not None:
+        if error_message.startswith(CONTEXT_LENGTH_EXCEEDED_PREFIX):
+            # The HTTP status is already committed (the body itself streams),
+            # so a runner-side context rejection surfaces as a structured
+            # OpenAI error envelope in the body rather than a broken stream.
+            yield error_chunk_response(error_message).model_dump_json()
+            return
         raise ValueError(error_message)
 
     combined_text = "".join(text_parts)

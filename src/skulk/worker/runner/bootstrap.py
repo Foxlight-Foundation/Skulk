@@ -389,6 +389,7 @@ def entrypoint(
     task_receiver: MpReceiver[Task],
     cancel_receiver: MpReceiver[TaskId],
     _logger: "loguru.Logger",
+    context_token_limit: int | None = None,
 ) -> None:
     global logger
     logger = _logger
@@ -454,7 +455,11 @@ def entrypoint(
             apply_mlx_patches()
 
             runner = Runner(
-                bound_instance, event_sender, task_receiver, cancel_receiver
+                bound_instance,
+                event_sender,
+                task_receiver,
+                cancel_receiver,
+                context_token_limit=context_token_limit,
             )
             runner.main()
 

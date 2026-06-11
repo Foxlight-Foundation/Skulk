@@ -135,11 +135,16 @@ class Runner:
         event_sender: MpSender[Event],
         task_receiver: MpReceiver[Task],
         cancel_receiver: MpReceiver[TaskId],
+        context_token_limit: int | None = None,
     ):
         self.event_sender = event_sender
         self.task_receiver = task_receiver
         self.cancel_receiver = cancel_receiver
         self.bound_instance = bound_instance
+        # Static per-instance context ceiling for request admission (#145),
+        # computed by the worker from gossiped node memory before spawn so
+        # every rank of a multi-node instance enforces the identical limit.
+        self.context_token_limit = context_token_limit
 
         self.instance, self.runner_id, self.shard_metadata = (
             self.bound_instance.instance,
@@ -162,6 +167,7 @@ class Runner:
             self.event_sender,
             self.cancel_receiver,
             self.shard_metadata.model_card,
+            context_token_limit=self.context_token_limit,
         )
 
         self.seen: set[TaskId] = set()
@@ -733,6 +739,8 @@ class Builder:
     vision_processor: VisionProcessor | None = None
     mtp_weights: dict[str, mx.array] | None = None
     assistant_model: object | None = None
+    # Static per-instance context ceiling for request admission (#145).
+    context_token_limit: int | None = None
 
     def build(
         self,
@@ -841,6 +849,7 @@ class Builder:
                 vision_processor=vision_processor,
                 mtp_weights=self.mtp_weights,
                 assistant_model=self.assistant_model,
+                context_token_limit=self.context_token_limit,
             )
         logger.info("using BatchGenerator")
         return BatchGenerator(
@@ -856,4 +865,5 @@ class Builder:
             event_sender=self.event_sender,
             vision_processor=vision_processor,
             mtp_weights=self.mtp_weights,
+            context_token_limit=self.context_token_limit,
         )

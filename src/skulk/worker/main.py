@@ -18,6 +18,7 @@ from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
 from skulk.shared.models.memory_estimate import (
     estimate_shard_footprint,
     gpu_working_set_ceiling,
+    instance_context_token_limit,
 )
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -854,9 +855,26 @@ class Worker:
             f"world_size={shard.world_size}, "
             f"layers={shard.start_layer}:{shard.end_layer})"
         )
+        # Context-admission ceiling (#145): derived exclusively from static
+        # inputs (per-node ram_total, card, shard fractions) so every rank of
+        # a multi-node instance computes the identical limit — placement only
+        # happens after the master indexed memory for all hosting nodes, so
+        # the replicated state already carries every entry we need here.
+        context_token_limit = instance_context_token_limit(
+            task.bound_instance.instance.shard_assignments,
+            {
+                node_id: usage.ram_total
+                for node_id, usage in self.state.node_memory.items()
+            },
+        )
+        logger.info(
+            "Context admission limit for instance "
+            f"{task.instance_id}: {context_token_limit} tokens"
+        )
         runner = RunnerSupervisor.create(
             bound_instance=task.bound_instance,
             event_sender=self.event_sender.clone(),
+            context_token_limit=context_token_limit,
         )
         self.runners[task.bound_instance.bound_runner_id] = runner
         self._tg.start_soon(runner.run)

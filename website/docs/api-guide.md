@@ -177,6 +177,27 @@ non-positive `max_tokens` returns **400 Bad Request** rather than being
 accepted and failing during generation. (This applies across the Claude,
 Ollama, and Responses wire formats too, which share the same dispatch path.)
 
+### Context-length limits
+
+Every placed instance has a usable context limit: the smaller of the model's
+advertised context length and the number of KV-cache tokens that fit in memory
+next to the model weights on the hosting node(s). Requests are admitted
+against that limit instead of growing the KV cache until the node runs out of
+memory:
+
+- A `max_tokens` value that cannot fit in the limit at all returns
+  **400 Bad Request** immediately (`context_length_exceeded: ...`).
+- After tokenization on the serving instance, a prompt that fills the window,
+  or a prompt plus an explicit `max_tokens` that exceeds the limit, is
+  rejected with an OpenAI-style `invalid_request_error` whose message starts
+  with `context_length_exceeded:`. For streaming requests this arrives as the
+  first SSE `data:` event; for non-streaming requests the response body is the
+  error envelope (the HTTP status is already committed when the rejection is
+  computed on the serving node).
+- When `max_tokens` is omitted, the server default output budget is clamped to
+  the remaining window, so generation ends with `finish_reason: "length"`
+  instead of overrunning the context.
+
 ### OpenAI Python SDK Example
 
 ```python

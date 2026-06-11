@@ -66,3 +66,163 @@ def test_shard_footprint_fraction_scales_weights_and_kv_not_floor():
 def test_gpu_working_set_ceiling_is_fraction_of_total():
     expected = Memory.from_gb(16) * GPU_WORKING_SET_FRACTION
     assert gpu_working_set_ceiling(Memory.from_gb(16)).in_bytes == expected.in_bytes
+
+
+# --- Context-admission ceiling (#145) ---------------------------------------
+
+from skulk.shared.models.memory_estimate import (  # noqa: E402
+    KV_DTYPE_BYTES,
+    KV_HEAD_DIM_FALLBACK,
+    instance_context_token_limit,
+    per_token_kv_bytes,
+    shard_fraction_of_model,
+)
+from skulk.shared.types.common import NodeId  # noqa: E402
+from skulk.shared.types.worker.runners import RunnerId, ShardAssignments  # noqa: E402
+from skulk.shared.types.worker.shards import (  # noqa: E402
+    PipelineShardMetadata,
+    TensorShardMetadata,
+)
+
+
+def _assignments(
+    card: ModelCard,
+    shards: dict[str, tuple[PipelineShardMetadata | TensorShardMetadata, str]],
+) -> ShardAssignments:
+    """Build ShardAssignments from {runner_name: (shard, node_name)}."""
+    return ShardAssignments(
+        model_id=card.model_id,
+        runner_to_shard={
+            RunnerId(runner): shard for runner, (shard, _node) in shards.items()
+        },
+        node_to_runner={
+            NodeId(node): RunnerId(runner) for runner, (_shard, node) in shards.items()
+        },
+    )
+
+
+def _pipeline_shard(
+    card: ModelCard, *, start: int, end: int, rank: int = 0, world: int = 1
+) -> PipelineShardMetadata:
+    return PipelineShardMetadata(
+        model_card=card,
+        device_rank=rank,
+        world_size=world,
+        start_layer=start,
+        end_layer=end,
+        n_layers=card.n_layers,
+    )
+
+
+def test_per_token_kv_bytes_formula():
+    card = _card(4, kv_heads=8, n_layers=32)
+    assert per_token_kv_bytes(card) == 2 * 32 * 8 * KV_HEAD_DIM_FALLBACK * KV_DTYPE_BYTES
+
+
+def test_per_token_kv_bytes_zero_without_kv_heads():
+    assert per_token_kv_bytes(_card(4)) == 0
+
+
+def test_shard_fraction_tensor_is_inverse_world_size():
+    card = _card(4, kv_heads=8)
+    shard = TensorShardMetadata(
+        model_card=card,
+        device_rank=0,
+        world_size=2,
+        start_layer=0,
+        end_layer=32,
+        n_layers=32,
+    )
+    assert shard_fraction_of_model(shard) == 0.5
+
+
+def test_shard_fraction_pipeline_is_layer_share():
+    card = _card(4, kv_heads=8, n_layers=32)
+    assert shard_fraction_of_model(_pipeline_shard(card, start=0, end=8)) == 0.25
+
+
+def test_instance_limit_single_node_matches_independent_arithmetic():
+    card = _card(4, kv_heads=8, n_layers=32)
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    limit = instance_context_token_limit(
+        assignments, {NodeId("n0"): Memory.from_gb(16)}
+    )
+    gib = 1024**3
+    budget = (
+        round(16 * gib * GPU_WORKING_SET_FRACTION)
+        - round(4 * gib * MEMORY_OVERHEAD_FACTOR)
+        - MEMORY_OVERHEAD_FLOOR.in_bytes
+    )
+    assert limit == int(budget / (2 * 32 * 8 * KV_HEAD_DIM_FALLBACK * KV_DTYPE_BYTES))
+
+
+def test_instance_limit_is_min_across_nodes():
+    card = _card(4, kv_heads=8, n_layers=32)
+    half_a = _pipeline_shard(card, start=0, end=16, rank=0, world=2)
+    half_b = _pipeline_shard(card, start=16, end=32, rank=1, world=2)
+    assignments = _assignments(card, {"r0": (half_a, "big"), "r1": (half_b, "small")})
+    both_big = instance_context_token_limit(
+        assignments,
+        {NodeId("big"): Memory.from_gb(32), NodeId("small"): Memory.from_gb(32)},
+    )
+    constrained = instance_context_token_limit(
+        assignments,
+        {NodeId("big"): Memory.from_gb(32), NodeId("small"): Memory.from_gb(8)},
+    )
+    assert both_big is not None and constrained is not None
+    assert constrained < both_big
+
+
+def test_instance_limit_capped_by_card_context_length():
+    card = _card(1, kv_heads=8, n_layers=32).model_copy(
+        update={"context_length": 1000}
+    )
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    assert (
+        instance_context_token_limit(assignments, {NodeId("n0"): Memory.from_gb(64)})
+        == 1000
+    )
+
+
+def test_instance_limit_missing_node_memory_falls_back_to_card():
+    card = _card(4, kv_heads=8, n_layers=32).model_copy(
+        update={"context_length": 4096}
+    )
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    assert instance_context_token_limit(assignments, {}) == 4096
+
+
+def test_instance_limit_none_when_nothing_enforceable():
+    card = _card(4, kv_heads=8, n_layers=32)  # context_length defaults to 0
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    assert instance_context_token_limit(assignments, {}) is None
+
+
+def test_instance_limit_unknown_kv_cost_falls_back_to_card():
+    card = _card(4, n_layers=32).model_copy(update={"context_length": 2048})
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    assert (
+        instance_context_token_limit(assignments, {NodeId("n0"): Memory.from_gb(16)})
+        == 2048
+    )
+
+
+def test_instance_limit_zero_when_weights_leave_no_kv_room():
+    card = _card(64, kv_heads=8, n_layers=32)
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    assert (
+        instance_context_token_limit(assignments, {NodeId("n0"): Memory.from_gb(16)})
+        == 0
+    )
