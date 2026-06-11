@@ -561,6 +561,18 @@ Important caveats:
 
 ## Benchmarks
 
+### Speculative decoding speedups (measured)
+
+<p align="center">
+  <img src="docs/benchmarks/skulk/mtp-speedups.png" alt="Bar chart of measured speculative-decoding speedups: +30% to +120% across eight model and placement configurations" width="85%" />
+</p>
+
+Protocol: production API, greedy decoding, 200-token completions, median of 3 runs per arm on the same live instance, M4-class Apple Silicon. The output is verification-exact: speculation produces the identical tokens plain decoding would have produced, so the gain is free. The ratios hold under longer generations and temperature sampling, and the percentage is the portable number: absolute tok/s scales with memory bandwidth, the ratio travels with the model. Full methodology and per-configuration discussion in the [Speculative Decoding guide](https://foxlight-foundation.github.io/Skulk/speculative-decoding/).
+
+For external context, production native-MTP serving on datacenter GPUs typically lands in the +30% to +80% band. Skulk reaches the top of that band on consumer hardware, and the multi-node pipeline results beat published distributed-speculation figures.
+
+### Community benchmarks
+
 <details>
   <summary>Qwen3-235B (8-bit) on 4 × M3 Ultra Mac Studio with Tensor Parallel RDMA</summary>
   <img src="docs/benchmarks/jeffgeerling/mac-studio-cluster-ai-full-1-qwen3-235b.jpeg" alt="Benchmark - Qwen3-235B (8-bit) on 4 × M3 Ultra Mac Studio with Tensor Parallel RDMA" width="80%" />
