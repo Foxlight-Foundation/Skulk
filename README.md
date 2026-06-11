@@ -13,36 +13,64 @@
 [![Release Notes](https://img.shields.io/badge/release_notes-v1.2.0-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/release-notes/1.2.0/)
 [![Architecture](https://img.shields.io/badge/docs-architecture-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/architecture/)
 
+  <br>
   <img src="docs/imgs/skulk-logo-2.png" width="200" height="200" alt="Skulk logo">
 </div>
 
-Skulk, maintained by the [Foxlight Foundation](https://github.com/foxlight-foundation), runs AI
-models across one or more machines as a single cluster: point it at a few Apple Silicon boxes and
-it pools their memory and GPUs behind one OpenAI-compatible endpoint. It builds on the distributed
-inference foundations provided by exo and goes well beyond them. Production-grade speculative
-decoding delivers measured 1.16–2.2× speedups — including across nodes, on mixed hardware. A
-real-time React dashboard gives you a central model store, a placement manager with live cluster
-preview, chat, and deep observability (cross-rank trace waterfalls, cluster timelines, centralized
-logging). Four API wire formats — OpenAI Chat Completions and Responses, Claude Messages, and
-Ollama — converge on one pipeline with continuous batching, selectable KV-cache quantization
-backends, and rational context-length control that returns a clean error instead of letting a
-long request OOM a node mid-stream. And the stability story is earned, not asserted: placements
-survive master failover, crash loops trip a breaker instead of leaking GPU memory, oversized
-placements are refused before they wedge a machine, and the whole thing runs as a supervised
-service — validated by deliberately killing masters, bouncing nodes, and storming the cluster
-until it stopped breaking.
+<br>
+Skulk runs AI models across one or more machines as a single cluster: point it at a few Apple Silicon machines and
+it pools their memory and GPUs behind one OpenAI-compatible endpoint. Skulk builds on the distributed
+inference foundations provided by exo and adds:
+
+- Production-grade speculative decoding delivering 1.16–2.2× speedups across nodes and on heterogeneous hardware. 
+- A real-time React dashboard with easy access to:
+  - A central model store
+  - A placement manager with live cluster
+preview
+  - Chat
+  - Deep observability (cross-rank trace waterfalls, cluster timelines, and centralized
+logging). 
+- Flexible API wire formats including:
+  - OpenAI Chat Completions and Responses
+  - Claude Messages
+  - Ollama
+- One pipeline with continuous batching, selectable KV-cache quantization
+backends, and rational context-length control 
+- Stability hardening including
+  - Placement failover in case nodes (including the master) go down
+  - crash loops protection
+  - Smarter placement management so that oversized placements are refused before they cause failures
+- And much more.
 
 ## Why Skulk
 
-What's been added on top of the distributed-MLX baseline, and what each of these gets you:
+Why would you use Skulk over another solution? What does it get you?
+
+### Performance
+
+- **Speculative decoding that actually ships.** Multi-token-prediction (MTP) drafting with a bonus-driven verify loop, chained draft depths measured per model card (`mtp_max_depth`), and support for both greedy and temperature sampling. Works on single-node, pipeline-sharded, and tensor-parallel placements — including heterogeneous multi-node rings, where draft/accept decisions are explicitly broadcast so mixed hardware cannot silently diverge and wedge the GPU. On by default for supported cards, with a per-card `speculative_multi_node` opt-out; the dashboard shows a ⚡ MTP badge with the active depth on each running instance. Full guide: [Speculative Decoding](https://foxlight-foundation.github.io/Skulk/speculative-decoding/). **Why it matters:** measured 1.16–2.2× decode speedups with verification-exact output — the accepted tokens are identical to what plain decode would have produced.
+
+- **Continuous batching.** `BatchGenerator` queues incoming requests and decodes them together token-by-token. `SKULK_MAX_CONCURRENT_REQUESTS` (default 8) controls the per-runner ceiling. **Why it matters:** multiple concurrent users share one model's forward pass; throughput scales with concurrency instead of head-of-line blocking.
 
 ### Reliability
+
+- **Placements survive master failover.** A newly elected master seeds its session from the prior replicated state — placed instances, completed downloads, node info — and suppresses liveness-based pruning for a topology-settle grace window while gossip rebuilds. **Why it matters:** restarting or losing the coordinator node is a model-reload-sized blip (~20 s to resume serving in live tests), not a silent outage where every placement becomes a 404 until an operator notices.
+
+- **Memory-safe placement, checked twice.** The placement fit-check and a worker-side pre-spawn guard share one memory model — GPU-wireable availability (total minus wired, anonymous, and compressor pages), not naive free RAM — so the master and the executing node cannot disagree about whether a model fits. Oversized placements are refused with the node and the GB arithmetic in the error. **Why it matters:** the failure mode this kills is the worst one on Apple Silicon — a mid-load Metal OOM that SIGABRTs the runner and leaks wired GPU memory until reboot.
+
+- **Crash containment.** The crash circuit breaker is edge-triggered — one trip per crash loop, not one per failure — and GPU-wedge runner deaths are never retried, because each retry of a wedged load leaked ~5 GB of wired memory. A wedged warmup marks the instance failed loudly instead of silently disabling the node. **Why it matters:** a misbehaving model gives up cleanly and tells you why; it cannot grind a node into the ground by retrying.
+
+- **Event-storm immunity.** Clients that abandon requests (short timeouts against a loading model) used to be able to ignite a self-sustaining event storm that drowned replicas and churned master elections. Fixed at five layers, ending with a master-side cap that refuses to index task events for tasks that no longer exist. **Why it matters:** an impatient or buggy client cannot destabilize the cluster — validated by deliberately spraying abandoned requests at a loading model and watching the event rate hold at baseline.
+
+- **Ring formation under a deadline, on the right wires.** Distributed group connect runs under a hard timeout (`SKULK_GROUP_CONNECT_DEADLINE_SECONDS`, default 120) with a network diagnosis on expiry, instead of hanging forever on a failed rank handshake. Interconnect selection ranks observed links Thunderbolt > Ethernet > Wi-Fi > VPN, detecting Tailscale addresses so a VPN path is used only when nothing better exists. **Why it matters:** a half-formed ring self-heals through re-placement in seconds, and a Thunderbolt-connected cluster actually uses its Thunderbolt — Tailscale stays what it is for: reachability, not a data path.
+
+- **Telemetry that cannot take down inference.** Node monitoring uses mactop; the previous poller's GPU queries could collide with MLX under load and reboot the machine. **Why it matters:** watching the cluster never costs you the cluster.
 
 - **Hang detection.** Pipeline-collective evals carry per-eval timeouts (`SKULK_PIPELINE_EVAL_TIMEOUT_SECONDS`). Runner subprocesses watch their parent and exit if the agent dies. Always-on per-runner flight recorder retains the last 128 phase transitions. **Why it matters:** wedged Metal collectives produce a precise rank attribution in seconds instead of indefinite SSE silence; recovering disk + GPU memory after a SIGKILL is automatic.
 
 - **Snapshot bootstrap + bounded replay retention.** The master writes periodic state snapshots; followers hydrate from a snapshot and replay only the retained tail. The live `events.bin` no longer grows without limit. **Why it matters:** rejoin time on a long-lived cluster is bounded by the snapshot, not by the entire event history. Disk use stops being an SLO concern.
 
-- **Per-model runtime overrides.** Model cards carry `metal_fast_synch` and other Skulk-specific knobs the engine consults at runtime. Gemma 4 has FAST_SYNCH disabled by default after the kernel-panic incident in April. **Why it matters:** known-bad upstream defaults don't bite you the first time you try a new model.
+- **Per-model runtime overrides.** Model cards carry `metal_fast_synch` and other Skulk-specific knobs the engine consults at runtime. `MLX_METAL_FAST_SYNCH` now defaults OFF cluster-wide — it repeatedly wedged warmups (Nemotron, gpt-oss) for no measurable decode gain — and cards pin it back on only where it is proven safe and useful. **Why it matters:** known-bad upstream defaults don't bite you the first time you try a new model.
 
 - **Trace janitor.** Hourly background task in the API drops saved trace files older than `tracing.retention_days` (default 3). **Why it matters:** debugging traces don't fill the disk during incident response.
 
@@ -66,7 +94,7 @@ What's been added on top of the distributed-MLX baseline, and what each of these
 
 ### Inference
 
-- **Continuous batching.** `BatchGenerator` queues incoming requests and decodes them together token-by-token. `SKULK_MAX_CONCURRENT_REQUESTS` (default 8) controls the per-runner ceiling. **Why it matters:** multiple concurrent users share one model's forward pass; throughput scales with concurrency instead of head-of-line blocking.
+- **Rational context-length control.** Every placed instance derives a usable context ceiling — the smaller of the model's advertised context length and the KV-cache tokens that actually fit in memory beside the weight share on each hosting node — computed deterministically so all ranks of a multi-node placement enforce the identical limit. An explicit `max_tokens` that cannot fit is rejected with an OpenAI-style `context_length_exceeded` error; a window-filling prompt is rejected before prefill; an omitted `max_tokens` is clamped so generation ends with `finish_reason: "length"`. **Why it matters:** other stacks let the KV cache grow until the allocator kills the process mid-stream. Skulk tells the client no, precisely and immediately, and the node keeps serving.
 
 - **KV cache backend choice.** Per-cluster selection between `default`, `mlx_quantized`, `turboquant`, `turboquant_adaptive`, and `optiq`. Configurable via `skulk.yaml` or `SKULK_KV_CACHE_BACKEND`. **Why it matters:** trade memory footprint against cache fidelity at the cluster level; pick what fits your hardware.
 
@@ -78,17 +106,23 @@ What's been added on top of the distributed-MLX baseline, and what each of these
 
 - **Auto-generated OpenAPI.** Routes carry `tags`, `summary`, and `description`; Pydantic field descriptions flow into the schema. The interactive API browser is built from the live spec. **Why it matters:** the API surface is programmable — generate clients, run contract tests, no doc drift.
 
-- **Per-task cancellation.** `POST /v1/cancel/{command_id}` and the cooperative runner-task cancel both work; the dashboard exposes "Cancel task" on each running task in the Node tab. **Why it matters:** stuck or runaway requests are recoverable without restarting the runner.
-
 ### Storage
 
 - **Model store.** Optional cluster-shared host with rsync-style staging — download once, every node stages locally instead of independently fetching from Hugging Face. **Why it matters:** large-model cluster cold start is bandwidth-bounded by one node, not N.
 
 - **Custom model cards.** Operator-added `*.toml` files under `~/.local/share/skulk/custom_model_cards/` (XDG on Linux, `~/.skulk/...` on macOS). The capability resolver reads built-in + custom and prefers custom on `model_id` collision. **Why it matters:** ship your own quantized variant or override a built-in card without forking the repo.
 
+### Operations
+
+- **Runs as a real service.** One-shot installers (`deployment/install/install-launchd.sh` on macOS, `install-systemd.sh` on Linux) register Skulk as a user-level supervised service: starts at login/boot, restarts on crash with backoff, stops after a hot crash loop, and leaves a deliberate `skulk stop` stopped. The LaunchAgent can self-update on boot, operator knobs live in an env file at `~/.skulk/skulk.env`, and a separate `skulk-vector` agent ships logs without coupling log shipping to the inference lifecycle. **Why it matters:** a cluster node survives reboots, crashes, and upgrades unattended — no terminal sessions to babysit.
+
+- **Per-task cancellation.** `POST /v1/cancel/{command_id}` and the cooperative runner-task cancel both work; the dashboard exposes "Cancel task" on each running task in the Node tab. **Why it matters:** stuck or runaway requests are recoverable without restarting the runner.
+
 ### Engineering discipline
 
 - **Strict typing, tests, docs.** `basedpyright` runs at `0 errors, 0 warnings, 0 notes` on the main branch. Placement, apply, and API paths have test coverage. Architecture docs (`architecture.md` for narrative, `architecture-reference.md` for the dense fact-sheet) are required to update on architectural shape changes. **Why it matters:** regressions surface in CI, the codebase stays legible to future contributors, and the docs reflect what the code actually does.
+
+- **Stability claims are earned on hardware.** Every reliability fix above was reproduced and re-verified live on a multi-node Apple Silicon cluster — batteries that deliberately kill the master mid-serving, bounce nodes during decode, spray abandoned requests at loading models, and soak concurrent clients for hours. The bugs those batteries surfaced were fixed before any user hit them. **Why it matters:** "it should survive that" and "we watched it survive that" are different claims; Skulk makes the second one.
 
 ## Prerequisites
 
@@ -171,6 +205,7 @@ Build/runtime note:
 ## Core Features
 
 - **Distributed inference**: split work across devices instead of treating each machine as an island.
+- **Speculative decoding**: measured 1.16–2.2× decode speedups via multi-token prediction, on by default for supported model cards — including multi-node placements on mixed hardware.
 - **Skulk Dashboard**: React dashboard for topology, model store, chat, settings, and placement workflows.
 - **Model Store**: centralize model files on one node and stage them to the rest of the cluster over the LAN.
 - **Cluster-wide config sync**: update config from the dashboard and sync it across nodes.
@@ -481,6 +516,10 @@ uv run skulk --bootstrap-peers /ip4/192.168.1.20/tcp/5678/p2p/12D3KooW...
 | `SKULK_NO_BATCH` | Force sequential generation | `false` |
 | `SKULK_OPTIQ_BITS` | Bit width for `optiq` | `4` |
 | `SKULK_OPTIQ_FP16_LAYERS` | Edge FP16 layers for `optiq` | `4` |
+| `SKULK_MAX_CONCURRENT_REQUESTS` | Per-runner continuous-batching ceiling | `8` |
+| `SKULK_MAX_OUTPUT_TOKENS` | Default generated-token budget when a request omits `max_tokens` | `4096` |
+| `SKULK_GROUP_CONNECT_DEADLINE_SECONDS` | Hard deadline for distributed group formation before the runner exits with a network diagnosis | `120` |
+| `SKULK_LOGGING_EXTERNAL` | Emit structured JSON logs on stdout for external shipping (Vector etc.) | `false` |
 | `SKULK_BOOTSTRAP_PEERS` | Comma-separated static peers to dial on startup | None |
 | `HF_TOKEN` | Hugging Face token | None |
 
@@ -529,6 +568,7 @@ Important caveats:
 
 ## More Documentation
 
+- [Speculative Decoding guide](https://foxlight-foundation.github.io/Skulk/speculative-decoding/)
 - [docs/api.md](docs/api.md)
 - [docs/model-store.md](docs/model-store.md)
 - [docs/architecture.md](docs/architecture.md)
