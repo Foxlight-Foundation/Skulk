@@ -116,6 +116,10 @@ class RunnerSupervisor:
     in_progress: dict[TaskId, Task] = field(default_factory=dict, init=False)
     completed: set[TaskId] = field(default_factory=set, init=False)
     cancelled: set[TaskId] = field(default_factory=set, init=False)
+    # Tasks whose terminal status has already been forwarded to the cluster;
+    # duplicates from the runner are suppressed (#278). Bounded by the tasks
+    # this runner ever saw (runner lifetime is instance-scoped).
+    _terminal_forwarded: set[TaskId] = field(default_factory=set, init=False)
     _cancel_watch_runner: anyio.CancelScope = field(
         default_factory=anyio.CancelScope, init=False
     )
@@ -327,6 +331,18 @@ class RunnerSupervisor:
                         isinstance(event, TaskStatusUpdated)
                         and event.task_status in _TERMINAL_TASK_STATUSES
                     ):
+                        # A terminal status is forwarded AT MOST ONCE per task.
+                        # The runner may legitimately re-report a terminal
+                        # outcome (e.g. a cancellation acknowledged again after
+                        # a duplicate cancel dispatch); re-forwarding minted
+                        # unbounded TaskStatusUpdated+TaskDeleted event pairs
+                        # into the cluster log (#278).
+                        if event.task_id in self._terminal_forwarded:
+                            self._record_milestone(
+                                "terminal_status_suppressed", str(event.task_id)
+                            )
+                            continue
+                        self._terminal_forwarded.add(event.task_id)
                         # If a task has just been completed, we should be working on it.
                         assert isinstance(
                             self.status,

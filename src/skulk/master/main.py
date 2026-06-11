@@ -723,6 +723,28 @@ class Master:
                             if task_id == event.task_id:
                                 self.command_task_mapping.pop(command_id, None)
 
+                    # Refuse to index task-lifecycle events that are state
+                    # no-ops (the task is already gone). Without this cap a
+                    # single misbehaving emitter could mint unbounded
+                    # status/delete events for dead tasks — each one indexed,
+                    # persisted, and broadcast cluster-wide — drowning
+                    # replicas and starving liveness into election churn
+                    # (#278; observed at ~800 events/s, 12k+ events for one
+                    # task). Ordering makes this safe: TaskCreated is always
+                    # indexed before any follower can reference the task, so
+                    # an unknown task_id here is necessarily stale. The
+                    # command-mapping sweep above still runs — it is
+                    # in-memory hygiene, not amplification.
+                    if (
+                        isinstance(event, (TaskStatusUpdated, TaskDeleted, TaskFailed))
+                        and event.task_id not in self.state.tasks
+                    ):
+                        logger.debug(
+                            f"Dropping no-op task event for unknown task: "
+                            f"{type(event).__name__}({event.task_id})"
+                        )
+                        continue
+
                     logger.debug(f"Master indexing event: {str(event)[:100]}")
                     indexed = IndexedEvent(event=event, idx=len(self._event_log))
                     self.state = apply(self.state, indexed)

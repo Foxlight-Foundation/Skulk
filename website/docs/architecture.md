@@ -141,6 +141,8 @@ Skulk is event-sourced because distributed clusters need a clear notion of "what
 - **The master indexes events.** Every event arrives at the master via `LOCAL_EVENTS`, gets a monotonically increasing index, gets persisted to the disk event log, and gets republished on `GLOBAL_EVENTS`.
 - **Followers replay.** A new node bootstraps by requesting the current state snapshot, applying it, then replaying retained events at indices after the snapshot's high-water mark.
 
+The current implementation still routes some non-state payloads, including generated chunks, through this event machinery. The target architecture is to split durable control events, latest-value telemetry, and generated data streams into separate runtime planes; see [Runtime Plane Separation](runtime-plane-separation) for the proposal and migration plan.
+
 Why event sourcing here:
 
 - **Observable history.** Every state change is replayable. Debugging a "how did we get into this state?" question reduces to inspecting the event log.

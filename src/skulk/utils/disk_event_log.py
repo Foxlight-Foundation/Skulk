@@ -40,6 +40,15 @@ _DISK_CHECK_INTERVAL_APPENDS = 1024
 """How many appends between free-space checks (a statvfs call is cheap but
 not free; per-token chunk events make append a hot path)."""
 
+_METADATA_WRITE_INTERVAL_APPENDS = 256
+"""How many appends between events.meta.json refreshes. The metadata file is
+diagnostic only — nothing reads it back at runtime and ``__init__`` deletes
+it on startup — but writing it PER APPEND (a full open/truncate/write/close
+of a separate file) was the dominant physical-write term of every indexed
+event, measured cluster-wide in #279 (~4 KB-class block update per event,
+~4,000 file rewrite cycles/sec during the #278 storm). Rotation, compaction,
+and close still write it eagerly."""
+
 
 class EventLogMetadata(CamelCaseModel):
     """Metadata describing the absolute index range of the active replay tail."""
@@ -221,7 +230,8 @@ class DiskEventLog:
             self._file.write(packed)
             self._count += 1
             counted = True
-            self._write_metadata()
+            if self._count % _METADATA_WRITE_INTERVAL_APPENDS == 0:
+                self._write_metadata()
         except OSError as error:
             # The count must advance EXACTLY once per append: a failure in
             # _write_metadata (the observed ENOSPC site) arrives here with

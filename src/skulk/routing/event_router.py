@@ -38,9 +38,16 @@ class EventRouter:
     event_buffer: OrderedBuffer[Event] = field(
         init=False, default_factory=OrderedBuffer
     )
-    out_for_delivery: dict[EventId, tuple[float, LocalForwarderEvent]] = field(
+    # event_id -> (next retry deadline, attempts so far, event). Entries are
+    # popped when the event round-trips back from the master as an indexed
+    # broadcast; until then _simple_retry re-sends with exponential backoff
+    # and gives up after RETRY_MAX_ATTEMPTS — an unbounded fixed-interval
+    # resend amplified event volume under backpressure (#278).
+    out_for_delivery: dict[EventId, tuple[float, int, LocalForwarderEvent]] = field(
         init=False, default_factory=dict
     )
+    retry_base_seconds: float = 5.0
+    retry_max_attempts: int = 6
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
 
     _nack_cancel_scope: CancelScope | None = field(init=False, default=None)
@@ -64,15 +71,34 @@ class EventRouter:
             for send in self.internal_outbound:
                 send.close()
 
-    # can make this better in future
     async def _simple_retry(self):
         while True:
             await anyio.sleep(1 + random())
             # list here is a shallow clone for shared mutation
-            for e_id, (time, event) in list(self.out_for_delivery.items()):
-                if anyio.current_time() > time + 5:
-                    self.out_for_delivery[e_id] = (anyio.current_time(), event)
-                    await self.external_outbound.send(event)
+            for e_id, (deadline, attempts, event) in list(
+                self.out_for_delivery.items()
+            ):
+                if anyio.current_time() <= deadline:
+                    continue
+                if attempts >= self.retry_max_attempts:
+                    # The master never echoed this event back (dead session,
+                    # sustained partition, or saturation). Give up: endless
+                    # fixed-interval resend only adds volume to whatever is
+                    # already wrong (#278).
+                    logger.warning(
+                        f"Dropping undeliverable event after "
+                        f"{attempts} retries: {type(event.event).__name__} "
+                        f"({e_id})"
+                    )
+                    self.out_for_delivery.pop(e_id, None)
+                    continue
+                backoff = self.retry_base_seconds * (2.0**attempts)
+                self.out_for_delivery[e_id] = (
+                    anyio.current_time() + backoff,
+                    attempts + 1,
+                    event,
+                )
+                await self.external_outbound.send(event)
 
     def sender(self) -> Sender[Event]:
         send, recv = channel[Event]()
@@ -102,7 +128,11 @@ class EventRouter:
                 )
                 idx += 1
                 await self.external_outbound.send(f_ev)
-                self.out_for_delivery[event.event_id] = (anyio.current_time(), f_ev)
+                self.out_for_delivery[event.event_id] = (
+                    anyio.current_time() + self.retry_base_seconds,
+                    0,
+                    f_ev,
+                )
 
     async def _run_ext_in(self):
         with self.external_inbound as events:
