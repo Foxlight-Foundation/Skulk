@@ -9,6 +9,25 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Abandoned requests can no longer storm the event log into election
+  churn (#278).** An idle SequentialGenerator re-reported every
+  ever-cancelled task id on every step without pruning the set, and the
+  runner supervisor converted each re-report into a fresh
+  `TaskStatusUpdated(Cancelled)` + `TaskDeleted` pair — observed live at
+  ~800 events/s with 12,000+ events minted for a single dead task. The
+  flood drowned replica apply loops, starved liveness into cascading
+  elections, and silently lost placements. Five-layer fix: the idle
+  generator now reports each cancellation exactly once (preserving the
+  forward-looking CANCEL_ALL marker); the supervisor forwards a terminal
+  status at most once per task; the master refuses to index task-lifecycle
+  events for tasks absent from state (capping any future emitter at zero
+  amplification); the event router's delivery retry gains exponential
+  backoff and a max-attempts cap instead of unbounded fixed-interval
+  resend; and the disk event log refreshes its diagnostic metadata file on
+  a coarse cadence instead of one open/truncate/write/close per appended
+  event (previously the dominant physical-write term of every indexed
+  event, cluster-wide).
+
 - **Long-context requests are rejected cleanly instead of OOM-crashing the
   runner (#145, phase 1).** The within-request KV cache grew one entry per
   token with no bound and no preflight check, so a request whose prompt plus

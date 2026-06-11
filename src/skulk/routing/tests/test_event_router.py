@@ -6,7 +6,7 @@ import pytest
 
 from skulk.routing.event_router import EventRouter
 from skulk.shared.types.commands import ForwarderCommand, RequestEventLog
-from skulk.shared.types.common import NodeId, SessionId
+from skulk.shared.types.common import NodeId, SessionId, SystemId
 from skulk.shared.types.events import (
     GlobalForwarderEvent,
     IndexedEvent,
@@ -514,3 +514,77 @@ async def test_conflicting_duplicate_index_requests_replay_instead_of_crashing()
 
         router.shutdown()
         tg.cancel_scope.cancel()
+
+
+@pytest.mark.asyncio
+async def test_simple_retry_backs_off_and_gives_up() -> None:
+    """Unbounded fixed-interval resend amplified event storms (#278).
+
+    Retries must back off exponentially and stop after retry_max_attempts —
+    an event the master never echoes back (dead session, partition,
+    saturation) is dropped instead of being re-sent forever.
+    """
+    session_id = SessionId(master_node_id=NodeId("master"), election_clock=1)
+    command_sender, _command_receiver = channel[ForwarderCommand]()
+    state_sync_sender, _requests = channel[StateSyncMessage]()
+    _responses, state_sync_receiver = channel[
+        tuple[str | None, StateSyncMessage]
+    ]()
+    _external_sender, external_receiver = channel[GlobalForwarderEvent]()
+    external_outbound, outbound_receiver = channel[LocalForwarderEvent]()
+
+    router = EventRouter(
+        NodeId("self"),
+        session_id,
+        command_sender=command_sender,
+        state_sync_sender=state_sync_sender,
+        state_sync_receiver=state_sync_receiver,
+        external_inbound=external_receiver,
+        external_outbound=external_outbound,
+    )
+
+    event = TestEvent()
+    forwarder_event = LocalForwarderEvent(
+        origin_idx=0,
+        origin=SystemId("test"),
+        session=session_id,
+        event=event,
+    )
+
+    resent: list[LocalForwarderEvent] = []
+
+    async def _collect() -> None:
+        with outbound_receiver as outbound:
+            async for sent in outbound:
+                resent.append(sent)
+
+    # Expired deadline, one attempt left before the cap.
+    router.out_for_delivery[event.event_id] = (
+        -1.0,
+        router.retry_max_attempts - 1,
+        forwarder_event,
+    )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_collect)
+        tg.start_soon(router._simple_retry)  # pyright: ignore[reportPrivateUsage]
+        with anyio.fail_after(5):
+            while not resent:
+                await anyio.sleep(0.05)
+        # The final allowed attempt was sent with a backed-off deadline.
+        deadline, attempts, _ = router.out_for_delivery[event.event_id]
+        assert attempts == router.retry_max_attempts
+        assert deadline > anyio.current_time()
+
+        # Force the deadline into the past: the cap must now drop it.
+        router.out_for_delivery[event.event_id] = (
+            -1.0,
+            router.retry_max_attempts,
+            forwarder_event,
+        )
+        with anyio.fail_after(5):
+            while event.event_id in router.out_for_delivery:
+                await anyio.sleep(0.05)
+        tg.cancel_scope.cancel()
+
+    assert len(resent) == 1

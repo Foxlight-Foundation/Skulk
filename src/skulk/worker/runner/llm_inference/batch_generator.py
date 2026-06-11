@@ -240,7 +240,26 @@ class SequentialGenerator(InferenceGenerator):
             if self._queue:
                 self._start_next()
             else:
-                return map(lambda task: (task, Cancelled()), self._cancelled_tasks)
+                # Report each cancellation EXACTLY ONCE, then forget it.
+                # This idle path used to re-report every ever-cancelled id on
+                # every step without clearing the set: an idle runner with N
+                # cancelled tasks minted N fresh Cancelled results ~2x/s
+                # forever, which the supervisor converted into an unbounded
+                # TaskStatusUpdated(Cancelled)+TaskDeleted event storm that
+                # drowned replicas and churned elections (#278). Ids in the
+                # set here are neither queued nor active, so forgetting them
+                # mirrors BatchGenerator._apply_cancellations; CANCEL_ALL is
+                # forward-looking (cleared by the next submit) and survives.
+                reported = [
+                    (task_id, Cancelled())
+                    for task_id in self._cancelled_tasks
+                    if task_id != CANCEL_ALL_TASKS
+                ]
+                had_cancel_all = CANCEL_ALL_TASKS in self._cancelled_tasks
+                self._cancelled_tasks.clear()
+                if had_cancel_all:
+                    self._cancelled_tasks.add(CANCEL_ALL_TASKS)
+                return reported
 
         assert self._active is not None
 

@@ -338,11 +338,18 @@ def test_metadata_failure_counts_exactly_once(log_dir: Path):
 
     log._write_metadata = _fail_metadata
 
+    # Metadata now writes on a coarse cadence (#278/#279): drive the count to
+    # the cadence boundary so the injected failure actually fires.
+    from skulk.utils.disk_event_log import _METADATA_WRITE_INTERVAL_APPENDS
+
+    while len(log) % _METADATA_WRITE_INTERVAL_APPENDS != _METADATA_WRITE_INTERVAL_APPENDS - 1:
+        log.append(TestEvent())
+    before = len(log)
     log.append(TestEvent())  # record write succeeds, metadata fails
-    assert len(log) == 2  # exactly once, not twice
+    assert len(log) == before + 1  # exactly once, not twice
     assert log._persistence_failed
     log.append(TestEvent())
-    assert len(log) == 3
+    assert len(log) == before + 2
     log.close()
 
 
@@ -474,4 +481,30 @@ def test_append_after_compact_does_not_overwrite_tail(log_dir: Path):
     assert len(events) == 5
     assert len(log) == 11
     assert log.active_size_bytes > 0
+    log.close()
+
+
+def test_metadata_not_rewritten_per_append(log_dir: Path):
+    """Per-append metadata rewrites were the dominant physical-write term of
+    every indexed event (#278/#279); the file is diagnostic-only and is now
+    refreshed on a coarse cadence plus rotation/compaction/close."""
+    import json
+
+    log = DiskEventLog(log_dir)
+    meta_path = log_dir / "events.meta.json"
+    assert json.loads(meta_path.read_text())["count"] == 0
+
+    for _ in range(10):
+        log.append(TestEvent())
+    # Ten appends: metadata still reflects the init-time write.
+    assert json.loads(meta_path.read_text())["count"] == 0
+
+    from skulk.utils.disk_event_log import _METADATA_WRITE_INTERVAL_APPENDS
+
+    for _ in range(_METADATA_WRITE_INTERVAL_APPENDS - 10):
+        log.append(TestEvent())
+    assert (
+        json.loads(meta_path.read_text())["count"]
+        == _METADATA_WRITE_INTERVAL_APPENDS
+    )
     log.close()

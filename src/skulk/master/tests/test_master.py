@@ -26,6 +26,7 @@ from skulk.shared.types.events import (
     NodeGatheredInfo,
     TaskCreated,
     TaskDeleted,
+    TaskStatusUpdated,
 )
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
@@ -36,6 +37,7 @@ from skulk.shared.types.tasks import TaskId, TaskStatus
 from skulk.shared.types.tasks import TextGeneration as TextGenerationTask
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from skulk.shared.types.worker.instances import (
+    InstanceId,
     InstanceMeta,
     MlxRingInstance,
     ShardAssignments,
@@ -436,3 +438,94 @@ async def test_task_deleted_event_clears_command_mapping() -> None:
         tg.cancel_scope.cancel()
 
     assert command_id not in master.command_task_mapping
+
+
+@pytest.mark.asyncio
+async def test_noop_task_events_for_unknown_tasks_are_not_indexed() -> None:
+    """The master must not index task events for tasks absent from state.
+
+    A misbehaving emitter (the #278 idle-runner mint) produced unbounded
+    TaskStatusUpdated(Cancelled)+TaskDeleted pairs for long-dead tasks; each
+    was a state no-op yet was still indexed, persisted, and broadcast
+    cluster-wide. The ingest backstop drops them before indexing.
+    """
+    keypair = get_node_id_keypair()
+    node_id = NodeId(keypair.to_node_id())
+    session_id = SessionId(master_node_id=node_id, election_clock=0)
+
+    global_sender, global_receiver = channel[GlobalForwarderEvent]()
+    _command_sender, command_receiver = channel[ForwarderCommand]()
+    local_event_sender, local_event_receiver = channel[LocalForwarderEvent]()
+    _request_sender, state_sync_receiver = channel[StateSyncMessage]()
+    state_sync_sender, _response_receiver = channel[StateSyncMessage]()
+    download_sender, _download_receiver = channel[ForwarderDownloadCommand]()
+    event_sender, _event_receiver = channel[Event]()
+
+    master = Master(
+        node_id,
+        session_id,
+        event_sender=event_sender,
+        global_event_sender=global_sender,
+        local_event_receiver=local_event_receiver,
+        command_receiver=command_receiver,
+        state_sync_receiver=state_sync_receiver,
+        state_sync_sender=state_sync_sender,
+        download_command_sender=download_sender,
+    )
+
+    known_task = TextGenerationTask(
+        task_id=TaskId("task-known"),
+        instance_id=InstanceId("instance-a"),
+        command_id=CommandId("cmd-known"),
+        task_params=TextGenerationTaskParams(
+            model=ModelId("test-model"),
+            input=[InputMessage(role="user", content="hi")],
+        ),
+    )
+    master.state = master.state.model_copy(
+        update={"tasks": {known_task.task_id: known_task}}
+    )
+
+    def _local(event: Event, idx: int) -> LocalForwarderEvent:
+        return LocalForwarderEvent(
+            origin=SystemId("Worker"),
+            origin_idx=idx,
+            session=session_id,
+            event=event,
+        )
+
+    indexed: GlobalForwarderEvent | None = None
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(master._event_processor)  # pyright: ignore[reportPrivateUsage]
+
+        # No-op events for a task state has never seen: must NOT be indexed.
+        await local_event_sender.send(
+            _local(
+                TaskStatusUpdated(
+                    task_id=TaskId("task-ghost"), task_status=TaskStatus.Cancelled
+                ),
+                0,
+            )
+        )
+        await local_event_sender.send(_local(TaskDeleted(task_id=TaskId("task-ghost")), 1))
+        # A legitimate status for a known task: must be indexed and broadcast.
+        await local_event_sender.send(
+            _local(
+                TaskStatusUpdated(
+                    task_id=known_task.task_id, task_status=TaskStatus.Running
+                ),
+                2,
+            )
+        )
+
+        with anyio.fail_after(2):
+            indexed = await global_receiver.receive()
+        tg.cancel_scope.cancel()
+
+    # The first (and only) indexed event is the known-task status — the two
+    # ghost events were dropped without consuming indices.
+    assert indexed is not None
+    assert indexed.origin_idx == 0
+    assert isinstance(indexed.event, TaskStatusUpdated)
+    assert indexed.event.task_id == known_task.task_id
+    assert len(master._event_log) == 1  # pyright: ignore[reportPrivateUsage]

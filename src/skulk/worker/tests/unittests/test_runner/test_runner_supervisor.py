@@ -223,3 +223,68 @@ async def test_runner_flight_recorder_retains_newest_entries() -> None:
     assert len(diagnostics.flight_recorder) == 128
     assert diagnostics.flight_recorder[0].event == "token_12"
     assert diagnostics.flight_recorder[-1].event == "token_139"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_terminal_status_is_forwarded_exactly_once() -> None:
+    """A re-reported terminal status must not mint another event pair (#278).
+
+    An idle SequentialGenerator used to re-report every ever-cancelled task
+    on every step; the supervisor converted each report into a fresh
+    TaskStatusUpdated(Cancelled) + TaskDeleted pair, flooding the cluster
+    log. The supervisor now forwards a terminal status at most once.
+    """
+    event_sender, event_receiver = channel[Event]()
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    ev_send, ev_recv = mp_channel[Event]()
+    _, diag_recv = mp_channel[RunnerDiagnosticUpdate]()
+
+    bound_instance: BoundInstance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-a"),
+        model_id=ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit"),
+        runner_id=RunnerId("runner-a"),
+        node_id=NodeId("node-a"),
+    )
+
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=ev_recv,
+        _diag_recv=diag_recv,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+    )
+    supervisor.status = RunnerRunning()
+
+    task_id = TaskId("task-a")
+    forwarded: list[Event] = []
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(supervisor._forward_events)  # pyright: ignore[reportPrivateUsage]
+        ev_send.send(
+            TaskStatusUpdated(task_id=task_id, task_status=TaskStatus.Cancelled)
+        )
+        # first report: status + explicit delete
+        forwarded.append(await event_receiver.receive())
+        forwarded.append(await event_receiver.receive())
+        # duplicate report: must be suppressed entirely
+        ev_send.send(
+            TaskStatusUpdated(task_id=task_id, task_status=TaskStatus.Cancelled)
+        )
+        with anyio.move_on_after(0.3):
+            forwarded.append(await event_receiver.receive())
+        tg.cancel_scope.cancel()
+
+    ev_send.close()
+
+    assert len(forwarded) == 2
+    assert isinstance(forwarded[0], TaskStatusUpdated)
+    assert isinstance(forwarded[1], TaskDeleted)
+
+    event_sender.close()
+    with anyio.move_on_after(0.1):
+        await event_receiver.aclose()
