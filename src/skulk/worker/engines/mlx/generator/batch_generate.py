@@ -35,6 +35,7 @@ from skulk.worker.engines.mlx.cache import (
     make_kv_cache,
 )
 from skulk.worker.engines.mlx.constants import DEFAULT_TOP_LOGPROBS, MAX_TOKENS
+from skulk.worker.engines.mlx.generator.context_admission import admit_max_tokens
 from skulk.worker.engines.mlx.generator.generate import (
     ban_token_ids,
     eos_ids_from_tokenizer,
@@ -94,6 +95,9 @@ class SkulkBatchGenerator:
     group: mx.distributed.Group | None
     kv_prefix_cache: KVPrefixCache | None
     vision_processor: VisionProcessor | None = None
+    # Static per-instance context ceiling for request admission (#145); None
+    # preserves the historical unbounded behavior.
+    context_token_limit: int | None = None
 
     _mlx_gen: MlxBatchGenerator = field(init=False)
     _active_tasks: dict[int, _EngineTask] = field(default_factory=dict, init=False)
@@ -173,6 +177,17 @@ class SkulkBatchGenerator:
         if vision is not None:
             all_prompt_tokens = vision.prompt_tokens
             media_regions = vision.media_regions
+
+        # Context admission: after vision finalizes the token count, before
+        # the prefix cache or prefill collectives. Deterministic across ranks
+        # (same tokens, same static limit) so every rank rejects in lockstep
+        # rather than deadlocking the ring (#145).
+        max_tokens = admit_max_tokens(
+            prompt_tokens=len(all_prompt_tokens),
+            requested_max_output_tokens=task_params.max_output_tokens,
+            default_max_output_tokens=MAX_TOKENS,
+            context_token_limit=self.context_token_limit,
+        )
 
         is_bench = task_params.bench
 
@@ -310,8 +325,7 @@ class SkulkBatchGenerator:
             eos_ids = eos_ids_from_tokenizer(self.tokenizer)
             logits_processors = [ban_token_ids(eos_ids)] + logits_processors
 
-        max_tokens = task_params.max_output_tokens or MAX_TOKENS
-
+        # max_tokens was resolved by context admission above, before prefill.
         uids = self._mlx_gen.insert(
             prompts=[last_tokens.tolist()],
             max_tokens=[max_tokens],

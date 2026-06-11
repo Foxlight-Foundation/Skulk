@@ -24,6 +24,9 @@ from skulk.shared.types.worker.runner_response import (
 from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.engines.mlx.cache import KVPrefixCache
 from skulk.worker.engines.mlx.generator.batch_generate import SkulkBatchGenerator
+from skulk.worker.engines.mlx.generator.context_admission import (
+    ContextLengthExceededError,
+)
 from skulk.worker.engines.mlx.generator.generate import (
     PrefillCancelled,
     mlx_generate,
@@ -148,6 +151,8 @@ class SequentialGenerator(InferenceGenerator):
     mtp_weights: "dict[str, mx.array] | None" = None
     assistant_model: object | None = None
     check_for_cancel_every: int = 50
+    # Static per-instance context ceiling for request admission (#145).
+    context_token_limit: int | None = None
 
     _cancelled_tasks: set[TaskId] = field(default_factory=set, init=False)
     _maybe_queue: list[TextGeneration] = field(default_factory=list, init=False)
@@ -272,6 +277,25 @@ class SequentialGenerator(InferenceGenerator):
             record_runner_phase(
                 "completion",
                 event="decode_complete",
+                task_id=task.task_id,
+                command_id=str(task.command_id),
+                include_memory=True,
+            )
+            output.append((task.task_id, Finished()))
+            self._active = None
+            if self._queue:
+                self._start_next()
+
+        except ContextLengthExceededError as e:
+            # Deterministic pre-prefill rejection (#145): every rank raises
+            # this in lockstep before any collective, so the task terminates
+            # cleanly (error chunk + Finished) and the runner stays alive —
+            # unlike the generic arm below, which escalates to a runner crash.
+            self._record_decode_span(task.task_id)
+            self._send_error(task, e)
+            record_runner_phase(
+                "completion",
+                event="context_admission_rejected",
                 task_id=task.task_id,
                 command_id=str(task.command_id),
                 include_memory=True,
@@ -447,6 +471,7 @@ class SequentialGenerator(InferenceGenerator):
             trace_rank=self.device_rank,
             mtp_weights=self.mtp_weights,
             assistant_model=self.assistant_model,
+            context_token_limit=self.context_token_limit,
             model_card=self.model_card,
         )
 
@@ -484,6 +509,8 @@ class BatchGenerator(InferenceGenerator):
     vision_processor: VisionProcessor | None = None
     mtp_weights: "dict[str, mx.array] | None" = None
     assistant_model: object | None = None
+    # Static per-instance context ceiling for request admission (#145).
+    context_token_limit: int | None = None
 
     _cancelled_tasks: set[TaskId] = field(default_factory=set, init=False)
     _maybe_queue: list[TextGeneration] = field(default_factory=list, init=False)
@@ -503,6 +530,7 @@ class BatchGenerator(InferenceGenerator):
             group=self.group,
             kv_prefix_cache=self.kv_prefix_cache,
             vision_processor=self.vision_processor,
+            context_token_limit=self.context_token_limit,
         )
 
     def warmup(self):
@@ -578,6 +606,11 @@ class BatchGenerator(InferenceGenerator):
         if not self._queue:
             self.agree_on_tasks()
 
+        # Tasks rejected by context admission before reaching the engine
+        # (#145): they terminate with an error chunk + Finished, and the
+        # runner keeps serving.
+        rejected: list[tuple[TaskId, Finished]] = []
+
         # Submit any queued tasks to the engine
         while self._queue and len(self._active_tasks) < SKULK_MAX_CONCURRENT_REQUESTS:
             task = self._queue.popleft()
@@ -601,6 +634,20 @@ class BatchGenerator(InferenceGenerator):
             try:
                 uid = self._start_task(task)
             except PrefillCancelled:
+                continue
+            except ContextLengthExceededError as e:
+                # Deterministic pre-prefill rejection: all ranks agree (same
+                # tokens, same static limit), so finishing the task here keeps
+                # the batch engine in lockstep across the ring.
+                self._send_error(task, e)
+                record_runner_phase(
+                    "completion",
+                    event="context_admission_rejected",
+                    task_id=task.task_id,
+                    command_id=str(task.command_id),
+                    include_memory=True,
+                )
+                rejected.append((task.task_id, Finished()))
                 continue
             except Exception as e:
                 self._send_error(task, e)
@@ -631,7 +678,7 @@ class BatchGenerator(InferenceGenerator):
             )
 
         if not self._mlx_gen.has_work:
-            return self._apply_cancellations()
+            return itertools.chain(rejected, self._apply_cancellations())
 
         shared_task_ids = [active.task.task_id for active in self._active_tasks.values()]
         decode_step_start_us = now_us()
@@ -698,7 +745,7 @@ class BatchGenerator(InferenceGenerator):
                 output.append((task.task_id, Finished()))
                 del self._active_tasks[uid]
 
-        return itertools.chain(output, self._apply_cancellations())
+        return itertools.chain(rejected, output, self._apply_cancellations())
 
     def _apply_cancellations(
         self,

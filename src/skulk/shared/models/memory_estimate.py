@@ -15,8 +15,18 @@ typical serving use) and runtime overhead is a multiplicative factor measured
 on real loads.
 """
 
+from collections.abc import Mapping
+
 from skulk.shared.models.model_cards import ModelCard
+from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.worker.runners import ShardAssignments
+from skulk.shared.types.worker.shards import (
+    CfgShardMetadata,
+    PipelineShardMetadata,
+    ShardMetadata,
+    TensorShardMetadata,
+)
 
 MEMORY_OVERHEAD_FACTOR: float = 1.30
 """Multiplier on a shard's *weight* bytes covering runtime overhead that scales
@@ -108,3 +118,96 @@ def estimate_shard_footprint(
 def gpu_working_set_ceiling(ram_total: Memory) -> Memory:
     """Metal GPU working-set ceiling derived from total RAM (placement path)."""
     return ram_total * GPU_WORKING_SET_FRACTION
+
+
+def per_token_kv_bytes(model_card: ModelCard) -> int:
+    """Whole-model KV-cache bytes consumed by ONE token of context.
+
+    Covers all layers at fp16 (``KV_DTYPE_BYTES``); a node holding
+    ``shard_fraction`` of the model pays ``per_token_kv_bytes * shard_fraction``
+    per token. Returns 0 when the card lacks ``num_key_value_heads`` —
+    callers must treat 0 as "KV cost unknown, cannot enforce a memory ceiling".
+    """
+    kv_heads = model_card.num_key_value_heads
+    if kv_heads is None or model_card.n_layers <= 0:
+        return 0
+    return 2 * model_card.n_layers * kv_heads * KV_HEAD_DIM_FALLBACK * KV_DTYPE_BYTES
+
+
+def shard_fraction_of_model(shard: ShardMetadata) -> float | None:
+    """Fraction of the whole model's weights AND KV held by one shard.
+
+    Mirrors the placement-side accounting in ``estimate_shard_footprint``:
+    pipeline shards hold a contiguous layer range, tensor shards hold all
+    layers but ``1/world_size`` of each matrix and of the KV heads. CFG shards
+    (image models) have no text-generation KV admission story, so ``None``.
+    """
+    match shard:
+        case TensorShardMetadata():
+            return 1.0 / shard.world_size if shard.world_size > 0 else None
+        case PipelineShardMetadata():
+            if shard.n_layers <= 0:
+                return None
+            return (shard.end_layer - shard.start_layer) / shard.n_layers
+        case CfgShardMetadata():
+            return None
+
+
+def instance_context_token_limit(
+    shard_assignments: ShardAssignments,
+    node_ram_totals: Mapping[NodeId, Memory],
+) -> int | None:
+    """Deterministic context-token ceiling for one placed instance.
+
+    For each hosting node: tokens that fit in the GPU working set after the
+    node's weight share and overhead, at the shard's per-token KV cost. The
+    instance ceiling is the minimum across nodes (the smallest rank OOMs
+    first and takes the whole ring down), then min'd with the card's
+    advertised ``context_length`` (0 means unadvertised).
+
+    Determinism is load-bearing: on multi-rank instances every rank admits or
+    rejects a request independently, and divergent verdicts deadlock the
+    collectives. All inputs here are static — ``ram_total`` never changes for
+    a node, and placement only happens after the master has indexed memory
+    for every hosting node, so every worker computes the identical value.
+    Time-varying ``ram_available`` must NOT be used here.
+
+    Returns ``None`` when no ceiling is enforceable (unknown KV cost or
+    missing node memory, falling back to the card limit when that exists).
+    """
+    model_card: ModelCard | None = None
+    memory_limit: int | None = None
+    for shard in shard_assignments.runner_to_shard.values():
+        model_card = shard.model_card
+        break
+    if model_card is None:
+        return None
+
+    whole_model_token_bytes = per_token_kv_bytes(model_card)
+    if whole_model_token_bytes > 0:
+        node_to_runner = shard_assignments.node_to_runner
+        for node_id, runner_id in node_to_runner.items():
+            shard = shard_assignments.runner_to_shard[runner_id]
+            fraction = shard_fraction_of_model(shard)
+            ram_total = node_ram_totals.get(node_id)
+            if fraction is None or fraction <= 0.0 or ram_total is None:
+                memory_limit = None
+                break
+            kv_budget = (
+                gpu_working_set_ceiling(ram_total)
+                - model_card.storage_size * fraction * MEMORY_OVERHEAD_FACTOR
+                - MEMORY_OVERHEAD_FLOOR
+            )
+            node_tokens = max(
+                0, int(kv_budget.in_bytes / (whole_model_token_bytes * fraction))
+            )
+            memory_limit = (
+                node_tokens if memory_limit is None else min(memory_limit, node_tokens)
+            )
+
+    card_limit = model_card.context_length if model_card.context_length > 0 else None
+    if memory_limit is None:
+        return card_limit
+    if card_limit is None:
+        return memory_limit
+    return min(memory_limit, card_limit)

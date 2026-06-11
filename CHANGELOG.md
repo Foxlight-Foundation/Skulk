@@ -9,6 +9,23 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Long-context requests are rejected cleanly instead of OOM-crashing the
+  runner (#145, phase 1).** The within-request KV cache grew one entry per
+  token with no bound and no preflight check, so a request whose prompt plus
+  output exceeded what the hosting node(s) could hold killed the runner
+  mid-generation with an unhandled Metal OOM (SIGABRT, broken stream or 500
+  for the client, wired GPU memory leaked). Each placed instance now carries
+  a static context-token ceiling — the smaller of the card's advertised
+  context length and the KV tokens that fit beside the weight share on every
+  hosting node — computed deterministically from gossiped node memory so all
+  ranks of a multi-node instance enforce the identical limit. Requests are
+  admitted against it before prefill: explicit `max_tokens` overflow and
+  window-filling prompts get an OpenAI-style `context_length_exceeded`
+  invalid-request error (400 at the API when detectable pre-dispatch), and an
+  omitted `max_tokens` is clamped to the remaining window so generation ends
+  with `finish_reason: "length"`. Unquantized KV only; quantized-KV budget
+  math is phase 2.
+
 - **Instance placements survive master failover (#273).** A newly-elected
   master previously always started its session from an empty state: the
   empty snapshot propagated to every follower, each worker's plan loop saw

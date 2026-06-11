@@ -151,7 +151,14 @@ class RunnerSupervisor:
         bound_instance: BoundInstance,
         event_sender: Sender[Event],
         initialize_timeout: float = 400,
+        context_token_limit: int | None = None,
     ) -> Self:
+        """Spawn the runner subprocess for one shard of a placed instance.
+
+        ``context_token_limit`` is the instance's static context-admission
+        ceiling (#145), threaded through the local (same-binary) process
+        boundary precisely so no gossiped type needs a new field.
+        """
         ev_send, ev_recv = mp_channel[Event]()
         diag_send, diag_recv = mp_channel[RunnerDiagnosticUpdate](max_buffer_size=256)
         task_sender, task_recv = mp_channel[Task]()
@@ -166,6 +173,7 @@ class RunnerSupervisor:
                 task_recv,
                 cancel_recv,
                 logger,
+                context_token_limit,
             ),
             daemon=True,
         )

@@ -167,6 +167,7 @@ from skulk.shared.constants import (
 from skulk.shared.election import ElectionMessage
 from skulk.shared.logging import InterceptLogger
 from skulk.shared.models.capabilities import resolve_model_capability_profile
+from skulk.shared.models.memory_estimate import instance_context_token_limit
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -1801,6 +1802,34 @@ class API:
             "TODO: we should send a notification to the user to download the model"
         )
 
+    def _context_token_limit_for_model(self, model_id: ModelId) -> int | None:
+        """Most permissive context-token ceiling across instances of a model.
+
+        The API cannot tokenize (tokenizers live with the model files on the
+        hosting nodes), so this limit supports only the exact pre-flight check
+        on ``max_tokens`` alone; the runner enforces the precise
+        prompt-inclusive limit per instance (#145). When several instances
+        serve the same model the request may be routed to any of them, so the
+        maximum avoids falsely rejecting a request the largest instance could
+        still serve.
+        """
+        node_ram_totals = {
+            node_id: usage.ram_total
+            for node_id, usage in self.state.node_memory.items()
+        }
+        limits = [
+            limit
+            for instance in self.state.instances.values()
+            if instance.shard_assignments.model_id == model_id
+            and (
+                limit := instance_context_token_limit(
+                    instance.shard_assignments, node_ram_totals
+                )
+            )
+            is not None
+        ]
+        return max(limits) if limits else None
+
     async def _send_text_generation_with_images(
         self, task_params: TextGenerationTaskParams
     ) -> TextGeneration:
@@ -1810,6 +1839,27 @@ class API:
         # IndexError that crashes the runner (#233; empty messages reached
         # apply_chat_template([]) -> list index out of range).
         validate_renderable_text_generation(task_params)
+        # Context admission pre-flight (#145): the API has no tokenizer, so
+        # only the prompt-independent certainty is checked here — an explicit
+        # max_tokens that cannot fit even before counting a single prompt
+        # token. The runner performs the exact prompt-inclusive check.
+        context_token_limit = self._context_token_limit_for_model(task_params.model)
+        if (
+            context_token_limit is not None
+            and task_params.max_output_tokens is not None
+            and task_params.max_output_tokens >= context_token_limit
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"context_length_exceeded: max_tokens "
+                    f"({task_params.max_output_tokens}) cannot fit within this "
+                    f"model's usable context limit of {context_token_limit} "
+                    f"tokens (the smaller of the model's advertised context "
+                    f"length and what fits in memory next to the model weights "
+                    f"on the hosting node(s))"
+                ),
+            )
         images = task_params.images
         if not images:
             command = TextGeneration(task_params=task_params)

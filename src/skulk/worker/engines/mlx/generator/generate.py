@@ -72,6 +72,7 @@ from skulk.worker.engines.mlx.constants import (
     MAX_TOKENS,
 )
 from skulk.worker.engines.mlx.drafters import Drafter, build_drafter
+from skulk.worker.engines.mlx.generator.context_admission import admit_max_tokens
 from skulk.worker.engines.mlx.generator.speculative_sampling import (
     SamplingParams,
     ratio_accept,
@@ -2452,6 +2453,7 @@ def mlx_generate(
     mtp_weights: "dict[str, mx.array] | None" = None,
     assistant_model: object | None = None,
     model_card: ModelCard | None = None,
+    context_token_limit: int | None = None,
 ) -> Generator[GenerationResponse]:
     # Ensure that generation stats only contains peak memory for this generation
     mx.reset_peak_memory()
@@ -2548,6 +2550,18 @@ def mlx_generate(
             "prompt_tokens": len(all_prompt_tokens),
             **_vision_trace_attrs(vision),
         },
+    )
+
+    # Context admission must happen here: after vision (which finalizes the
+    # token count) and before any prefix-cache work or collective. Every rank
+    # tokenizes the identical prompt against the identical static limit, so
+    # all ranks reach the same verdict in lockstep — a rank-divergent
+    # rejection would deadlock the ring collectives (#145).
+    max_tokens = admit_max_tokens(
+        prompt_tokens=len(all_prompt_tokens),
+        requested_max_output_tokens=task.max_output_tokens,
+        default_max_output_tokens=MAX_TOKENS,
+        context_token_limit=context_token_limit,
     )
 
     # Do not use the prefix cache if we are trying to do benchmarks.
@@ -2868,7 +2882,7 @@ def mlx_generate(
     # token.
     last_token = prompt_tokens[-1:] if uses_pipeline_decode else prompt_tokens[-2:]
 
-    max_tokens = task.max_output_tokens or MAX_TOKENS
+    # max_tokens was resolved by context admission above, before prefill.
     accumulated_text = ""
     generated_text_parts: list[str] = []
     generation_start_time = time.perf_counter()
