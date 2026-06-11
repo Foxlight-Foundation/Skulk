@@ -7,7 +7,6 @@
 [![Version](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2FFoxlight-Foundation%2FSkulk%2Fmain%2Fpyproject.toml&query=%24.project.version&prefix=v&label=version&color=blue&style=flat-square)](https://foxlight-foundation.github.io/Skulk/release-notes/1.2.0/)
 [![Tests](https://img.shields.io/github/actions/workflow/status/Foxlight-Foundation/Skulk/pipeline.yml?branch=main&label=tests&style=flat-square&logo=github)](https://github.com/Foxlight-Foundation/Skulk/actions/workflows/pipeline.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-4c72b0?style=flat-square)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/Foxlight-Foundation/Skulk?style=flat-square&logo=github&label=stars&color=dfb317)](https://github.com/Foxlight-Foundation/Skulk/stargazers)
 
 [![Documentation](https://img.shields.io/badge/docs-documentation-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/)
 [![Build & Runtime Paths](https://img.shields.io/badge/docs-build_%26_runtime-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/build-and-runtime/)
