@@ -7,6 +7,8 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-06-11
+
 ### Fixed
 
 - **Abandoned requests can no longer storm the event log into election
