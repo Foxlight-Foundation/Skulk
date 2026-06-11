@@ -569,7 +569,23 @@ Important caveats:
 
 Protocol: production API, greedy decoding, 200-token completions, median of 3 runs per arm on the same live instance, M4-class Apple Silicon. The output is verification-exact: speculation produces the identical tokens plain decoding would have produced, so the gain is free. The ratios hold under longer generations and temperature sampling, and the percentage is the portable number: absolute tok/s scales with memory bandwidth, the ratio travels with the model. Full methodology and per-configuration discussion in the [Speculative Decoding guide](https://foxlight-foundation.github.io/Skulk/speculative-decoding/).
 
-For external context, production native-MTP serving on datacenter GPUs typically lands in the +30% to +80% band. Skulk reaches the top of that band on consumer hardware, and the multi-node pipeline results beat published distributed-speculation figures.
+<p align="center">
+  <img src="docs/benchmarks/skulk/mtp-vs-published.png" alt="Skulk's measured speculation gains against the published production band for datacenter GPUs" width="85%" />
+</p>
+
+For external context, production native-MTP serving on datacenter GPUs typically lands in the +30% to +80% band. Skulk's worst configuration enters that band on consumer hardware, and two configurations clear the top of it. The multi-node pipeline results beat published distributed-speculation figures on comparable clusters.
+
+<p align="center">
+  <img src="docs/benchmarks/skulk/mtp-depth-tuning.png" alt="Speedup by draft depth for four models, with the shipped per-card depth starred" width="85%" />
+</p>
+
+Draft depth is a measured property, not a guess: deeper chains trade acceptance for extra verify rows and the peak differs per model (single-node sweeps; the starred bar is the depth shipped in each model card). This is why `mtp_max_depth` lives on the card.
+
+<p align="center">
+  <img src="docs/benchmarks/skulk/mtp-robustness.png" alt="Speedups hold at 1000 tokens and under temperature sampling" width="75%" />
+</p>
+
+The gains are not an artifact of short greedy runs: the same instances keep most of their advantage at 1000-token generations and under temperature sampling, where speculation still preserves the output distribution exactly.
 
 ### Community benchmarks
 
