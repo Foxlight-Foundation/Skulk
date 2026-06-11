@@ -221,19 +221,29 @@ The React dashboard in `dashboard-react/` is the only supported UI.
 The normal dashboard flow is: confirm topology, launch a model, wait for it to become ready, then open chat.
 
 <p align="center">
-  <img src="docs/imgs/dash-1.png" alt="Skulk dashboard showing cluster topology and currently running models" width="80%" />
+  <img src="docs/imgs/dash-1.png" alt="Skulk dashboard cluster view: a four-node topology serving a Gemma 4 MoE placement" width="80%" />
 </p>
-<p align="center"><em>Start here: confirm the node or cluster looks healthy in the cluster view.</em></p>
+<p align="center"><em>Start here: confirm the node or cluster looks healthy in the cluster view. Shown: a Gemma 4 MoE placed across all four nodes of a live cluster, with per-node memory, GPU, and temperature at a glance.</em></p>
 
 <p align="center">
-  <img src="docs/imgs/dash-2.png" alt="Skulk dashboard model store" width="80%" />
+  <img src="docs/imgs/dash-2.png" alt="Skulk dashboard model store with the active instance panel" width="80%" />
 </p>
-<p align="center"><em>Next: launch or download a model from the Model Store view.</em></p>
+<p align="center"><em>Next: launch or download a model from the Model Store view. Running instances stay visible in the side panel wherever you are.</em></p>
 
 <p align="center">
-  <img src="docs/imgs/dash-3.png" alt="Skulk dashboard chat view" width="80%" />
+  <img src="docs/imgs/dash-3.png" alt="Skulk dashboard chat view with a streamed answer from the placed model" width="80%" />
 </p>
-<p align="center"><em>Then: chat once a model is placed and ready.</em></p>
+<p align="center"><em>Then: chat once a model is placed and ready, with conversation history in the sidebar.</em></p>
+
+<p align="center">
+  <img src="docs/imgs/dash-4.png" alt="Skulk placement manager modal with a live cluster preview" width="80%" />
+</p>
+<p align="center"><em>Placing a model: the placement manager previews exactly how a model will shard across the cluster before you commit, with per-node include/exclude pills and a Pipeline/Tensor selector.</em></p>
+
+<p align="center">
+  <img src="docs/imgs/dash-5.png" alt="Skulk observability panel showing a distributed trace across four ranks" width="80%" />
+</p>
+<p align="center"><em>Debugging a distributed request: the observability panel's Traces tab shows one request's prefill, decode, and KV-cache phases across all four ranks, inline, without the trace data ever leaving the cluster.</em></p>
 
 ## Single-Node Quick Start
 
