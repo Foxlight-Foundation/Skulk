@@ -4,7 +4,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2FFoxlight-Foundation%2FSkulk%2Fmain%2Fpyproject.toml&query=%24.project.version&prefix=v&label=version&color=blue&style=flat-square)](https://foxlight-foundation.github.io/Skulk/release-notes/1.2.0/)
+[![Version](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2FFoxlight-Foundation%2FSkulk%2Fmain%2Fpyproject.toml&query=%24.project.version&prefix=v&label=version&color=blue&style=flat-square)](CHANGELOG.md)
 [![Tests](https://img.shields.io/github/actions/workflow/status/Foxlight-Foundation/Skulk/pipeline.yml?branch=main&label=tests&style=flat-square&logo=github)](https://github.com/Foxlight-Foundation/Skulk/actions/workflows/pipeline.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-4c72b0?style=flat-square)](LICENSE)
 
@@ -18,27 +18,22 @@
 </div>
 
 <br>
-Skulk runs AI models across one or more machines as a single cluster: point it at a few Apple Silicon machines and
-it pools their memory and GPUs behind one OpenAI-compatible endpoint. Skulk builds on the distributed
-inference foundations provided by exo and adds:
+Skulk runs AI models across one or more machines as a single cluster: point it at a few Apple Silicon machines and it pools their memory and GPUs behind one OpenAI-compatible endpoint. Skulk builds on the distributed inference foundations provided by [exo](#about-exo) and adds:
 
-- Production-grade speculative decoding delivering 1.16–2.2× speedups across nodes and on heterogeneous hardware. 
+- Production-grade speculative decoding delivering 1.16–2.2× speedups across nodes and on heterogeneous hardware.
 - A real-time React dashboard with easy access to:
   - A central model store
-  - A placement manager with live cluster
-preview
+  - A placement manager with live cluster preview
   - Chat
-  - Deep observability (cross-rank trace waterfalls, cluster timelines, and centralized
-logging). 
+  - Deep observability (cross-rank trace waterfalls, cluster timelines, and centralized logging)
 - Flexible API wire formats including:
   - OpenAI Chat Completions and Responses
   - Claude Messages
   - Ollama
-- One pipeline with continuous batching, selectable KV-cache quantization
-backends, and rational context-length control 
-- Stability hardening including
+- One pipeline with continuous batching, selectable KV-cache quantization backends, and rational context-length control
+- Stability hardening including:
   - Placement failover in case nodes (including the master) go down
-  - crash loops protection
+  - Crash-loop protection
   - Smarter placement management so that oversized placements are refused before they cause failures
 - And much more.
 
