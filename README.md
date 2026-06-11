@@ -581,12 +581,6 @@ For external context, production native-MTP serving on datacenter GPUs typically
 
 Draft depth is a measured property, not a guess: deeper chains trade acceptance for extra verify rows and the peak differs per model (single-node sweeps; the starred bar is the depth shipped in each model card). This is why `mtp_max_depth` lives on the card.
 
-<p align="center">
-  <img src="docs/benchmarks/skulk/mtp-robustness.png" alt="Speedups hold at 1000 tokens and under temperature sampling" width="75%" />
-</p>
-
-The gains are not an artifact of short greedy runs: the same instances keep most of their advantage at 1000-token generations and under temperature sampling, where speculation still preserves the output distribution exactly.
-
 ### Community benchmarks
 
 <details>
