@@ -1,0 +1,11 @@
+Skulk
+Copyright 2025-2026 Foxlight Foundation
+
+This product includes software developed as part of the exo project
+(https://github.com/exo-explore/exo), Copyright 2025 Exo Technologies Ltd,
+licensed under the Apache License, Version 2.0.
+
+Skulk began as a fork of exo and has substantially diverged. The portions of
+this codebase derived from exo remain subject to Exo Technologies Ltd's
+copyright; all other portions are Copyright Foxlight Foundation. The entire
+work is distributed under the Apache License, Version 2.0 (see LICENSE).
