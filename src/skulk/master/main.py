@@ -76,6 +76,7 @@ from skulk.shared.types.tasks import (
 from skulk.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
 )
+from skulk.shared.types.telemetry import TelemetryView
 from skulk.shared.types.worker.instances import InstanceId
 from skulk.store.config import resolve_config_path
 from skulk.utils.channels import Receiver, Sender
@@ -191,9 +192,16 @@ class Master:
         download_command_sender: Sender[ForwarderDownloadCommand],
         snapshot_event_cadence: int = SNAPSHOT_EVENT_CADENCE,
         initial_state: State | None = None,
+        telemetry_view: TelemetryView | None = None,
     ):
         self.node_id = node_id
         self.session_id = session_id
+        # Live node telemetry off the event log (#279). Node-owned so it
+        # survives this master's election: a freshly promoted master keeps the
+        # cluster's current node_resources instead of starting blind and
+        # risking a placement on a management node. None only in tests/standalone
+        # construction; the planner falls back to "no telemetry constraints".
+        self._telemetry_view = telemetry_view if telemetry_view is not None else TelemetryView()
         # A promoted master seeds its session from the node's prior
         # replicated state (shared/session_carryover.py) so placements
         # survive failover (#273) — previously every new session started
@@ -543,7 +551,7 @@ class Master:
                                 self.state.node_network,
                                 download_status=self.state.downloads,
                                 excluded_nodes=set(command.excluded_nodes),
-                                node_resources=self.state.node_resources,
+                                node_resources=self._telemetry_view.node_resources,
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks

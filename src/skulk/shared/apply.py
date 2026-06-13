@@ -435,10 +435,12 @@ def apply_node_gathered_info(event: NodeGatheredInfo, state: State) -> State:
                 ),
             }
         case NodeResources():
-            update["node_resources"] = {
-                **state.node_resources,
-                event.node_id: info,
-            }
+            # NodeResources travels the telemetry plane (#279), not the event
+            # log — the worker routes it to the TELEMETRY topic and it lands in
+            # TelemetryView, never here. Kept as an explicit no-op so the match
+            # over GatheredInfo stays exhaustive and a stray log-path delivery
+            # is harmless rather than a crash.
+            pass
 
     return state.model_copy(update=update)
 

@@ -52,7 +52,7 @@ from skulk.shared.types.events import (
     TopologyEdgeDeleted,
 )
 from skulk.shared.types.multiaddr import Multiaddr
-from skulk.shared.types.profiling import MemoryUsage
+from skulk.shared.types.profiling import MemoryUsage, NodeResources
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import (
     CancelTask,
@@ -67,6 +67,7 @@ from skulk.shared.types.tasks import (
     TaskStatus,
     TextGeneration,
 )
+from skulk.shared.types.telemetry import NodeTelemetry
 from skulk.shared.types.topology import Connection, SocketConnection
 from skulk.shared.types.worker.downloads import (
     DownloadCompleted,
@@ -302,6 +303,7 @@ class Worker:
         # but I think it's the correct way to be thinking about commands
         command_sender: Sender[ForwarderCommand],
         download_command_sender: Sender[ForwarderDownloadCommand],
+        telemetry_sender: Sender[NodeTelemetry] | None = None,
         store_client: ModelStoreClient | None = None,
         staging_config: StagingNodeConfig | None = None,
     ):
@@ -310,6 +312,7 @@ class Worker:
         self.event_sender = event_sender
         self.command_sender = command_sender
         self.download_command_sender = download_command_sender
+        self._telemetry_sender = telemetry_sender
         self._store_client = store_client
         self._staging_config = staging_config
 
@@ -437,6 +440,17 @@ class Worker:
         with recv as info_stream:
             async for info in info_stream:
                 try:
+                    # Telemetry plane (#279): NodeResources is gossiped on the
+                    # telemetry topic, off the event log. Everything else still
+                    # travels as an indexed NodeGatheredInfo event in slice 1.
+                    if (
+                        isinstance(info, NodeResources)
+                        and self._telemetry_sender is not None
+                    ):
+                        await self._telemetry_sender.send(
+                            NodeTelemetry(node_id=self.node_id, info=info)
+                        )
+                        continue
                     await self.event_sender.send(
                         NodeGatheredInfo(
                             node_id=self.node_id,
