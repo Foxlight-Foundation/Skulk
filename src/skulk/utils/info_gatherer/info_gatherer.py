@@ -25,6 +25,7 @@ from skulk.shared.types.profiling import (
     MachMemoryCategories,
     MemoryUsage,
     NetworkInterfaceInfo,
+    NodeResources,
     ThunderboltBridgeStatus,
     parse_vm_stat_output,
 )
@@ -458,6 +459,7 @@ GatheredInfo = (
     | NodeConfig
     | MiscData
     | StaticNodeInformation
+    | NodeResources
     | NodeDiskUsage
 )
 
@@ -472,6 +474,7 @@ class InfoGatherer:
     mactop_interval: float | None = 1 if IS_DARWIN else None
     thunderbolt_bridge_poll_interval: float | None = 10 if IS_DARWIN else None
     static_info_poll_interval: float | None = 60
+    node_resources_poll_interval: float | None = 60
     rdma_ctl_poll_interval: float | None = 10 if IS_DARWIN else None
     disk_poll_interval: float | None = 30
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
@@ -498,6 +501,7 @@ class InfoGatherer:
                 tg.start_soon(self._monitor_memory_usage)
                 tg.start_soon(self._monitor_misc)
                 tg.start_soon(self._monitor_static_info)
+                tg.start_soon(self._monitor_node_resources)
                 tg.start_soon(self._monitor_disk_usage)
 
                 nc = await NodeConfig.gather()
@@ -549,6 +553,22 @@ class InfoGatherer:
             except Exception as e:
                 logger.warning(f"Error gathering static node info: {e}")
             await anyio.sleep(self.static_info_poll_interval)
+
+    async def _monitor_node_resources(self):
+        if self.node_resources_poll_interval is None:
+            return
+        while True:
+            try:
+                with fail_after(30):
+                    await self.info_sender.send(await NodeResources.gather())
+            except (ClosedResourceError, BrokenResourceError):
+                # Consumer gone: stop signal, not a fault. Escape the
+                # per-iteration catch-all so the loop cannot spin on a dead
+                # channel (#266); run() converts it into a clean stop.
+                raise
+            except Exception as e:
+                logger.warning(f"Error gathering node resources: {e}")
+            await anyio.sleep(self.node_resources_poll_interval)
 
     async def _monitor_misc(self):
         if self.misc_poll_interval is None:

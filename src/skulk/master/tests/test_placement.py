@@ -23,7 +23,11 @@ from skulk.shared.types.events import (
 )
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.multiaddr import Multiaddr
-from skulk.shared.types.profiling import NetworkInterfaceInfo, NodeNetworkInfo
+from skulk.shared.types.profiling import (
+    NetworkInterfaceInfo,
+    NodeNetworkInfo,
+    NodeResources,
+)
 from skulk.shared.types.tasks import TaskId, TaskStatus, TextGeneration
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from skulk.shared.types.topology import Connection, SocketConnection
@@ -923,3 +927,88 @@ def test_placement_does_not_prefer_cycle_with_failed_download(
     assigned_nodes = set(instance.shard_assignments.node_to_runner.keys())
     # node_a should win on RAM tiebreaker since failed download scores 0.0
     assert assigned_nodes == {node_a}
+
+
+def test_management_node_is_excluded_from_placement() -> None:
+    """A node declaring participation="management" must never receive an
+    inference shard, even though it is topologically present and has memory.
+    The planner routes to the full-participation node instead (#149)."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_resources={
+            node_a: NodeResources(participation="management"),
+            node_b: NodeResources(participation="full"),
+        },
+    )
+
+    assert len(placements) == 1
+    instance = next(iter(placements.values()))
+    assert set(instance.shard_assignments.node_to_runner.keys()) == {node_b}
+
+
+def test_all_management_nodes_fail_to_place() -> None:
+    """If every candidate node is management-only, placement raises rather
+    than assigning a shard to a non-participating node."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    with pytest.raises(ValueError, match="ineligible for this model"):
+        place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources={
+                node_a: NodeResources(participation="management"),
+                node_b: NodeResources(participation="management"),
+            },
+        )
+
+
+def test_backend_incompatible_node_is_excluded() -> None:
+    """A node whose advertised backends do not intersect the card's
+    compatible_backends (default {"mlx"}) is filtered out (#149)."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_resources={
+            node_a: NodeResources(backends=frozenset({"llama_cpp"})),
+            node_b: NodeResources(backends=frozenset({"mlx"})),
+        },
+    )
+
+    assert len(placements) == 1
+    instance = next(iter(placements.values()))
+    assert set(instance.shard_assignments.node_to_runner.keys()) == {node_b}
+
+
+def test_missing_node_resources_is_treated_as_eligible() -> None:
+    """Nodes with no resources entry yet (gossip still warming up) must remain
+    placeable, matching the pre-#149 full/mlx default — no regression."""
+    topology, _node_a, _node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_resources={},  # nothing gossiped yet
+    )
+
+    assert len(placements) == 1

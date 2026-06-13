@@ -245,6 +245,26 @@ class ToolingCardConfig(CamelCaseModel):
         ]
 
 
+class PlacementCardConfig(CamelCaseModel):
+    """Hardware/routing constraints the planner reads from a model card (#149).
+
+    The only card section the planner consults directly. Defaults describe the
+    current implicit assumption (an MLX model with no extra memory floor), so
+    cards without a ``[placement]`` section behave exactly as before.
+    """
+
+    compatible_backends: frozenset[str] = frozenset({"mlx"})
+    """Hard constraint: only route to nodes whose advertised backends intersect
+    this set. Making the implicit ``{"mlx"}`` explicit is what enables future
+    heterogeneous (llama_cpp / rocm / cuda) routing."""
+
+    min_vram_gib: float | None = None
+    """Hard constraint: planner gates on node available memory when set."""
+
+    max_context_tokens: int | None = None
+    """Soft: caps the placement-time KV budget check (see #145) when set."""
+
+
 class RuntimeCapabilityCardConfig(CamelCaseModel):
     """Optional runtime behavior hints for a model card."""
 
@@ -374,6 +394,7 @@ class ModelCard(CamelCaseModel):
     modalities: ModalitiesCardConfig | None = None
     tooling: ToolingCardConfig | None = None
     runtime: RuntimeCapabilityCardConfig | None = None
+    placement: PlacementCardConfig = PlacementCardConfig()
 
     @model_validator(mode="after")
     def _fill_vision_weights_repo(self) -> "ModelCard":

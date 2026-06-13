@@ -29,7 +29,11 @@ from skulk.shared.types.events import (
     TaskStatusUpdated,
 )
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.profiling import MemoryUsage, NodeNetworkInfo
+from skulk.shared.types.profiling import (
+    MemoryUsage,
+    NodeNetworkInfo,
+    NodeResources,
+)
 from skulk.shared.types.tasks import Task, TaskId, TaskStatus
 from skulk.shared.types.worker.downloads import (
     DownloadCompleted,
@@ -132,6 +136,7 @@ def place_instance(
     required_nodes: set[NodeId] | None = None,
     download_status: Mapping[NodeId, Sequence[DownloadProgress]] | None = None,
     excluded_nodes: set[NodeId] | None = None,
+    node_resources: Mapping[NodeId, NodeResources] | None = None,
 ) -> dict[InstanceId, Instance]:
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
@@ -175,6 +180,36 @@ def place_instance(
                 "Check the excluded_nodes list — node IDs change when a "
                 "cluster session restarts."
             )
+
+    # Hard-filter on node participation and backend compatibility (#149).
+    # A node is ineligible for an inference shard of THIS model when it
+    # declares a non-``full`` participation role (e.g. a ``management`` /
+    # edge node that serves the API but never joins a ring), or when its
+    # advertised backends do not intersect the card's compatible_backends.
+    # Nodes with no resources entry yet (gossip still warming up) are treated
+    # as eligible so behavior matches the pre-#149 default of full/mlx.
+    if node_resources:
+        compatible_backends = command.model_card.placement.compatible_backends
+        ineligible_nodes = {
+            node_id
+            for node_id, resources in node_resources.items()
+            if resources.participation != "full"
+            or not (resources.backends & compatible_backends)
+        }
+        if ineligible_nodes:
+            candidate_cycles = [
+                cycle
+                for cycle in candidate_cycles
+                if not (set(cycle.node_ids) & ineligible_nodes)
+            ]
+            if not candidate_cycles:
+                raise PlacementError(
+                    f"All cycles of at least {command.min_nodes} node(s) touch a "
+                    f"node ineligible for this model: either a non-participating "
+                    f"(management/edge) node or one whose backends do not match "
+                    f"the model's compatible_backends "
+                    f"({sorted(compatible_backends)})."
+                )
 
     # Filter to cycles containing all required nodes (subset matching)
     if required_nodes:

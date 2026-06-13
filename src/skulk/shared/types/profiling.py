@@ -1,6 +1,8 @@
+import os
 import re
 import shutil
 import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal, Self, final
@@ -214,6 +216,44 @@ class NodeIdentity(CamelCaseModel):
     os_build_version: str = "Unknown"
     skulk_version: str = "Unknown"
     skulk_commit: str = "Unknown"
+
+
+NodeParticipation = Literal["full", "management", "ffn_only"]
+"""How deeply a node participates in inference (Axis 1 of the heterogeneous-
+participation model, #149/#286):
+
+- ``full``: attention + FFN; an ordinary inference rank (today's default).
+- ``management``: control plane only; sees the whole cluster and serves the
+  API/dashboard, but the planner never assigns it an inference shard. The
+  declared form of the ``excluded_nodes`` workaround (e.g. a remote node on a
+  high-latency link).
+- ``ffn_only``: reserved for LARQL slice placement (FFN/expert but not
+  attention); not yet honored by the planner.
+"""
+
+
+class NodeResources(CamelCaseModel):
+    """Inference-relevant capability and policy a node advertises to the planner.
+
+    Mixes probed capability (``backends``) with operator-declared policy
+    (``participation``); both ride the same node-info gossip path. The planner
+    reads this to hard-filter placement candidates. Defaults describe a normal
+    Apple-Silicon full-participation node so pre-upgrade gossip and missing
+    entries stay non-breaking.
+    """
+
+    backends: frozenset[str] = frozenset({"mlx"})
+    participation: NodeParticipation = "full"
+
+    @classmethod
+    async def gather(cls) -> "NodeResources":
+        """Probe backends and read the declared participation role at startup."""
+        backends = frozenset({"mlx"}) if sys.platform == "darwin" else frozenset()
+        declared = os.environ.get("SKULK_NODE_PARTICIPATION", "full").strip().lower()
+        participation: NodeParticipation = (
+            declared if declared in ("full", "management", "ffn_only") else "full"
+        )
+        return cls(backends=backends, participation=participation)
 
 
 class NodeNetworkInfo(CamelCaseModel):

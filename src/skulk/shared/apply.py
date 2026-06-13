@@ -35,6 +35,7 @@ from skulk.shared.types.profiling import (
     NodeIdentity,
     NodeNetworkInfo,
     NodeRdmaCtlStatus,
+    NodeResources,
     NodeThunderboltInfo,
     ThunderboltBridgeStatus,
 )
@@ -432,6 +433,11 @@ def apply_node_gathered_info(event: NodeGatheredInfo, state: State) -> State:
                     enabled=info.enabled,
                     interfaces_present=info.interfaces_present,
                 ),
+            }
+        case NodeResources():
+            update["node_resources"] = {
+                **state.node_resources,
+                event.node_id: info,
             }
 
     return state.model_copy(update=update)
