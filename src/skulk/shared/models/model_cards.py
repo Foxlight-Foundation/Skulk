@@ -1,6 +1,7 @@
 import json
+from collections.abc import Iterable
 from enum import Enum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 import aiofiles
 import aiofiles.os as aios
@@ -15,6 +16,7 @@ from pydantic import (
     PositiveInt,
     ValidationError,
     ValidationInfo,
+    field_serializer,
     field_validator,
     model_validator,
 )
@@ -245,6 +247,42 @@ class ToolingCardConfig(CamelCaseModel):
         ]
 
 
+class PlacementCardConfig(CamelCaseModel):
+    """Hardware/routing constraints the planner reads from a model card (#149).
+
+    The only card section the planner consults directly. Defaults describe the
+    current implicit assumption (an MLX model with no extra memory floor), so
+    cards without a ``[placement]`` section behave exactly as before.
+    """
+
+    compatible_backends: frozenset[str] = frozenset({"mlx"})
+    """Hard constraint: only route to nodes whose advertised backends intersect
+    this set. Making the implicit ``{"mlx"}`` explicit is what enables future
+    heterogeneous (llama_cpp / rocm / cuda) routing."""
+
+    min_vram_gib: float | None = None
+    """Hard constraint: planner gates on node available memory when set."""
+
+    max_context_tokens: int | None = None
+    """Soft: caps the placement-time KV budget check (see #145) when set."""
+
+    @field_validator("compatible_backends", mode="before")
+    @classmethod
+    def _coerce_compatible_backends(cls, v: object) -> object:
+        # TOML provides a list (compatible_backends = ["mlx"]); strict mode
+        # would reject it for a frozenset field and make any card with an
+        # explicit [placement] section unloadable. Coerce before validation.
+        if isinstance(v, (list, tuple, set, frozenset)):
+            return frozenset(cast("Iterable[str]", v))
+        return v
+
+    @field_serializer("compatible_backends")
+    def _serialize_compatible_backends(self, value: frozenset[str]) -> list[str]:
+        # tomlkit cannot encode a frozenset, and ModelCard.save() now always
+        # includes this section. Emit a sorted list for TOML and JSON alike.
+        return sorted(value)
+
+
 class RuntimeCapabilityCardConfig(CamelCaseModel):
     """Optional runtime behavior hints for a model card."""
 
@@ -374,6 +412,7 @@ class ModelCard(CamelCaseModel):
     modalities: ModalitiesCardConfig | None = None
     tooling: ToolingCardConfig | None = None
     runtime: RuntimeCapabilityCardConfig | None = None
+    placement: PlacementCardConfig = PlacementCardConfig()
 
     @model_validator(mode="after")
     def _fill_vision_weights_repo(self) -> "ModelCard":

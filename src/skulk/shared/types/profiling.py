@@ -1,12 +1,14 @@
+import os
 import re
 import shutil
 import subprocess
-from collections.abc import Sequence
+import sys
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Literal, Self, final
+from typing import Literal, Self, cast, final
 
 import psutil
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer, field_validator
 
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.thunderbolt import ThunderboltIdentifier
@@ -214,6 +216,63 @@ class NodeIdentity(CamelCaseModel):
     os_build_version: str = "Unknown"
     skulk_version: str = "Unknown"
     skulk_commit: str = "Unknown"
+
+
+NodeParticipation = Literal["full", "management", "ffn_only"]
+"""How deeply a node participates in inference (Axis 1 of the heterogeneous-
+participation model, #149/#286):
+
+- ``full``: attention + FFN; an ordinary inference rank (today's default).
+- ``management``: control plane only; sees the whole cluster and serves the
+  API/dashboard, but the planner never assigns it an inference shard. The
+  declared form of the ``excluded_nodes`` workaround (e.g. a remote node on a
+  high-latency link).
+- ``ffn_only``: reserved for LARQL slice placement (FFN/expert but not
+  attention); not yet honored by the planner.
+"""
+
+
+class NodeResources(CamelCaseModel):
+    """Inference-relevant capability and policy a node advertises to the planner.
+
+    Mixes probed capability (``backends``) with operator-declared policy
+    (``participation``); both ride the same node-info gossip path. The planner
+    reads this to hard-filter placement candidates. Defaults describe a normal
+    Apple-Silicon full-participation node so pre-upgrade gossip and missing
+    entries stay non-breaking.
+    """
+
+    backends: frozenset[str] = frozenset({"mlx"})
+    participation: NodeParticipation = "full"
+
+    @field_validator("backends", mode="before")
+    @classmethod
+    def _coerce_backends(cls, v: object) -> object:
+        # Strict mode rejects a list where a frozenset is declared, but the
+        # wire path (model_dump(mode="json") -> array -> model_validate) and
+        # any list-shaped input arrive as a list. Coerce iterables to a
+        # frozenset before strict validation so node_resources actually
+        # populates over gossip (without this the feature is inert).
+        if isinstance(v, (list, tuple, set, frozenset)):
+            return frozenset(cast("Iterable[str]", v))
+        return v
+
+    @field_serializer("backends")
+    def _serialize_backends(self, value: frozenset[str]) -> list[str]:
+        # Emit a sorted list in both json and python dump modes so JSON wire
+        # encoding and TOML serialization (tomlkit cannot encode a frozenset)
+        # both succeed and round-trip deterministically.
+        return sorted(value)
+
+    @classmethod
+    async def gather(cls) -> "NodeResources":
+        """Probe backends and read the declared participation role at startup."""
+        backends = frozenset({"mlx"}) if sys.platform == "darwin" else frozenset()
+        declared = os.environ.get("SKULK_NODE_PARTICIPATION", "full").strip().lower()
+        participation: NodeParticipation = (
+            declared if declared in ("full", "management", "ffn_only") else "full"
+        )
+        return cls(backends=backends, participation=participation)
 
 
 class NodeNetworkInfo(CamelCaseModel):

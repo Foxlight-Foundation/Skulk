@@ -13,6 +13,7 @@ from skulk.shared.types.profiling import (
     NodeIdentity,
     NodeNetworkInfo,
     NodeRdmaCtlStatus,
+    NodeResources,
     NodeThunderboltInfo,
     SystemPerformanceProfile,
     ThunderboltBridgeStatus,
@@ -58,6 +59,7 @@ class State(CamelCaseModel):
     node_thunderbolt: Mapping[NodeId, NodeThunderboltInfo] = {}
     node_thunderbolt_bridge: Mapping[NodeId, ThunderboltBridgeStatus] = {}
     node_rdma_ctl: Mapping[NodeId, NodeRdmaCtlStatus] = {}
+    node_resources: Mapping[NodeId, NodeResources] = {}
 
     # Detected cycles where all nodes have Thunderbolt bridge enabled (>2 nodes)
     thunderbolt_bridge_cycles: Sequence[Sequence[NodeId]] = []

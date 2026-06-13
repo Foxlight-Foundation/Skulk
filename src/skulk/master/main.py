@@ -543,6 +543,7 @@ class Master:
                                 self.state.node_network,
                                 download_status=self.state.downloads,
                                 excluded_nodes=set(command.excluded_nodes),
+                                node_resources=self.state.node_resources,
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
