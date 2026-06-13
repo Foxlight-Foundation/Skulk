@@ -13,13 +13,13 @@ can run on different engines, and — because placement already assigns each
 instance to its own subset of nodes — different engines can run concurrently
 on different sub-clusters with no central conflict.
 
-> **One decision is deliberately deferred** (see
-> [§9 Open Decisions](#9-open-decisions)): *how* an engine is selected per
-> model (an explicit `engine` field on the model card vs. a per-`ModelTask`
-> default vs. a registry heuristic). Phases 1–3 below are intentionally
-> structured so that this decision can be made late without rework. Do **not**
-> hardcode a selection policy before that decision is made; route every
-> selection call through the single resolver seam defined in Phase 3.
+> **Engine-selection policy is decided** (see
+> [§9.1](#91-engine-selection-policy-decided)): an explicit, optional
+> `engine` field on the `ModelCard`, defaulting to a per-`ModelTask` mapping
+> when unset. Phases 1–3 still route every selection call through the single
+> resolver seam defined in Phase 3 (`registry.resolve_engine`), so the field
+> and its validation land as a localized change in Phase 3 — not scattered
+> across `bootstrap`, `plan.py`, or the host.
 
 ---
 
@@ -177,8 +177,8 @@ full `ModelCard` (`BaseShardMetadata.model_card`). `ModelCard` flows
 master → placement → `Instance` → `ShardMetadata` → `BoundInstance` →
 `RunnerSupervisor` → `entrypoint`. **So whatever identifies the engine, if it
 lives on the `ModelCard`, already reaches every node and every runner with zero
-new plumbing through placement.** This is why the selection-policy decision can
-be deferred cheaply: the *transport* for the decision already exists.
+new plumbing through placement.** This is what makes the decided `engine` card
+field (§9.1) nearly free to plumb: the *transport* for it already exists.
 
 ### 2.7 Master-side coupling: the memory model
 
@@ -201,7 +201,7 @@ worker/runner/host.py            # ONE generic pipeline host: lifecycle SM, IPC,
 worker/engines/base.py           # InferenceEngine protocol + shared value types
                                  #   (EngineCapabilities, EngineTopology, EngineResult).
 worker/engines/registry.py       # The SINGLE selection seam: (ModelCard) -> EngineFactory.
-                                 #   Selection policy is deferred (§9) but lives ONLY here.
+                                 #   engine card field + ModelTask default (§9.1); lives ONLY here.
 worker/engines/mlx_lm/           # today's llm_inference engine, behind the protocol
 worker/engines/transformers/     # today's embeddings engine, behind the protocol
 worker/engines/image/            # today's image engine, behind the protocol
@@ -358,28 +358,45 @@ identically (add focused characterization tests if missing). The three former
 `runner.py` files contain no lifecycle/IPC boilerplate — only engine logic (or
 are deleted in favor of `worker/engines/*/engine.py`).
 
-### Phase 3 — Registry + selection seam (policy still deferred)
+### Phase 3 — Registry + selection seam + the `engine` card field
 
-**Goal:** Route engine selection through exactly one resolver, without yet
-committing to a selection *policy*.
+**Goal:** Route engine selection through exactly one resolver and land the
+decided selection policy (§9.1): an explicit, optional `engine` field on the
+card with a per-`ModelTask` default.
 
 1. Create `worker/engines/registry.py` with:
-   - an `EngineFactory` registration table keyed by an `engine_id: str`,
-   - `resolve_engine(model_card: ModelCard) -> EngineFactory`.
+   - an `EngineFactory` registration table keyed by `EngineId`
+     (`NewType("EngineId", str)` — see §9.1 for why not a `Literal`),
+   - `resolve_engine(model_card: ModelCard) -> EngineFactory`,
+   - `is_registered(engine_id: EngineId) -> bool` for placement-time validation.
 2. Replace the `if/elif/else` in `bootstrap.entrypoint`
    (`bootstrap.py:437-464`) with `resolve_engine(card)(...)`.
-3. For now, `resolve_engine` reproduces **today's exact behavior** via the
-   `ModelTask`-based mapping (`TextEmbedding → transformers`,
-   `TextToImage/ImageToImage → image`, else `mlx_lm`). This is the *fallback*
-   that the deferred policy (§9) will layer on top of — keep it as the default
-   branch so nothing breaks when the real selector lands.
-4. Add `apply_mlx_patches()` invocation into the MLX engine factory rather than
+3. Add `engine: EngineId | None = None` to `ModelCard`
+   (`shared/models/model_cards.py:355`). `resolve_engine` selects:
+   - the card's `engine` if set and registered;
+   - otherwise the per-`ModelTask` default, which **reproduces today's exact
+     behavior** (`TextEmbedding → transformers`,
+     `TextToImage/ImageToImage → image`, else `mlx_lm`).
+   The field is additive and optional, so every existing card and every old
+   node keeps working unchanged (rolling-upgrade safe — see §2.5).
+4. **Validate at placement time, not at runner spawn.** The master must reject a
+   placement whose card names an unregistered engine (`is_registered` is False)
+   with a clear operator-facing error, rather than letting every rank spawn and
+   fail in `bootstrap` (which would trip the crash circuit breaker). This is the
+   same fail-fast posture as the existing oversized-placement refusal.
+5. **Do not** add an operator-level engine override (env var / settings). Engine
+   choice changes memory footprint and topology — exactly what the master
+   fit-check reasons about — so an out-of-band override could desync placement
+   from what the runner actually loads. The card is the single source of truth;
+   the escape hatch is "edit the card, re-place."
+6. Add `apply_mlx_patches()` invocation into the MLX engine factory rather than
    `bootstrap` (so non-MLX engines don't import/patch MLX).
 
-**Acceptance:** Observable behavior identical to Phase 2. The `is_image_model`/
-`is_embedding_model` ladder in `bootstrap.py` is gone; all selection flows
-through `registry.resolve_engine`. Adding a new engine is now a registration,
-not a `bootstrap` edit.
+**Acceptance:** With no `engine` set on any card, observable behavior is
+identical to Phase 2. The `is_image_model`/`is_embedding_model` ladder in
+`bootstrap.py` is gone; all selection flows through `registry.resolve_engine`.
+A card naming an unregistered engine is refused at placement with a clear error.
+Adding a new engine is now a registration, not a `bootstrap` edit.
 
 ### Phase 4 — Make master + planner engine-capability-aware (the real risk)
 
@@ -418,8 +435,8 @@ suite + a multi-node placement test).
 of the abstraction, exercising same-task/different-engine selection.
 
 - Implement `worker/engines/mlx_vllm/engine.py` against the protocol.
-- Wire the deferred selection policy (§9) so a `TextGeneration` model can route
-  to either `mlx_lm` or `mlx_vllm`.
+- Register `mlx_vllm` so a `TextGeneration` card with `engine = "mlx_vllm"`
+  (§9.1) routes to it while unset cards stay on the `mlx_lm` default.
 - Validate two instances of different engines running concurrently on disjoint
   node subsets (the sub-cluster scenario).
 
@@ -472,9 +489,9 @@ selection seam), so per `CLAUDE.md`'s mandatory workflow rules:
   `worker/engines/*` layout.
 - Update `CLAUDE.md`'s Architecture section (Rust/engine/runner description) and
   `CONTRIBUTING.md` if directory structure changes.
-- If a new env var or `ModelCard` field is added for engine selection (§9), it
-  must be documented in both architecture docs and `CHANGELOG.md` +
-  `website/docs/release-notes/`.
+- The new optional `engine` field on `ModelCard` (§9.1) must be documented in
+  both architecture docs and `CHANGELOG.md` + `website/docs/release-notes/`,
+  and reflected in the OpenAPI spec (the card flows into `/v1/models`).
 - No API endpoints change in Phases 1–4. If `/v1/models` later exposes engine
   identity, update `website/docs/api-guide.md` and the OpenAPI decorators.
 
@@ -493,33 +510,68 @@ selection seam), so per `CLAUDE.md`'s mandatory workflow rules:
 
 ---
 
-## 9. Open Decisions
+## 9. Decisions & remaining open questions
 
-### 9.1 Engine selection policy (DEFERRED — do not pre-empt)
+### 9.1 Engine selection policy (DECIDED)
 
-The user has deferred *how* an engine is chosen per model. The three candidates:
+**Decision:** an explicit, optional `engine` field on the `ModelCard`, defaulting
+to a per-`ModelTask` mapping when unset. Implemented in Phase 3, resolved through
+the single `registry.resolve_engine(model_card)` seam.
 
-1. **Explicit `engine: str | None` on `ModelCard`**, with a per-`ModelTask`
-   default fallback. Most flexible; the only option that expresses "two models,
-   same task, different engine." Rides existing card transport for free
-   (§2.6). Cost: a new gossiped/persisted card field (additive, documented).
-2. **Keep `ModelTask` as the only key.** Simplest; cannot express
-   same-task/different-engine — defeats part of the stated goal. Effectively the
-   current behavior.
-3. **Registry heuristic** (engine inferred from card facts: family, quant,
-   components) with no explicit field. No card change; least predictable.
+```python
+# shared/types/common.py (or models/) — validated against the registry, not closed.
+EngineId = NewType("EngineId", str)
 
-**Implementation constraint regardless of choice:** all selection must flow
-through `registry.resolve_engine(model_card)` (Phase 3). The default branch
-reproduces today's `ModelTask` mapping, so whichever policy is chosen later is a
-*localized* change to one function plus (for option 1) one additive card field.
-**Do not** scatter selection logic into `bootstrap`, `plan.py`, or the host.
+# shared/models/model_cards.py — additive, optional, rolling-upgrade safe.
+class ModelCard(CamelCaseModel):
+    ...
+    engine: EngineId | None = None  # None ⇒ per-ModelTask default
+```
 
-> Recommendation when the decision is revisited: **option 1** — it is the only
-> one that satisfies the "different models, different engines" requirement, and
-> §2.6 makes it nearly free to plumb.
+**Why this option** (over "keep `ModelTask` as the only key" or "registry
+heuristic from card facts"):
 
-### 9.2 Distributed topology ownership
+- It is the **only** option that expresses "two models, same task, different
+  engine" — the core requirement. The `ModelTask`-only approach structurally
+  can't; a heuristic can but only implicitly.
+- **Explicit beats implicit on the hot path.** A heuristic makes routing
+  unpredictable: an operator can't tell which engine a model lands on without
+  reading registry code, and a card-metadata tweak can silently flip engines.
+  For a system that sells production debuggability, dispatch should be legible.
+- **The transport is already free** (§2.6): the card rides `ShardMetadata` to
+  every rank, so the field reaches every node with zero new placement plumbing.
+- **It fits the existing card philosophy.** Cards already carry per-model runtime
+  contracts (`metal_fast_synch`, `mtp_heads`, `speculative_multi_node`). "Which
+  engine executes this model" is the same declarative, per-model, conservative-
+  default fact.
+- **Additive and rolling-upgrade safe** (§2.5): `engine: ... = None` means old
+  cards, old nodes, and old gossiped messages keep working untouched.
+
+**Refinements (binding on the implementation):**
+
+1. **Validate at placement time, not at runner spawn.** A card naming an
+   unregistered engine must be refused by the master with a clear error
+   (`registry.is_registered`), not allowed to spawn every rank and fail in
+   `bootstrap` (which trips the crash circuit breaker). Same fail-fast posture
+   as the oversized-placement refusal. (Phase 3, step 4.)
+2. **`EngineId = NewType("EngineId", str)`, not a `Literal`.** Repo convention
+   leans toward `Literal[...]` for enum-like sets, but a closed literal union
+   means every new engine edits a shared type embedded in a gossiped/persisted
+   model. A NewType'd string validated against the registry keeps the card
+   schema stable while the registry evolves — validation lives where the
+   knowledge lives (the registry), not in the type.
+3. **No operator-level override** (env var / settings). Engine choice changes
+   memory footprint and topology — exactly what the master fit-check reasons
+   about — so an out-of-band override could desync placement from what the
+   runner loads. The card is the single source of truth; the escape hatch is
+   "edit the card, re-place." (Phase 3, step 5.)
+
+**Implementation constraint:** all selection flows through
+`registry.resolve_engine(model_card)`. The default branch reproduces today's
+`ModelTask` mapping, so the field is purely additive. **Do not** scatter
+selection logic into `bootstrap`, `plan.py`, or the host.
+
+### 9.2 Distributed topology ownership (open)
 
 Engines that own their own collective (e.g. vLLM) vs. engines that rely on
 `mx.distributed` need a clear contract for who forms the topology. Phase 4's
@@ -527,7 +579,7 @@ Engines that own their own collective (e.g. vLLM) vs. engines that rely on
 `EngineTopology` should be richer (engine-owned process groups, port
 allocation) when Phase 5's concrete second engine lands.
 
-### 9.3 Result-type neutrality
+### 9.3 Result-type neutrality (open)
 
 Whether to fully unify `EngineResult` across text/embedding/image now, or keep
 per-engine result unions translated by the host. Lean toward the latter
