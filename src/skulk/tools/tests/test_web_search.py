@@ -242,6 +242,14 @@ async def test_fetch_url_keeps_non_2xx_status_metadata(
         fake_async_client,
     )
 
+    # Stub the SSRF guard's DNS lookup to a public address so the test does
+    # not depend on real resolution of example.com (CI runners can sit behind
+    # flaky or restricted DNS). Mirrors the sibling validation tests.
+    def fake_getaddrinfo(*_args: object, **_kwargs: object) -> list[tuple[Any, ...]]:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+
+    monkeypatch.setattr("skulk.tools.web_search.socket.getaddrinfo", fake_getaddrinfo)
+
     response = await provider.open_url("https://example.com/missing")
 
     assert response.status_code == 404
