@@ -3,12 +3,12 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Literal, Self, final
+from typing import Literal, Self, cast, final
 
 import psutil
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer, field_validator
 
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.thunderbolt import ThunderboltIdentifier
@@ -244,6 +244,25 @@ class NodeResources(CamelCaseModel):
 
     backends: frozenset[str] = frozenset({"mlx"})
     participation: NodeParticipation = "full"
+
+    @field_validator("backends", mode="before")
+    @classmethod
+    def _coerce_backends(cls, v: object) -> object:
+        # Strict mode rejects a list where a frozenset is declared, but the
+        # wire path (model_dump(mode="json") -> array -> model_validate) and
+        # any list-shaped input arrive as a list. Coerce iterables to a
+        # frozenset before strict validation so node_resources actually
+        # populates over gossip (without this the feature is inert).
+        if isinstance(v, (list, tuple, set, frozenset)):
+            return frozenset(cast("Iterable[str]", v))
+        return v
+
+    @field_serializer("backends")
+    def _serialize_backends(self, value: frozenset[str]) -> list[str]:
+        # Emit a sorted list in both json and python dump modes so JSON wire
+        # encoding and TOML serialization (tomlkit cannot encode a frozenset)
+        # both succeed and round-trip deterministically.
+        return sorted(value)
 
     @classmethod
     async def gather(cls) -> "NodeResources":

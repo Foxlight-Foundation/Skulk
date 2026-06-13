@@ -1,6 +1,7 @@
 import json
+from collections.abc import Iterable
 from enum import Enum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 import aiofiles
 import aiofiles.os as aios
@@ -15,6 +16,7 @@ from pydantic import (
     PositiveInt,
     ValidationError,
     ValidationInfo,
+    field_serializer,
     field_validator,
     model_validator,
 )
@@ -263,6 +265,22 @@ class PlacementCardConfig(CamelCaseModel):
 
     max_context_tokens: int | None = None
     """Soft: caps the placement-time KV budget check (see #145) when set."""
+
+    @field_validator("compatible_backends", mode="before")
+    @classmethod
+    def _coerce_compatible_backends(cls, v: object) -> object:
+        # TOML provides a list (compatible_backends = ["mlx"]); strict mode
+        # would reject it for a frozenset field and make any card with an
+        # explicit [placement] section unloadable. Coerce before validation.
+        if isinstance(v, (list, tuple, set, frozenset)):
+            return frozenset(cast("Iterable[str]", v))
+        return v
+
+    @field_serializer("compatible_backends")
+    def _serialize_compatible_backends(self, value: frozenset[str]) -> list[str]:
+        # tomlkit cannot encode a frozenset, and ModelCard.save() now always
+        # includes this section. Emit a sorted list for TOML and JSON alike.
+        return sorted(value)
 
 
 class RuntimeCapabilityCardConfig(CamelCaseModel):

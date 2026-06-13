@@ -1418,6 +1418,7 @@ class API:
                     node_network=self.state.node_network,
                     download_status=self.state.downloads,
                     excluded_nodes=set(command.excluded_nodes),
+                    node_resources=self.state.node_resources,
                 )
                 break
             except PlacementInfoPendingError as exc:
@@ -1485,6 +1486,7 @@ class API:
                 topology=self.state.topology,
                 current_instances=self.state.instances,
                 download_status=self.state.downloads,
+                node_resources=self.state.node_resources,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1551,6 +1553,7 @@ class API:
                     required_nodes=required_nodes,
                     download_status=self.state.downloads,
                     excluded_nodes=excluded_nodes,
+                    node_resources=self.state.node_resources,
                 )
             except ValueError as exc:
                 if (model_card.model_id, sharding, instance_meta, 0) not in seen:

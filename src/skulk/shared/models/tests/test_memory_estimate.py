@@ -226,3 +226,25 @@ def test_instance_limit_zero_when_weights_leave_no_kv_room():
         instance_context_token_limit(assignments, {NodeId("n0"): Memory.from_gb(16)})
         == 0
     )
+
+
+def test_placement_card_config_round_trips_through_toml_and_json() -> None:
+    """frozenset compatible_backends must survive TOML save and JSON wire;
+    without coercion+list serialization, explicit [placement] cards are
+    unloadable and ModelCard.save() crashes (#149)."""
+    import tomlkit
+
+    from skulk.shared.models.model_cards import PlacementCardConfig
+
+    # TOML provides a list; strict mode must accept it.
+    cfg = PlacementCardConfig.model_validate({"compatible_backends": ["mlx"]})
+    assert cfg.compatible_backends == frozenset({"mlx"})
+
+    # model_dump must emit a list tomlkit can encode (ModelCard.save path).
+    dumped = cfg.model_dump(exclude_none=True)
+    assert dumped["compatible_backends"] == ["mlx"]
+    tomlkit.dumps(dumped)  # pyright: ignore[reportUnknownMemberType]  # no raise
+
+    # JSON wire round-trip preserves the value.
+    restored = PlacementCardConfig.model_validate(cfg.model_dump(mode="json"))
+    assert restored.compatible_backends == frozenset({"mlx"})
