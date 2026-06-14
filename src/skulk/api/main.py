@@ -237,6 +237,7 @@ from skulk.shared.types.events import (
     ChunkGenerated,
     Event,
     IndexedEvent,
+    NodeTimedOut,
     StateSnapshotHydrated,
     TaskFailed,
     TaskStatusUpdated,
@@ -3161,6 +3162,16 @@ class API:
                     self._event_log.append(event)
                     self._maybe_compact_event_log()
                 self.state = apply(self.state, i_event)
+
+                # Keep the telemetry plane tracking live membership: it is
+                # last-write-wins with no natural expiry, so prune a node's
+                # readings when it times out (#279 slice 2). This runs on every
+                # node (each runs an API applier) over the Node-shared
+                # TelemetryView, so master placement reads and dashboard /state
+                # both stop seeing a dead node at the source, not just via
+                # per-reader live-node filters.
+                if isinstance(event, NodeTimedOut):
+                    self._telemetry_view.prune(event.node_id)
 
                 if isinstance(event, ChunkGenerated):
                     if queue := self._image_generation_queues.get(

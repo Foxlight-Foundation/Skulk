@@ -95,3 +95,28 @@ def test_view_coalesces_mactop_memory_and_system() -> None:
     )
     assert view.node_memory[node].ram_available.in_bytes == 20 * 2**30
     assert view.node_system[node].sys_power == 42.0
+
+
+def test_prune_drops_all_telemetry_for_a_node() -> None:
+    # On NodeTimedOut the view must drop the node entirely (it has no natural
+    # expiry); otherwise a dead node lingers as a ghost in /state and skews
+    # capacity/energy aggregates (#279 slice 2).
+    gib = 1024 * 1024 * 1024
+    reading = MemoryUsage.from_bytes(
+        ram_total=16 * gib, ram_available=8 * gib, swap_total=0, swap_available=0
+    )
+    profile = SystemPerformanceProfile(sys_power=10.0)
+    view = TelemetryView()
+    a, b = NodeId("node-a"), NodeId("node-b")
+    for node in (a, b):
+        view.apply(NodeTelemetry(node_id=node, info=NodeResources(participation="full")))
+        view.apply(
+            NodeTelemetry(
+                node_id=node,
+                info=MactopMetrics(system_profile=profile, memory=reading),
+            )
+        )
+    view.prune(a)
+    for m in (view.node_resources, view.node_memory, view.node_system):
+        assert a not in m
+        assert b in m  # only the pruned node is dropped

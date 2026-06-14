@@ -53,6 +53,20 @@ class TelemetryView:
         self.node_memory: dict[NodeId, MemoryUsage] = {}
         self.node_system: dict[NodeId, SystemPerformanceProfile] = {}
 
+    def prune(self, node_id: NodeId) -> None:
+        """Drop all telemetry for a node that left the cluster.
+
+        The telemetry plane is last-write-wins with no natural expiry, so a
+        node that times out (``NodeTimedOut``) would otherwise keep its last
+        readings forever — surfacing as a ghost node in the dashboard and
+        skewing capacity/energy aggregates. Callers invoke this where
+        ``NodeTimedOut`` is applied so the view tracks live membership; readers
+        then never see a dead node regardless of whether they also filter.
+        """
+        self.node_resources.pop(node_id, None)
+        self.node_memory.pop(node_id, None)
+        self.node_system.pop(node_id, None)
+
     def apply(self, message: NodeTelemetry) -> None:
         """Coalesce one telemetry message into the latest-value view."""
         info = message.info
