@@ -49,10 +49,11 @@ class BaseInstance(TaggedModel):
         memory-derived ceiling applies), so this only fills the legacy gap.
         """
         if self.context_token_limit is None:
-            for shard in self.shard_assignments.runner_to_shard.values():
-                if shard.model_card.context_length > 0:
-                    self.context_token_limit = shard.model_card.context_length
-                break
+            # All shards of an instance share one model card, so any shard's
+            # context_length is authoritative; take the first.
+            shard = next(iter(self.shard_assignments.runner_to_shard.values()), None)
+            if shard is not None and shard.model_card.context_length > 0:
+                self.context_token_limit = shard.model_card.context_length
         return self
 
 

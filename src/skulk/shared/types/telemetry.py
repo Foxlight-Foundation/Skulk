@@ -16,6 +16,7 @@ and power sampler now read them here instead of off the event log.
 from __future__ import annotations
 
 from skulk.shared.types.common import NodeId
+from skulk.shared.types.events import Event, NodeGatheredInfo, NodeTimedOut
 from skulk.shared.types.profiling import (
     MemoryUsage,
     NodeResources,
@@ -27,6 +28,12 @@ from skulk.utils.info_gatherer.info_gatherer import (
     MactopMetrics,
 )
 from skulk.utils.pydantic_ext import CamelCaseModel
+
+# GatheredInfo variants that live on the telemetry plane (#279): gossiped
+# last-write-wins, never indexed or persisted. NodeResources (slice 1) plus
+# memory + the system profile (slice 2). Workers fork these onto the TELEMETRY
+# topic instead of emitting NodeGatheredInfo events.
+TELEMETRY_PLANE_INFO = (NodeResources, MemoryUsage, MactopMetrics, MacmonMetrics)
 
 
 class NodeTelemetry(CamelCaseModel):
@@ -82,3 +89,28 @@ class TelemetryView:
             self.node_system[node_id] = info.system_profile
         # Remaining GatheredInfo variants (disk, network, thunderbolt,
         # identities) still travel the event log; they migrate in later slices.
+
+
+def record_membership_from_event(view: TelemetryView, event: Event) -> None:
+    """Maintain telemetry-plane membership from the control event stream.
+
+    Called from EVERY node's event applier(s) — worker and API both — so the
+    Node-shared view tracks live membership regardless of which long-running
+    components a node runs (``--no-api`` skips the API applier, ``--no-worker``
+    skips the worker applier; a node runs at least one). Two duties:
+
+    - Prune a node's readings when it times out (``NodeTimedOut``) — the plane
+      has no natural expiry, so without this a dead node lingers as a ghost.
+    - Bridge a legacy/un-upgraded worker's telemetry-plane ``NodeGatheredInfo``
+      into the view during a rolling upgrade. ``apply`` no-ops those events, and
+      an upgraded node reads memory only from the view, so without the bridge it
+      would report "memory not gathered" and refuse placement on those live
+      nodes until every worker restarts. New workers gossip these directly and
+      never as events, so only legacy senders are bridged.
+    """
+    if isinstance(event, NodeTimedOut):
+        view.prune(event.node_id)
+    elif isinstance(event, NodeGatheredInfo) and isinstance(
+        event.info, TELEMETRY_PLANE_INFO
+    ):
+        view.apply(NodeTelemetry(node_id=event.node_id, info=event.info))

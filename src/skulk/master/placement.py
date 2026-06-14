@@ -72,9 +72,10 @@ def add_instance_to_placements(
     # card-limit backfill (BaseInstance validator), and since runners now trust
     # the stamped value instead of recomputing from per-node RAM, a prompt that
     # fits the card but not the hosting node could reach MLX instead of a clean
-    # context_length_exceeded. instance_context_token_limit returns the
-    # card-limit fallback when memory is unknown, so this never loosens the
-    # guard (review catch on #292).
+    # context_length_exceeded. instance_context_token_limit falls back to the
+    # card's advertised context_length whenever ANY hosting node's ram_total is
+    # still unknown, so a transient missing reading yields the card guard rather
+    # than None (review catch on #292).
     assignments = command.instance.shard_assignments
     ceiling = instance_context_token_limit(
         assignments,

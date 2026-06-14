@@ -45,14 +45,13 @@ from skulk.shared.types.events import (
     InputChunkReceived,
     NodeDownloadProgress,
     NodeGatheredInfo,
-    NodeTimedOut,
     TaskCreated,
     TaskStatusUpdated,
     TopologyEdgeCreated,
     TopologyEdgeDeleted,
 )
 from skulk.shared.types.multiaddr import Multiaddr
-from skulk.shared.types.profiling import MemoryUsage, NodeResources
+from skulk.shared.types.profiling import MemoryUsage
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import (
     CancelTask,
@@ -67,7 +66,12 @@ from skulk.shared.types.tasks import (
     TaskStatus,
     TextGeneration,
 )
-from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
+from skulk.shared.types.telemetry import (
+    TELEMETRY_PLANE_INFO,
+    NodeTelemetry,
+    TelemetryView,
+    record_membership_from_event,
+)
 from skulk.shared.types.topology import Connection, SocketConnection
 from skulk.shared.types.worker.downloads import (
     DownloadCompleted,
@@ -90,8 +94,6 @@ from skulk.utils.crash_window import CrashWindow
 from skulk.utils.info_gatherer.info_gatherer import (
     GatheredInfo,
     InfoGatherer,
-    MacmonMetrics,
-    MactopMetrics,
 )
 from skulk.utils.info_gatherer.net_profile import check_reachable
 from skulk.utils.keyed_backoff import KeyedBackoff
@@ -99,12 +101,6 @@ from skulk.utils.task_group import TaskGroup
 from skulk.worker.plan import plan
 from skulk.worker.runner.bootstrap import WEDGE_FAILURE_MARKER
 from skulk.worker.runner.runner_supervisor import RunnerSupervisor
-
-# GatheredInfo variants that live on the telemetry plane (#279) rather than the
-# event log: gossiped last-write-wins, never indexed or persisted. Memory and
-# the system profile (carried together by Mactop/Macmon metrics) joined in
-# slice 2; the rest of the node_* readings migrate in later slices.
-_TELEMETRY_PLANE_INFO = (NodeResources, MemoryUsage, MactopMetrics, MacmonMetrics)
 
 _STALE_RESET_MAX_WAIT_TICKS = 300
 """How many ~100ms planning ticks to hold planning while stale download
@@ -463,7 +459,7 @@ class Worker:
                     # readings still travel as indexed NodeGatheredInfo events
                     # until later slices migrate them.
                     if (
-                        isinstance(info, _TELEMETRY_PLANE_INFO)
+                        isinstance(info, TELEMETRY_PLANE_INFO)
                         and self._telemetry_sender is not None
                     ):
                         await self._telemetry_sender.send(
@@ -491,33 +487,12 @@ class Worker:
                 self.state = apply(self.state, event=event)
                 event = event.event
 
-                # Prune telemetry for a node that left (#279 slice 2). Runs on
-                # every node via the worker (unlike the API hook), so a
-                # --no-api node's shared TelemetryView still tracks live
-                # membership instead of growing unbounded across churn.
-                if (
-                    isinstance(event, NodeTimedOut)
-                    and self._telemetry_view is not None
-                ):
-                    self._telemetry_view.prune(event.node_id)
-
-                # Rolling-upgrade bridge (#279 slice 2): an un-upgraded worker
-                # still emits telemetry-plane readings as NodeGatheredInfo
-                # events, which apply() now no-ops. Feed them into the shared
-                # view so the upgraded master/API can place on those live nodes
-                # during the mixed-version window instead of reporting "memory
-                # not gathered" until every worker restarts. New workers gossip
-                # these directly (never as events), so this only bridges legacy
-                # senders; their stale entry is pruned when they restart under a
-                # new id and the old id times out.
-                if (
-                    isinstance(event, NodeGatheredInfo)
-                    and isinstance(event.info, _TELEMETRY_PLANE_INFO)
-                    and self._telemetry_view is not None
-                ):
-                    self._telemetry_view.apply(
-                        NodeTelemetry(node_id=event.node_id, info=event.info)
-                    )
+                # Maintain telemetry-plane membership (prune timed-out nodes,
+                # bridge legacy telemetry events) from the worker applier. The
+                # API applier does the same; together they cover --no-api and
+                # --no-worker nodes (#279 slice 2).
+                if self._telemetry_view is not None:
+                    record_membership_from_event(self._telemetry_view, event)
 
                 # Buffer input image chunks for image editing
                 if isinstance(event, InputChunkReceived):

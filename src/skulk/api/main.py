@@ -245,7 +245,10 @@ from skulk.shared.types.events import (
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import MemoryUsage, read_wired_memory_bytes
 from skulk.shared.types.state import State
-from skulk.shared.types.telemetry import TelemetryView
+from skulk.shared.types.telemetry import (
+    TelemetryView,
+    record_membership_from_event,
+)
 from skulk.shared.types.text_generation import TextGenerationTaskParams
 from skulk.shared.types.worker.downloads import DownloadCompleted
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
@@ -3166,6 +3169,11 @@ class API:
                     self._event_log.append(event)
                     self._maybe_compact_event_log()
                 self.state = apply(self.state, i_event)
+
+                # Maintain telemetry-plane membership (prune timed-out nodes,
+                # bridge legacy telemetry events) from the API applier too, so
+                # a --no-worker node still tracks live membership (#279 slice 2).
+                record_membership_from_event(self._telemetry_view, event)
 
                 if isinstance(event, ChunkGenerated):
                     if queue := self._image_generation_queues.get(
