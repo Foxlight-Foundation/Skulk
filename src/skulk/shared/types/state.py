@@ -7,7 +7,6 @@ from pydantic import (
     Field,
     field_serializer,
     field_validator,
-    model_validator,
 )
 from pydantic.alias_generators import to_camel
 
@@ -26,18 +25,6 @@ from skulk.shared.types.worker.downloads import DownloadProgress
 from skulk.shared.types.worker.instances import Instance, InstanceId
 from skulk.shared.types.worker.runners import RunnerId, RunnerStatus
 from skulk.utils.pydantic_ext import CamelCaseModel
-
-# State fields removed when their data moved to the telemetry plane (#279).
-# Both camelCase (wire/snapshot) and snake_case (defensive) spellings, so a
-# pre-#279 snapshot still hydrates under extra="forbid" (see the validator).
-_LEGACY_TELEMETRY_KEYS = (
-    "nodeResources",
-    "node_resources",
-    "nodeMemory",
-    "node_memory",
-    "nodeSystem",
-    "node_system",
-)
 
 
 class State(CamelCaseModel):
@@ -74,33 +61,17 @@ class State(CamelCaseModel):
     node_rdma_ctl: Mapping[NodeId, NodeRdmaCtlStatus] = {}
     # node_resources (#279 slice 1) and node_memory + node_system (#279 slice 2)
     # moved to the telemetry plane — gossiped last-write-wins off the event log,
-    # held in TelemetryView, not here.
+    # held in TelemetryView, not here. NB: do NOT add a model_validator(mode=
+    # "before") to strip legacy keys for cross-version snapshots — that forces
+    # the whole model into strict PYTHON-mode validation, where ISO datetime
+    # strings (last_seen, serialized over the wire) are rejected, which silently
+    # broke state-sync entirely (followers livelock requesting the event log
+    # from 0). Mixed-version clusters are unsupported anyway (see #293 / the
+    # versioning policy in CLAUDE.md), so extra="forbid" simply rejecting an
+    # old snapshot's removed keys is the correct, intended behavior.
 
     # Detected cycles where all nodes have Thunderbolt bridge enabled (>2 nodes)
     thunderbolt_bridge_cycles: Sequence[Sequence[NodeId]] = []
-
-    @model_validator(mode="before")
-    @classmethod
-    def _drop_legacy_telemetry_fields(cls, data: object) -> object:
-        """Strip removed telemetry fields from inbound payloads.
-
-        ``node_resources``/``node_memory``/``node_system`` moved to the
-        telemetry plane (#279), but ``State`` keeps ``extra="forbid"`` so a
-        newer binary's unknown fields are caught rather than silently dropped.
-        Without this, a state-sync snapshot from a pre-#279 master (which still
-        carries those keys) fails validation on an upgraded follower; the
-        follower then discards the snapshot and falls back to replay from index
-        0, losing any instances/topology that lived only in an already-compacted
-        log prefix (the #273 outage class). Popping only the known-removed keys
-        preserves rolling-upgrade hydration without weakening the forbid-extra
-        guard for genuinely unknown fields.
-        """
-        if not isinstance(data, dict):
-            return data
-        cleaned: dict[str, object] = dict(cast("dict[str, object]", data))
-        for key in _LEGACY_TELEMETRY_KEYS:
-            cleaned.pop(key, None)
-        return cleaned
 
     @field_serializer("topology", mode="plain")
     def _encode_topology(self, value: Topology) -> TopologySnapshot:
