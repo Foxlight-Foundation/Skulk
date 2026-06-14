@@ -51,7 +51,8 @@ flowchart TB
 
 Each subsystem has its own concern:
 
-- **Router** wraps libp2p (via PyO3 Rust bindings) and exposes typed pub/sub topics: `GLOBAL_EVENTS`, `LOCAL_EVENTS`, `COMMANDS`, `DOWNLOAD_COMMANDS`, `STATE_SYNC_MESSAGES`, `ELECTION_MESSAGES`, `CONNECTION_MESSAGES`. Components subscribe by topic; payloads are validated Pydantic types.
+- **Router** wraps libp2p (via PyO3 Rust bindings) and exposes typed pub/sub topics: `GLOBAL_EVENTS`, `LOCAL_EVENTS`, `COMMANDS`, `DOWNLOAD_COMMANDS`, `STATE_SYNC_MESSAGES`, `ELECTION_MESSAGES`, `CONNECTION_MESSAGES`, `TELEMETRY`. Components subscribe by topic; payloads are validated Pydantic types.
+- **Telemetry plane** (`TELEMETRY` topic, #279) carries last-write-wins node readings that are *not* decisions — currently each node's `participation` role and `backends`. They are gossiped into an in-memory `TelemetryView` (read by the planner for placement eligibility) instead of being event-sourced into `State`, so routine readings don't bloat the event log. This is the first slice of separating the control plane (decisions, event-sourced) from telemetry and data planes.
 - **Election** runs the bully algorithm and broadcasts `ELECTION_MESSAGES`. The winner takes the master role.
 - **Master** indexes incoming events into the event log (writing them to disk via `DiskEventLog`), publishes indexed events on `GLOBAL_EVENTS` for followers, and decides instance placements when a model is launched.
 - **Worker** receives indexed events, applies them to its local view of `State`, downloads model weights to disk when assigned a placement, and spawns / supervises runner subprocesses. Before spawning, it refuses a shard that won't fit local memory — a last-resort guard below the master's admission check, using the same shared estimator — and a crash circuit breaker gives up on a runner that keeps failing rather than relaunching it into another GPU-memory leak.

@@ -112,6 +112,7 @@ Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `STATE_SYNC_MESSAGES`: Followers request the current session snapshot before replaying the retained tail
 - `ELECTION_MESSAGES`: Election protocol messages
 - `CONNECTION_MESSAGES`: libp2p connection updates
+- `TELEMETRY`: Workers gossip `NodeTelemetry` (last-write-wins node readings — currently `NodeResources`: participation role + backends) into an in-memory `TelemetryView`, NOT the event log. First slice of the control/telemetry/data plane separation (#279); read by the planner for placement eligibility. `node_resources` lives here, not in `State`.
 
 ### Event Sourcing
 The system uses event sourcing for state management:

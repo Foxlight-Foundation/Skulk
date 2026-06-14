@@ -109,6 +109,13 @@ Defined in `src/skulk/routing/topics.py`.
 | `STATE_SYNC_MESSAGES` | `StateSyncMessage` | bidirectional: followers publish `kind="request"` for snapshot/config bootstrap; master publishes `kind="response"` with the requested payload (`StateSnapshotHydrated` etc.) | All nodes (request: followers; response: master) | All nodes |
 | `ELECTION_MESSAGES` | `ElectionMessage` | bully election rounds | All nodes | All nodes |
 | `CONNECTION_MESSAGES` | libp2p connection updates | peer arrivals / departures | Router | All nodes |
+| `TELEMETRY` | `NodeTelemetry` | `GatheredInfo` (currently `NodeResources` — participation role + backends) | Workers | All nodes (applied into `TelemetryView`) |
+
+### Telemetry plane (#279)
+
+`TELEMETRY` is the first slice of the control/telemetry/data plane separation (#279). Node readings that are **last-write-wins and not decisions** are gossiped on this topic instead of being event-sourced into `State`. They land in an in-memory `TelemetryView` (`src/skulk/shared/types/telemetry.py`), held per-`Node` and read by the planner (placement eligibility) and the API placement previews — they are **not** persisted in the event log or carried in snapshots.
+
+`node_resources` (a node's `participation` role and `backends`) moved here out of `State`: the worker forwards `NodeResources` to the telemetry sender (`worker/main.py`), and `apply_node_gathered_info` treats `NodeResources` as a no-op (`shared/apply.py`). The `TelemetryView` survives master re-election (Node-owned), so a freshly promoted master does not start blind. Rolling-upgrade note: an old worker that still emits `NodeResources` as a `NodeGatheredInfo` event no longer feeds the view (the legacy path is a no-op) — tracked for #279 slice 2.
 
 ## Events
 
@@ -289,6 +296,7 @@ Lives in `src/skulk/api/main.py` (route registration in `API.__init__`).
 - `tracing_enabled: bool` — cluster-wide tracing flag
 - `last_event_applied_idx: int` — water mark for the local apply
 - `node_identities`, `node_memory`, `node_disk`, `node_system`, `node_network`, `node_thunderbolt`, `node_thunderbolt_bridge`, `node_rdma_ctl: Mapping[NodeId, *]` — granular per-node telemetry that updates at independent frequencies
+- `node_resources` (participation role + backends) is **not** a `State` field — it moved to the telemetry plane (`TelemetryView`, gossiped on `TELEMETRY`, see "Telemetry plane" above) as part of #279. `State` keeps `extra="forbid"`, so a pre-#279 snapshot carrying the old `nodeResources` key is stripped by a before-validator on hydrate rather than rejected (rolling-upgrade compatibility).
 - `thunderbolt_bridge_cycles: Sequence[Sequence[NodeId]]` — detected Thunderbolt-bridge cycles where every node has it enabled (>2 nodes)
 
 Note: there is no `master_node_id` field on `State`. Master identity lives outside the event-sourced state — each node tracks the current master independently via the election protocol (`src/skulk/shared/election.py`). `placements` is also not a field; placement information is derived from `instances` (each `Instance` has its own shard assignments).
