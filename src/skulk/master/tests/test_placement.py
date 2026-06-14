@@ -3,6 +3,7 @@ import pytest
 from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
+    add_instance_to_placements,
     get_transition_events,
     place_instance,
 )
@@ -14,7 +15,7 @@ from skulk.master.tests.conftest import (
 )
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.topology import Topology
-from skulk.shared.types.commands import PlaceInstance
+from skulk.shared.types.commands import CreateInstance, PlaceInstance
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import (
     InstanceCreated,
@@ -815,6 +816,40 @@ def test_legacy_instance_backfills_context_token_limit_from_card() -> None:
         # context_token_limit deliberately omitted (the legacy/None case)
     )
     assert instance.context_token_limit == 8192
+
+
+def test_create_instance_restamps_context_token_limit() -> None:
+    # The exact-control POST /instance path must stamp the master's
+    # memory-derived ceiling too (#292 review) — runners trust the stamped
+    # field now, so a client-supplied placement can't smuggle in an inflated
+    # ceiling and reach MLX past the safe limit.
+    node_id = NodeId()
+    runner_id = RunnerId()
+    card = ModelCard(
+        model_id=ModelId("exact-model"),
+        storage_size=Memory.from_gb(1),
+        n_layers=10,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        context_length=4096,
+    )
+    client_instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=ModelId("exact-model"),
+            runner_to_shard={runner_id: _make_shard_metadata(card)},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+        context_token_limit=999_999,  # client-inflated; must be overridden
+    )
+    command = CreateInstance(command_id=CommandId(), instance=client_instance)
+    node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
+    result = add_instance_to_placements(command, Topology(), {}, node_memory)
+    stamped = next(iter(result.values())).context_token_limit
+    assert stamped is not None and stamped <= 4096
 
 
 def test_placement_prefers_cycle_with_downloaded_model(

@@ -62,10 +62,30 @@ def add_instance_to_placements(
     command: CreateInstance,
     topology: Topology,
     current_instances: Mapping[InstanceId, Instance],
+    node_memory: Mapping[NodeId, MemoryUsage],
 ) -> Mapping[InstanceId, Instance]:
     # TODO: validate against topology
 
-    return {**current_instances, command.instance.instance_id: command.instance}
+    # Stamp the memory-derived context-admission ceiling, same as the
+    # place_instance path (#279 slice 2). A client-supplied exact placement
+    # usually omits contextTokenLimit; without this it would get only the
+    # card-limit backfill (BaseInstance validator), and since runners now trust
+    # the stamped value instead of recomputing from per-node RAM, a prompt that
+    # fits the card but not the hosting node could reach MLX instead of a clean
+    # context_length_exceeded. instance_context_token_limit returns the
+    # card-limit fallback when memory is unknown, so this never loosens the
+    # guard (review catch on #292).
+    assignments = command.instance.shard_assignments
+    ceiling = instance_context_token_limit(
+        assignments,
+        {
+            node_id: node_memory[node_id].ram_total
+            for node_id in assignments.node_to_runner
+            if node_id in node_memory
+        },
+    )
+    instance = command.instance.model_copy(update={"context_token_limit": ceiling})
+    return {**current_instances, instance.instance_id: instance}
 
 
 def _get_node_download_fraction(

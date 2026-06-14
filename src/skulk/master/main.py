@@ -564,6 +564,9 @@ class Master:
                                 command,
                                 self.state.topology,
                                 self.state.instances,
+                                # telemetry plane (#279 slice 2) — stamp the
+                                # memory-derived ceiling on exact placements too
+                                self._telemetry_view.node_memory,
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
