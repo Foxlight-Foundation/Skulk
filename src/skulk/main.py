@@ -35,6 +35,7 @@ from skulk.shared.session_carryover import seed_state_for_new_session
 from skulk.shared.types.commands import ForwarderDownloadCommand, SyncConfig
 from skulk.shared.types.common import NodeId, SessionId, SystemId
 from skulk.shared.types.state_sync import StateSyncMessage
+from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
 from skulk.startup_recovery import preflight_api_port
 from skulk.store.config import (
     SkulkConfig,
@@ -139,6 +140,10 @@ class Node:
     exo_config: SkulkConfig | None
     store_client: ModelStoreClient | None
     store_server: ModelStoreServer | None
+    # Live node telemetry off the event log (#279). Node-owned so it survives
+    # master re-election; the subscriber feeds it, the master/API read it.
+    telemetry_view: TelemetryView
+    telemetry_receiver: Receiver[NodeTelemetry]
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
 
     @classmethod
@@ -158,6 +163,8 @@ class Node:
         await router.register_topic(topics.CONNECTION_MESSAGES)
         await router.register_topic(topics.DOWNLOAD_COMMANDS)
         await router.register_topic(topics.STATE_SYNC_MESSAGES)
+        await router.register_topic(topics.TELEMETRY)
+        telemetry_view = TelemetryView()
         event_router = EventRouter(
             node_id,
             session_id,
@@ -268,6 +275,7 @@ class Node:
                 election_receiver=router.receiver(topics.ELECTION_MESSAGES),
                 exo_config=exo_config,
                 store_client=store_client,
+                telemetry_view=telemetry_view,
             )
         else:
             api = None
@@ -290,6 +298,7 @@ class Node:
                 event_sender=event_router.sender(),
                 command_sender=router.sender(topics.COMMANDS),
                 download_command_sender=router.sender(topics.DOWNLOAD_COMMANDS),
+                telemetry_sender=router.sender(topics.TELEMETRY),
                 store_client=worker_store_client,
                 staging_config=worker_staging_cfg,
             )
@@ -310,6 +319,7 @@ class Node:
             state_sync_receiver=router.receiver(topics.STATE_SYNC_MESSAGES),
             state_sync_sender=router.sender(topics.STATE_SYNC_MESSAGES),
             download_command_sender=router.sender(topics.DOWNLOAD_COMMANDS),
+            telemetry_view=telemetry_view,
         )
 
         er_send, er_recv = channel[ElectionResult]()
@@ -340,6 +350,8 @@ class Node:
             exo_config,
             store_client,
             store_server,
+            telemetry_view,
+            router.receiver(topics.TELEMETRY),
         )
 
     async def run(self):
@@ -349,6 +361,7 @@ class Node:
             tg.start_soon(self.router.run)
             tg.start_soon(self.event_router.run)
             tg.start_soon(self.election.run)
+            tg.start_soon(self._run_telemetry)
             if self.store_server:
                 tg.start_soon(self.store_server.start)
             if self.download_coordinator:
@@ -360,6 +373,17 @@ class Node:
             if self.api:
                 tg.start_soon(self.api.run)
             tg.start_soon(self._elect_loop)
+
+    async def _run_telemetry(self) -> None:
+        """Maintain the node-owned TelemetryView from the telemetry plane (#279).
+
+        Runs for the node's lifetime, independent of master election, so the
+        view of every node's resources persists across a master flip. Each
+        message coalesces last-write-wins; there is no ordering or persistence.
+        """
+        with self.telemetry_receiver as messages:
+            async for message in messages:
+                self.telemetry_view.apply(message)
 
     def shutdown(self):
         # if this is our second call to shutdown, just sys.exit
@@ -552,6 +576,7 @@ class Node:
                         download_command_sender=self.router.sender(
                             topics.DOWNLOAD_COMMANDS
                         ),
+                        telemetry_view=self.telemetry_view,
                     )
                     self._tg.start_soon(self.master.run)
                 elif (
@@ -651,6 +676,13 @@ class Node:
                             ),
                             store_client=self.store_client,
                             staging_config=elect_staging2,
+                            # Must match Node.create's Worker wiring: without this
+                            # the recreated worker stops publishing NodeResources
+                            # telemetry, and after a master restart (fresh
+                            # telemetry_view) the node never reappears in
+                            # node_resources, so placement silently treats a
+                            # management/edge node as eligible (#279 review).
+                            telemetry_sender=self.router.sender(topics.TELEMETRY),
                         )
                         self._tg.start_soon(self.worker.run)
                         if self.api is not None:
