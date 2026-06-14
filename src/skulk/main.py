@@ -688,6 +688,12 @@ class Node:
                             # management/edge node as eligible (#279 review).
                             telemetry_sender=self.router.sender(topics.TELEMETRY),
                             telemetry_view=self.telemetry_view,
+                            # Must ALSO match Node.create's wiring: without this
+                            # the recreated worker has no data sender, so every
+                            # generation output chunk falls back to the event
+                            # plane — which the API no longer routes (#279 Phase
+                            # 2a) — and every completion stream hangs forever.
+                            data_sender=self.router.sender(topics.DATA),
                         )
                         self._tg.start_soon(self.worker.run)
                         if self.api is not None:
