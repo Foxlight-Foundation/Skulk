@@ -3261,19 +3261,19 @@ class API:
             assert isinstance(chunk, (ImageChunk, ErrorChunk))
             try:
                 await queue.send(chunk)
-            except BrokenResourceError:
+            except (BrokenResourceError, ClosedResourceError):
                 self._image_generation_queues.pop(command_id, None)
         if queue := self._text_generation_queues.get(command_id, None):
             assert not isinstance(chunk, (ImageChunk, EmbeddingChunk))
             try:
                 await queue.send(chunk)
-            except BrokenResourceError:
+            except (BrokenResourceError, ClosedResourceError):
                 self._text_generation_queues.pop(command_id, None)
         if queue := self._embedding_queues.get(command_id, None):
             assert isinstance(chunk, (EmbeddingChunk, ErrorChunk))
             try:
                 await queue.send(chunk)
-            except BrokenResourceError:
+            except (BrokenResourceError, ClosedResourceError):
                 self._embedding_queues.pop(command_id, None)
 
     async def _terminate_command_stream(

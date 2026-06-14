@@ -102,6 +102,31 @@ async def test_dispatch_routes_error_chunk_to_image_queue() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_survives_closed_sender() -> None:
+    # Regression (#297 review): cancel_command() closes the queue's sender; a
+    # late chunk then raises ClosedResourceError on send. The dispatcher must
+    # swallow it (and drop the queue), not let it crash the whole data loop.
+    api = _build_api()
+    cmd = CommandId("cmd-closed")
+    send, _recv = channel[
+        TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk
+    ]()
+    api._text_generation_queues[cmd] = send  # pyright: ignore[reportPrivateUsage]
+    send.close()  # simulate cancel_command() closing the sender
+
+    chunk = TokenChunk(
+        model=ModelId("mlx-community/test"),
+        text="late",
+        token_id=9,
+        usage=None,
+        finish_reason=None,
+    )
+    # must not raise
+    await api._dispatch_generation_chunk(cmd, chunk)  # pyright: ignore[reportPrivateUsage]
+    assert cmd not in api._text_generation_queues  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
 async def test_dispatch_for_unknown_command_is_a_noop() -> None:
     # A chunk for a command with no registered queue (client already gone) must
     # not raise — the data loop has to survive late/orphan chunks.
