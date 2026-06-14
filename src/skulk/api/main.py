@@ -2934,12 +2934,18 @@ class API:
         return {"version": get_skulk_version_label()}
 
     def _calculate_total_available_memory(self) -> Memory:
-        """Calculate total available memory across all nodes in bytes."""
+        """Total available RAM across nodes still live in ``last_seen``.
+
+        Feeds the ``POST /instance`` admission pre-check, so it must exclude
+        timed-out nodes: the telemetry view is not pruned on ``NodeTimedOut``
+        (last-write-wins, node-lifetime), and counting a dead node's last RAM
+        sample could admit a placement the live cluster cannot support. Matches
+        the live-node filtering in ``get_cluster_state`` and the power sampler.
+        """
         total_available = Memory()
-
-        for memory in self._telemetry_view.node_memory.values():
-            total_available += memory.ram_available
-
+        for node_id, memory in self._telemetry_view.node_memory.items():
+            if node_id in self.state.last_seen:
+                total_available += memory.ram_available
         return total_available
 
     @staticmethod
