@@ -82,6 +82,10 @@ Clusters form via libp2p mDNS or via explicit `--bootstrap-peers` multiaddrs. Ne
 
 Any node's API can serve any request — the API forwards work to the placed runners through the master/worker plumbing. Operators usually pick one node as the public entry point (commonly the most stable / best-connected one) but the cluster doesn't require a specific entry point.
 
+### Deployment & versioning
+
+**All nodes in a cluster must run the same Skulk version. Mixed-version clusters are unsupported — this is an anti-pattern, not a deployment mode.** Skulk's wire types are strict (`extra="forbid"`), so an older node will reject events, commands, or snapshots that carry a newer node's fields; running mixed versions produces silent state divergence, dropped placements, and election churn. Upgrade the whole fleet together (e.g. `git checkout <ref>` + restart the service on every node) rather than rolling nodes one at a time. The only cross-version concession is the unavoidable one-time *transition*: a node reads a snapshot it persisted under the previous version on its first restart (handled by stripping removed fields on hydrate). Cross-version *interoperation* (a protocol-version handshake) is deliberately out of scope — tracked, and rejected as a supported mode, in #293.
+
 ## Lifecycle of a request
 
 This is the path a chat completion takes from HTTP through to SSE response:

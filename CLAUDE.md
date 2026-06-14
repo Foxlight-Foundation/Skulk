@@ -120,6 +120,8 @@ The system uses event sourcing for state management:
 - `apply()` (src/skulk/shared/apply.py): Pure function that applies events to state
 - Master indexes events and broadcasts; workers apply indexed events
 
+**Versioning: all nodes in a cluster MUST run the same Skulk version.** Mixed-version clusters are an unsupported anti-pattern — wire types are strict (`extra="forbid"`), so a stale node rejects newer fields, causing state divergence/churn. Upgrade the whole fleet together; do NOT engineer cross-version compatibility (no dual-publish/legacy-event bridges). The only allowed concession is one-time transition hydration (a node reading its own pre-upgrade snapshot). See `website/docs/architecture.md` "Deployment & versioning" and #293.
+
 ### Key Type Hierarchy
 - `src/skulk/shared/types/`: Pydantic models for all shared types
   - `events.py`: Event types (discriminated union)

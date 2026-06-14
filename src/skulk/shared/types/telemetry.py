@@ -16,7 +16,7 @@ and power sampler now read them here instead of off the event log.
 from __future__ import annotations
 
 from skulk.shared.types.common import NodeId
-from skulk.shared.types.events import Event, NodeGatheredInfo, NodeTimedOut
+from skulk.shared.types.events import Event, NodeTimedOut
 from skulk.shared.types.profiling import (
     MemoryUsage,
     NodeResources,
@@ -92,25 +92,19 @@ class TelemetryView:
 
 
 def record_membership_from_event(view: TelemetryView, event: Event) -> None:
-    """Maintain telemetry-plane membership from the control event stream.
+    """Prune a node's telemetry when it leaves the cluster.
 
     Called from EVERY node's event applier(s) — worker and API both — so the
     Node-shared view tracks live membership regardless of which long-running
     components a node runs (``--no-api`` skips the API applier, ``--no-worker``
-    skips the worker applier; a node runs at least one). Two duties:
+    skips the worker applier; a node runs at least one). The telemetry plane has
+    no natural expiry, so without this a timed-out node lingers as a ghost.
 
-    - Prune a node's readings when it times out (``NodeTimedOut``) — the plane
-      has no natural expiry, so without this a dead node lingers as a ghost.
-    - Bridge a legacy/un-upgraded worker's telemetry-plane ``NodeGatheredInfo``
-      into the view during a rolling upgrade. ``apply`` no-ops those events, and
-      an upgraded node reads memory only from the view, so without the bridge it
-      would report "memory not gathered" and refuse placement on those live
-      nodes until every worker restarts. New workers gossip these directly and
-      never as events, so only legacy senders are bridged.
+    Note: there is deliberately no "bridge legacy NodeGatheredInfo telemetry
+    into the view" path here. Mixed-version clusters are unsupported (an
+    anti-pattern — all nodes must run the same Skulk version, deployed
+    whole-fleet); engineering for an un-upgraded worker's legacy event stream
+    would be supporting exactly that. See the deployment docs and #293.
     """
     if isinstance(event, NodeTimedOut):
         view.prune(event.node_id)
-    elif isinstance(event, NodeGatheredInfo) and isinstance(
-        event.info, TELEMETRY_PLANE_INFO
-    ):
-        view.apply(NodeTelemetry(node_id=event.node_id, info=event.info))

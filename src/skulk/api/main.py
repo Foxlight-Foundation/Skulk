@@ -3170,9 +3170,8 @@ class API:
                     self._maybe_compact_event_log()
                 self.state = apply(self.state, i_event)
 
-                # Maintain telemetry-plane membership (prune timed-out nodes,
-                # bridge legacy telemetry events) from the API applier too, so
-                # a --no-worker node still tracks live membership (#279 slice 2).
+                # Prune telemetry for timed-out nodes from the API applier too,
+                # so a --no-worker node still tracks live membership (#279).
                 record_membership_from_event(self._telemetry_view, event)
 
                 if isinstance(event, ChunkGenerated):

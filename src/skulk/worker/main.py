@@ -487,10 +487,9 @@ class Worker:
                 self.state = apply(self.state, event=event)
                 event = event.event
 
-                # Maintain telemetry-plane membership (prune timed-out nodes,
-                # bridge legacy telemetry events) from the worker applier. The
-                # API applier does the same; together they cover --no-api and
-                # --no-worker nodes (#279 slice 2).
+                # Prune telemetry for timed-out nodes from the worker applier.
+                # The API applier does the same; together they cover --no-api
+                # and --no-worker nodes (#279 slice 2).
                 if self._telemetry_view is not None:
                     record_membership_from_event(self._telemetry_view, event)
 
