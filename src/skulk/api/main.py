@@ -237,7 +237,6 @@ from skulk.shared.types.events import (
     ChunkGenerated,
     Event,
     IndexedEvent,
-    NodeTimedOut,
     StateSnapshotHydrated,
     TaskFailed,
     TaskStatusUpdated,
@@ -1837,7 +1836,7 @@ class API:
         ]
         return max(limits) if limits else None
 
-    def get_cluster_state(self) -> dict[str, object]:
+    async def get_cluster_state(self) -> dict[str, object]:
         """Cluster state for ``GET /state``: event-sourced ``State`` plus live
         telemetry (per-node memory + system profile) merged back in.
 
@@ -1845,11 +1844,16 @@ class API:
         the telemetry plane (#279 slice 2), but ``/state`` is the dashboard's
         single data source and still renders per-node memory/system. Merge the
         ``TelemetryView`` maps in under their camelCase keys so the wire shape is
-        unchanged for the dashboard and any external consumer. The view is not
-        pruned on ``NodeTimedOut`` (it is node-lifetime, last-write-wins), so the
-        merge is filtered to nodes still live in ``last_seen`` — otherwise a
-        timed-out node's last reading would surface as a ghost node in the
-        dashboard, the same class of staleness #218 fixed for identities.
+        unchanged for the dashboard and any external consumer. The merge is
+        filtered to ``last_seen``-live nodes as defense-in-depth on top of the
+        worker's ``NodeTimedOut`` prune, so a dead node never shows as a ghost.
+
+        Declared ``async`` so FastAPI serves it ON the event loop rather than a
+        worker thread: the telemetry subscriber and the ``NodeTimedOut`` prune
+        mutate these dicts on the loop, and a threadpool read could iterate one
+        mid-mutation and 500 with ``dictionary changed size during iteration``.
+        There is no ``await`` here, so the comprehensions run atomically wrt
+        those same-loop mutators.
         """
         live = self.state.last_seen
         payload = self.state.model_dump(mode="json", by_alias=True)
@@ -2938,10 +2942,10 @@ class API:
         """Total available RAM across nodes still live in ``last_seen``.
 
         Feeds the ``POST /instance`` admission pre-check, so it must exclude
-        timed-out nodes: the telemetry view is not pruned on ``NodeTimedOut``
-        (last-write-wins, node-lifetime), and counting a dead node's last RAM
-        sample could admit a placement the live cluster cannot support. Matches
-        the live-node filtering in ``get_cluster_state`` and the power sampler.
+        timed-out nodes: counting a dead node's last RAM sample could admit a
+        placement the live cluster cannot support. Filtered to ``last_seen``-live
+        nodes as defense-in-depth on top of the worker's ``NodeTimedOut`` prune
+        of the view, matching ``get_cluster_state`` and the power sampler.
         """
         total_available = Memory()
         for node_id, memory in self._telemetry_view.node_memory.items():
@@ -3162,16 +3166,6 @@ class API:
                     self._event_log.append(event)
                     self._maybe_compact_event_log()
                 self.state = apply(self.state, i_event)
-
-                # Keep the telemetry plane tracking live membership: it is
-                # last-write-wins with no natural expiry, so prune a node's
-                # readings when it times out (#279 slice 2). This runs on every
-                # node (each runs an API applier) over the Node-shared
-                # TelemetryView, so master placement reads and dashboard /state
-                # both stop seeing a dead node at the source, not just via
-                # per-reader live-node filters.
-                if isinstance(event, NodeTimedOut):
-                    self._telemetry_view.prune(event.node_id)
 
                 if isinstance(event, ChunkGenerated):
                     if queue := self._image_generation_queues.get(

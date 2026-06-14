@@ -45,6 +45,7 @@ from skulk.shared.types.events import (
     InputChunkReceived,
     NodeDownloadProgress,
     NodeGatheredInfo,
+    NodeTimedOut,
     TaskCreated,
     TaskStatusUpdated,
     TopologyEdgeCreated,
@@ -66,7 +67,7 @@ from skulk.shared.types.tasks import (
     TaskStatus,
     TextGeneration,
 )
-from skulk.shared.types.telemetry import NodeTelemetry
+from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
 from skulk.shared.types.topology import Connection, SocketConnection
 from skulk.shared.types.worker.downloads import (
     DownloadCompleted,
@@ -314,6 +315,7 @@ class Worker:
         command_sender: Sender[ForwarderCommand],
         download_command_sender: Sender[ForwarderDownloadCommand],
         telemetry_sender: Sender[NodeTelemetry] | None = None,
+        telemetry_view: TelemetryView | None = None,
         store_client: ModelStoreClient | None = None,
         staging_config: StagingNodeConfig | None = None,
     ):
@@ -323,6 +325,12 @@ class Worker:
         self.command_sender = command_sender
         self.download_command_sender = download_command_sender
         self._telemetry_sender = telemetry_sender
+        # Shared, Node-owned telemetry view (#279). The worker prunes a node's
+        # telemetry here when it sees NodeTimedOut, because the worker runs on
+        # EVERY node regardless of role — so a --no-api node (or a --no-api
+        # master placing off this view) still drops dead nodes, where an
+        # API-only prune hook would leak unbounded across churn.
+        self._telemetry_view = telemetry_view
         self._store_client = store_client
         self._staging_config = staging_config
 
@@ -482,6 +490,16 @@ class Worker:
                 # 2. for each event, apply it to the state
                 self.state = apply(self.state, event=event)
                 event = event.event
+
+                # Prune telemetry for a node that left (#279 slice 2). Runs on
+                # every node via the worker (unlike the API hook), so a
+                # --no-api node's shared TelemetryView still tracks live
+                # membership instead of growing unbounded across churn.
+                if (
+                    isinstance(event, NodeTimedOut)
+                    and self._telemetry_view is not None
+                ):
+                    self._telemetry_view.prune(event.node_id)
 
                 # Buffer input image chunks for image editing
                 if isinstance(event, InputChunkReceived):

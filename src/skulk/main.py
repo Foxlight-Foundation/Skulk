@@ -299,6 +299,7 @@ class Node:
                 command_sender=router.sender(topics.COMMANDS),
                 download_command_sender=router.sender(topics.DOWNLOAD_COMMANDS),
                 telemetry_sender=router.sender(topics.TELEMETRY),
+                telemetry_view=telemetry_view,
                 store_client=worker_store_client,
                 staging_config=worker_staging_cfg,
             )
@@ -683,6 +684,7 @@ class Node:
                             # node_resources, so placement silently treats a
                             # management/edge node as eligible (#279 review).
                             telemetry_sender=self.router.sender(topics.TELEMETRY),
+                            telemetry_view=self.telemetry_view,
                         )
                         self._tg.start_soon(self.worker.run)
                         if self.api is not None:
