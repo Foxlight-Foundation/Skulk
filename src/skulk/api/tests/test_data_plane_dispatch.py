@@ -79,6 +79,29 @@ async def test_dispatch_routes_embedding_chunk_to_embedding_queue() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_routes_error_chunk_to_image_queue() -> None:
+    # Regression (#297 review): a runner failure on an ImageGeneration command
+    # emits an ErrorChunk; it must reach the image client, not crash the data
+    # loop on a too-narrow `assert isinstance(chunk, ImageChunk)`.
+    from skulk.shared.types.chunks import ImageChunk
+
+    api = _build_api()
+    cmd = CommandId("cmd-img")
+    send, recv = channel[ImageChunk | ErrorChunk]()
+    api._image_generation_queues[cmd] = send  # pyright: ignore[reportPrivateUsage]
+
+    err = ErrorChunk(
+        model=ModelId("mlx-community/image"),
+        error_message="runner shutdown before completing command",
+    )
+    await api._dispatch_generation_chunk(cmd, err)  # pyright: ignore[reportPrivateUsage]
+    with recv as stream:
+        got = stream.receive_nowait()
+        assert isinstance(got, ErrorChunk)
+        assert got is err
+
+
+@pytest.mark.asyncio
 async def test_dispatch_for_unknown_command_is_a_noop() -> None:
     # A chunk for a command with no registered queue (client already gone) must
     # not raise — the data loop has to survive late/orphan chunks.

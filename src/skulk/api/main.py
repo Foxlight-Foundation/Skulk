@@ -3254,7 +3254,11 @@ class API:
         wedge the dispatcher.
         """
         if queue := self._image_generation_queues.get(command_id, None):
-            assert isinstance(chunk, ImageChunk)
+            # ErrorChunk too: a runner failure on an ImageGeneration/ImageEdits
+            # command emits ErrorChunk (RunnerSupervisor._check_runner), which
+            # must reach the image client instead of crashing the data loop on a
+            # too-narrow assert. The queue is typed ImageChunk | ErrorChunk.
+            assert isinstance(chunk, (ImageChunk, ErrorChunk))
             try:
                 await queue.send(chunk)
             except BrokenResourceError:
