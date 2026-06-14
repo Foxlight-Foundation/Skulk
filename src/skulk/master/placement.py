@@ -12,6 +12,7 @@ from skulk.master.placement_utils import (
     get_shard_assignments,
     get_smallest_cycles,
 )
+from skulk.shared.models.memory_estimate import instance_context_token_limit
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import (
@@ -61,10 +62,31 @@ def add_instance_to_placements(
     command: CreateInstance,
     topology: Topology,
     current_instances: Mapping[InstanceId, Instance],
+    node_memory: Mapping[NodeId, MemoryUsage],
 ) -> Mapping[InstanceId, Instance]:
     # TODO: validate against topology
 
-    return {**current_instances, command.instance.instance_id: command.instance}
+    # Stamp the memory-derived context-admission ceiling, same as the
+    # place_instance path (#279 slice 2). A client-supplied exact placement
+    # usually omits contextTokenLimit; without this it would get only the
+    # card-limit backfill (BaseInstance validator), and since runners now trust
+    # the stamped value instead of recomputing from per-node RAM, a prompt that
+    # fits the card but not the hosting node could reach MLX instead of a clean
+    # context_length_exceeded. instance_context_token_limit falls back to the
+    # card's advertised context_length whenever ANY hosting node's ram_total is
+    # still unknown, so a transient missing reading yields the card guard rather
+    # than None (review catch on #292).
+    assignments = command.instance.shard_assignments
+    ceiling = instance_context_token_limit(
+        assignments,
+        {
+            node_id: node_memory[node_id].ram_total
+            for node_id in assignments.node_to_runner
+            if node_id in node_memory
+        },
+    )
+    instance = command.instance.model_copy(update={"context_token_limit": ceiling})
+    return {**current_instances, instance.instance_id: instance}
 
 
 def _get_node_download_fraction(
@@ -319,6 +341,15 @@ def place_instance(
         command.model_card, selected_cycle, command.sharding, node_memory
     )
 
+    # Stamp the context-admission ceiling into the placement decision (#279
+    # slice 2). Computed once here from the hosting nodes' static ram_total, so
+    # every rank reads the identical value off replicated state rather than
+    # recomputing from the (now telemetry-plane, last-write-wins) node memory.
+    context_token_limit = instance_context_token_limit(
+        shard_assignments,
+        {node_id: node_memory[node_id].ram_total for node_id in selected_cycle.node_ids},
+    )
+
     cycle_digraph: Topology = topology.get_subgraph_from_nodes(selected_cycle.node_ids)
 
     instance_id = InstanceId()
@@ -354,6 +385,7 @@ def place_instance(
             target_instances[instance_id] = MlxJacclInstance(
                 instance_id=instance_id,
                 shard_assignments=shard_assignments,
+                context_token_limit=context_token_limit,
                 jaccl_devices=mlx_jaccl_devices,
                 jaccl_coordinators=mlx_jaccl_coordinators,
             )
@@ -368,6 +400,7 @@ def place_instance(
             target_instances[instance_id] = MlxRingInstance(
                 instance_id=instance_id,
                 shard_assignments=shard_assignments,
+                context_token_limit=context_token_limit,
                 hosts_by_node=hosts_by_node,
                 ephemeral_port=ephemeral_port,
             )

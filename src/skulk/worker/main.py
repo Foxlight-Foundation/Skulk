@@ -18,7 +18,6 @@ from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
 from skulk.shared.models.memory_estimate import (
     estimate_shard_footprint,
     gpu_working_set_ceiling,
-    instance_context_token_limit,
 )
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -52,7 +51,7 @@ from skulk.shared.types.events import (
     TopologyEdgeDeleted,
 )
 from skulk.shared.types.multiaddr import Multiaddr
-from skulk.shared.types.profiling import MemoryUsage, NodeResources
+from skulk.shared.types.profiling import MemoryUsage
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import (
     CancelTask,
@@ -67,7 +66,12 @@ from skulk.shared.types.tasks import (
     TaskStatus,
     TextGeneration,
 )
-from skulk.shared.types.telemetry import NodeTelemetry
+from skulk.shared.types.telemetry import (
+    TELEMETRY_PLANE_INFO,
+    NodeTelemetry,
+    TelemetryView,
+    record_membership_from_event,
+)
 from skulk.shared.types.topology import Connection, SocketConnection
 from skulk.shared.types.worker.downloads import (
     DownloadCompleted,
@@ -87,7 +91,10 @@ from skulk.store.staging_eviction import (
 )
 from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.crash_window import CrashWindow
-from skulk.utils.info_gatherer.info_gatherer import GatheredInfo, InfoGatherer
+from skulk.utils.info_gatherer.info_gatherer import (
+    GatheredInfo,
+    InfoGatherer,
+)
 from skulk.utils.info_gatherer.net_profile import check_reachable
 from skulk.utils.keyed_backoff import KeyedBackoff
 from skulk.utils.task_group import TaskGroup
@@ -304,6 +311,7 @@ class Worker:
         command_sender: Sender[ForwarderCommand],
         download_command_sender: Sender[ForwarderDownloadCommand],
         telemetry_sender: Sender[NodeTelemetry] | None = None,
+        telemetry_view: TelemetryView | None = None,
         store_client: ModelStoreClient | None = None,
         staging_config: StagingNodeConfig | None = None,
     ):
@@ -313,6 +321,12 @@ class Worker:
         self.command_sender = command_sender
         self.download_command_sender = download_command_sender
         self._telemetry_sender = telemetry_sender
+        # Shared, Node-owned telemetry view (#279). The worker prunes a node's
+        # telemetry here when it sees NodeTimedOut, because the worker runs on
+        # EVERY node regardless of role — so a --no-api node (or a --no-api
+        # master placing off this view) still drops dead nodes, where an
+        # API-only prune hook would leak unbounded across churn.
+        self._telemetry_view = telemetry_view
         self._store_client = store_client
         self._staging_config = staging_config
 
@@ -440,11 +454,12 @@ class Worker:
         with recv as info_stream:
             async for info in info_stream:
                 try:
-                    # Telemetry plane (#279): NodeResources is gossiped on the
-                    # telemetry topic, off the event log. Everything else still
-                    # travels as an indexed NodeGatheredInfo event in slice 1.
+                    # Telemetry plane (#279): live readings are gossiped on the
+                    # telemetry topic, off the event log. The remaining node_*
+                    # readings still travel as indexed NodeGatheredInfo events
+                    # until later slices migrate them.
                     if (
-                        isinstance(info, NodeResources)
+                        isinstance(info, TELEMETRY_PLANE_INFO)
                         and self._telemetry_sender is not None
                     ):
                         await self._telemetry_sender.send(
@@ -471,6 +486,12 @@ class Worker:
                 # 2. for each event, apply it to the state
                 self.state = apply(self.state, event=event)
                 event = event.event
+
+                # Prune telemetry for timed-out nodes from the worker applier.
+                # The API applier does the same; together they cover --no-api
+                # and --no-worker nodes (#279 slice 2).
+                if self._telemetry_view is not None:
+                    record_membership_from_event(self._telemetry_view, event)
 
                 # Buffer input image chunks for image editing
                 if isinstance(event, InputChunkReceived):
@@ -869,18 +890,13 @@ class Worker:
             f"world_size={shard.world_size}, "
             f"layers={shard.start_layer}:{shard.end_layer})"
         )
-        # Context-admission ceiling (#145): derived exclusively from static
-        # inputs (per-node ram_total, card, shard fractions) so every rank of
-        # a multi-node instance computes the identical limit — placement only
-        # happens after the master indexed memory for all hosting nodes, so
-        # the replicated state already carries every entry we need here.
-        context_token_limit = instance_context_token_limit(
-            task.bound_instance.instance.shard_assignments,
-            {
-                node_id: usage.ram_total
-                for node_id, usage in self.state.node_memory.items()
-            },
-        )
+        # Context-admission ceiling (#145/#279 slice 2): the master computed
+        # this once at placement time and stamped it into the event-sourced
+        # placement decision, so every rank reads the identical value here.
+        # Recomputing from node memory would now be non-deterministic — memory
+        # moved to the last-write-wins telemetry plane and is no longer in the
+        # ordered, replicated event log.
+        context_token_limit = task.bound_instance.instance.context_token_limit
         logger.info(
             "Context admission limit for instance "
             f"{task.instance_id}: {context_token_limit} tokens"

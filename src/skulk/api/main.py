@@ -167,7 +167,6 @@ from skulk.shared.constants import (
 from skulk.shared.election import ElectionMessage
 from skulk.shared.logging import InterceptLogger
 from skulk.shared.models.capabilities import resolve_model_capability_profile
-from skulk.shared.models.memory_estimate import instance_context_token_limit
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -246,7 +245,10 @@ from skulk.shared.types.events import (
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import MemoryUsage, read_wired_memory_bytes
 from skulk.shared.types.state import State
-from skulk.shared.types.telemetry import TelemetryView
+from skulk.shared.types.telemetry import (
+    TelemetryView,
+    record_membership_from_event,
+)
 from skulk.shared.types.text_generation import TextGenerationTaskParams
 from skulk.shared.types.worker.downloads import DownloadCompleted
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
@@ -1075,8 +1077,8 @@ class API:
             "/state",
             tags=["State & Tracing"],
             summary="Get cluster state",
-            description="Return the current cluster state as seen by this API node, including topology, instances, and node capabilities.",
-        )(lambda: self.state)
+            description="Return the current cluster state as seen by this API node, including topology, instances, node capabilities, and live telemetry (per-node memory and system profile).",
+        )(self.get_cluster_state)
         self.app.get(
             "/events",
             tags=["State & Tracing"],
@@ -1421,7 +1423,7 @@ class API:
                     copy.deepcopy(command),
                     topology=self.state.topology,
                     current_instances=self.state.instances,
-                    node_memory=self.state.node_memory,
+                    node_memory=self._telemetry_view.node_memory,
                     node_network=self.state.node_network,
                     download_status=self.state.downloads,
                     excluded_nodes=set(command.excluded_nodes),
@@ -1488,7 +1490,7 @@ class API:
                     instance_meta=instance_meta,
                     min_nodes=min_nodes,
                 ),
-                node_memory=self.state.node_memory,
+                node_memory=self._telemetry_view.node_memory,
                 node_network=self.state.node_network,
                 topology=self.state.topology,
                 current_instances=self.state.instances,
@@ -1553,7 +1555,7 @@ class API:
                         instance_meta=instance_meta,
                         min_nodes=min_nodes,
                     ),
-                    node_memory=self.state.node_memory,
+                    node_memory=self._telemetry_view.node_memory,
                     node_network=self.state.node_network,
                     topology=self.state.topology,
                     current_instances=self.state.instances,
@@ -1741,7 +1743,13 @@ class API:
     async def _collect_text_generation_with_stats(
         self, command_id: CommandId
     ) -> BenchChatCompletionResponse:
-        sampler = PowerSampler(get_node_system=lambda: self.state.node_system)
+        sampler = PowerSampler(
+            get_node_system=lambda: {
+                node_id: profile
+                for node_id, profile in self._telemetry_view.node_system.items()
+                if node_id in self.state.last_seen
+            }
+        )
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         model: ModelId | None = None
@@ -1823,22 +1831,46 @@ class API:
         maximum avoids falsely rejecting a request the largest instance could
         still serve.
         """
-        node_ram_totals = {
-            node_id: usage.ram_total
-            for node_id, usage in self.state.node_memory.items()
-        }
         limits = [
-            limit
+            instance.context_token_limit
             for instance in self.state.instances.values()
             if instance.shard_assignments.model_id == model_id
-            and (
-                limit := instance_context_token_limit(
-                    instance.shard_assignments, node_ram_totals
-                )
-            )
-            is not None
+            and instance.context_token_limit is not None
         ]
         return max(limits) if limits else None
+
+    async def get_cluster_state(self) -> dict[str, object]:
+        """Cluster state for ``GET /state``: event-sourced ``State`` plus live
+        telemetry (per-node memory + system profile) merged back in.
+
+        ``node_memory`` and ``node_system`` moved off event-sourced ``State`` to
+        the telemetry plane (#279 slice 2), but ``/state`` is the dashboard's
+        single data source and still renders per-node memory/system. Merge the
+        ``TelemetryView`` maps in under their camelCase keys so the wire shape is
+        unchanged for the dashboard and any external consumer. The merge is
+        filtered to ``last_seen``-live nodes as defense-in-depth on top of the
+        worker's ``NodeTimedOut`` prune, so a dead node never shows as a ghost.
+
+        Declared ``async`` so FastAPI serves it ON the event loop rather than a
+        worker thread: the telemetry subscriber and the ``NodeTimedOut`` prune
+        mutate these dicts on the loop, and a threadpool read could iterate one
+        mid-mutation and 500 with ``dictionary changed size during iteration``.
+        There is no ``await`` here, so the comprehensions run atomically wrt
+        those same-loop mutators.
+        """
+        live = self.state.last_seen
+        payload = self.state.model_dump(mode="json", by_alias=True)
+        payload["nodeMemory"] = {
+            str(node_id): usage.model_dump(mode="json", by_alias=True)
+            for node_id, usage in self._telemetry_view.node_memory.items()
+            if node_id in live
+        }
+        payload["nodeSystem"] = {
+            str(node_id): profile.model_dump(mode="json", by_alias=True)
+            for node_id, profile in self._telemetry_view.node_system.items()
+            if node_id in live
+        }
+        return payload
 
     async def _send_text_generation_with_images(
         self, task_params: TextGenerationTaskParams
@@ -2401,7 +2433,13 @@ class API:
         num_images: int,
         response_format: str,
     ) -> BenchImageGenerationResponse:
-        sampler = PowerSampler(get_node_system=lambda: self.state.node_system)
+        sampler = PowerSampler(
+            get_node_system=lambda: {
+                node_id: profile
+                for node_id, profile in self._telemetry_view.node_system.items()
+                if node_id in self.state.last_seen
+            }
+        )
         images: list[ImageData] = []
         stats: ImageGenerationStats | None = None
         async with anyio.create_task_group() as tg:
@@ -2904,12 +2942,18 @@ class API:
         return {"version": get_skulk_version_label()}
 
     def _calculate_total_available_memory(self) -> Memory:
-        """Calculate total available memory across all nodes in bytes."""
+        """Total available RAM across nodes still live in ``last_seen``.
+
+        Feeds the ``POST /instance`` admission pre-check, so it must exclude
+        timed-out nodes: counting a dead node's last RAM sample could admit a
+        placement the live cluster cannot support. Filtered to ``last_seen``-live
+        nodes as defense-in-depth on top of the worker's ``NodeTimedOut`` prune
+        of the view, matching ``get_cluster_state`` and the power sampler.
+        """
         total_available = Memory()
-
-        for memory in self.state.node_memory.values():
-            total_available += memory.ram_available
-
+        for node_id, memory in self._telemetry_view.node_memory.items():
+            if node_id in self.state.last_seen:
+                total_available += memory.ram_available
         return total_available
 
     @staticmethod
@@ -3125,6 +3169,10 @@ class API:
                     self._event_log.append(event)
                     self._maybe_compact_event_log()
                 self.state = apply(self.state, i_event)
+
+                # Prune telemetry for timed-out nodes from the API applier too,
+                # so a --no-worker node still tracks live membership (#279).
+                record_membership_from_event(self._telemetry_view, event)
 
                 if isinstance(event, ChunkGenerated):
                     if queue := self._image_generation_queues.get(
@@ -4006,11 +4054,11 @@ class API:
             )
 
         return NodeResourceDiagnostics(
-            gathered_memory=self.state.node_memory.get(self.node_id),
+            gathered_memory=self._telemetry_view.node_memory.get(self.node_id),
             current_memory=current_memory,
             current_wired=current_wired,
             disk=self.state.node_disk.get(self.node_id),
-            system=self.state.node_system.get(self.node_id),
+            system=self._telemetry_view.node_system.get(self.node_id),
             network=self.state.node_network.get(self.node_id),
         )
 

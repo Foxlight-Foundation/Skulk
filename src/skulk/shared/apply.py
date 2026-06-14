@@ -269,15 +269,10 @@ def apply_node_timed_out(event: NodeTimedOut, state: State) -> State:
     downloads = {
         key: value for key, value in state.downloads.items() if key != event.node_id
     }
-    # Clean up all granular node mappings
-    node_memory = {
-        key: value for key, value in state.node_memory.items() if key != event.node_id
-    }
+    # Clean up all granular node mappings (node_memory and node_system live on
+    # the telemetry plane now, #279 slice 2 — not in State, so not cleaned here)
     node_disk = {
         key: value for key, value in state.node_disk.items() if key != event.node_id
-    }
-    node_system = {
-        key: value for key, value in state.node_system.items() if key != event.node_id
     }
     node_network = {
         key: value for key, value in state.node_network.items() if key != event.node_id
@@ -314,9 +309,7 @@ def apply_node_timed_out(event: NodeTimedOut, state: State) -> State:
             "topology": topology,
             "last_seen": last_seen,
             "node_identities": node_identities,
-            "node_memory": node_memory,
             "node_disk": node_disk,
-            "node_system": node_system,
             "node_network": node_network,
             "node_thunderbolt": node_thunderbolt,
             "node_thunderbolt_bridge": node_thunderbolt_bridge,
@@ -341,16 +334,16 @@ def apply_node_gathered_info(event: NodeGatheredInfo, state: State) -> State:
     }
 
     match info:
-        # MacmonMetrics is a decode-only shim for rolling upgrades; it carries
-        # the same normalized system_profile/memory shape as MactopMetrics.
+        # Memory and the system profile moved to the telemetry plane (#279
+        # slice 2): workers now gossip them on the TELEMETRY topic into the
+        # TelemetryView, off the event log. These cases stay only to keep the
+        # match exhaustive and to no-op a legacy event from an un-upgraded
+        # worker during a rolling upgrade (its readings ride telemetry once it
+        # restarts on the new binary). last_seen is still bumped above.
         case MactopMetrics() | MacmonMetrics():
-            update["node_system"] = {
-                **state.node_system,
-                event.node_id: info.system_profile,
-            }
-            update["node_memory"] = {**state.node_memory, event.node_id: info.memory}
+            pass
         case MemoryUsage():
-            update["node_memory"] = {**state.node_memory, event.node_id: info}
+            pass
         case NodeDiskUsage():
             update["node_disk"] = {**state.node_disk, event.node_id: info.disk_usage}
         case NodeConfig():

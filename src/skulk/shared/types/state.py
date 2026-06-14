@@ -15,12 +15,10 @@ from skulk.shared.topology import Topology, TopologySnapshot
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.profiling import (
     DiskUsage,
-    MemoryUsage,
     NodeIdentity,
     NodeNetworkInfo,
     NodeRdmaCtlStatus,
     NodeThunderboltInfo,
-    SystemPerformanceProfile,
     ThunderboltBridgeStatus,
 )
 from skulk.shared.types.tasks import Task, TaskId
@@ -28,6 +26,18 @@ from skulk.shared.types.worker.downloads import DownloadProgress
 from skulk.shared.types.worker.instances import Instance, InstanceId
 from skulk.shared.types.worker.runners import RunnerId, RunnerStatus
 from skulk.utils.pydantic_ext import CamelCaseModel
+
+# State fields removed when their data moved to the telemetry plane (#279).
+# Both camelCase (wire/snapshot) and snake_case (defensive) spellings, so a
+# pre-#279 snapshot still hydrates under extra="forbid" (see the validator).
+_LEGACY_TELEMETRY_KEYS = (
+    "nodeResources",
+    "node_resources",
+    "nodeMemory",
+    "node_memory",
+    "nodeSystem",
+    "node_system",
+)
 
 
 class State(CamelCaseModel):
@@ -57,40 +67,39 @@ class State(CamelCaseModel):
 
     # Granular node state mappings (update independently at different frequencies)
     node_identities: Mapping[NodeId, NodeIdentity] = {}
-    node_memory: Mapping[NodeId, MemoryUsage] = {}
     node_disk: Mapping[NodeId, DiskUsage] = {}
-    node_system: Mapping[NodeId, SystemPerformanceProfile] = {}
     node_network: Mapping[NodeId, NodeNetworkInfo] = {}
     node_thunderbolt: Mapping[NodeId, NodeThunderboltInfo] = {}
     node_thunderbolt_bridge: Mapping[NodeId, ThunderboltBridgeStatus] = {}
     node_rdma_ctl: Mapping[NodeId, NodeRdmaCtlStatus] = {}
-    # node_resources moved to the telemetry plane (#279) — it is gossiped
-    # last-write-wins off the event log and lives in TelemetryView, not here.
+    # node_resources (#279 slice 1) and node_memory + node_system (#279 slice 2)
+    # moved to the telemetry plane — gossiped last-write-wins off the event log,
+    # held in TelemetryView, not here.
 
     # Detected cycles where all nodes have Thunderbolt bridge enabled (>2 nodes)
     thunderbolt_bridge_cycles: Sequence[Sequence[NodeId]] = []
 
     @model_validator(mode="before")
     @classmethod
-    def _drop_legacy_node_resources(cls, data: object) -> object:
-        """Strip the removed ``node_resources`` field from inbound payloads.
+    def _drop_legacy_telemetry_fields(cls, data: object) -> object:
+        """Strip removed telemetry fields from inbound payloads.
 
-        ``node_resources`` moved to the telemetry plane (#279), but ``State``
-        keeps ``extra="forbid"`` so a newer binary's unknown fields are caught
-        rather than silently dropped. Without this, a state-sync snapshot from
-        a pre-#279 master (which still carries ``nodeResources``) fails
-        validation on an upgraded follower; the follower then discards the
-        snapshot and falls back to replay from index 0, losing any
-        instances/topology that lived only in an already-compacted log prefix
-        (the #273 outage class). Popping the known-removed key — and only that
-        key — preserves rolling-upgrade hydration without weakening the
-        forbid-extra guard for genuinely unknown fields.
+        ``node_resources``/``node_memory``/``node_system`` moved to the
+        telemetry plane (#279), but ``State`` keeps ``extra="forbid"`` so a
+        newer binary's unknown fields are caught rather than silently dropped.
+        Without this, a state-sync snapshot from a pre-#279 master (which still
+        carries those keys) fails validation on an upgraded follower; the
+        follower then discards the snapshot and falls back to replay from index
+        0, losing any instances/topology that lived only in an already-compacted
+        log prefix (the #273 outage class). Popping only the known-removed keys
+        preserves rolling-upgrade hydration without weakening the forbid-extra
+        guard for genuinely unknown fields.
         """
         if not isinstance(data, dict):
             return data
         cleaned: dict[str, object] = dict(cast("dict[str, object]", data))
-        cleaned.pop("nodeResources", None)
-        cleaned.pop("node_resources", None)
+        for key in _LEGACY_TELEMETRY_KEYS:
+            cleaned.pop(key, None)
         return cleaned
 
     @field_serializer("topology", mode="plain")

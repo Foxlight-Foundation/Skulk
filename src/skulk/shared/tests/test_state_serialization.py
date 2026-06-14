@@ -70,18 +70,30 @@ def test_state_ignores_legacy_node_resources_from_old_snapshot() -> None:
     state.topology.add_node(node_id)
 
     # Simulate the wire payload an older binary would emit: the current JSON
-    # plus the removed camelCase field.
+    # plus the removed camelCase fields (node_resources from slice 1, plus
+    # node_memory + node_system from slice 2).
     payload = state.model_dump(mode="json", by_alias=True)
     payload["nodeResources"] = {
         str(node_id): {"backends": ["mlx"], "participation": "management"}
     }
+    payload["nodeMemory"] = {
+        str(node_id): {
+            "ramTotal": {"inBytes": 16 * 2**30},
+            "ramAvailable": {"inBytes": 8 * 2**30},
+            "swapTotal": {"inBytes": 0},
+            "swapAvailable": {"inBytes": 0},
+        }
+    }
+    payload["nodeSystem"] = {str(node_id): {}}
 
     restored = State.model_validate(payload)
 
     assert restored.last_event_applied_idx == 7
     assert restored.topology.to_snapshot().nodes == state.topology.to_snapshot().nodes
-    # The legacy field is dropped, not surfaced anywhere on the model.
+    # The legacy fields are dropped, not surfaced anywhere on the model.
     assert not hasattr(restored, "node_resources")
+    assert not hasattr(restored, "node_memory")
+    assert not hasattr(restored, "node_system")
 
 
 def test_state_still_forbids_genuinely_unknown_fields() -> None:

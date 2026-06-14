@@ -125,12 +125,19 @@ async def test_master():
             )
         )
 
-        # wait for initial topology event
+        # wait for initial topology event (the NodeGatheredInfo above still
+        # builds topology + last_seen even though its memory now rides telemetry)
         logger.info("wait for initial topology event")
         while len(list(master.state.topology.list_nodes())) == 0:
             await anyio.sleep(0.001)
-        while len(master.state.node_memory) == 0:
-            await anyio.sleep(0.001)
+        # node_memory lives on the telemetry plane now (#279 slice 2); placement
+        # reads it from the master's TelemetryView, so seed it there directly.
+        master._telemetry_view.node_memory[node_id] = MemoryUsage(  # pyright: ignore[reportPrivateUsage]
+            ram_total=Memory.from_bytes(678948 * 1024),
+            ram_available=Memory.from_bytes(678948 * 1024),
+            swap_total=Memory.from_bytes(0),
+            swap_available=Memory.from_bytes(0),
+        )
 
         logger.info("inject a CreateInstance Command")
         await command_sender.send(

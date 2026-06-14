@@ -3,6 +3,7 @@ import pytest
 from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
+    add_instance_to_placements,
     get_transition_events,
     place_instance,
 )
@@ -14,7 +15,7 @@ from skulk.master.tests.conftest import (
 )
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.topology import Topology
-from skulk.shared.types.commands import PlaceInstance
+from skulk.shared.types.commands import CreateInstance, PlaceInstance
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import (
     InstanceCreated,
@@ -44,7 +45,7 @@ from skulk.shared.types.worker.instances import (
     MlxJacclInstance,
     MlxRingInstance,
 )
-from skulk.shared.types.worker.runners import ShardAssignments
+from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import PipelineShardMetadata, Sharding
 
 
@@ -230,6 +231,34 @@ def test_get_instance_placements_one_node_fits_with_extra_memory() -> None:
     assert len(instance.shard_assignments.node_to_runner) == 1
     assert len(instance.shard_assignments.runner_to_shard) == 1
     assert len(instance.shard_assignments.runner_to_shard) == 1
+
+
+def test_placement_stamps_context_token_limit() -> None:
+    # #279 slice 2: the master computes the context-admission ceiling once at
+    # placement time and stamps it onto the instance, so every rank reads the
+    # identical value instead of recomputing from (now telemetry-plane) memory.
+    topology = Topology()
+    node_id = NodeId()
+    topology.add_node(node_id)
+    node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
+    node_network = {node_id: create_node_network()}
+    cic = place_instance_command(
+        ModelCard(
+            model_id=ModelId("test-model"),
+            storage_size=Memory.from_gb(5),
+            n_layers=10,
+            hidden_size=1000,
+            supports_tensor=True,
+            tasks=[ModelTask.TextGeneration],
+            context_length=4096,
+        ),
+    )
+    placements = place_instance(cic, topology, {}, node_memory, node_network)
+    instance = next(iter(placements.values()))
+    # A card-advertised context_length makes the ceiling enforceable; the stamp
+    # is present and never exceeds the advertised limit.
+    assert instance.context_token_limit is not None
+    assert instance.context_token_limit <= 4096
 
 
 def test_get_instance_placements_one_node_not_fit() -> None:
@@ -758,6 +787,69 @@ def _make_shard_metadata(model_card: ModelCard) -> PipelineShardMetadata:
         end_layer=model_card.n_layers,
         n_layers=model_card.n_layers,
     )
+
+
+def test_legacy_instance_backfills_context_token_limit_from_card() -> None:
+    # An instance hydrated without a stamped ceiling (pre-#279 slice 2 snapshot
+    # / event / older CreateInstance) must fall back to the card's context
+    # length so the #145 admission guard still applies (review catch on #292).
+    node_id = NodeId()
+    runner_id = RunnerId()
+    card = ModelCard(
+        model_id=ModelId("legacy-model"),
+        storage_size=Memory.from_gb(1),
+        n_layers=10,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        context_length=8192,
+    )
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=ModelId("legacy-model"),
+            runner_to_shard={runner_id: _make_shard_metadata(card)},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+        # context_token_limit deliberately omitted (the legacy/None case)
+    )
+    assert instance.context_token_limit == 8192
+
+
+def test_create_instance_restamps_context_token_limit() -> None:
+    # The exact-control POST /instance path must stamp the master's
+    # memory-derived ceiling too (#292 review) — runners trust the stamped
+    # field now, so a client-supplied placement can't smuggle in an inflated
+    # ceiling and reach MLX past the safe limit.
+    node_id = NodeId()
+    runner_id = RunnerId()
+    card = ModelCard(
+        model_id=ModelId("exact-model"),
+        storage_size=Memory.from_gb(1),
+        n_layers=10,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        context_length=4096,
+    )
+    client_instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=ModelId("exact-model"),
+            runner_to_shard={runner_id: _make_shard_metadata(card)},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+        context_token_limit=999_999,  # client-inflated; must be overridden
+    )
+    command = CreateInstance(command_id=CommandId(), instance=client_instance)
+    node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
+    result = add_instance_to_placements(command, Topology(), {}, node_memory)
+    stamped = next(iter(result.values())).context_token_limit
+    assert stamped is not None and stamped <= 4096
 
 
 def test_placement_prefers_cycle_with_downloaded_model(

@@ -100,12 +100,11 @@ def seed_state_for_new_session(prior: State, now: datetime | None = None) -> Sta
     # last_seen entry is immortal (the phantom-node leak, #218 family). This
     # MUST cover every node_* map copied into the seed below — a node present
     # only in node_thunderbolt/node_thunderbolt_bridge/node_rdma_ctl (not in
-    # identities/memory) would otherwise still leak (review catch on #291).
+    # identities) would otherwise still leak (review catch on #291). node_memory
+    # is no longer carried — it moved to the telemetry plane (#279 slice 2).
     carried_node_ids = (
         prior.node_identities.keys()
-        | prior.node_memory.keys()
         | prior.node_disk.keys()
-        | prior.node_system.keys()
         | prior.node_network.keys()
         | prior.node_thunderbolt.keys()
         | prior.node_thunderbolt_bridge.keys()
@@ -118,9 +117,7 @@ def seed_state_for_new_session(prior: State, now: datetime | None = None) -> Sta
         tracing_enabled=prior.tracing_enabled,
         last_seen=last_seen,
         node_identities=prior.node_identities,
-        node_memory=prior.node_memory,
         node_disk=prior.node_disk,
-        node_system=prior.node_system,
         node_network=prior.node_network,
         node_thunderbolt=prior.node_thunderbolt,
         node_thunderbolt_bridge=prior.node_thunderbolt_bridge,
