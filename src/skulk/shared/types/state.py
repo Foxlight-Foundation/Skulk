@@ -2,7 +2,13 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any, cast
 
-from pydantic import ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 from pydantic.alias_generators import to_camel
 
 from skulk.shared.topology import Topology, TopologySnapshot
@@ -63,6 +69,29 @@ class State(CamelCaseModel):
 
     # Detected cycles where all nodes have Thunderbolt bridge enabled (>2 nodes)
     thunderbolt_bridge_cycles: Sequence[Sequence[NodeId]] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_legacy_node_resources(cls, data: object) -> object:
+        """Strip the removed ``node_resources`` field from inbound payloads.
+
+        ``node_resources`` moved to the telemetry plane (#279), but ``State``
+        keeps ``extra="forbid"`` so a newer binary's unknown fields are caught
+        rather than silently dropped. Without this, a state-sync snapshot from
+        a pre-#279 master (which still carries ``nodeResources``) fails
+        validation on an upgraded follower; the follower then discards the
+        snapshot and falls back to replay from index 0, losing any
+        instances/topology that lived only in an already-compacted log prefix
+        (the #273 outage class). Popping the known-removed key — and only that
+        key — preserves rolling-upgrade hydration without weakening the
+        forbid-extra guard for genuinely unknown fields.
+        """
+        if not isinstance(data, dict):
+            return data
+        cleaned: dict[str, object] = dict(cast("dict[str, object]", data))
+        cleaned.pop("nodeResources", None)
+        cleaned.pop("node_resources", None)
+        return cleaned
 
     @field_serializer("topology", mode="plain")
     def _encode_topology(self, value: Topology) -> TopologySnapshot:

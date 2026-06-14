@@ -676,6 +676,13 @@ class Node:
                             ),
                             store_client=self.store_client,
                             staging_config=elect_staging2,
+                            # Must match Node.create's Worker wiring: without this
+                            # the recreated worker stops publishing NodeResources
+                            # telemetry, and after a master restart (fresh
+                            # telemetry_view) the node never reappears in
+                            # node_resources, so placement silently treats a
+                            # management/edge node as eligible (#279 review).
+                            telemetry_sender=self.router.sender(topics.TELEMETRY),
                         )
                         self._tg.start_soon(self.worker.run)
                         if self.api is not None:
