@@ -1740,7 +1740,13 @@ class API:
     async def _collect_text_generation_with_stats(
         self, command_id: CommandId
     ) -> BenchChatCompletionResponse:
-        sampler = PowerSampler(get_node_system=lambda: self._telemetry_view.node_system)
+        sampler = PowerSampler(
+            get_node_system=lambda: {
+                node_id: profile
+                for node_id, profile in self._telemetry_view.node_system.items()
+                if node_id in self.state.last_seen
+            }
+        )
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         model: ModelId | None = None
@@ -1838,16 +1844,23 @@ class API:
         the telemetry plane (#279 slice 2), but ``/state`` is the dashboard's
         single data source and still renders per-node memory/system. Merge the
         ``TelemetryView`` maps in under their camelCase keys so the wire shape is
-        unchanged for the dashboard and any external consumer.
+        unchanged for the dashboard and any external consumer. The view is not
+        pruned on ``NodeTimedOut`` (it is node-lifetime, last-write-wins), so the
+        merge is filtered to nodes still live in ``last_seen`` — otherwise a
+        timed-out node's last reading would surface as a ghost node in the
+        dashboard, the same class of staleness #218 fixed for identities.
         """
+        live = self.state.last_seen
         payload = self.state.model_dump(mode="json", by_alias=True)
         payload["nodeMemory"] = {
             str(node_id): usage.model_dump(mode="json", by_alias=True)
             for node_id, usage in self._telemetry_view.node_memory.items()
+            if node_id in live
         }
         payload["nodeSystem"] = {
             str(node_id): profile.model_dump(mode="json", by_alias=True)
             for node_id, profile in self._telemetry_view.node_system.items()
+            if node_id in live
         }
         return payload
 
@@ -2412,7 +2425,13 @@ class API:
         num_images: int,
         response_format: str,
     ) -> BenchImageGenerationResponse:
-        sampler = PowerSampler(get_node_system=lambda: self._telemetry_view.node_system)
+        sampler = PowerSampler(
+            get_node_system=lambda: {
+                node_id: profile
+                for node_id, profile in self._telemetry_view.node_system.items()
+                if node_id in self.state.last_seen
+            }
+        )
         images: list[ImageData] = []
         stats: ImageGenerationStats | None = None
         async with anyio.create_task_group() as tg:

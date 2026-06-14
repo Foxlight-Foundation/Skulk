@@ -44,7 +44,7 @@ from skulk.shared.types.worker.instances import (
     MlxJacclInstance,
     MlxRingInstance,
 )
-from skulk.shared.types.worker.runners import ShardAssignments
+from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import PipelineShardMetadata, Sharding
 
 
@@ -786,6 +786,35 @@ def _make_shard_metadata(model_card: ModelCard) -> PipelineShardMetadata:
         end_layer=model_card.n_layers,
         n_layers=model_card.n_layers,
     )
+
+
+def test_legacy_instance_backfills_context_token_limit_from_card() -> None:
+    # An instance hydrated without a stamped ceiling (pre-#279 slice 2 snapshot
+    # / event / older CreateInstance) must fall back to the card's context
+    # length so the #145 admission guard still applies (review catch on #292).
+    node_id = NodeId()
+    runner_id = RunnerId()
+    card = ModelCard(
+        model_id=ModelId("legacy-model"),
+        storage_size=Memory.from_gb(1),
+        n_layers=10,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        context_length=8192,
+    )
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=ModelId("legacy-model"),
+            runner_to_shard={runner_id: _make_shard_metadata(card)},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+        # context_token_limit deliberately omitted (the legacy/None case)
+    )
+    assert instance.context_token_limit == 8192
 
 
 def test_placement_prefers_cycle_with_downloaded_model(
