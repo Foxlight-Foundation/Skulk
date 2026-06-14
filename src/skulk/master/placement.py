@@ -425,8 +425,17 @@ def replacement_command_for_refused_instance(instance: Instance) -> PlaceInstanc
     size makes :func:`place_instance` raise :class:`PlacementError`, which the
     caller treats as the terminal "cannot fit anywhere" outcome — this bounds
     the refuse→re-place loop to at most ``cluster_size`` iterations.
+
+    Raises :class:`PlacementError` if the instance carries no shards (an empty
+    ``ShardAssignments`` is structurally allowed); there is no model to
+    re-place, and raising lets the caller tear the husk down on the same path
+    it uses for a genuine no-fit rather than crashing the command processor.
     """
     shards = list(instance.shard_assignments.runner_to_shard.values())
+    if not shards:
+        raise PlacementError(
+            f"Cannot re-place instance {instance.instance_id}: it has no shards"
+        )
     # All shards of an instance share one model card.
     model_card = shards[0].model_card
     sharding = (

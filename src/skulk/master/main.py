@@ -10,6 +10,7 @@ from loguru import logger
 
 from skulk.master.placement import (
     PlacementError,
+    PlacementInfoPendingError,
     add_instance_to_placements,
     cancel_unnecessary_downloads,
     delete_instance,
@@ -244,6 +245,16 @@ class Master:
         self._last_snapshot_idx = -1
         self._pending_traces: dict[TaskId, dict[int, list[TraceEventData]]] = {}
         self._expected_ranks: dict[TaskId, set[int]] = {}
+        # Instance ids whose memory-refusal re-placement has already been
+        # initiated (#290). The command processor generates events but does not
+        # apply them — self.state only updates when they round-trip through
+        # _event_processor — so two ranks of the same instance refusing in the
+        # same window would both still see the instance present and each spawn a
+        # wider replacement. Deduping on the refused id makes re-placement
+        # happen at most once per instance regardless of how many ranks refuse
+        # or of redelivery. Grows only by refused ids (rare); never reused since
+        # InstanceIds are unique.
+        self._refusal_replaced: set[InstanceId] = set()
 
     def _configure_expected_trace_ranks(
         self, task_id: TaskId, instance_id: InstanceId, *, trace_enabled: bool
@@ -556,14 +567,24 @@ class Master:
                             # stop at the deletion — that terminal case bounds
                             # the refuse→re-place loop to the cluster size.
                             refused = self.state.instances.get(command.instance_id)
-                            if refused is None:
-                                # Already gone (operator delete, redelivery, or
-                                # a prior refusal for the same instance) — no-op.
+                            if command.instance_id in self._refusal_replaced:
+                                # Another rank of the same instance already
+                                # triggered re-placement (self.state lags command
+                                # processing, so both ranks can still see the
+                                # instance present) — re-place exactly once.
+                                logger.info(
+                                    "RefuseInstancePlacement for "
+                                    f"{command.instance_id} already handled; ignoring"
+                                )
+                            elif refused is None:
+                                # Already gone (operator delete or redelivery) —
+                                # no-op.
                                 logger.info(
                                     "RefuseInstancePlacement for unknown instance "
                                     f"{command.instance_id}; ignoring"
                                 )
                             else:
+                                self._refusal_replaced.add(command.instance_id)
                                 after_delete = delete_instance(
                                     DeleteInstance(instance_id=command.instance_id),
                                     self.state.instances,
@@ -587,6 +608,21 @@ class Master:
                                         f"min_nodes={replace_command.min_nodes} after "
                                         f"{command.node_id} refused its shard "
                                         f"({command.reason})"
+                                    )
+                                except PlacementInfoPendingError as err:
+                                    # Telemetry for a needed node has not arrived
+                                    # yet (rare during a load-time refusal, since
+                                    # the cluster is already running). Distinct
+                                    # from a true shortfall: the refused instance
+                                    # still can't stay on the node that rejected
+                                    # it, so it is torn down, but log the
+                                    # transient cause rather than "cannot fit".
+                                    final_placement = after_delete
+                                    logger.error(
+                                        "Cannot re-place "
+                                        f"{replace_command.model_card.model_id} after "
+                                        f"refusal on {command.node_id}: cluster info "
+                                        f"still gossiping ({err}). Torn down."
                                     )
                                 except PlacementError as err:
                                     final_placement = after_delete
