@@ -119,7 +119,7 @@ Slice 1 moved `node_resources` (a node's `participation` role and `backends`); s
 
 **Placement reads two views.** The memory-fit check and the context-admission ceiling read `node_memory` from the `TelemetryView`, not `State`. Because the ceiling must be identical across ranks (divergent verdicts deadlock the collectives) and telemetry is unordered last-write-wins, the master computes the ceiling **once at placement time** and stamps it onto the instance (`BaseInstance.context_token_limit`, event-sourced); every worker rank and the API reject pre-flight read that stamped value instead of recomputing.
 
-**Rolling-upgrade note:** an old worker that still emits these readings as `NodeGatheredInfo` events no longer feeds the view (the legacy path is a no-op). Latent today (all nodes are `participation=full`); the legacy event path feeding the view is tracked for a later slice. `State` keeps `extra="forbid"`, so a pre-#279 snapshot carrying the old `nodeResources`/`nodeMemory`/`nodeSystem` keys is stripped by a before-validator on hydrate rather than rejected.
+**Rolling-upgrade note:** an un-upgraded worker still emits these readings as `NodeGatheredInfo` events (which `apply` no-ops). The worker event applier **bridges** any telemetry-plane `NodeGatheredInfo` into the shared `TelemetryView` (`worker/main.py`), so the upgraded master/API can place on those nodes during the mixed-version window instead of seeing "memory not gathered"; the bridged entry is pruned when the legacy worker restarts under a new id and the old id times out. `State` also keeps `extra="forbid"`, so a pre-#279 snapshot carrying the old `nodeResources`/`nodeMemory`/`nodeSystem` keys is stripped by a before-validator on hydrate rather than rejected.
 
 ## Events
 

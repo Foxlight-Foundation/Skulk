@@ -501,6 +501,24 @@ class Worker:
                 ):
                     self._telemetry_view.prune(event.node_id)
 
+                # Rolling-upgrade bridge (#279 slice 2): an un-upgraded worker
+                # still emits telemetry-plane readings as NodeGatheredInfo
+                # events, which apply() now no-ops. Feed them into the shared
+                # view so the upgraded master/API can place on those live nodes
+                # during the mixed-version window instead of reporting "memory
+                # not gathered" until every worker restarts. New workers gossip
+                # these directly (never as events), so this only bridges legacy
+                # senders; their stale entry is pruned when they restart under a
+                # new id and the old id times out.
+                if (
+                    isinstance(event, NodeGatheredInfo)
+                    and isinstance(event.info, _TELEMETRY_PLANE_INFO)
+                    and self._telemetry_view is not None
+                ):
+                    self._telemetry_view.apply(
+                        NodeTelemetry(node_id=event.node_id, info=event.info)
+                    )
+
                 # Buffer input image chunks for image editing
                 if isinstance(event, InputChunkReceived):
                     cmd_id = event.command_id
