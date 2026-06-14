@@ -55,54 +55,51 @@ def test_state_snapshot_serialization_roundtrip() -> None:
     assert restored.state.topology.to_snapshot() == snapshot.state.topology.to_snapshot()
 
 
-def test_state_ignores_legacy_node_resources_from_old_snapshot() -> None:
-    """A pre-#279 snapshot carrying ``nodeResources`` must still hydrate.
+def test_state_sync_message_round_trips_with_last_seen() -> None:
+    """State-sync snapshot must survive the wire codec WITH last_seen entries.
 
-    ``node_resources`` moved to the telemetry plane (#279), but ``State`` keeps
-    ``extra="forbid"``. Without the legacy-key strip, an upgraded follower
-    rejects an old master's state-sync snapshot, falls back to replay from
-    index 0, and loses instances/topology that lived only in an already-
-    compacted log prefix (the #273 outage class). This pins that an inbound
-    payload containing the removed key validates instead of raising.
+    Regression for the bug that broke follower bootstrap: a model_validator on
+    State (added for cross-version key-stripping) forced strict PYTHON-mode
+    validation, where ISO datetime *strings* — last_seen, serialized over the
+    wire — were rejected. Followers then dropped every state-sync snapshot
+    ("schema-incompatible") and livelocked requesting the event log from 0.
+    The earlier snapshot test missed it because its fixture had no last_seen.
     """
-    node_id = NodeId("node-a")
-    state = State(last_event_applied_idx=7)
-    state.topology.add_node(node_id)
+    from datetime import datetime, timezone
 
-    # Simulate the wire payload an older binary would emit: the current JSON
-    # plus the removed camelCase fields (node_resources from slice 1, plus
-    # node_memory + node_system from slice 2).
-    payload = state.model_dump(mode="json", by_alias=True)
-    payload["nodeResources"] = {
-        str(node_id): {"backends": ["mlx"], "participation": "management"}
-    }
-    payload["nodeMemory"] = {
-        str(node_id): {
-            "ramTotal": {"inBytes": 16 * 2**30},
-            "ramAvailable": {"inBytes": 8 * 2**30},
-            "swapTotal": {"inBytes": 0},
-            "swapAvailable": {"inBytes": 0},
-        }
-    }
-    payload["nodeSystem"] = {str(node_id): {}}
+    from skulk.routing.topics import STATE_SYNC_MESSAGES
+    from skulk.shared.topology import Topology
+    from skulk.shared.types.common import SystemId
+    from skulk.shared.types.state_sync import StateSyncMessage
 
-    restored = State.model_validate(payload)
+    topo = Topology()
+    nodes = [NodeId(), NodeId(), NodeId()]
+    for n in nodes:
+        topo.add_node(n)
+    state = State(
+        topology=topo,
+        last_seen={n: datetime.now(tz=timezone.utc) for n in nodes},
+        last_event_applied_idx=184,
+    )
+    session = SessionId(master_node_id=nodes[0], election_clock=1)
+    msg = StateSyncMessage(
+        kind="response",
+        requester=SystemId(),
+        session_id=session,
+        snapshot=StateSnapshot(
+            session_id=session, last_event_applied_idx=184, state=state
+        ),
+    )
+    # The exact path that runs on the wire (TypedTopic uses model_validate_json).
+    restored = STATE_SYNC_MESSAGES.deserialize(STATE_SYNC_MESSAGES.serialize(msg))
+    assert restored.snapshot is not None
+    assert len(restored.snapshot.state.last_seen) == 3
+    assert restored.snapshot.state.topology.to_snapshot() == topo.to_snapshot()
 
-    assert restored.last_event_applied_idx == 7
-    assert restored.topology.to_snapshot().nodes == state.topology.to_snapshot().nodes
-    # The legacy fields are dropped, not surfaced anywhere on the model.
-    assert not hasattr(restored, "node_resources")
-    assert not hasattr(restored, "node_memory")
-    assert not hasattr(restored, "node_system")
 
-
-def test_state_still_forbids_genuinely_unknown_fields() -> None:
-    """The legacy strip must not weaken the forbid-extra guard otherwise.
-
-    Only the known-removed ``node_resources`` key is tolerated; a truly
-    unknown field (e.g. one a NEWER binary added) must still raise so a stale
-    binary fails loudly instead of silently dropping state it can't model.
-    """
+def test_state_forbids_genuinely_unknown_fields() -> None:
+    """A truly unknown field must still raise (extra='forbid'), so a stale
+    binary fails loudly instead of silently dropping state it can't model."""
     import pytest
     from pydantic import ValidationError
 
