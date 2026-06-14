@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from skulk.shared.session_carryover import seed_state_for_new_session
 from skulk.shared.topology import Topology
 from skulk.shared.types.common import NodeId
-from skulk.shared.types.profiling import NodeIdentity
+from skulk.shared.types.profiling import NodeNetworkInfo
 from skulk.shared.types.state import State
 from skulk.shared.types.worker.downloads import (
     DownloadCompleted,
@@ -36,7 +36,9 @@ def _prior_state() -> tuple[State, NodeId]:
         topology=topology,
         tracing_enabled=True,
         last_event_applied_idx=4242,
-        node_identities={node: NodeIdentity(friendly_name="kite-test")},
+        # A connectivity field stays on the control plane and is carried; the
+        # telemetry-plane readings (identities/disk/etc.) are not.
+        node_network={node: NodeNetworkInfo(interfaces=[])},
     ), node
 
 
@@ -46,9 +48,10 @@ def test_carries_durable_facts():
     assert seed.instances == prior.instances
     assert seed.downloads == prior.downloads
     assert seed.tracing_enabled is True
-    assert seed.node_identities[node].friendly_name == "kite-test"
-    # node_memory is no longer carried in the seed — it moved to the telemetry
-    # plane (#279 slice 2), which is Node-owned and survives election separately.
+    assert node in seed.node_network
+    # The telemetry-plane readings (node_memory/system since slice 2;
+    # node_identities/disk/rdma-ctl since slice 3) are no longer carried — they
+    # live in the Node-owned TelemetryView, which survives election separately.
 
 
 def test_carries_only_completed_downloads():

@@ -8,13 +8,21 @@ an in-process-only test missed a strict round-trip failure.
 
 from skulk.routing.topics import TELEMETRY
 from skulk.shared.types.common import NodeId
+from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
+    DiskUsage,
     MemoryUsage,
     NodeResources,
     SystemPerformanceProfile,
 )
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
-from skulk.utils.info_gatherer.info_gatherer import MactopMetrics
+from skulk.utils.info_gatherer.info_gatherer import (
+    MactopMetrics,
+    MiscData,
+    NodeDiskUsage,
+    RdmaCtlStatus,
+    StaticNodeInformation,
+)
 
 
 def test_node_telemetry_survives_topic_codec_round_trip() -> None:
@@ -97,6 +105,65 @@ def test_view_coalesces_mactop_memory_and_system() -> None:
     assert view.node_system[node].sys_power == 42.0
 
 
+def test_view_coalesces_disk_and_rdma_telemetry() -> None:
+    # Slice 3: disk + rdma-ctl readings land in their own view maps.
+    view = TelemetryView()
+    node = NodeId("node-a")
+    view.apply(
+        NodeTelemetry(
+            node_id=node,
+            info=NodeDiskUsage(
+                disk_usage=DiskUsage(
+                    total=Memory.from_bytes(500 * 2**30),
+                    available=Memory.from_bytes(200 * 2**30),
+                )
+            ),
+        )
+    )
+    assert view.node_disk[node].available.in_bytes == 200 * 2**30
+    view.apply(
+        NodeTelemetry(
+            node_id=node,
+            info=RdmaCtlStatus(enabled=True, interfaces_present=True),
+        )
+    )
+    assert view.node_rdma_ctl[node].enabled is True
+
+
+def test_view_merges_identity_from_two_readings() -> None:
+    # Slice 3: identity is assembled from MiscData (friendly name) and
+    # StaticNodeInformation (static fields); the two readings must MERGE into one
+    # NodeIdentity rather than overwrite each other (mirrors the event applier's
+    # accumulation), regardless of arrival order.
+    view = TelemetryView()
+    node = NodeId("node-a")
+    view.apply(NodeTelemetry(node_id=node, info=MiscData(friendly_name="Kite 2")))
+    view.apply(
+        NodeTelemetry(
+            node_id=node,
+            info=StaticNodeInformation(
+                model="Mac mini",
+                chip="M4",
+                os_version="26.4",
+                os_build_version="X",
+                skulk_version="1.2.0",
+                skulk_commit="abc123",
+            ),
+        )
+    )
+    identity = view.node_identities[node]
+    assert identity.friendly_name == "Kite 2"  # preserved across the static merge
+    assert identity.chip_id == "M4"
+    assert identity.skulk_version == "1.2.0"
+    # a later friendly-name update keeps the static fields
+    view.apply(
+        NodeTelemetry(node_id=node, info=MiscData(friendly_name="Kite 2 (renamed)"))
+    )
+    identity = view.node_identities[node]
+    assert identity.friendly_name == "Kite 2 (renamed)"
+    assert identity.chip_id == "M4"
+
+
 def test_prune_drops_all_telemetry_for_a_node() -> None:
     # On NodeTimedOut the view must drop the node entirely (it has no natural
     # expiry); otherwise a dead node lingers as a ghost in /state and skews
@@ -109,14 +176,42 @@ def test_prune_drops_all_telemetry_for_a_node() -> None:
     view = TelemetryView()
     a, b = NodeId("node-a"), NodeId("node-b")
     for node in (a, b):
-        view.apply(NodeTelemetry(node_id=node, info=NodeResources(participation="full")))
+        view.apply(
+            NodeTelemetry(node_id=node, info=NodeResources(participation="full"))
+        )
         view.apply(
             NodeTelemetry(
                 node_id=node,
                 info=MactopMetrics(system_profile=profile, memory=reading),
             )
         )
+        # slice-3 maps too
+        view.apply(NodeTelemetry(node_id=node, info=MiscData(friendly_name="n")))
+        view.apply(
+            NodeTelemetry(
+                node_id=node,
+                info=NodeDiskUsage(
+                    disk_usage=DiskUsage(
+                        total=Memory.from_bytes(500 * gib),
+                        available=Memory.from_bytes(200 * gib),
+                    )
+                ),
+            )
+        )
+        view.apply(
+            NodeTelemetry(
+                node_id=node,
+                info=RdmaCtlStatus(enabled=False, interfaces_present=False),
+            )
+        )
     view.prune(a)
-    for m in (view.node_resources, view.node_memory, view.node_system):
+    for m in (
+        view.node_resources,
+        view.node_memory,
+        view.node_system,
+        view.node_identities,
+        view.node_disk,
+        view.node_rdma_ctl,
+    ):
         assert a not in m
         assert b in m  # only the pruned node is dropped

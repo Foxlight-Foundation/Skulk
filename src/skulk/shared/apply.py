@@ -32,9 +32,7 @@ from skulk.shared.types.events import (
     TracingStateChanged,
 )
 from skulk.shared.types.profiling import (
-    NodeIdentity,
     NodeNetworkInfo,
-    NodeRdmaCtlStatus,
     NodeResources,
     NodeThunderboltInfo,
     ThunderboltBridgeStatus,
@@ -261,19 +259,13 @@ def apply_node_timed_out(event: NodeTimedOut, state: State) -> State:
     last_seen = {
         key: value for key, value in state.last_seen.items() if key != event.node_id
     }
-    node_identities = {
-        key: value
-        for key, value in state.node_identities.items()
-        if key != event.node_id
-    }
     downloads = {
         key: value for key, value in state.downloads.items() if key != event.node_id
     }
-    # Clean up all granular node mappings (node_memory and node_system live on
-    # the telemetry plane now, #279 slice 2 — not in State, so not cleaned here)
-    node_disk = {
-        key: value for key, value in state.node_disk.items() if key != event.node_id
-    }
+    # Clean up the connectivity mappings still held in State. The telemetry-plane
+    # readings (node_memory/node_system since slice 2; node_identities/node_disk/
+    # node_rdma_ctl since slice 3) are pruned from TelemetryView via
+    # record_membership_from_event, not here.
     node_network = {
         key: value for key, value in state.node_network.items() if key != event.node_id
     }
@@ -286,9 +278,6 @@ def apply_node_timed_out(event: NodeTimedOut, state: State) -> State:
         key: value
         for key, value in state.node_thunderbolt_bridge.items()
         if key != event.node_id
-    }
-    node_rdma_ctl = {
-        key: value for key, value in state.node_rdma_ctl.items() if key != event.node_id
     }
     # Only recompute cycles if the leaving node had TB bridge enabled
     leaving_node_status = state.node_thunderbolt_bridge.get(event.node_id)
@@ -308,12 +297,9 @@ def apply_node_timed_out(event: NodeTimedOut, state: State) -> State:
             "downloads": downloads,
             "topology": topology,
             "last_seen": last_seen,
-            "node_identities": node_identities,
-            "node_disk": node_disk,
             "node_network": node_network,
             "node_thunderbolt": node_thunderbolt,
             "node_thunderbolt_bridge": node_thunderbolt_bridge,
-            "node_rdma_ctl": node_rdma_ctl,
             "thunderbolt_bridge_cycles": thunderbolt_bridge_cycles,
         }
     )
@@ -345,34 +331,19 @@ def apply_node_gathered_info(event: NodeGatheredInfo, state: State) -> State:
         case MemoryUsage():
             pass
         case NodeDiskUsage():
-            update["node_disk"] = {**state.node_disk, event.node_id: info.disk_usage}
+            # Telemetry plane since #279 slice 3 — applied to TelemetryView, not
+            # State. A NodeGatheredInfo still bumps last_seen above, but the
+            # reading no longer rides the event log (workers fork it to the
+            # TELEMETRY topic; a legacy event from an un-upgraded worker no-ops).
+            pass
         case NodeConfig():
             pass
         case MiscData():
-            current_identity = state.node_identities.get(event.node_id, NodeIdentity())
-            new_identity = current_identity.model_copy(
-                update={"friendly_name": info.friendly_name}
-            )
-            update["node_identities"] = {
-                **state.node_identities,
-                event.node_id: new_identity,
-            }
+            # Telemetry plane since #279 slice 3 (identity friendly-name).
+            pass
         case StaticNodeInformation():
-            current_identity = state.node_identities.get(event.node_id, NodeIdentity())
-            new_identity = current_identity.model_copy(
-                update={
-                    "model_id": info.model,
-                    "chip_id": info.chip,
-                    "os_version": info.os_version,
-                    "os_build_version": info.os_build_version,
-                    "skulk_version": info.skulk_version,
-                    "skulk_commit": info.skulk_commit,
-                }
-            )
-            update["node_identities"] = {
-                **state.node_identities,
-                event.node_id: new_identity,
-            }
+            # Telemetry plane since #279 slice 3 (identity static info).
+            pass
         case NodeNetworkInterfaces():
             update["node_network"] = {
                 **state.node_network,
@@ -420,13 +391,8 @@ def apply_node_gathered_info(event: NodeGatheredInfo, state: State) -> State:
                     )
                 )
         case RdmaCtlStatus():
-            update["node_rdma_ctl"] = {
-                **state.node_rdma_ctl,
-                event.node_id: NodeRdmaCtlStatus(
-                    enabled=info.enabled,
-                    interfaces_present=info.interfaces_present,
-                ),
-            }
+            # Telemetry plane since #279 slice 3 (rdma-ctl status).
+            pass
         case NodeResources():
             # NodeResources travels the telemetry plane (#279), not the event
             # log — the worker routes it to the TELEMETRY topic and it lands in

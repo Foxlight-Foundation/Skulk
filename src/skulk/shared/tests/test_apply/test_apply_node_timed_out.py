@@ -5,7 +5,7 @@ from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import NodeTimedOut
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.profiling import NodeIdentity
+from skulk.shared.types.profiling import NodeNetworkInfo
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import StartWarmup, TaskId, TaskStatus
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
@@ -19,7 +19,9 @@ from skulk.shared.types.worker.runners import (
 from skulk.shared.types.worker.shards import PipelineShardMetadata
 
 
-def _make_pipeline_shard(model_id: ModelId, device_rank: int, world_size: int) -> PipelineShardMetadata:
+def _make_pipeline_shard(
+    model_id: ModelId, device_rank: int, world_size: int
+) -> PipelineShardMetadata:
     return PipelineShardMetadata(
         model_card=ModelCard(
             model_id=model_id,
@@ -60,8 +62,12 @@ def test_apply_node_timed_out_removes_affected_instances_runners_and_tasks() -> 
                 node_b: affected_runner_b,
             },
             runner_to_shard={
-                affected_runner_a: _make_pipeline_shard(model_id, device_rank=0, world_size=2),
-                affected_runner_b: _make_pipeline_shard(model_id, device_rank=1, world_size=2),
+                affected_runner_a: _make_pipeline_shard(
+                    model_id, device_rank=0, world_size=2
+                ),
+                affected_runner_b: _make_pipeline_shard(
+                    model_id, device_rank=1, world_size=2
+                ),
             },
         ),
         hosts_by_node={},
@@ -74,7 +80,9 @@ def test_apply_node_timed_out_removes_affected_instances_runners_and_tasks() -> 
             model_id=model_id,
             node_to_runner={node_c: unaffected_runner},
             runner_to_shard={
-                unaffected_runner: _make_pipeline_shard(model_id, device_rank=0, world_size=1),
+                unaffected_runner: _make_pipeline_shard(
+                    model_id, device_rank=0, world_size=1
+                ),
             },
         ),
         hosts_by_node={},
@@ -110,10 +118,10 @@ def test_apply_node_timed_out_removes_affected_instances_runners_and_tasks() -> 
             node_b: datetime.now(),
             node_c: datetime.now(),
         },
-        node_identities={
-            node_a: NodeIdentity(friendly_name="kite1"),
-            node_b: NodeIdentity(friendly_name="kite2"),
-            node_c: NodeIdentity(friendly_name="kite3"),
+        node_network={
+            node_a: NodeNetworkInfo(interfaces=[]),
+            node_b: NodeNetworkInfo(interfaces=[]),
+            node_c: NodeNetworkInfo(interfaces=[]),
         },
     )
 
@@ -133,6 +141,9 @@ def test_apply_node_timed_out_removes_affected_instances_runners_and_tasks() -> 
     assert node_b in new_state.last_seen
     assert node_c in new_state.last_seen
 
-    assert node_a not in new_state.node_identities
-    assert node_b in new_state.node_identities
-    assert node_c in new_state.node_identities
+    # node_network stays on the control plane; NodeTimedOut still prunes it.
+    # (Telemetry-plane readings like node_identities are pruned from
+    # TelemetryView via record_membership_from_event, covered in telemetry tests.)
+    assert node_a not in new_state.node_network
+    assert node_b in new_state.node_network
+    assert node_c in new_state.node_network
