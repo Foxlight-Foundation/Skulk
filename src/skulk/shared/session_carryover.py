@@ -12,6 +12,7 @@ safe starting state for the new session.
 """
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.state import State
@@ -37,7 +38,7 @@ def _completed_downloads_only(
     }
 
 
-def seed_state_for_new_session(prior: State) -> State:
+def seed_state_for_new_session(prior: State, now: datetime | None = None) -> State:
     """Build the new session's initial state from the prior replicated view.
 
     Carried (the durable facts the new session should preserve):
@@ -59,6 +60,20 @@ def seed_state_for_new_session(prior: State) -> State:
     - ``thunderbolt_bridge_cycles`` and ``tracing_enabled`` — cluster
       configuration facts that have no session affinity.
 
+    - ``last_seen`` — carried, but re-stamped to ``now`` for every node the
+      seed still knows about (the union of the carried ``node_*`` maps) rather
+      than copied from the prior snapshot. This arms the master's 30s
+      liveness clock for each carried identity: a node that re-gossips (under
+      the same id) keeps refreshing normally, while a carried identity that
+      never returns is reaped by the ordinary ``NodeTimedOut`` prune after the
+      settle grace. Dropping ``last_seen`` entirely (the pre-fix behavior)
+      left carried identities with NO liveness anchor, and the prune loop only
+      reaps via ``last_seen`` — so a node that restarted under a new id around
+      a session transition leaked its prior identity into ``node_identities``/
+      ``node_memory`` permanently, surfacing as a phantom node in ``/state``
+      (#218 family). Re-stamping to ``now`` (not the stale prior timestamp)
+      avoids admitting a long-dead node onto the live clock as already-fresh.
+
     Deliberately dropped (session-scoped or liveness-derived):
     - ``tasks`` — in-flight commands/streams died with the old session's
       router plumbing; carrying them would spawn cancel loops against
@@ -67,20 +82,35 @@ def seed_state_for_new_session(prior: State) -> State:
       tears down (each node's worker is re-created and shuts its supervisors
       down); stale ``RunnerReady`` entries would confuse the ConnectToGroup
       readiness gates. Fresh CreateRunner cycles repopulate them.
-    - ``topology`` and ``last_seen`` — liveness must come from the live
-      router's connection gossip, not a snapshot that still shows the dead
-      master as connected; a stale edge here would delay dead-node instance
-      cleanup or admit placements onto a corpse.
+    - ``topology`` — liveness must come from the live router's connection
+      gossip, not a snapshot that still shows the dead master as connected; a
+      stale edge here would delay dead-node instance cleanup or admit
+      placements onto a corpse. (Placement eligibility and instance cleanup
+      both key off ``topology``, not ``last_seen``, so re-stamping the latter
+      above does neither.)
     - ``last_event_applied_idx`` — the master indexes this seed as the FIRST
       EVENT of the new session (a logged ``StateSnapshotHydrated``), setting
       the index at that point; followers receive it inside the snapshot if
       they bootstrap later, or as live event 0 if they bootstrapped against
       the momentarily-empty pre-seed state (the promotion race).
     """
+    stamp = now if now is not None else datetime.now(tz=timezone.utc)
+    # Arm the liveness clock for every node the seed still carries info about.
+    # The prune loop only reaps via last_seen, so a carried identity with no
+    # last_seen entry is immortal (the phantom-node leak, #218 family).
+    carried_node_ids = (
+        prior.node_identities.keys()
+        | prior.node_memory.keys()
+        | prior.node_disk.keys()
+        | prior.node_system.keys()
+        | prior.node_network.keys()
+    )
+    last_seen = {node_id: stamp for node_id in carried_node_ids}
     return State(
         instances=prior.instances,
         downloads=_completed_downloads_only(prior.downloads),
         tracing_enabled=prior.tracing_enabled,
+        last_seen=last_seen,
         node_identities=prior.node_identities,
         node_memory=prior.node_memory,
         node_disk=prior.node_disk,

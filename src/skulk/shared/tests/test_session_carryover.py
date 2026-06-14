@@ -103,7 +103,7 @@ def test_carries_only_completed_downloads():
 
 
 def test_drops_session_scoped_state():
-    prior, node = _prior_state()
+    prior, _node = _prior_state()
     seed = seed_state_for_new_session(prior)
     # In-flight tasks died with the old session's plumbing.
     assert seed.tasks == {}
@@ -112,7 +112,21 @@ def test_drops_session_scoped_state():
     # Liveness must come from live gossip — a carried topology would keep a
     # dead master's out-edges forever (only their source node deletes them).
     assert seed.topology.list_nodes() == []
-    assert seed.last_seen == {}
     # The new session's event log starts at the beginning.
     assert seed.last_event_applied_idx == -1
-    assert node not in seed.last_seen
+
+
+def test_seeds_last_seen_for_carried_identities():
+    # last_seen is re-stamped (not dropped) for every carried node so the
+    # master's 30s prune clock is armed: a carried identity that never
+    # re-gossips is reaped instead of leaking as a phantom node (#218 family).
+    # Pre-fix this was dropped entirely, leaving carried identities with no
+    # liveness anchor — and the prune loop only reaps via last_seen.
+    prior, node = _prior_state()
+    stamp = datetime(2026, 6, 13, 12, 0, 0, tzinfo=timezone.utc)
+    seed = seed_state_for_new_session(prior, now=stamp)
+    # Every carried node identity gets a fresh last_seen anchor...
+    assert seed.last_seen == {node: stamp}
+    # ...re-stamped to `now`, NOT copied from the prior (possibly stale) view,
+    # so a long-dead node is not admitted to the live clock as already-fresh.
+    assert seed.last_seen[node] != prior.last_seen[node]
