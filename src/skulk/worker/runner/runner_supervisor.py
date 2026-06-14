@@ -15,7 +15,7 @@ from anyio import (
 )
 from loguru import logger
 
-from skulk.shared.types.chunks import ErrorChunk
+from skulk.shared.types.chunks import DataChunk, ErrorChunk
 from skulk.shared.types.diagnostics import (
     MlxMemorySnapshot,
     RunnerDiagnosticContext,
@@ -110,6 +110,11 @@ class RunnerSupervisor:
     _task_sender: MpSender[Task]
     _event_sender: Sender[Event]
     _cancel_sender: MpSender[TaskId]
+    # Data plane (#279 Phase 2): generation output chunks (ChunkGenerated) are
+    # diverted here and streamed direct to the owning API node instead of the
+    # event log. None falls back to the event path (tests / a node with no DATA
+    # topic wired), preserving the pre-Phase-2 behavior.
+    _data_sender: "Sender[DataChunk] | None" = None
     _tg: TaskGroup = field(default_factory=TaskGroup, init=False)
     status: RunnerStatus = field(default_factory=RunnerIdle, init=False)
     pending: dict[TaskId, anyio.Event] = field(default_factory=dict, init=False)
@@ -156,6 +161,7 @@ class RunnerSupervisor:
         event_sender: Sender[Event],
         initialize_timeout: float = 400,
         context_token_limit: int | None = None,
+        data_sender: "Sender[DataChunk] | None" = None,
     ) -> Self:
         """Spawn the runner subprocess for one shard of a placed instance.
 
@@ -194,9 +200,26 @@ class RunnerSupervisor:
             _task_sender=task_sender,
             _cancel_sender=cancel_sender,
             _event_sender=event_sender,
+            _data_sender=data_sender,
         )
 
         return self
+
+    async def _emit(self, event: Event) -> None:
+        """Forward one runner event to the right plane (#279 Phase 2).
+
+        Generation output chunks (``ChunkGenerated``) are diverted to the data
+        plane (``DATA`` topic, direct to the owning API node) so they never hit
+        the master's event log; every other event (task status, acks, runner
+        status) stays on the ordered control-plane event sender. Falls back to
+        the event sender when no data sender is wired (tests / no DATA topic).
+        """
+        if isinstance(event, ChunkGenerated) and self._data_sender is not None:
+            await self._data_sender.send(
+                DataChunk(command_id=event.command_id, chunk=event.chunk)
+            )
+        else:
+            await self._event_sender.send(event)
 
     async def run(self):
         self._record_milestone("process_start_requested")
@@ -376,7 +399,10 @@ class RunnerSupervisor:
                                 TaskDeleted(task_id=event.task_id)
                             )
                         continue
-                    await self._event_sender.send(event)
+                    # Catch-all: runner-produced events, including the per-token
+                    # ChunkGenerated output, which _emit diverts to the data
+                    # plane (#279 Phase 2).
+                    await self._emit(event)
         except (ClosedResourceError, BrokenResourceError) as e:
             await self._check_runner(e)
         finally:
@@ -436,7 +462,7 @@ class RunnerSupervisor:
         for task in self.in_progress.values():
             if isinstance(task, (TextGeneration, ImageGeneration, ImageEdits)):
                 with anyio.CancelScope(shield=True):
-                    await self._event_sender.send(
+                    await self._emit(
                         ChunkGenerated(
                             command_id=task.command_id,
                             chunk=ErrorChunk(

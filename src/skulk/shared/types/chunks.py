@@ -10,7 +10,7 @@ from skulk.api.types import (
     Usage,
 )
 from skulk.shared.models.model_cards import ModelId
-from skulk.utils.pydantic_ext import TaggedModel
+from skulk.utils.pydantic_ext import CamelCaseModel, TaggedModel
 
 from .common import CommandId
 
@@ -100,3 +100,20 @@ GenerationChunk = (
     | EmbeddingChunk
     | PrefillProgressChunk
 )
+
+
+class DataChunk(CamelCaseModel):
+    """A generation output chunk on the data plane (#279 Phase 2).
+
+    Carries the same ``{command_id, chunk}`` payload as the ``ChunkGenerated``
+    event, but travels the ``DATA`` topic directly from the serving rank-0
+    worker to the owning API node: it is never indexed by the master, written to
+    the event log, or rebroadcast cluster-wide. The owning API node demuxes by
+    ``command_id`` into its per-command stream queue, exactly as it did for the
+    event. Output chunks never mutate ``State`` (apply was a no-op), so removing
+    them from the ordered log is loss-free for correctness while eliminating the
+    per-token master hop + disk write that dominated event-log volume (#278).
+    """
+
+    command_id: CommandId
+    chunk: GenerationChunk

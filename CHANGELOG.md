@@ -9,6 +9,20 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- **Plane separation #279 Phase 2a: generation output chunks move to a data
+  plane, off the master.** Per-token output (`ChunkGenerated`) used to flow
+  worker → master (index + disk write + cluster-wide rebroadcast) → owning API,
+  for data that never mutates `State` and is only ever read by that one API
+  node. It now travels a new `DATA` topic as `DataChunk` (`{command_id, chunk}`)
+  directly from the serving rank-0 worker to the owning API node, which demuxes
+  by `command_id` into the per-command stream queues. The master no longer
+  indexes, persists, or rebroadcasts output chunks; the API event log no longer
+  records the per-token firehose (it had grown ~54MB in 9 idle hours). This
+  removes the per-token master hop + disk write that dominated event-log volume
+  and was the #278 storm vector. Inbound vision chunks (`InputChunkReceived`)
+  stay on the control plane for now. Producer split lives in
+  `RunnerSupervisor._emit`; the API consumes in `API._apply_data`.
+
 - **Plane separation #279 slice 3: observational node readings move to the
   telemetry plane.** `node_identities`, `node_disk`, and `node_rdma_ctl` now ride
   the last-write-wins `TELEMETRY` topic into the node-owned `TelemetryView`

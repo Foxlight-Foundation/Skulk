@@ -57,7 +57,9 @@ def _add_model_search_path(path: Path) -> None:
     """Ensure the given model path is visible to the current process and children."""
 
     expanded = path.expanduser()
-    existing_path = os.environ.get("SKULK_MODELS_PATH", os.environ.get("SKULK_MODELS_PATH", ""))
+    existing_path = os.environ.get(
+        "SKULK_MODELS_PATH", os.environ.get("SKULK_MODELS_PATH", "")
+    )
     paths = [p for p in existing_path.split(":") if p]
     path_str = str(expanded)
     if path_str not in paths:
@@ -164,15 +166,14 @@ class Node:
         await router.register_topic(topics.DOWNLOAD_COMMANDS)
         await router.register_topic(topics.STATE_SYNC_MESSAGES)
         await router.register_topic(topics.TELEMETRY)
+        await router.register_topic(topics.DATA)
         telemetry_view = TelemetryView()
         event_router = EventRouter(
             node_id,
             session_id,
             command_sender=router.sender(topics.COMMANDS),
             state_sync_sender=router.sender(topics.STATE_SYNC_MESSAGES),
-            state_sync_receiver=router.receiver_with_origin(
-                topics.STATE_SYNC_MESSAGES
-            ),
+            state_sync_receiver=router.receiver_with_origin(topics.STATE_SYNC_MESSAGES),
             external_outbound=router.sender(topics.LOCAL_EVENTS),
             external_inbound=router.receiver(topics.GLOBAL_EVENTS),
         )
@@ -219,9 +220,7 @@ class Node:
             os.environ["HF_TOKEN"] = exo_config.hf_token
             logger.info("HF token loaded from config")
 
-        store_client, store_server = _configure_model_store_runtime(
-            node_id, exo_config
-        )
+        store_client, store_server = _configure_model_store_runtime(node_id, exo_config)
 
         # Create DownloadCoordinator (unless --no-downloads)
         if not args.no_downloads:
@@ -276,6 +275,7 @@ class Node:
                 exo_config=exo_config,
                 store_client=store_client,
                 telemetry_view=telemetry_view,
+                data_receiver=router.receiver(topics.DATA),
             )
         else:
             api = None
@@ -300,6 +300,7 @@ class Node:
                 download_command_sender=router.sender(topics.DOWNLOAD_COMMANDS),
                 telemetry_sender=router.sender(topics.TELEMETRY),
                 telemetry_view=telemetry_view,
+                data_sender=router.sender(topics.DATA),
                 store_client=worker_store_client,
                 staging_config=worker_staging_cfg,
             )
@@ -520,7 +521,9 @@ class Node:
                         self.node_id,
                         result.session_id,
                         command_sender=self.router.sender(topics.COMMANDS),
-                        state_sync_sender=self.router.sender(topics.STATE_SYNC_MESSAGES),
+                        state_sync_sender=self.router.sender(
+                            topics.STATE_SYNC_MESSAGES
+                        ),
                         state_sync_receiver=self.router.receiver_with_origin(
                             topics.STATE_SYNC_MESSAGES
                         ),
@@ -553,9 +556,7 @@ class Node:
                     # away against an empty snapshot. apply() replaces the
                     # worker's state wholesale (immutable convention), so the
                     # reference read here is a consistent snapshot.
-                    prior_state = (
-                        self.worker.state if self.worker is not None else None
-                    )
+                    prior_state = self.worker.state if self.worker is not None else None
                     self.master = Master(
                         self.node_id,
                         result.session_id,
@@ -603,7 +604,9 @@ class Node:
                     if authoritative_config_yaml is not None:
                         self._apply_cluster_config_yaml(authoritative_config_yaml)
                         new_store_client, new_store_server = (
-                            _configure_model_store_runtime(self.node_id, self.exo_config)
+                            _configure_model_store_runtime(
+                                self.node_id, self.exo_config
+                            )
                         )
                         self.store_client = new_store_client
                         self.store_server = (
@@ -748,7 +751,9 @@ def main():
         ingest_url=_log_cfg.ingest_url if _log_cfg else "",
     )
     logger.info("Starting Skulk")
-    logger.info(f"LIBP2P_NAMESPACE: {os.environ.get('SKULK_LIBP2P_NAMESPACE', os.getenv('SKULK_LIBP2P_NAMESPACE'))}")
+    logger.info(
+        f"LIBP2P_NAMESPACE: {os.environ.get('SKULK_LIBP2P_NAMESPACE', os.getenv('SKULK_LIBP2P_NAMESPACE'))}"
+    )
 
     if args.spawn_api:
         preflight_api_port(args.api_port)
@@ -761,6 +766,7 @@ def main():
     )
     if _ts_config and _ts_config.enabled:
         import asyncio as _asyncio
+
         _ts_status = _asyncio.run(query_tailscale_status())
         if _ts_status.running:
             logger.info(
