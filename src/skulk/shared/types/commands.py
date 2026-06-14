@@ -65,6 +65,28 @@ class DeleteInstance(BaseCommand):
     instance_id: InstanceId
 
 
+class RefuseInstancePlacement(BaseCommand):
+    """Worker → master: a node cannot fit its shard for this instance at load
+    time, so the master should re-place the model on a *wider* split rather
+    than silently tearing it down (#290).
+
+    The master's placement admission reads the gossiped (telemetry-plane,
+    last-write-wins) ``ramAvailable``, while the worker's pre-spawn guard reads
+    a fresh live ``vm_stat`` GPU-wireable figure at load time. On a borderline
+    multi-node split the live reading can sit just under the admitted estimate,
+    so the master admits a cycle the worker then refuses. Treating that refusal
+    as a re-placement signal (one node wider, which shrinks every node's share)
+    lets the cluster self-correct to a split that fits instead of leaving the
+    operator with a placement that vanished without explanation.
+    """
+
+    instance_id: InstanceId
+    # The node whose worker guard refused its shard, for diagnostics/logging.
+    node_id: NodeId
+    # The worker's refusal message (footprint vs. usable memory).
+    reason: str
+
+
 class TaskCancelled(BaseCommand):
     cancelled_command_id: CommandId
 
@@ -125,7 +147,12 @@ class DeleteCustomModelCard(BaseCommand):
 
 
 DownloadCommand = (
-    StartDownload | DeleteDownload | CancelDownload | SyncConfig | PurgeStagingCache | RestartNode
+    StartDownload
+    | DeleteDownload
+    | CancelDownload
+    | SyncConfig
+    | PurgeStagingCache
+    | RestartNode
 )
 
 CustomModelCardCommand = AddCustomModelCard | DeleteCustomModelCard
@@ -142,6 +169,7 @@ Command = (
     | PlaceInstance
     | CreateInstance
     | DeleteInstance
+    | RefuseInstancePlacement
     | TaskCancelled
     | TaskFinished
     | SendInputChunk

@@ -9,11 +9,13 @@ import yaml
 from loguru import logger
 
 from skulk.master.placement import (
+    PlacementError,
     add_instance_to_placements,
     cancel_unnecessary_downloads,
     delete_instance,
     get_transition_events,
     place_instance,
+    replacement_command_for_refused_instance,
 )
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_EVENT_LOG_DIR, SKULK_TRACING_ENABLED
@@ -27,6 +29,7 @@ from skulk.shared.types.commands import (
     ImageEdits,
     ImageGeneration,
     PlaceInstance,
+    RefuseInstancePlacement,
     RequestEventLog,
     SendInputChunk,
     SetTracingEnabled,
@@ -201,7 +204,9 @@ class Master:
         # cluster's current node_resources instead of starting blind and
         # risking a placement on a management node. None only in tests/standalone
         # construction; the planner falls back to "no telemetry constraints".
-        self._telemetry_view = telemetry_view if telemetry_view is not None else TelemetryView()
+        self._telemetry_view = (
+            telemetry_view if telemetry_view is not None else TelemetryView()
+        )
         # A promoted master seeds its session from the node's prior
         # replicated state (shared/session_carryover.py) so placements
         # survive failover (#273) — previously every new session started
@@ -542,6 +547,70 @@ class Master:
                                     )
                                 )
                             generated_events.extend(transition_events)
+                        case RefuseInstancePlacement():
+                            # A worker could not fit its shard at load time
+                            # (#290). Delete the refused instance and re-place
+                            # the model one node wider so each node holds a
+                            # smaller share. If even a full-width split will not
+                            # fit, place_instance raises PlacementError and we
+                            # stop at the deletion — that terminal case bounds
+                            # the refuse→re-place loop to the cluster size.
+                            refused = self.state.instances.get(command.instance_id)
+                            if refused is None:
+                                # Already gone (operator delete, redelivery, or
+                                # a prior refusal for the same instance) — no-op.
+                                logger.info(
+                                    "RefuseInstancePlacement for unknown instance "
+                                    f"{command.instance_id}; ignoring"
+                                )
+                            else:
+                                after_delete = delete_instance(
+                                    DeleteInstance(instance_id=command.instance_id),
+                                    self.state.instances,
+                                )
+                                replace_command = (
+                                    replacement_command_for_refused_instance(refused)
+                                )
+                                try:
+                                    final_placement = place_instance(
+                                        replace_command,
+                                        self.state.topology,
+                                        after_delete,
+                                        self._telemetry_view.node_memory,
+                                        self.state.node_network,
+                                        download_status=self.state.downloads,
+                                        node_resources=self._telemetry_view.node_resources,
+                                    )
+                                    logger.warning(
+                                        "Re-placing "
+                                        f"{replace_command.model_card.model_id} at "
+                                        f"min_nodes={replace_command.min_nodes} after "
+                                        f"{command.node_id} refused its shard "
+                                        f"({command.reason})"
+                                    )
+                                except PlacementError as err:
+                                    final_placement = after_delete
+                                    logger.error(
+                                        "Cannot re-place "
+                                        f"{replace_command.model_card.model_id} after "
+                                        f"refusal on {command.node_id} (tried "
+                                        f"min_nodes={replace_command.min_nodes}): {err}. "
+                                        "Giving up on this placement."
+                                    )
+                                transition_events = get_transition_events(
+                                    self.state.instances,
+                                    final_placement,
+                                    self.state.tasks,
+                                )
+                                for cmd in cancel_unnecessary_downloads(
+                                    final_placement, self.state.downloads
+                                ):
+                                    await self.download_command_sender.send(
+                                        ForwarderDownloadCommand(
+                                            origin=self._system_id, command=cmd
+                                        )
+                                    )
+                                generated_events.extend(transition_events)
                         case PlaceInstance():
                             placement = place_instance(
                                 command,
@@ -733,7 +802,9 @@ class Master:
                         continue
 
                     if isinstance(event, TaskDeleted):
-                        for command_id, task_id in list(self.command_task_mapping.items()):
+                        for command_id, task_id in list(
+                            self.command_task_mapping.items()
+                        ):
                             if task_id == event.task_id:
                                 self.command_task_mapping.pop(command_id, None)
 

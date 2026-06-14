@@ -7,6 +7,23 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- **Tight multi-node placements no longer silently vanish (#290).** The
+  master admits placements on the gossiped (telemetry-plane, last-write-wins)
+  available memory, while each worker's pre-spawn OOM guard reads a fresh live
+  GPU-wireable figure at load time. On a borderline split the live reading can
+  sit just below what the master admitted, so the master placed a cycle the
+  worker then refused, and the instance was torn down ("instance vanished")
+  with no recovery. The worker now sends a new `RefuseInstancePlacement`
+  command for the memory-refusal case (distinct from a crash or GPU wedge,
+  which still `DeleteInstance`), and the master re-places the same model one
+  node wider (`min_nodes` = refused width + 1) so each node holds a smaller
+  share. The loop is bounded: once even a full-width split raises
+  `PlacementError` the master stops at the deletion. Refusals for
+  already-removed instances are no-ops, so redelivery and operator deletes are
+  safe.
+
 ## [1.2.0] - 2026-06-11
 
 ### Fixed
