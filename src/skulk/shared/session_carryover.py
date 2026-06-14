@@ -99,16 +99,15 @@ def seed_state_for_new_session(prior: State, now: datetime | None = None) -> Sta
     # The prune loop only reaps via last_seen, so a carried identity with no
     # last_seen entry is immortal (the phantom-node leak, #218 family). This
     # MUST cover every node_* map copied into the seed below — a node present
-    # only in node_thunderbolt/node_thunderbolt_bridge/node_rdma_ctl (not in
-    # identities) would otherwise still leak (review catch on #291). node_memory
-    # is no longer carried — it moved to the telemetry plane (#279 slice 2).
+    # only in node_thunderbolt/node_thunderbolt_bridge (not in node_network)
+    # would otherwise still leak (review catch on #291). The telemetry-plane
+    # readings are no longer carried — memory/system (#279 slice 2) and
+    # identities/disk/rdma-ctl (#279 slice 3) live in the node-owned
+    # TelemetryView, which already survives election.
     carried_node_ids = (
-        prior.node_identities.keys()
-        | prior.node_disk.keys()
-        | prior.node_network.keys()
+        prior.node_network.keys()
         | prior.node_thunderbolt.keys()
         | prior.node_thunderbolt_bridge.keys()
-        | prior.node_rdma_ctl.keys()
     )
     last_seen = {node_id: stamp for node_id in carried_node_ids}
     return State(
@@ -116,11 +115,8 @@ def seed_state_for_new_session(prior: State, now: datetime | None = None) -> Sta
         downloads=_completed_downloads_only(prior.downloads),
         tracing_enabled=prior.tracing_enabled,
         last_seen=last_seen,
-        node_identities=prior.node_identities,
-        node_disk=prior.node_disk,
         node_network=prior.node_network,
         node_thunderbolt=prior.node_thunderbolt,
         node_thunderbolt_bridge=prior.node_thunderbolt_bridge,
-        node_rdma_ctl=prior.node_rdma_ctl,
         thunderbolt_bridge_cycles=prior.thunderbolt_bridge_cycles,
     )

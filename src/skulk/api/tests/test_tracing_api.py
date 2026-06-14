@@ -147,12 +147,10 @@ def test_list_traces_returns_metadata_rich_items(
     )
 
     api = _build_api("local-node")
-    api.state = api.state.model_copy(
-        update={
-            "node_identities": {
-                NodeId("peer-node"): NodeIdentity(friendly_name="Kite 2")
-            }
-        }
+    # node_identities moved to the telemetry plane (#279 slice 3); the API reads
+    # friendly names from the TelemetryView, not event-sourced State.
+    api._telemetry_view.node_identities[NodeId("peer-node")] = NodeIdentity(  # pyright: ignore[reportPrivateUsage]
+        friendly_name="Kite 2"
     )
     client = TestClient(api.app)
 
@@ -221,9 +219,7 @@ def test_list_cluster_traces_dedupes_local_and_peer_results(
                 "categories": ["decode", "prefill"],
                 "tags": ["tool_call"],
                 "hasToolActivity": True,
-                "sourceNodes": [
-                    {"nodeId": "peer-node", "friendlyName": "Kite 3"}
-                ],
+                "sourceNodes": [{"nodeId": "peer-node", "friendlyName": "Kite 3"}],
             },
             {
                 "taskId": "task-999",
@@ -234,9 +230,7 @@ def test_list_cluster_traces_dedupes_local_and_peer_results(
                 "categories": ["embedding"],
                 "tags": [],
                 "hasToolActivity": False,
-                "sourceNodes": [
-                    {"nodeId": "peer-node", "friendlyName": "Kite 3"}
-                ],
+                "sourceNodes": [{"nodeId": "peer-node", "friendlyName": "Kite 3"}],
             },
         ]
     }

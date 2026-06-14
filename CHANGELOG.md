@@ -7,6 +7,22 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Changed
+
+- **Plane separation #279 slice 3: observational node readings move to the
+  telemetry plane.** `node_identities`, `node_disk`, and `node_rdma_ctl` now ride
+  the last-write-wins `TELEMETRY` topic into the node-owned `TelemetryView`
+  instead of being event-sourced into `State` (joining `node_resources` from
+  slice 1 and `node_memory`/`node_system` from slice 2). They are no longer
+  persisted in the event log or carried in the failover seed; `GET /state`
+  merges them back in so the dashboard wire shape is unchanged. The
+  **connectivity** readings (`node_network`, `node_thunderbolt`,
+  `node_thunderbolt_bridge`, and the derived `thunderbolt_bridge_cycles`)
+  deliberately stay on the control plane — they define the topology graph
+  (`apply()` builds RDMA edges and TB-bridge cycles from them, and the planner
+  reads `node_network` for host selection), so they remain ordered rather than
+  unordered telemetry.
+
 ### Fixed
 
 - **Tight multi-node placements no longer silently vanish (#290).** The

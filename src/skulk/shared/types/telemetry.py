@@ -18,7 +18,10 @@ from __future__ import annotations
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import Event, NodeTimedOut
 from skulk.shared.types.profiling import (
+    DiskUsage,
     MemoryUsage,
+    NodeIdentity,
+    NodeRdmaCtlStatus,
     NodeResources,
     SystemPerformanceProfile,
 )
@@ -26,14 +29,35 @@ from skulk.utils.info_gatherer.info_gatherer import (
     GatheredInfo,
     MacmonMetrics,
     MactopMetrics,
+    MiscData,
+    NodeDiskUsage,
+    RdmaCtlStatus,
+    StaticNodeInformation,
 )
 from skulk.utils.pydantic_ext import CamelCaseModel
 
 # GatheredInfo variants that live on the telemetry plane (#279): gossiped
-# last-write-wins, never indexed or persisted. NodeResources (slice 1) plus
-# memory + the system profile (slice 2). Workers fork these onto the TELEMETRY
-# topic instead of emitting NodeGatheredInfo events.
-TELEMETRY_PLANE_INFO = (NodeResources, MemoryUsage, MactopMetrics, MacmonMetrics)
+# last-write-wins, never indexed or persisted. NodeResources (slice 1); memory +
+# the system profile (slice 2); the observational node readings disk/identity/
+# rdma-ctl (slice 3). Workers fork these onto the TELEMETRY topic instead of
+# emitting NodeGatheredInfo events.
+#
+# Deliberately NOT here: the connectivity readings (NodeNetworkInterfaces,
+# MacThunderboltIdentifiers/Connections, ThunderboltBridgeInfo). Those define
+# the topology graph — apply() builds RDMA edges and thunderbolt-bridge cycles
+# from them, and the placement planner reads node_network for host selection —
+# so they stay on the ordered control plane rather than an unordered
+# last-write-wins plane (#279 slice 3 scoping).
+TELEMETRY_PLANE_INFO = (
+    NodeResources,
+    MemoryUsage,
+    MactopMetrics,
+    MacmonMetrics,
+    NodeDiskUsage,
+    MiscData,
+    StaticNodeInformation,
+    RdmaCtlStatus,
+)
 
 
 class NodeTelemetry(CamelCaseModel):
@@ -59,6 +83,10 @@ class TelemetryView:
         self.node_resources: dict[NodeId, NodeResources] = {}
         self.node_memory: dict[NodeId, MemoryUsage] = {}
         self.node_system: dict[NodeId, SystemPerformanceProfile] = {}
+        # Slice 3 observational readings (disk/identity/rdma-ctl).
+        self.node_disk: dict[NodeId, DiskUsage] = {}
+        self.node_identities: dict[NodeId, NodeIdentity] = {}
+        self.node_rdma_ctl: dict[NodeId, NodeRdmaCtlStatus] = {}
 
     def prune(self, node_id: NodeId) -> None:
         """Drop all telemetry for a node that left the cluster.
@@ -73,6 +101,9 @@ class TelemetryView:
         self.node_resources.pop(node_id, None)
         self.node_memory.pop(node_id, None)
         self.node_system.pop(node_id, None)
+        self.node_disk.pop(node_id, None)
+        self.node_identities.pop(node_id, None)
+        self.node_rdma_ctl.pop(node_id, None)
 
     def apply(self, message: NodeTelemetry) -> None:
         """Coalesce one telemetry message into the latest-value view."""
@@ -87,8 +118,36 @@ class TelemetryView:
             # normalized memory/system_profile shape as MactopMetrics.
             self.node_memory[node_id] = info.memory
             self.node_system[node_id] = info.system_profile
-        # Remaining GatheredInfo variants (disk, network, thunderbolt,
-        # identities) still travel the event log; they migrate in later slices.
+        elif isinstance(info, NodeDiskUsage):
+            self.node_disk[node_id] = info.disk_usage
+        elif isinstance(info, RdmaCtlStatus):
+            self.node_rdma_ctl[node_id] = NodeRdmaCtlStatus(
+                enabled=info.enabled,
+                interfaces_present=info.interfaces_present,
+            )
+        elif isinstance(info, MiscData):
+            # Identity is assembled from two readings (friendly name +
+            # static info), so merge into the existing entry rather than
+            # overwrite — mirrors the accumulation the event applier did.
+            current = self.node_identities.get(node_id, NodeIdentity())
+            self.node_identities[node_id] = current.model_copy(
+                update={"friendly_name": info.friendly_name}
+            )
+        elif isinstance(info, StaticNodeInformation):
+            current = self.node_identities.get(node_id, NodeIdentity())
+            self.node_identities[node_id] = current.model_copy(
+                update={
+                    "model_id": info.model,
+                    "chip_id": info.chip,
+                    "os_version": info.os_version,
+                    "os_build_version": info.os_build_version,
+                    "skulk_version": info.skulk_version,
+                    "skulk_commit": info.skulk_commit,
+                }
+            )
+        # Connectivity readings (network, thunderbolt, thunderbolt-bridge)
+        # deliberately stay on the control plane — they define the topology
+        # graph (see TELEMETRY_PLANE_INFO note above).
 
 
 def record_membership_from_event(view: TelemetryView, event: Event) -> None:

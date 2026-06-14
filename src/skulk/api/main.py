@@ -432,15 +432,10 @@ def validate_renderable_text_generation(
                 "(messages / input must contain a non-empty message)"
             ),
         )
-    if (
-        task_params.max_output_tokens is not None
-        and task_params.max_output_tokens <= 0
-    ):
+    if task_params.max_output_tokens is not None and task_params.max_output_tokens <= 0:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "max_tokens (max_output_tokens) must be a positive integer"
-            ),
+            detail=("max_tokens (max_output_tokens) must be a positive integer"),
         )
 
 
@@ -557,7 +552,11 @@ def _coerce_candidate_bits(value: object) -> list[int]:
     if not isinstance(value, list):
         return list(_DEFAULT_OPTIMIZER_CANDIDATE_BITS)
     raw_items = cast(list[object], value)
-    normalized = [item for item in raw_items if isinstance(item, int) and not isinstance(item, bool)]
+    normalized = [
+        item
+        for item in raw_items
+        if isinstance(item, int) and not isinstance(item, bool)
+    ]
     return normalized or list(_DEFAULT_OPTIMIZER_CANDIDATE_BITS)
 
 
@@ -630,12 +629,13 @@ class API:
         self._store_client = store_client
         self._config_path = resolve_config_path()
         self._model_optimizer: "ModelOptimizer | None" = None
-        self._runner_diagnostics_provider: Callable[
-            [], Sequence[RunnerSupervisorDiagnostics]
-        ] | None = None
-        self._runner_cancel_provider: Callable[
-            [RunnerId, task_types.TaskId], Awaitable[RunnerTaskCancelResponse]
-        ] | None = None
+        self._runner_diagnostics_provider: (
+            Callable[[], Sequence[RunnerSupervisorDiagnostics]] | None
+        ) = None
+        self._runner_cancel_provider: (
+            Callable[[RunnerId, task_types.TaskId], Awaitable[RunnerTaskCancelResponse]]
+            | None
+        ) = None
         self._sent_image_hashes: set[str] = set()
         # Initialize optimizer if store path is available
         if exo_config and exo_config.model_store and exo_config.model_store.enabled:
@@ -1870,6 +1870,24 @@ class API:
             for node_id, profile in self._telemetry_view.node_system.items()
             if node_id in live
         }
+        # Observational readings moved to telemetry in #279 slice 3; merge them
+        # back under their original camelCase keys so the dashboard wire shape is
+        # unchanged.
+        payload["nodeIdentities"] = {
+            str(node_id): identity.model_dump(mode="json", by_alias=True)
+            for node_id, identity in self._telemetry_view.node_identities.items()
+            if node_id in live
+        }
+        payload["nodeDisk"] = {
+            str(node_id): disk.model_dump(mode="json", by_alias=True)
+            for node_id, disk in self._telemetry_view.node_disk.items()
+            if node_id in live
+        }
+        payload["nodeRdmaCtl"] = {
+            str(node_id): status.model_dump(mode="json", by_alias=True)
+            for node_id, status in self._telemetry_view.node_rdma_ctl.items()
+            if node_id in live
+        }
         return payload
 
     async def _send_text_generation_with_images(
@@ -1938,8 +1956,7 @@ class API:
             )
         for idx, h in cached_hashes.items():
             _log_image_transport(
-                f"TextGeneration cached image {idx}: "
-                f"b64_sha256={h[:12]}..."
+                f"TextGeneration cached image {idx}: b64_sha256={h[:12]}..."
             )
 
         if not new_images:
@@ -2064,7 +2081,9 @@ class API:
                 )
                 if isinstance(runner_to_shard, dict):
                     for shard in cast(dict[object, object], runner_to_shard).values():
-                        shard_model_card = cast(object, getattr(shard, "model_card", None))
+                        shard_model_card = cast(
+                            object, getattr(shard, "model_card", None)
+                        )
                         if isinstance(shard_model_card, ModelCard):
                             return shard_model_card
                 fallback_card = cast(
@@ -3027,9 +3046,7 @@ class API:
                         downloaded_model_ids.add(dl.shard_metadata.model_card.model_id)
             cards = [c for c in cards if c.model_id in downloaded_model_ids]
 
-        return ModelList(
-            data=[self._model_list_entry(card) for card in cards]
-        )
+        return ModelList(data=[self._model_list_entry(card) for card in cards])
 
     async def add_custom_model(self, payload: AddCustomModelParams) -> ModelListModel:
         """Fetch a model from HuggingFace and save as a custom model card, then sync across the cluster."""
@@ -3162,9 +3179,8 @@ class API:
         with self.event_receiver as events:
             async for i_event in events:
                 event = i_event.event
-                if (
-                    self._event_log is not None
-                    and not isinstance(event, StateSnapshotHydrated)
+                if self._event_log is not None and not isinstance(
+                    event, StateSnapshotHydrated
                 ):
                     self._event_log.append(event)
                     self._maybe_compact_event_log()
@@ -3214,8 +3230,7 @@ class API:
                     # this is a no-op for them.
                     await self._terminate_command_stream(
                         event.task_id,
-                        "The request was cancelled because its instance "
-                        "was deleted",
+                        "The request was cancelled because its instance was deleted",
                     )
                 if isinstance(event, TracesMerged):
                     self._save_merged_trace(event)
@@ -3316,7 +3331,8 @@ class API:
             try:
                 retention_days = (
                     self._exo_config.tracing.retention_days
-                    if self._exo_config is not None and self._exo_config.tracing is not None
+                    if self._exo_config is not None
+                    and self._exo_config.tracing is not None
                     else 3
                 )
                 removed = prune_old_trace_files(
@@ -3468,7 +3484,7 @@ class API:
         return trace_path
 
     def _friendly_name_for_trace_node(self, node_id: str) -> str | None:
-        for known_node_id, identity in self.state.node_identities.items():
+        for known_node_id, identity in self._telemetry_view.node_identities.items():
             if str(known_node_id) != node_id:
                 continue
             if identity.friendly_name and identity.friendly_name != "Unknown":
@@ -3482,7 +3498,9 @@ class API:
             friendly_name=self._friendly_name_for_trace_node(node_id),
         )
 
-    def _trace_source_nodes(self, trace_events: list[TraceEvent]) -> list[TraceSourceNode]:
+    def _trace_source_nodes(
+        self, trace_events: list[TraceEvent]
+    ) -> list[TraceSourceNode]:
         node_ids = [event.node_id for event in trace_events if event.node_id]
         if not node_ids:
             node_ids = [str(self.node_id)]
@@ -3558,12 +3576,16 @@ class API:
         created_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
         trace_events = load_trace_file(trace_path)
 
-        model_id = next((event.model_id for event in trace_events if event.model_id), None)
+        model_id = next(
+            (event.model_id for event in trace_events if event.model_id), None
+        )
         task_kind = cast(
             TraceTaskKind | None,
             next((event.task_kind for event in trace_events if event.task_kind), None),
         )
-        categories = sorted({event.category for event in trace_events if event.category})
+        categories = sorted(
+            {event.category for event in trace_events if event.category}
+        )
         tags = sorted({tag for event in trace_events for tag in event.tags})
         has_tool_activity = any("tool_call" in event.tags for event in trace_events)
 
@@ -3580,9 +3602,12 @@ class API:
         )
 
     @staticmethod
-    def _merge_trace_list_item(existing: TraceListItem, incoming: TraceListItem) -> TraceListItem:
+    def _merge_trace_list_item(
+        existing: TraceListItem, incoming: TraceListItem
+    ) -> TraceListItem:
         source_nodes_by_id = {
-            source.node_id: source for source in [*existing.source_nodes, *incoming.source_nodes]
+            source.node_id: source
+            for source in [*existing.source_nodes, *incoming.source_nodes]
         }
         return existing.model_copy(
             update={
@@ -3592,7 +3617,8 @@ class API:
                 "task_kind": existing.task_kind or incoming.task_kind,
                 "categories": sorted({*existing.categories, *incoming.categories}),
                 "tags": sorted({*existing.tags, *incoming.tags}),
-                "has_tool_activity": existing.has_tool_activity or incoming.has_tool_activity,
+                "has_tool_activity": existing.has_tool_activity
+                or incoming.has_tool_activity,
                 "source_nodes": list(source_nodes_by_id.values()),
             }
         )
@@ -3629,7 +3655,7 @@ class API:
     def _friendly_name_for_node(self, node_id: NodeId) -> str | None:
         """Return a known friendly node name for diagnostics."""
 
-        identity = self.state.node_identities.get(node_id)
+        identity = self._telemetry_view.node_identities.get(node_id)
         if identity is None:
             return None
         if identity.friendly_name and identity.friendly_name != "Unknown":
@@ -3659,7 +3685,9 @@ class API:
         return None
 
     @staticmethod
-    def _task_model_id(task: task_types.Task, default_model_id: str | None) -> str | None:
+    def _task_model_id(
+        task: task_types.Task, default_model_id: str | None
+    ) -> str | None:
         """Return the model associated with a task when available."""
 
         if isinstance(
@@ -3707,8 +3735,12 @@ class API:
             shard_assignments = instance.shard_assignments
             placement_node_ids = list(shard_assignments.node_to_runner.keys())
             placement_node_id_strings = [str(node_id) for node_id in placement_node_ids]
-            master_is_placement_node = master_node_id in shard_assignments.node_to_runner
-            local_node_is_placement_node = self.node_id in shard_assignments.node_to_runner
+            master_is_placement_node = (
+                master_node_id in shard_assignments.node_to_runner
+            )
+            local_node_is_placement_node = (
+                self.node_id in shard_assignments.node_to_runner
+            )
             warnings: list[str] = []
 
             if not master_is_placement_node:
@@ -3797,7 +3829,9 @@ class API:
             instance_task_ids: set[str] = set()
             if placement is not None:
                 instance_task_ids = {
-                    task.task_id for placement_runner in placement.runners for task in placement_runner.tasks
+                    task.task_id
+                    for placement_runner in placement.runners
+                    for task in placement_runner.tasks
                 }
                 for placement_runner in placement.runners:
                     if placement_runner.runner_id == runner.runner_id:
@@ -3806,7 +3840,11 @@ class API:
                         }
                         break
 
-            if runner.process_alive and runner.in_progress_tasks and not instance_task_ids:
+            if (
+                runner.process_alive
+                and runner.in_progress_tasks
+                and not instance_task_ids
+            ):
                 message = (
                     "Runner "
                     f"{self._short_diagnostics_id(runner.runner_id)} is still alive with "
@@ -3815,9 +3853,9 @@ class API:
                     f"{self._short_diagnostics_id(runner.instance_id)}."
                 )
                 top_level_warnings.add(message)
-                placement_warnings_by_instance.setdefault(runner.instance_id, set()).add(
-                    message
-                )
+                placement_warnings_by_instance.setdefault(
+                    runner.instance_id, set()
+                ).add(message)
 
             for task in runner.in_progress_tasks:
                 matching_state_task = task_by_id.get(task.task_id)
@@ -3828,7 +3866,10 @@ class API:
                         f"{task.task_kind}:{self._short_diagnostics_id(task.task_id)} in progress, "
                         "but cluster state no longer tracks that task."
                     )
-                elif matching_state_task.task_status.value not in {"Pending", "Running"}:
+                elif matching_state_task.task_status.value not in {
+                    "Pending",
+                    "Running",
+                }:
                     message = (
                         "Runner "
                         f"{self._short_diagnostics_id(runner.runner_id)} still reports "
@@ -3846,12 +3887,14 @@ class API:
                     continue
 
                 top_level_warnings.add(message)
-                placement_warnings_by_instance.setdefault(runner.instance_id, set()).add(
-                    message
-                )
+                placement_warnings_by_instance.setdefault(
+                    runner.instance_id, set()
+                ).add(message)
 
         for placement in placements:
-            extra_warnings = placement_warnings_by_instance.get(placement.instance_id, set())
+            extra_warnings = placement_warnings_by_instance.get(
+                placement.instance_id, set()
+            )
             if extra_warnings:
                 placement.warnings = sorted(set(placement.warnings) | extra_warnings)
 
@@ -3978,9 +4021,7 @@ class API:
             children = []
 
         runner_pids = {
-            runner.pid
-            for runner in supervisor_runners
-            if runner.pid is not None
+            runner.pid for runner in supervisor_runners if runner.pid is not None
         }
         child_pids = {current.pid, *(child.pid for child in children)}
         process_by_pid: dict[int, psutil.Process] = {
@@ -4010,8 +4051,10 @@ class API:
     def _runtime_diagnostics(self) -> NodeRuntimeDiagnostics:
         """Build local runtime diagnostics from API process and state."""
 
-        identity = self.state.node_identities.get(self.node_id)
-        logging_config = self._exo_config.logging if self._exo_config is not None else None
+        identity = self._telemetry_view.node_identities.get(self.node_id)
+        logging_config = (
+            self._exo_config.logging if self._exo_config is not None else None
+        )
         master_node_id = self._master_node_id
         return NodeRuntimeDiagnostics(
             node_id=str(self.node_id),
@@ -4028,7 +4071,8 @@ class API:
                 "SKULK_LIBP2P_NAMESPACE",
                 "EXO_LIBP2P_NAMESPACE",
             ),
-            python_unbuffered=os.environ.get("PYTHONUNBUFFERED") in {"1", "true", "True"},
+            python_unbuffered=os.environ.get("PYTHONUNBUFFERED")
+            in {"1", "true", "True"},
             tracing_enabled=self.state.tracing_enabled,
             structured_logging_configured=bool(
                 logging_config is not None
@@ -4057,7 +4101,7 @@ class API:
             gathered_memory=self._telemetry_view.node_memory.get(self.node_id),
             current_memory=current_memory,
             current_wired=current_wired,
-            disk=self.state.node_disk.get(self.node_id),
+            disk=self._telemetry_view.node_disk.get(self.node_id),
             system=self._telemetry_view.node_system.get(self.node_id),
             network=self.state.node_network.get(self.node_id),
         )
@@ -4080,7 +4124,7 @@ class API:
         return NodeDiagnostics(
             generated_at=datetime.now(tz=timezone.utc).isoformat(),
             runtime=self._runtime_diagnostics(),
-            identity=self.state.node_identities.get(self.node_id),
+            identity=self._telemetry_view.node_identities.get(self.node_id),
             resources=resources,
             processes=self._collect_process_diagnostics(supervisor_runners),
             supervisor_runners=supervisor_runners,
@@ -4308,7 +4352,9 @@ class API:
 
         diagnostics = await self.get_node_diagnostics()
         runner = self._match_capture_runner(diagnostics, request)
-        if (request.runner_id is not None or request.task_id is not None) and runner is None:
+        if (
+            request.runner_id is not None or request.task_id is not None
+        ) and runner is None:
             raise HTTPException(
                 status_code=404,
                 detail="No local runner matched the requested runnerId/taskId.",
@@ -4454,8 +4500,7 @@ class API:
                     ClusterTimelineUnreachable(
                         node_id=node.node_id,
                         url=node.url,
-                        error=node.error
-                        or "Node diagnostics returned no payload.",
+                        error=node.error or "Node diagnostics returned no payload.",
                     )
                 )
                 continue
@@ -4683,9 +4728,7 @@ class API:
         async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
             for base_url in peer_urls:
                 try:
-                    response = await client.get(
-                        f"{base_url}/v1/traces/{task_id}/stats"
-                    )
+                    response = await client.get(f"{base_url}/v1/traces/{task_id}/stats")
                 except httpx.HTTPError as exc:
                     logger.opt(exception=exc).debug(
                         f"Failed to proxy trace stats {task_id} from {base_url}"
@@ -4698,7 +4741,9 @@ class API:
 
         raise HTTPException(status_code=404, detail=f"Trace not found: {task_id}")
 
-    async def get_cluster_trace_raw(self, task_id: str) -> FileResponse | StreamingResponse:
+    async def get_cluster_trace_raw(
+        self, task_id: str
+    ) -> FileResponse | StreamingResponse:
         try:
             return await self.get_trace_raw(task_id)
         except HTTPException as exc:
@@ -4710,9 +4755,7 @@ class API:
         async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
             for base_url in peer_urls:
                 try:
-                    response = await client.get(
-                        f"{base_url}/v1/traces/{task_id}/raw"
-                    )
+                    response = await client.get(f"{base_url}/v1/traces/{task_id}/raw")
                 except httpx.HTTPError as exc:
                     logger.opt(exception=exc).debug(
                         f"Failed to proxy raw trace {task_id} from {base_url}"
@@ -4889,8 +4932,7 @@ class API:
             # already-running Vector subprocess shipping to the prior URL.
             ingest_url_str = str(logging_cfg_update.get("ingest_url", ""))
             log_on = external_log_pipe_enabled() or (
-                bool(logging_cfg_update.get("enabled", False))
-                and bool(ingest_url_str)
+                bool(logging_cfg_update.get("enabled", False)) and bool(ingest_url_str)
             )
             set_structured_stdout(log_on, ingest_url=ingest_url_str)
         # model_store changes still require restart; inference-only changes don't
