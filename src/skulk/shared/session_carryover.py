@@ -97,13 +97,19 @@ def seed_state_for_new_session(prior: State, now: datetime | None = None) -> Sta
     stamp = now if now is not None else datetime.now(tz=timezone.utc)
     # Arm the liveness clock for every node the seed still carries info about.
     # The prune loop only reaps via last_seen, so a carried identity with no
-    # last_seen entry is immortal (the phantom-node leak, #218 family).
+    # last_seen entry is immortal (the phantom-node leak, #218 family). This
+    # MUST cover every node_* map copied into the seed below — a node present
+    # only in node_thunderbolt/node_thunderbolt_bridge/node_rdma_ctl (not in
+    # identities/memory) would otherwise still leak (review catch on #291).
     carried_node_ids = (
         prior.node_identities.keys()
         | prior.node_memory.keys()
         | prior.node_disk.keys()
         | prior.node_system.keys()
         | prior.node_network.keys()
+        | prior.node_thunderbolt.keys()
+        | prior.node_thunderbolt_bridge.keys()
+        | prior.node_rdma_ctl.keys()
     )
     last_seen = {node_id: stamp for node_id in carried_node_ids}
     return State(

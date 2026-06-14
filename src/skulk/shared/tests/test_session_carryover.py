@@ -30,7 +30,9 @@ def _prior_state() -> tuple[State, NodeId]:
         runners={},
         tasks={},
         downloads={node: []},
-        last_seen={node: datetime.now(tz=timezone.utc)},
+        # Deterministically stale so the "re-stamped to now, not copied from
+        # prior" assertion can never collide with the test's stamp.
+        last_seen={node: datetime(2020, 1, 1, tzinfo=timezone.utc)},
         topology=topology,
         tracing_enabled=True,
         last_event_applied_idx=4242,
@@ -130,3 +132,20 @@ def test_seeds_last_seen_for_carried_identities():
     # ...re-stamped to `now`, NOT copied from the prior (possibly stale) view,
     # so a long-dead node is not admitted to the live clock as already-fresh.
     assert seed.last_seen[node] != prior.last_seen[node]
+
+
+def test_seeds_last_seen_for_node_in_only_thunderbolt_map():
+    # A node carried ONLY in a TB/RDMA map (not identities/memory) must still
+    # get a last_seen anchor — otherwise it evades the prune loop and leaks as
+    # a phantom after a session transition (review catch on #291). The carried
+    # set must cover every node_* map copied into the seed, not just the common
+    # identity/memory ones.
+    from skulk.shared.types.profiling import NodeThunderboltInfo
+
+    tb_only = NodeId()
+    prior = State(node_thunderbolt={tb_only: NodeThunderboltInfo(interfaces=[])})
+    stamp = datetime(2026, 6, 13, 12, 0, 0, tzinfo=timezone.utc)
+    seed = seed_state_for_new_session(prior, now=stamp)
+    assert seed.node_thunderbolt[tb_only].interfaces == []
+    # The TB-only node is armed for the prune loop.
+    assert seed.last_seen.get(tb_only) == stamp
