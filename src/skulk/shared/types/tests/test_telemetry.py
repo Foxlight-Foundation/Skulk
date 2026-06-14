@@ -190,6 +190,17 @@ def test_prune_drops_all_telemetry_for_a_node() -> None:
         view.apply(
             NodeTelemetry(
                 node_id=node,
+                info=NodeDiskUsage(
+                    disk_usage=DiskUsage(
+                        total=Memory.from_bytes(500 * gib),
+                        available=Memory.from_bytes(200 * gib),
+                    )
+                ),
+            )
+        )
+        view.apply(
+            NodeTelemetry(
+                node_id=node,
                 info=RdmaCtlStatus(enabled=False, interfaces_present=False),
             )
         )
@@ -199,6 +210,7 @@ def test_prune_drops_all_telemetry_for_a_node() -> None:
         view.node_memory,
         view.node_system,
         view.node_identities,
+        view.node_disk,
         view.node_rdma_ctl,
     ):
         assert a not in m
