@@ -12,6 +12,7 @@ from skulk.master.placement_utils import (
     get_shard_assignments,
     get_smallest_cycles,
 )
+from skulk.shared.models.memory_estimate import instance_context_token_limit
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import (
@@ -319,6 +320,15 @@ def place_instance(
         command.model_card, selected_cycle, command.sharding, node_memory
     )
 
+    # Stamp the context-admission ceiling into the placement decision (#279
+    # slice 2). Computed once here from the hosting nodes' static ram_total, so
+    # every rank reads the identical value off replicated state rather than
+    # recomputing from the (now telemetry-plane, last-write-wins) node memory.
+    context_token_limit = instance_context_token_limit(
+        shard_assignments,
+        {node_id: node_memory[node_id].ram_total for node_id in selected_cycle.node_ids},
+    )
+
     cycle_digraph: Topology = topology.get_subgraph_from_nodes(selected_cycle.node_ids)
 
     instance_id = InstanceId()
@@ -354,6 +364,7 @@ def place_instance(
             target_instances[instance_id] = MlxJacclInstance(
                 instance_id=instance_id,
                 shard_assignments=shard_assignments,
+                context_token_limit=context_token_limit,
                 jaccl_devices=mlx_jaccl_devices,
                 jaccl_coordinators=mlx_jaccl_coordinators,
             )
@@ -368,6 +379,7 @@ def place_instance(
             target_instances[instance_id] = MlxRingInstance(
                 instance_id=instance_id,
                 shard_assignments=shard_assignments,
+                context_token_limit=context_token_limit,
                 hosts_by_node=hosts_by_node,
                 ephemeral_port=ephemeral_port,
             )

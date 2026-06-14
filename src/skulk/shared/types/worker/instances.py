@@ -20,6 +20,14 @@ class InstanceMeta(str, Enum):
 class BaseInstance(TaggedModel):
     instance_id: InstanceId
     shard_assignments: ShardAssignments
+    # Context-admission ceiling (#145/#279 slice 2): the master computes this
+    # ONCE at placement time and stamps it here, in the event-sourced placement
+    # decision. Every rank then reads the identical value off replicated state
+    # instead of recomputing from per-node memory — required now that node
+    # memory lives in the (last-write-wins, unordered) telemetry plane rather
+    # than the ordered event log, where divergent per-rank ceilings would
+    # deadlock the collectives. ``None`` means no enforceable ceiling.
+    context_token_limit: int | None = None
 
     def shard(self, runner_id: RunnerId) -> ShardMetadata | None:
         return self.shard_assignments.runner_to_shard.get(runner_id, None)

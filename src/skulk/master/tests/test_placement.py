@@ -232,6 +232,34 @@ def test_get_instance_placements_one_node_fits_with_extra_memory() -> None:
     assert len(instance.shard_assignments.runner_to_shard) == 1
 
 
+def test_placement_stamps_context_token_limit() -> None:
+    # #279 slice 2: the master computes the context-admission ceiling once at
+    # placement time and stamps it onto the instance, so every rank reads the
+    # identical value instead of recomputing from (now telemetry-plane) memory.
+    topology = Topology()
+    node_id = NodeId()
+    topology.add_node(node_id)
+    node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
+    node_network = {node_id: create_node_network()}
+    cic = place_instance_command(
+        ModelCard(
+            model_id=ModelId("test-model"),
+            storage_size=Memory.from_gb(5),
+            n_layers=10,
+            hidden_size=1000,
+            supports_tensor=True,
+            tasks=[ModelTask.TextGeneration],
+            context_length=4096,
+        ),
+    )
+    placements = place_instance(cic, topology, {}, node_memory, node_network)
+    instance = next(iter(placements.values()))
+    # A card-advertised context_length makes the ceiling enforceable; the stamp
+    # is present and never exceeds the advertised limit.
+    assert instance.context_token_limit is not None
+    assert instance.context_token_limit <= 4096
+
+
 def test_get_instance_placements_one_node_not_fit() -> None:
     topology = Topology()
     node_id = NodeId()

@@ -547,7 +547,9 @@ class Master:
                                 command,
                                 self.state.topology,
                                 self.state.instances,
-                                self.state.node_memory,
+                                # node_memory now lives on the telemetry plane
+                                # (#279 slice 2), not in event-sourced State.
+                                self._telemetry_view.node_memory,
                                 self.state.node_network,
                                 download_status=self.state.downloads,
                                 excluded_nodes=set(command.excluded_nodes),

@@ -167,7 +167,6 @@ from skulk.shared.constants import (
 from skulk.shared.election import ElectionMessage
 from skulk.shared.logging import InterceptLogger
 from skulk.shared.models.capabilities import resolve_model_capability_profile
-from skulk.shared.models.memory_estimate import instance_context_token_limit
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -1075,8 +1074,8 @@ class API:
             "/state",
             tags=["State & Tracing"],
             summary="Get cluster state",
-            description="Return the current cluster state as seen by this API node, including topology, instances, and node capabilities.",
-        )(lambda: self.state)
+            description="Return the current cluster state as seen by this API node, including topology, instances, node capabilities, and live telemetry (per-node memory and system profile).",
+        )(self.get_cluster_state)
         self.app.get(
             "/events",
             tags=["State & Tracing"],
@@ -1421,7 +1420,7 @@ class API:
                     copy.deepcopy(command),
                     topology=self.state.topology,
                     current_instances=self.state.instances,
-                    node_memory=self.state.node_memory,
+                    node_memory=self._telemetry_view.node_memory,
                     node_network=self.state.node_network,
                     download_status=self.state.downloads,
                     excluded_nodes=set(command.excluded_nodes),
@@ -1488,7 +1487,7 @@ class API:
                     instance_meta=instance_meta,
                     min_nodes=min_nodes,
                 ),
-                node_memory=self.state.node_memory,
+                node_memory=self._telemetry_view.node_memory,
                 node_network=self.state.node_network,
                 topology=self.state.topology,
                 current_instances=self.state.instances,
@@ -1553,7 +1552,7 @@ class API:
                         instance_meta=instance_meta,
                         min_nodes=min_nodes,
                     ),
-                    node_memory=self.state.node_memory,
+                    node_memory=self._telemetry_view.node_memory,
                     node_network=self.state.node_network,
                     topology=self.state.topology,
                     current_instances=self.state.instances,
@@ -1741,7 +1740,7 @@ class API:
     async def _collect_text_generation_with_stats(
         self, command_id: CommandId
     ) -> BenchChatCompletionResponse:
-        sampler = PowerSampler(get_node_system=lambda: self.state.node_system)
+        sampler = PowerSampler(get_node_system=lambda: self._telemetry_view.node_system)
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         model: ModelId | None = None
@@ -1823,22 +1822,34 @@ class API:
         maximum avoids falsely rejecting a request the largest instance could
         still serve.
         """
-        node_ram_totals = {
-            node_id: usage.ram_total
-            for node_id, usage in self.state.node_memory.items()
-        }
         limits = [
-            limit
+            instance.context_token_limit
             for instance in self.state.instances.values()
             if instance.shard_assignments.model_id == model_id
-            and (
-                limit := instance_context_token_limit(
-                    instance.shard_assignments, node_ram_totals
-                )
-            )
-            is not None
+            and instance.context_token_limit is not None
         ]
         return max(limits) if limits else None
+
+    def get_cluster_state(self) -> dict[str, object]:
+        """Cluster state for ``GET /state``: event-sourced ``State`` plus live
+        telemetry (per-node memory + system profile) merged back in.
+
+        ``node_memory`` and ``node_system`` moved off event-sourced ``State`` to
+        the telemetry plane (#279 slice 2), but ``/state`` is the dashboard's
+        single data source and still renders per-node memory/system. Merge the
+        ``TelemetryView`` maps in under their camelCase keys so the wire shape is
+        unchanged for the dashboard and any external consumer.
+        """
+        payload = self.state.model_dump(mode="json", by_alias=True)
+        payload["nodeMemory"] = {
+            str(node_id): usage.model_dump(mode="json", by_alias=True)
+            for node_id, usage in self._telemetry_view.node_memory.items()
+        }
+        payload["nodeSystem"] = {
+            str(node_id): profile.model_dump(mode="json", by_alias=True)
+            for node_id, profile in self._telemetry_view.node_system.items()
+        }
+        return payload
 
     async def _send_text_generation_with_images(
         self, task_params: TextGenerationTaskParams
@@ -2401,7 +2412,7 @@ class API:
         num_images: int,
         response_format: str,
     ) -> BenchImageGenerationResponse:
-        sampler = PowerSampler(get_node_system=lambda: self.state.node_system)
+        sampler = PowerSampler(get_node_system=lambda: self._telemetry_view.node_system)
         images: list[ImageData] = []
         stats: ImageGenerationStats | None = None
         async with anyio.create_task_group() as tg:
@@ -2907,7 +2918,7 @@ class API:
         """Calculate total available memory across all nodes in bytes."""
         total_available = Memory()
 
-        for memory in self.state.node_memory.values():
+        for memory in self._telemetry_view.node_memory.values():
             total_available += memory.ram_available
 
         return total_available
@@ -4006,11 +4017,11 @@ class API:
             )
 
         return NodeResourceDiagnostics(
-            gathered_memory=self.state.node_memory.get(self.node_id),
+            gathered_memory=self._telemetry_view.node_memory.get(self.node_id),
             current_memory=current_memory,
             current_wired=current_wired,
             disk=self.state.node_disk.get(self.node_id),
-            system=self.state.node_system.get(self.node_id),
+            system=self._telemetry_view.node_system.get(self.node_id),
             network=self.state.node_network.get(self.node_id),
         )
 

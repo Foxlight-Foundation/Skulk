@@ -18,7 +18,6 @@ from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
 from skulk.shared.models.memory_estimate import (
     estimate_shard_footprint,
     gpu_working_set_ceiling,
-    instance_context_token_limit,
 )
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -87,13 +86,24 @@ from skulk.store.staging_eviction import (
 )
 from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.crash_window import CrashWindow
-from skulk.utils.info_gatherer.info_gatherer import GatheredInfo, InfoGatherer
+from skulk.utils.info_gatherer.info_gatherer import (
+    GatheredInfo,
+    InfoGatherer,
+    MacmonMetrics,
+    MactopMetrics,
+)
 from skulk.utils.info_gatherer.net_profile import check_reachable
 from skulk.utils.keyed_backoff import KeyedBackoff
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.plan import plan
 from skulk.worker.runner.bootstrap import WEDGE_FAILURE_MARKER
 from skulk.worker.runner.runner_supervisor import RunnerSupervisor
+
+# GatheredInfo variants that live on the telemetry plane (#279) rather than the
+# event log: gossiped last-write-wins, never indexed or persisted. Memory and
+# the system profile (carried together by Mactop/Macmon metrics) joined in
+# slice 2; the rest of the node_* readings migrate in later slices.
+_TELEMETRY_PLANE_INFO = (NodeResources, MemoryUsage, MactopMetrics, MacmonMetrics)
 
 _STALE_RESET_MAX_WAIT_TICKS = 300
 """How many ~100ms planning ticks to hold planning while stale download
@@ -440,11 +450,12 @@ class Worker:
         with recv as info_stream:
             async for info in info_stream:
                 try:
-                    # Telemetry plane (#279): NodeResources is gossiped on the
-                    # telemetry topic, off the event log. Everything else still
-                    # travels as an indexed NodeGatheredInfo event in slice 1.
+                    # Telemetry plane (#279): live readings are gossiped on the
+                    # telemetry topic, off the event log. The remaining node_*
+                    # readings still travel as indexed NodeGatheredInfo events
+                    # until later slices migrate them.
                     if (
-                        isinstance(info, NodeResources)
+                        isinstance(info, _TELEMETRY_PLANE_INFO)
                         and self._telemetry_sender is not None
                     ):
                         await self._telemetry_sender.send(
@@ -869,18 +880,13 @@ class Worker:
             f"world_size={shard.world_size}, "
             f"layers={shard.start_layer}:{shard.end_layer})"
         )
-        # Context-admission ceiling (#145): derived exclusively from static
-        # inputs (per-node ram_total, card, shard fractions) so every rank of
-        # a multi-node instance computes the identical limit — placement only
-        # happens after the master indexed memory for all hosting nodes, so
-        # the replicated state already carries every entry we need here.
-        context_token_limit = instance_context_token_limit(
-            task.bound_instance.instance.shard_assignments,
-            {
-                node_id: usage.ram_total
-                for node_id, usage in self.state.node_memory.items()
-            },
-        )
+        # Context-admission ceiling (#145/#279 slice 2): the master computed
+        # this once at placement time and stamped it into the event-sourced
+        # placement decision, so every rank reads the identical value here.
+        # Recomputing from node memory would now be non-deterministic — memory
+        # moved to the last-write-wins telemetry plane and is no longer in the
+        # ordered, replicated event log.
+        context_token_limit = task.bound_instance.instance.context_token_limit
         logger.info(
             "Context admission limit for instance "
             f"{task.instance_id}: {context_token_limit} tokens"
