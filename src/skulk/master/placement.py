@@ -50,7 +50,7 @@ from skulk.shared.types.worker.instances import (
     MlxJacclInstance,
     MlxRingInstance,
 )
-from skulk.shared.types.worker.shards import Sharding
+from skulk.shared.types.worker.shards import Sharding, TensorShardMetadata
 
 
 def random_ephemeral_port() -> int:
@@ -347,7 +347,10 @@ def place_instance(
     # recomputing from the (now telemetry-plane, last-write-wins) node memory.
     context_token_limit = instance_context_token_limit(
         shard_assignments,
-        {node_id: node_memory[node_id].ram_total for node_id in selected_cycle.node_ids},
+        {
+            node_id: node_memory[node_id].ram_total
+            for node_id in selected_cycle.node_ids
+        },
     )
 
     cycle_digraph: Topology = topology.get_subgraph_from_nodes(selected_cycle.node_ids)
@@ -406,6 +409,52 @@ def place_instance(
             )
 
     return target_instances
+
+
+def replacement_command_for_refused_instance(instance: Instance) -> PlaceInstance:
+    """Build a *wider* placement command to recover a memory-refused instance.
+
+    When a worker refuses its shard for lack of GPU-wireable memory at load
+    time (#290), the master re-places the same model one node wider so every
+    node holds a smaller share. The placement intent (model card, sharding
+    family, instance backend) is recovered from the instance itself; the
+    operator's original per-placement node exclusions are not retained on the
+    instance, so the wider re-placement searches the full topology.
+
+    ``min_nodes`` is the refused width plus one. Raising it past the cluster
+    size makes :func:`place_instance` raise :class:`PlacementError`, which the
+    caller treats as the terminal "cannot fit anywhere" outcome — this bounds
+    the refuse→re-place loop to at most ``cluster_size`` iterations.
+
+    Raises :class:`PlacementError` if the instance carries no shards (an empty
+    ``ShardAssignments`` is structurally allowed); there is no model to
+    re-place, and raising lets the caller tear the husk down on the same path
+    it uses for a genuine no-fit rather than crashing the command processor.
+    """
+    shards = list(instance.shard_assignments.runner_to_shard.values())
+    if not shards:
+        raise PlacementError(
+            f"Cannot re-place instance {instance.instance_id}: it has no shards"
+        )
+    # All shards of an instance share one model card.
+    model_card = shards[0].model_card
+    sharding = (
+        Sharding.Tensor
+        if any(isinstance(shard, TensorShardMetadata) for shard in shards)
+        else Sharding.Pipeline
+    )
+    instance_meta = (
+        InstanceMeta.MlxJaccl
+        if isinstance(instance, MlxJacclInstance)
+        else InstanceMeta.MlxRing
+    )
+    current_width = len(instance.shard_assignments.node_to_runner)
+    return PlaceInstance(
+        model_card=model_card,
+        sharding=sharding,
+        instance_meta=instance_meta,
+        min_nodes=current_width + 1,
+    )
 
 
 def delete_instance(

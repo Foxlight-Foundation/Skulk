@@ -7,13 +7,21 @@ import pytest
 from loguru import logger
 
 from skulk.master.main import REPLAY_TAIL_RETENTION_EVENTS, Master
+from skulk.master.placement import place_instance
+from skulk.master.tests.conftest import (
+    create_node_memory,
+    create_node_network,
+    create_socket_connection,
+)
 from skulk.routing.router import get_node_id_keypair
 from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.topology import Topology
 from skulk.shared.types.commands import (
     CommandId,
     ForwarderCommand,
     ForwarderDownloadCommand,
     PlaceInstance,
+    RefuseInstancePlacement,
     TextGeneration,
 )
 from skulk.shared.types.common import ModelId, NodeId, SessionId, SystemId
@@ -32,10 +40,13 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
     MemoryUsage,
 )
+from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSyncMessage
 from skulk.shared.types.tasks import TaskId, TaskStatus
 from skulk.shared.types.tasks import TextGeneration as TextGenerationTask
+from skulk.shared.types.telemetry import TelemetryView
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
+from skulk.shared.types.topology import Connection
 from skulk.shared.types.worker.instances import (
     InstanceId,
     InstanceMeta,
@@ -514,7 +525,9 @@ async def test_noop_task_events_for_unknown_tasks_are_not_indexed() -> None:
                 0,
             )
         )
-        await local_event_sender.send(_local(TaskDeleted(task_id=TaskId("task-ghost")), 1))
+        await local_event_sender.send(
+            _local(TaskDeleted(task_id=TaskId("task-ghost")), 1)
+        )
         # A legitimate status for a known task: must be indexed and broadcast.
         await local_event_sender.send(
             _local(
@@ -536,3 +549,142 @@ async def test_noop_task_events_for_unknown_tasks_are_not_indexed() -> None:
     assert isinstance(indexed.event, TaskStatusUpdated)
     assert indexed.event.task_id == known_task.task_id
     assert len(master._event_log) == 1  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_refuse_instance_placement_replaces_wider_once() -> None:
+    """A memory refusal re-places one node wider, and simultaneous refusals
+    from multiple ranks re-place exactly once (#290).
+
+    The command processor generates events without applying them (self.state
+    only updates when they round-trip through the event processor), so without
+    a dedup guard two ranks refusing the same instance would each spawn a wider
+    replacement. This drives two RefuseInstancePlacement commands and asserts a
+    single surviving instance at the wider width.
+    """
+    keypair = get_node_id_keypair()
+    node_id = NodeId(keypair.to_node_id())
+    session_id = SessionId(master_node_id=node_id, election_clock=0)
+
+    # 3-node fully-connected topology with generous memory.
+    node_ids = [node_id, NodeId(), NodeId()]
+    topology = Topology()
+    for nid in node_ids:
+        topology.add_node(nid)
+    port = 1
+    for source in node_ids:
+        for sink in node_ids:
+            if source != sink:
+                topology.add_connection(
+                    Connection(
+                        source=source, sink=sink, edge=create_socket_connection(port)
+                    )
+                )
+                port += 1
+    node_memory = {
+        nid: create_node_memory(Memory.from_gb(40).in_bytes) for nid in node_ids
+    }
+    node_network = {nid: create_node_network() for nid in node_ids}
+
+    card = ModelCard(
+        model_id=ModelId("refuse-replace-model"),
+        storage_size=Memory.from_gb(6),
+        n_layers=12,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+    )
+    two_node_cmd = PlaceInstance(
+        model_card=card,
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=2,
+    )
+    placed = place_instance(two_node_cmd, topology, {}, node_memory, node_network)
+    instance = next(iter(placed.values()))
+    instance_id = instance.instance_id
+    assert len(instance.shard_assignments.node_to_runner) == 2
+    refused_nodes = list(instance.shard_assignments.node_to_runner.keys())
+
+    seed_state = State(
+        topology=topology,
+        instances={instance_id: instance},
+        node_network=node_network,
+    )
+    telemetry = TelemetryView()
+    for nid, mem in node_memory.items():
+        telemetry.node_memory[nid] = mem
+
+    ge_sender, global_event_receiver = channel[GlobalForwarderEvent]()
+    command_sender, co_receiver = channel[ForwarderCommand]()
+    local_event_sender, le_receiver = channel[LocalForwarderEvent]()
+    state_sync_sender, state_sync_receiver = channel[StateSyncMessage]()
+    fcds, _fcdr = channel[ForwarderDownloadCommand]()
+    ev_send, ev_recv = channel[Event]()
+
+    async def mock_event_router() -> None:
+        idx = 0
+        sid = SystemId()
+        with ev_recv as master_events:
+            async for event in master_events:
+                await local_event_sender.send(
+                    LocalForwarderEvent(
+                        origin=sid,
+                        origin_idx=idx,
+                        session=session_id,
+                        event=event,
+                    )
+                )
+                idx += 1
+
+    master = Master(
+        node_id,
+        session_id,
+        event_sender=ev_send,
+        global_event_sender=ge_sender,
+        local_event_receiver=le_receiver,
+        command_receiver=co_receiver,
+        state_sync_receiver=state_sync_receiver,
+        state_sync_sender=state_sync_sender,
+        download_command_sender=fcds,
+        initial_state=seed_state,
+        telemetry_view=telemetry,
+    )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(master.run)
+        tg.start_soon(mock_event_router)
+
+        # wait for the seeded 2-node instance to land in state
+        with anyio.fail_after(5):
+            while instance_id not in master.state.instances:
+                await anyio.sleep(0.005)
+
+        # two ranks refuse the same instance, back to back
+        for refusing in refused_nodes:
+            await command_sender.send(
+                ForwarderCommand(
+                    origin=SystemId("Worker"),
+                    command=RefuseInstancePlacement(
+                        instance_id=instance_id,
+                        node_id=refusing,
+                        reason="not enough GPU-wireable memory",
+                    ),
+                )
+            )
+
+        # wait for a wider replacement to appear and the original to be gone
+        with anyio.fail_after(5):
+            while True:
+                instances = dict(master.state.instances)
+                if instance_id not in instances and len(instances) == 1:
+                    break
+                await anyio.sleep(0.005)
+
+        replaced = next(iter(master.state.instances.values()))
+        assert len(replaced.shard_assignments.node_to_runner) == 3
+        # exactly one replacement despite two refusals
+        assert len(master.state.instances) == 1
+
+        global_event_receiver.collect()
+        tg.cancel_scope.cancel()

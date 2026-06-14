@@ -6,6 +6,7 @@ from skulk.master.placement import (
     add_instance_to_placements,
     get_transition_events,
     place_instance,
+    replacement_command_for_refused_instance,
 )
 from skulk.master.tests.conftest import (
     create_node_memory,
@@ -25,6 +26,7 @@ from skulk.shared.types.events import (
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.multiaddr import Multiaddr
 from skulk.shared.types.profiling import (
+    MemoryUsage,
     NetworkInterfaceInfo,
     NodeNetworkInfo,
     NodeResources,
@@ -1104,3 +1106,143 @@ def test_missing_node_resources_is_treated_as_eligible() -> None:
     )
 
     assert len(placements) == 1
+
+
+def _fully_connected_three_nodes(
+    available_memory: tuple[float, float, float],
+) -> tuple[
+    Topology,
+    dict[NodeId, MemoryUsage],
+    dict[NodeId, NodeNetworkInfo],
+    list[NodeId],
+]:
+    """Build a fully-connected 3-node topology with the given available RAM.
+
+    Returns ``(topology, node_memory, node_network, node_ids)``. Used by the
+    refused-placement re-placement tests (#290).
+    """
+    topology = Topology()
+    node_ids = [NodeId(), NodeId(), NodeId()]
+    for node_id in node_ids:
+        topology.add_node(node_id)
+    # directed full mesh
+    port = 1
+    for source in node_ids:
+        for sink in node_ids:
+            if source != sink:
+                topology.add_connection(
+                    Connection(
+                        source=source,
+                        sink=sink,
+                        edge=create_socket_connection(port),
+                    )
+                )
+                port += 1
+    node_memory = {
+        node_ids[i]: create_node_memory(Memory.from_gb(available_memory[i]).in_bytes)
+        for i in range(3)
+    }
+    node_network = {node_id: create_node_network() for node_id in node_ids}
+    return topology, node_memory, node_network, node_ids
+
+
+def test_replacement_command_widens_refused_instance_by_one_node() -> None:
+    """A refused instance re-places one node wider, preserving model + backend (#290)."""
+    topology, node_memory, node_network, _ = _fully_connected_three_nodes(
+        (10.0, 10.0, 10.0)
+    )
+    card = ModelCard(
+        model_id=ModelId("widen-model"),
+        storage_size=Memory.from_gb(6),
+        n_layers=12,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+    )
+    two_node = PlaceInstance(
+        model_card=card,
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=2,
+    )
+    placed = place_instance(two_node, topology, {}, node_memory, node_network)
+    instance = next(iter(placed.values()))
+    assert len(instance.shard_assignments.node_to_runner) == 2
+
+    replacement = replacement_command_for_refused_instance(instance)
+    assert replacement.min_nodes == 3
+    assert replacement.model_card.model_id == card.model_id
+    assert replacement.sharding == Sharding.Pipeline
+    assert replacement.instance_meta == InstanceMeta.MlxRing
+
+
+def test_refused_instance_replaces_onto_a_wider_split() -> None:
+    """A refused 2-node placement re-places across all three nodes (#290).
+
+    The master picks the smallest fitting cycle, so on a memory view where the
+    2-node split looks fine it keeps choosing 2 nodes — exactly the view that
+    over-admits the split a worker then refuses on its tighter live reading.
+    Bumping ``min_nodes`` to 3 forces the wider floor, so the re-placement lands
+    a 3-node split (smaller per-node share) instead of the doomed 2-node one.
+    """
+    topology, node_memory, node_network, _ = _fully_connected_three_nodes(
+        (10.0, 10.0, 10.0)
+    )
+    card = ModelCard(
+        model_id=ModelId("widen-fit-model"),
+        storage_size=Memory.from_gb(6),
+        n_layers=12,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+    )
+    two_node = PlaceInstance(
+        model_card=card,
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=2,
+    )
+    placed = place_instance(two_node, topology, {}, node_memory, node_network)
+    refused_instance = next(iter(placed.values()))
+    # The same memory view keeps selecting the 2-node split.
+    assert len(refused_instance.shard_assignments.node_to_runner) == 2
+
+    replacement = replacement_command_for_refused_instance(refused_instance)
+    assert replacement.min_nodes == 3
+    widened = place_instance(replacement, topology, {}, node_memory, node_network)
+    widened_instance = next(iter(widened.values()))
+    assert len(widened_instance.shard_assignments.node_to_runner) == 3
+
+
+def test_replacement_at_full_cluster_width_is_terminal() -> None:
+    """Re-placing a full-width instance raises PlacementError (loop bound) (#290).
+
+    A 3-node instance on a 3-node cluster widens to min_nodes=4, which cannot be
+    satisfied — place_instance raises, and the master treats that as the terminal
+    "cannot fit anywhere" outcome that stops the refuse→re-place loop.
+    """
+    topology, node_memory, node_network, _ = _fully_connected_three_nodes(
+        (10.0, 10.0, 10.0)
+    )
+    card = ModelCard(
+        model_id=ModelId("full-width-model"),
+        storage_size=Memory.from_gb(9),
+        n_layers=12,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+    )
+    three_node = PlaceInstance(
+        model_card=card,
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=3,
+    )
+    placed = place_instance(three_node, topology, {}, node_memory, node_network)
+    instance = next(iter(placed.values()))
+    assert len(instance.shard_assignments.node_to_runner) == 3
+
+    replacement = replacement_command_for_refused_instance(instance)
+    assert replacement.min_nodes == 4
+    with pytest.raises(PlacementError):
+        place_instance(replacement, topology, {}, node_memory, node_network)

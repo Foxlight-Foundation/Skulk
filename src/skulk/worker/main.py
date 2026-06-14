@@ -30,6 +30,7 @@ from skulk.shared.types.commands import (
     DeleteInstance,
     ForwarderCommand,
     ForwarderDownloadCommand,
+    RefuseInstancePlacement,
     StartDownload,
 )
 from skulk.shared.types.common import CommandId, NodeId, SystemId
@@ -426,6 +427,38 @@ class Worker:
             )
         )
 
+    async def _refuse_instance_placement(
+        self, instance_id: InstanceId, reason: str
+    ) -> None:
+        """Ask the master to re-place this instance on a wider split (#290).
+
+        Used instead of :meth:`_give_up_on_instance` when the give-up is driven
+        by the *memory fit guard* rather than a runner crash or GPU wedge. The
+        master admits placements on the gossiped (telemetry-plane) availability,
+        which can sit just above the live GPU-wireable figure this node measures
+        at load time; on a borderline split that gap makes the master admit a
+        cycle this worker then refuses. Rather than letting the instance vanish,
+        the master re-places the model one node wider (smaller per-node share),
+        and only gives up for good once even a full-width split won't fit. The
+        crash window is left set, exactly as in :meth:`_give_up_on_instance`, so
+        the edge-triggered breaker does not re-send while the deletion that the
+        re-placement performs propagates through replicated state.
+        """
+        logger.error(
+            f"Worker: refusing instance {instance_id} for placement "
+            f"(asking master to re-place wider): {reason}"
+        )
+        await self.command_sender.send(
+            ForwarderCommand(
+                origin=self._system_id,
+                command=RefuseInstancePlacement(
+                    instance_id=instance_id,
+                    node_id=self.node_id,
+                    reason=reason,
+                ),
+            )
+        )
+
     async def run(self):
         logger.info("Starting Worker")
         self._reconcile_staging_on_startup()
@@ -603,8 +636,12 @@ class Worker:
                                 task_id=task.task_id, task_status=TaskStatus.Failed
                             )
                         )
+                        # Memory refusal (not a crash/wedge): ask the master to
+                        # re-place wider instead of silently deleting (#290).
                         if self._crash_breaker.record(task.instance_id):
-                            await self._give_up_on_instance(task.instance_id, fit_error)
+                            await self._refuse_instance_placement(
+                                task.instance_id, fit_error
+                            )
                     else:
                         self._create_supervisor(task)
                         await self.event_sender.send(
@@ -866,8 +903,12 @@ class Worker:
                             task_id=task.task_id, task_status=TaskStatus.Failed
                         )
                     )
+                    # Memory refusal (not a crash/wedge): ask the master to
+                    # re-place wider instead of silently deleting (#290).
                     if self._crash_breaker.record(task.instance_id):
-                        await self._give_up_on_instance(task.instance_id, fit_error)
+                        await self._refuse_instance_placement(
+                            task.instance_id, fit_error
+                        )
                     return
             logger.info(
                 "Dispatching worker task "
