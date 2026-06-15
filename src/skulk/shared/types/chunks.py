@@ -113,7 +113,16 @@ class DataChunk(CamelCaseModel):
     event. Output chunks never mutate ``State`` (apply was a no-op), so removing
     them from the ordered log is loss-free for correctness while eliminating the
     per-token master hop + disk write that dominated event-log volume (#278).
+
+    ``sequence`` is a per-command monotonic counter stamped by the producing
+    rank-0 supervisor (0, 1, 2, ...). The control plane this replaced gave every
+    chunk a total order via the master's event ``idx``; the ``DATA`` gossip topic
+    has no such order, and when the producing worker and the owning API node are
+    different nodes the mesh can deliver a command's chunks out of order, which
+    silently transposed multi-node generation output. The API reorders by
+    ``sequence`` before yielding (see ``API._dispatch_generation_chunk``).
     """
 
     command_id: CommandId
     chunk: GenerationChunk
+    sequence: int

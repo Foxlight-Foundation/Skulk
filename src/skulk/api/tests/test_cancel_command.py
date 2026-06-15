@@ -21,6 +21,7 @@ def _make_api() -> Any:
     api._image_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._embedding_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._cancelled_command_ids = set()  # pyright: ignore[reportPrivateUsage]
+    api._chunk_reorder = {}  # pyright: ignore[reportPrivateUsage]
     api._send = AsyncMock()  # pyright: ignore[reportPrivateUsage]
     api._setup_exception_handlers()  # pyright: ignore[reportPrivateUsage]
     app.post("/v1/cancel/{command_id}")(api.cancel_command)
