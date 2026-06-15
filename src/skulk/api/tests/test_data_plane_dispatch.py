@@ -5,8 +5,12 @@ exercises `_dispatch_generation_chunk` directly (the shared routing used by the
 DATA-plane consumer) without standing up the full gossip path.
 """
 
+from unittest.mock import AsyncMock
+
+import anyio
 import pytest
 
+import skulk.api.main as api_main
 from skulk.api.main import API
 from skulk.shared.election import ElectionMessage
 from skulk.shared.models.model_cards import ModelId
@@ -141,3 +145,27 @@ async def test_dispatch_for_unknown_command_is_a_noop() -> None:
     await api._dispatch_generation_chunk(  # pyright: ignore[reportPrivateUsage]
         CommandId("nobody-home"), chunk
     )
+
+
+@pytest.mark.asyncio
+async def test_token_stream_stall_yields_terminal_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #279 Phase 2b backstop: the DATA plane is best-effort, so a dropped final
+    # chunk would leave _token_chunk_stream blocked on receive() forever. With no
+    # producer, the idle timeout must fire, yield a terminal ErrorChunk, and end
+    # the stream (NOT hang). fail_after is the anti-hang guard.
+    monkeypatch.setattr(api_main, "_STREAM_IDLE_TIMEOUT_SECONDS", 0.15)
+    api = _build_api()
+    api._send = AsyncMock()  # pyright: ignore[reportPrivateUsage]  # avoid finalize blocking on the dead test channel
+    cmd = CommandId("cmd-stall")
+
+    chunks: list[object] = []
+    with anyio.fail_after(5):
+        async for ch in api._token_chunk_stream(cmd):  # pyright: ignore[reportPrivateUsage]
+            chunks.append(ch)
+
+    assert len(chunks) == 1
+    assert isinstance(chunks[0], ErrorChunk)
+    assert "stall" in chunks[0].error_message.lower()
+    assert cmd not in api._text_generation_queues  # pyright: ignore[reportPrivateUsage]

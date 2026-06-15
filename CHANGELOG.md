@@ -7,6 +7,18 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- **Data-plane streams can't hang on a dropped final chunk (#279 Phase 2b).**
+  Output chunks ride the best-effort `DATA` topic (no replay), so a dropped
+  final chunk would leave a streaming response blocked on `receive()` forever.
+  `_token_chunk_stream` now applies a per-receive idle timeout
+  (`_STREAM_IDLE_TIMEOUT_SECONDS`, 120s): if no chunk (token or prefill
+  progress) arrives for that long it closes the stream with a terminal error
+  instead of hanging. The timeout wraps only the receive (not the yield), so it
+  measures producer silence, never a slow client, and prefill-progress chunks
+  keep it alive during a legitimately slow first token.
+
 ### Changed
 
 - **Plane separation #279 Phase 2a: generation output chunks move to a data

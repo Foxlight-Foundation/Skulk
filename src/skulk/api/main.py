@@ -21,7 +21,13 @@ import httpx
 import hypercorn.asyncio as hypercorn_asyncio
 import psutil
 import yaml
-from anyio import BrokenResourceError, ClosedResourceError, WouldBlock, to_thread
+from anyio import (
+    BrokenResourceError,
+    ClosedResourceError,
+    EndOfStream,
+    WouldBlock,
+    to_thread,
+)
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -306,6 +312,15 @@ _API_EVENT_LOG_DIR = SKULK_EVENT_LOG_DIR / "api"
 _API_EVENT_LOG_MAX_ACTIVE_BYTES = 256 * 1024 * 1024
 _API_EVENT_LOG_COMPACT_KEEP_EVENTS = 20_000
 _API_EVENT_LOG_CHECK_INTERVAL_APPENDS = 4096
+
+# Data-plane stream idle backstop (#279 Phase 2b). Output chunks ride the
+# best-effort DATA topic (no replay), so a dropped *final* chunk would leave a
+# streaming response waiting forever. If no chunk (token OR PrefillProgress)
+# arrives for this long, the stream is closed with a terminal error instead of
+# hanging. It measures producer silence only (the timeout wraps the receive,
+# not the yield), and prefill emits progress chunks that keep it alive, so it
+# never fires on a legitimately slow first token — only on a genuine stall.
+_STREAM_IDLE_TIMEOUT_SECONDS = 120.0
 
 # How long POST /place_instance waits for node memory info to finish
 # gossiping before giving up with 503. Covers the window between cluster
@@ -1725,7 +1740,40 @@ class API:
             ]()
 
             with recv as token_chunks:
-                async for chunk in token_chunks:
+                while True:
+                    # Idle backstop (#279 Phase 2b): wrap ONLY the receive so the
+                    # timeout measures producer silence, not a slow client. A
+                    # dropped final data-plane chunk would otherwise hang here
+                    # forever; on a genuine stall, emit a terminal error so the
+                    # response closes cleanly.
+                    chunk: (
+                        TokenChunk
+                        | ErrorChunk
+                        | ToolCallChunk
+                        | PrefillProgressChunk
+                        | None
+                    ) = None
+                    with anyio.move_on_after(_STREAM_IDLE_TIMEOUT_SECONDS) as scope:
+                        try:
+                            chunk = await token_chunks.receive()
+                        except (EndOfStream, ClosedResourceError):
+                            return  # producer closed normally
+                    if scope.cancelled_caught or chunk is None:
+                        logger.warning(
+                            f"Token stream for command {command_id} idle for "
+                            f">{int(_STREAM_IDLE_TIMEOUT_SECONDS)}s; closing with a "
+                            "terminal error (a data-plane chunk may have been "
+                            "dropped)."
+                        )
+                        yield ErrorChunk(
+                            model=ModelId("unknown"),
+                            error_message=(
+                                "Stream stalled: no output for "
+                                f"{int(_STREAM_IDLE_TIMEOUT_SECONDS)}s; the response "
+                                "may be incomplete."
+                            ),
+                        )
+                        return
                     yield chunk
                     if isinstance(chunk, PrefillProgressChunk):
                         continue
