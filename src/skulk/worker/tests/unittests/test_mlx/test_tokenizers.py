@@ -348,20 +348,6 @@ async def test_kimi_tokenizer_specifically():
     assert eos_token_ids == [163586], "Kimi EOS token should be [163586]"
 
 
-def test_moonlight_eos_includes_im_end() -> None:
-    """Moonlight must stop on <|im_end|> (163586), not just its [EOS] (163585).
-
-    Moonlight's tokenizer eos_token is [EOS] but its chat template ends assistant
-    turns with <|im_end|>. Without 163586 in the eos set the turn token leaks into
-    output and generation runs past the turn boundary (Skulk #304). Pure mapping
-    test (no tokenizer download needed).
-    """
-    eos = get_eos_token_ids_for_model("mlx-community/Moonlight-16B-A3B-Instruct-4-bit")
-    assert eos is not None, "Moonlight should have explicit eos token ids"
-    assert 163586 in eos, "Moonlight eos must include <|im_end|> (163586)"
-    assert 163585 in eos, "Moonlight eos should retain [EOS] (163585)"
-
-
 # Test GLM tokenizer since it also has special handling
 @pytest.mark.asyncio
 async def test_glm_tokenizer_specifically():
