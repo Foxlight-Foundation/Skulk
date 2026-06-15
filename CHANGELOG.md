@@ -9,6 +9,25 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Master failover no longer silently kills a healthy serving instance on a
+  memory-tight node.** On a master-election transition the winning node tears
+  its worker down (`worker.shutdown()`) and rebuilds it; that cancels each
+  `RunnerSupervisor.run()`, whose teardown `finally` reaps the runner process so
+  Metal reclaims its wired GPU memory on exit. The teardown was not shielded
+  from cancellation, so the first `await` in it (the process join) re-raised
+  immediately and the runner process was never reaped, so it lingered holding
+  its GPU memory. The replacement worker then planned `CreateRunner` for the same
+  carried shard, the pre-load memory guard saw the not-yet-reclaimed memory,
+  falsely refused, and the #290 re-place-wider path deleted the carried instance
+  (every subsequent request 404'd until a manual re-place). The teardown is now
+  wrapped in a shielded `CancelScope`, so the runner process is fully joined
+  (memory reclaimed) before `worker.shutdown()` returns and the replacement
+  worker admits against true post-reclaim availability. Only bites when the
+  election winner also hosts a rank of a carried instance and is memory-tight
+  (common on small clusters); restores the documented "survives master failover"
+  guarantee. The terminate/kill joins are now also off-thread (`to_thread`)
+  instead of blocking the event loop.
+
 - **Data-plane streams can't hang on a dropped final chunk (#279 Phase 2b).**
   Output chunks ride the best-effort `DATA` topic (no replay), so a dropped
   final chunk would leave a streaming response blocked on `receive()` forever.

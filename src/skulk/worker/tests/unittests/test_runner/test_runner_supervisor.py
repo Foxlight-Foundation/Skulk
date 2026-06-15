@@ -47,6 +47,103 @@ class _DeadProcess:
         return None
 
 
+class _ReapTrackingProcess:
+    """A live process stub that records whether it was reaped.
+
+    Stays alive until ``join``/``terminate``/``kill`` is called, so the
+    supervisor's watcher/forwarder subtasks block (keeping ``run()`` alive)
+    until the test cancels it externally — mirroring a worker shutdown on a
+    master-election transition.
+    """
+
+    pid = 123
+    exitcode = 0
+
+    def __init__(self) -> None:
+        self.joins = 0
+        self.closed = False
+        self._alive = True
+
+    def start(self) -> None:
+        return None
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def join(self, _timeout: float | None = None) -> None:
+        self.joins += 1
+        self._alive = False
+
+    def terminate(self) -> None:
+        self._alive = False
+
+    def kill(self) -> None:
+        self._alive = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_teardown_reaps_runner_process_under_cancellation() -> None:
+    """The runner process must be reaped even when run() is cancelled.
+
+    Regression: on a master-election transition the worker is torn down via
+    ``worker.shutdown()``, which cancels the worker task group and so cancels
+    each ``RunnerSupervisor.run()``. The teardown ``finally`` reaps the runner
+    process (Metal reclaims its wired GPU memory on exit). Without shielding,
+    the first ``await`` in that ``finally`` (the process join) re-raised
+    CancelledError immediately, so the process was never reaped — it lingered
+    holding GPU memory. The replacement worker then planned CreateRunner for the
+    same shard, the pre-load memory guard saw the not-yet-reclaimed memory,
+    falsely refused, and #290 deleted the carried instance (master failover
+    silently killed a healthy serving instance). The teardown is now shielded,
+    so the process is joined/closed before run() returns.
+    """
+    event_sender, _ = channel[Event]()
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    _, ev_recv = mp_channel[Event]()
+    _, diag_recv = mp_channel[RunnerDiagnosticUpdate]()
+
+    bound_instance: BoundInstance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-a"),
+        model_id=ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit"),
+        runner_id=RunnerId("runner-a"),
+        node_id=NodeId("node-a"),
+    )
+
+    proc = _ReapTrackingProcess()
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, proc)),
+        initialize_timeout=400,
+        _ev_recv=ev_recv,
+        _diag_recv=diag_recv,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+    )
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(supervisor.run)
+            # let run() start the process + its watcher/forwarder subtasks
+            await anyio.sleep(0.2)
+            assert proc.is_alive()
+            # simulate worker.shutdown() cancelling the worker task group
+            tg.cancel_scope.cancel()
+
+    # despite the cancellation, the teardown must have reaped the process so its
+    # GPU memory is reclaimed before the replacement worker admits a new runner.
+    assert proc.joins >= 1, "process was not joined during cancelled teardown"
+    assert not proc.is_alive()
+    assert proc.closed, "process.close() was skipped during cancelled teardown"
+
+    event_sender.close()
+
+
 @pytest.mark.asyncio
 async def test_check_runner_emits_error_chunk_for_inflight_text_generation() -> None:
     event_sender, event_receiver = channel[Event]()
