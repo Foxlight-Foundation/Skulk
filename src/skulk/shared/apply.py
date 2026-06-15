@@ -212,7 +212,30 @@ def apply_instance_deleted(event: InstanceDeleted, state: State) -> State:
     new_instances: Mapping[InstanceId, Instance] = {
         iid: inst for iid, inst in state.instances.items() if iid != event.instance_id
     }
-    return state.model_copy(update={"instances": new_instances})
+    # Drop the deleted instance's runner records too. Runner records are
+    # otherwise only removed by a terminal RunnerStatusUpdated(RunnerShutdown),
+    # but that final status is unreliably delivered: the worker's Shutdown
+    # handler cancels the supervisor's event forwarder (runner.shutdown()) as
+    # soon as the Shutdown task completes/times out, often before the runner
+    # process's RunnerShutdown is forwarded — and on a master-failover teardown
+    # the forwarder is torn down outright. Every instance delete therefore
+    # leaked one RunnerShuttingDown record per rank, growing State.runners
+    # without bound. Cleaning them here makes deletion atomic and independent of
+    # that handshake (mirrors apply_node_timed_out, which already prunes an
+    # affected instance's runners). The actual process teardown is driven
+    # separately by the Shutdown task, so dropping the status record early is
+    # safe.
+    deleted = state.instances.get(event.instance_id)
+    update: dict[str, object] = {"instances": new_instances}
+    if deleted is not None:
+        doomed_runner_ids = set(deleted.shard_assignments.runner_to_shard.keys())
+        if doomed_runner_ids:
+            update["runners"] = {
+                rid: rs
+                for rid, rs in state.runners.items()
+                if rid not in doomed_runner_ids
+            }
+    return state.model_copy(update=update)
 
 
 def apply_runner_status_updated(event: RunnerStatusUpdated, state: State) -> State:
@@ -221,6 +244,21 @@ def apply_runner_status_updated(event: RunnerStatusUpdated, state: State) -> Sta
             rid: rs for rid, rs in state.runners.items() if rid != event.runner_id
         }
         return state.model_copy(update={"runners": new_runners})
+    # Don't resurrect a record for a runner that no longer belongs to any
+    # instance. During teardown the worker emits a RunnerShuttingDown status that
+    # races behind InstanceDeleted; without this guard it re-adds a runner record
+    # that then never receives its terminal RunnerShutdown (that final status is
+    # routinely lost when the supervisor's event forwarder is cancelled on
+    # shutdown), so State.runners grows without bound. A status update for a live
+    # runner always has its instance present (CreateRunner is planned only after
+    # the instance exists, and events apply in order), so this only drops the
+    # post-deletion stragglers.
+    runner_belongs_to_an_instance = any(
+        event.runner_id in instance.shard_assignments.runner_to_shard
+        for instance in state.instances.values()
+    )
+    if not runner_belongs_to_an_instance:
+        return state
     new_runners = {
         **state.runners,
         event.runner_id: event.runner_status,

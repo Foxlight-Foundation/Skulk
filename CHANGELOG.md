@@ -32,6 +32,24 @@ This project records release notes here and mirrors public-facing notes in
   with it, so late chunks after finalize don't leak; the producer drops its
   per-command sequence counter on the terminal chunk for the same reason.
 
+- **Deleting an instance no longer leaks its runner records (unbounded
+  `State.runners` growth).** Runner status records were only removed by a
+  terminal `RunnerStatusUpdated(RunnerShutdown)`, but that final status is
+  unreliably delivered: the worker's Shutdown handler cancels the supervisor's
+  event forwarder (`runner.shutdown()`) as soon as the Shutdown task
+  completes/times out, usually before the runner process's `RunnerShutdown` is
+  forwarded, and on a master-failover teardown the forwarder is torn down
+  outright. Every instance delete therefore leaked one `RunnerShuttingDown`
+  record per rank (one per node for a multi-node instance), so `State.runners`
+  grew without bound over the cluster's lifetime, bloating state-sync snapshots.
+  Two changes close it: `apply_instance_deleted` now prunes the deleted
+  instance's runner records directly (mirroring `apply_node_timed_out`), and
+  `apply_runner_status_updated` ignores updates for a runner that belongs to no
+  instance, so the late `RunnerShuttingDown` that races behind `InstanceDeleted`
+  can no longer resurrect the record. Deletion is now atomic and independent of
+  the shutdown handshake. The actual runner-process teardown is driven
+  separately by the Shutdown task, so dropping the status record early is safe.
+
 - **Master failover no longer silently kills a healthy serving instance on a
   memory-tight node.** On a master-election transition the winning node tears
   its worker down (`worker.shutdown()`) and rebuilds it; that cancels each
