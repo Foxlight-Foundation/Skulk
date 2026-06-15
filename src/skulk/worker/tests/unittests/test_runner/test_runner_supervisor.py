@@ -333,6 +333,75 @@ async def test_cancelled_task_event_clears_in_progress_and_emits_delete() -> Non
 
 
 @pytest.mark.asyncio
+async def test_terminal_task_status_clears_chunk_sequence_counter() -> None:
+    """A terminal task status (e.g. cancel) clears the per-command counter.
+
+    #301 review (Codex P2): commands that end without a finish_reason chunk
+    (image generation, or cancel/fail terminal TaskStatusUpdated that bypasses
+    _emit) would otherwise leak one _chunk_sequence entry per command on a
+    long-lived runner.
+    """
+    from skulk.shared.types.text_generation import (
+        InputMessage,
+        TextGenerationTaskParams,
+    )
+
+    event_sender, event_receiver = channel[Event]()
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    ev_send, ev_recv = mp_channel[Event]()
+    _, diag_recv = mp_channel[RunnerDiagnosticUpdate]()
+
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-a"),
+        model_id=ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit"),
+        runner_id=RunnerId("runner-a"),
+        node_id=NodeId("node-a"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=ev_recv,
+        _diag_recv=diag_recv,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+    )
+    supervisor.status = RunnerRunning()
+
+    cmd = CommandId("cmd-x")
+    task = TextGeneration(
+        task_id=TaskId("task-x"),
+        instance_id=bound_instance.instance.instance_id,
+        command_id=cmd,
+        task_params=TextGenerationTaskParams(
+            model=bound_instance.bound_shard.model_card.model_id,
+            input=[InputMessage(role="user", content="hi")],
+            stream=True,
+        ),
+    )
+    supervisor.in_progress[task.task_id] = task
+    supervisor._chunk_sequence[cmd] = 5  # pyright: ignore[reportPrivateUsage]  # mid-stream
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(supervisor._forward_events)  # pyright: ignore[reportPrivateUsage]
+        ev_send.send(
+            TaskStatusUpdated(task_id=task.task_id, task_status=TaskStatus.Cancelled)
+        )
+        await event_receiver.receive()  # forwarded status
+        await event_receiver.receive()  # TaskDeleted
+        tg.cancel_scope.cancel()
+
+    ev_send.close()
+    assert cmd not in supervisor._chunk_sequence  # pyright: ignore[reportPrivateUsage]
+    event_sender.close()
+    with anyio.move_on_after(0.1):
+        await event_receiver.aclose()
+
+
+@pytest.mark.asyncio
 async def test_runner_flight_recorder_retains_newest_entries() -> None:
     event_sender, _ = channel[Event]()
     task_sender, _ = mp_channel[Task]()

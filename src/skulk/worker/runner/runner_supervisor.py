@@ -425,6 +425,24 @@ class RunnerSupervisor:
                                 RunnerShuttingDown,
                             ),
                         )
+                        # Drop the per-command data-plane sequence counter on any
+                        # terminal task status, covering commands that end without
+                        # a finish_reason chunk: image generation (ImageChunk has
+                        # no finish_reason) and cancellations/failures that arrive
+                        # as terminal TaskStatusUpdated bypassing _emit (#301
+                        # review). Done before popping in_progress, which holds the
+                        # task->command_id mapping.
+                        ending_task = self.in_progress.get(event.task_id)
+                        if isinstance(
+                            ending_task,
+                            (
+                                TextGeneration,
+                                ImageGeneration,
+                                ImageEdits,
+                                TextEmbedding,
+                            ),
+                        ):
+                            self._chunk_sequence.pop(ending_task.command_id, None)
                         self.in_progress.pop(event.task_id, None)
                         if event.task_status == TaskStatus.Complete:
                             self.completed.add(event.task_id)

@@ -352,7 +352,11 @@ class _ChunkReorderState:
     pending: dict[int, GenerationChunk] = field(default_factory=dict)
     # Monotonic time the current head-of-line gap was first observed (chunks
     # buffered above next_seq that couldn't drain). None when there is no gap.
+    # `gap_at` is the next_seq the timer started waiting on, so later chunks
+    # arriving behind the *same* gap don't refresh the timer (a moving stream
+    # resets it; a stuck one ages to the flush window).
     gap_since: float | None = None
+    gap_at: int | None = None
 
 
 # Task statuses for which the runner has stopped producing — a mid-stream idle
@@ -3453,10 +3457,25 @@ class API:
             )
             state.next_seq = skipped_to
             await self._drain_in_order(command_id, state)
-        # Track the head-of-line gap age so the periodic sweep can release a gap
-        # the size cap never reaches (a dropped seq 0 / a trailing drop). monotonic
-        # is set only while a gap persists.
-        state.gap_since = time.monotonic() if state.pending else None
+        self._mark_reorder_gap(state)
+
+    @staticmethod
+    def _mark_reorder_gap(state: "_ChunkReorderState") -> None:
+        """Stamp the head-of-line gap's age, preserving it across new chunks.
+
+        The timer must measure how long *this* gap (the one at ``next_seq``) has
+        been stuck, not refresh on every chunk that arrives behind it — otherwise
+        a long stream with a dropped sequence never ages to the flush window. So
+        only (re)start the clock when there is no timer yet or the gap moved to a
+        new ``next_seq`` (the stream made progress).
+        """
+        if state.pending:
+            if state.gap_since is None or state.gap_at != state.next_seq:
+                state.gap_since = time.monotonic()
+                state.gap_at = state.next_seq
+        else:
+            state.gap_since = None
+            state.gap_at = None
 
     async def _drain_in_order(
         self, command_id: CommandId, state: "_ChunkReorderState"
@@ -3498,7 +3517,7 @@ class API:
                 )
                 state.next_seq = skipped_to
                 await self._drain_in_order(command_id, state)
-                state.gap_since = time.monotonic() if state.pending else None
+                self._mark_reorder_gap(state)
 
     async def _dispatch_generation_chunk(
         self, command_id: CommandId, chunk: GenerationChunk
