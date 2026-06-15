@@ -5,7 +5,7 @@ import anyio
 import pytest
 
 from skulk.shared.models.model_cards import ModelId
-from skulk.shared.types.chunks import ErrorChunk
+from skulk.shared.types.chunks import ErrorChunk, TokenChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.diagnostics import (
     RunnerDiagnosticContext,
@@ -145,6 +145,72 @@ async def test_teardown_reaps_runner_process_under_cancellation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_emit_stamps_sequence_and_clears_counter_on_terminal_chunk() -> None:
+    """Each DataChunk gets a per-command sequence; the counter clears on finish.
+
+    #279 Phase 2b: the API reorders by this sequence. #301 review: the
+    per-command counter must be dropped on the terminal chunk so a long-lived
+    runner doesn't accumulate one entry per command served.
+    """
+    from skulk.shared.types.chunks import DataChunk
+    from skulk.shared.types.events import ChunkGenerated
+
+    data_sender, data_recv = channel[DataChunk]()
+    event_sender, _ = channel[Event]()
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    _, ev_recv = mp_channel[Event]()
+    _, diag_recv = mp_channel[RunnerDiagnosticUpdate]()
+
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-a"),
+        model_id=ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit"),
+        runner_id=RunnerId("runner-a"),
+        node_id=NodeId("node-a"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=ev_recv,
+        _diag_recv=diag_recv,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+        _data_sender=data_sender,
+    )
+    cmd = CommandId("cmd-seq")
+
+    def chunk(text: str, finish: str | None) -> TokenChunk:
+        return TokenChunk(
+            model=ModelId("mlx-community/test"),
+            text=text,
+            token_id=0,
+            usage=None,
+            finish_reason=finish,  # pyright: ignore[reportArgumentType]
+        )
+
+    await supervisor._emit(  # pyright: ignore[reportPrivateUsage]
+        ChunkGenerated(command_id=cmd, chunk=chunk("a", None))
+    )
+    await supervisor._emit(  # pyright: ignore[reportPrivateUsage]
+        ChunkGenerated(command_id=cmd, chunk=chunk("b", None))
+    )
+    assert supervisor._chunk_sequence[cmd] == 2  # pyright: ignore[reportPrivateUsage]
+    await supervisor._emit(  # pyright: ignore[reportPrivateUsage]
+        ChunkGenerated(command_id=cmd, chunk=chunk("c", "stop"))
+    )
+    # terminal chunk clears the per-command counter
+    assert cmd not in supervisor._chunk_sequence  # pyright: ignore[reportPrivateUsage]
+
+    seqs = [data_recv.receive_nowait().sequence for _ in range(3)]
+    assert seqs == [0, 1, 2]
+    data_sender.close()
+    event_sender.close()
+
+
+@pytest.mark.asyncio
 async def test_check_runner_emits_error_chunk_for_inflight_text_generation() -> None:
     event_sender, event_receiver = channel[Event]()
     task_sender, _ = mp_channel[Task]()
@@ -261,6 +327,75 @@ async def test_cancelled_task_event_clears_in_progress_and_emits_delete() -> Non
     assert task.task_id not in supervisor.in_progress
     assert task.task_id in supervisor.cancelled
 
+    event_sender.close()
+    with anyio.move_on_after(0.1):
+        await event_receiver.aclose()
+
+
+@pytest.mark.asyncio
+async def test_terminal_task_status_clears_chunk_sequence_counter() -> None:
+    """A terminal task status (e.g. cancel) clears the per-command counter.
+
+    #301 review (Codex P2): commands that end without a finish_reason chunk
+    (image generation, or cancel/fail terminal TaskStatusUpdated that bypasses
+    _emit) would otherwise leak one _chunk_sequence entry per command on a
+    long-lived runner.
+    """
+    from skulk.shared.types.text_generation import (
+        InputMessage,
+        TextGenerationTaskParams,
+    )
+
+    event_sender, event_receiver = channel[Event]()
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    ev_send, ev_recv = mp_channel[Event]()
+    _, diag_recv = mp_channel[RunnerDiagnosticUpdate]()
+
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-a"),
+        model_id=ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit"),
+        runner_id=RunnerId("runner-a"),
+        node_id=NodeId("node-a"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=ev_recv,
+        _diag_recv=diag_recv,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+    )
+    supervisor.status = RunnerRunning()
+
+    cmd = CommandId("cmd-x")
+    task = TextGeneration(
+        task_id=TaskId("task-x"),
+        instance_id=bound_instance.instance.instance_id,
+        command_id=cmd,
+        task_params=TextGenerationTaskParams(
+            model=bound_instance.bound_shard.model_card.model_id,
+            input=[InputMessage(role="user", content="hi")],
+            stream=True,
+        ),
+    )
+    supervisor.in_progress[task.task_id] = task
+    supervisor._chunk_sequence[cmd] = 5  # pyright: ignore[reportPrivateUsage]  # mid-stream
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(supervisor._forward_events)  # pyright: ignore[reportPrivateUsage]
+        ev_send.send(
+            TaskStatusUpdated(task_id=task.task_id, task_status=TaskStatus.Cancelled)
+        )
+        await event_receiver.receive()  # forwarded status
+        await event_receiver.receive()  # TaskDeleted
+        tg.cancel_scope.cancel()
+
+    ev_send.close()
+    assert cmd not in supervisor._chunk_sequence  # pyright: ignore[reportPrivateUsage]
     event_sender.close()
     with anyio.move_on_after(0.1):
         await event_receiver.aclose()

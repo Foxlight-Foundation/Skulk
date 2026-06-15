@@ -9,6 +9,29 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Multi-node generation output is no longer silently reordered (#279 Phase 2b
+  sequencing).** #279 Phase 2a moved per-token output (`ChunkGenerated`) off the
+  master-indexed control plane (where the monotonic event `idx` gave every chunk
+  a total order) onto the best-effort `DATA` gossip topic, which has no ordering
+  key. When the producing rank-0 worker and the owning API node are different
+  nodes, the gossip mesh can deliver a command's chunks out of order, and the API
+  consumed them in arrival order, silently transposing tokens/sub-words in the
+  response (`"Question"` -> `"Qesution"`). It was specific to multi-node *sampled*
+  speculative decoding (single-node is local/in-order; greedy emits steadily) and
+  hit ~90% of responses at temperature 0.2; the model battery never caught it
+  because it only checked `finish_reason` and token count, never output
+  coherence. `DataChunk` now carries a per-command monotonic `sequence` stamped
+  by the producing supervisor, and the API reorders by it in a small per-command
+  buffer before dispatch (releasing strictly in order, dropping duplicates). A
+  genuinely dropped sequence on the best-effort topic is bounded two ways so it
+  can never stall a stream: a size cap skips the gap if chunks pile up behind it,
+  and a periodic sweep releases a gap left unfilled for `_REORDER_GAP_FLUSH_SECONDS`
+  even when no later chunk arrives to trigger the cap (the dropped-seq-0 case,
+  where the stream's own idle backstop never arms because nothing was yielded
+  yet). The buffer is created only while a command has a live stream and cleared
+  with it, so late chunks after finalize don't leak; the producer drops its
+  per-command sequence counter on the terminal chunk for the same reason.
+
 - **Master failover no longer silently kills a healthy serving instance on a
   memory-tight node.** On a master-election transition the winning node tears
   its worker down (`worker.shutdown()`) and rebuilds it; that cancels each
