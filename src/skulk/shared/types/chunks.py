@@ -120,7 +120,7 @@ class DataChunk(CamelCaseModel):
     has no such order, and when the producing worker and the owning API node are
     different nodes the mesh can deliver a command's chunks out of order, which
     silently transposed multi-node generation output. The API reorders by
-    ``sequence`` before yielding (see ``API._dispatch_generation_chunk``).
+    ``sequence`` before yielding (see ``API._reorder_and_dispatch``).
     """
 
     command_id: CommandId

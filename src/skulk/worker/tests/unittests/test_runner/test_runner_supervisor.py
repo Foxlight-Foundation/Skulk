@@ -5,7 +5,7 @@ import anyio
 import pytest
 
 from skulk.shared.models.model_cards import ModelId
-from skulk.shared.types.chunks import ErrorChunk
+from skulk.shared.types.chunks import ErrorChunk, TokenChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.diagnostics import (
     RunnerDiagnosticContext,
@@ -141,6 +141,72 @@ async def test_teardown_reaps_runner_process_under_cancellation() -> None:
     assert not proc.is_alive()
     assert proc.closed, "process.close() was skipped during cancelled teardown"
 
+    event_sender.close()
+
+
+@pytest.mark.asyncio
+async def test_emit_stamps_sequence_and_clears_counter_on_terminal_chunk() -> None:
+    """Each DataChunk gets a per-command sequence; the counter clears on finish.
+
+    #279 Phase 2b: the API reorders by this sequence. #301 review: the
+    per-command counter must be dropped on the terminal chunk so a long-lived
+    runner doesn't accumulate one entry per command served.
+    """
+    from skulk.shared.types.chunks import DataChunk
+    from skulk.shared.types.events import ChunkGenerated
+
+    data_sender, data_recv = channel[DataChunk]()
+    event_sender, _ = channel[Event]()
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    _, ev_recv = mp_channel[Event]()
+    _, diag_recv = mp_channel[RunnerDiagnosticUpdate]()
+
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-a"),
+        model_id=ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit"),
+        runner_id=RunnerId("runner-a"),
+        node_id=NodeId("node-a"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=ev_recv,
+        _diag_recv=diag_recv,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+        _data_sender=data_sender,
+    )
+    cmd = CommandId("cmd-seq")
+
+    def chunk(text: str, finish: str | None) -> TokenChunk:
+        return TokenChunk(
+            model=ModelId("mlx-community/test"),
+            text=text,
+            token_id=0,
+            usage=None,
+            finish_reason=finish,  # pyright: ignore[reportArgumentType]
+        )
+
+    await supervisor._emit(  # pyright: ignore[reportPrivateUsage]
+        ChunkGenerated(command_id=cmd, chunk=chunk("a", None))
+    )
+    await supervisor._emit(  # pyright: ignore[reportPrivateUsage]
+        ChunkGenerated(command_id=cmd, chunk=chunk("b", None))
+    )
+    assert supervisor._chunk_sequence[cmd] == 2  # pyright: ignore[reportPrivateUsage]
+    await supervisor._emit(  # pyright: ignore[reportPrivateUsage]
+        ChunkGenerated(command_id=cmd, chunk=chunk("c", "stop"))
+    )
+    # terminal chunk clears the per-command counter
+    assert cmd not in supervisor._chunk_sequence  # pyright: ignore[reportPrivateUsage]
+
+    seqs = [data_recv.receive_nowait().sequence for _ in range(3)]
+    assert seqs == [0, 1, 2]
+    data_sender.close()
     event_sender.close()
 
 

@@ -15,7 +15,7 @@ from anyio import (
 )
 from loguru import logger
 
-from skulk.shared.types.chunks import DataChunk, ErrorChunk
+from skulk.shared.types.chunks import DataChunk, EmbeddingChunk, ErrorChunk
 from skulk.shared.types.common import CommandId
 from skulk.shared.types.diagnostics import (
     MlxMemorySnapshot,
@@ -223,12 +223,22 @@ class RunnerSupervisor:
         """
         if isinstance(event, ChunkGenerated) and self._data_sender is not None:
             seq = self._chunk_sequence.get(event.command_id, 0)
-            self._chunk_sequence[event.command_id] = seq + 1
             await self._data_sender.send(
                 DataChunk(
                     command_id=event.command_id, chunk=event.chunk, sequence=seq
                 )
             )
+            # Drop the per-command counter on the terminal chunk so a long-lived
+            # runner doesn't accumulate one entry per command served (#301 review).
+            # EmbeddingChunk is single-shot (no finish_reason) but also terminal.
+            chunk_finished = (
+                getattr(event.chunk, "finish_reason", None) is not None
+                or isinstance(event.chunk, EmbeddingChunk)
+            )
+            if chunk_finished:
+                self._chunk_sequence.pop(event.command_id, None)
+            else:
+                self._chunk_sequence[event.command_id] = seq + 1
         else:
             await self._event_sender.send(event)
 

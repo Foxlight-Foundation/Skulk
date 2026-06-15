@@ -22,10 +22,15 @@ This project records release notes here and mirrors public-facing notes in
   because it only checked `finish_reason` and token count, never output
   coherence. `DataChunk` now carries a per-command monotonic `sequence` stamped
   by the producing supervisor, and the API reorders by it in a small per-command
-  buffer before dispatch (releasing strictly in order, dropping duplicates,
-  skipping past a genuinely dropped sequence once the buffer exceeds a bound so a
-  best-effort drop can't stall). The buffer is created only while a command has a
-  live stream and cleared with it, so late chunks after finalize don't leak.
+  buffer before dispatch (releasing strictly in order, dropping duplicates). A
+  genuinely dropped sequence on the best-effort topic is bounded two ways so it
+  can never stall a stream: a size cap skips the gap if chunks pile up behind it,
+  and a periodic sweep releases a gap left unfilled for `_REORDER_GAP_FLUSH_SECONDS`
+  even when no later chunk arrives to trigger the cap (the dropped-seq-0 case,
+  where the stream's own idle backstop never arms because nothing was yielded
+  yet). The buffer is created only while a command has a live stream and cleared
+  with it, so late chunks after finalize don't leak; the producer drops its
+  per-command sequence counter on the terminal chunk for the same reason.
 
 - **Master failover no longer silently kills a healthy serving instance on a
   memory-tight node.** On a master-election transition the winning node tears

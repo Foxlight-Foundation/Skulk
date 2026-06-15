@@ -114,6 +114,53 @@ async def test_reorder_buffer_drops_duplicate_and_late_sequences() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reorder_gap_flush_releases_chunks_after_a_dropped_sequence() -> None:
+    # #301 review (Codex P2 + Copilot): if a sequence is dropped on the
+    # best-effort topic (especially seq 0), the size cap may never trigger and
+    # nothing is dispatched, so the stream hangs (its idle backstop never arms
+    # because no chunk was yielded). The periodic gap sweep must release the
+    # chunks behind a stale gap. Here seq 0 is "dropped"; 1,2 buffer; the sweep
+    # then skips the gap and delivers 1,2.
+    api = _build_api()
+    cmd = CommandId("cmd-gap")
+    send, recv = channel[
+        TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk
+    ]()
+    api._text_generation_queues[cmd] = send  # pyright: ignore[reportPrivateUsage]
+
+    def tok(i: int) -> TokenChunk:
+        return TokenChunk(
+            model=ModelId("mlx-community/test"),
+            text=f"t{i}",
+            token_id=i,
+            usage=None,
+            finish_reason=None,
+        )
+
+    # seq 0 never arrives; 1 and 2 buffer behind the gap -> nothing dispatched
+    await api._reorder_and_dispatch(cmd, 1, tok(1))  # pyright: ignore[reportPrivateUsage]
+    await api._reorder_and_dispatch(cmd, 2, tok(2))  # pyright: ignore[reportPrivateUsage]
+    with recv as stream:
+        with pytest.raises(anyio.WouldBlock):
+            stream.receive_nowait()  # confirm the gap holds everything
+
+        # age the gap past the flush window and run one sweep pass
+        state = api._chunk_reorder[cmd]  # pyright: ignore[reportPrivateUsage]
+        assert state.gap_since is not None
+        flush_window = api_main._REORDER_GAP_FLUSH_SECONDS  # pyright: ignore[reportPrivateUsage]
+        await api._flush_stale_reorder_gaps(  # pyright: ignore[reportPrivateUsage]
+            state.gap_since + flush_window + 1.0
+        )
+
+        got: list[int] = []
+        for _ in range(2):
+            c = stream.receive_nowait()
+            assert isinstance(c, TokenChunk)
+            got.append(c.token_id)
+        assert got == [1, 2]
+
+
+@pytest.mark.asyncio
 async def test_reorder_state_dropped_when_no_queue() -> None:
     # A chunk for a command with no live stream queue (finalized / client gone)
     # must be dropped without creating a lingering reorder buffer.
