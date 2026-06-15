@@ -93,3 +93,30 @@ class State(CamelCaseModel):
             return Topology.from_snapshot(snapshot)
 
         raise TypeError("Invalid representation for Topology field in State")
+
+    @field_validator("last_seen", mode="before")
+    @classmethod
+    def _coerce_last_seen(cls, value: object) -> object:
+        """Coerce ISO datetime strings in ``last_seen`` back to ``datetime``.
+
+        A ``StateSnapshotHydrated`` event persisted to the disk event log is
+        read back through the ``Event`` TypeAdapter, whose ``TaggedModel`` wrap
+        validator unwraps the ``{ClassName: inner}`` envelope by re-validating
+        the inner payload as a *python* object. Under ``strict=True`` that path
+        does not apply JSON-mode coercion to the nested ``State``, so the ISO
+        datetime strings that JSON serialization produced for ``last_seen`` are
+        rejected (``datetime_type``), halting event-log replay (#279 Phase 3 /
+        the failover-seed read). Coerce them here — scoped to this one field, so
+        unlike a model-level ``before`` validator it does not force the whole
+        model into python-mode validation (which previously broke state-sync,
+        see the note on ``last_seen`` above). Over-the-wire state-sync seeds
+        ``last_seen`` empty, so this only matters for the disk path.
+        """
+        if isinstance(value, Mapping):
+            return {
+                key: (
+                    datetime.fromisoformat(item) if isinstance(item, str) else item
+                )
+                for key, item in cast("Mapping[object, object]", value).items()
+            }
+        return value

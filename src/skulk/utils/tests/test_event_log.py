@@ -1,9 +1,12 @@
 # pyright: reportPrivateUsage=false
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from skulk.shared.types.events import TestEvent
+from skulk.shared.types.common import NodeId
+from skulk.shared.types.events import StateSnapshotHydrated, TestEvent
+from skulk.shared.types.state import State
 from skulk.utils.disk_event_log import DiskEventLog
 
 
@@ -26,6 +29,38 @@ def test_append_and_read_back(log_dir: Path):
         assert original.event_id == restored.event_id
 
     log.close()
+
+
+def test_state_snapshot_hydrated_with_last_seen_round_trips(log_dir: Path):
+    """A StateSnapshotHydrated with populated last_seen must replay from disk.
+
+    Regression: the disk-log Event adapter reads events through the TaggedModel
+    wrap validator, which re-validates the unwrapped payload as a python object;
+    under State's strict mode the ISO datetime strings JSON produced for
+    last_seen were rejected (datetime_type), halting replay at the seed event
+    (#279 failover-seed / Phase 3 replay). State now coerces last_seen strings
+    back to datetime, so the seed round-trips.
+    """
+    node = NodeId("node-a")
+    when = datetime.now(tz=timezone.utc)
+    seed = StateSnapshotHydrated(
+        state=State(
+            last_seen={node: when},
+            thunderbolt_bridge_cycles=[[node, NodeId("node-b")]],
+            last_event_applied_idx=0,
+        )
+    )
+
+    log = DiskEventLog(log_dir)
+    log.append(seed)
+    restored = list(log.read_all())
+    log.close()
+
+    assert len(restored) == 1
+    got = restored[0]
+    assert isinstance(got, StateSnapshotHydrated)
+    assert got.state.last_event_applied_idx == 0
+    assert got.state.last_seen[node] == when
 
 
 def test_read_range(log_dir: Path):
