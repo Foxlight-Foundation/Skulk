@@ -234,39 +234,66 @@ class RunnerSupervisor:
                 tg.start_soon(self._forward_events)
                 tg.start_soon(self._forward_diagnostics)
         finally:
-            logger.info("Runner supervisor shutting down")
-            if not self._cancel_watch_runner.cancel_called:
-                self._cancel_watch_runner.cancel()
-            with contextlib.suppress(ClosedResourceError):
-                self._ev_recv.close()
-            with contextlib.suppress(ClosedResourceError):
-                self._diag_recv.close()
-            with contextlib.suppress(ClosedResourceError):
-                self._task_sender.close()
-            with contextlib.suppress(ClosedResourceError):
-                self._event_sender.close()
-            with contextlib.suppress(ClosedResourceError):
-                self._cancel_sender.send(CANCEL_ALL_TASKS)
-            with contextlib.suppress(ClosedResourceError):
-                self._cancel_sender.close()
+            # Shield the entire teardown from cancellation. This `finally` runs
+            # under cancellation when the worker is torn down on a master-election
+            # transition (worker.shutdown() cancels the worker task group, which
+            # cancels this run()). Without the shield, the very first `await`
+            # below (the process join) re-raises CancelledError immediately, so
+            # the runner process is never reaped — it lingers holding its wired
+            # GPU memory. The replacement worker then plans CreateRunner for the
+            # same shard and the pre-load memory guard sees the not-yet-reclaimed
+            # memory, falsely refuses, and #290 deletes the carried instance —
+            # i.e. a master failover silently kills a healthy serving instance on
+            # a memory-tight node. Reaping the process here (Metal reclaims wired
+            # memory on process exit) before shutdown() returns guarantees the
+            # replacement worker admits against true post-reclaim availability.
+            with anyio.CancelScope(shield=True):
+                logger.info("Runner supervisor shutting down")
+                if not self._cancel_watch_runner.cancel_called:
+                    self._cancel_watch_runner.cancel()
+                with contextlib.suppress(ClosedResourceError):
+                    self._ev_recv.close()
+                with contextlib.suppress(ClosedResourceError):
+                    self._diag_recv.close()
+                with contextlib.suppress(ClosedResourceError):
+                    self._task_sender.close()
+                with contextlib.suppress(ClosedResourceError):
+                    self._event_sender.close()
+                with contextlib.suppress(ClosedResourceError):
+                    self._cancel_sender.send(CANCEL_ALL_TASKS)
+                with contextlib.suppress(ClosedResourceError):
+                    self._cancel_sender.close()
 
-            await to_thread.run_sync(self.runner_process.join, 5)
+                await to_thread.run_sync(self.runner_process.join, 5)
 
-            if self.runner_process.is_alive():
-                logger.warning(
-                    "Runner process didn't shutdown successfully, terminating"
-                )
-                self.runner_process.terminate()
-                self.runner_process.join(timeout=5)
-                # This is overkill but it's not technically bad, just unnecessary.
                 if self.runner_process.is_alive():
-                    logger.critical("Runner process didn't respond to SIGTERM, killing")
-                    self.runner_process.kill()
-                    self.runner_process.join(timeout=5)
-            else:
-                logger.info("Runner process successfully terminated")
+                    logger.warning(
+                        "Runner process didn't shutdown successfully, terminating"
+                    )
+                    self.runner_process.terminate()
+                    await to_thread.run_sync(self.runner_process.join, 5)
+                    # This is overkill but it's not technically bad, just unnecessary.
+                    if self.runner_process.is_alive():
+                        logger.critical(
+                            "Runner process didn't respond to SIGTERM, killing"
+                        )
+                        self.runner_process.kill()
+                        await to_thread.run_sync(self.runner_process.join, 5)
+                else:
+                    logger.info("Runner process successfully terminated")
 
-            self.runner_process.close()
+                # close() raises ValueError on a still-running process. A process
+                # surviving SIGKILL + join is rare (uninterruptible sleep), but
+                # since the teardown is now shielded and reliably runs, guard the
+                # close so an unexpected straggler can't raise out of the failover
+                # teardown and destabilize worker.shutdown().
+                if self.runner_process.is_alive():
+                    logger.error(
+                        "Runner process still alive after SIGKILL; skipping "
+                        "close() to avoid ValueError (likely uninterruptible)."
+                    )
+                else:
+                    self.runner_process.close()
 
     def shutdown(self):
         self._record_milestone("shutdown_requested")
