@@ -163,7 +163,7 @@ class Router:
         self._id_count = count()
         self._tg: TaskGroup = TaskGroup()
 
-    def _uses_zenoh(self, topic: str) -> bool:
+    def uses_zenoh(self, topic: str) -> bool:
         """Whether ``topic`` is routed over the Zenoh data plane (DATA only)."""
         return self._zenoh is not None and topic == DATA.topic
 
@@ -239,7 +239,7 @@ class Router:
         self._tg.cancel_tasks()
 
     async def _networking_subscribe(self, topic: str):
-        if self._uses_zenoh(topic):
+        if self.uses_zenoh(topic):
             assert self._zenoh is not None
             await self._zenoh.zenoh_subscribe(topic)
             logger.info(f"Subscribed to {topic} (zenoh data plane)")
@@ -248,7 +248,7 @@ class Router:
         logger.info(f"Subscribed to {topic}")
 
     async def _networking_unsubscribe(self, topic: str):
-        if self._uses_zenoh(topic):
+        if self.uses_zenoh(topic):
             # Zenoh subscribers are undeclared when the session closes; there is
             # no per-topic unsubscribe to issue here.
             return
@@ -327,7 +327,7 @@ class Router:
                         logger.warning(
                             "Sending overlarge payload, network performance may be temporarily degraded"
                         )
-                    if self._uses_zenoh(topic):
+                    if self.uses_zenoh(topic):
                         assert self._zenoh is not None
                         await self._zenoh.zenoh_publish(topic, data)
                         continue
