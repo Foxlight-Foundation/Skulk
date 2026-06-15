@@ -15,9 +15,9 @@ This project records release notes here and mirrors public-facing notes in
   `{ClassName: inner}` envelope by re-validating the inner payload as a *python*
   object. Under `State`'s `strict=True` that path skips JSON-mode coercion, so
   the ISO datetime strings JSON produced for `last_seen` were rejected
-  (`datetime_type`) and `DiskEventLog.read_range` halted at the seed. The phantom
-  -node fix (#291) had started re-stamping `last_seen` on the seed, so every
-  carried seed now hit this. `State` now coerces `last_seen` strings back to
+  (`datetime_type`) and `DiskEventLog.read_range` halted at the seed. The
+  phantom-node fix (#291) had started re-stamping `last_seen` on the seed, so
+  every carried seed now hit this. `State` now coerces `last_seen` strings back to
   `datetime` in a field-scoped `before` validator (it does not force the whole
   model into python-mode validation, unlike a model-level validator). This
   unblocks event-log replay across a failover and is a prerequisite for #279
