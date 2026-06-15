@@ -25,7 +25,7 @@ from skulk.shared.models.model_cards import (
     add_to_card_cache,
     delete_custom_card,
 )
-from skulk.shared.types.chunks import InputImageChunk
+from skulk.shared.types.chunks import DataChunk, InputImageChunk
 from skulk.shared.types.commands import (
     DeleteInstance,
     ForwarderCommand,
@@ -313,6 +313,7 @@ class Worker:
         download_command_sender: Sender[ForwarderDownloadCommand],
         telemetry_sender: Sender[NodeTelemetry] | None = None,
         telemetry_view: TelemetryView | None = None,
+        data_sender: Sender[DataChunk] | None = None,
         store_client: ModelStoreClient | None = None,
         staging_config: StagingNodeConfig | None = None,
     ):
@@ -322,6 +323,11 @@ class Worker:
         self.command_sender = command_sender
         self.download_command_sender = download_command_sender
         self._telemetry_sender = telemetry_sender
+        # Data plane (#279 Phase 2): per-token output chunks stream direct to the
+        # owning API node via this sender (DATA topic), bypassing the master's
+        # event log. Threaded into each RunnerSupervisor. None falls back to the
+        # event path (no DATA topic wired / tests).
+        self._data_sender = data_sender
         # Shared, Node-owned telemetry view (#279). The worker prunes a node's
         # telemetry here when it sees NodeTimedOut, because the worker runs on
         # EVERY node regardless of role — so a --no-api node (or a --no-api
@@ -946,6 +952,9 @@ class Worker:
             bound_instance=task.bound_instance,
             event_sender=self.event_sender.clone(),
             context_token_limit=context_token_limit,
+            data_sender=self._data_sender.clone()
+            if self._data_sender is not None
+            else None,
         )
         self.runners[task.bound_instance.bound_runner_id] = runner
         self._tg.start_soon(runner.run)

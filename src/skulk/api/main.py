@@ -180,8 +180,10 @@ from skulk.shared.tracing import (
     load_trace_file,
 )
 from skulk.shared.types.chunks import (
+    DataChunk,
     EmbeddingChunk,
     ErrorChunk,
+    GenerationChunk,
     ImageChunk,
     InputImageChunk,
     PrefillProgressChunk,
@@ -234,7 +236,6 @@ from skulk.shared.types.diagnostics import (
     RunnerTaskDiagnostics,
 )
 from skulk.shared.types.events import (
-    ChunkGenerated,
     Event,
     IndexedEvent,
     StateSnapshotHydrated,
@@ -295,11 +296,13 @@ serve = cast(_HypercornServe, hypercorn_asyncio.serve)
 _API_EVENT_LOG_DIR = SKULK_EVENT_LOG_DIR / "api"
 
 # Ring retention for the API event log. Unlike the master's log (compacted
-# after every snapshot), the API log had NO compaction and records per-token
-# ChunkGenerated events — it grew without bound for the whole session (54 MB
-# in 9 idle hours on every node; GBs/day under load; the file a node died
-# writing in the 2026-06-06 launch smoke). It only backs GET /events
-# diagnostics, so dropping the old tail is safe.
+# after every snapshot), the API log has NO compaction. Historically it
+# recorded per-token ChunkGenerated events and grew without bound for the whole
+# session (54 MB in 9 idle hours on every node; GBs/day under load; the file a
+# node died writing in the 2026-06-06 launch smoke). As of #279 Phase 2 those
+# output chunks ride the data plane, NOT the event log, so this log no longer
+# carries the per-token firehose — but it still backs GET /events diagnostics
+# and is uncompacted, so the ring retention stays as a backstop.
 _API_EVENT_LOG_MAX_ACTIVE_BYTES = 256 * 1024 * 1024
 _API_EVENT_LOG_COMPACT_KEEP_EVENTS = 20_000
 _API_EVENT_LOG_CHECK_INTERVAL_APPENDS = 4096
@@ -607,8 +610,14 @@ class API:
         enable_event_log: bool = True,
         mount_dashboard: bool = True,
         telemetry_view: "TelemetryView | None" = None,
+        data_receiver: "Receiver[DataChunk] | None" = None,
     ) -> None:
         self.state = State()
+        # Data plane (#279 Phase 2): per-token output chunks arrive here direct
+        # from the serving worker (DATA topic), not as ChunkGenerated events off
+        # the master. Demuxed by command_id into the per-command stream queues.
+        # None means no DATA topic wired (tests); streaming then has no source.
+        self._data_receiver = data_receiver
         # Node telemetry off the event log (#279): placement previews read
         # node_resources from the live view, matching what the master enforces.
         self._telemetry_view = (
@@ -3118,6 +3127,11 @@ class API:
             async with self._tg as tg:
                 logger.info("Starting API")
                 tg.start_soon(self._apply_state)
+                # Data plane (#279 Phase 2): per-command output chunks, off the
+                # event log. Started once for the API's lifetime — the DATA
+                # subscription is session-independent, so (unlike _apply_state)
+                # it is NOT re-spawned by reset().
+                tg.start_soon(self._apply_data)
                 tg.start_soon(self._pause_on_new_election)
                 tg.start_soon(self._cleanup_expired_images)
                 tg.start_soon(self._prune_old_traces)
@@ -3190,29 +3204,8 @@ class API:
                 # so a --no-worker node still tracks live membership (#279).
                 record_membership_from_event(self._telemetry_view, event)
 
-                if isinstance(event, ChunkGenerated):
-                    if queue := self._image_generation_queues.get(
-                        event.command_id, None
-                    ):
-                        assert isinstance(event.chunk, ImageChunk)
-                        try:
-                            await queue.send(event.chunk)
-                        except BrokenResourceError:
-                            self._image_generation_queues.pop(event.command_id, None)
-                    if queue := self._text_generation_queues.get(
-                        event.command_id, None
-                    ):
-                        assert not isinstance(event.chunk, (ImageChunk, EmbeddingChunk))
-                        try:
-                            await queue.send(event.chunk)
-                        except BrokenResourceError:
-                            self._text_generation_queues.pop(event.command_id, None)
-                    if queue := self._embedding_queues.get(event.command_id, None):
-                        assert isinstance(event.chunk, (EmbeddingChunk, ErrorChunk))
-                        try:
-                            await queue.send(event.chunk)
-                        except BrokenResourceError:
-                            self._embedding_queues.pop(event.command_id, None)
+                # Output chunks no longer travel the event log — they arrive on
+                # the data plane (#279 Phase 2), demuxed by _apply_data.
                 if isinstance(event, TaskFailed):
                     await self._terminate_command_stream(
                         event.task_id,
@@ -3234,6 +3227,54 @@ class API:
                     )
                 if isinstance(event, TracesMerged):
                     self._save_merged_trace(event)
+
+    async def _apply_data(self) -> None:
+        """Consume the data plane (#279 Phase 2): per-command output chunks.
+
+        Output chunks stream here directly from the serving worker (DATA topic)
+        rather than as ``ChunkGenerated`` events off the master, so they never
+        touch the ordered event log or the master hop. Demux by ``command_id``
+        into the per-command stream queues exactly as the event path did. No-op
+        on a node with no DATA topic wired (tests).
+        """
+        if self._data_receiver is None:
+            return
+        with self._data_receiver as data_chunks:
+            async for data in data_chunks:
+                await self._dispatch_generation_chunk(data.command_id, data.chunk)
+
+    async def _dispatch_generation_chunk(
+        self, command_id: CommandId, chunk: GenerationChunk
+    ) -> None:
+        """Route one output chunk to its per-command stream queue by type.
+
+        Shared by the data plane (#279 Phase 2). ``await send`` preserves the
+        backpressure the event path had (a slow client throttles its producer);
+        a closed receiver (client gone) drops the queue so a late chunk can't
+        wedge the dispatcher.
+        """
+        if queue := self._image_generation_queues.get(command_id, None):
+            # ErrorChunk too: a runner failure on an ImageGeneration/ImageEdits
+            # command emits ErrorChunk (RunnerSupervisor._check_runner), which
+            # must reach the image client instead of crashing the data loop on a
+            # too-narrow assert. The queue is typed ImageChunk | ErrorChunk.
+            assert isinstance(chunk, (ImageChunk, ErrorChunk))
+            try:
+                await queue.send(chunk)
+            except (BrokenResourceError, ClosedResourceError):
+                self._image_generation_queues.pop(command_id, None)
+        if queue := self._text_generation_queues.get(command_id, None):
+            assert not isinstance(chunk, (ImageChunk, EmbeddingChunk))
+            try:
+                await queue.send(chunk)
+            except (BrokenResourceError, ClosedResourceError):
+                self._text_generation_queues.pop(command_id, None)
+        if queue := self._embedding_queues.get(command_id, None):
+            assert isinstance(chunk, (EmbeddingChunk, ErrorChunk))
+            try:
+                await queue.send(chunk)
+            except (BrokenResourceError, ClosedResourceError):
+                self._embedding_queues.pop(command_id, None)
 
     async def _terminate_command_stream(
         self, task_id: task_types.TaskId, error_message: str
