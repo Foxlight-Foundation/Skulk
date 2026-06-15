@@ -21,7 +21,13 @@ import httpx
 import hypercorn.asyncio as hypercorn_asyncio
 import psutil
 import yaml
-from anyio import BrokenResourceError, ClosedResourceError, WouldBlock, to_thread
+from anyio import (
+    BrokenResourceError,
+    ClosedResourceError,
+    EndOfStream,
+    WouldBlock,
+    to_thread,
+)
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -306,6 +312,28 @@ _API_EVENT_LOG_DIR = SKULK_EVENT_LOG_DIR / "api"
 _API_EVENT_LOG_MAX_ACTIVE_BYTES = 256 * 1024 * 1024
 _API_EVENT_LOG_COMPACT_KEEP_EVENTS = 20_000
 _API_EVENT_LOG_CHECK_INTERVAL_APPENDS = 4096
+
+# Data-plane stream idle backstop (#279 Phase 2b). Output chunks ride the
+# best-effort DATA topic (no replay), so a dropped *final* chunk would leave a
+# streaming response waiting forever. The timer is armed ONLY after the first
+# real output token (it wraps the receive, not the yield, and measures the gap
+# between tokens). Time-to-first-token is deliberately unbounded: a request can
+# sit behind a long decode or a slow prefill (prefill emits progress chunks that
+# are explicitly NOT treated as output and do not arm the timer). So this only
+# fires on a genuine mid-stream stall, e.g. a dropped data-plane chunk.
+_STREAM_IDLE_TIMEOUT_SECONDS = 120.0
+
+# Task statuses for which the runner has stopped producing — a mid-stream idle
+# stall on such a command is a dropped FINAL chunk, not a stuck runner, so it
+# must clean up via the normal TaskFinished path, not TaskCancelled (#298 review).
+_TERMINAL_TASK_STATUSES: frozenset[task_types.TaskStatus] = frozenset(
+    {
+        task_types.TaskStatus.Complete,
+        task_types.TaskStatus.Failed,
+        task_types.TaskStatus.TimedOut,
+        task_types.TaskStatus.Cancelled,
+    }
+)
 
 # How long POST /place_instance waits for node memory info to finish
 # gossiping before giving up with 503. Covers the window between cluster
@@ -1692,6 +1720,24 @@ class API:
             command_id=command_id,
         )
 
+    def _command_task_is_terminal(self, command_id: CommandId) -> bool:
+        """Return True if the master already considers this command's task done.
+
+        Used to disambiguate a mid-stream idle stall (#298 review): if the task
+        has already reached a terminal status (Complete/Failed/TimedOut/Cancelled)
+        the stall is just a dropped FINAL data-plane chunk — the runner finished.
+        Sending TaskCancelled there is a no-op on a completed runner and leaves the
+        master's task/command mapping leaked forever; we must let the normal
+        TaskFinished path run instead. A non-terminal task means a genuinely stuck
+        runner, which TaskCancelled correctly tears down.
+        """
+
+        target = str(command_id)
+        for task in self.state.tasks.values():
+            if self._task_command_id(task) == target:
+                return task.task_status in _TERMINAL_TASK_STATUSES
+        return False
+
     async def _finalize_command_stream(
         self,
         command_id: CommandId,
@@ -1725,10 +1771,86 @@ class API:
             ]()
 
             with recv as token_chunks:
-                async for chunk in token_chunks:
+                # Idle backstop (#279 Phase 2b): the DATA plane is best-effort, so
+                # a dropped chunk could hang this receive forever. The idle timer
+                # applies ONLY once streaming has started (after the first chunk)
+                # and measures the gap BETWEEN chunks — wrapping just the receive,
+                # not the yield. It deliberately does NOT bound time-to-first
+                # chunk: a request can sit in the runner queue behind a long
+                # decode, or in a slow prefill, for an unbounded time, and the
+                # control plane (TaskFailed -> _terminate_command_stream) already
+                # covers instance death. So this only fires on a mid-stream stall.
+                started = False
+                while True:
+                    chunk: (
+                        TokenChunk
+                        | ErrorChunk
+                        | ToolCallChunk
+                        | PrefillProgressChunk
+                        | None
+                    ) = None
+                    delay = _STREAM_IDLE_TIMEOUT_SECONDS if started else None
+                    with anyio.move_on_after(delay) as scope:
+                        try:
+                            chunk = await token_chunks.receive()
+                        except (EndOfStream, ClosedResourceError):
+                            return  # producer closed normally
+                    if scope.cancelled_caught:
+                        # Mid-stream stall: the receive went idle for longer than
+                        # the inter-token bound. Two distinct causes, disambiguated
+                        # by the master's task status (#298 review):
+                        #   - task already terminal -> the runner finished and only
+                        #     the FINAL data-plane chunk was dropped. Sending
+                        #     TaskCancelled here is a no-op on a completed runner and
+                        #     leaks the master's task/command mapping forever, so let
+                        #     the normal TaskFinished path (via _finalize) clean up.
+                        #   - task not terminal -> a genuinely stuck runner; send
+                        #     TaskCancelled so the master tears it down (otherwise we
+                        #     orphan an in-flight runner task).
+                        task_done = self._command_task_is_terminal(command_id)
+                        logger.warning(
+                            f"Token stream for command {command_id} idle for "
+                            f">{_STREAM_IDLE_TIMEOUT_SECONDS:g}s mid-stream; "
+                            + (
+                                "task already terminal — finishing (a final "
+                                "data-plane chunk was likely dropped)."
+                                if task_done
+                                else "task still active — cancelling (a data-plane "
+                                "chunk may have been dropped)."
+                            )
+                        )
+                        if not task_done:
+                            self._cancelled_command_ids.add(command_id)
+                            with anyio.CancelScope(shield=True):
+                                await self.command_sender.send(
+                                    ForwarderCommand(
+                                        origin=self._system_id,
+                                        command=TaskCancelled(
+                                            cancelled_command_id=command_id
+                                        ),
+                                    )
+                                )
+                        yield ErrorChunk(
+                            model=ModelId("unknown"),
+                            error_message=(
+                                "Stream stalled: no output for "
+                                f"{_STREAM_IDLE_TIMEOUT_SECONDS:g}s; the response "
+                                "may be incomplete."
+                            ),
+                        )
+                        return
+                    assert chunk is not None  # not timed out and not EndOfStream
                     yield chunk
                     if isinstance(chunk, PrefillProgressChunk):
+                        # Prefill progress is NOT real output: keep the idle timer
+                        # disarmed (delay stays None). Prefill of a huge prompt on
+                        # a slow node can run far longer than the inter-token idle
+                        # bound between progress updates, so arming here would
+                        # falsely time out a still-prefilling request (#298 review).
                         continue
+                    # First real output token: from here, gaps are inter-token and
+                    # the idle timeout applies.
+                    started = True
                     if chunk.finish_reason is not None:
                         break
 
