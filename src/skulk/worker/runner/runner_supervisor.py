@@ -282,7 +282,18 @@ class RunnerSupervisor:
                 else:
                     logger.info("Runner process successfully terminated")
 
-                self.runner_process.close()
+                # close() raises ValueError on a still-running process. A process
+                # surviving SIGKILL + join is rare (uninterruptible sleep), but
+                # since the teardown is now shielded and reliably runs, guard the
+                # close so an unexpected straggler can't raise out of the failover
+                # teardown and destabilize worker.shutdown().
+                if self.runner_process.is_alive():
+                    logger.error(
+                        "Runner process still alive after SIGKILL; skipping "
+                        "close() to avoid ValueError (likely uninterruptible)."
+                    )
+                else:
+                    self.runner_process.close()
 
     def shutdown(self):
         self._record_milestone("shutdown_requested")
