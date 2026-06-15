@@ -9,6 +9,21 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **The failover-seed event round-trips through the disk event log again.** A
+  `StateSnapshotHydrated` (the failover seed, indexed as event 0) is read back
+  through the `Event` TypeAdapter, whose `TaggedModel` wrap validator unwraps the
+  `{ClassName: inner}` envelope by re-validating the inner payload as a *python*
+  object. Under `State`'s `strict=True` that path skips JSON-mode coercion, so
+  the ISO datetime strings JSON produced for `last_seen` were rejected
+  (`datetime_type`) and `DiskEventLog.read_range` halted at the seed. The phantom
+  -node fix (#291) had started re-stamping `last_seen` on the seed, so every
+  carried seed now hit this. `State` now coerces `last_seen` strings back to
+  `datetime` in a field-scoped `before` validator (it does not force the whole
+  model into python-mode validation, unlike a model-level validator). This
+  unblocks event-log replay across a failover and is a prerequisite for #279
+  Phase 3 snapshot/truncate (snapshots persist a full `State`, `last_seen`
+  included).
+
 - **Multi-node generation output is no longer silently reordered (#279 Phase 2b
   sequencing).** #279 Phase 2a moved per-token output (`ChunkGenerated`) off the
   master-indexed control plane (where the monotonic event `idx` gave every chunk
