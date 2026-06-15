@@ -1795,10 +1795,17 @@ class API:
                         )
                         return
                     assert chunk is not None  # not timed out and not EndOfStream
-                    started = True
                     yield chunk
                     if isinstance(chunk, PrefillProgressChunk):
+                        # Prefill progress is NOT real output: keep the idle timer
+                        # disarmed (delay stays None). Prefill of a huge prompt on
+                        # a slow node can run far longer than the inter-token idle
+                        # bound between progress updates, so arming here would
+                        # falsely time out a still-prefilling request (#298 review).
                         continue
+                    # First real output token: from here, gaps are inter-token and
+                    # the idle timeout applies.
+                    started = True
                     if chunk.finish_reason is not None:
                         break
 

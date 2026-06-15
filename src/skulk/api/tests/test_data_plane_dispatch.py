@@ -231,3 +231,43 @@ async def test_token_stream_does_not_timeout_before_first_chunk(
 
     assert chunks == []  # EndOfStream -> clean return, no error chunk
     assert cmd not in api._cancelled_command_ids  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_prefill_progress_does_not_arm_idle_timer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #298 review: a PrefillProgressChunk is not real output. Receiving one must
+    # NOT arm the idle timer (prefill of a huge prompt can outlast the inter-token
+    # bound between progress updates). Send one progress chunk, then stay silent
+    # well past a tiny idle timeout: no stall error must be emitted.
+    monkeypatch.setattr(api_main, "_STREAM_IDLE_TIMEOUT_SECONDS", 0.05)
+    api = _build_api()
+    api._send = AsyncMock()  # pyright: ignore[reportPrivateUsage]
+    cmd = CommandId("cmd-prefill")
+
+    chunks: list[object] = []
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tg:
+
+            async def consume() -> None:
+                async for ch in api._token_chunk_stream(cmd):  # pyright: ignore[reportPrivateUsage]
+                    chunks.append(ch)
+
+            tg.start_soon(consume)
+            while cmd not in api._text_generation_queues:  # pyright: ignore[reportPrivateUsage]
+                await anyio.sleep(0.005)
+            await api._text_generation_queues[cmd].send(  # pyright: ignore[reportPrivateUsage]
+                PrefillProgressChunk(
+                    model=ModelId("mlx-community/test"),
+                    processed_tokens=10,
+                    total_tokens=1000,
+                )
+            )
+            await anyio.sleep(0.3)  # >> idle timeout, but timer must stay disarmed
+            assert all(isinstance(c, PrefillProgressChunk) for c in chunks)
+            api._text_generation_queues[cmd].close()  # pyright: ignore[reportPrivateUsage]
+
+    # only the progress chunk(s); no synthetic stall ErrorChunk
+    assert all(isinstance(c, PrefillProgressChunk) for c in chunks)
+    assert cmd not in api._cancelled_command_ids  # pyright: ignore[reportPrivateUsage]
