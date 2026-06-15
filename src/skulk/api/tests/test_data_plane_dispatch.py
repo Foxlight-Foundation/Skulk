@@ -201,6 +201,80 @@ async def test_token_stream_stall_after_first_chunk_cancels(
 
 
 @pytest.mark.asyncio
+async def test_token_stream_stall_with_terminal_task_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #298 review: a mid-stream stall whose task has ALREADY reached a terminal
+    # status is a dropped FINAL data-plane chunk, not a stuck runner. Sending
+    # TaskCancelled there is a no-op on a completed runner and leaks the master's
+    # task/command mapping forever — so the stall must clean up via the normal
+    # TaskFinished path (no TaskCancelled, command not marked cancelled).
+    from skulk.shared.types.state import State
+    from skulk.shared.types.tasks import (
+        TaskId,
+        TaskStatus,
+        TextGeneration,
+    )
+    from skulk.shared.types.text_generation import (
+        InputMessage,
+        TextGenerationTaskParams,
+    )
+    from skulk.shared.types.worker.instances import InstanceId
+
+    monkeypatch.setattr(api_main, "_STREAM_IDLE_TIMEOUT_SECONDS", 0.15)
+    api = _build_api()
+    finish_send = AsyncMock()
+    cancel_send = AsyncMock()
+    api._send = finish_send  # pyright: ignore[reportPrivateUsage]
+    api.command_sender = cancel_send
+    cmd = CommandId("cmd-stall-done")
+
+    # The master already considers this command's task Complete.
+    task = TextGeneration(
+        task_id=TaskId(),
+        task_status=TaskStatus.Complete,
+        instance_id=InstanceId(),
+        command_id=cmd,
+        task_params=TextGenerationTaskParams(
+            model=ModelId("mlx-community/test"),
+            input=[InputMessage(role="user", content="hi")],
+        ),
+    )
+    api.state = State(tasks={task.task_id: task})
+
+    chunks: list[object] = []
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tg:
+
+            async def consume() -> None:
+                async for ch in api._token_chunk_stream(cmd):  # pyright: ignore[reportPrivateUsage]
+                    chunks.append(ch)
+
+            tg.start_soon(consume)
+            while cmd not in api._text_generation_queues:  # pyright: ignore[reportPrivateUsage]
+                await anyio.sleep(0.005)
+            await api._text_generation_queues[cmd].send(  # pyright: ignore[reportPrivateUsage]
+                TokenChunk(
+                    model=ModelId("mlx-community/test"),
+                    text="hi",
+                    token_id=1,
+                    usage=None,
+                    finish_reason=None,
+                )
+            )
+
+    assert len(chunks) == 2
+    assert isinstance(chunks[0], TokenChunk)
+    assert isinstance(chunks[1], ErrorChunk)
+    # terminal task -> no TaskCancelled, command NOT marked cancelled, so
+    # _finalize_command_stream sends the normal TaskFinished (master cleans up).
+    cancel_send.send.assert_not_awaited()  # pyright: ignore[reportAny]
+    finish_send.assert_awaited()
+    assert cmd not in api._cancelled_command_ids  # pyright: ignore[reportPrivateUsage]
+    assert cmd not in api._text_generation_queues  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
 async def test_token_stream_does_not_timeout_before_first_chunk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

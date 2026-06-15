@@ -315,12 +315,25 @@ _API_EVENT_LOG_CHECK_INTERVAL_APPENDS = 4096
 
 # Data-plane stream idle backstop (#279 Phase 2b). Output chunks ride the
 # best-effort DATA topic (no replay), so a dropped *final* chunk would leave a
-# streaming response waiting forever. If no chunk (token OR PrefillProgress)
-# arrives for this long, the stream is closed with a terminal error instead of
-# hanging. It measures producer silence only (the timeout wraps the receive,
-# not the yield), and prefill emits progress chunks that keep it alive, so it
-# never fires on a legitimately slow first token — only on a genuine stall.
+# streaming response waiting forever. The timer is armed ONLY after the first
+# real output token (it wraps the receive, not the yield, and measures the gap
+# between tokens). Time-to-first-token is deliberately unbounded: a request can
+# sit behind a long decode or a slow prefill (prefill emits progress chunks that
+# are explicitly NOT treated as output and do not arm the timer). So this only
+# fires on a genuine mid-stream stall, e.g. a dropped data-plane chunk.
 _STREAM_IDLE_TIMEOUT_SECONDS = 120.0
+
+# Task statuses for which the runner has stopped producing — a mid-stream idle
+# stall on such a command is a dropped FINAL chunk, not a stuck runner, so it
+# must clean up via the normal TaskFinished path, not TaskCancelled (#298 review).
+_TERMINAL_TASK_STATUSES: frozenset[task_types.TaskStatus] = frozenset(
+    {
+        task_types.TaskStatus.Complete,
+        task_types.TaskStatus.Failed,
+        task_types.TaskStatus.TimedOut,
+        task_types.TaskStatus.Cancelled,
+    }
+)
 
 # How long POST /place_instance waits for node memory info to finish
 # gossiping before giving up with 503. Covers the window between cluster
@@ -1707,6 +1720,24 @@ class API:
             command_id=command_id,
         )
 
+    def _command_task_is_terminal(self, command_id: CommandId) -> bool:
+        """Return True if the master already considers this command's task done.
+
+        Used to disambiguate a mid-stream idle stall (#298 review): if the task
+        has already reached a terminal status (Complete/Failed/TimedOut/Cancelled)
+        the stall is just a dropped FINAL data-plane chunk — the runner finished.
+        Sending TaskCancelled there is a no-op on a completed runner and leaves the
+        master's task/command mapping leaked forever; we must let the normal
+        TaskFinished path run instead. A non-terminal task means a genuinely stuck
+        runner, which TaskCancelled correctly tears down.
+        """
+
+        target = str(command_id)
+        for task in self.state.tasks.values():
+            if self._task_command_id(task) == target:
+                return task.task_status in _TERMINAL_TASK_STATUSES
+        return False
+
     async def _finalize_command_stream(
         self,
         command_id: CommandId,
@@ -1765,31 +1796,45 @@ class API:
                         except (EndOfStream, ClosedResourceError):
                             return  # producer closed normally
                     if scope.cancelled_caught:
-                        # Mid-stream stall. Treat as a cancellation, not a clean
-                        # finish: mark the command cancelled so _finalize suppresses
-                        # TaskFinished, and send TaskCancelled so the master tears
-                        # the (possibly still-running) task down and the runner is
-                        # cancelled — otherwise we'd orphan an in-flight runner task.
+                        # Mid-stream stall: the receive went idle for longer than
+                        # the inter-token bound. Two distinct causes, disambiguated
+                        # by the master's task status (#298 review):
+                        #   - task already terminal -> the runner finished and only
+                        #     the FINAL data-plane chunk was dropped. Sending
+                        #     TaskCancelled here is a no-op on a completed runner and
+                        #     leaks the master's task/command mapping forever, so let
+                        #     the normal TaskFinished path (via _finalize) clean up.
+                        #   - task not terminal -> a genuinely stuck runner; send
+                        #     TaskCancelled so the master tears it down (otherwise we
+                        #     orphan an in-flight runner task).
+                        task_done = self._command_task_is_terminal(command_id)
                         logger.warning(
                             f"Token stream for command {command_id} idle for "
-                            f">{int(_STREAM_IDLE_TIMEOUT_SECONDS)}s mid-stream; "
-                            "cancelling (a data-plane chunk may have been dropped)."
-                        )
-                        self._cancelled_command_ids.add(command_id)
-                        with anyio.CancelScope(shield=True):
-                            await self.command_sender.send(
-                                ForwarderCommand(
-                                    origin=self._system_id,
-                                    command=TaskCancelled(
-                                        cancelled_command_id=command_id
-                                    ),
-                                )
+                            f">{_STREAM_IDLE_TIMEOUT_SECONDS:g}s mid-stream; "
+                            + (
+                                "task already terminal — finishing (a final "
+                                "data-plane chunk was likely dropped)."
+                                if task_done
+                                else "task still active — cancelling (a data-plane "
+                                "chunk may have been dropped)."
                             )
+                        )
+                        if not task_done:
+                            self._cancelled_command_ids.add(command_id)
+                            with anyio.CancelScope(shield=True):
+                                await self.command_sender.send(
+                                    ForwarderCommand(
+                                        origin=self._system_id,
+                                        command=TaskCancelled(
+                                            cancelled_command_id=command_id
+                                        ),
+                                    )
+                                )
                         yield ErrorChunk(
                             model=ModelId("unknown"),
                             error_message=(
                                 "Stream stalled: no output for "
-                                f"{int(_STREAM_IDLE_TIMEOUT_SECONDS)}s; the response "
+                                f"{_STREAM_IDLE_TIMEOUT_SECONDS:g}s; the response "
                                 "may be incomplete."
                             ),
                         )
