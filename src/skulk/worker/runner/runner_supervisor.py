@@ -15,7 +15,8 @@ from anyio import (
 )
 from loguru import logger
 
-from skulk.shared.types.chunks import DataChunk, ErrorChunk
+from skulk.shared.types.chunks import DataChunk, EmbeddingChunk, ErrorChunk
+from skulk.shared.types.common import CommandId
 from skulk.shared.types.diagnostics import (
     MlxMemorySnapshot,
     RunnerDiagnosticContext,
@@ -125,6 +126,12 @@ class RunnerSupervisor:
     # duplicates from the runner are suppressed (#278). Bounded by the tasks
     # this runner ever saw (runner lifetime is instance-scoped).
     _terminal_forwarded: set[TaskId] = field(default_factory=set, init=False)
+    # Per-command monotonic counter stamped onto each DataChunk so the owning
+    # API node can reorder output that the DATA gossip topic may deliver out of
+    # order (#279 Phase 2b: multi-node producers reach the API across the mesh).
+    # _forward_events reads the runner's events in generation order, so the
+    # counter assigned here is the true order.
+    _chunk_sequence: dict[CommandId, int] = field(default_factory=dict, init=False)
     _cancel_watch_runner: anyio.CancelScope = field(
         default_factory=anyio.CancelScope, init=False
     )
@@ -215,9 +222,23 @@ class RunnerSupervisor:
         the event sender when no data sender is wired (tests / no DATA topic).
         """
         if isinstance(event, ChunkGenerated) and self._data_sender is not None:
+            seq = self._chunk_sequence.get(event.command_id, 0)
             await self._data_sender.send(
-                DataChunk(command_id=event.command_id, chunk=event.chunk)
+                DataChunk(
+                    command_id=event.command_id, chunk=event.chunk, sequence=seq
+                )
             )
+            # Drop the per-command counter on the terminal chunk so a long-lived
+            # runner doesn't accumulate one entry per command served (#301 review).
+            # EmbeddingChunk is single-shot (no finish_reason) but also terminal.
+            chunk_finished = (
+                getattr(event.chunk, "finish_reason", None) is not None
+                or isinstance(event.chunk, EmbeddingChunk)
+            )
+            if chunk_finished:
+                self._chunk_sequence.pop(event.command_id, None)
+            else:
+                self._chunk_sequence[event.command_id] = seq + 1
         else:
             await self._event_sender.send(event)
 
@@ -404,6 +425,24 @@ class RunnerSupervisor:
                                 RunnerShuttingDown,
                             ),
                         )
+                        # Drop the per-command data-plane sequence counter on any
+                        # terminal task status, covering commands that end without
+                        # a finish_reason chunk: image generation (ImageChunk has
+                        # no finish_reason) and cancellations/failures that arrive
+                        # as terminal TaskStatusUpdated bypassing _emit (#301
+                        # review). Done before popping in_progress, which holds the
+                        # task->command_id mapping.
+                        ending_task = self.in_progress.get(event.task_id)
+                        if isinstance(
+                            ending_task,
+                            (
+                                TextGeneration,
+                                ImageGeneration,
+                                ImageEdits,
+                                TextEmbedding,
+                            ),
+                        ):
+                            self._chunk_sequence.pop(ending_task.command_id, None)
                         self.in_progress.pop(event.task_id, None)
                         if event.task_status == TaskStatus.Complete:
                             self.completed.add(event.task_id)

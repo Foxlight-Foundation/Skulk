@@ -10,6 +10,7 @@ import shutil
 import socket
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
@@ -322,6 +323,41 @@ _API_EVENT_LOG_CHECK_INTERVAL_APPENDS = 4096
 # are explicitly NOT treated as output and do not arm the timer). So this only
 # fires on a genuine mid-stream stall, e.g. a dropped data-plane chunk.
 _STREAM_IDLE_TIMEOUT_SECONDS = 120.0
+
+# Largest per-command data-plane reorder window (#279 Phase 2b). The DATA topic
+# is best-effort: a genuinely dropped chunk would otherwise stall the reorder
+# buffer forever waiting for a sequence that never arrives. Once this many
+# out-of-order chunks are held for one command, we give up on the missing
+# sequence(s), skip ahead to the lowest buffered one, and drain — bounding memory
+# and converting an undeliverable gap into (rare) minor loss rather than a hang.
+# Normal mesh reordering spans only a few chunks, far below this.
+_MAX_CHUNK_REORDER_BUFFER = 512
+
+# How long the reorder buffer waits for a missing sequence before giving up on
+# it and releasing the chunks behind the gap (#279 Phase 2b). A genuine mesh
+# reorder resolves in milliseconds; a sequence still missing after this was
+# dropped on the best-effort topic. Without a time bound, a dropped sequence
+# that the size cap never reaches (e.g. seq 0 lost on a short response, or a
+# trailing gap with no later chunk to re-trigger the size check) would hold all
+# the chunks behind it forever — and the stream's own idle backstop never arms
+# because nothing has been yielded yet. A periodic sweep flushes such gaps.
+_REORDER_GAP_FLUSH_SECONDS = 5.0
+
+
+@dataclass
+class _ChunkReorderState:
+    """Per-command reorder cursor for the data plane (#279 Phase 2b)."""
+
+    next_seq: int = 0
+    pending: dict[int, GenerationChunk] = field(default_factory=dict)
+    # Monotonic time the current head-of-line gap was first observed (chunks
+    # buffered above next_seq that couldn't drain). None when there is no gap.
+    # `gap_at` is the next_seq the timer started waiting on, so later chunks
+    # arriving behind the *same* gap don't refresh the timer (a moving stream
+    # resets it; a stuck one ages to the flush window).
+    gap_since: float | None = None
+    gap_at: int | None = None
+
 
 # Task statuses for which the runner has stopped producing — a mid-stream idle
 # stall on such a command is a dropped FINAL chunk, not a stuck runner, so it
@@ -738,6 +774,11 @@ class API:
             CommandId, Sender[EmbeddingChunk | ErrorChunk]
         ] = {}
         self._cancelled_command_ids: set[CommandId] = set()
+        # Per-command data-plane reorder buffers (#279 Phase 2b). The DATA gossip
+        # topic has no total order (unlike the master event idx it replaced), so
+        # a multi-node producer's chunks can arrive out of order; we reorder by
+        # the per-command sequence stamped on each DataChunk before dispatch.
+        self._chunk_reorder: dict[CommandId, _ChunkReorderState] = {}
         self._image_store = ImageStore(SKULK_IMAGE_CACHE_DIR)
         self._tg: TaskGroup = TaskGroup()
 
@@ -1755,6 +1796,9 @@ class API:
         if should_send_finished:
             await self._send(TaskFinished(finished_command_id=command_id))
         queue_map.pop(command_id, None)
+        # Drop the data-plane reorder buffer alongside the queue so a late chunk
+        # arriving after finalize is dropped (no queue) instead of leaking state.
+        self._chunk_reorder.pop(command_id, None)
 
     async def _token_chunk_stream(
         self, command_id: CommandId
@@ -3254,6 +3298,10 @@ class API:
                 # subscription is session-independent, so (unlike _apply_state)
                 # it is NOT re-spawned by reset().
                 tg.start_soon(self._apply_data)
+                # Releases reorder gaps stuck on a chunk dropped by the
+                # best-effort DATA topic (#279 Phase 2b); lifetime-scoped like
+                # _apply_data.
+                tg.start_soon(self._sweep_reorder_buffers)
                 tg.start_soon(self._pause_on_new_election)
                 tg.start_soon(self._cleanup_expired_images)
                 tg.start_soon(self._prune_old_traces)
@@ -3363,7 +3411,113 @@ class API:
             return
         with self._data_receiver as data_chunks:
             async for data in data_chunks:
-                await self._dispatch_generation_chunk(data.command_id, data.chunk)
+                await self._reorder_and_dispatch(
+                    data.command_id, data.sequence, data.chunk
+                )
+
+    def _command_has_queue(self, command_id: CommandId) -> bool:
+        return (
+            command_id in self._text_generation_queues
+            or command_id in self._image_generation_queues
+            or command_id in self._embedding_queues
+        )
+
+    async def _reorder_and_dispatch(
+        self, command_id: CommandId, sequence: int, chunk: GenerationChunk
+    ) -> None:
+        """Reorder a command's data-plane chunks by sequence, then dispatch.
+
+        The DATA gossip topic has no total order (it replaced the master event
+        ``idx`` that did), so a multi-node producer's per-token chunks can arrive
+        out of order at the owning API node, which silently transposed generation
+        output. We hold each command's chunks in a small per-command buffer and
+        release them strictly in ``sequence`` order. Late duplicates (below the
+        cursor) are dropped; if the buffer exceeds ``_MAX_CHUNK_REORDER_BUFFER``
+        (a genuinely dropped sequence on the best-effort topic) we skip past the
+        gap rather than stall. State is only created while the command has a live
+        stream queue, so a chunk arriving after the stream finalized is dropped
+        without leaking a buffer (the queue and buffer are cleared together).
+        """
+        if not self._command_has_queue(command_id):
+            return  # client gone / stream finalized: drop late chunk, no buffer
+        state = self._chunk_reorder.setdefault(command_id, _ChunkReorderState())
+        if sequence < state.next_seq:
+            return  # already delivered (duplicate / late re-send)
+        state.pending[sequence] = chunk
+        await self._drain_in_order(command_id, state)
+        # Emergency size cap: if the buffer runs away (a dropped sequence the
+        # later chunks keep piling up behind), skip the gap and keep draining.
+        # Looped so several gaps in one burst are all cleared in this call.
+        while len(state.pending) > _MAX_CHUNK_REORDER_BUFFER:
+            skipped_to = min(state.pending)
+            logger.warning(
+                f"Data-plane reorder buffer for command {command_id} exceeded "
+                f"{_MAX_CHUNK_REORDER_BUFFER}; a chunk was likely dropped on the "
+                f"best-effort DATA topic. Skipping seq {state.next_seq}..{skipped_to - 1}."
+            )
+            state.next_seq = skipped_to
+            await self._drain_in_order(command_id, state)
+        self._mark_reorder_gap(state)
+
+    @staticmethod
+    def _mark_reorder_gap(state: "_ChunkReorderState") -> None:
+        """Stamp the head-of-line gap's age, preserving it across new chunks.
+
+        The timer must measure how long *this* gap (the one at ``next_seq``) has
+        been stuck, not refresh on every chunk that arrives behind it — otherwise
+        a long stream with a dropped sequence never ages to the flush window. So
+        only (re)start the clock when there is no timer yet or the gap moved to a
+        new ``next_seq`` (the stream made progress).
+        """
+        if state.pending:
+            if state.gap_since is None or state.gap_at != state.next_seq:
+                state.gap_since = time.monotonic()
+                state.gap_at = state.next_seq
+        else:
+            state.gap_since = None
+            state.gap_at = None
+
+    async def _drain_in_order(
+        self, command_id: CommandId, state: "_ChunkReorderState"
+    ) -> None:
+        """Dispatch contiguous buffered chunks starting at ``next_seq``."""
+        while state.next_seq in state.pending:
+            ready = state.pending.pop(state.next_seq)
+            state.next_seq += 1
+            await self._dispatch_generation_chunk(command_id, ready)
+
+    async def _sweep_reorder_buffers(self) -> None:
+        """Release reorder gaps stuck waiting for a sequence dropped on the topic.
+
+        A genuine mesh reorder resolves in milliseconds; a gap older than
+        ``_REORDER_GAP_FLUSH_SECONDS`` means the missing sequence was dropped on
+        the best-effort DATA topic. Skipping ahead to the lowest buffered
+        sequence releases the held chunks (so the stream yields and its idle
+        backstop can arm) instead of hanging forever — the case the size cap
+        misses when no later chunk arrives to trigger it (#279 Phase 2b review).
+        """
+        while True:
+            await anyio.sleep(1.0)
+            await self._flush_stale_reorder_gaps(time.monotonic())
+
+    async def _flush_stale_reorder_gaps(self, now: float) -> None:
+        """One sweep pass: release reorder gaps older than the flush window."""
+        for command_id, state in list(self._chunk_reorder.items()):
+            if (
+                state.pending
+                and state.gap_since is not None
+                and now - state.gap_since > _REORDER_GAP_FLUSH_SECONDS
+            ):
+                skipped_to = min(state.pending)
+                logger.warning(
+                    f"Data-plane reorder gap for command {command_id} unfilled "
+                    f"for >{_REORDER_GAP_FLUSH_SECONDS:g}s (seq "
+                    f"{state.next_seq}..{skipped_to - 1} dropped on the "
+                    "best-effort DATA topic); releasing buffered chunks."
+                )
+                state.next_seq = skipped_to
+                await self._drain_in_order(command_id, state)
+                self._mark_reorder_gap(state)
 
     async def _dispatch_generation_chunk(
         self, command_id: CommandId, chunk: GenerationChunk

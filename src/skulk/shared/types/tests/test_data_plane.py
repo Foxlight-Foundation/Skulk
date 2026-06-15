@@ -26,9 +26,11 @@ def test_data_chunk_token_survives_topic_codec_round_trip() -> None:
             usage=None,
             finish_reason=None,
         ),
+        sequence=7,
     )
     restored = DATA.deserialize(DATA.serialize(msg))
     assert restored.command_id == CommandId("cmd-1")
+    assert restored.sequence == 7
     assert isinstance(restored.chunk, TokenChunk)
     assert restored.chunk.text == "hello"
     assert restored.chunk.token_id == 42
@@ -43,6 +45,7 @@ def test_data_chunk_error_survives_topic_codec_round_trip() -> None:
             model=ModelId("mlx-community/test"),
             error_message="runner shutdown before completing command",
         ),
+        sequence=0,
     )
     restored = DATA.deserialize(DATA.serialize(msg))
     assert isinstance(restored.chunk, ErrorChunk)

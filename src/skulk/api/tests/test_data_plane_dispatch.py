@@ -45,6 +45,172 @@ def _build_api() -> API:
 
 
 @pytest.mark.asyncio
+async def test_reorder_buffer_delivers_chunks_in_sequence_order() -> None:
+    # #279 Phase 2b: the DATA gossip topic has no total order, so a multi-node
+    # producer's chunks can arrive out of order. _reorder_and_dispatch must
+    # buffer by sequence and release in order. Feed 1,0,3,2 -> expect 0,1,2,3.
+    api = _build_api()
+    cmd = CommandId("cmd-reorder")
+    send, recv = channel[
+        TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk
+    ]()
+    api._text_generation_queues[cmd] = send  # pyright: ignore[reportPrivateUsage]
+
+    def tok(i: int) -> TokenChunk:
+        return TokenChunk(
+            model=ModelId("mlx-community/test"),
+            text=f"t{i}",
+            token_id=i,
+            usage=None,
+            finish_reason=None,
+        )
+
+    for seq in (1, 0, 3, 2):
+        await api._reorder_and_dispatch(cmd, seq, tok(seq))  # pyright: ignore[reportPrivateUsage]
+
+    got: list[int] = []
+    with recv as stream:
+        for _ in range(4):
+            c = stream.receive_nowait()
+            assert isinstance(c, TokenChunk)
+            got.append(c.token_id)
+    assert got == [0, 1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_reorder_buffer_drops_duplicate_and_late_sequences() -> None:
+    # A sequence at/below the cursor (duplicate or late re-send) must be dropped,
+    # not re-delivered.
+    api = _build_api()
+    cmd = CommandId("cmd-dup")
+    send, recv = channel[
+        TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk
+    ]()
+    api._text_generation_queues[cmd] = send  # pyright: ignore[reportPrivateUsage]
+
+    def tok(i: int) -> TokenChunk:
+        return TokenChunk(
+            model=ModelId("mlx-community/test"),
+            text=f"t{i}",
+            token_id=i,
+            usage=None,
+            finish_reason=None,
+        )
+
+    await api._reorder_and_dispatch(cmd, 0, tok(0))  # pyright: ignore[reportPrivateUsage]
+    await api._reorder_and_dispatch(cmd, 1, tok(1))  # pyright: ignore[reportPrivateUsage]
+    await api._reorder_and_dispatch(cmd, 0, tok(99))  # pyright: ignore[reportPrivateUsage]  # duplicate of 0
+
+    got: list[int] = []
+    with recv as stream:
+        for _ in range(2):
+            c = stream.receive_nowait()
+            assert isinstance(c, TokenChunk)
+            got.append(c.token_id)
+        assert got == [0, 1]
+        # the duplicate of seq 0 produced nothing more
+        with pytest.raises(anyio.WouldBlock):
+            stream.receive_nowait()
+
+
+@pytest.mark.asyncio
+async def test_reorder_gap_flush_releases_chunks_after_a_dropped_sequence() -> None:
+    # #301 review (Codex P2 + Copilot): if a sequence is dropped on the
+    # best-effort topic (especially seq 0), the size cap may never trigger and
+    # nothing is dispatched, so the stream hangs (its idle backstop never arms
+    # because no chunk was yielded). The periodic gap sweep must release the
+    # chunks behind a stale gap. Here seq 0 is "dropped"; 1,2 buffer; the sweep
+    # then skips the gap and delivers 1,2.
+    api = _build_api()
+    cmd = CommandId("cmd-gap")
+    send, recv = channel[
+        TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk
+    ]()
+    api._text_generation_queues[cmd] = send  # pyright: ignore[reportPrivateUsage]
+
+    def tok(i: int) -> TokenChunk:
+        return TokenChunk(
+            model=ModelId("mlx-community/test"),
+            text=f"t{i}",
+            token_id=i,
+            usage=None,
+            finish_reason=None,
+        )
+
+    # seq 0 never arrives; 1 and 2 buffer behind the gap -> nothing dispatched
+    await api._reorder_and_dispatch(cmd, 1, tok(1))  # pyright: ignore[reportPrivateUsage]
+    await api._reorder_and_dispatch(cmd, 2, tok(2))  # pyright: ignore[reportPrivateUsage]
+    with recv as stream:
+        with pytest.raises(anyio.WouldBlock):
+            stream.receive_nowait()  # confirm the gap holds everything
+
+        # age the gap past the flush window and run one sweep pass
+        state = api._chunk_reorder[cmd]  # pyright: ignore[reportPrivateUsage]
+        assert state.gap_since is not None
+        flush_window = api_main._REORDER_GAP_FLUSH_SECONDS  # pyright: ignore[reportPrivateUsage]
+        await api._flush_stale_reorder_gaps(  # pyright: ignore[reportPrivateUsage]
+            state.gap_since + flush_window + 1.0
+        )
+
+        got: list[int] = []
+        for _ in range(2):
+            c = stream.receive_nowait()
+            assert isinstance(c, TokenChunk)
+            got.append(c.token_id)
+        assert got == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_reorder_gap_timer_not_refreshed_by_later_chunks() -> None:
+    # #301 review (Codex P2): the gap timer must measure how long THIS gap has
+    # been stuck, not refresh on every chunk that arrives behind it — else a
+    # stream that keeps receiving later chunks (with a dropped early seq) never
+    # ages to the flush window. Feeding 1 then 2 (gap at 0) must keep the same
+    # gap_since.
+    api = _build_api()
+    cmd = CommandId("cmd-gap-timer")
+    send, _recv = channel[
+        TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk
+    ]()
+    api._text_generation_queues[cmd] = send  # pyright: ignore[reportPrivateUsage]
+
+    def tok(i: int) -> TokenChunk:
+        return TokenChunk(
+            model=ModelId("mlx-community/test"),
+            text=f"t{i}",
+            token_id=i,
+            usage=None,
+            finish_reason=None,
+        )
+
+    await api._reorder_and_dispatch(cmd, 1, tok(1))  # pyright: ignore[reportPrivateUsage]
+    first_gap_since = api._chunk_reorder[cmd].gap_since  # pyright: ignore[reportPrivateUsage]
+    assert first_gap_since is not None
+    assert api._chunk_reorder[cmd].gap_at == 0  # pyright: ignore[reportPrivateUsage]
+
+    await api._reorder_and_dispatch(cmd, 2, tok(2))  # pyright: ignore[reportPrivateUsage]
+    # same head-of-line gap (still waiting on seq 0): timer preserved, not reset
+    assert api._chunk_reorder[cmd].gap_since == first_gap_since  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_reorder_state_dropped_when_no_queue() -> None:
+    # A chunk for a command with no live stream queue (finalized / client gone)
+    # must be dropped without creating a lingering reorder buffer.
+    api = _build_api()
+    cmd = CommandId("cmd-gone")
+    chunk = TokenChunk(
+        model=ModelId("mlx-community/test"),
+        text="late",
+        token_id=5,
+        usage=None,
+        finish_reason="stop",
+    )
+    await api._reorder_and_dispatch(cmd, 3, chunk)  # pyright: ignore[reportPrivateUsage]
+    assert cmd not in api._chunk_reorder  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
 async def test_dispatch_routes_token_chunk_to_text_queue() -> None:
     api = _build_api()
     cmd = CommandId("cmd-text")
