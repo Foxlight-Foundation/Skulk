@@ -5,6 +5,7 @@
 //!
 pub mod discovery;
 pub mod swarm;
+pub mod zenoh_session;
 
 /// Namespace for all the type/trait aliases used by this crate.
 pub(crate) mod alias {
