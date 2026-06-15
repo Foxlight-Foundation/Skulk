@@ -153,10 +153,31 @@ class Node:
         keypair = get_node_id_keypair()
         node_id = NodeId(keypair.to_node_id())
         session_id = SessionId(master_node_id=node_id, election_clock=0)
+        # Experimental zenoh data plane (#279 follow-on, default OFF). When
+        # SKULK_ZENOH_DATA_PLANE is truthy the DATA topic (per-token output)
+        # rides a Zenoh peer session instead of gossipsub; all other planes stay
+        # on libp2p. Endpoints are per-node (multicast off), so they come from
+        # the environment, not the gossip-synced config. The fleet runs
+        # gossipsub until this is proven in production.
+        _zenoh_on = os.environ.get("SKULK_ZENOH_DATA_PLANE", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         router = Router.create(
             keypair,
             bootstrap_peers=args.bootstrap_peers,
             listen_port=args.libp2p_port,
+            zenoh_listen_endpoints=(
+                [os.environ.get("SKULK_ZENOH_LISTEN", "tcp/0.0.0.0:7447")]
+                if _zenoh_on
+                else None
+            ),
+            zenoh_connect_endpoints=[
+                endpoint
+                for endpoint in os.environ.get("SKULK_ZENOH_CONNECT", "").split(",")
+                if endpoint
+            ],
         )
         await router.register_topic(topics.GLOBAL_EVENTS)
         await router.register_topic(topics.LOCAL_EVENTS)

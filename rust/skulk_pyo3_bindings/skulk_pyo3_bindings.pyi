@@ -42,7 +42,7 @@ class MessageTooLargeError(builtins.Exception):
 
 @typing.final
 class NetworkingHandle:
-    def __new__(cls, identity: Keypair, bootstrap_peers: typing.Sequence[builtins.str], listen_port: builtins.int) -> NetworkingHandle: ...
+    def __new__(cls, identity: Keypair, bootstrap_peers: typing.Optional[typing.Sequence[builtins.str]] = None, listen_port: builtins.int = 0) -> NetworkingHandle: ...
     async def gossipsub_subscribe(self, topic: builtins.str) -> builtins.bool:
         r"""
         Subscribe to a `GossipSub` topic.
@@ -91,4 +91,37 @@ class PyFromSwarm:
         def __new__(cls, origin: builtins.str, topic: builtins.str, data: bytes) -> PyFromSwarm.Message: ...
     
     ...
+
+@typing.final
+class ZenohHandle:
+    r"""
+    Handle to the Zenoh peer session backing the data plane (Phase 1).
+    
+    Separate from [`PyNetworkingHandle`] (libp2p): only the DATA topic is routed
+    here when the `zenoh_data_plane` flag is on. Methods mirror the gossipsub
+    surface (subscribe / publish / recv) so the Python `Router` can treat it as
+    an alternate transport backend.
+    """
+    def __new__(cls, listen_endpoints: typing.Optional[typing.Sequence[builtins.str]] = None, connect_endpoints: typing.Optional[typing.Sequence[builtins.str]] = None) -> ZenohHandle: ...
+    async def zenoh_subscribe(self, topic: builtins.str) -> None:
+        r"""
+        Subscribe to a Zenoh key (topic). Idempotent.
+        """
+    async def zenoh_publish(self, topic: builtins.str, data: bytes) -> None:
+        r"""
+        Publish `data` on a Zenoh key (Reliable + Block + single priority).
+        """
+    async def recv(self) -> ZenohMessage: ...
+
+@typing.final
+class ZenohMessage:
+    r"""
+    One inbound Zenoh sample handed to Python: the key (topic) it arrived on and
+    its raw payload. Mirrors the `Message` arm of [`PyFromSwarm`]; the data-plane
+    consumer demuxes by the `command_id` carried inside `data`.
+    """
+    @property
+    def topic(self) -> builtins.str: ...
+    @property
+    def data(self) -> bytes: ...
 

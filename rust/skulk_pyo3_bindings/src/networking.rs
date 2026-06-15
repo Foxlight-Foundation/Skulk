@@ -398,7 +398,7 @@ pyo3_stub_gen::inventory::submit! {
     gen_methods_from_python! {
         r#"
             class PyZenohHandle:
-                async def recv() -> PyZenohMessage: ...
+                async def recv() -> ZenohMessage: ...
         "#
     }
 }

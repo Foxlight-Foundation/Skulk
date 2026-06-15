@@ -22,6 +22,7 @@ from skulk_pyo3_bindings import (
     NetworkingHandle,
     NoPeersSubscribedToTopicError,
     PyFromSwarm,
+    ZenohHandle,
 )
 
 from skulk.shared.constants import SKULK_NODE_ID_KEYPAIR
@@ -30,7 +31,7 @@ from skulk.utils.pydantic_ext import CamelCaseModel
 from skulk.utils.task_group import TaskGroup
 
 from .connection_message import ConnectionMessage
-from .topics import CONNECTION_MESSAGES, PublishPolicy, TypedTopic
+from .topics import CONNECTION_MESSAGES, DATA, PublishPolicy, TypedTopic
 
 
 # A significant current limitation of the TopicRouter is that it is not capable
@@ -134,19 +135,37 @@ class Router:
         identity: Keypair,
         bootstrap_peers: Sequence[str] = (),
         listen_port: int = 0,
+        zenoh_listen_endpoints: Sequence[str] | None = None,
+        zenoh_connect_endpoints: Sequence[str] = (),
     ) -> "Router":
+        # When zenoh_listen_endpoints is provided the data plane (DATA topic)
+        # rides a Zenoh peer session instead of gossipsub (the zenoh_data_plane
+        # flag, decided by the caller). All other topics stay on libp2p.
+        zenoh: ZenohHandle | None = None
+        if zenoh_listen_endpoints is not None:
+            zenoh = ZenohHandle(
+                list(zenoh_listen_endpoints), list(zenoh_connect_endpoints)
+            )
         return cls(
-            handle=NetworkingHandle(identity, list(bootstrap_peers), listen_port)
+            handle=NetworkingHandle(identity, list(bootstrap_peers), listen_port),
+            zenoh=zenoh,
         )
 
-    def __init__(self, handle: NetworkingHandle):
+    def __init__(self, handle: NetworkingHandle, zenoh: ZenohHandle | None = None):
         self.topic_routers: dict[str, TopicRouter[CamelCaseModel]] = {}
         send, recv = channel[tuple[str, bytes]]()
         self.networking_receiver: Receiver[tuple[str, bytes]] = recv
         self._net: NetworkingHandle = handle
+        # Optional Zenoh transport for the data plane; None keeps everything on
+        # gossipsub (default, until the flag is proven in production).
+        self._zenoh: ZenohHandle | None = zenoh
         self._tmp_networking_sender: Sender[tuple[str, bytes]] | None = send
         self._id_count = count()
         self._tg: TaskGroup = TaskGroup()
+
+    def _uses_zenoh(self, topic: str) -> bool:
+        """Whether ``topic`` is routed over the Zenoh data plane (DATA only)."""
+        return self._zenoh is not None and topic == DATA.topic
 
     async def register_topic[T: CamelCaseModel](self, topic: TypedTopic[T]):
         send = self._tmp_networking_sender
@@ -203,6 +222,8 @@ class Router:
                     tg.start_soon(router.run)
                 tg.start_soon(self._networking_recv)
                 tg.start_soon(self._networking_publish)
+                if self._zenoh is not None:
+                    tg.start_soon(self._zenoh_recv)
                 # subscribe to pending topics
                 for topic in self.topic_routers:
                     await self._networking_subscribe(topic)
@@ -218,12 +239,47 @@ class Router:
         self._tg.cancel_tasks()
 
     async def _networking_subscribe(self, topic: str):
+        if self._uses_zenoh(topic):
+            assert self._zenoh is not None
+            await self._zenoh.zenoh_subscribe(topic)
+            logger.info(f"Subscribed to {topic} (zenoh data plane)")
+            return
         await self._net.gossipsub_subscribe(topic)
         logger.info(f"Subscribed to {topic}")
 
     async def _networking_unsubscribe(self, topic: str):
+        if self._uses_zenoh(topic):
+            # Zenoh subscribers are undeclared when the session closes; there is
+            # no per-topic unsubscribe to issue here.
+            return
         await self._net.gossipsub_unsubscribe(topic)
         logger.info(f"Unsubscribed from {topic}")
+
+    async def _zenoh_recv(self):
+        """Drain inbound DATA-plane samples from Zenoh into their topic router.
+
+        Parallel to :meth:`_networking_recv` (which handles the gossipsub
+        planes). Demux is by the ``command_id`` inside the payload, done
+        downstream in the DATA topic's consumer, exactly as on gossipsub.
+        """
+        assert self._zenoh is not None
+        try:
+            while True:
+                message = await self._zenoh.recv()
+                topic = message.topic
+                if topic not in self.topic_routers:
+                    logger.warning(
+                        f"Received zenoh message on unknown or inactive topic {topic}"
+                    )
+                    continue
+                # No origin peer id on the zenoh data plane; the data plane does
+                # not use origin (output chunks never mutate State).
+                await self.topic_routers[topic].publish_bytes(message.data, None)
+        except Exception as exception:
+            logger.opt(exception=exception).error(
+                "Zenoh data-plane receive loop terminated unexpectedly"
+            )
+            raise
 
     async def _networking_recv(self):
         try:
@@ -271,6 +327,10 @@ class Router:
                         logger.warning(
                             "Sending overlarge payload, network performance may be temporarily degraded"
                         )
+                    if self._uses_zenoh(topic):
+                        assert self._zenoh is not None
+                        await self._zenoh.zenoh_publish(topic, data)
+                        continue
                     await self._net.gossipsub_publish(topic, data)
                 except NoPeersSubscribedToTopicError:
                     pass
