@@ -1740,12 +1740,17 @@ class API:
             ]()
 
             with recv as token_chunks:
+                # Idle backstop (#279 Phase 2b): the DATA plane is best-effort, so
+                # a dropped chunk could hang this receive forever. The idle timer
+                # applies ONLY once streaming has started (after the first chunk)
+                # and measures the gap BETWEEN chunks — wrapping just the receive,
+                # not the yield. It deliberately does NOT bound time-to-first
+                # chunk: a request can sit in the runner queue behind a long
+                # decode, or in a slow prefill, for an unbounded time, and the
+                # control plane (TaskFailed -> _terminate_command_stream) already
+                # covers instance death. So this only fires on a mid-stream stall.
+                started = False
                 while True:
-                    # Idle backstop (#279 Phase 2b): wrap ONLY the receive so the
-                    # timeout measures producer silence, not a slow client. A
-                    # dropped final data-plane chunk would otherwise hang here
-                    # forever; on a genuine stall, emit a terminal error so the
-                    # response closes cleanly.
                     chunk: (
                         TokenChunk
                         | ErrorChunk
@@ -1753,18 +1758,33 @@ class API:
                         | PrefillProgressChunk
                         | None
                     ) = None
-                    with anyio.move_on_after(_STREAM_IDLE_TIMEOUT_SECONDS) as scope:
+                    delay = _STREAM_IDLE_TIMEOUT_SECONDS if started else None
+                    with anyio.move_on_after(delay) as scope:
                         try:
                             chunk = await token_chunks.receive()
                         except (EndOfStream, ClosedResourceError):
                             return  # producer closed normally
-                    if scope.cancelled_caught or chunk is None:
+                    if scope.cancelled_caught:
+                        # Mid-stream stall. Treat as a cancellation, not a clean
+                        # finish: mark the command cancelled so _finalize suppresses
+                        # TaskFinished, and send TaskCancelled so the master tears
+                        # the (possibly still-running) task down and the runner is
+                        # cancelled — otherwise we'd orphan an in-flight runner task.
                         logger.warning(
                             f"Token stream for command {command_id} idle for "
-                            f">{int(_STREAM_IDLE_TIMEOUT_SECONDS)}s; closing with a "
-                            "terminal error (a data-plane chunk may have been "
-                            "dropped)."
+                            f">{int(_STREAM_IDLE_TIMEOUT_SECONDS)}s mid-stream; "
+                            "cancelling (a data-plane chunk may have been dropped)."
                         )
+                        self._cancelled_command_ids.add(command_id)
+                        with anyio.CancelScope(shield=True):
+                            await self.command_sender.send(
+                                ForwarderCommand(
+                                    origin=self._system_id,
+                                    command=TaskCancelled(
+                                        cancelled_command_id=command_id
+                                    ),
+                                )
+                            )
                         yield ErrorChunk(
                             model=ModelId("unknown"),
                             error_message=(
@@ -1774,6 +1794,8 @@ class API:
                             ),
                         )
                         return
+                    assert chunk is not None  # not timed out and not EndOfStream
+                    started = True
                     yield chunk
                     if isinstance(chunk, PrefillProgressChunk):
                         continue

@@ -148,24 +148,86 @@ async def test_dispatch_for_unknown_command_is_a_noop() -> None:
 
 
 @pytest.mark.asyncio
-async def test_token_stream_stall_yields_terminal_error(
+async def test_token_stream_stall_after_first_chunk_cancels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # #279 Phase 2b backstop: the DATA plane is best-effort, so a dropped final
-    # chunk would leave _token_chunk_stream blocked on receive() forever. With no
-    # producer, the idle timeout must fire, yield a terminal ErrorChunk, and end
-    # the stream (NOT hang). fail_after is the anti-hang guard.
+    # #279 Phase 2b backstop: once streaming has started, a dropped chunk would
+    # leave _token_chunk_stream blocked on receive() forever. Feed one chunk
+    # (started=True), then go silent: the idle timeout must fire, send a
+    # TaskCancelled (not TaskFinished — don't orphan the runner), yield a terminal
+    # ErrorChunk, and end the stream. fail_after is the anti-hang guard.
     monkeypatch.setattr(api_main, "_STREAM_IDLE_TIMEOUT_SECONDS", 0.15)
     api = _build_api()
-    api._send = AsyncMock()  # pyright: ignore[reportPrivateUsage]  # avoid finalize blocking on the dead test channel
+    finish_send = AsyncMock()
+    cancel_send = AsyncMock()
+    api._send = finish_send  # pyright: ignore[reportPrivateUsage]  # finalize: suppress real channel send
+    api.command_sender = cancel_send  # stall path sends TaskCancelled here
     cmd = CommandId("cmd-stall")
 
     chunks: list[object] = []
     with anyio.fail_after(5):
-        async for ch in api._token_chunk_stream(cmd):  # pyright: ignore[reportPrivateUsage]
-            chunks.append(ch)
+        async with anyio.create_task_group() as tg:
 
-    assert len(chunks) == 1
-    assert isinstance(chunks[0], ErrorChunk)
-    assert "stall" in chunks[0].error_message.lower()
+            async def consume() -> None:
+                async for ch in api._token_chunk_stream(cmd):  # pyright: ignore[reportPrivateUsage]
+                    chunks.append(ch)
+
+            tg.start_soon(consume)
+            # wait for the generator to register its per-command queue, then feed
+            # exactly one chunk so the stream is "started", then go silent.
+            while cmd not in api._text_generation_queues:  # pyright: ignore[reportPrivateUsage]
+                await anyio.sleep(0.005)
+            await api._text_generation_queues[cmd].send(  # pyright: ignore[reportPrivateUsage]
+                TokenChunk(
+                    model=ModelId("mlx-community/test"),
+                    text="hi",
+                    token_id=1,
+                    usage=None,
+                    finish_reason=None,
+                )
+            )
+
+    # first the delivered token, then the synthetic terminal error
+    assert len(chunks) == 2
+    assert isinstance(chunks[0], TokenChunk)
+    assert isinstance(chunks[1], ErrorChunk)
+    assert "stall" in chunks[1].error_message.lower()
+    # stall is treated as a cancellation (TaskCancelled sent on the command
+    # channel), NOT a clean finish (finalize's TaskFinished suppressed because the
+    # command was marked cancelled) — so the runner isn't orphaned.
+    cancel_send.send.assert_awaited()  # pyright: ignore[reportAny]
+    finish_send.assert_not_awaited()
     assert cmd not in api._text_generation_queues  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_token_stream_does_not_timeout_before_first_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A request queued behind a long decode (no chunk yet) must NOT be timed out
+    # (Codex P1): with a tiny idle timeout and no chunk delivered, the stream
+    # stays open until we close the producer (EndOfStream) — no spurious error.
+    monkeypatch.setattr(api_main, "_STREAM_IDLE_TIMEOUT_SECONDS", 0.05)
+    api = _build_api()
+    api._send = AsyncMock()  # pyright: ignore[reportPrivateUsage]
+    cmd = CommandId("cmd-queued")
+
+    chunks: list[object] = []
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tg:
+
+            async def consume() -> None:
+                async for ch in api._token_chunk_stream(cmd):  # pyright: ignore[reportPrivateUsage]
+                    chunks.append(ch)
+
+            tg.start_soon(consume)
+            while cmd not in api._text_generation_queues:  # pyright: ignore[reportPrivateUsage]
+                await anyio.sleep(0.005)
+            # stay silent well past the idle timeout; must NOT yield an error
+            await anyio.sleep(0.3)
+            assert chunks == []  # no spurious stall before the first chunk
+            # close the producer to end the stream cleanly
+            api._text_generation_queues[cmd].close()  # pyright: ignore[reportPrivateUsage]
+
+    assert chunks == []  # EndOfStream -> clean return, no error chunk
+    assert cmd not in api._cancelled_command_ids  # pyright: ignore[reportPrivateUsage]
