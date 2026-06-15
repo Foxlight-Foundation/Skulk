@@ -1,7 +1,7 @@
-from skulk.shared.apply import apply_instance_deleted
+from skulk.shared.apply import apply_instance_deleted, apply_runner_status_updated
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.common import NodeId
-from skulk.shared.types.events import InstanceDeleted
+from skulk.shared.types.events import InstanceDeleted, RunnerStatusUpdated
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
@@ -97,6 +97,39 @@ def test_apply_instance_deleted_removes_its_runner_records() -> None:
     assert runner_b not in new_state.runners
     assert survivor_runner in new_state.runners
     assert len(new_state.runners) == 1
+
+
+def test_runner_status_update_does_not_resurrect_a_deleted_instances_runner() -> None:
+    """A late RunnerShuttingDown after InstanceDeleted must not re-add the record.
+
+    This is the other half of the leak: even after apply_instance_deleted drops
+    the runner records, the worker's teardown emits a RunnerShuttingDown status
+    that races behind the deletion. Without the guard it re-adds a record that
+    never gets a terminal RunnerShutdown to clear it (that final status is
+    routinely lost when the supervisor's forwarder is cancelled), so the record
+    leaks. apply_runner_status_updated now ignores updates for a runner that no
+    longer belongs to any instance.
+    """
+    model_id = ModelId("mlx-community/gemma-4-26b-a4b-it-4bit")
+    runner_a = RunnerId("runner-a")
+    doomed = _make_instance(
+        InstanceId("doomed"), model_id, {NodeId("node-a"): runner_a}
+    )
+    state = State(instances={InstanceId("doomed"): doomed}, runners={})
+
+    # delete the instance (drops any runner records + the instance)
+    state = apply_instance_deleted(
+        InstanceDeleted(instance_id=InstanceId("doomed")), state
+    )
+    assert runner_a not in state.runners
+
+    # the straggler RunnerShuttingDown arrives afterward — must be ignored
+    state = apply_runner_status_updated(
+        RunnerStatusUpdated(runner_id=runner_a, runner_status=RunnerShuttingDown()),
+        state,
+    )
+    assert runner_a not in state.runners
+    assert len(state.runners) == 0
 
 
 def test_apply_instance_deleted_unknown_instance_is_a_noop() -> None:

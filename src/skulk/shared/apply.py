@@ -244,6 +244,21 @@ def apply_runner_status_updated(event: RunnerStatusUpdated, state: State) -> Sta
             rid: rs for rid, rs in state.runners.items() if rid != event.runner_id
         }
         return state.model_copy(update={"runners": new_runners})
+    # Don't resurrect a record for a runner that no longer belongs to any
+    # instance. During teardown the worker emits a RunnerShuttingDown status that
+    # races behind InstanceDeleted; without this guard it re-adds a runner record
+    # that then never receives its terminal RunnerShutdown (that final status is
+    # routinely lost when the supervisor's event forwarder is cancelled on
+    # shutdown), so State.runners grows without bound. A status update for a live
+    # runner always has its instance present (CreateRunner is planned only after
+    # the instance exists, and events apply in order), so this only drops the
+    # post-deletion stragglers.
+    runner_belongs_to_an_instance = any(
+        event.runner_id in instance.shard_assignments.runner_to_shard
+        for instance in state.instances.values()
+    )
+    if not runner_belongs_to_an_instance:
+        return state
     new_runners = {
         **state.runners,
         event.runner_id: event.runner_status,

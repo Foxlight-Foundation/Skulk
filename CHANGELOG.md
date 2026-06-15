@@ -19,11 +19,13 @@ This project records release notes here and mirrors public-facing notes in
   outright. Every instance delete therefore leaked one `RunnerShuttingDown`
   record per rank (one per node for a multi-node instance), so `State.runners`
   grew without bound over the cluster's lifetime, bloating state-sync snapshots.
-  `apply_instance_deleted` now prunes the deleted instance's runner records
-  directly (mirroring `apply_node_timed_out`), making deletion atomic and
-  independent of the shutdown handshake. The actual runner-process teardown is
-  driven separately by the Shutdown task, so dropping the status record early is
-  safe.
+  Two changes close it: `apply_instance_deleted` now prunes the deleted
+  instance's runner records directly (mirroring `apply_node_timed_out`), and
+  `apply_runner_status_updated` ignores updates for a runner that belongs to no
+  instance, so the late `RunnerShuttingDown` that races behind `InstanceDeleted`
+  can no longer resurrect the record. Deletion is now atomic and independent of
+  the shutdown handshake. The actual runner-process teardown is driven
+  separately by the Shutdown task, so dropping the status record early is safe.
 
 - **Master failover no longer silently kills a healthy serving instance on a
   memory-tight node.** On a master-election transition the winning node tears
