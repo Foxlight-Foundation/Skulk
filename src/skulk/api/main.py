@@ -2097,7 +2097,7 @@ class API:
             )
         images = task_params.images
         if not images:
-            command = TextGeneration(task_params=task_params)
+            command = TextGeneration(task_params=task_params, owner_node=self.node_id)
             await self._send(command)
             return command
 
@@ -2138,7 +2138,7 @@ class API:
             task_params = task_params.model_copy(
                 update={"images": [], "image_hashes": cached_hashes}
             )
-            command = TextGeneration(task_params=task_params)
+            command = TextGeneration(task_params=task_params, owner_node=self.node_id)
             await self._send(command)
             return command
 
@@ -2155,7 +2155,7 @@ class API:
                 "image_count": len(new_images),
             }
         )
-        command = TextGeneration(task_params=task_params)
+        command = TextGeneration(task_params=task_params, owner_node=self.node_id)
 
         for global_idx, (img_idx, chunk_data) in enumerate(all_chunks):
             await self._send(
@@ -2373,6 +2373,7 @@ class API:
         )
 
         command = ImageGeneration(
+            owner_node=self.node_id,
             task_params=payload,
         )
         await self._send(command)
@@ -2659,6 +2660,7 @@ class API:
         )
 
         command = ImageGeneration(
+            owner_node=self.node_id,
             task_params=payload,
         )
         await self._send(command)
@@ -2702,6 +2704,7 @@ class API:
         total_chunks = len(data_chunks)
 
         command = ImageEdits(
+            owner_node=self.node_id,
             task_params=ImageEditsTaskParams(
                 image_data="",
                 total_input_chunks=total_chunks,
@@ -5493,6 +5496,7 @@ class API:
 
         model_id = await self._validate_embedding_model(ModelId(request.model))
         command = TextEmbedding(
+            owner_node=self.node_id,
             task_params=TextEmbeddingTaskParams(
                 model=model_id,
                 input_texts=texts,

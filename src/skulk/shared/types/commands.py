@@ -22,20 +22,29 @@ class TestCommand(BaseCommand):
     __test__ = False
 
 
+# The API node that submits a serving command owns the resulting output stream.
+# It stamps its own node id here so the master can carry it onto the worker task,
+# letting the rank-0 supervisor address output chunks to this node over the Zenoh
+# data plane (data/<owner_node>) instead of fanning out (#279 Phase 2). Optional
+# so the gossipsub data path (no per-owner key) is unaffected.
 class TextGeneration(BaseCommand):
     task_params: TextGenerationTaskParams
+    owner_node: NodeId | None = None
 
 
 class ImageGeneration(BaseCommand):
     task_params: ImageGenerationTaskParams
+    owner_node: NodeId | None = None
 
 
 class ImageEdits(BaseCommand):
     task_params: ImageEditsTaskParams
+    owner_node: NodeId | None = None
 
 
 class TextEmbedding(BaseCommand):
     task_params: TextEmbeddingTaskParams
+    owner_node: NodeId | None = None
 
 
 class SetTracingEnabled(BaseCommand):

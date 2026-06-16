@@ -16,7 +16,7 @@ from anyio import (
 from loguru import logger
 
 from skulk.shared.types.chunks import DataChunk, EmbeddingChunk, ErrorChunk
-from skulk.shared.types.common import CommandId
+from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.diagnostics import (
     MlxMemorySnapshot,
     RunnerDiagnosticContext,
@@ -132,6 +132,13 @@ class RunnerSupervisor:
     # _forward_events reads the runner's events in generation order, so the
     # counter assigned here is the true order.
     _chunk_sequence: dict[CommandId, int] = field(default_factory=dict, init=False)
+    # The owning API node for each in-flight serving command (#279 Phase 2).
+    # Populated when a serving task is submitted (the master stamps the task with
+    # the API node that owns the command), read in _emit to address each DataChunk
+    # to that node over the Zenoh data plane. Same lifecycle as _chunk_sequence:
+    # dropped on the terminal chunk or terminal task status. Empty for the
+    # gossipsub path (owner_node is None), which keys by the bare topic.
+    _command_owner: dict[CommandId, NodeId] = field(default_factory=dict, init=False)
     _cancel_watch_runner: anyio.CancelScope = field(
         default_factory=anyio.CancelScope, init=False
     )
@@ -225,7 +232,10 @@ class RunnerSupervisor:
             seq = self._chunk_sequence.get(event.command_id, 0)
             await self._data_sender.send(
                 DataChunk(
-                    command_id=event.command_id, chunk=event.chunk, sequence=seq
+                    command_id=event.command_id,
+                    chunk=event.chunk,
+                    sequence=seq,
+                    owner_node=self._command_owner.get(event.command_id),
                 )
             )
             # Drop the per-command counter on the terminal chunk so a long-lived
@@ -237,6 +247,7 @@ class RunnerSupervisor:
             )
             if chunk_finished:
                 self._chunk_sequence.pop(event.command_id, None)
+                self._command_owner.pop(event.command_id, None)
             else:
                 self._chunk_sequence[event.command_id] = seq + 1
         else:
@@ -335,6 +346,17 @@ class RunnerSupervisor:
         event = anyio.Event()
         self.pending[task.task_id] = event
         self.in_progress[task.task_id] = task
+        # Record the owning API node so _emit can address this command's output
+        # chunks to it over the Zenoh data plane (#279 Phase 2). Set before the
+        # task is dispatched to the runner, which is what may begin emitting.
+        if (
+            isinstance(
+                task,
+                (TextGeneration, ImageGeneration, ImageEdits, TextEmbedding),
+            )
+            and task.owner_node is not None
+        ):
+            self._command_owner[task.command_id] = task.owner_node
         self._last_task_sent_at = _now_utc_iso()
         self._record_milestone(
             "task_sent",
@@ -443,6 +465,7 @@ class RunnerSupervisor:
                             ),
                         ):
                             self._chunk_sequence.pop(ending_task.command_id, None)
+                            self._command_owner.pop(ending_task.command_id, None)
                         self.in_progress.pop(event.task_id, None)
                         if event.task_status == TaskStatus.Complete:
                             self.completed.add(event.task_id)

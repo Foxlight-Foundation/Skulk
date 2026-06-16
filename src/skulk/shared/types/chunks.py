@@ -12,7 +12,7 @@ from skulk.api.types import (
 from skulk.shared.models.model_cards import ModelId
 from skulk.utils.pydantic_ext import CamelCaseModel, TaggedModel
 
-from .common import CommandId
+from .common import CommandId, NodeId
 
 
 class BaseChunk(TaggedModel):
@@ -126,3 +126,12 @@ class DataChunk(CamelCaseModel):
     command_id: CommandId
     chunk: GenerationChunk
     sequence: int
+    owner_node: NodeId | None = None
+    """The API node that owns this command (#279 Phase 2).
+
+    Set by the API at command creation and carried through the serving task to
+    the producing rank-0 supervisor, which stamps it here. When the Zenoh data
+    plane routes per-owner (`data/<owner_node>`), this addresses the chunk to the
+    owning API node so non-owning nodes receive none of it (killing the gossip
+    fan-out). ``None`` on the gossipsub path, which keys by the bare topic.
+    """
