@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 # datastructures
 either = { workspace = true }
+zenoh = { workspace = true }
 
 # macro dependencies
 extend = { workspace = true }

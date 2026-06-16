@@ -7,6 +7,21 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- **Optional Eclipse Zenoh transport for the data plane (experimental, default
+  off).** When `SKULK_ZENOH_DATA_PLANE` is set, the `DATA` topic (per-token
+  generation output) rides a Zenoh `peer` session instead of gossipsub; control,
+  telemetry, and election planes stay on libp2p. Endpoints are per-node and
+  explicit via `SKULK_ZENOH_LISTEN` / `SKULK_ZENOH_CONNECT` (multicast scouting
+  off, gossip on, the macOS Local Network Privacy-safe posture). The swap is
+  transparent above the transport: `DataChunk`, the per-command `sequence`, and
+  the reorder buffer are unchanged, so the two transports are interchangeable
+  behind the flag. Publishers use `Reliable` + `Block` on a single priority for
+  per-key FIFO. With the flag unset, behavior is identical to before. Foundation
+  for #279's data-plane evolution (later phases: per-command unicast to drop the
+  fan-out, and removing the app-layer reorder buffer once ordering is relied on).
+
 ### Fixed
 
 - **The failover-seed event round-trips through the disk event log again.** A

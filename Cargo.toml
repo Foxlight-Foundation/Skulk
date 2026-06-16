@@ -44,6 +44,10 @@ log = "0.4"
 # networking
 libp2p = "0.56"
 libp2p-tcp = "0.44"
+# Zenoh: data-plane transport (Phase 1, flag-gated). `unstable` exposes the
+# reliability/QoS knobs the per-token stream relies on (Reliable + single
+# priority for in-order delivery). Pinned minor; the fleet runs one version.
+zenoh = { version = "1.9", features = ["unstable"] }
 
 [workspace.lints.rust]
 static_mut_refs = "warn"      # Or use "warn" instead of deny

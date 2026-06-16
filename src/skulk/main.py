@@ -153,10 +153,47 @@ class Node:
         keypair = get_node_id_keypair()
         node_id = NodeId(keypair.to_node_id())
         session_id = SessionId(master_node_id=node_id, election_clock=0)
+        # Experimental zenoh data plane (#279 follow-on, default OFF). When
+        # SKULK_ZENOH_DATA_PLANE is truthy the DATA topic (per-token output)
+        # rides a Zenoh peer session instead of gossipsub; all other planes stay
+        # on libp2p. Endpoints are per-node (multicast off), so they come from
+        # the environment, not the gossip-synced config. The fleet runs
+        # gossipsub until this is proven in production.
+        _zenoh_on = os.environ.get("SKULK_ZENOH_DATA_PLANE", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        # Strip whitespace and ignore empty entries so a stray space or an empty
+        # SKULK_ZENOH_LISTEN (e.g. `export SKULK_ZENOH_LISTEN=`) doesn't become a
+        # bogus endpoint; an empty/whitespace listen falls back to the default.
+        _zenoh_listen = (
+            os.environ.get("SKULK_ZENOH_LISTEN", "").strip() or "tcp/0.0.0.0:7447"
+        )
+        _zenoh_connect = [
+            endpoint.strip()
+            for endpoint in os.environ.get("SKULK_ZENOH_CONNECT", "").split(",")
+            if endpoint.strip()
+        ]
+        if _zenoh_on:
+            # The Zenoh data plane currently has no auth/TLS/ACL/namespace, and
+            # the default listen binds all interfaces, so any host that can reach
+            # the port can subscribe to `data` and read generation output. Run
+            # only on a trusted, firewalled network until that is hardened
+            # (#308); the flag is experimental and off by default for this
+            # reason.
+            logger.warning(
+                f"SKULK_ZENOH_DATA_PLANE is ENABLED (experimental): generation "
+                f"output is served over Zenoh on {_zenoh_listen} with NO "
+                f"auth/TLS/namespace isolation. Run only on a trusted, firewalled "
+                f"network. Hardening tracked in #308."
+            )
         router = Router.create(
             keypair,
             bootstrap_peers=args.bootstrap_peers,
             listen_port=args.libp2p_port,
+            zenoh_listen_endpoints=[_zenoh_listen] if _zenoh_on else None,
+            zenoh_connect_endpoints=_zenoh_connect,
         )
         await router.register_topic(topics.GLOBAL_EVENTS)
         await router.register_topic(topics.LOCAL_EVENTS)
