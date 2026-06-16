@@ -17,11 +17,19 @@ use std::collections::HashMap;
 
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use zenoh::Session;
 use zenoh::pubsub::{Publisher, Subscriber};
 use zenoh::qos::{CongestionControl, Priority, Reliability};
 
 use crate::alias::{AnyError, AnyResult};
+
+/// Bound on buffered inbound samples awaiting the Python consumer. The Zenoh
+/// subscribe callback is non-blocking and drops on a full channel rather than
+/// growing memory without limit if the consumer falls behind (DATA is
+/// best-effort; the API reorder buffer + idle backstop tolerate gaps, the same
+/// as the gossipsub path's queue-full drop).
+const INBOUND_BUFFER_CAPACITY: usize = 4096;
 
 /// Endpoint configuration for the Zenoh peer session.
 #[derive(Debug, Clone, Default)]
@@ -47,8 +55,8 @@ pub struct ZenohSession {
     session: Session,
     publishers: Mutex<HashMap<String, Publisher<'static>>>,
     subscribers: Mutex<HashMap<String, Subscriber<()>>>,
-    inbound_tx: mpsc::UnboundedSender<(String, Vec<u8>)>,
-    inbound_rx: Mutex<mpsc::UnboundedReceiver<(String, Vec<u8>)>>,
+    inbound_tx: mpsc::Sender<(String, Vec<u8>)>,
+    inbound_rx: Mutex<mpsc::Receiver<(String, Vec<u8>)>>,
 }
 
 impl ZenohSession {
@@ -81,7 +89,7 @@ impl ZenohSession {
         let session = zenoh::open(zconfig)
             .await
             .map_err(|e| -> AnyError { format!("zenoh open: {e}").into() })?;
-        let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
+        let (inbound_tx, inbound_rx) = mpsc::channel(INBOUND_BUFFER_CAPACITY);
         Ok(Self {
             session,
             publishers: Mutex::new(HashMap::new()),
@@ -132,9 +140,19 @@ impl ZenohSession {
             .callback(move |sample| {
                 let key = sample.key_expr().as_str().to_string();
                 let payload = sample.payload().to_bytes().to_vec();
-                // The receiver is dropped only on session teardown; ignore the
-                // closed-channel error during shutdown.
-                let _ = tx.send((key, payload));
+                // The Zenoh callback runs on a Zenoh thread and must not block,
+                // so use the non-blocking try_send. On a full channel (consumer
+                // fell behind) drop the sample rather than grow memory without
+                // bound; on a closed channel (session teardown) stay silent.
+                match tx.try_send((key, payload)) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(_)) => {
+                        log::warn!(
+                            "zenoh data-plane inbound buffer full; dropping a chunk"
+                        );
+                    }
+                    Err(TrySendError::Closed(_)) => {}
+                }
             })
             .await
             .map_err(|e| -> AnyError { format!("declare_subscriber {topic}: {e}").into() })?;

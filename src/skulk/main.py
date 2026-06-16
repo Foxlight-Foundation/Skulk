@@ -159,25 +159,28 @@ class Node:
         # on libp2p. Endpoints are per-node (multicast off), so they come from
         # the environment, not the gossip-synced config. The fleet runs
         # gossipsub until this is proven in production.
-        _zenoh_on = os.environ.get("SKULK_ZENOH_DATA_PLANE", "").lower() in (
+        _zenoh_on = os.environ.get("SKULK_ZENOH_DATA_PLANE", "").strip().lower() in (
             "1",
             "true",
             "yes",
         )
+        # Strip whitespace and ignore empty entries so a stray space or an empty
+        # SKULK_ZENOH_LISTEN (e.g. `export SKULK_ZENOH_LISTEN=`) doesn't become a
+        # bogus endpoint; an empty/whitespace listen falls back to the default.
+        _zenoh_listen = (
+            os.environ.get("SKULK_ZENOH_LISTEN", "").strip() or "tcp/0.0.0.0:7447"
+        )
+        _zenoh_connect = [
+            endpoint.strip()
+            for endpoint in os.environ.get("SKULK_ZENOH_CONNECT", "").split(",")
+            if endpoint.strip()
+        ]
         router = Router.create(
             keypair,
             bootstrap_peers=args.bootstrap_peers,
             listen_port=args.libp2p_port,
-            zenoh_listen_endpoints=(
-                [os.environ.get("SKULK_ZENOH_LISTEN", "tcp/0.0.0.0:7447")]
-                if _zenoh_on
-                else None
-            ),
-            zenoh_connect_endpoints=[
-                endpoint
-                for endpoint in os.environ.get("SKULK_ZENOH_CONNECT", "").split(",")
-                if endpoint
-            ],
+            zenoh_listen_endpoints=[_zenoh_listen] if _zenoh_on else None,
+            zenoh_connect_endpoints=_zenoh_connect,
         )
         await router.register_topic(topics.GLOBAL_EVENTS)
         await router.register_topic(topics.LOCAL_EVENTS)
