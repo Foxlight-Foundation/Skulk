@@ -440,8 +440,8 @@ Selection logic: `src/skulk/worker/engines/mlx/cache.py::make_kv_cache`. Some ba
 | `SKULK_NO_BATCH` / `SKULK_NO_BATCH` | Disable continuous batching |
 | `SKULK_KV_CACHE_BACKEND` / `SKULK_KV_CACHE_BACKEND` | KV cache backend selection (overrides config) |
 | `SKULK_LIBP2P_NAMESPACE` / `SKULK_LIBP2P_NAMESPACE` | libp2p namespace for cluster isolation |
-| `SKULK_ZENOH_DATA_PLANE` | Experimental, default OFF. When truthy (`1`/`true`/`yes`) the `DATA` topic (per-token output) rides an Eclipse Zenoh peer session instead of gossipsub; all other planes stay on libp2p. Read in `Node.create` (`src/skulk/main.py`), wired in `Router` (`uses_zenoh`). |
-| `SKULK_ZENOH_LISTEN` | Zenoh listen endpoint when the data plane is on (default `tcp/0.0.0.0:7447`). |
+| `SKULK_ZENOH_DATA_PLANE` | Experimental, default OFF. When truthy (`1`/`true`/`yes`) the `DATA` topic (per-token output) rides an Eclipse Zenoh peer session instead of gossipsub; all other planes stay on libp2p. Read in `Node.create` (`src/skulk/main.py`), wired in `Router` (`uses_zenoh`). **Security:** the Zenoh session has no auth/TLS/ACL/namespace yet and the default listen binds all interfaces, so any host that can reach the port can subscribe to `data` and read generation output. Enable only on a trusted, firewalled network; a loud startup warning fires when on. Hardening (auth/TLS/namespace/bind-restriction) is tracked in #308 and gates ever defaulting it on. |
+| `SKULK_ZENOH_LISTEN` | Zenoh listen endpoint when the data plane is on (default `tcp/0.0.0.0:7447`; see the security note above and restrict to a private interface on shared networks). |
 | `SKULK_ZENOH_CONNECT` | Comma-separated explicit Zenoh peer endpoints (multicast scouting is off, so peers are explicit), e.g. `tcp/192.168.0.117:7447,tcp/192.168.0.122:7447`. Per-node. |
 | `SKULK_SKIP_LLM_WARMUP` | Skip warmup synthesis (single-node debug only) |
 | `SKULK_IMAGE_TRANSPORT_DEBUG` | Verbose logging in image-transport pipeline |

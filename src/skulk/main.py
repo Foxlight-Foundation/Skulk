@@ -175,6 +175,19 @@ class Node:
             for endpoint in os.environ.get("SKULK_ZENOH_CONNECT", "").split(",")
             if endpoint.strip()
         ]
+        if _zenoh_on:
+            # The Zenoh data plane currently has no auth/TLS/ACL/namespace, and
+            # the default listen binds all interfaces, so any host that can reach
+            # the port can subscribe to `data` and read generation output. Run
+            # only on a trusted, firewalled network until that is hardened
+            # (#308); the flag is experimental and off by default for this
+            # reason.
+            logger.warning(
+                f"SKULK_ZENOH_DATA_PLANE is ENABLED (experimental): generation "
+                f"output is served over Zenoh on {_zenoh_listen} with NO "
+                f"auth/TLS/namespace isolation. Run only on a trusted, firewalled "
+                f"network. Hardening tracked in #308."
+            )
         router = Router.create(
             keypair,
             bootstrap_peers=args.bootstrap_peers,
