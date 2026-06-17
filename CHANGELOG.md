@@ -11,7 +11,8 @@ This project records release notes here and mirrors public-facing notes in
 
 - **Zenoh data-plane hardening toward default-on (#308 + #309).** Security
   (#308): the Zenoh session now sets a **namespace** (a collision-resistant
-  SHA-256 hash of `SKULK_LIBP2P_NAMESPACE`, raw token default `skulk`) so
+  SHA-256 hash of the exact token libp2p isolates on: `SKULK_LIBP2P_NAMESPACE`
+  when set, else the `NETWORK_VERSION` default `v0.0.1`, mirroring `swarm.rs`) so
   foreign peers on a different namespace cannot subscribe to this fleet's `data`,
   restoring parity with the libp2p private namespace; and `SKULK_ZENOH_LISTEN` is
   now **required explicitly** when the plane is enabled rather than silently

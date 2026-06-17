@@ -5,7 +5,9 @@ namespaces must not collide on the same Zenoh namespace (or peers on different
 libp2p namespaces could read each other's `data`). We hash unconditionally
 (collision-resistant): a char-replacement sanitizer collapsed
 "prod/main"/"prod_main" (P1), and a verbatim-when-safe split let a literal
-"ns<sha256(victim)>" collide (P2). The bind restriction fails fast when the
+"ns<sha256(victim)>" collide (P2). The namespace token mirrors exactly what
+libp2p isolates on (swarm.rs), so one libp2p cluster cannot split across two
+Zenoh namespaces (#312 review P2). The bind restriction fails fast when the
 plane is enabled without an explicit listen endpoint (#308).
 """
 
@@ -14,7 +16,9 @@ import hashlib
 import pytest
 
 from skulk.main import (
+    _LIBP2P_NETWORK_VERSION,  # pyright: ignore[reportPrivateUsage]
     _derive_zenoh_namespace,  # pyright: ignore[reportPrivateUsage]
+    _libp2p_namespace_token,  # pyright: ignore[reportPrivateUsage]
     _require_zenoh_listen,  # pyright: ignore[reportPrivateUsage]
 )
 
@@ -44,6 +48,20 @@ def test_no_verbatim_hash_overlap() -> None:
     derived_victim = _derive_zenoh_namespace(victim)
     attacker_literal = "ns" + hashlib.sha256(victim.encode()).hexdigest()
     assert _derive_zenoh_namespace(attacker_literal) != derived_victim
+
+
+def test_libp2p_namespace_token_mirrors_swarm() -> None:
+    # #312 review P2: the Zenoh namespace must derive from the SAME token libp2p
+    # isolates on (swarm.rs), or one cluster splits across two Zenoh namespaces.
+    # Override present -> override value, even when empty (Rust env::var is Ok("")).
+    assert _libp2p_namespace_token({"SKULK_LIBP2P_NAMESPACE": "prod"}) == "prod"
+    assert _libp2p_namespace_token({"SKULK_LIBP2P_NAMESPACE": ""}) == ""
+    # Unset -> NETWORK_VERSION default, NOT a Skulk-only "skulk" default.
+    assert _libp2p_namespace_token({}) == _LIBP2P_NETWORK_VERSION
+    # The legacy EXO_ env libp2p never reads must NOT influence the token.
+    assert _libp2p_namespace_token({"EXO_LIBP2P_NAMESPACE": "legacy"}) == (
+        _LIBP2P_NETWORK_VERSION
+    )
 
 
 def test_require_zenoh_listen_returns_explicit_value() -> None:

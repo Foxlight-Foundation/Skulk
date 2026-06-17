@@ -5,6 +5,7 @@ import os
 import resource
 import signal
 import socket
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Self
@@ -71,6 +72,31 @@ def _derive_zenoh_namespace(raw: str) -> str:
     is logged alongside it).
     """
     return "ns" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+# Keep in sync with rust/networking/src/swarm.rs: NETWORK_VERSION default and
+# the OVERRIDE_VERSION_ENV_VAR name used to build the libp2p private-network key.
+_LIBP2P_NETWORK_VERSION = "v0.0.1"
+_LIBP2P_NAMESPACE_ENV_VAR = "SKULK_LIBP2P_NAMESPACE"
+
+
+def _libp2p_namespace_token(environ: Mapping[str, str]) -> str:
+    """Return the exact token libp2p isolates on, for the Zenoh namespace (#312).
+
+    The Zenoh namespace MUST derive from the identical token that builds the
+    libp2p private-network key in ``swarm.rs`` (``PNET_PRESHARED_KEY``); otherwise
+    two nodes in the same libp2p cluster can land in different Zenoh namespaces
+    and silently drop all cross-node generation output. ``swarm.rs`` uses
+    ``SKULK_LIBP2P_NAMESPACE`` when the var is *present* (Rust ``env::var``
+    returns ``Ok`` even for an empty value) and the ``NETWORK_VERSION`` default
+    (``v0.0.1``) otherwise; it does NOT read the legacy ``EXO_LIBP2P_NAMESPACE``.
+    We mirror that precisely: presence (not truthiness) selects the override, and
+    an unset var falls back to ``v0.0.1`` rather than a Skulk-only default.
+    """
+    override = environ.get(_LIBP2P_NAMESPACE_ENV_VAR)
+    if override is not None:
+        return override
+    return _LIBP2P_NETWORK_VERSION
 
 
 def _require_zenoh_listen(env_value: str) -> str:
@@ -221,16 +247,14 @@ class Node:
             _zenoh_listen_endpoints = [_zenoh_listen]
             # Namespace isolation (#308): Zenoh transparently prefixes all keys
             # with this segment, so a peer on a different namespace cannot read
-            # this fleet's `data`. Derive it from the libp2p namespace token (the
-            # same per-deployment isolation libp2p uses) via a collision-resistant
-            # SHA-256 hash (see _derive_zenoh_namespace). The raw token defaults
-            # to "skulk" when unset; the derived namespace is the hash, not the
-            # literal token (logged below).
-            _ns_raw = (
-                os.environ.get("SKULK_LIBP2P_NAMESPACE")
-                or os.environ.get("EXO_LIBP2P_NAMESPACE")
-                or "skulk"
-            )
+            # this fleet's `data`. Derive it from the EXACT token libp2p isolates
+            # on (_libp2p_namespace_token mirrors swarm.rs), via a
+            # collision-resistant SHA-256 hash (see _derive_zenoh_namespace). If
+            # the source diverged from libp2p (legacy env, different default),
+            # two nodes in one libp2p cluster could land in different Zenoh
+            # namespaces and silently drop all cross-node output (#312 review).
+            # The derived namespace is the hash, not the literal token (logged).
+            _ns_raw = _libp2p_namespace_token(os.environ)
             _zenoh_namespace = _derive_zenoh_namespace(_ns_raw)
             if "0.0.0.0" in _zenoh_listen:
                 logger.warning(
