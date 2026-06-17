@@ -784,7 +784,7 @@ class API:
         # when the DATA transport can deliver a command's chunks out of order.
         # Gossipsub (the flag-off default) reorders, so the buffer stays on there
         # (the #301 fix). Zenoh delivers a command's chunks per-publisher FIFO, so
-        # arrival order IS generation order, so the buffer is skipped and chunks
+        # arrival order is generation order, so the buffer is skipped and chunks
         # dispatch as they arrive (validated: 20/20 buffer-off coherence on a 3-node
         # sampled-MTP matrix). SKULK_DATA_REORDER_BUFFER overrides the transport
         # default explicitly (`1`/`0`) for testing or belt-and-suspenders.

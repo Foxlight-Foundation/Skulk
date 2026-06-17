@@ -12,7 +12,7 @@ This project records release notes here and mirrors public-facing notes in
 - **Data-plane reorder buffer is now transport-conditional (#279 Phase 3).** The
   per-command `sequence` reorder buffer (the #301 fix for gossipsub reordering
   multi-node output) is now skipped when the DATA plane rides Zenoh, which
-  delivers each command's chunks per-publisher FIFO — output dispatches in
+  delivers each command's chunks per-publisher FIFO, so output dispatches in
   arrival order, eliminating the per-token buffering/reordering hop. The buffer
   stays ON for the gossipsub default (which reorders). The API selects this from
   the transport (`data_plane_zenoh`, from `SKULK_ZENOH_DATA_PLANE`);
