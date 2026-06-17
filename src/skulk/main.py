@@ -253,9 +253,13 @@ class Node:
             # the source diverged from libp2p (legacy env, different default),
             # two nodes in one libp2p cluster could land in different Zenoh
             # namespaces and silently drop all cross-node output (#312 review).
-            # The derived namespace is the hash, not the literal token (logged).
+            # We never log the raw token: it seeds libp2p's private-network PSK
+            # (swarm.rs PNET_PRESHARED_KEY), so emitting it would leak the cluster
+            # isolation secret into centralized logs (#312 review). Log only the
+            # derived (one-way hashed) namespace and whether an override was set.
             _ns_raw = _libp2p_namespace_token(os.environ)
             _zenoh_namespace = _derive_zenoh_namespace(_ns_raw)
+            _ns_override_set = _LIBP2P_NAMESPACE_ENV_VAR in os.environ
             if "0.0.0.0" in _zenoh_listen:
                 logger.warning(
                     f"SKULK_ZENOH_LISTEN={_zenoh_listen} binds all interfaces; "
@@ -263,11 +267,12 @@ class Node:
                 )
             logger.warning(
                 f"SKULK_ZENOH_DATA_PLANE is ENABLED (experimental): generation "
-                f"output is served over Zenoh on {_zenoh_listen}, namespace"
-                f"-isolated (libp2p namespace '{_ns_raw}' -> Zenoh "
-                f"'{_zenoh_namespace}'). There is still NO transport auth/TLS, so "
-                f"on an untrusted network enable Zenoh TLS or keep it firewalled "
-                f"(#308)."
+                f"output is served over Zenoh on {_zenoh_listen}, isolated under "
+                f"namespace '{_zenoh_namespace}' (derived from the libp2p token; "
+                f"{_LIBP2P_NAMESPACE_ENV_VAR} "
+                f"{'set' if _ns_override_set else 'unset, using default'}). There "
+                f"is still NO transport auth/TLS, so on an untrusted network "
+                f"enable Zenoh TLS or keep it firewalled (#308)."
             )
         router = Router.create(
             keypair,

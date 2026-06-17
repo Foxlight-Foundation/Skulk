@@ -9,6 +9,7 @@ from typing import cast
 from anyio import (
     BrokenResourceError,
     ClosedResourceError,
+    get_cancelled_exc_class,
     move_on_after,
     sleep_forever,
 )
@@ -434,6 +435,10 @@ class Router:
                     continue
                 try:
                     await self._zenoh.zenoh_publish(f"{topic}/{routing_key}", data)
+                except get_cancelled_exc_class():
+                    # Honor shutdown: never let the best-effort drop below swallow
+                    # task cancellation and keep this loop alive (#312 review).
+                    raise
                 except Exception as exception:
                     logger.opt(exception=exception).warning(
                         f"Zenoh DATA publish on {topic}/{routing_key} failed; "
