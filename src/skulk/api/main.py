@@ -675,6 +675,7 @@ class API:
         mount_dashboard: bool = True,
         telemetry_view: "TelemetryView | None" = None,
         data_receiver: "Receiver[DataChunk] | None" = None,
+        data_plane_zenoh: bool = False,
     ) -> None:
         self.state = State()
         # Data plane (#279 Phase 2): per-token output chunks arrive here direct
@@ -779,17 +780,23 @@ class API:
         # a multi-node producer's chunks can arrive out of order; we reorder by
         # the per-command sequence stamped on each DataChunk before dispatch.
         self._chunk_reorder: dict[CommandId, _ChunkReorderState] = {}
-        # Phase 3 sub-flag (#279): when disabled, the data plane dispatches output
-        # chunks in arrival order instead of buffering and reordering by sequence,
-        # relying on the transport's own ordering. Zenoh delivers a command's
-        # chunks per-publisher FIFO, so arrival order IS generation order there.
-        # Default ON: the gossipsub DATA path (the flag-off default transport)
-        # reorders, so the buffer must stay until the data plane is Zenoh. Set
-        # SKULK_DATA_REORDER_BUFFER=0 to run the Phase 3 buffer-disabled
-        # acceptance matrix before the machinery is deleted.
-        self._reorder_buffer_enabled: bool = os.environ.get(
-            "SKULK_DATA_REORDER_BUFFER", "1"
-        ).strip().lower() not in ("0", "false", "no")
+        # Data-plane ordering (#279 Phase 3): the reorder buffer is needed only
+        # when the DATA transport can deliver a command's chunks out of order.
+        # Gossipsub (the flag-off default) reorders, so the buffer stays on there
+        # (the #301 fix). Zenoh delivers a command's chunks per-publisher FIFO, so
+        # arrival order IS generation order, so the buffer is skipped and chunks
+        # dispatch as they arrive (validated: 20/20 buffer-off coherence on a 3-node
+        # sampled-MTP matrix). SKULK_DATA_REORDER_BUFFER overrides the transport
+        # default explicitly (`1`/`0`) for testing or belt-and-suspenders.
+        _reorder_override = os.environ.get("SKULK_DATA_REORDER_BUFFER", "").strip()
+        if _reorder_override:
+            self._reorder_buffer_enabled: bool = _reorder_override.lower() not in (
+                "0",
+                "false",
+                "no",
+            )
+        else:
+            self._reorder_buffer_enabled = not data_plane_zenoh
         self._image_store = ImageStore(SKULK_IMAGE_CACHE_DIR)
         self._tg: TaskGroup = TaskGroup()
 
@@ -3427,9 +3434,10 @@ class API:
             return
         if not self._reorder_buffer_enabled:
             logger.info(
-                "Data-plane reorder buffer DISABLED (SKULK_DATA_REORDER_BUFFER); "
-                "dispatching output chunks in arrival order, relying on the "
-                "transport's ordering (#279 Phase 3)."
+                "Data-plane reorder buffer DISABLED; dispatching output chunks in "
+                "arrival order, relying on the transport's ordering (Zenoh "
+                "per-publisher FIFO, or SKULK_DATA_REORDER_BUFFER override). "
+                "#279 Phase 3."
             )
         with self._data_receiver as data_chunks:
             async for data in data_chunks:

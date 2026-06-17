@@ -27,7 +27,7 @@ from skulk.shared.types.events import IndexedEvent
 from skulk.utils.channels import channel
 
 
-def _build_api() -> API:
+def _build_api(*, data_plane_zenoh: bool = False) -> API:
     command_sender, _ = channel[ForwarderCommand]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
     _, event_receiver = channel[IndexedEvent]()
@@ -41,7 +41,23 @@ def _build_api() -> API:
         election_receiver=election_receiver,
         enable_event_log=False,
         mount_dashboard=False,
+        data_plane_zenoh=data_plane_zenoh,
     )
+
+
+def test_reorder_buffer_default_follows_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #279 Phase 3 (transport-conditional): the buffer defaults ON for gossipsub
+    # (it reorders) and OFF for Zenoh (per-publisher FIFO). The env var overrides.
+    monkeypatch.delenv("SKULK_DATA_REORDER_BUFFER", raising=False)
+    assert _build_api()._reorder_buffer_enabled is True  # pyright: ignore[reportPrivateUsage]
+    assert _build_api(data_plane_zenoh=True)._reorder_buffer_enabled is False  # pyright: ignore[reportPrivateUsage]
+    # explicit override beats the transport default in both directions
+    monkeypatch.setenv("SKULK_DATA_REORDER_BUFFER", "1")
+    assert _build_api(data_plane_zenoh=True)._reorder_buffer_enabled is True  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setenv("SKULK_DATA_REORDER_BUFFER", "0")
+    assert _build_api()._reorder_buffer_enabled is False  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.asyncio
