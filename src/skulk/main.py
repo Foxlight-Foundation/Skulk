@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import multiprocessing as mp
 import os
 import resource
@@ -51,6 +52,23 @@ from skulk.utils.channels import Receiver, channel
 from skulk.utils.pydantic_ext import CamelCaseModel
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.main import Worker
+
+
+def _derive_zenoh_namespace(raw: str) -> str:
+    """Map a libp2p namespace to a Zenoh key-expr namespace segment (#308).
+
+    Must be INJECTIVE: two libp2p-isolated fleets (e.g. ``prod/main`` vs
+    ``prod_main``) must not collapse to the same Zenoh namespace, or peers on
+    different libp2p namespaces could read each other's ``data`` keys, weakening
+    the boundary below libp2p's (a char-replacement sanitizer is not injective,
+    #312 review). The raw value is used verbatim when it is already a valid Zenoh
+    key-expr segment (readable, injective among such values); otherwise it is
+    SHA-256-hashed (collision-resistant and key-expr-safe), with an ``nshash_``
+    prefix to keep the two regimes from overlapping.
+    """
+    if raw and all(c.isalnum() or c in "._-" for c in raw):
+        return raw
+    return "nshash_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _add_model_search_path(path: Path) -> None:
@@ -196,10 +214,7 @@ class Node:
                 or os.environ.get("EXO_LIBP2P_NAMESPACE")
                 or "skulk"
             )
-            _zenoh_namespace = (
-                "".join(c if (c.isalnum() or c in "._-") else "_" for c in _ns_raw)
-                or "skulk"
-            )
+            _zenoh_namespace = _derive_zenoh_namespace(_ns_raw)
             if "0.0.0.0" in _zenoh_listen:
                 logger.warning(
                     f"SKULK_ZENOH_LISTEN={_zenoh_listen} binds all interfaces; "
