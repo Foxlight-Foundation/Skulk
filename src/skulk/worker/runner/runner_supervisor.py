@@ -133,11 +133,14 @@ class RunnerSupervisor:
     # counter assigned here is the true order.
     _chunk_sequence: dict[CommandId, int] = field(default_factory=dict, init=False)
     # The owning API node for each in-flight serving command (#279 Phase 2).
-    # Populated when a serving task is submitted (the master stamps the task with
-    # the API node that owns the command), read in _emit to address each DataChunk
-    # to that node over the Zenoh data plane. Same lifecycle as _chunk_sequence:
-    # dropped on the terminal chunk or terminal task status. Empty for the
-    # gossipsub path (owner_node is None), which keys by the bare topic.
+    # Populated when a serving task is submitted (the master carries the owning
+    # API node onto the task), read in _emit to stamp each DataChunk so the Zenoh
+    # data plane can address it to that node. Same lifecycle as _chunk_sequence:
+    # dropped on the terminal chunk or terminal task status. The API stamps
+    # owner_node on every serving command (gossipsub and Zenoh alike), so this is
+    # normally populated on both paths; on gossipsub the stamped owner is simply
+    # ignored (the bare topic broadcasts). Entries are absent only for tasks that
+    # carry no owner_node at all.
     _command_owner: dict[CommandId, NodeId] = field(default_factory=dict, init=False)
     _cancel_watch_runner: anyio.CancelScope = field(
         default_factory=anyio.CancelScope, init=False
