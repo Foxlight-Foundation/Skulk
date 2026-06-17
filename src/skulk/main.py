@@ -57,18 +57,19 @@ from skulk.worker.main import Worker
 def _derive_zenoh_namespace(raw: str) -> str:
     """Map a libp2p namespace to a Zenoh key-expr namespace segment (#308).
 
-    Must be INJECTIVE: two libp2p-isolated fleets (e.g. ``prod/main`` vs
-    ``prod_main``) must not collapse to the same Zenoh namespace, or peers on
-    different libp2p namespaces could read each other's ``data`` keys, weakening
-    the boundary below libp2p's (a char-replacement sanitizer is not injective,
-    #312 review). The raw value is used verbatim when it is already a valid Zenoh
-    key-expr segment (readable, injective among such values); otherwise it is
-    SHA-256-hashed (collision-resistant and key-expr-safe), with an ``nshash_``
-    prefix to keep the two regimes from overlapping.
+    This is the Zenoh data-plane isolation boundary, so it must be INJECTIVE for
+    ALL raw inputs: two libp2p-isolated fleets must never collapse to the same
+    Zenoh namespace, or peers on different libp2p namespaces could read each
+    other's ``data``. We therefore SHA-256-hash unconditionally rather than a
+    verbatim/hash split: a char-replacement sanitizer collapses ``prod/main`` and
+    ``prod_main`` (#312 review P1), and a verbatim-when-safe split still lets a
+    fleet named literally ``ns<sha256(victim)>`` collide with the victim's hashed
+    namespace (#312 review P2). A SHA-256 hex digest is collision-resistant and
+    always a valid key-expr segment; the ``ns`` prefix just keeps it from
+    starting with a digit. The trade-off is a non-human-readable namespace, which
+    is fine for an internal key prefix (the raw value is logged alongside it).
     """
-    if raw and all(c.isalnum() or c in "._-" for c in raw):
-        return raw
-    return "nshash_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return "ns" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _add_model_search_path(path: Path) -> None:
@@ -223,9 +224,10 @@ class Node:
             logger.warning(
                 f"SKULK_ZENOH_DATA_PLANE is ENABLED (experimental): generation "
                 f"output is served over Zenoh on {_zenoh_listen}, namespace"
-                f"-isolated as '{_zenoh_namespace}'. There is still NO transport "
-                f"auth/TLS, so on an untrusted network enable Zenoh TLS or keep it "
-                f"firewalled (#308)."
+                f"-isolated (libp2p namespace '{_ns_raw}' -> Zenoh "
+                f"'{_zenoh_namespace}'). There is still NO transport auth/TLS, so "
+                f"on an untrusted network enable Zenoh TLS or keep it firewalled "
+                f"(#308)."
             )
         router = Router.create(
             keypair,
