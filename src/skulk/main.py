@@ -68,8 +68,10 @@ def _derive_zenoh_namespace(raw: str) -> str:
     P2). A SHA-256 hex digest is collision-resistant (no two distinct namespaces
     collide in practice) and always a valid key-expr segment; the ``ns`` prefix
     keeps it from starting with a digit. The trade-off is a non-human-readable
-    namespace, which is fine for an internal key prefix (the raw libp2p namespace
-    is logged alongside it).
+    namespace, which is fine for an internal key prefix. Note: neither this
+    derived namespace nor the raw libp2p token is ever logged (with no TLS the
+    namespace is itself the isolation value); startup logs only a non-routing
+    fingerprint of it (see ``_namespace_fingerprint``).
     """
     return "ns" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
