@@ -57,19 +57,38 @@ from skulk.worker.main import Worker
 def _derive_zenoh_namespace(raw: str) -> str:
     """Map a libp2p namespace to a Zenoh key-expr namespace segment (#308).
 
-    This is the Zenoh data-plane isolation boundary, so it must be INJECTIVE for
-    ALL raw inputs: two libp2p-isolated fleets must never collapse to the same
-    Zenoh namespace, or peers on different libp2p namespaces could read each
-    other's ``data``. We therefore SHA-256-hash unconditionally rather than a
-    verbatim/hash split: a char-replacement sanitizer collapses ``prod/main`` and
-    ``prod_main`` (#312 review P1), and a verbatim-when-safe split still lets a
-    fleet named literally ``ns<sha256(victim)>`` collide with the victim's hashed
-    namespace (#312 review P2). A SHA-256 hex digest is collision-resistant and
-    always a valid key-expr segment; the ``ns`` prefix just keeps it from
-    starting with a digit. The trade-off is a non-human-readable namespace, which
-    is fine for an internal key prefix (the raw value is logged alongside it).
+    This is the Zenoh data-plane isolation boundary, so distinct libp2p
+    namespaces must not collide on the same Zenoh namespace, or peers on
+    different libp2p namespaces could read each other's ``data``. We SHA-256-hash
+    unconditionally rather than a verbatim/hash split: a char-replacement
+    sanitizer collapses ``prod/main`` and ``prod_main`` (#312 review P1), and a
+    verbatim-when-safe split still lets a fleet named literally
+    ``ns<sha256(victim)>`` collide with the victim's hashed namespace (#312 review
+    P2). A SHA-256 hex digest is collision-resistant (no two distinct namespaces
+    collide in practice) and always a valid key-expr segment; the ``ns`` prefix
+    keeps it from starting with a digit. The trade-off is a non-human-readable
+    namespace, which is fine for an internal key prefix (the raw libp2p namespace
+    is logged alongside it).
     """
     return "ns" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _require_zenoh_listen(env_value: str) -> str:
+    """Return the explicit Zenoh listen endpoint, or raise (#308 bind restriction).
+
+    When the Zenoh data plane is enabled, the listen endpoint must be set
+    explicitly; Skulk refuses to default it to ``tcp/0.0.0.0:7447`` (all
+    interfaces) so a shared-network deployment doesn't silently expose the plane.
+    """
+    listen = env_value.strip()
+    if not listen:
+        raise ValueError(
+            "SKULK_ZENOH_DATA_PLANE is enabled but SKULK_ZENOH_LISTEN is unset. "
+            "Set it explicitly (e.g. tcp/<this-node-ip>:7447); Skulk refuses to "
+            "default the Zenoh listen endpoint to 0.0.0.0 / all interfaces "
+            "(#308 bind restriction)."
+        )
+    return listen
 
 
 def _add_model_search_path(path: Path) -> None:
@@ -196,20 +215,17 @@ class Node:
             # interfaces). The operator picks the interface (a private IP on a
             # shared network); an explicit 0.0.0.0 is still allowed but is then
             # a deliberate choice, not a silent default.
-            _zenoh_listen = os.environ.get("SKULK_ZENOH_LISTEN", "").strip()
-            if not _zenoh_listen:
-                raise ValueError(
-                    "SKULK_ZENOH_DATA_PLANE is enabled but SKULK_ZENOH_LISTEN is "
-                    "unset. Set it explicitly (e.g. tcp/<this-node-ip>:7447); "
-                    "Skulk refuses to default the Zenoh listen endpoint to "
-                    "0.0.0.0 / all interfaces (#308 bind restriction)."
-                )
+            _zenoh_listen = _require_zenoh_listen(
+                os.environ.get("SKULK_ZENOH_LISTEN", "")
+            )
             _zenoh_listen_endpoints = [_zenoh_listen]
             # Namespace isolation (#308): Zenoh transparently prefixes all keys
             # with this segment, so a peer on a different namespace cannot read
-            # this fleet's `data`. Derive it from the libp2p namespace token
-            # (the same per-deployment isolation libp2p uses), sanitized to a
-            # valid key-expr segment; default to "skulk" when unset.
+            # this fleet's `data`. Derive it from the libp2p namespace token (the
+            # same per-deployment isolation libp2p uses) via a collision-resistant
+            # SHA-256 hash (see _derive_zenoh_namespace). The raw token defaults
+            # to "skulk" when unset; the derived namespace is the hash, not the
+            # literal token (logged below).
             _ns_raw = (
                 os.environ.get("SKULK_LIBP2P_NAMESPACE")
                 or os.environ.get("EXO_LIBP2P_NAMESPACE")

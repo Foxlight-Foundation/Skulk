@@ -1,15 +1,22 @@
-"""The Zenoh namespace derivation must be injective (#308 / #312 review).
+"""Zenoh data-plane hardening helpers (#308 / #312 review).
 
-The derived value is the Zenoh data-plane isolation boundary, so distinct libp2p
-namespaces must never collapse to the same Zenoh namespace (or peers on different
-libp2p namespaces could read each other's `data`). We hash unconditionally:
-a char-replacement sanitizer collapsed "prod/main"/"prod_main" (P1), and a
-verbatim-when-safe split let a literal "ns<sha256(victim)>" collide (P2).
+The namespace derivation is the Zenoh isolation boundary, so distinct libp2p
+namespaces must not collide on the same Zenoh namespace (or peers on different
+libp2p namespaces could read each other's `data`). We hash unconditionally
+(collision-resistant): a char-replacement sanitizer collapsed
+"prod/main"/"prod_main" (P1), and a verbatim-when-safe split let a literal
+"ns<sha256(victim)>" collide (P2). The bind restriction fails fast when the
+plane is enabled without an explicit listen endpoint (#308).
 """
 
 import hashlib
 
-from skulk.main import _derive_zenoh_namespace  # pyright: ignore[reportPrivateUsage]
+import pytest
+
+from skulk.main import (
+    _derive_zenoh_namespace,  # pyright: ignore[reportPrivateUsage]
+    _require_zenoh_listen,  # pyright: ignore[reportPrivateUsage]
+)
 
 
 def _keyexpr_safe(s: str) -> bool:
@@ -37,3 +44,15 @@ def test_no_verbatim_hash_overlap() -> None:
     derived_victim = _derive_zenoh_namespace(victim)
     attacker_literal = "ns" + hashlib.sha256(victim.encode()).hexdigest()
     assert _derive_zenoh_namespace(attacker_literal) != derived_victim
+
+
+def test_require_zenoh_listen_returns_explicit_value() -> None:
+    assert _require_zenoh_listen("tcp/192.168.0.115:7447") == "tcp/192.168.0.115:7447"
+    assert _require_zenoh_listen("  tcp/127.0.0.1:7447  ") == "tcp/127.0.0.1:7447"
+
+
+def test_require_zenoh_listen_rejects_empty() -> None:
+    # #308 bind restriction: must fail fast rather than default to 0.0.0.0.
+    for empty in ("", "   "):
+        with pytest.raises(ValueError, match="SKULK_ZENOH_LISTEN"):
+            _require_zenoh_listen(empty)
