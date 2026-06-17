@@ -511,3 +511,68 @@ async def test_prefill_progress_does_not_arm_idle_timer(
     # only the progress chunk(s); no synthetic stall ErrorChunk
     assert all(isinstance(c, PrefillProgressChunk) for c in chunks)
     assert cmd not in api._cancelled_command_ids  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_reorder_buffer_disabled_dispatches_in_arrival_order() -> None:
+    # #279 Phase 3: with the reorder buffer disabled, _apply_data dispatches
+    # chunks in ARRIVAL order (relying on the transport's ordering), not sorted
+    # by sequence. Feed arrival order 2,0,1 -> expect 2,0,1 out (the buffer would
+    # have produced 0,1,2). Also confirms a late chunk for a stream with no queue
+    # is dropped without error.
+    from skulk.shared.types.chunks import DataChunk
+
+    data_send, data_recv = channel[DataChunk]()
+    command_sender, _ = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    _, event_receiver = channel[IndexedEvent]()
+    _, election_receiver = channel[ElectionMessage]()
+    api = API(
+        NodeId("api-node"),
+        port=52415,
+        event_receiver=event_receiver,
+        command_sender=command_sender,
+        download_command_sender=download_sender,
+        election_receiver=election_receiver,
+        enable_event_log=False,
+        mount_dashboard=False,
+        data_receiver=data_recv,
+    )
+    assert api._reorder_buffer_enabled is True  # pyright: ignore[reportPrivateUsage]  # default
+    api._reorder_buffer_enabled = False  # pyright: ignore[reportPrivateUsage]
+
+    cmd = CommandId("cmd-arrival")
+    owned = CommandId("cmd-no-queue")
+    qsend, qrecv = channel[
+        TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk
+    ]()
+    api._text_generation_queues[cmd] = qsend  # pyright: ignore[reportPrivateUsage]
+
+    def tok(i: int) -> TokenChunk:
+        return TokenChunk(
+            model=ModelId("mlx-community/test"),
+            text=f"t{i}",
+            token_id=i,
+            usage=None,
+            finish_reason=None,
+        )
+
+    for seq in (2, 0, 1):
+        await data_send.send(
+            DataChunk(command_id=cmd, chunk=tok(seq), sequence=seq, owner_node=None)
+        )
+    # a chunk for a command with no live queue must be dropped, not crash
+    await data_send.send(
+        DataChunk(command_id=owned, chunk=tok(7), sequence=0, owner_node=None)
+    )
+    data_send.close()
+
+    await api._apply_data()  # pyright: ignore[reportPrivateUsage]  # drains until channel closed
+
+    got: list[int] = []
+    with qrecv as stream:
+        for _ in range(3):
+            c = stream.receive_nowait()
+            assert isinstance(c, TokenChunk)
+            got.append(c.token_id)
+    assert got == [2, 0, 1]  # arrival order preserved, no reordering by sequence

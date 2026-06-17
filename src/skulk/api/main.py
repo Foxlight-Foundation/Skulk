@@ -779,6 +779,17 @@ class API:
         # a multi-node producer's chunks can arrive out of order; we reorder by
         # the per-command sequence stamped on each DataChunk before dispatch.
         self._chunk_reorder: dict[CommandId, _ChunkReorderState] = {}
+        # Phase 3 sub-flag (#279): when disabled, the data plane dispatches output
+        # chunks in arrival order instead of buffering and reordering by sequence,
+        # relying on the transport's own ordering. Zenoh delivers a command's
+        # chunks per-publisher FIFO, so arrival order IS generation order there.
+        # Default ON: the gossipsub DATA path (the flag-off default transport)
+        # reorders, so the buffer must stay until the data plane is Zenoh. Set
+        # SKULK_DATA_REORDER_BUFFER=0 to run the Phase 3 buffer-disabled
+        # acceptance matrix before the machinery is deleted.
+        self._reorder_buffer_enabled: bool = os.environ.get(
+            "SKULK_DATA_REORDER_BUFFER", "1"
+        ).strip().lower() not in ("0", "false", "no")
         self._image_store = ImageStore(SKULK_IMAGE_CACHE_DIR)
         self._tg: TaskGroup = TaskGroup()
 
@@ -3303,8 +3314,10 @@ class API:
                 tg.start_soon(self._apply_data)
                 # Releases reorder gaps stuck on a chunk dropped by the
                 # best-effort DATA topic (#279 Phase 2b); lifetime-scoped like
-                # _apply_data.
-                tg.start_soon(self._sweep_reorder_buffers)
+                # _apply_data. Only meaningful while the reorder buffer is on;
+                # with it disabled (#279 Phase 3) no gaps are ever buffered.
+                if self._reorder_buffer_enabled:
+                    tg.start_soon(self._sweep_reorder_buffers)
                 tg.start_soon(self._pause_on_new_election)
                 tg.start_soon(self._cleanup_expired_images)
                 tg.start_soon(self._prune_old_traces)
@@ -3412,11 +3425,23 @@ class API:
         """
         if self._data_receiver is None:
             return
+        if not self._reorder_buffer_enabled:
+            logger.info(
+                "Data-plane reorder buffer DISABLED (SKULK_DATA_REORDER_BUFFER); "
+                "dispatching output chunks in arrival order, relying on the "
+                "transport's ordering (#279 Phase 3)."
+            )
         with self._data_receiver as data_chunks:
             async for data in data_chunks:
-                await self._reorder_and_dispatch(
-                    data.command_id, data.sequence, data.chunk
-                )
+                if self._reorder_buffer_enabled:
+                    await self._reorder_and_dispatch(
+                        data.command_id, data.sequence, data.chunk
+                    )
+                elif self._command_has_queue(data.command_id):
+                    # Buffer off: dispatch in arrival order (the transport orders
+                    # per command). Drop late chunks for a finalized stream, the
+                    # same guard _reorder_and_dispatch applies.
+                    await self._dispatch_generation_chunk(data.command_id, data.chunk)
 
     def _command_has_queue(self, command_id: CommandId) -> bool:
         return (
