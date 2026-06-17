@@ -33,7 +33,7 @@ async def test_publish_bytes_drops_unknown_field_payload_without_raising():
     the bad message is dropped silently and the router stays alive to process
     the next valid message.
     """
-    networking_send, _networking_recv = channel[tuple[str, bytes]]()
+    networking_send, _networking_recv = channel[tuple[str, str | None, bytes]]()
     router_v1 = TopicRouter[_SchemaV1](_TOPIC_V1, networking_send)
 
     incompatible_payload = _TOPIC_V2.serialize(_SchemaV2(name="hi", extra=["x"]))

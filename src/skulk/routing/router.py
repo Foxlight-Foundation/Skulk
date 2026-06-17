@@ -42,7 +42,7 @@ class TopicRouter[T: CamelCaseModel]:
     def __init__(
         self,
         topic: TypedTopic[T],
-        networking_sender: Sender[tuple[str, bytes]],
+        networking_sender: Sender[tuple[str, str | None, bytes]],
         max_buffer_size: float = inf,
     ):
         self.topic: TypedTopic[T] = topic
@@ -51,7 +51,9 @@ class TopicRouter[T: CamelCaseModel]:
         send, recv = channel[T]()
         self.receiver: Receiver[T] = recv
         self._sender: Sender[T] = send
-        self.networking_sender: Sender[tuple[str, bytes]] = networking_sender
+        self.networking_sender: Sender[tuple[str, str | None, bytes]] = (
+            networking_sender
+        )
 
     async def run(self):
         logger.debug(f"Topic Router {self.topic} ready to send")
@@ -106,7 +108,7 @@ class TopicRouter[T: CamelCaseModel]:
         # Wire-format payloads are deserialized strictly (extra="forbid"). During
         # rolling upgrades, an older node may receive a message containing fields
         # it doesn't know about. Catch the validation failure so the gossipsub
-        # receive loop survives — dropping the message is recoverable; tearing
+        # receive loop survives - dropping the message is recoverable; tearing
         # down the loop is not.
         try:
             item = self.topic.deserialize(data)
@@ -123,8 +125,15 @@ class TopicRouter[T: CamelCaseModel]:
 
     async def _send_out(self, item: T):
         logger.trace(f"TopicRouter {self.topic.topic} sending {item}")
+        # The routing key (Zenoh data plane only) addresses this message to a
+        # single subscriber; None broadcasts on the bare topic (#279 Phase 2).
+        routing_key = (
+            self.topic.routing_key(item)
+            if self.topic.routing_key is not None
+            else None
+        )
         await self.networking_sender.send(
-            (str(self.topic.topic), self.topic.serialize(item))
+            (str(self.topic.topic), routing_key, self.topic.serialize(item))
         )
 
 
@@ -137,6 +146,7 @@ class Router:
         listen_port: int = 0,
         zenoh_listen_endpoints: Sequence[str] | None = None,
         zenoh_connect_endpoints: Sequence[str] = (),
+        node_id: str | None = None,
     ) -> "Router":
         # When zenoh_listen_endpoints is provided the data plane (DATA topic)
         # rides a Zenoh peer session instead of gossipsub (the zenoh_data_plane
@@ -146,20 +156,44 @@ class Router:
             zenoh = ZenohHandle(
                 list(zenoh_listen_endpoints), list(zenoh_connect_endpoints)
             )
+        # The Zenoh data plane addresses output per owner (key data/<node_id>),
+        # so the Router subscribes only to its own id; default to the keypair's
+        # node id when the caller doesn't override it.
+        resolved_node_id = node_id if node_id is not None else identity.to_node_id()
         return cls(
             handle=NetworkingHandle(identity, list(bootstrap_peers), listen_port),
             zenoh=zenoh,
+            node_id=resolved_node_id,
         )
 
-    def __init__(self, handle: NetworkingHandle, zenoh: ZenohHandle | None = None):
+    def __init__(
+        self,
+        handle: NetworkingHandle,
+        zenoh: ZenohHandle | None = None,
+        node_id: str = "",
+    ):
         self.topic_routers: dict[str, TopicRouter[CamelCaseModel]] = {}
-        send, recv = channel[tuple[str, bytes]]()
-        self.networking_receiver: Receiver[tuple[str, bytes]] = recv
+        send, recv = channel[tuple[str, str | None, bytes]]()
+        self.networking_receiver: Receiver[tuple[str, str | None, bytes]] = recv
         self._net: NetworkingHandle = handle
         # Optional Zenoh transport for the data plane; None keeps everything on
         # gossipsub (default, until the flag is proven in production).
         self._zenoh: ZenohHandle | None = zenoh
-        self._tmp_networking_sender: Sender[tuple[str, bytes]] | None = send
+        # This node's id, used as the Zenoh data-plane subscription suffix so a
+        # node receives only output addressed to it (#279 Phase 2). Required when
+        # Zenoh is enabled: an empty id would subscribe to "data/" and the node
+        # would never receive its addressed chunks, silently losing output (#310
+        # review). `create()` always resolves it from the keypair, so this only
+        # guards a raw misuse of the constructor.
+        if zenoh is not None and not node_id:
+            raise ValueError(
+                "Router requires a non-empty node_id when the Zenoh data plane "
+                "is enabled (it is the data/<node_id> subscription key)."
+            )
+        self._node_id: str = node_id
+        self._tmp_networking_sender: Sender[tuple[str, str | None, bytes]] | None = (
+            send
+        )
         self._id_count = count()
         self._tg: TaskGroup = TaskGroup()
 
@@ -241,8 +275,14 @@ class Router:
     async def _networking_subscribe(self, topic: str):
         if self.uses_zenoh(topic):
             assert self._zenoh is not None
-            await self._zenoh.zenoh_subscribe(topic)
-            logger.info(f"Subscribed to {topic} (zenoh data plane)")
+            # Subscribe only to output addressed to this node (data/<node_id>),
+            # not the whole topic, so the serving worker's unicast reaches just
+            # the owning API node instead of fanning out to every node (#279
+            # Phase 2). The owner is keyed by node id; the bare topic is never
+            # subscribed, so non-owners receive nothing.
+            key = f"{topic}/{self._node_id}"
+            await self._zenoh.zenoh_subscribe(key)
+            logger.info(f"Subscribed to {key} (zenoh data plane)")
             return
         await self._net.gossipsub_subscribe(topic)
         logger.info(f"Subscribed to {topic}")
@@ -266,10 +306,14 @@ class Router:
         try:
             while True:
                 message = await self._zenoh.recv()
-                topic = message.topic
+                # The sample key is data/<owner_node>; the TopicRouter is keyed by
+                # the bare topic, so strip the routing suffix to find it (#279
+                # Phase 2).
+                topic = message.topic.split("/", 1)[0]
                 if topic not in self.topic_routers:
                     logger.warning(
-                        f"Received zenoh message on unknown or inactive topic {topic}"
+                        f"Received zenoh message on unknown or inactive topic "
+                        f"{message.topic}"
                     )
                     continue
                 # No origin peer id on the zenoh data plane; the data plane does
@@ -320,7 +364,7 @@ class Router:
 
     async def _networking_publish(self):
         with self.networking_receiver as networked_items:
-            async for topic, data in networked_items:
+            async for topic, routing_key, data in networked_items:
                 try:
                     logger.trace(f"Sending message on {topic} with payload {data}")
                     if len(data) > 1024 * 1024:
@@ -329,7 +373,22 @@ class Router:
                         )
                     if self.uses_zenoh(topic):
                         assert self._zenoh is not None
-                        await self._zenoh.zenoh_publish(topic, data)
+                        # Address the chunk to its owning API node (data/<owner>).
+                        # Nodes subscribe only to data/<own_node_id>, never the
+                        # bare topic, so a message with no routing key reaches no
+                        # subscriber. That should not happen - every serving task
+                        # carries owner_node (#279 Phase 2) - so warn loudly
+                        # rather than dropping it silently if it ever does (#310
+                        # review).
+                        if not routing_key:
+                            logger.warning(
+                                f"Zenoh DATA publish on {topic} has no routing key "
+                                f"(owner_node unset); no node subscribes to the bare "
+                                f"topic, so this output would be lost. Dropping a "
+                                f"chunk of {len(data)} bytes."
+                            )
+                            continue
+                        await self._zenoh.zenoh_publish(f"{topic}/{routing_key}", data)
                         continue
                     await self._net.gossipsub_publish(topic, data)
                 except NoPeersSubscribedToTopicError:

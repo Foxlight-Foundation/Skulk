@@ -1,6 +1,8 @@
 from collections.abc import Generator
 from typing import Any, Literal
 
+from pydantic import Field
+
 from skulk.api.types import (
     FinishReason,
     GenerationStats,
@@ -12,7 +14,7 @@ from skulk.api.types import (
 from skulk.shared.models.model_cards import ModelId
 from skulk.utils.pydantic_ext import CamelCaseModel, TaggedModel
 
-from .common import CommandId
+from .common import CommandId, NodeId
 
 
 class BaseChunk(TaggedModel):
@@ -126,3 +128,15 @@ class DataChunk(CamelCaseModel):
     command_id: CommandId
     chunk: GenerationChunk
     sequence: int
+    owner_node: NodeId | None = Field(
+        default=None,
+        description=(
+            "The API node that owns this command (#279 Phase 2). The API stamps "
+            "it on the serving command, the master carries it onto the task, and "
+            "the producing rank-0 supervisor stamps it here. On the Zenoh data "
+            "plane the Router publishes to the key data/<owner_node> so only the "
+            "owning API node receives the chunk (killing the cluster-wide "
+            "fan-out). On gossipsub it is ignored (the bare topic broadcasts), "
+            "and it is None only for output with no recorded owner."
+        ),
+    )

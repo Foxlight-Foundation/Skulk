@@ -194,6 +194,7 @@ class Node:
             listen_port=args.libp2p_port,
             zenoh_listen_endpoints=[_zenoh_listen] if _zenoh_on else None,
             zenoh_connect_endpoints=_zenoh_connect,
+            node_id=str(node_id),
         )
         await router.register_topic(topics.GLOBAL_EVENTS)
         await router.register_topic(topics.LOCAL_EVENTS)

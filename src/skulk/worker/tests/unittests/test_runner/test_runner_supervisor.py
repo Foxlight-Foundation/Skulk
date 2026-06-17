@@ -211,6 +211,73 @@ async def test_emit_stamps_sequence_and_clears_counter_on_terminal_chunk() -> No
 
 
 @pytest.mark.asyncio
+async def test_emit_stamps_owner_node_and_clears_it_on_terminal_chunk() -> None:
+    """_emit addresses each DataChunk to the command's owning API node.
+
+    #279 Phase 2: the owner is recorded when the serving task starts and stamped
+    onto every output chunk so the Zenoh data plane keys to data/<owner_node>.
+    The owner mapping clears on the terminal chunk alongside the sequence
+    counter, so a long-lived runner does not accumulate one entry per command.
+    """
+    from skulk.shared.types.chunks import DataChunk
+    from skulk.shared.types.events import ChunkGenerated
+
+    data_sender, data_recv = channel[DataChunk]()
+    event_sender, _ = channel[Event]()
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    _, ev_recv = mp_channel[Event]()
+    _, diag_recv = mp_channel[RunnerDiagnosticUpdate]()
+
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-a"),
+        model_id=ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit"),
+        runner_id=RunnerId("runner-a"),
+        node_id=NodeId("node-a"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=ev_recv,
+        _diag_recv=diag_recv,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+        _data_sender=data_sender,
+    )
+    cmd = CommandId("cmd-owner")
+    owner = NodeId("api-node-7")
+    # The owner is recorded by start_task; set it directly here (start_task
+    # blocks on the runner ack, which a dead process never sends).
+    supervisor._command_owner[cmd] = owner  # pyright: ignore[reportPrivateUsage]
+
+    def chunk(text: str, finish: str | None) -> TokenChunk:
+        return TokenChunk(
+            model=ModelId("mlx-community/test"),
+            text=text,
+            token_id=0,
+            usage=None,
+            finish_reason=finish,  # pyright: ignore[reportArgumentType]
+        )
+
+    await supervisor._emit(  # pyright: ignore[reportPrivateUsage]
+        ChunkGenerated(command_id=cmd, chunk=chunk("a", None))
+    )
+    await supervisor._emit(  # pyright: ignore[reportPrivateUsage]
+        ChunkGenerated(command_id=cmd, chunk=chunk("b", "stop"))
+    )
+    # The owner mapping clears on the terminal chunk.
+    assert cmd not in supervisor._command_owner  # pyright: ignore[reportPrivateUsage]
+
+    owners = [data_recv.receive_nowait().owner_node for _ in range(2)]
+    assert owners == [owner, owner]
+    data_sender.close()
+    event_sender.close()
+
+
+@pytest.mark.asyncio
 async def test_check_runner_emits_error_chunk_for_inflight_text_generation() -> None:
     event_sender, event_receiver = channel[Event]()
     task_sender, _ = mp_channel[Task]()

@@ -19,8 +19,17 @@ This project records release notes here and mirrors public-facing notes in
   the reorder buffer are unchanged, so the two transports are interchangeable
   behind the flag. Publishers use `Reliable` + `Block` on a single priority for
   per-key FIFO. With the flag unset, behavior is identical to before. Foundation
-  for #279's data-plane evolution (later phases: per-command unicast to drop the
-  fan-out, and removing the app-layer reorder buffer once ordering is relied on).
+  for #279's data-plane evolution (later phase: removing the app-layer reorder
+  buffer once Zenoh's per-publisher ordering is relied on).
+- **Zenoh data plane is key-addressed per owner (#279 Phase 2), killing the
+  cluster-wide fan-out.** The owning API node stamps its node id on the serving
+  command (`owner_node`); the master carries it onto the worker task, and the
+  rank-0 supervisor stamps it onto each `DataChunk`. On Zenoh the `DATA` topic
+  now publishes to the key `data/<owner_node>` and each node subscribes only to
+  `data/<own_node_id>`, so generation output reaches just the owning API node
+  instead of every node in the cluster. On gossipsub (flag off) `owner_node` is
+  ignored and the topic broadcasts as before, so the transports stay
+  interchangeable behind the flag.
 
 ### Fixed
 

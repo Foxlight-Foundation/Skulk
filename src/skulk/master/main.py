@@ -376,6 +376,11 @@ class Master:
                                     task=TextGenerationTask(
                                         task_id=task_id,
                                         command_id=command.command_id,
+                                        # Carry the owning API node onto the task
+                                        # so the rank-0 supervisor can address
+                                        # output over the Zenoh data plane (#279
+                                        # Phase 2).
+                                        owner_node=command.owner_node,
                                         instance_id=selected_instance_id,
                                         task_status=TaskStatus.Pending,
                                         task_params=command.task_params,
@@ -426,6 +431,7 @@ class Master:
                                     task=ImageGenerationTask(
                                         task_id=task_id,
                                         command_id=command.command_id,
+                                        owner_node=command.owner_node,  # #279 Phase 2
                                         instance_id=selected_instance_id,
                                         task_status=TaskStatus.Pending,
                                         task_params=command.task_params,
@@ -476,6 +482,7 @@ class Master:
                                     task=ImageEditsTask(
                                         task_id=task_id,
                                         command_id=command.command_id,
+                                        owner_node=command.owner_node,  # #279 Phase 2
                                         instance_id=selected_instance_id,
                                         task_status=TaskStatus.Pending,
                                         task_params=command.task_params,
@@ -526,6 +533,7 @@ class Master:
                                     task=TextEmbeddingTask(
                                         task_id=task_id,
                                         command_id=command.command_id,
+                                        owner_node=command.owner_node,  # #279 Phase 2
                                         instance_id=selected_instance_id,
                                         task_status=TaskStatus.Pending,
                                         task_params=command.task_params,
