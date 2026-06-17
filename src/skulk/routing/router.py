@@ -108,7 +108,7 @@ class TopicRouter[T: CamelCaseModel]:
         # Wire-format payloads are deserialized strictly (extra="forbid"). During
         # rolling upgrades, an older node may receive a message containing fields
         # it doesn't know about. Catch the validation failure so the gossipsub
-        # receive loop survives — dropping the message is recoverable; tearing
+        # receive loop survives - dropping the message is recoverable; tearing
         # down the loop is not.
         try:
             item = self.topic.deserialize(data)
@@ -364,11 +364,22 @@ class Router:
                         )
                     if self.uses_zenoh(topic):
                         assert self._zenoh is not None
-                        # Address the chunk to its owning API node when a routing
-                        # key is present (data/<owner_node>); fall back to the
-                        # bare topic otherwise (#279 Phase 2).
-                        key = f"{topic}/{routing_key}" if routing_key else topic
-                        await self._zenoh.zenoh_publish(key, data)
+                        # Address the chunk to its owning API node (data/<owner>).
+                        # Nodes subscribe only to data/<own_node_id>, never the
+                        # bare topic, so a message with no routing key reaches no
+                        # subscriber. That should not happen - every serving task
+                        # carries owner_node (#279 Phase 2) - so warn loudly
+                        # rather than dropping it silently if it ever does (#310
+                        # review).
+                        if not routing_key:
+                            logger.warning(
+                                f"Zenoh DATA publish on {topic} has no routing key "
+                                f"(owner_node unset); no node subscribes to the bare "
+                                f"topic, so this output would be lost. Dropping a "
+                                f"chunk of {len(data)} bytes."
+                            )
+                            continue
+                        await self._zenoh.zenoh_publish(f"{topic}/{routing_key}", data)
                         continue
                     await self._net.gossipsub_publish(topic, data)
                 except NoPeersSubscribedToTopicError:

@@ -11,7 +11,6 @@ from anyio import BrokenResourceError, ClosedResourceError, fail_after, to_threa
 from loguru import logger
 from PIL import Image
 
-from skulk.api.types import ImageEditsTaskParams
 from skulk.download.download_utils import resolve_model_in_path
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
@@ -106,7 +105,7 @@ from skulk.worker.runner.runner_supervisor import RunnerSupervisor
 _STALE_RESET_MAX_WAIT_TICKS = 300
 """How many ~100ms planning ticks to hold planning while stale download
 resets round-trip through the master (~30s). The deadline exists so a
-masterless interval cannot freeze the worker forever — past it, planning
+masterless interval cannot freeze the worker forever - past it, planning
 resumes and the download coordinator's missing-directory self-heal covers
 the residual risk."""
 
@@ -127,7 +126,7 @@ def _wedged_live_instances(
 
     These never get a planner ``Shutdown`` (``plan._kill_runner`` only fires
     when the instance is gone or a PEER failed), so the worker must give the
-    instance up directly on observation — otherwise a single-node wedge
+    instance up directly on observation - otherwise a single-node wedge
     strands a dead runner behind a live instance forever.
     """
     return [
@@ -227,6 +226,25 @@ def _summarize_worker_task(task: Task) -> str:
             f"stream={params.stream!r})"
         )
     return task.__class__.__name__
+
+
+def _inject_assembled_image_edit(task: ImageEdits, assembled_image: str) -> ImageEdits:
+    """Return the ImageEdits task with the reassembled image injected.
+
+    Uses ``model_copy`` so every other field is preserved - in particular
+    ``owner_node``, which the Zenoh data plane needs to address generation output
+    back to the owning API node (#279 Phase 2). Rebuilding the task field-by-field
+    here previously dropped ``owner_node`` (and would silently drop any future
+    field), causing the supervisor to stamp ``owner_node=None`` and the Router to
+    publish output to a Zenoh key no node subscribes to (#310 review).
+    """
+    return task.model_copy(
+        update={
+            "task_params": task.task_params.model_copy(
+                update={"image_data": assembled_image}
+            )
+        }
+    )
 
 
 def _log_image_transport(message: str) -> None:
@@ -330,7 +348,7 @@ class Worker:
         self._data_sender = data_sender
         # Shared, Node-owned telemetry view (#279). The worker prunes a node's
         # telemetry here when it sees NodeTimedOut, because the worker runs on
-        # EVERY node regardless of role — so a --no-api node (or a --no-api
+        # EVERY node regardless of role - so a --no-api node (or a --no-api
         # master placing off this view) still drops dead nodes, where an
         # API-only prune hook would leak unbounded across churn.
         self._telemetry_view = telemetry_view
@@ -344,7 +362,7 @@ class Worker:
         # be replicating in; countered lazily by
         # plan_step once state carries them. Names stay in the pending set
         # until the reset has APPLIED (state stops advertising the stale
-        # entry) — discarding on send would reopen the plan gate while the
+        # entry) - discarding on send would reopen the plan gate while the
         # event is still round-tripping through the master.
         self._stale_downloads_pending_reset: set[str] = set()
         self._stale_resets_sent: set[str] = set()
@@ -388,7 +406,7 @@ class Worker:
         Last-resort guard using *local, current* memory, not the master's
         gossiped view. Availability is the same GPU-wireable figure the master
         admits on (``total − wired − anonymous − compressor`` from a vm_stat
-        snapshot, capped at the Metal GPU working-set ceiling) — psutil's
+        snapshot, capped at the Metal GPU working-set ceiling) - psutil's
         ``available`` counts reclaimable file cache as used, so right after a
         model download it would veto the very placement the master just
         correctly admitted. Falls back to psutil when vm_stat fails. Refusing
@@ -417,7 +435,7 @@ class Worker:
         """Tear down a repeatedly-failing instance instead of relaunching it.
 
         Sends ``DeleteInstance`` to the master so the doomed instance stops
-        being reconciled into fresh runners — each relaunch risks another
+        being reconciled into fresh runners - each relaunch risks another
         leak-on-abort. The crash window is deliberately NOT cleared: the trip is
         edge-triggered, so leaving the failure history in place keeps the latch
         set and suppresses re-tripping (and duplicate ``DeleteInstance``) while
@@ -600,7 +618,7 @@ class Worker:
                     await self._give_up_on_instance(
                         _wedge_iid,
                         f"runner for {_wedge_model} died with a suspected GPU "
-                        f"wedge ({WEDGE_FAILURE_MARKER}); not retrying — each "
+                        f"wedge ({WEDGE_FAILURE_MARKER}); not retrying - each "
                         "wedge attempt leaks wired GPU memory. If this node's "
                         "available memory dropped, a reboot is the only way "
                         "to reclaim it.",
@@ -730,7 +748,7 @@ class Worker:
                                 f"runner for "
                                 f"{shard_for_eviction.model_card.model_id} died "
                                 "with a suspected GPU wedge "
-                                f"({WEDGE_FAILURE_MARKER}); not retrying — each "
+                                f"({WEDGE_FAILURE_MARKER}); not retrying - each "
                                 "wedge attempt leaks wired GPU memory. If this "
                                 "node's available memory dropped, a reboot is "
                                 "the only way to reclaim it.",
@@ -748,7 +766,7 @@ class Worker:
                             )
                         else:
                             # Runner crashed but instance still exists and the
-                            # breaker has not tripped — reset download status so
+                            # breaker has not tripped - reset download status so
                             # the planner re-stages the model instead of assuming
                             # it's still on disk, and retry.
                             logger.info(
@@ -785,29 +803,10 @@ class Worker:
                     _log_image_payload_debug(
                         "Worker assembled image edit", 0, assembled
                     )
-                    # Create modified task with assembled image data
-                    modified_task = ImageEdits(
-                        task_id=task.task_id,
-                        command_id=task.command_id,
-                        instance_id=task.instance_id,
-                        task_status=task.task_status,
-                        task_params=ImageEditsTaskParams(
-                            image_data=assembled,
-                            total_input_chunks=task.task_params.total_input_chunks,
-                            prompt=task.task_params.prompt,
-                            model=task.task_params.model,
-                            n=task.task_params.n,
-                            quality=task.task_params.quality,
-                            output_format=task.task_params.output_format,
-                            response_format=task.task_params.response_format,
-                            size=task.task_params.size,
-                            image_strength=task.task_params.image_strength,
-                            bench=task.task_params.bench,
-                            stream=task.task_params.stream,
-                            partial_images=task.task_params.partial_images,
-                            advanced_params=task.task_params.advanced_params,
-                        ),
-                    )
+                    # Inject the assembled image while preserving every other
+                    # field (notably owner_node for Zenoh routing - #279 Phase 2 /
+                    # #310 review).
+                    modified_task = _inject_assembled_image_edit(task, assembled)
                     # Cleanup buffers
                     if cmd_id in self.input_chunk_buffer:
                         del self.input_chunk_buffer[cmd_id]
@@ -898,8 +897,8 @@ class Worker:
             if isinstance(task, LoadModel) and shard is not None:
                 # Re-check fit at load dispatch. The CreateRunner guard runs
                 # before download and before any concurrently-placed instance
-                # has loaded, so this is the last accurate point — current free
-                # memory now reflects those other loads — to refuse before the
+                # has loaded, so this is the last accurate point - current free
+                # memory now reflects those other loads - to refuse before the
                 # runner allocates and risks an OOM-abort that leaks GPU memory.
                 fit_error = self._local_shard_fit_error(shard)
                 if fit_error is not None:
@@ -940,7 +939,7 @@ class Worker:
         # Context-admission ceiling (#145/#279 slice 2): the master computed
         # this once at placement time and stamped it into the event-sourced
         # placement decision, so every rank reads the identical value here.
-        # Recomputing from node memory would now be non-deterministic — memory
+        # Recomputing from node memory would now be non-deterministic - memory
         # moved to the last-write-wins telemetry plane and is no longer in the
         # ordered, replicated event log.
         context_token_limit = task.bound_instance.instance.context_token_limit
@@ -1014,7 +1013,7 @@ class Worker:
 
         Includes companion repos (MTP sidecar, assistant, split vision
         weights) of active models: no instance names them directly, but
-        evicting one corrupts a live runner just the same — MLX loads
+        evicting one corrupts a live runner just the same - MLX loads
         weights lazily.
         """
 
@@ -1033,7 +1032,7 @@ class Worker:
         for runner in self.runners.values():
             _add_card(runner.shard_metadata.model_card)
         # A store-backed download in progress has already created its
-        # staging directory but no runner exists yet — a concurrent
+        # staging directory but no runner exists yet - a concurrent
         # teardown's budget pass must not delete a directory that is
         # actively being written.
         for progress in self.state.downloads.get(self.node_id, []):
@@ -1056,7 +1055,7 @@ class Worker:
             or not self._staging_config.cleanup_on_deactivate
         ):
             return
-        # The just-deactivated model was in use until this very moment —
+        # The just-deactivated model was in use until this very moment -
         # refresh its last-use marker (and its companions') BEFORE the
         # budget pass, or a long-staged but heavily-used model sorts as
         # old and gets evicted despite being the most recently used thing
@@ -1064,7 +1063,7 @@ class Worker:
         # and reuse from an existing DownloadCompleted skips it).
         self._touch_staged_model_and_companions(shard.model_card)
         # The walk + rmtree are synchronous filesystem work on potentially
-        # tens of GB — run off the event loop so teardown doesn't stall
+        # tens of GB - run off the event loop so teardown doesn't stall
         # other worker tasks. The in-use snapshot is taken HERE, on the
         # loop thread: the threaded pass must not iterate self.runners /
         # self.state while the loop mutates them.
@@ -1089,7 +1088,7 @@ class Worker:
         cache_path = Path(self._staging_config.node_cache_path).expanduser()
         # Keyed by forward-sanitized directory name: the report's model ids
         # are best-effort inverses of directory names and can be ambiguous
-        # for ids containing "--" — sanitizing both sides forward makes the
+        # for ids containing "--" - sanitizing both sides forward makes the
         # match exact.
         own_downloads = {
             staging_directory_name(
@@ -1108,7 +1107,7 @@ class Worker:
                 else own_downloads.get(evicted_directory)
             )
             if shard_metadata is None:
-                # Never advertised as downloaded on this node — nothing to
+                # Never advertised as downloaded on this node - nothing to
                 # reset (e.g. a companion repo staged without its own
                 # download entry).
                 continue
@@ -1145,7 +1144,7 @@ class Worker:
         """Run one staging-budget enforcement pass (best-effort).
 
         ``models_in_use`` is snapshotted by the caller on the event-loop
-        thread — this method may run in a worker thread and must not touch
+        thread - this method may run in a worker thread and must not touch
         the loop's mutable structures.
         """
         if self._staging_config is None or not self._staging_config.enabled:
@@ -1154,7 +1153,7 @@ class Worker:
         # A store host configured for direct loading points node_cache_path
         # at the CANONICAL store directory (a common override that was safe
         # under the old no-cleanup default). Eviction there would delete the
-        # cluster's only copy of every model beyond the budget — refuse,
+        # cluster's only copy of every model beyond the budget - refuse,
         # whatever the config says (codex review on #215).
         if self._store_client is not None:
             local_store_path = self._store_client.local_store_path
@@ -1163,7 +1162,7 @@ class Worker:
                 and local_store_path.expanduser().resolve() == staging_root.resolve()
             ):
                 logger.warning(
-                    "Worker: staging eviction skipped — node_cache_path is "
+                    "Worker: staging eviction skipped - node_cache_path is "
                     f"the canonical store directory ({staging_root}); the "
                     "store is never evicted. Set a separate staging path if "
                     "this node should have a managed staging cache."
@@ -1218,7 +1217,7 @@ class Worker:
                 continue
             staged_dir = cache_path / directory_name
             if staged_dir.exists():
-                # Re-staged since eviction — state is truthful again.
+                # Re-staged since eviction - state is truthful again.
                 self._stale_downloads_pending_reset.discard(directory_name)
                 self._stale_resets_sent.discard(directory_name)
                 continue
@@ -1239,7 +1238,7 @@ class Worker:
                 "(staged files were evicted at startup)"
             )
         # Anything we sent a reset for that state no longer advertises has
-        # APPLIED — only then does it stop gating the planner.
+        # APPLIED - only then does it stop gating the planner.
         for directory_name in list(self._stale_resets_sent):
             if directory_name not in still_completed:
                 self._stale_downloads_pending_reset.discard(directory_name)
@@ -1253,7 +1252,7 @@ class Worker:
         A node that dies never runs the deactivate-time eviction, so its
         staged copies survive forever without this. At startup nothing is
         in use yet, so every staged model is a candidate and the grace
-        budget alone decides what survives — which is exactly the crash
+        budget alone decides what survives - which is exactly the crash
         recovery behavior we want: recent models stay warm for the
         restart, the old tail goes.
         """
@@ -1270,7 +1269,7 @@ class Worker:
                 f"({report.evicted_bytes / 2**30:.1f} GiB)"
             )
             # The master may still hold DownloadCompleted entries for the
-            # files we just deleted, but this runs BEFORE state replay —
+            # files we just deleted, but this runs BEFORE state replay -
             # there is no shard metadata to build the reset events from
             # yet. Remember the DIRECTORY names (forward-sanitized; the
             # report's repo-form ids are best-effort inverses and would be
