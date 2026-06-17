@@ -10,7 +10,10 @@ from typing import cast
 
 from skulk_pyo3_bindings import NetworkingHandle, ZenohHandle
 
-from skulk.routing.router import Router
+from skulk.routing.router import (
+    _ZENOH_DATA_OUTBOUND_BUFFER,  # pyright: ignore[reportPrivateUsage]
+    Router,
+)
 from skulk.routing.topics import COMMANDS, DATA, GLOBAL_EVENTS
 
 
@@ -35,6 +38,18 @@ def test_nothing_routes_over_zenoh_when_disabled() -> None:
     router = _router(zenoh=False)
     assert router.uses_zenoh(DATA.topic) is False
     assert router.uses_zenoh(COMMANDS.topic) is False
+
+
+def test_zenoh_outbound_channel_is_bounded() -> None:
+    """The DATA egress channel must be bounded so a stalled subscriber
+    backpressures the producer instead of growing memory without limit and
+    OOMing the node (#312 review)."""
+    router = _router(zenoh=True)
+    assert router._zenoh_out_send is not None  # pyright: ignore[reportPrivateUsage]
+    stats = router._zenoh_out_send.statistics()  # pyright: ignore[reportPrivateUsage]
+    assert stats.max_buffer_size == _ZENOH_DATA_OUTBOUND_BUFFER
+    # Sanity: a finite (non-inf) bound.
+    assert stats.max_buffer_size < float("inf")
 
 
 def test_data_owner_key_addresses_owning_node() -> None:

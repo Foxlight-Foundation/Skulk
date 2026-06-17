@@ -901,9 +901,19 @@ def main():
         ingest_url=_log_cfg.ingest_url if _log_cfg else "",
     )
     logger.info("Starting Skulk")
-    logger.info(
-        f"LIBP2P_NAMESPACE: {os.environ.get('SKULK_LIBP2P_NAMESPACE', os.getenv('SKULK_LIBP2P_NAMESPACE'))}"
-    )
+    # The libp2p namespace token seeds the private-network PSK (swarm.rs) and, when
+    # the Zenoh data plane is on, the no-TLS Zenoh namespace too; logging its value
+    # would let anyone with log access compute the namespace and subscribe to
+    # `data` (#312 review). Log only whether it is set and a non-routing
+    # fingerprint, which is enough to confirm two nodes share a namespace.
+    _libp2p_ns = os.environ.get(_LIBP2P_NAMESPACE_ENV_VAR)
+    if _libp2p_ns is not None:
+        logger.info(
+            f"{_LIBP2P_NAMESPACE_ENV_VAR} set (fingerprint "
+            f"{_namespace_fingerprint(_libp2p_ns)})"
+        )
+    else:
+        logger.info(f"{_LIBP2P_NAMESPACE_ENV_VAR} unset, using default")
 
     if args.spawn_api:
         preflight_api_port(args.api_port)

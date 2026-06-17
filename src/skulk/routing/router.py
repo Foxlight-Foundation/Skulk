@@ -34,6 +34,19 @@ from skulk.utils.task_group import TaskGroup
 from .connection_message import ConnectionMessage
 from .topics import CONNECTION_MESSAGES, DATA, PublishPolicy, TypedTopic
 
+# Bound on the Zenoh DATA-plane outbound channel (#312 review). The Zenoh
+# publisher uses CongestionControl::Block, so a stuck/slow subscriber parks the
+# egress task inside zenoh_publish. With an unbounded channel the producer (the
+# rank-0 worker's per-token emit) would keep enqueueing chunks during a long
+# generation and grow memory without limit until the node OOMs. A bounded channel
+# instead backpressures the producer (TopicRouter._send_out awaits the send), so
+# generation throttles to subscriber speed. We backpressure rather than drop on
+# purpose: the Zenoh plane is Reliable+ordered, which is exactly what lets the
+# app-layer reorder buffer be skipped (#311), so dropping chunks here would break
+# that no-loss assumption and corrupt output. The buffer is sized to absorb
+# ordinary subscriber jitter without throttling steady-state streaming.
+_ZENOH_DATA_OUTBOUND_BUFFER = 2048
+
 
 # A significant current limitation of the TopicRouter is that it is not capable
 # of preventing feedback, as it does not ask for a system id so cannot tell
@@ -203,11 +216,16 @@ class Router:
         # path publishes with CongestionControl::Block, so a stuck/slow
         # subscriber can stall its egress. Draining it on its OWN loop (not the
         # shared networking loop that also carries control-plane commands/events)
-        # confines that backpressure to DATA. Only created when Zenoh is on.
+        # confines that backpressure to DATA. The channel is BOUNDED (#312
+        # review) so a stalled subscriber backpressures the producer instead of
+        # growing memory without limit and OOMing the node. Only created when
+        # Zenoh is on.
         self._zenoh_out_send: Sender[tuple[str, str | None, bytes]] | None = None
         self._zenoh_out_recv: Receiver[tuple[str, str | None, bytes]] | None = None
         if zenoh is not None:
-            zsend, zrecv = channel[tuple[str, str | None, bytes]]()
+            zsend, zrecv = channel[tuple[str, str | None, bytes]](
+                _ZENOH_DATA_OUTBOUND_BUFFER
+            )
             self._zenoh_out_send = zsend
             self._zenoh_out_recv = zrecv
         self._id_count = count()
