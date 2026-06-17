@@ -675,6 +675,7 @@ class API:
         mount_dashboard: bool = True,
         telemetry_view: "TelemetryView | None" = None,
         data_receiver: "Receiver[DataChunk] | None" = None,
+        data_plane_zenoh: bool = False,
     ) -> None:
         self.state = State()
         # Data plane (#279 Phase 2): per-token output chunks arrive here direct
@@ -779,6 +780,40 @@ class API:
         # a multi-node producer's chunks can arrive out of order; we reorder by
         # the per-command sequence stamped on each DataChunk before dispatch.
         self._chunk_reorder: dict[CommandId, _ChunkReorderState] = {}
+        # Per-command dedupe cursor for the buffer-off path (#279 Phase 3 / #311
+        # review). Even with reordering disabled the data plane must drop
+        # duplicate sequences: when the serving rank-0 worker and the owning API
+        # are the same node, a chunk is delivered twice on Zenoh - once via the
+        # DATA TopicRouter's local publish, once via the node's own
+        # data/<node_id> Zenoh subscription (self-loopback). The reorder buffer
+        # dropped these as below-cursor duplicates; without it, this cursor does
+        # the same O(1) drop (sequence < cursor) while still dispatching in
+        # arrival order. The transport delivers each command in order, so the
+        # only out-of-cursor chunks are these duplicates.
+        self._data_dedup_cursor: dict[CommandId, int] = {}
+        # Data-plane ordering (#279 Phase 3): the reorder buffer is needed only
+        # when the DATA transport can deliver a command's chunks out of order.
+        # Gossipsub (the flag-off default) reorders, so the buffer stays on there
+        # (the #301 fix). Zenoh delivers a command's chunks per-publisher FIFO, so
+        # arrival order is generation order, so the buffer is skipped and chunks
+        # dispatch as they arrive (validated: 20/20 buffer-off coherence on a 3-node
+        # sampled-MTP matrix). SKULK_DATA_REORDER_BUFFER overrides the transport
+        # default explicitly (`1`/`0`) for testing or belt-and-suspenders.
+        _reorder_override = os.environ.get("SKULK_DATA_REORDER_BUFFER", "").strip().lower()
+        if _reorder_override in ("1", "true", "yes", "on"):
+            self._reorder_buffer_enabled: bool = True
+        elif _reorder_override in ("0", "false", "no", "off"):
+            self._reorder_buffer_enabled = False
+        else:
+            if _reorder_override:
+                logger.warning(
+                    f"Ignoring unrecognized SKULK_DATA_REORDER_BUFFER="
+                    f"{_reorder_override!r} (expected 1/0/true/false/yes/no/on/"
+                    f"off); following the transport default."
+                )
+            # Default by transport: gossipsub reorders (buffer on), Zenoh is
+            # per-publisher FIFO (buffer off).
+            self._reorder_buffer_enabled = not data_plane_zenoh
         self._image_store = ImageStore(SKULK_IMAGE_CACHE_DIR)
         self._tg: TaskGroup = TaskGroup()
 
@@ -1796,9 +1831,11 @@ class API:
         if should_send_finished:
             await self._send(TaskFinished(finished_command_id=command_id))
         queue_map.pop(command_id, None)
-        # Drop the data-plane reorder buffer alongside the queue so a late chunk
-        # arriving after finalize is dropped (no queue) instead of leaking state.
+        # Drop the data-plane reorder buffer / dedupe cursor alongside the queue
+        # so a late chunk arriving after finalize is dropped (no queue) instead
+        # of leaking state.
         self._chunk_reorder.pop(command_id, None)
+        self._data_dedup_cursor.pop(command_id, None)
 
     async def _token_chunk_stream(
         self, command_id: CommandId
@@ -3303,8 +3340,10 @@ class API:
                 tg.start_soon(self._apply_data)
                 # Releases reorder gaps stuck on a chunk dropped by the
                 # best-effort DATA topic (#279 Phase 2b); lifetime-scoped like
-                # _apply_data.
-                tg.start_soon(self._sweep_reorder_buffers)
+                # _apply_data. Only meaningful while the reorder buffer is on;
+                # with it disabled (#279 Phase 3) no gaps are ever buffered.
+                if self._reorder_buffer_enabled:
+                    tg.start_soon(self._sweep_reorder_buffers)
                 tg.start_soon(self._pause_on_new_election)
                 tg.start_soon(self._cleanup_expired_images)
                 tg.start_soon(self._prune_old_traces)
@@ -3412,11 +3451,31 @@ class API:
         """
         if self._data_receiver is None:
             return
+        if not self._reorder_buffer_enabled:
+            logger.info(
+                "Data-plane reorder buffer DISABLED; dispatching output chunks in "
+                "arrival order (with O(1) sequence dedupe). Only safe on an "
+                "ordered transport - Zenoh delivers per-publisher FIFO; gossipsub "
+                "reorders, so forcing this off there (SKULK_DATA_REORDER_BUFFER=0) "
+                "can garble multi-node output. #279 Phase 3."
+            )
         with self._data_receiver as data_chunks:
             async for data in data_chunks:
-                await self._reorder_and_dispatch(
-                    data.command_id, data.sequence, data.chunk
-                )
+                if self._reorder_buffer_enabled:
+                    await self._reorder_and_dispatch(
+                        data.command_id, data.sequence, data.chunk
+                    )
+                elif self._command_has_queue(data.command_id):
+                    # Buffer off: dispatch in arrival order (the transport orders
+                    # per command), but still dedupe by sequence so a same-node
+                    # Zenoh self-loopback duplicate is dropped (#311 review).
+                    # Late chunks for a finalized stream are already excluded by
+                    # _command_has_queue above.
+                    cursor = self._data_dedup_cursor.get(data.command_id, 0)
+                    if data.sequence < cursor:
+                        continue  # duplicate (local publish + Zenoh loopback)
+                    self._data_dedup_cursor[data.command_id] = data.sequence + 1
+                    await self._dispatch_generation_chunk(data.command_id, data.chunk)
 
     def _command_has_queue(self, command_id: CommandId) -> bool:
         return (

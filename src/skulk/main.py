@@ -314,6 +314,7 @@ class Node:
                 store_client=store_client,
                 telemetry_view=telemetry_view,
                 data_receiver=router.receiver(topics.DATA),
+                data_plane_zenoh=_zenoh_on,
             )
         else:
             api = None
