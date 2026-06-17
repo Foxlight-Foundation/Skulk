@@ -9,6 +9,20 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **Zenoh data-plane hardening toward default-on (#308 + #309).** Security
+  (#308): the Zenoh session now sets a **namespace** (derived from
+  `SKULK_LIBP2P_NAMESPACE`, sanitized to a key-expr segment, default `skulk`) so
+  foreign peers on a different namespace cannot subscribe to this fleet's `data`,
+  restoring parity with the libp2p private namespace; and `SKULK_ZENOH_LISTEN` is
+  now **required explicitly** when the plane is enabled rather than silently
+  defaulting to `0.0.0.0` (an explicit `0.0.0.0` still works but warns). TLS/ACL
+  stay operator-configurable for untrusted networks (documented; not built in).
+  Robustness (#309): the DATA plane egresses on its **own outbound loop**, so its
+  `CongestionControl::Block` backpressure can no longer stall the shared
+  control-plane publish loop (commands/events); and `ZenohSession` publish/
+  subscribe no longer hold the publishers/subscribers mutex across the
+  `declare`/`put` await, so per-command concurrent publishes don't serialize.
+
 - **Data-plane reorder buffer is now transport-conditional (#279 Phase 3).** The
   per-command `sequence` reorder buffer (the #301 fix for gossipsub reordering
   multi-node output) is now skipped when the DATA plane rides Zenoh, which

@@ -164,37 +164,62 @@ class Node:
             "true",
             "yes",
         )
-        # Strip whitespace and ignore empty entries so a stray space or an empty
-        # SKULK_ZENOH_LISTEN (e.g. `export SKULK_ZENOH_LISTEN=`) doesn't become a
-        # bogus endpoint; an empty/whitespace listen falls back to the default.
-        _zenoh_listen = (
-            os.environ.get("SKULK_ZENOH_LISTEN", "").strip() or "tcp/0.0.0.0:7447"
-        )
         _zenoh_connect = [
             endpoint.strip()
             for endpoint in os.environ.get("SKULK_ZENOH_CONNECT", "").split(",")
             if endpoint.strip()
         ]
+        _zenoh_listen_endpoints: list[str] | None = None
+        _zenoh_namespace: str | None = None
         if _zenoh_on:
-            # The Zenoh data plane currently has no auth/TLS/ACL/namespace, and
-            # the default listen binds all interfaces, so any host that can reach
-            # the port can subscribe to `data` and read generation output. Run
-            # only on a trusted, firewalled network until that is hardened
-            # (#308); the flag is experimental and off by default for this
-            # reason.
+            # Bind restriction (#308): require SKULK_ZENOH_LISTEN explicitly
+            # rather than silently defaulting to tcp/0.0.0.0:7447 (all
+            # interfaces). The operator picks the interface (a private IP on a
+            # shared network); an explicit 0.0.0.0 is still allowed but is then
+            # a deliberate choice, not a silent default.
+            _zenoh_listen = os.environ.get("SKULK_ZENOH_LISTEN", "").strip()
+            if not _zenoh_listen:
+                raise ValueError(
+                    "SKULK_ZENOH_DATA_PLANE is enabled but SKULK_ZENOH_LISTEN is "
+                    "unset. Set it explicitly (e.g. tcp/<this-node-ip>:7447); "
+                    "Skulk refuses to default the Zenoh listen endpoint to "
+                    "0.0.0.0 / all interfaces (#308 bind restriction)."
+                )
+            _zenoh_listen_endpoints = [_zenoh_listen]
+            # Namespace isolation (#308): Zenoh transparently prefixes all keys
+            # with this segment, so a peer on a different namespace cannot read
+            # this fleet's `data`. Derive it from the libp2p namespace token
+            # (the same per-deployment isolation libp2p uses), sanitized to a
+            # valid key-expr segment; default to "skulk" when unset.
+            _ns_raw = (
+                os.environ.get("SKULK_LIBP2P_NAMESPACE")
+                or os.environ.get("EXO_LIBP2P_NAMESPACE")
+                or "skulk"
+            )
+            _zenoh_namespace = (
+                "".join(c if (c.isalnum() or c in "._-") else "_" for c in _ns_raw)
+                or "skulk"
+            )
+            if "0.0.0.0" in _zenoh_listen:
+                logger.warning(
+                    f"SKULK_ZENOH_LISTEN={_zenoh_listen} binds all interfaces; "
+                    f"prefer a specific private IP on a shared network (#308)."
+                )
             logger.warning(
                 f"SKULK_ZENOH_DATA_PLANE is ENABLED (experimental): generation "
-                f"output is served over Zenoh on {_zenoh_listen} with NO "
-                f"auth/TLS/namespace isolation. Run only on a trusted, firewalled "
-                f"network. Hardening tracked in #308."
+                f"output is served over Zenoh on {_zenoh_listen}, namespace"
+                f"-isolated as '{_zenoh_namespace}'. There is still NO transport "
+                f"auth/TLS, so on an untrusted network enable Zenoh TLS or keep it "
+                f"firewalled (#308)."
             )
         router = Router.create(
             keypair,
             bootstrap_peers=args.bootstrap_peers,
             listen_port=args.libp2p_port,
-            zenoh_listen_endpoints=[_zenoh_listen] if _zenoh_on else None,
+            zenoh_listen_endpoints=_zenoh_listen_endpoints,
             zenoh_connect_endpoints=_zenoh_connect,
             node_id=str(node_id),
+            zenoh_namespace=_zenoh_namespace,
         )
         await router.register_topic(topics.GLOBAL_EVENTS)
         await router.register_topic(topics.LOCAL_EVENTS)

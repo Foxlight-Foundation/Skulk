@@ -117,11 +117,14 @@ def test_zenoh_publish_keys_by_owner_and_subscribe_keys_by_self() -> None:
             DATA_TOPIC.routing_key(chunk) if DATA_TOPIC.routing_key else None,
             DATA_TOPIC.serialize(chunk),
         )
-        send = router.networking_receiver.clone_sender()
+        # DATA egresses via the dedicated Zenoh outbound loop (#309), not the
+        # shared control-plane loop, so feed its channel and drain it.
+        assert router._zenoh_out_send is not None  # pyright: ignore[reportPrivateUsage]
+        send = router._zenoh_out_send.clone()  # pyright: ignore[reportPrivateUsage]
         await send.send((topic, routing_key, payload))
         send.close()
         with anyio.move_on_after(1):
-            await router._networking_publish()  # pyright: ignore[reportPrivateUsage]
+            await router._zenoh_networking_publish()  # pyright: ignore[reportPrivateUsage]
         assert zenoh.published == [("data/owner-9", payload)]
 
     anyio.run(_run)
