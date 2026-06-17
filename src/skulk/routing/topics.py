@@ -39,7 +39,7 @@ class TypedTopic[T: CamelCaseModel]:
     # on that suffix (its own node id) instead of every node, killing the
     # cluster-wide fan-out. ``None`` (the default, and every topic on gossipsub)
     # keys by the bare topic, preserving broadcast semantics.
-    routing_key: "Callable[[T], str | None] | None" = None
+    routing_key: Callable[[T], str | None] | None = None
 
     @staticmethod
     def serialize(t: T) -> bytes:

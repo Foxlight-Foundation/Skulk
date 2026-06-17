@@ -19,7 +19,8 @@ def _router(*, zenoh: bool) -> Router:
     # the handles are never called here, so opaque stand-ins are sufficient.
     fake_net = cast(NetworkingHandle, object())
     fake_zenoh = cast(ZenohHandle, object()) if zenoh else None
-    return Router(handle=fake_net, zenoh=fake_zenoh)
+    # node_id is required when zenoh is enabled (the data/<node_id> sub key).
+    return Router(handle=fake_net, zenoh=fake_zenoh, node_id="test-node")
 
 
 def test_data_routes_over_zenoh_when_enabled() -> None:

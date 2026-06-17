@@ -180,7 +180,16 @@ class Router:
         # gossipsub (default, until the flag is proven in production).
         self._zenoh: ZenohHandle | None = zenoh
         # This node's id, used as the Zenoh data-plane subscription suffix so a
-        # node receives only output addressed to it (#279 Phase 2).
+        # node receives only output addressed to it (#279 Phase 2). Required when
+        # Zenoh is enabled: an empty id would subscribe to "data/" and the node
+        # would never receive its addressed chunks, silently losing output (#310
+        # review). `create()` always resolves it from the keypair, so this only
+        # guards a raw misuse of the constructor.
+        if zenoh is not None and not node_id:
+            raise ValueError(
+                "Router requires a non-empty node_id when the Zenoh data plane "
+                "is enabled (it is the data/<node_id> subscription key)."
+            )
         self._node_id: str = node_id
         self._tmp_networking_sender: Sender[tuple[str, str | None, bytes]] | None = (
             send
