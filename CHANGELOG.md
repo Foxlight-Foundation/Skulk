@@ -9,6 +9,18 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **Data-plane reorder buffer is now transport-conditional (#279 Phase 3).** The
+  per-command `sequence` reorder buffer (the #301 fix for gossipsub reordering
+  multi-node output) is now skipped when the DATA plane rides Zenoh, which
+  delivers each command's chunks per-publisher FIFO — output dispatches in
+  arrival order, eliminating the per-token buffering/reordering hop. The buffer
+  stays ON for the gossipsub default (which reorders). The API selects this from
+  the transport (`data_plane_zenoh`, from `SKULK_ZENOH_DATA_PLANE`);
+  `SKULK_DATA_REORDER_BUFFER` (`1`/`0`) overrides explicitly. Validated 20/20 on
+  a 3-node sampled-MTP coherence matrix with the buffer off. The full removal of
+  the `sequence` field and reorder machinery is deferred until Zenoh is the
+  default DATA transport.
+
 - **Optional Eclipse Zenoh transport for the data plane (experimental, default
   off).** When `SKULK_ZENOH_DATA_PLANE` is set, the `DATA` topic (per-token
   generation output) rides a Zenoh `peer` session instead of gossipsub; control,
