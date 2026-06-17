@@ -99,6 +99,19 @@ def _libp2p_namespace_token(environ: Mapping[str, str]) -> str:
     return _LIBP2P_NETWORK_VERSION
 
 
+def _namespace_fingerprint(namespace: str) -> str:
+    """Return a short non-routing fingerprint of a Zenoh namespace (#312 review).
+
+    With no transport auth/TLS the namespace prefix is itself the isolation
+    value: a peer that learns it can subscribe to the fully prefixed key and read
+    ``data``. So startup logging emits this fingerprint instead of the namespace.
+    It is a truncated second hash, so it cannot be used to subscribe and cannot be
+    reversed to the namespace, yet it is stable per namespace, which is all an
+    operator needs to confirm two nodes resolved to the same isolation segment.
+    """
+    return hashlib.sha256(namespace.encode("utf-8")).hexdigest()[:12]
+
+
 def _require_zenoh_listen(env_value: str) -> str:
     """Return the explicit Zenoh listen endpoint, or raise (#308 bind restriction).
 
@@ -253,10 +266,13 @@ class Node:
             # the source diverged from libp2p (legacy env, different default),
             # two nodes in one libp2p cluster could land in different Zenoh
             # namespaces and silently drop all cross-node output (#312 review).
-            # We never log the raw token: it seeds libp2p's private-network PSK
-            # (swarm.rs PNET_PRESHARED_KEY), so emitting it would leak the cluster
-            # isolation secret into centralized logs (#312 review). Log only the
-            # derived (one-way hashed) namespace and whether an override was set.
+            # We never log the raw token or the derived namespace: the raw token
+            # seeds libp2p's private-network PSK (swarm.rs PNET_PRESHARED_KEY), and
+            # because the plane has no transport auth/TLS the derived namespace IS
+            # the only isolation value (a peer that learns it can subscribe to the
+            # prefixed key and read `data`). Log only a non-routing fingerprint and
+            # whether an override was set, so operators can still confirm two nodes
+            # share a namespace without exposing it (#312 review).
             _ns_raw = _libp2p_namespace_token(os.environ)
             _zenoh_namespace = _derive_zenoh_namespace(_ns_raw)
             _ns_override_set = _LIBP2P_NAMESPACE_ENV_VAR in os.environ
@@ -267,8 +283,8 @@ class Node:
                 )
             logger.warning(
                 f"SKULK_ZENOH_DATA_PLANE is ENABLED (experimental): generation "
-                f"output is served over Zenoh on {_zenoh_listen}, isolated under "
-                f"namespace '{_zenoh_namespace}' (derived from the libp2p token; "
+                f"output is served over Zenoh on {_zenoh_listen}, namespace"
+                f"-isolated (fingerprint {_namespace_fingerprint(_zenoh_namespace)}; "
                 f"{_LIBP2P_NAMESPACE_ENV_VAR} "
                 f"{'set' if _ns_override_set else 'unset, using default'}). There "
                 f"is still NO transport auth/TLS, so on an untrusted network "
