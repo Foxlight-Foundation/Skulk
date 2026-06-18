@@ -31,8 +31,8 @@ For the runtime details, see [build and runtime paths](build-and-runtime) and
 
 ## Why Skulk
 
-**Run models that don't fit on one machine.** Skulk splits a model across every
-device in the cluster and routes the work through the pipeline automatically. A
+**Run models that don't fit on one machine.** Skulk splits a model across as many
+machines as it needs and routes the work through the pipeline automatically. A
 70B model that won't fit in one Mac's unified memory can run across two.
 
 **Every device counts.** MacBooks, Mac Studios, Mac Pros, and Linux boxes all
@@ -41,8 +41,9 @@ nodes, and rebalances when a node leaves or rejoins.
 
 **Always on, self-healing.** Skulk runs as a supervised service on macOS and
 Linux: it starts at boot, restarts on crash, and rebuilds cluster state on
-recovery. If the master node dies mid-request, a new one is elected and serving
-continues.
+recovery. If the master node dies, a new one is elected and the models already
+placed keep running, so the cluster stays available (an in-flight request at the
+moment of failover may need to be retried).
 
 **Manage it from anywhere.** Put your nodes on a Tailscale network and the
 mobile-friendly operator panel gives you live memory, GPU, and temperature for
