@@ -10,7 +10,7 @@ This is the long-form mental model for how Skulk is put together end to end. Rea
 
 ## What Skulk is
 
-Skulk is a distributed inference system that connects multiple Apple Silicon (and increasingly Linux/CUDA) nodes into one logical inference cluster. Models are sharded across nodes; any node's API can serve cluster-wide requests; the cluster keeps running through node arrivals, departures, and master failures. One Python binary (`uv run skulk`) is everything you need on each node — the same process is router, worker, master-eligible coordinator, election participant, API server, and dashboard host.
+Skulk is an interconnect fabric for multi-node AI compute: it connects multiple Apple Silicon (and increasingly Linux/CUDA) nodes into one cluster and moves work across them. Its headline use is distributed inference, where models are sharded across nodes, any node's API can serve cluster-wide requests, and the cluster keeps running through node arrivals, departures, and master failures. One Python binary (`uv run skulk`) is everything you need on each node: the same process is router, worker, master-eligible coordinator, election participant, API server, and dashboard host.
 
 The design choices that shape almost everything else:
 

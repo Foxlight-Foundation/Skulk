@@ -58,26 +58,24 @@ The combined approach gives us:
 - one declarative source of truth
 - one normalized execution contract
 
-## Current Phase 1 Goal
+## The capability spine
 
-Phase 1 is about building the capability spine that UI and API work can depend on.
-
-That means:
+The capability system is the spine that UI and API behavior depend on:
 
 - cards can declare advanced capability sections
-- old cards still work
+- older cards without those sections still work
 - runtime behavior for key decisions is capability-driven
-- model metadata exposed by the API can begin surfacing refined behavior to clients
+- model metadata exposed by the API surfaces refined behavior to clients
 
-Phase 1 specifically focuses on:
+The decisions it drives today are:
 
 - reasoning/thinking defaults
 - prompt renderer selection
 - output parser selection
 
-## Phase 2 Thinking Contract
+## Thinking contract
 
-Phase 2 keeps the existing public controls:
+The existing public controls are preserved:
 
 - `enable_thinking`
 - `reasoning_effort`
@@ -124,7 +122,7 @@ The resolved runtime profile follows a simple precedence model:
 2. model-family defaults fill in known behavior for important families
 3. generic fallback preserves compatibility for everything else
 
-Phase 1 intentionally keeps those heuristics conservative. The goal is not to
+The runtime intentionally keeps those heuristics conservative. The goal is not to
 guess every possible advanced feature, but to preserve current behavior while
 letting extended cards make support more precise.
 

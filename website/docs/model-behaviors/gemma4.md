@@ -73,7 +73,7 @@ Today that includes declarations for:
 
 ## Current Gaps
 
-Phase 1 does **not** mean Gemma 4 is fully feature-complete yet.
+Current support does **not** mean Gemma 4 is fully feature-complete yet.
 
 Some follow-up work is intentionally tracked separately, including:
 
