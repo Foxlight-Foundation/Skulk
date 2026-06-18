@@ -1,9 +1,11 @@
 import argparse
+import hashlib
 import multiprocessing as mp
 import os
 import resource
 import signal
 import socket
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Self
@@ -51,6 +53,83 @@ from skulk.utils.channels import Receiver, channel
 from skulk.utils.pydantic_ext import CamelCaseModel
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.main import Worker
+
+
+def _derive_zenoh_namespace(raw: str) -> str:
+    """Map a libp2p namespace to a Zenoh key-expr namespace segment (#308).
+
+    This is the Zenoh data-plane isolation boundary, so distinct libp2p
+    namespaces must not collide on the same Zenoh namespace, or peers on
+    different libp2p namespaces could read each other's ``data``. We SHA-256-hash
+    unconditionally rather than a verbatim/hash split: a char-replacement
+    sanitizer collapses ``prod/main`` and ``prod_main`` (#312 review P1), and a
+    verbatim-when-safe split still lets a fleet named literally
+    ``ns<sha256(victim)>`` collide with the victim's hashed namespace (#312 review
+    P2). A SHA-256 hex digest is collision-resistant (no two distinct namespaces
+    collide in practice) and always a valid key-expr segment; the ``ns`` prefix
+    keeps it from starting with a digit. The trade-off is a non-human-readable
+    namespace, which is fine for an internal key prefix. Note: neither this
+    derived namespace nor the raw libp2p token is ever logged (with no TLS the
+    namespace is itself the isolation value); startup logs only a non-routing
+    fingerprint of it (see ``_namespace_fingerprint``).
+    """
+    return "ns" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+# Keep in sync with rust/networking/src/swarm.rs: NETWORK_VERSION default and
+# the OVERRIDE_VERSION_ENV_VAR name used to build the libp2p private-network key.
+_LIBP2P_NETWORK_VERSION = "v0.0.1"
+_LIBP2P_NAMESPACE_ENV_VAR = "SKULK_LIBP2P_NAMESPACE"
+
+
+def _libp2p_namespace_token(environ: Mapping[str, str]) -> str:
+    """Return the exact token libp2p isolates on, for the Zenoh namespace (#312).
+
+    The Zenoh namespace MUST derive from the identical token that builds the
+    libp2p private-network key in ``swarm.rs`` (``PNET_PRESHARED_KEY``); otherwise
+    two nodes in the same libp2p cluster can land in different Zenoh namespaces
+    and silently drop all cross-node generation output. ``swarm.rs`` uses
+    ``SKULK_LIBP2P_NAMESPACE`` when the var is *present* (Rust ``env::var``
+    returns ``Ok`` even for an empty value) and the ``NETWORK_VERSION`` default
+    (``v0.0.1``) otherwise; it does NOT read the legacy ``EXO_LIBP2P_NAMESPACE``.
+    We mirror that precisely: presence (not truthiness) selects the override, and
+    an unset var falls back to ``v0.0.1`` rather than a Skulk-only default.
+    """
+    override = environ.get(_LIBP2P_NAMESPACE_ENV_VAR)
+    if override is not None:
+        return override
+    return _LIBP2P_NETWORK_VERSION
+
+
+def _namespace_fingerprint(namespace: str) -> str:
+    """Return a short non-routing fingerprint of a Zenoh namespace (#312 review).
+
+    With no transport auth/TLS the namespace prefix is itself the isolation
+    value: a peer that learns it can subscribe to the fully prefixed key and read
+    ``data``. So startup logging emits this fingerprint instead of the namespace.
+    It is a truncated second hash, so it cannot be used to subscribe and cannot be
+    reversed to the namespace, yet it is stable per namespace, which is all an
+    operator needs to confirm two nodes resolved to the same isolation segment.
+    """
+    return hashlib.sha256(namespace.encode("utf-8")).hexdigest()[:12]
+
+
+def _require_zenoh_listen(env_value: str) -> str:
+    """Return the explicit Zenoh listen endpoint, or raise (#308 bind restriction).
+
+    When the Zenoh data plane is enabled, the listen endpoint must be set
+    explicitly; Skulk refuses to default it to ``tcp/0.0.0.0:7447`` (all
+    interfaces) so a shared-network deployment doesn't silently expose the plane.
+    """
+    listen = env_value.strip()
+    if not listen:
+        raise ValueError(
+            "SKULK_ZENOH_DATA_PLANE is enabled but SKULK_ZENOH_LISTEN is unset. "
+            "Set it explicitly (e.g. tcp/<this-node-ip>:7447); Skulk refuses to "
+            "default the Zenoh listen endpoint to 0.0.0.0 / all interfaces "
+            "(#308 bind restriction)."
+        )
+    return listen
 
 
 def _add_model_search_path(path: Path) -> None:
@@ -164,37 +243,63 @@ class Node:
             "true",
             "yes",
         )
-        # Strip whitespace and ignore empty entries so a stray space or an empty
-        # SKULK_ZENOH_LISTEN (e.g. `export SKULK_ZENOH_LISTEN=`) doesn't become a
-        # bogus endpoint; an empty/whitespace listen falls back to the default.
-        _zenoh_listen = (
-            os.environ.get("SKULK_ZENOH_LISTEN", "").strip() or "tcp/0.0.0.0:7447"
-        )
         _zenoh_connect = [
             endpoint.strip()
             for endpoint in os.environ.get("SKULK_ZENOH_CONNECT", "").split(",")
             if endpoint.strip()
         ]
+        _zenoh_listen_endpoints: list[str] | None = None
+        _zenoh_namespace: str | None = None
         if _zenoh_on:
-            # The Zenoh data plane currently has no auth/TLS/ACL/namespace, and
-            # the default listen binds all interfaces, so any host that can reach
-            # the port can subscribe to `data` and read generation output. Run
-            # only on a trusted, firewalled network until that is hardened
-            # (#308); the flag is experimental and off by default for this
-            # reason.
+            # Bind restriction (#308): require SKULK_ZENOH_LISTEN explicitly
+            # rather than silently defaulting to tcp/0.0.0.0:7447 (all
+            # interfaces). The operator picks the interface (a private IP on a
+            # shared network); an explicit 0.0.0.0 is still allowed but is then
+            # a deliberate choice, not a silent default.
+            _zenoh_listen = _require_zenoh_listen(
+                os.environ.get("SKULK_ZENOH_LISTEN", "")
+            )
+            _zenoh_listen_endpoints = [_zenoh_listen]
+            # Namespace isolation (#308): Zenoh transparently prefixes all keys
+            # with this segment, so a peer on a different namespace cannot read
+            # this fleet's `data`. Derive it from the EXACT token libp2p isolates
+            # on (_libp2p_namespace_token mirrors swarm.rs), via a
+            # collision-resistant SHA-256 hash (see _derive_zenoh_namespace). If
+            # the source diverged from libp2p (legacy env, different default),
+            # two nodes in one libp2p cluster could land in different Zenoh
+            # namespaces and silently drop all cross-node output (#312 review).
+            # We never log the raw token or the derived namespace: the raw token
+            # seeds libp2p's private-network PSK (swarm.rs PNET_PRESHARED_KEY), and
+            # because the plane has no transport auth/TLS the derived namespace IS
+            # the only isolation value (a peer that learns it can subscribe to the
+            # prefixed key and read `data`). Log only a non-routing fingerprint and
+            # whether an override was set, so operators can still confirm two nodes
+            # share a namespace without exposing it (#312 review).
+            _ns_raw = _libp2p_namespace_token(os.environ)
+            _zenoh_namespace = _derive_zenoh_namespace(_ns_raw)
+            _ns_override_set = _LIBP2P_NAMESPACE_ENV_VAR in os.environ
+            if "0.0.0.0" in _zenoh_listen:
+                logger.warning(
+                    f"SKULK_ZENOH_LISTEN={_zenoh_listen} binds all interfaces; "
+                    f"prefer a specific private IP on a shared network (#308)."
+                )
             logger.warning(
                 f"SKULK_ZENOH_DATA_PLANE is ENABLED (experimental): generation "
-                f"output is served over Zenoh on {_zenoh_listen} with NO "
-                f"auth/TLS/namespace isolation. Run only on a trusted, firewalled "
-                f"network. Hardening tracked in #308."
+                f"output is served over Zenoh on {_zenoh_listen}, namespace"
+                f"-isolated (fingerprint {_namespace_fingerprint(_zenoh_namespace)}; "
+                f"{_LIBP2P_NAMESPACE_ENV_VAR} "
+                f"{'set' if _ns_override_set else 'unset, using default'}). There "
+                f"is still NO transport auth/TLS, so on an untrusted network "
+                f"enable Zenoh TLS or keep it firewalled (#308)."
             )
         router = Router.create(
             keypair,
             bootstrap_peers=args.bootstrap_peers,
             listen_port=args.libp2p_port,
-            zenoh_listen_endpoints=[_zenoh_listen] if _zenoh_on else None,
+            zenoh_listen_endpoints=_zenoh_listen_endpoints,
             zenoh_connect_endpoints=_zenoh_connect,
             node_id=str(node_id),
+            zenoh_namespace=_zenoh_namespace,
         )
         await router.register_topic(topics.GLOBAL_EVENTS)
         await router.register_topic(topics.LOCAL_EVENTS)
@@ -796,9 +901,19 @@ def main():
         ingest_url=_log_cfg.ingest_url if _log_cfg else "",
     )
     logger.info("Starting Skulk")
-    logger.info(
-        f"LIBP2P_NAMESPACE: {os.environ.get('SKULK_LIBP2P_NAMESPACE', os.getenv('SKULK_LIBP2P_NAMESPACE'))}"
-    )
+    # The libp2p namespace token seeds the private-network PSK (swarm.rs) and, when
+    # the Zenoh data plane is on, the no-TLS Zenoh namespace too; logging its value
+    # would let anyone with log access compute the namespace and subscribe to
+    # `data` (#312 review). Log only whether it is set and a non-routing
+    # fingerprint, which is enough to confirm two nodes share a namespace.
+    _libp2p_ns = os.environ.get(_LIBP2P_NAMESPACE_ENV_VAR)
+    if _libp2p_ns is not None:
+        logger.info(
+            f"{_LIBP2P_NAMESPACE_ENV_VAR} set (fingerprint "
+            f"{_namespace_fingerprint(_libp2p_ns)})"
+        )
+    else:
+        logger.info(f"{_LIBP2P_NAMESPACE_ENV_VAR} unset, using default")
 
     if args.spawn_api:
         preflight_api_port(args.api_port)

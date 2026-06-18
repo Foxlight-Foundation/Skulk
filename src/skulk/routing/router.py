@@ -9,6 +9,7 @@ from typing import cast
 from anyio import (
     BrokenResourceError,
     ClosedResourceError,
+    get_cancelled_exc_class,
     move_on_after,
     sleep_forever,
 )
@@ -32,6 +33,19 @@ from skulk.utils.task_group import TaskGroup
 
 from .connection_message import ConnectionMessage
 from .topics import CONNECTION_MESSAGES, DATA, PublishPolicy, TypedTopic
+
+# Bound on the Zenoh DATA-plane outbound channel (#312 review). The Zenoh
+# publisher uses CongestionControl::Block, so a stuck/slow subscriber parks the
+# egress task inside zenoh_publish. With an unbounded channel the producer (the
+# rank-0 worker's per-token emit) would keep enqueueing chunks during a long
+# generation and grow memory without limit until the node OOMs. A bounded channel
+# instead backpressures the producer (TopicRouter._send_out awaits the send), so
+# generation throttles to subscriber speed. We backpressure rather than drop on
+# purpose: the Zenoh plane is Reliable+ordered, which is exactly what lets the
+# app-layer reorder buffer be skipped (#311), so dropping chunks here would break
+# that no-loss assumption and corrupt output. The buffer is sized to absorb
+# ordinary subscriber jitter without throttling steady-state streaming.
+_ZENOH_DATA_OUTBOUND_BUFFER = 2048
 
 
 # A significant current limitation of the TopicRouter is that it is not capable
@@ -147,14 +161,18 @@ class Router:
         zenoh_listen_endpoints: Sequence[str] | None = None,
         zenoh_connect_endpoints: Sequence[str] = (),
         node_id: str | None = None,
+        zenoh_namespace: str | None = None,
     ) -> "Router":
         # When zenoh_listen_endpoints is provided the data plane (DATA topic)
         # rides a Zenoh peer session instead of gossipsub (the zenoh_data_plane
         # flag, decided by the caller). All other topics stay on libp2p.
+        # zenoh_namespace (#308) isolates this fleet's keys from foreign peers.
         zenoh: ZenohHandle | None = None
         if zenoh_listen_endpoints is not None:
             zenoh = ZenohHandle(
-                list(zenoh_listen_endpoints), list(zenoh_connect_endpoints)
+                list(zenoh_listen_endpoints),
+                list(zenoh_connect_endpoints),
+                zenoh_namespace,
             )
         # The Zenoh data plane addresses output per owner (key data/<node_id>),
         # so the Router subscribes only to its own id; default to the keypair's
@@ -194,6 +212,22 @@ class Router:
         self._tmp_networking_sender: Sender[tuple[str, str | None, bytes]] | None = (
             send
         )
+        # Dedicated outbound channel for the Zenoh DATA plane (#309): the DATA
+        # path publishes with CongestionControl::Block, so a stuck/slow
+        # subscriber can stall its egress. Draining it on its OWN loop (not the
+        # shared networking loop that also carries control-plane commands/events)
+        # confines that backpressure to DATA. The channel is BOUNDED (#312
+        # review) so a stalled subscriber backpressures the producer instead of
+        # growing memory without limit and OOMing the node. Only created when
+        # Zenoh is on.
+        self._zenoh_out_send: Sender[tuple[str, str | None, bytes]] | None = None
+        self._zenoh_out_recv: Receiver[tuple[str, str | None, bytes]] | None = None
+        if zenoh is not None:
+            zsend, zrecv = channel[tuple[str, str | None, bytes]](
+                _ZENOH_DATA_OUTBOUND_BUFFER
+            )
+            self._zenoh_out_send = zsend
+            self._zenoh_out_recv = zrecv
         self._id_count = count()
         self._tg: TaskGroup = TaskGroup()
 
@@ -202,11 +236,17 @@ class Router:
         return self._zenoh is not None and topic == DATA.topic
 
     async def register_topic[T: CamelCaseModel](self, topic: TypedTopic[T]):
-        send = self._tmp_networking_sender
-        if send:
-            self._tmp_networking_sender = None
+        if self.uses_zenoh(topic.topic):
+            # DATA on Zenoh egresses via its own loop so Block backpressure
+            # can't stall the shared control-plane publish loop (#309).
+            assert self._zenoh_out_send is not None
+            send = self._zenoh_out_send.clone()
         else:
-            send = self.networking_receiver.clone_sender()
+            send = self._tmp_networking_sender
+            if send:
+                self._tmp_networking_sender = None
+            else:
+                send = self.networking_receiver.clone_sender()
         router = TopicRouter[T](topic, send)
         self.topic_routers[topic.topic] = cast(TopicRouter[CamelCaseModel], router)
         if self._tg.is_running():
@@ -258,6 +298,9 @@ class Router:
                 tg.start_soon(self._networking_publish)
                 if self._zenoh is not None:
                     tg.start_soon(self._zenoh_recv)
+                    # Dedicated DATA-plane egress loop so Block backpressure
+                    # stays off the shared control-plane publish loop (#309).
+                    tg.start_soon(self._zenoh_networking_publish)
                 # subscribe to pending topics
                 for topic in self.topic_routers:
                     await self._networking_subscribe(topic)
@@ -363,33 +406,18 @@ class Router:
             raise
 
     async def _networking_publish(self):
+        # Gossipsub (control/telemetry/election + DATA when Zenoh is off). DATA on
+        # Zenoh is diverted to _zenoh_networking_publish at register time, so it
+        # never reaches this shared loop (#309). routing_key is gossipsub-irrelevant
+        # (bare-topic broadcast).
         with self.networking_receiver as networked_items:
-            async for topic, routing_key, data in networked_items:
+            async for topic, _routing_key, data in networked_items:
                 try:
                     logger.trace(f"Sending message on {topic} with payload {data}")
                     if len(data) > 1024 * 1024:
                         logger.warning(
                             "Sending overlarge payload, network performance may be temporarily degraded"
                         )
-                    if self.uses_zenoh(topic):
-                        assert self._zenoh is not None
-                        # Address the chunk to its owning API node (data/<owner>).
-                        # Nodes subscribe only to data/<own_node_id>, never the
-                        # bare topic, so a message with no routing key reaches no
-                        # subscriber. That should not happen - every serving task
-                        # carries owner_node (#279 Phase 2) - so warn loudly
-                        # rather than dropping it silently if it ever does (#310
-                        # review).
-                        if not routing_key:
-                            logger.warning(
-                                f"Zenoh DATA publish on {topic} has no routing key "
-                                f"(owner_node unset); no node subscribes to the bare "
-                                f"topic, so this output would be lost. Dropping a "
-                                f"chunk of {len(data)} bytes."
-                            )
-                            continue
-                        await self._zenoh.zenoh_publish(f"{topic}/{routing_key}", data)
-                        continue
                     await self._net.gossipsub_publish(topic, data)
                 except NoPeersSubscribedToTopicError:
                     pass
@@ -398,6 +426,41 @@ class Router:
                 except MessageTooLargeError:
                     logger.warning(
                         f"Message too large for gossipsub on {topic} ({len(data)} bytes), dropping"
+                    )
+
+    async def _zenoh_networking_publish(self):
+        """Drain the DATA-plane outbound channel onto Zenoh (#309).
+
+        Separate from `_networking_publish` so the DATA path's
+        `CongestionControl::Block` can only ever stall DATA egress, never the
+        shared control-plane publish loop. DATA is best-effort, so a publish
+        failure is logged and dropped rather than allowed to tear the loop down.
+        """
+        assert self._zenoh is not None and self._zenoh_out_recv is not None
+        with self._zenoh_out_recv as items:
+            async for topic, routing_key, data in items:
+                # Nodes subscribe only to data/<own_node_id>, never the bare
+                # topic, so a keyless message reaches no subscriber. Every serving
+                # task carries owner_node (#279 Phase 2), so this should not
+                # happen - warn loudly rather than drop silently (#310 review).
+                if not routing_key:
+                    logger.warning(
+                        f"Zenoh DATA publish on {topic} has no routing key "
+                        f"(owner_node unset); no node subscribes to the bare topic, "
+                        f"so this output would be lost. Dropping a chunk of "
+                        f"{len(data)} bytes."
+                    )
+                    continue
+                try:
+                    await self._zenoh.zenoh_publish(f"{topic}/{routing_key}", data)
+                except get_cancelled_exc_class():
+                    # Honor shutdown: never let the best-effort drop below swallow
+                    # task cancellation and keep this loop alive (#312 review).
+                    raise
+                except Exception as exception:
+                    logger.opt(exception=exception).warning(
+                        f"Zenoh DATA publish on {topic}/{routing_key} failed; "
+                        f"dropping chunk (best-effort data plane)"
                     )
 
 

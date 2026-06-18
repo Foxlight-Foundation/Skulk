@@ -102,7 +102,7 @@ class ZenohHandle:
     surface (subscribe / publish / recv) so the Python `Router` can treat it as
     an alternate transport backend.
     """
-    def __new__(cls, listen_endpoints: typing.Optional[typing.Sequence[builtins.str]] = None, connect_endpoints: typing.Optional[typing.Sequence[builtins.str]] = None) -> ZenohHandle: ...
+    def __new__(cls, listen_endpoints: typing.Optional[typing.Sequence[builtins.str]] = None, connect_endpoints: typing.Optional[typing.Sequence[builtins.str]] = None, namespace: typing.Optional[builtins.str] = None) -> ZenohHandle: ...
     async def zenoh_subscribe(self, topic: builtins.str) -> None:
         r"""
         Subscribe to a Zenoh key (topic). Idempotent.

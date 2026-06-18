@@ -201,8 +201,8 @@ impl PyNetworkingHandle {
             bootstrap_peers.unwrap_or_default(),
             listen_port,
         )
-            .pyerr()?
-            .into_stream();
+        .pyerr()?
+        .into_stream();
 
         Ok(Self {
             swarm: Arc::new(Mutex::new(swarm)),
@@ -331,14 +331,19 @@ struct PyZenohHandle {
 #[pymethods]
 impl PyZenohHandle {
     #[new]
-    #[pyo3(signature = (listen_endpoints=None, connect_endpoints=None))]
+    #[pyo3(signature = (listen_endpoints=None, connect_endpoints=None, namespace=None))]
     fn py_new(
         listen_endpoints: Option<Vec<String>>,
         connect_endpoints: Option<Vec<String>>,
+        namespace: Option<String>,
     ) -> PyResult<Self> {
         let config = ZenohConfig {
             listen_endpoints: listen_endpoints.unwrap_or_default(),
             connect_endpoints: connect_endpoints.unwrap_or_default(),
+            // #308 namespace isolation; the Python caller passes an
+            // already-validated key-expr segment (or None for the legacy
+            // unprefixed behavior).
+            namespace,
         };
         // Opening the session is async; block on it inside the shared tokio
         // runtime (the same runtime the swarm uses), matching `py_new` above.

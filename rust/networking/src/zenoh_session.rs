@@ -14,6 +14,7 @@
 //! Phase 3 delete the app-layer reorder buffer.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
@@ -38,6 +39,13 @@ pub struct ZenohConfig {
     pub listen_endpoints: Vec<String>,
     /// Peer endpoints to connect to (explicit, since multicast is off).
     pub connect_endpoints: Vec<String>,
+    /// Optional session namespace (#308): a non-wildcard key-expr prefix that
+    /// Zenoh transparently prepends to every published/subscribed key. Foreign
+    /// peers on a different namespace cannot subscribe to this fleet's `data`,
+    /// restoring parity with the libp2p private-namespace isolation. The caller
+    /// must pass a valid, already-sanitized key-expr segment (derived from
+    /// `SKULK_LIBP2P_NAMESPACE`); `None` leaves keys unprefixed (legacy).
+    pub namespace: Option<String>,
 }
 
 fn json_str_array(items: &[String]) -> String {
@@ -53,7 +61,12 @@ fn json_str_array(items: &[String]) -> String {
 /// `command_id` carried inside the payload, exactly as the gossipsub path does).
 pub struct ZenohSession {
     session: Session,
-    publishers: Mutex<HashMap<String, Publisher<'static>>>,
+    // Publishers are kept behind `Arc` so `publish` can clone the handle out
+    // under the lock and release the guard BEFORE the `put().await` (#309): the
+    // lock then only guards the map, never an in-flight network put, so
+    // concurrent publishes to different per-command keys don't serialize and a
+    // `Block`-stalled put can't hold the map lock.
+    publishers: Mutex<HashMap<String, Arc<Publisher<'static>>>>,
     subscribers: Mutex<HashMap<String, Subscriber<()>>>,
     inbound_tx: mpsc::Sender<(String, Vec<u8>)>,
     inbound_rx: Mutex<mpsc::Receiver<(String, Vec<u8>)>>,
@@ -71,6 +84,13 @@ impl ZenohSession {
         set(&mut zconfig, "mode", "\"peer\"")?;
         set(&mut zconfig, "scouting/multicast/enabled", "false")?;
         set(&mut zconfig, "scouting/gossip/enabled", "true")?;
+        // Namespace isolation (#308): Zenoh transparently prefixes every key
+        // with this non-wildcard key-expr, so a peer on a different namespace
+        // never receives this fleet's `data` samples. The caller passes an
+        // already-validated segment.
+        if let Some(ns) = &config.namespace {
+            set(&mut zconfig, "namespace", &format!("{ns:?}"))?;
+        }
         if !config.listen_endpoints.is_empty() {
             set(
                 &mut zconfig,
@@ -104,21 +124,36 @@ impl ZenohSession {
     /// The publisher for a topic is declared once and reused, preserving the
     /// single-publisher-per-key FIFO ordering the data plane depends on.
     pub async fn publish(&self, topic: &str, data: Vec<u8>) -> AnyResult<()> {
-        let mut publishers = self.publishers.lock().await;
-        if !publishers.contains_key(topic) {
-            let publisher = self
-                .session
-                .declare_publisher(topic.to_string())
-                .congestion_control(CongestionControl::Block)
-                .priority(Priority::Data)
-                .reliability(Reliability::Reliable)
-                .await
-                .map_err(|e| -> AnyError { format!("declare_publisher {topic}: {e}").into() })?;
-            publishers.insert(topic.to_string(), publisher);
-        }
-        let publisher = publishers
-            .get(topic)
-            .expect("publisher just inserted for topic");
+        // Fast path: an existing publisher is cloned out under a short-lived
+        // lock, which is then released before the put (#309). The guard never
+        // spans the `put().await`, so a Block-stalled put can't hold the map.
+        let existing = self.publishers.lock().await.get(topic).cloned();
+        let publisher = match existing {
+            Some(p) => p,
+            None => {
+                // Declare WITHOUT holding the lock across the await, then insert
+                // with a double-check: a concurrent publish to the same key may
+                // have declared first, in which case we keep the stored one (and
+                // drop ours) so there stays exactly one publisher per key per
+                // session (the single-publisher FIFO ordering the plane needs).
+                let declared = Arc::new(
+                    self.session
+                        .declare_publisher(topic.to_string())
+                        .congestion_control(CongestionControl::Block)
+                        .priority(Priority::Data)
+                        .reliability(Reliability::Reliable)
+                        .await
+                        .map_err(|e| -> AnyError {
+                            format!("declare_publisher {topic}: {e}").into()
+                        })?,
+                );
+                let mut publishers = self.publishers.lock().await;
+                publishers
+                    .entry(topic.to_string())
+                    .or_insert(declared)
+                    .clone()
+            }
+        };
         publisher
             .put(data)
             .await
@@ -129,8 +164,9 @@ impl ZenohSession {
     ///
     /// Idempotent: subscribing to an already-subscribed topic is a no-op.
     pub async fn subscribe(&self, topic: &str) -> AnyResult<()> {
-        let mut subscribers = self.subscribers.lock().await;
-        if subscribers.contains_key(topic) {
+        // Check-and-release before declaring so the lock never spans the await
+        // (#309); startup-only, but tidy alongside the publish refactor.
+        if self.subscribers.lock().await.contains_key(topic) {
             return Ok(());
         }
         let tx = self.inbound_tx.clone();
@@ -147,16 +183,17 @@ impl ZenohSession {
                 match tx.try_send((key, payload)) {
                     Ok(()) => {}
                     Err(TrySendError::Full(_)) => {
-                        log::warn!(
-                            "zenoh data-plane inbound buffer full; dropping a chunk"
-                        );
+                        log::warn!("zenoh data-plane inbound buffer full; dropping a chunk");
                     }
                     Err(TrySendError::Closed(_)) => {}
                 }
             })
             .await
             .map_err(|e| -> AnyError { format!("declare_subscriber {topic}: {e}").into() })?;
-        subscribers.insert(topic.to_string(), subscriber);
+        // Re-lock and insert with a double-check: if a concurrent subscribe to
+        // the same topic won the race, keep the existing one and drop ours.
+        let mut subscribers = self.subscribers.lock().await;
+        subscribers.entry(topic.to_string()).or_insert(subscriber);
         Ok(())
     }
 
