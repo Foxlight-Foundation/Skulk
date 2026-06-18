@@ -52,6 +52,7 @@ const sidebars: SidebarsConfig = {
           label: "Release Notes",
           items: ["release-notes/1.2.0", "release-notes/1.1.0", "release-notes/1.0.3", "release-notes/1.0.2"],
         },
+        "cluster-communication",
         "architecture",
         "architecture-reference",
       ],
