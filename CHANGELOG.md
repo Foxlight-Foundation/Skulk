@@ -12,8 +12,9 @@ This project records release notes here and mirrors public-facing notes in
 - **Zenoh data plane is now soft default-on (#315).** The `DATA` topic (per-token
   generation output) uses the Eclipse Zenoh transport by default when a node is
   configured for it. `SKULK_ZENOH_DATA_PLANE` is now tri-state
-  (`_resolve_zenoh_enabled`): `1`/`true`/`yes` forces Zenoh on (still requires an
-  explicit `SKULK_ZENOH_LISTEN`, #308), `0`/`false`/`no` forces gossipsub, and
+  (`_resolve_zenoh_enabled`): `1`/`true`/`yes`/`on` forces Zenoh on (still requires
+  an explicit `SKULK_ZENOH_LISTEN`, #308), `0`/`false`/`no`/`off` forces gossipsub,
+  any other non-empty value is rejected, and
   **unset** is the soft default (Zenoh when `SKULK_ZENOH_LISTEN` is set, else
   gossipsub). A bare node with no Zenoh config (e.g. a fresh `uv run skulk`) stays
   on gossipsub rather than failing the listen requirement, so the listen endpoint

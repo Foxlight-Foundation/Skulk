@@ -398,6 +398,18 @@ requirement, so the listen endpoint is the opt-in signal under the default. The
 two transports are interchangeable per node; gossipsub remains a first-class
 fallback.
 
+**All nodes in a cluster must resolve to the same DATA transport.** The choice is
+per-node and local, so a partially configured fleet (for example
+`SKULK_ZENOH_LISTEN` set on some nodes but missed on one during rollout) splits:
+configured nodes use Zenoh and subscribe only to `data/<node_id>`, while the
+unconfigured node uses gossipsub, so any cross-node generation whose owner API
+and serving worker land on opposite transports drops every `DataChunk` and the
+stream ends only by idle timeout. This is the same unsupported-configuration
+class as a mixed-version cluster, and Skulk does not bridge transports. For a
+production fleet, set `SKULK_ZENOH_DATA_PLANE=1` explicitly on every node (it
+fails loudly via the #308 listen requirement if a node is misconfigured) rather
+than relying on the implicit soft default to be uniform across the fleet.
+
 How it satisfies the Phase 6 goals:
 
 - **No non-target fan-out (key-addressed delivery).** The owning API node stamps
