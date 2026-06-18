@@ -21,6 +21,7 @@ from skulk.main import (
     _libp2p_namespace_token,  # pyright: ignore[reportPrivateUsage]
     _namespace_fingerprint,  # pyright: ignore[reportPrivateUsage]
     _require_zenoh_listen,  # pyright: ignore[reportPrivateUsage]
+    _resolve_zenoh_enabled,  # pyright: ignore[reportPrivateUsage]
 )
 
 
@@ -76,6 +77,24 @@ def test_namespace_fingerprint_is_stable_and_non_routing() -> None:
     assert fp != ns and fp not in ns  # not the namespace, not a prefix of it
     # Distinct namespaces yield distinct fingerprints.
     assert fp != _namespace_fingerprint(_derive_zenoh_namespace("other"))
+
+
+def test_resolve_zenoh_enabled_soft_default_on() -> None:
+    # Soft default-on (#313): the listen endpoint is the opt-in signal when the
+    # flag is unset, so a bare node (no listen) stays on gossipsub and never hits
+    # the #308 listen requirement.
+    assert _resolve_zenoh_enabled("", "tcp/10.0.0.1:7447") is True
+    assert _resolve_zenoh_enabled("", "") is False
+    assert _resolve_zenoh_enabled("   ", "   ") is False
+
+
+def test_resolve_zenoh_enabled_explicit_overrides() -> None:
+    # Explicit on/off win regardless of listen presence (explicit-on with no
+    # listen is a loud error later, in _require_zenoh_listen, not here).
+    for truthy in ("1", "true", "TRUE", "yes"):
+        assert _resolve_zenoh_enabled(truthy, "") is True
+    for falsy in ("0", "false", "No"):
+        assert _resolve_zenoh_enabled(falsy, "tcp/10.0.0.1:7447") is False
 
 
 def test_require_zenoh_listen_returns_explicit_value() -> None:

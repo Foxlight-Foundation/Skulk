@@ -132,6 +132,32 @@ def _require_zenoh_listen(env_value: str) -> str:
     return listen
 
 
+def _resolve_zenoh_enabled(data_plane_env: str, listen_env: str) -> bool:
+    """Resolve whether the Zenoh DATA plane is enabled (soft default-on, #315).
+
+    The DATA plane defaults to Zenoh when a node is configured for it, but never
+    crashes a bare node:
+
+    - Explicit truthy (``1``/``true``/``yes``) -> enabled. The caller still
+      requires an explicit listen endpoint via :func:`_require_zenoh_listen`, so
+      an explicit opt-in with no listen is a loud error, not a silent default.
+    - Explicit falsy (``0``/``false``/``no``) -> disabled (gossipsub).
+    - Unset/blank -> soft default: enabled only when ``SKULK_ZENOH_LISTEN`` is
+      configured. A node with no Zenoh config at all (e.g. a fresh ``uv run
+      skulk``) stays on gossipsub instead of failing the #308 listen
+      requirement, so the listen endpoint is the opt-in signal under the default.
+
+    ``listen_env`` is the raw ``SKULK_ZENOH_LISTEN`` value; only its presence
+    (after stripping) matters here.
+    """
+    value = data_plane_env.strip().lower()
+    if value in ("1", "true", "yes"):
+        return True
+    if value in ("0", "false", "no"):
+        return False
+    return bool(listen_env.strip())
+
+
 def _add_model_search_path(path: Path) -> None:
     """Ensure the given model path is visible to the current process and children."""
 
@@ -232,17 +258,24 @@ class Node:
         keypair = get_node_id_keypair()
         node_id = NodeId(keypair.to_node_id())
         session_id = SessionId(master_node_id=node_id, election_clock=0)
-        # Experimental zenoh data plane (#279 follow-on, default OFF). When
-        # SKULK_ZENOH_DATA_PLANE is truthy the DATA topic (per-token output)
+        # Zenoh data plane (#279 follow-on). The DATA topic (per-token output)
         # rides a Zenoh peer session instead of gossipsub; all other planes stay
         # on libp2p. Endpoints are per-node (multicast off), so they come from
-        # the environment, not the gossip-synced config. The fleet runs
-        # gossipsub until this is proven in production.
-        _zenoh_on = os.environ.get("SKULK_ZENOH_DATA_PLANE", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-        )
+        # the environment, not the gossip-synced config. Soft default-on (#315):
+        # Zenoh is the default WHEN configured (SKULK_ZENOH_LISTEN set) and a bare
+        # node with no Zenoh config falls back to gossipsub rather than crashing
+        # on the #308 listen requirement; SKULK_ZENOH_DATA_PLANE=1/0 forces it
+        # on/off explicitly. See _resolve_zenoh_enabled.
+        _zenoh_data_plane_env = os.environ.get("SKULK_ZENOH_DATA_PLANE", "")
+        _zenoh_listen_env = os.environ.get("SKULK_ZENOH_LISTEN", "")
+        _zenoh_on = _resolve_zenoh_enabled(_zenoh_data_plane_env, _zenoh_listen_env)
+        if not _zenoh_on and not _zenoh_data_plane_env.strip():
+            # Default path on a node with no listen configured: say why we're on
+            # gossipsub so the operator knows how to opt into Zenoh.
+            logger.info(
+                "DATA plane on gossipsub (default): SKULK_ZENOH_LISTEN unset. "
+                "Set it to use the Zenoh data plane."
+            )
         _zenoh_connect = [
             endpoint.strip()
             for endpoint in os.environ.get("SKULK_ZENOH_CONNECT", "").split(",")
@@ -284,7 +317,7 @@ class Node:
                     f"prefer a specific private IP on a shared network (#308)."
                 )
             logger.warning(
-                f"SKULK_ZENOH_DATA_PLANE is ENABLED (experimental): generation "
+                f"Zenoh DATA plane ENABLED: generation "
                 f"output is served over Zenoh on {_zenoh_listen}, namespace"
                 f"-isolated (fingerprint {_namespace_fingerprint(_zenoh_namespace)}; "
                 f"{_LIBP2P_NAMESPACE_ENV_VAR} "
