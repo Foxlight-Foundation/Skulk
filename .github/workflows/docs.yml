@@ -1,71 +1,103 @@
 name: docs
 
+# The docs site is built and deployed from `dev`, but it serves TWO live sites
+# assembled into one GitHub Pages deploy:
+#   - the stable docs, built from `main`, at /Skulk/
+#   - the development ("next") docs, built from `dev`, at /Skulk/next/
+# Each is a normal full Docusaurus build of that branch's current content, so
+# there are no version snapshots to maintain or miss: a push to either branch
+# rebuilds both and redeploys. READMEs link per branch (main -> /Skulk/, dev ->
+# /Skulk/next/), and an announcement bar cross-links the two.
+
 on:
   pull_request:
   push:
     branches:
       - main
+      - dev
 
 permissions:
   contents: read
 
 jobs:
-  build-docs:
+  # PR validation: build the PR's own docs once (no deploy).
+  validate:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-          # Cache both the dashboard and the Docusaurus site together.
           cache-dependency-path: |
             dashboard-react/package-lock.json
             website/package-lock.json
-
-      - name: Install Python dependencies
-        run: uv sync --group dev
-
-      - name: Install dashboard dependencies
-        working-directory: dashboard-react
+      - run: uv sync --group dev
+      - working-directory: dashboard-react
         run: npm ci
-
-      - name: Install website dependencies
-        working-directory: website
+      - working-directory: website
         run: npm ci
-
-      - name: Build dashboard
-        working-directory: dashboard-react
+      - working-directory: dashboard-react
         run: npm run build
-
-      - name: Build docs site
-        run: uv run python scripts/build_docs.py
-
-      - name: Upload docs artifact
-        if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v4
+      - run: uv run python scripts/build_docs.py
+      - uses: actions/upload-artifact@v4
         with:
           name: docs-site
           path: website/build
 
-      - name: Upload Pages artifact
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-pages-artifact@v3
+  # Build the two live sites (stable from main, next from dev) on a push.
+  build:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - channel: stable
+            ref: main
+            base_url: /Skulk/
+          - channel: next
+            ref: dev
+            base_url: /Skulk/next/
+    steps:
+      - uses: actions/checkout@v4
         with:
+          ref: ${{ matrix.ref }}
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            dashboard-react/package-lock.json
+            website/package-lock.json
+      - run: uv sync --group dev
+      - working-directory: dashboard-react
+        run: npm ci
+      - working-directory: website
+        run: npm ci
+      - working-directory: dashboard-react
+        run: npm run build
+      - name: Build docs site (${{ matrix.channel }})
+        env:
+          DOCS_BASE_URL: ${{ matrix.base_url }}
+          DOCS_CHANNEL: ${{ matrix.channel }}
+        run: uv run python scripts/build_docs.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site-${{ matrix.channel }}
           path: website/build
 
-  deploy-docs:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: build-docs
+  deploy:
+    if: github.event_name == 'push'
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       pages: write
@@ -74,6 +106,19 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: Prepare site directory
+        run: mkdir -p site
+      - uses: actions/download-artifact@v4
+        with:
+          name: site-stable
+          path: site
+      - uses: actions/download-artifact@v4
+        with:
+          name: site-next
+          path: site/next
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
