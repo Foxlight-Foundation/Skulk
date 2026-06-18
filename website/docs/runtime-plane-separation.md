@@ -380,6 +380,108 @@ Goal: remove non-target network fan-out.
 
 This is the final throughput-oriented architecture.
 
+## Phase 6 Realization: Eclipse Zenoh Data-Plane Transport
+
+Phase 6 shipped as an **Eclipse Zenoh** transport for the `DATA` topic rather
+than a hand-rolled libp2p stream. Zenoh is a purpose-built data-in-motion
+transport, so it supplies the direct routing, FIFO ordering, and stream-layer
+flow control that Phase 6 calls for without Skulk owning that machinery. The
+control, telemetry, and election planes stay on libp2p; only `DATA` moves.
+
+Transport selection is **soft default-on** (#315, `_resolve_zenoh_enabled` in
+`Node.create`): an explicit `SKULK_ZENOH_DATA_PLANE` of `1`/`true`/`yes`/`on`
+forces Zenoh on (and still requires an explicit `SKULK_ZENOH_LISTEN`, see
+Security below), `0`/`false`/`no`/`off` forces gossipsub, and an unset value uses
+Zenoh when `SKULK_ZENOH_LISTEN` is configured and gossipsub otherwise. A bare
+node with no Zenoh config stays on gossipsub instead of failing the listen
+requirement, so the listen endpoint is the opt-in signal under the default. The
+two transports are interchangeable per node; gossipsub remains a first-class
+fallback.
+
+**All nodes in a cluster must resolve to the same DATA transport.** The choice is
+per-node and local, so a partially configured fleet (for example
+`SKULK_ZENOH_LISTEN` set on some nodes but missed on one during rollout) splits:
+configured nodes use Zenoh and subscribe only to `data/<node_id>`, while the
+unconfigured node uses gossipsub, so any cross-node generation whose owner API
+and serving worker land on opposite transports drops every `DataChunk` and the
+stream ends only by idle timeout. This is the same unsupported-configuration
+class as a mixed-version cluster, and Skulk does not bridge transports. For a
+production fleet, set `SKULK_ZENOH_DATA_PLANE=1` explicitly on every node (it
+fails loudly via the #308 listen requirement if a node is misconfigured) rather
+than relying on the implicit soft default to be uniform across the fleet.
+
+How it satisfies the Phase 6 goals:
+
+- **No non-target fan-out (key-addressed delivery).** The owning API node stamps
+  `owner_node` on the serving command; the master carries it onto the task, and
+  the rank-0 supervisor stamps it onto each `DataChunk`. The `Router` publishes
+  to the Zenoh key `data/<owner_node>` and every node subscribes only to
+  `data/<own_node_id>`, so output reaches just the owner. On gossipsub the
+  `owner_node` is ignored (bare-topic broadcast), which is why the transports
+  stay interchangeable.
+- **Ordering by construction.** The session is a Zenoh `peer` (multicast
+  scouting off, gossip plus explicit `SKULK_ZENOH_CONNECT` endpoints) publishing
+  `Reliable` + `Block` on a single priority, so a single rank-0 producer's chunks
+  are FIFO per key. Because Zenoh preserves per-publisher order, the app-layer
+  reorder buffer is **transport-conditional** (#311): kept for gossipsub (which
+  reorders), skipped under Zenoh. The per-command `sequence` number is still
+  stamped (gossipsub needs it) but unused under Zenoh, and is retained until
+  Zenoh is the sole DATA transport.
+- **Flow control at the stream layer.** DATA egresses on its own loop
+  (`Router._zenoh_networking_publish`) over a **bounded** channel
+  (`_ZENOH_DATA_OUTBOUND_BUFFER`, #309/#312). A stalled or slow subscriber
+  backpressures the producer (the rank-0 emit) rather than growing memory without
+  bound. Backpressure, not drop: the plane is reliable and ordered, so dropping
+  would corrupt the stream. The bounded loop also keeps Zenoh's blocking
+  backpressure off the shared control-plane publish path.
+- **Cancel on origin close.** Generation is cancelled through the control plane
+  when the owning API node closes the stream, exactly as for the gossipsub path.
+
+### Security posture
+
+The Zenoh session is **namespace-isolated** (#308): it sets a `namespace` derived
+as a SHA-256 hash of the exact token libp2p isolates on (`SKULK_LIBP2P_NAMESPACE`
+when set, else the `NETWORK_VERSION` default), and Zenoh transparently prefixes
+every key with it. This is **isolation between distinct clusters**, so two
+separate Skulk fleets sharing a network do not cross-deliver `data`. It is **not
+confidentiality against an adversary already on the same Zenoh network**: with no
+TLS the prefix is the only barrier and its seed is non-secret operator config.
+For untrusted networks, enable Zenoh TLS or firewall the listen endpoint.
+`SKULK_ZENOH_LISTEN` must be set explicitly (no `0.0.0.0` default), and neither
+the token nor the derived namespace is logged (startup logs only a non-routing
+fingerprint).
+
+### Interaction with speculative decoding
+
+Speculative decoding (MTP) and the Zenoh data plane operate on **different
+interconnects and do not meet in the decode loop**. Speculation runs entirely
+inside the worker ranks on the MLX compute ring (jaccl over RDMA / Thunderbolt):
+drafting, the K+1-token verify forward, accept/reject, and cache reconciliation.
+On a multi-node pipeline placement the cross-rank lockstep (#254) also rides the
+compute ring, not the data plane: one collective lands the draft tokens and a
+second lands the accept length plus the next bonus token. Zenoh is not in that
+path and does not even run for output on non-owner ranks.
+
+Zenoh sees only the **committed tokens** that fall out of the loop. The one
+observable interaction is **bursty emission**: a speculative round verifies
+`[bonus, draft_1 .. draft_K]` in a single forward and commits the longest
+matching prefix, so a good round commits several tokens at once. The supervisor's
+emit therefore hands the data sender a burst of `DataChunk`s per accepted round
+rather than a steady one-per-step trickle, and Zenoh transports that burst.
+
+This is precisely why the Zenoh ordering guarantee matters. On the old
+unordered gossipsub DATA topic, multi-node sampled-MTP bursts could reorder and
+produce garbled output (#297). Zenoh's single-publisher FIFO delivers each burst
+in commit order by construction, which both removes that failure mode and lets
+the reorder buffer be skipped. The bounded egress channel keeps a burst intact
+under a slow consumer by backpressuring the producer instead of dropping chunks.
+Swapping the data plane from gossipsub to Zenoh changes nothing about how
+speculation works; it only changes whether the committed-token stream arrives in
+order (Zenoh: yes by construction; gossipsub: only via the reorder buffer).
+
+See `architecture-reference.md` for the concrete env vars, the
+`_resolve_zenoh_enabled` truth table, and the Rust session details.
+
 ## Acceptance Criteria
 
 The migration is complete when these statements are true:
