@@ -63,8 +63,7 @@ for the remote setup.
 
 ## The data plane in detail
 
-The data plane can run over either of two transports, and the two are
-interchangeable per node:
+The data plane can run over either of two transports:
 
 - **libp2p gossip** (the same stack as the control plane), or
 - **Eclipse Zenoh**, a transport built specifically for streaming data.
@@ -77,12 +76,19 @@ is configured (a listen endpoint is set), Skulk uses it for the data plane; a no
 with no Zenoh configuration falls back to gossip, and `SKULK_ZENOH_DATA_PLANE`
 forces the choice either way.
 
-Zenoh sessions are kept isolated per cluster (each cluster prefixes its keys with
-a segment derived from its network name), so two separate Skulk clusters on the
-same network do not receive each other's output. That isolation is a partition
-between clusters, not a secret: confidentiality on an untrusted network is the
-job of the fabric (Tailscale, or a firewall), which is why the trusted-fabric
-model above matters.
+**Every node in a cluster must use the same data-plane transport.** Skulk does not
+bridge the two, so a partially configured fleet (Zenoh on some nodes, gossip on
+others) silently drops output for any request whose serving node and requesting
+node land on opposite transports, and that stream ends only by timeout. Configure
+the whole fleet the same way (the simplest rule: either set a Zenoh listen
+endpoint on every node, or on none).
+
+Zenoh sessions are kept isolated per cluster: each cluster prefixes its keys with
+a segment derived from its libp2p network namespace (`SKULK_LIBP2P_NAMESPACE`), so
+two separate Skulk clusters on the same network do not receive each other's
+output. That isolation is a partition between clusters, not a secret:
+confidentiality on an untrusted network is the job of the fabric (Tailscale, or a
+firewall), which is why the trusted-fabric model above matters.
 
 ## How speculative decoding rides the planes
 
