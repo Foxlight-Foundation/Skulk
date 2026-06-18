@@ -138,23 +138,35 @@ def _resolve_zenoh_enabled(data_plane_env: str, listen_env: str) -> bool:
     The DATA plane defaults to Zenoh when a node is configured for it, but never
     crashes a bare node:
 
-    - Explicit truthy (``1``/``true``/``yes``) -> enabled. The caller still
-      requires an explicit listen endpoint via :func:`_require_zenoh_listen`, so
-      an explicit opt-in with no listen is a loud error, not a silent default.
-    - Explicit falsy (``0``/``false``/``no``) -> disabled (gossipsub).
+    - Explicit truthy (``1``/``true``/``yes``/``on``) -> enabled. The caller
+      still requires an explicit listen endpoint via :func:`_require_zenoh_listen`,
+      so an explicit opt-in with no listen is a loud error, not a silent default.
+    - Explicit falsy (``0``/``false``/``no``/``off``) -> disabled (gossipsub).
     - Unset/blank -> soft default: enabled only when ``SKULK_ZENOH_LISTEN`` is
       configured. A node with no Zenoh config at all (e.g. a fresh ``uv run
       skulk``) stays on gossipsub instead of failing the #308 listen
       requirement, so the listen endpoint is the opt-in signal under the default.
+    - Any other non-empty value -> ``ValueError``. An unrecognized value
+      (a typo, or a boolean spelling we don't accept) must NOT silently fall
+      through to the listen-based default, or an operator who wrote
+      ``SKULK_ZENOH_DATA_PLANE=disable`` could unexpectedly get Zenoh ON; we
+      refuse to guess the transport (#315 review).
 
     ``listen_env`` is the raw ``SKULK_ZENOH_LISTEN`` value; only its presence
     (after stripping) matters here.
     """
     value = data_plane_env.strip().lower()
-    if value in ("1", "true", "yes"):
+    if value in ("1", "true", "yes", "on"):
         return True
-    if value in ("0", "false", "no"):
+    if value in ("0", "false", "no", "off"):
         return False
+    if value:
+        raise ValueError(
+            f"SKULK_ZENOH_DATA_PLANE={data_plane_env!r} is not a recognized "
+            "boolean. Use 1/true/yes/on or 0/false/no/off, or leave it unset to "
+            "use the default (Zenoh when SKULK_ZENOH_LISTEN is set, else "
+            "gossipsub). Refusing to guess the DATA transport (#315)."
+        )
     return bool(listen_env.strip())
 
 
