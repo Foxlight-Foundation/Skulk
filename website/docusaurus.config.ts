@@ -163,6 +163,25 @@ const config: Config = {
           position: "left",
         },
         {
+          // Always-visible switch between the two live sites. The label shows
+          // the channel you're currently on (driven by DOCS_CHANNEL, the same
+          // env that drives the cross-link banner), and both destinations are
+          // listed so you can jump either way from anywhere in the docs.
+          type: "dropdown",
+          label: process.env.DOCS_CHANNEL === "next" ? "Next (dev)" : "Stable",
+          position: "right",
+          items: [
+            {
+              label: "Stable",
+              href: "https://foxlight-foundation.github.io/Skulk/",
+            },
+            {
+              label: "Next (dev)",
+              href: "https://foxlight-foundation.github.io/Skulk/next/",
+            },
+          ],
+        },
+        {
           href: "https://github.com/Foxlight-Foundation/Skulk",
           label: "GitHub",
           position: "right",
