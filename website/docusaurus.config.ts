@@ -10,7 +10,11 @@ import type { PluginOptions as OpenApiPluginOptions } from "docusaurus-plugin-op
 // current docs, so there are no version snapshots to maintain or miss. Anything
 // pointing at the site root (e.g. the TypeDoc static dir) is derived from this
 // so it stays correct on whichever channel is being built.
-const baseUrl = process.env.DOCS_BASE_URL ?? "/Skulk/";
+// Normalize to exactly one leading and trailing slash (Docusaurus requires both)
+// so a fat-fingered DOCS_BASE_URL (e.g. "Skulk/next") still builds.
+const rawBaseUrl = process.env.DOCS_BASE_URL ?? "/Skulk/";
+const strippedBaseUrl = rawBaseUrl.replace(/^\/+|\/+$/g, "");
+const baseUrl = strippedBaseUrl ? `/${strippedBaseUrl}/` : "/";
 
 const config: Config = {
   title: "Skulk Developer Docs",
