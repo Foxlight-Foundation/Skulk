@@ -6,8 +6,7 @@ sidebar_position: 3
 
 <!-- Copyright 2025 Foxlight Foundation -->
 
-DeepSeek V3.2 is the Phase 1 reference point for DSML-based prompt and parsing
-behavior.
+DeepSeek V3.2 is the reference point for DSML-based prompt and parsing behavior.
 
 ## Why DeepSeek V3.2 Is Special
 
@@ -23,7 +22,7 @@ That means the runtime needs to know:
 
 ## Current Capability Handling
 
-Phase 1 supports DeepSeek V3.2 through resolved family defaults:
+Skulk supports DeepSeek V3.2 through resolved family defaults:
 
 - DSML prompt renderer
 - DeepSeek V3.2 output parser

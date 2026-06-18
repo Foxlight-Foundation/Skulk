@@ -173,7 +173,7 @@ When a model card declares `mtp_heads = true` and `mtp_sidecar_repo`, Skulk:
 
 1. Downloads `mtp.safetensors` from the sidecar repo alongside the base model weights.
 2. Loads the sidecar at model load time and makes the weights available to the runner.
-3. Uses the MTP heads during generation for speculative decoding (requires runner support — see issue #152).
+3. Uses the MTP heads during generation for speculative decoding (on runners that support it).
 
 If the sidecar is declared but the file is not found locally, Skulk logs a warning and continues with standard autoregressive generation.
 

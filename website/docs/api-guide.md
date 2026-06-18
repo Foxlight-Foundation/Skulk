@@ -13,35 +13,10 @@ That API has two jobs:
 - compatibility endpoints for tools that already speak OpenAI, Claude, or Ollama-style APIs
 - Skulk-specific control endpoints for placement, downloads, config, tracing, and model-store workflows
 
-## The Most Important Rule
-
-For text generation, Skulk is not just a stateless HTTP server.
-
-**A model has to be placed and running before chat-style requests will work.**
-
-The dashboard enforces this too: it will not let you chat until a model is placed and ready.
-
-If you call `/v1/chat/completions` too early, Skulk will usually return something like:
-
-```json
-{
-  "error": {
-    "message": "No instance found for model mlx-community/...",
-    "type": "Not Found",
-    "code": 404
-  }
-}
-```
-
-## Start Here
-
-If you want your first successful API call, use this flow:
-
-1. Start Skulk with `uv run skulk`.
-2. Preview valid placements for a model.
-3. Launch a placement.
-4. Wait for the model to be ready.
-5. Send a chat request.
+A model must be placed and running before chat requests for it succeed; calling
+`/v1/chat/completions` for an unplaced model returns a 404 `No instance found`.
+The [First Success Flow](#first-success-flow) below walks from placement to first
+token.
 
 ## Quick Navigation
 
