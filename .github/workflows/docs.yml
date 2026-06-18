@@ -99,6 +99,12 @@ jobs:
     if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
+    # Serialize deploys: a main push and a dev push close together would both
+    # reach here and race the single Pages deployment. Queue them instead of
+    # cancelling, so neither branch's publish is lost.
+    concurrency:
+      group: pages-deploy
+      cancel-in-progress: false
     permissions:
       contents: read
       actions: read
