@@ -41,10 +41,12 @@ kept deliberately separate from the firehose of generated tokens.
 
 The data plane carries generated output (the tokens, and other per-request
 chunks) from the node running the model back to the node that received the API
-request. It is point-to-point: output goes only to the node that needs it, not to
-the whole cluster, and it never passes through the master or gets written to the
-cluster's decision log. Keeping output off the control plane is what stops a busy
-model from drowning out the cluster's own coordination.
+request. It always goes straight to the node that needs it: it never passes
+through the master or gets written to the cluster's decision log. (On Zenoh it is
+addressed point-to-point to that one node; on the gossip transport it is published
+on a shared topic that only the owning node consumes, see below.) Keeping output
+off the control plane is what stops a busy model from drowning out the cluster's
+own coordination.
 
 ## Where the planes run, and the trust model
 
@@ -101,9 +103,11 @@ plane only ever sees the **committed** tokens that come out the far end.
 The one visible interaction is timing. Speculative decoding commits tokens in
 bursts: a good round accepts several tokens at once, so the model emits a little
 flurry of output and then pauses to verify the next round, rather than a steady
-one-token drip. The data plane carries those bursts. Because the transport keeps a
-single producer's output in order, the burst arrives in the order it was
-committed, and the client sees a clean, correctly ordered stream regardless of how
-bursty the underlying generation was. (See
-[speculative decoding](speculative-decoding) for how the decode loop itself
-works.)
+one-token drip. The data plane carries those bursts, and the client sees a clean,
+correctly ordered stream regardless of how bursty the underlying generation was.
+On Zenoh that ordering comes from the transport itself (a single producer's
+messages arrive in order); on the gossip transport, which can reorder, each chunk
+carries a sequence number and a small reorder buffer on the receiving node puts
+them back in order. Either way the committed tokens reach the client in the order
+they were produced. (See [speculative decoding](speculative-decoding) for how the
+decode loop itself works.)
