@@ -4,17 +4,21 @@ import type { Config } from "@docusaurus/types";
 import type * as Preset from "@docusaurus/preset-classic";
 import type { PluginOptions as OpenApiPluginOptions } from "docusaurus-plugin-openapi-docs";
 
+// baseUrl is env-overridable so one config can build two live sites from one
+// deploy job: the stable site (from `main`) at /Skulk/ and the "next" site
+// (from `dev`) at /Skulk/next/. Each is a normal full build of that branch's
+// current docs, so there are no version snapshots to maintain or miss. Anything
+// pointing at the site root (e.g. the TypeDoc static dir) is derived from this
+// so it stays correct on whichever channel is being built.
+const baseUrl = process.env.DOCS_BASE_URL ?? "/Skulk/";
+
 const config: Config = {
   title: "Skulk Developer Docs",
   tagline: "Distributed AI inference, edge-to-edge",
   favicon: "img/skulk-logo.svg",
 
   url: "https://foxlight-foundation.github.io",
-  // baseUrl is env-overridable so one config can build two live sites from one
-  // deploy job: the stable site (from `main`) at /Skulk/ and the "next" site
-  // (from `dev`) at /Skulk/next/. Each is a normal full build of that branch's
-  // current docs, so there are no version snapshots to maintain or miss.
-  baseUrl: process.env.DOCS_BASE_URL ?? "/Skulk/",
+  baseUrl,
 
   organizationName: "foxlight-foundation",
   projectName: "Skulk",
@@ -146,11 +150,11 @@ const config: Config = {
           label: "API Reference",
         },
         {
-          // TypeDoc HTML is served from website/static/typedoc/ at /typedoc/.
-          // Uses the full URL so Docusaurus doesn't treat it as an internal
-          // link and fail the broken-link check (static files are invisible
-          // to the link checker).
-          href: "https://foxlight-foundation.github.io/Skulk/typedoc/",
+          // TypeDoc HTML is served from website/static/typedoc/ under the
+          // site baseUrl. Built as a full URL (channel-aware via baseUrl) so
+          // Docusaurus doesn't treat it as an internal link and fail the
+          // broken-link check (static files are invisible to the link checker).
+          href: `https://foxlight-foundation.github.io${baseUrl}typedoc/`,
           label: "TypeScript API",
           position: "left",
         },
@@ -179,7 +183,7 @@ const config: Config = {
             { label: "API Reference", to: "/api/skulk-api" },
             {
               label: "TypeScript API",
-              href: "https://foxlight-foundation.github.io/Skulk/typedoc/",
+              href: `https://foxlight-foundation.github.io${baseUrl}typedoc/`,
             },
           ],
         },

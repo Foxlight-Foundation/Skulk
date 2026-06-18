@@ -1,13 +1,13 @@
 name: docs
 
-# The docs site is built and deployed from `dev`, but it serves TWO live sites
-# assembled into one GitHub Pages deploy:
+# The docs site serves TWO live sites assembled into one GitHub Pages deploy:
 #   - the stable docs, built from `main`, at /Skulk/
 #   - the development ("next") docs, built from `dev`, at /Skulk/next/
-# Each is a normal full Docusaurus build of that branch's current content, so
-# there are no version snapshots to maintain or miss: a push to either branch
-# rebuilds both and redeploys. READMEs link per branch (main -> /Skulk/, dev ->
-# /Skulk/next/), and an announcement bar cross-links the two.
+# A push to EITHER branch (main or dev) rebuilds both and redeploys: the build
+# matrix always builds stable from `main` and next from `dev`, regardless of
+# which branch triggered the run. Each is a normal full Docusaurus build of that
+# branch's current content, so there are no version snapshots to maintain or
+# miss. An announcement bar cross-links the two.
 
 on:
   pull_request:
@@ -100,6 +100,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     permissions:
+      contents: read
+      actions: read
       pages: write
       id-token: write
     environment:
