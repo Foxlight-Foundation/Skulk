@@ -69,6 +69,8 @@ Docs source lives in `website/docs/`. Generated content:
 - `website/static/typedoc/` — TypeDoc HTML reference (gitignored)
 - `website/build/` — final Docusaurus output (gitignored)
 
+Deploy (`.github/workflows/docs.yml`): a push to `main` OR `dev` publishes TWO live sites in one GitHub Pages deploy: the **stable** docs built from `main` at `/Skulk/` and the **next** docs built from `dev` at `/Skulk/next/`. A build matrix builds each branch's current content (baseUrl set via `DOCS_BASE_URL`, channel banner via `DOCS_CHANNEL`), and the deploy job assembles them (stable at root, next under `/next/`). There are no Docusaurus version snapshots to maintain: each site is rebuilt live from its branch, so a push to either rebuilds and redeploys both. PRs build the PR's own docs as a validation artifact only.
+
 ## Pre-Commit Checks (REQUIRED)
 
 **IMPORTANT: Always run these checks before committing code. CI will fail if these don't pass.**
