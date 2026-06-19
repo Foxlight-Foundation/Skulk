@@ -76,6 +76,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Embedding tasks reach a clean terminal state (#326).** The embedding runner
+  held `RunnerReady` across the `TextEmbedding` forward pass, but the supervisor
+  asserts the runner is in an active state when it forwards a task's terminal
+  status, so a completing embedding task tripped the assertion and aborted the
+  event forwarder. The runner now holds `RunnerRunning` across the forward pass
+  and returns to `RunnerReady` only after the terminal status is emitted,
+  matching the MLX and llama.cpp text runners.
+
 - **The failover-seed event round-trips through the disk event log again.** A
   `StateSnapshotHydrated` (the failover seed, indexed as event 0) is read back
   through the `Event` TypeAdapter, whose `TaggedModel` wrap validator unwraps the

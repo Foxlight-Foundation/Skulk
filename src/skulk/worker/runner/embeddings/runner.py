@@ -43,6 +43,7 @@ from skulk.shared.types.worker.runners import (
     RunnerIdle,
     RunnerLoading,
     RunnerReady,
+    RunnerRunning,
     RunnerShutdown,
     RunnerShuttingDown,
     RunnerStatus,
@@ -216,7 +217,13 @@ class Runner:
                 isinstance(self.current_status, RunnerReady)
             ):
                 logger.info(f"embedding request: {len(task_params.input_texts)} texts")
-                self.update_status(RunnerReady())
+                # Hold an active (RunnerRunning) status across the forward pass.
+                # The supervisor asserts the runner is in an active state when a
+                # task's terminal TaskStatus is forwarded; staying RunnerReady
+                # here would trip that assert (#326). Mirrors the MLX and
+                # llama.cpp text runners, which are RunnerRunning for the whole
+                # task. RunnerReady is restored after the work below.
+                self.update_status(RunnerRunning())
                 self.acknowledge_task(task)
 
                 assert self.model is not None and self.tokenizer is not None
