@@ -2,7 +2,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Literal, Self, cast, final
@@ -10,6 +9,7 @@ from typing import Literal, Self, cast, final
 import psutil
 from pydantic import BaseModel, field_serializer, field_validator
 
+from skulk.shared.backends import probe_node_backends
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.thunderbolt import ThunderboltIdentifier
 from skulk.utils.pydantic_ext import CamelCaseModel
@@ -267,7 +267,7 @@ class NodeResources(CamelCaseModel):
     @classmethod
     async def gather(cls) -> "NodeResources":
         """Probe backends and read the declared participation role at startup."""
-        backends = frozenset({"mlx"}) if sys.platform == "darwin" else frozenset()
+        backends = probe_node_backends()
         declared = os.environ.get("SKULK_NODE_PARTICIPATION", "full").strip().lower()
         participation: NodeParticipation = (
             declared if declared in ("full", "management", "ffn_only") else "full"

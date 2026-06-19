@@ -1,0 +1,338 @@
+# pyright: reportAny=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportMissingImports=false
+"""In-process text-generation runner backed by llama.cpp (``llama-cpp-python``).
+
+This is the first non-MLX inference engine: it serves GGUF models on GPU nodes
+that ``mlx-lm`` cannot target (e.g. an AMD Strix Halo box via the Vulkan or ROCm
+llama.cpp backend). It is selected by the model card's backend tags resolving to
+the ``llama_cpp`` engine on this node (``bootstrap._resolve_text_engine``).
+
+llama.cpp is autoregressive token-by-token, so it maps directly onto Skulk's
+existing per-token data plane: the runner emits one ``TokenChunk`` per decoded
+token via ``ChunkGenerated`` (exactly like the MLX runner), so no new chunk
+contract is needed. It is **single-node only** (no ring / ``ConnectToGroup`` /
+warmup), mirroring the embeddings runner's group-less lifecycle.
+
+``llama_cpp`` is imported lazily inside ``LoadModel`` so this module imports
+cleanly on nodes (e.g. Macs) where the binding is not installed.
+"""
+
+import time
+from pathlib import Path
+from typing import Any, Literal
+
+from anyio import WouldBlock
+
+from skulk.shared.types.chunks import ErrorChunk, TokenChunk
+from skulk.shared.types.events import (
+    ChunkGenerated,
+    Event,
+    RunnerStatusUpdated,
+    TaskAcknowledged,
+    TaskStatusUpdated,
+)
+from skulk.shared.types.tasks import (
+    CANCEL_ALL_TASKS,
+    LoadModel,
+    Shutdown,
+    Task,
+    TaskId,
+    TaskStatus,
+    TextGeneration,
+)
+from skulk.shared.types.text_generation import TextGenerationTaskParams
+from skulk.shared.types.worker.instances import BoundInstance
+from skulk.shared.types.worker.runners import (
+    RunnerIdle,
+    RunnerLoading,
+    RunnerReady,
+    RunnerRunning,
+    RunnerShutdown,
+    RunnerShuttingDown,
+    RunnerStatus,
+)
+from skulk.utils.channels import MpReceiver, MpSender
+from skulk.worker.runner.bootstrap import logger
+
+
+def select_gguf_file(model_dir: Path) -> Path:
+    """Pick the GGUF weights file to load from a staged model directory.
+
+    Returns the first ``*.gguf`` in sorted order, skipping multimodal projector
+    files (``mmproj*``). Sorted order puts the first shard (``*-00001-of-*``)
+    first, and llama.cpp discovers the remaining shards from it. Raises
+    ``FileNotFoundError`` when the directory contains no usable GGUF.
+    """
+    candidates = sorted(
+        path for path in model_dir.glob("*.gguf") if "mmproj" not in path.name.lower()
+    )
+    if not candidates:
+        raise FileNotFoundError(f"no .gguf weights file found in {model_dir}")
+    return candidates[0]
+
+
+def messages_for_llama(task_params: TextGenerationTaskParams) -> list[dict[str, Any]]:
+    """Build the chat-completion messages llama.cpp's chat template expects.
+
+    Prefers ``chat_template_messages`` (already-rendered OpenAI-style dicts that
+    the API populates on the chat path). Falls back to reconstructing a minimal
+    message list from ``instructions`` + ``input`` when that is absent.
+    """
+    if task_params.chat_template_messages:
+        return task_params.chat_template_messages
+    messages: list[dict[str, Any]] = []
+    if task_params.instructions:
+        messages.append({"role": "system", "content": task_params.instructions})
+    for message in task_params.input:
+        role = getattr(message, "role", "user")
+        content = getattr(message, "content", "")
+        messages.append(
+            {
+                "role": role,
+                "content": content if isinstance(content, str) else str(content),
+            }
+        )
+    return messages
+
+
+def _generation_kwargs(task_params: TextGenerationTaskParams) -> dict[str, Any]:
+    """Translate Skulk task params into llama.cpp ``create_chat_completion`` kwargs."""
+    kwargs: dict[str, Any] = {}
+    if task_params.max_output_tokens is not None:
+        kwargs["max_tokens"] = task_params.max_output_tokens
+    if task_params.temperature is not None:
+        kwargs["temperature"] = task_params.temperature
+    if task_params.top_p is not None:
+        kwargs["top_p"] = task_params.top_p
+    if task_params.top_k is not None:
+        kwargs["top_k"] = task_params.top_k
+    if task_params.min_p is not None:
+        kwargs["min_p"] = task_params.min_p
+    if task_params.repetition_penalty is not None:
+        kwargs["repeat_penalty"] = task_params.repetition_penalty
+    if task_params.stop is not None:
+        kwargs["stop"] = task_params.stop
+    if task_params.seed is not None:
+        kwargs["seed"] = task_params.seed
+    return kwargs
+
+
+def _map_finish_reason(
+    reason: str | None,
+) -> Literal["stop", "length", "content_filter"] | None:
+    """Map a llama.cpp finish reason onto Skulk's TokenChunk finish reasons."""
+    if reason is None:
+        return None
+    if reason == "length":
+        return "length"
+    # llama.cpp uses "stop" for both EOS and stop-string hits.
+    return "stop"
+
+
+class Runner:
+    """Single-node llama.cpp text-generation runner.
+
+    Lifecycle mirrors the embeddings runner: it skips ``ConnectToGroup`` and
+    ``StartWarmup`` (no ring), loads on ``LoadModel``, and serves
+    ``TextGeneration`` by streaming tokens.
+    """
+
+    def __init__(
+        self,
+        bound_instance: BoundInstance,
+        event_sender: MpSender[Event],
+        task_receiver: MpReceiver[Task],
+        cancel_receiver: MpReceiver[TaskId],
+    ):
+        self.event_sender = event_sender
+        self.task_receiver = task_receiver
+        self.cancel_receiver = cancel_receiver
+        self.bound_instance = bound_instance
+        self.instance, self.runner_id, self.shard_metadata = (
+            bound_instance.instance,
+            bound_instance.bound_runner_id,
+            bound_instance.bound_shard,
+        )
+        if self.shard_metadata.world_size != 1:
+            raise RuntimeError(
+                "llama.cpp runner requires single-node placement, got "
+                f"world_size={self.shard_metadata.world_size}"
+            )
+        self.setup_start_time = time.time()
+        self.cancelled_tasks: set[TaskId] = set()
+        self.seen: set[TaskId] = set()
+        self.model: Any = None
+        self.current_status: RunnerStatus = RunnerIdle()
+        logger.info("llama.cpp runner created")
+        self.update_status(RunnerIdle())
+
+    def update_status(self, status: RunnerStatus) -> None:
+        self.current_status = status
+        self.event_sender.send(
+            RunnerStatusUpdated(
+                runner_id=self.runner_id, runner_status=self.current_status
+            )
+        )
+
+    def send_task_status(self, task: Task, status: TaskStatus) -> None:
+        self.event_sender.send(
+            TaskStatusUpdated(task_id=task.task_id, task_status=status)
+        )
+
+    def acknowledge_task(self, task: Task) -> None:
+        self.event_sender.send(TaskAcknowledged(task_id=task.task_id))
+
+    def _drain_cancellations(self) -> None:
+        """Move any pending cancellation task-ids into ``cancelled_tasks``."""
+        while True:
+            try:
+                cancelled = self.cancel_receiver.receive_nowait()
+            except WouldBlock:
+                break
+            self.cancelled_tasks.add(cancelled)
+
+    def _is_cancelled(self, task_id: TaskId) -> bool:
+        self._drain_cancellations()
+        return (
+            task_id in self.cancelled_tasks or CANCEL_ALL_TASKS in self.cancelled_tasks
+        )
+
+    def main(self) -> None:
+        with self.task_receiver as tasks:
+            for task in tasks:
+                if task.task_id in self.seen:
+                    logger.warning("repeat task - potential error")
+                self.seen.add(task.task_id)
+                self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
+                self.send_task_status(task, TaskStatus.Running)
+                self.handle_task(task)
+                # Use only cancellations OBSERVED during execution (the streaming
+                # loop drains the cancel pipe via _is_cancelled as it runs). Do
+                # NOT re-drain here: a cancel that loses the race with completion
+                # must not retroactively flip an already-finished task (which has
+                # streamed its tokens + finish chunk) to Cancelled.
+                was_cancelled = (
+                    task.task_id in self.cancelled_tasks
+                    or CANCEL_ALL_TASKS in self.cancelled_tasks
+                )
+                self.send_task_status(
+                    task,
+                    TaskStatus.Cancelled if was_cancelled else TaskStatus.Complete,
+                )
+                self.update_status(self.current_status)
+                if isinstance(self.current_status, RunnerShutdown):
+                    break
+
+    def handle_task(self, task: Task) -> None:
+        match task:
+            case LoadModel() if isinstance(self.current_status, RunnerIdle):
+                self._load_model(task)
+            case TextGeneration() if isinstance(self.current_status, RunnerReady):
+                self._generate(task)
+            case Shutdown():
+                logger.info("llama.cpp runner shutting down")
+                self.update_status(RunnerShuttingDown())
+                self.acknowledge_task(task)
+                self.model = None
+                self.current_status = RunnerShutdown()
+            case _:
+                raise RuntimeError(
+                    f"llama.cpp runner received unsupported task "
+                    f"{task.__class__.__name__} in status "
+                    f"{self.current_status.__class__.__name__}"
+                )
+
+    def _load_model(self, task: Task) -> None:
+        self.update_status(RunnerLoading())
+        self.acknowledge_task(task)
+
+        from llama_cpp import Llama  # pyright: ignore[reportAttributeAccessIssue]
+
+        from skulk.download.download_utils import build_model_path
+        from skulk.shared.types.common import ModelId
+
+        model_id = self.shard_metadata.model_card.model_id
+        model_dir = build_model_path(ModelId(model_id))
+        gguf_path = select_gguf_file(model_dir)
+        logger.info(f"loading GGUF {gguf_path.name} for {model_id}")
+        # n_gpu_layers=-1 offloads every layer to the GPU backend the binding was
+        # built with (Vulkan/ROCm/CUDA); n_ctx=0 uses the model's trained context.
+        self.model = Llama(
+            model_path=str(gguf_path),
+            n_gpu_layers=-1,
+            n_ctx=0,
+            verbose=False,
+        )
+        self.current_status = RunnerReady()
+        logger.info(
+            f"llama.cpp runner ready in {time.time() - self.setup_start_time:.1f}s"
+        )
+
+    def _generate(self, task: Task) -> None:
+        assert isinstance(task, TextGeneration)
+        # Must be an ACTIVE status (not RunnerReady) for the whole task: the
+        # supervisor asserts the runner is RunnerRunning/Loading/etc. when the
+        # terminal TaskStatus arrives (runner_supervisor._forward_events). main()
+        # sends Complete after this returns, so we stay RunnerRunning until then
+        # and only flip current_status back to Ready (without an event) at the
+        # end, so the Ready event is ordered after Complete.
+        self.update_status(RunnerRunning())
+        self.acknowledge_task(task)
+        assert self.model is not None
+
+        model_id = self.shard_metadata.model_card.model_id
+        command_id = task.command_id
+        messages = messages_for_llama(task.task_params)
+        kwargs = _generation_kwargs(task.task_params)
+
+        try:
+            stream = self.model.create_chat_completion(
+                messages=messages, stream=True, **kwargs
+            )
+            emitted_finish = False
+            for chunk in stream:
+                if self._is_cancelled(task.task_id):
+                    logger.info(f"llama.cpp generation cancelled: {task.task_id}")
+                    break
+                choice = chunk["choices"][0]
+                text = choice.get("delta", {}).get("content") or ""
+                finish = _map_finish_reason(choice.get("finish_reason"))
+                if not text and finish is None:
+                    continue
+                emitted_finish = emitted_finish or finish is not None
+                self.event_sender.send(
+                    ChunkGenerated(
+                        command_id=command_id,
+                        chunk=TokenChunk(
+                            model=model_id,
+                            text=text,
+                            token_id=-1,  # llama.cpp chat stream does not expose ids
+                            usage=None,
+                            finish_reason=finish,
+                        ),
+                    )
+                )
+            # Guarantee a terminal chunk on normal completion so the consumer's
+            # stream closes even if llama.cpp ended without an explicit finish.
+            if not emitted_finish and not self._is_cancelled(task.task_id):
+                self.event_sender.send(
+                    ChunkGenerated(
+                        command_id=command_id,
+                        chunk=TokenChunk(
+                            model=model_id,
+                            text="",
+                            token_id=-1,
+                            usage=None,
+                            finish_reason="stop",
+                        ),
+                    )
+                )
+        except Exception as exc:
+            logger.opt(exception=exc).warning("llama.cpp generation failed")
+            self.event_sender.send(
+                ChunkGenerated(
+                    command_id=command_id,
+                    chunk=ErrorChunk(model=model_id, error_message=str(exc)),
+                )
+            )
+
+        self.current_status = RunnerReady()

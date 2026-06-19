@@ -266,6 +266,19 @@ class PlacementCardConfig(CamelCaseModel):
     max_context_tokens: int | None = None
     """Soft: caps the placement-time KV budget check (see #145) when set."""
 
+    backend_preference: tuple[str, ...] = ()
+    """Soft, ordered preference among the node's backend tags (e.g.
+    ``("llama_cpp-vulkan", "llama_cpp-rocm")``).
+
+    Unlike ``compatible_backends`` (a hard filter on which nodes are eligible),
+    this only *ranks* eligible nodes/devices: the planner prefers a node that
+    advertises an earlier-listed tag, and the runner picks the earliest-listed
+    backend the chosen node actually has. The same model runs on any compatible
+    backend, but their performance differs per model, so this captures "fastest
+    on Vulkan, ROCm is an acceptable fallback" while still degrading gracefully
+    to a node that only offers the fallback. Order is significant and preserved;
+    an empty tuple means no preference (use the node's default)."""
+
     @field_validator("compatible_backends", mode="before")
     @classmethod
     def _coerce_compatible_backends(cls, v: object) -> object:
@@ -281,6 +294,21 @@ class PlacementCardConfig(CamelCaseModel):
         # tomlkit cannot encode a frozenset, and ModelCard.save() now always
         # includes this section. Emit a sorted list for TOML and JSON alike.
         return sorted(value)
+
+    @field_validator("backend_preference", mode="before")
+    @classmethod
+    def _coerce_backend_preference(cls, v: object) -> object:
+        # TOML/JSON deliver a list; strict mode rejects a list for a tuple
+        # field. Coerce while PRESERVING ORDER (unlike compatible_backends, the
+        # preference is ranked, so it must not be turned into a set).
+        if isinstance(v, (list, tuple)):
+            return tuple(cast("Iterable[str]", v))
+        return v
+
+    @field_serializer("backend_preference")
+    def _serialize_backend_preference(self, value: tuple[str, ...]) -> list[str]:
+        # tomlkit cannot encode a tuple; emit an order-preserving list.
+        return list(value)
 
 
 class RuntimeCapabilityCardConfig(CamelCaseModel):
