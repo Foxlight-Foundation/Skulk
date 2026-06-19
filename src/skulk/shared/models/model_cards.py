@@ -555,12 +555,14 @@ class ModelCard(CamelCaseModel):
 
         # Structural metadata comes from config.json, which most community GGUF
         # repos (bartowski, unsloth, mlx-community) ship alongside the weights.
-        # Catch only the missing-file case so HF auth / rate-limit / transient
-        # network errors propagate unchanged instead of being mislabeled as
-        # "no config.json".
+        # Treat a missing config.json (FileNotFoundError) OR a present-but-unusable
+        # one (ValidationError, e.g. no num_hidden_layers, which ConfigData
+        # requires) as "no usable config" and fall back to the GGUF header. HF
+        # auth / rate-limit / transient network errors are neither and propagate
+        # unchanged instead of being mislabeled as "no config.json".
         try:
             config_data = await fetch_config_data(model_id)
-        except FileNotFoundError:
+        except (FileNotFoundError, ValidationError):
             config_data = None
 
         if config_data is not None and config_data.layer_count and (
@@ -960,6 +962,13 @@ _GGUF_WANTED_SUFFIXES: Final = (
     _GGUF_KEY_HEAD_COUNT_KV,
     _GGUF_KEY_CONTEXT_LENGTH,
 )
+# The keys a card cannot be built without; head_count_kv and context_length are
+# best-effort (default to None / 0). Used to decide the early stop at the start
+# of the tokenizer section when a best-effort key is simply absent.
+_GGUF_REQUIRED_SUFFIXES: Final = (
+    _GGUF_KEY_BLOCK_COUNT,
+    _GGUF_KEY_EMBEDDING_LENGTH,
+)
 
 
 class GgufStructuralFields(NamedTuple):
@@ -994,8 +1003,10 @@ class _GgufHeaderReader:
         """Fetch until the buffer holds at least ``end`` bytes (or EOF)."""
         while len(self._buf) < end and not self._eof:
             start = len(self._buf)
-            length = max(self._WINDOW, end - start)
-            chunk = await self._fetch(start, length)
+            # Cap each fetch at one window and loop, so a large forward jump (a
+            # bulk array skip past ``end``) never balloons into a single huge
+            # range request; the loop keeps memory/request size window-bounded.
+            chunk = await self._fetch(start, self._WINDOW)
             # Only an empty read is EOF; a short read is a partial transport
             # chunk, so keep fetching from the new offset rather than stopping.
             if not chunk:
@@ -1062,8 +1073,9 @@ class _GgufHeaderReader:
 
         Reads ``general.architecture`` and the arch-prefixed ``block_count`` /
         ``embedding_length`` / ``attention.head_count_kv`` / ``context_length``
-        keys, stopping as soon as all are seen (so a trailing multi-megabyte
-        tokenizer array is never fetched).
+        keys. Stops as soon as all are seen, or, if a best-effort key is absent,
+        at the start of the tokenizer section (the arch scalars always precede
+        it), so a trailing multi-megabyte tokenizer array is never fetched.
 
         Raises:
             ValueError: The bytes are not a supported GGUF header, or the header
@@ -1080,17 +1092,28 @@ class _GgufHeaderReader:
 
         architecture: str | None = None
         collected: dict[str, int] = {}
+
+        def _has(suffixes: "tuple[str, ...]") -> bool:
+            return architecture is not None and all(
+                f"{architecture}.{suffix}" in collected for suffix in suffixes
+            )
+
         for _ in range(kv_count):
             key = await self.read_string()
+            # The arch-prefixed scalar keys precede the tokenizer section; once a
+            # tokenizer key appears no more arch scalars follow, so if the
+            # required fields are known, stop before reading a potentially huge
+            # tokenizer array for best-effort fields that are simply absent.
+            if key.startswith("tokenizer.") and _has(_GGUF_REQUIRED_SUFFIXES):
+                break
             value = await self.read_value(await self._u32())
             if key == "general.architecture" and isinstance(value, str):
                 architecture = value
             elif isinstance(value, int):
                 collected[key] = value
-            if architecture is not None and all(
-                f"{architecture}.{suffix}" in collected
-                for suffix in _GGUF_WANTED_SUFFIXES
-            ):
+            # Fast path: every wanted key (including best-effort ones) is in,
+            # before any tokenizer array.
+            if _has(_GGUF_WANTED_SUFFIXES):
                 break
 
         if architecture is None:

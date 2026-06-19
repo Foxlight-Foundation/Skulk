@@ -176,6 +176,74 @@ async def test_fetch_gguf_card_reads_header_when_no_config(
     assert card.gguf_file == "model-q4.gguf"
 
 
+async def test_fetch_gguf_card_reads_header_when_config_unusable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A config.json that is present but missing num_hidden_layers fails ConfigData
+    # validation; that is "config present but unusable", so the header fallback
+    # must still kick in rather than letting the ValidationError abort the build.
+    monkeypatch.setattr(model_cards, "model_info", _fake_model_info(["model-q4.gguf"]))
+
+    async def _bad_config(_model_id: object) -> object:
+        # Raises a genuine pydantic ValidationError (layer_count is required).
+        model_cards.ConfigData.model_validate({"hidden_size": 1})
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(model_cards, "fetch_config_data", _bad_config)
+
+    blob = _build_gguf(
+        [
+            _kv_string("general.architecture", "qwen2"),
+            _kv_u32("qwen2.block_count", 12),
+            _kv_u32("qwen2.embedding_length", 1536),
+            _kv_u32("qwen2.attention.head_count_kv", 2),
+            _kv_u32("qwen2.context_length", 8192),
+        ]
+    )
+
+    from skulk.download import download_utils
+
+    async def _range(
+        _model_id: object, _revision: str, _path: str, start: int, length: int
+    ) -> bytes:
+        return blob[start : start + length]
+
+    monkeypatch.setattr(download_utils, "range_read", _range)
+
+    card = await ModelCard.fetch_from_hf(ModelId("partial-config/gguf-repo"))
+    assert card.n_layers == 12 and card.hidden_size == 1536
+
+
+async def test_read_gguf_stops_at_tokenizer_when_kv_heads_absent() -> None:
+    # head_count_kv is best-effort: when it is absent, the reader must stop at the
+    # tokenizer section once the required fields are known, NOT scan the whole KV
+    # block. The blob is truncated right after the first tokenizer key, so any
+    # attempt to read past it raises; a correct early stop returns cleanly (#327).
+    import struct as _struct
+
+    kvs = b"".join(
+        [
+            _kv_string("general.architecture", "llama"),
+            _kv_u32("llama.block_count", 8),
+            _kv_u32("llama.embedding_length", 512),
+            _kv_u32("llama.context_length", 2048),
+        ]
+    )
+    # Claim more keys than are fully present; the next key is a tokenizer key with
+    # no value bytes after it (truncated), which would fail if actually read.
+    header = (
+        model_cards._GGUF_MAGIC
+        + _struct.pack("<I", 3)
+        + _struct.pack("<Q", 0)
+        + _struct.pack("<Q", 5)
+    )
+    truncated = header + kvs + _g_str("tokenizer.ggml.model")
+
+    fields = await model_cards.read_gguf_structural_fields(_mem_fetch(truncated))
+    assert fields.n_layers == 8 and fields.hidden_size == 512
+    assert fields.num_key_value_heads is None and fields.context_length == 2048
+
+
 async def test_read_gguf_structural_fields_basic() -> None:
     blob = _build_gguf(
         [

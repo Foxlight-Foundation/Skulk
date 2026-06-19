@@ -319,14 +319,23 @@ def build_model_path(model_id: ModelId) -> Path:
     found = resolve_model_in_path(model_id)
     if found is not None:
         return found
+    # A safetensors/MLX repo is identified by its config.json; a bare GGUF repo
+    # (no config.json) is identified by a complete GGUF shard group on disk. Both
+    # must be accepted here or a bare GGUF model that downloaded fine would fail
+    # to load with FileNotFoundError (#327).
     default = SKULK_MODELS_DIR / model_id.normalize()
-    if default.is_dir() and (default / "config.json").exists():
+    if default.is_dir() and (
+        (default / "config.json").exists() or directory_has_gguf_weights(default)
+    ):
         return default
     # Fallback: check the default staging directory directly.
     # This covers cases where the staging path wasn't registered in
     # SKULK_MODELS_PATH (e.g., config not yet synced) but files exist.
     staging_fallback = Path.home() / ".exo" / "staging" / model_id.normalize()
-    if staging_fallback.is_dir() and (staging_fallback / "config.json").exists():
+    if staging_fallback.is_dir() and (
+        (staging_fallback / "config.json").exists()
+        or directory_has_gguf_weights(staging_fallback)
+    ):
         return staging_fallback
     raise FileNotFoundError(
         f"Model {model_id} not found on disk. "
