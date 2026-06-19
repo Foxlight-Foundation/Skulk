@@ -128,6 +128,36 @@ def _cycle_download_score(
     )
 
 
+def _cycle_backend_preference_score(
+    cycle: Cycle,
+    node_resources: Mapping[NodeId, NodeResources],
+    backend_preference: Sequence[str],
+) -> int:
+    """Rank a cycle by how well its nodes satisfy the card's backend preference.
+
+    ``backend_preference`` is an ordered list of backend tags (most preferred
+    first). The score is ``len(preference) - i`` for the earliest index ``i``
+    whose tag is advertised by every node in the cycle that has a resources
+    entry, or ``0`` when no preferred tag is satisfiable (and when there is no
+    preference at all). Higher is better, so a cycle that can serve the top
+    preference outranks one that can only serve a fallback, which in turn
+    outranks one that serves none (graceful degradation by construction).
+
+    This is a SOFT signal: ``compatible_backends`` has already hard-filtered the
+    candidates, so every cycle here is runnable; this only orders them. Nodes
+    without a resources entry yet (gossip warming up) are not counted against a
+    preference, matching the optimistic eligibility default elsewhere.
+    """
+    for index, tag in enumerate(backend_preference):
+        if all(
+            tag in node_resources[node_id].backends
+            for node_id in cycle
+            if node_id in node_resources
+        ):
+            return len(backend_preference) - index
+    return 0
+
+
 class PlacementError(ValueError):
     """Placement is impossible for the requested command and current state.
 
@@ -319,9 +349,19 @@ def place_instance(
         cycles_with_leaf_nodes if cycles_with_leaf_nodes != [] else smallest_cycles
     )
 
+    # Prefer a cycle that can serve the model's preferred backend (soft, ordered;
+    # compatible_backends has already hard-filtered, so this only ranks). This
+    # dominates the download/memory tie-breakers because serving a model on its
+    # faster backend is the whole point of the preference; among cycles with the
+    # same preference rank, download locality then free memory still decide.
+    resolved_node_resources = node_resources or {}
+    backend_preference = command.model_card.placement.backend_preference
     selected_cycle = max(
         candidate_cycles,
         key=lambda cycle: (
+            _cycle_backend_preference_score(
+                cycle, resolved_node_resources, backend_preference
+            ),
             _cycle_download_score(
                 cycle, command.model_card.model_id, resolved_download_status
             ),

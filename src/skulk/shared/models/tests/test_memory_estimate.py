@@ -116,7 +116,9 @@ def _pipeline_shard(
 
 def test_per_token_kv_bytes_formula():
     card = _card(4, kv_heads=8, n_layers=32)
-    assert per_token_kv_bytes(card) == 2 * 32 * 8 * KV_HEAD_DIM_FALLBACK * KV_DTYPE_BYTES
+    assert (
+        per_token_kv_bytes(card) == 2 * 32 * 8 * KV_HEAD_DIM_FALLBACK * KV_DTYPE_BYTES
+    )
 
 
 def test_per_token_kv_bytes_zero_without_kv_heads():
@@ -176,9 +178,7 @@ def test_instance_limit_is_min_across_nodes():
 
 
 def test_instance_limit_capped_by_card_context_length():
-    card = _card(1, kv_heads=8, n_layers=32).model_copy(
-        update={"context_length": 1000}
-    )
+    card = _card(1, kv_heads=8, n_layers=32).model_copy(update={"context_length": 1000})
     assignments = _assignments(
         card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
     )
@@ -189,9 +189,7 @@ def test_instance_limit_capped_by_card_context_length():
 
 
 def test_instance_limit_missing_node_memory_falls_back_to_card():
-    card = _card(4, kv_heads=8, n_layers=32).model_copy(
-        update={"context_length": 4096}
-    )
+    card = _card(4, kv_heads=8, n_layers=32).model_copy(update={"context_length": 4096})
     assignments = _assignments(
         card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
     )
@@ -248,3 +246,25 @@ def test_placement_card_config_round_trips_through_toml_and_json() -> None:
     # JSON wire round-trip preserves the value.
     restored = PlacementCardConfig.model_validate(cfg.model_dump(mode="json"))
     assert restored.compatible_backends == frozenset({"mlx"})
+
+
+def test_backend_preference_round_trips_and_preserves_order() -> None:
+    """backend_preference is an ORDERED tuple: list input must coerce, order
+    must survive TOML/JSON round-trips, and default is empty (no preference)."""
+    import tomlkit
+
+    from skulk.shared.models.model_cards import PlacementCardConfig
+
+    assert PlacementCardConfig().backend_preference == ()
+
+    cfg = PlacementCardConfig.model_validate(
+        {"backend_preference": ["llama_cpp-vulkan", "llama_cpp-rocm"]}
+    )
+    assert cfg.backend_preference == ("llama_cpp-vulkan", "llama_cpp-rocm")
+
+    dumped = cfg.model_dump(exclude_none=True)
+    assert dumped["backend_preference"] == ["llama_cpp-vulkan", "llama_cpp-rocm"]
+    tomlkit.dumps(dumped)  # pyright: ignore[reportUnknownMemberType]  # no raise
+
+    restored = PlacementCardConfig.model_validate(cfg.model_dump(mode="json"))
+    assert restored.backend_preference == ("llama_cpp-vulkan", "llama_cpp-rocm")
