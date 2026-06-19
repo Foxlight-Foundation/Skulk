@@ -47,7 +47,7 @@ Directory layout on the store host::
         ...
 
 The ``/`` → ``--`` sanitization in directory names matches the convention
-used by EXO's own ``~/.exo/models/`` cache.
+used for HuggingFace cache directories.
 
 Thread safety
 -------------

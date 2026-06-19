@@ -27,7 +27,7 @@ How staging works
 2. ``ModelStoreDownloader.ensure_shard()`` asks the store client whether the
    model is available (HTTP ``GET /models/{id}/files``).
 3. **Model in store**: ``stage_shard()`` downloads all model files to the
-   node-local staging directory (``~/.exo/staging/<org>--<model>/`` by
+   node-local staging directory (``~/.skulk/staging/<org>--<model>/`` by
    default).  Files are downloaded with HTTP ``Range`` resume support — if the
    process is interrupted, the next call picks up where it left off.
 4. **Model not in store + HF fallback enabled**: delegates to the inner
@@ -106,7 +106,7 @@ def _sanitize_model_id(model_id: str) -> str:
 
     ``"mlx-community/Qwen3-30B-A3B-4bit"`` → ``"mlx-community--Qwen3-30B-A3B-4bit"``
 
-    This mirrors the sanitization used by EXO's own ``~/.exo/models/`` cache
+    This mirrors the conventional HuggingFace cache-directory sanitization
     so that the staging layout is consistent with what users already expect.
     """
     return str(model_id).replace("/", "--")
@@ -722,7 +722,7 @@ class ModelStoreDownloader(ShardDownloader):
 
     Wrapping pattern (mirrors how Skulk wraps its own downloaders)::
 
-        base = exo_shard_downloader(offline=args.offline)
+        base = skulk_shard_downloader(offline=args.offline)
         downloader = ModelStoreDownloader(
             inner=base,
             store_client=store_client,

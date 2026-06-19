@@ -22,7 +22,7 @@ from skulk.connectivity.local_network import (
 )
 from skulk.connectivity.tailscale import query_tailscale_status
 from skulk.download.coordinator import DownloadCoordinator
-from skulk.download.impl_shard_downloader import exo_shard_downloader
+from skulk.download.impl_shard_downloader import skulk_shard_downloader
 from skulk.master.main import Master
 from skulk.routing.event_router import EventRouter
 from skulk.routing.router import Router, get_node_id_keypair
@@ -91,7 +91,7 @@ def _libp2p_namespace_token(environ: Mapping[str, str]) -> str:
     and silently drop all cross-node generation output. ``swarm.rs`` uses
     ``SKULK_LIBP2P_NAMESPACE`` when the var is *present* (Rust ``env::var``
     returns ``Ok`` even for an empty value) and the ``NETWORK_VERSION`` default
-    (``v0.0.1``) otherwise; it does NOT read the legacy ``EXO_LIBP2P_NAMESPACE``.
+    (``v0.0.1``) otherwise.
     We mirror that precisely: presence (not truthiness) selects the override, and
     an unset var falls back to ``v0.0.1`` rather than a Skulk-only default.
     """
@@ -192,18 +192,18 @@ def _add_model_search_path(path: Path) -> None:
 
 def _configure_model_store_runtime(
     node_id: NodeId,
-    exo_config: SkulkConfig | None,
+    skulk_config: SkulkConfig | None,
 ) -> tuple[ModelStoreClient | None, ModelStoreServer | None]:
     """Build store client/server wiring from the current config."""
 
     if (
-        exo_config is None
-        or exo_config.model_store is None
-        or not exo_config.model_store.enabled
+        skulk_config is None
+        or skulk_config.model_store is None
+        or not skulk_config.model_store.enabled
     ):
         return None, None
 
-    ms = exo_config.model_store
+    ms = skulk_config.model_store
     is_store_host = node_matches_store_host(
         ms.store_host,
         str(node_id),
@@ -256,7 +256,7 @@ class Node:
 
     node_id: NodeId
     offline: bool
-    exo_config: SkulkConfig | None
+    skulk_config: SkulkConfig | None
     store_client: ModelStoreClient | None
     store_server: ModelStoreServer | None
     # Live node telemetry off the event log (#279). Node-owned so it survives
@@ -368,58 +368,49 @@ class Node:
 
         logger.info(f"Starting node {node_id}")
 
-        # Load exo.yaml (returns None if absent — zero-config compatibility:
-        # when exo.yaml is missing, all store references stay None and exo
-        # behaves identically to the upstream default).
-        exo_config = load_skulk_config()
+        # Load skulk.yaml (returns None if absent, for zero-config compatibility:
+        # when skulk.yaml is missing, all store references stay None and the
+        # node behaves identically to the zero-config default).
+        skulk_config = load_skulk_config()
 
         # Track whether user provided the KV backend env var at launch —
         # if so, config syncs must not overwrite it.
-        _user_set_kv_backend = (
-            "SKULK_KV_CACHE_BACKEND" in os.environ
-            or "SKULK_KV_CACHE_BACKEND" in os.environ
-        )
+        _user_set_kv_backend = "SKULK_KV_CACHE_BACKEND" in os.environ
         os.environ["_SKULK_KV_BACKEND_USER_SET"] = "1" if _user_set_kv_backend else ""
-        os.environ["_EXO_KV_BACKEND_USER_SET"] = (
-            "1" if _user_set_kv_backend else ""
-        )  # legacy compat
 
         # Apply inference config to env var so runner subprocesses inherit it.
         # Env var takes precedence if user set it at launch.
         if (
-            exo_config is not None
-            and exo_config.inference is not None
+            skulk_config is not None
+            and skulk_config.inference is not None
             and not _user_set_kv_backend
         ):
-            os.environ["SKULK_KV_CACHE_BACKEND"] = exo_config.inference.kv_cache_backend
-            os.environ["SKULK_KV_CACHE_BACKEND"] = (
-                exo_config.inference.kv_cache_backend
-            )  # legacy compat
+            os.environ["SKULK_KV_CACHE_BACKEND"] = skulk_config.inference.kv_cache_backend
             logger.info(
-                f"Inference config: kv_cache_backend={exo_config.inference.kv_cache_backend}"
+                f"Inference config: kv_cache_backend={skulk_config.inference.kv_cache_backend}"
             )
 
         # Apply HF token from config if not already set via env
         if (
-            exo_config is not None
-            and exo_config.hf_token
+            skulk_config is not None
+            and skulk_config.hf_token
             and "HF_TOKEN" not in os.environ
         ):
-            os.environ["HF_TOKEN"] = exo_config.hf_token
+            os.environ["HF_TOKEN"] = skulk_config.hf_token
             logger.info("HF token loaded from config")
 
-        store_client, store_server = _configure_model_store_runtime(node_id, exo_config)
+        store_client, store_server = _configure_model_store_runtime(node_id, skulk_config)
 
         # Create DownloadCoordinator (unless --no-downloads)
         if not args.no_downloads:
-            base_downloader = exo_shard_downloader(offline=args.offline)
+            base_downloader = skulk_shard_downloader(offline=args.offline)
             if (
-                exo_config is not None
-                and exo_config.model_store is not None
-                and exo_config.model_store.enabled
+                skulk_config is not None
+                and skulk_config.model_store is not None
+                and skulk_config.model_store.enabled
                 and store_client is not None
             ):
-                ms = exo_config.model_store
+                ms = skulk_config.model_store
                 staging_cfg = resolve_node_staging(ms, str(node_id))
                 shard_downloader = ModelStoreDownloader(
                     inner=base_downloader,
@@ -433,12 +424,12 @@ class Node:
             coordinator_staging_path = (
                 Path(
                     resolve_node_staging(
-                        exo_config.model_store, str(node_id)
+                        skulk_config.model_store, str(node_id)
                     ).node_cache_path
                 )
-                if exo_config is not None
-                and exo_config.model_store is not None
-                and exo_config.model_store.enabled
+                if skulk_config is not None
+                and skulk_config.model_store is not None
+                and skulk_config.model_store.enabled
                 else None
             )
             download_coordinator = DownloadCoordinator(
@@ -460,7 +451,7 @@ class Node:
                 command_sender=router.sender(topics.COMMANDS),
                 download_command_sender=router.sender(topics.DOWNLOAD_COMMANDS),
                 election_receiver=router.receiver(topics.ELECTION_MESSAGES),
-                exo_config=exo_config,
+                skulk_config=skulk_config,
                 store_client=store_client,
                 telemetry_view=telemetry_view,
                 data_receiver=router.receiver(topics.DATA),
@@ -472,12 +463,12 @@ class Node:
         if not args.no_worker:
             worker_store_client: ModelStoreClient | None = store_client
             if (
-                exo_config is not None
-                and exo_config.model_store is not None
-                and exo_config.model_store.enabled
+                skulk_config is not None
+                and skulk_config.model_store is not None
+                and skulk_config.model_store.enabled
             ):
                 worker_staging_cfg = resolve_node_staging(
-                    exo_config.model_store, str(node_id)
+                    skulk_config.model_store, str(node_id)
                 )
             else:
                 worker_staging_cfg = None
@@ -538,7 +529,7 @@ class Node:
             api,
             node_id,
             args.offline,
-            exo_config,
+            skulk_config,
             store_client,
             store_server,
             telemetry_view,
@@ -621,7 +612,7 @@ class Node:
 
         config_path = resolve_config_path()
         config_path.write_text(config_yaml)
-        self.exo_config = load_skulk_config(config_path)
+        self.skulk_config = load_skulk_config(config_path)
 
     async def _broadcast_config_if_store_host(self) -> None:
         """If this node is the store host, broadcast a valid config to all nodes.
@@ -629,9 +620,9 @@ class Node:
         Fixes up ``store_http_host`` so that worker nodes receive a reachable
         address (the store host's hostname) rather than ``127.0.0.1`` or None.
         """
-        if self.exo_config is None or self.exo_config.model_store is None:
+        if self.skulk_config is None or self.skulk_config.model_store is None:
             return
-        ms = self.exo_config.model_store
+        ms = self.skulk_config.model_store
         if not ms.enabled:
             return
         local_hostname = socket.gethostname()
@@ -652,7 +643,7 @@ class Node:
         ):
             reachable_host = ms.store_http_host
 
-        config_dict = self.exo_config.model_dump()
+        config_dict = self.skulk_config.model_dump()
         config_dict["model_store"]["store_http_host"] = reachable_host
 
         import yaml
@@ -794,7 +785,7 @@ class Node:
                         self._apply_cluster_config_yaml(authoritative_config_yaml)
                         new_store_client, new_store_server = (
                             _configure_model_store_runtime(
-                                self.node_id, self.exo_config
+                                self.node_id, self.skulk_config
                             )
                         )
                         self.store_client = new_store_client
@@ -806,10 +797,10 @@ class Node:
                 if result.is_new_master:
                     if self.download_coordinator:
                         await self.download_coordinator.shutdown()
-                        base_dl = exo_shard_downloader(offline=self.offline)
+                        base_dl = skulk_shard_downloader(offline=self.offline)
                         ms = (
-                            self.exo_config.model_store
-                            if self.exo_config is not None
+                            self.skulk_config.model_store
+                            if self.skulk_config is not None
                             else None
                         )
                         if (
@@ -849,8 +840,8 @@ class Node:
                     if self.worker:
                         await self.worker.shutdown()
                         ms2 = (
-                            self.exo_config.model_store
-                            if self.exo_config is not None
+                            self.skulk_config.model_store
+                            if self.skulk_config is not None
                             else None
                         )
                         elect_staging2 = (

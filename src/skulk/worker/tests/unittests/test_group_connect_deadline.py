@@ -22,7 +22,6 @@ from skulk.worker.runner.bootstrap import (
 
 def test_default_deadline(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("SKULK_GROUP_CONNECT_DEADLINE_SECONDS", raising=False)
-    monkeypatch.delenv("EXO_GROUP_CONNECT_DEADLINE_SECONDS", raising=False)
     assert (
         resolve_group_connect_deadline_seconds()
         == GROUP_CONNECT_DEADLINE_SECONDS_DEFAULT

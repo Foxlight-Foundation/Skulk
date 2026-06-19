@@ -218,7 +218,6 @@ def _request_shape_debug_enabled() -> bool:
     """Return whether request-shape tracing is enabled for prompt debugging."""
     value = preferred_env_value(
         "SKULK_TRACE_REQUEST_SHAPES",
-        "EXO_TRACE_REQUEST_SHAPES",
     )
     if value is None:
         return False

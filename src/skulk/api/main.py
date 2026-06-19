@@ -457,8 +457,7 @@ def prune_old_trace_files(directory: Path, retention_days: int, now: float) -> i
 def _text_image_hash_cache_enabled() -> bool:
     value = preferred_env_value(
         "SKULK_TEXT_IMAGE_HASH_CACHE",
-        "EXO_TEXT_IMAGE_HASH_CACHE",
-        "false",
+        default="false",
     )
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -669,7 +668,7 @@ class API:
         download_command_sender: Sender[ForwarderDownloadCommand],
         # This lets us pause the API if an election is running
         election_receiver: Receiver[ElectionMessage],
-        exo_config: "SkulkConfig | None" = None,
+        skulk_config: "SkulkConfig | None" = None,
         store_client: "ModelStoreClient | None" = None,
         enable_event_log: bool = True,
         mount_dashboard: bool = True,
@@ -699,7 +698,7 @@ class API:
         self._master_node_id: NodeId = node_id
         self.last_completed_election: int = 0
         self.port = port
-        self._exo_config = exo_config
+        self._skulk_config = skulk_config
         self._store_client = store_client
         self._config_path = resolve_config_path()
         self._model_optimizer: "ModelOptimizer | None" = None
@@ -712,11 +711,11 @@ class API:
         ) = None
         self._sent_image_hashes: set[str] = set()
         # Initialize optimizer if store path is available
-        if exo_config and exo_config.model_store and exo_config.model_store.enabled:
+        if skulk_config and skulk_config.model_store and skulk_config.model_store.enabled:
             from skulk.store.model_optimizer import ModelOptimizer
 
             self._model_optimizer = ModelOptimizer(
-                store_path=Path(exo_config.model_store.store_path)
+                store_path=Path(skulk_config.model_store.store_path)
             )
 
         self.paused: bool = False
@@ -3721,9 +3720,9 @@ class API:
         while True:
             try:
                 retention_days = (
-                    self._exo_config.tracing.retention_days
-                    if self._exo_config is not None
-                    and self._exo_config.tracing is not None
+                    self._skulk_config.tracing.retention_days
+                    if self._skulk_config is not None
+                    and self._skulk_config.tracing is not None
                     else 3
                 )
                 removed = prune_old_trace_files(
@@ -3817,12 +3816,12 @@ class API:
         """
         staging_root: Path | None = None
         if (
-            self._exo_config is not None
-            and self._exo_config.model_store is not None
-            and self._exo_config.model_store.enabled
+            self._skulk_config is not None
+            and self._skulk_config.model_store is not None
+            and self._skulk_config.model_store.enabled
         ):
             staging = resolve_node_staging(
-                self._exo_config.model_store, str(self.node_id)
+                self._skulk_config.model_store, str(self.node_id)
             )
             if staging.enabled:
                 staging_root = Path(staging.node_cache_path).expanduser()
@@ -4444,7 +4443,7 @@ class API:
 
         identity = self._telemetry_view.node_identities.get(self.node_id)
         logging_config = (
-            self._exo_config.logging if self._exo_config is not None else None
+            self._skulk_config.logging if self._skulk_config is not None else None
         )
         master_node_id = self._master_node_id
         return NodeRuntimeDiagnostics(
@@ -4460,7 +4459,6 @@ class API:
             skulk_commit=identity.skulk_commit if identity is not None else "Unknown",
             libp2p_namespace=preferred_env_value(
                 "SKULK_LIBP2P_NAMESPACE",
-                "EXO_LIBP2P_NAMESPACE",
             ),
             python_unbuffered=os.environ.get("PYTHONUNBUFFERED")
             in {"1", "true", "True"},
@@ -5199,11 +5197,10 @@ class API:
     # ------------------------------------------------------------------
 
     def _effective_kv_cache_backend(self) -> str:
-        """Return the effective KV backend after SKULK/EXO env precedence is applied."""
+        """Return the effective KV backend from the env (or empty when unset)."""
         configured_backend = preferred_env_value(
             "SKULK_KV_CACHE_BACKEND",
-            "EXO_KV_CACHE_BACKEND",
-            "",
+            default="",
         )
         if not configured_backend:
             return DEFAULT_KV_CACHE_BACKEND
@@ -5291,15 +5288,10 @@ class API:
         # Apply inference config to env var immediately so next model launch uses it.
         # Don't overwrite if user provided the env var at launch.
         inference = _coerce_json_object(config_data.get("inference"))
-        if (
-            "kv_cache_backend" in inference
-            and not os.environ.get("_SKULK_KV_BACKEND_USER_SET")
-            and not os.environ.get("_EXO_KV_BACKEND_USER_SET")
+        if "kv_cache_backend" in inference and not os.environ.get(
+            "_SKULK_KV_BACKEND_USER_SET"
         ):
             os.environ["SKULK_KV_CACHE_BACKEND"] = str(inference["kv_cache_backend"])
-            os.environ["SKULK_KV_CACHE_BACKEND"] = str(
-                inference["kv_cache_backend"]
-            )  # legacy compat
         # Apply HF token immediately
         hf_token = config_data.get("hf_token")
         if hf_token and "HF_TOKEN" not in os.environ:

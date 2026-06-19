@@ -7,6 +7,7 @@ from skulk.store.config import (
     NodeOverrideConfig,
     StagingNodeConfig,
     hostname_aliases,
+    load_skulk_config,
     node_matches_store_host,
     resolve_node_staging,
 )
@@ -48,9 +49,8 @@ def test_staging_cleanup_defaults_to_budgeted_eviction(
     and the grace budget keeps crashes/restarts/repeat placements from
     re-paying the staging copy (deliberate product decision, 2026-06-06).
 
-    HOME is isolated so the legacy-staging fallback validator (below) cannot
-    fire on developer machines that still carry a populated ~/.exo/staging —
-    the unisolated form of this test passes or fails depending on host state.
+    HOME is isolated for consistency with the other staging tests so host
+    state cannot influence the result.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     config = StagingNodeConfig()
@@ -61,25 +61,22 @@ def test_staging_cleanup_defaults_to_budgeted_eviction(
     assert config.staging_keep_recent_gb == 40.0
 
 
-def test_staging_default_prefers_populated_legacy_dir(
+def test_staging_default_ignores_legacy_exo_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A populated pre-rename ~/.exo/staging keeps being used when staging is
-    unconfigured, so the 2026-06 exo->skulk rename does not silently orphan
-    staged copies and re-stage everything. An explicit path is respected
-    verbatim, and an empty legacy dir does not trigger the fallback."""
+    """The default staging path is always ~/.skulk/staging. The EXO_ deprecation
+    runway is gone (#324): a populated legacy ~/.exo/staging is no longer
+    migrated, and an explicit path is respected verbatim."""
     monkeypatch.setenv("HOME", str(tmp_path))
     legacy = tmp_path / ".exo" / "staging"
     legacy.mkdir(parents=True)
     (legacy / "mlx-community--some-model").mkdir()
 
-    assert StagingNodeConfig().node_cache_path == "~/.exo/staging"
+    # The populated legacy dir is ignored; the default stays ~/.skulk/staging.
+    assert StagingNodeConfig().node_cache_path == "~/.skulk/staging"
     # Explicit configuration is never rewritten.
     explicit = StagingNodeConfig(node_cache_path="/Volumes/foxlight/models")
     assert explicit.node_cache_path == "/Volumes/foxlight/models"
-    # Once the new dir exists, the default sticks.
-    (tmp_path / ".skulk" / "staging").mkdir(parents=True)
-    assert StagingNodeConfig().node_cache_path == "~/.skulk/staging"
 
 
 def test_resolve_node_staging_matches_local_hostname_alias(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -87,7 +84,7 @@ def test_resolve_node_staging_matches_local_hostname_alias(monkeypatch: pytest.M
     config = ModelStoreConfig(
         store_host="kite3.local",
         store_path="/Volumes/foxlight/models",
-        staging=StagingNodeConfig(node_cache_path="~/.exo/staging"),
+        staging=StagingNodeConfig(node_cache_path="~/.skulk/staging"),
         node_overrides={
             "kite3.local": NodeOverrideConfig(
                 staging=StagingNodeConfig(
@@ -102,3 +99,17 @@ def test_resolve_node_staging_matches_local_hostname_alias(monkeypatch: pytest.M
 
     assert resolved.node_cache_path == "/Volumes/foxlight/models"
     assert not resolved.cleanup_on_deactivate
+
+
+def test_load_skulk_config_absent_returns_none(tmp_path: Path) -> None:
+    """A missing skulk.yaml with no legacy file boots zero-config (returns None)."""
+    assert load_skulk_config(tmp_path / "skulk.yaml") is None
+
+
+def test_load_skulk_config_fails_loud_on_legacy_exo_yaml(tmp_path: Path) -> None:
+    """A leftover exo.yaml without skulk.yaml fails loudly with the rename, not
+    a silent zero-config boot that would drop store/logging/auth settings (#324)."""
+    (tmp_path / "exo.yaml").write_text("model_store:\n  enabled: true\n")
+    target = tmp_path / "skulk.yaml"
+    with pytest.raises(FileNotFoundError, match="exo.yaml is no longer read"):
+        load_skulk_config(target)
