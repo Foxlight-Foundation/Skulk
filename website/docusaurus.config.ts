@@ -163,6 +163,32 @@ const config: Config = {
           position: "left",
         },
         {
+          // Always-visible switch between the two live sites. The label shows
+          // the channel you're currently on (driven by DOCS_CHANNEL, the same
+          // env that drives the cross-link banner), and both destinations are
+          // listed so you can jump either way from anywhere in the docs.
+          type: "dropdown",
+          label: process.env.DOCS_CHANNEL === "next" ? "Next (dev)" : "Stable",
+          position: "right",
+          // Full URLs (not root-relative) for the same reason as the TypeDoc
+          // link above: a navbar `href` that looks internal is run through the
+          // broken-link checker, and a cross-channel path like /Skulk/next/ is
+          // not a routable page on the stable build (and vice versa), so it
+          // would fail the build. Full URLs are treated as external and skipped.
+          // (The announcementBar can use root-relative paths because its raw
+          // HTML string is not parsed by the link checker.)
+          items: [
+            {
+              label: "Stable",
+              href: "https://foxlight-foundation.github.io/Skulk/",
+            },
+            {
+              label: "Next (dev)",
+              href: "https://foxlight-foundation.github.io/Skulk/next/",
+            },
+          ],
+        },
+        {
           href: "https://github.com/Foxlight-Foundation/Skulk",
           label: "GitHub",
           position: "right",
