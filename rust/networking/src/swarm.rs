@@ -182,7 +182,10 @@ mod transport {
     /// Key used for networking's private network; parametrized on the [`NETWORK_VERSION`].
     /// See [`pnet_upgrade`] for more.
     static PNET_PRESHARED_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| {
-        let builder = Sha3_256::new().update(b"exo_discovery_network");
+        // Seed for the libp2p private-network pre-shared key. Changing this is a
+        // wire-compatibility break (nodes with a different seed cannot form a
+        // cluster), so it lands only as a coordinated whole-fleet upgrade (#324).
+        let builder = Sha3_256::new().update(b"skulk_discovery_network");
 
         if let Ok(var) = env::var(OVERRIDE_VERSION_ENV_VAR) {
             let bytes = var.into_bytes();
