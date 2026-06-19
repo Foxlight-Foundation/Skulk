@@ -70,6 +70,61 @@ import aiofiles.os as aios
 from loguru import logger
 from pydantic import BaseModel, ConfigDict
 
+from skulk.shared.types.worker.downloads import FileListEntry
+
+
+def select_store_gguf_download_files(
+    file_list: list[FileListEntry],
+) -> list[FileListEntry]:
+    """Filter a repo's file list to what the store host should download (#339).
+
+    A multi-quant GGUF repo ships every quantization (and sometimes the original
+    full-precision weights under ``original/`` plus ``metal/`` artifacts). The
+    store host should fetch exactly what the direct-HuggingFace path fetches:
+    the preferred quant's shard group plus ``config.json``, and nothing else.
+    This mirrors ``download_utils.resolve_allow_patterns`` for a GGUF card
+    (``[*gguf_allow_patterns(gguf_file), "config.json"]``), so a store-routed
+    download is no larger than a direct one. A non-GGUF repo (no ``.gguf`` LM
+    weights, excluding ``mmproj`` projectors) is returned unchanged.
+
+    Args:
+        file_list: The full recursive repo file list.
+
+    Returns:
+        The subset to download. Identical to the input for non-GGUF repos.
+    """
+    from fnmatch import fnmatch
+
+    from skulk.shared.models.model_cards import (
+        gguf_allow_patterns,
+        select_preferred_gguf,
+    )
+
+    gguf_weights = [
+        entry
+        for entry in file_list
+        if entry.path.endswith(".gguf") and "mmproj" not in entry.path.lower()
+    ]
+    if not gguf_weights:
+        return file_list  # not a GGUF repo (or vision-only projector): unchanged
+
+    selected = select_preferred_gguf(
+        [(entry.path, entry.size or 0) for entry in gguf_weights]
+    )
+    # Match the direct-HF GGUF allow-list exactly: the selected shard group
+    # (``gguf_allow_patterns`` returns either the single file or the
+    # ``<base>-*-of-*.gguf`` glob) plus ``config.json``. Patterns and paths are
+    # both repo-relative, the same basis HuggingFace's ``allow_patterns`` matches
+    # on, so a GGUF in a subdirectory aligns with the direct path. Every other
+    # file (other quants, original/* full-precision weights, metal/*, tokenizer,
+    # README) is dropped, just as the direct path drops them.
+    keep_patterns = [*gguf_allow_patterns(selected), "config.json"]
+
+    def _keep(entry: FileListEntry) -> bool:
+        return any(fnmatch(entry.path, pattern) for pattern in keep_patterns)
+
+    return [entry for entry in file_list if _keep(entry)]
+
 
 @final
 class StoreModelEntry(BaseModel):
@@ -370,6 +425,17 @@ class ModelStore:
             file_list = await fetch_file_list_with_cache(
                 ModelId(model_id), "main", recursive=True
             )
+            # For a GGUF repo, fetch only the preferred quant's shard group plus
+            # config.json (dropping other quants, original/*, metal/*, etc.),
+            # mirroring the direct-HF selective download (#339).
+            selected_files = select_store_gguf_download_files(file_list)
+            if len(selected_files) != len(file_list):
+                logger.info(
+                    f"ModelStore: {model_id} is a GGUF repo; downloading "
+                    f"{len(selected_files)}/{len(file_list)} files (selected "
+                    "quant's shard group + config.json only)"
+                )
+            file_list = selected_files
             total_bytes = sum(f.size or 0 for f in file_list)
             downloaded_bytes = 0
 
