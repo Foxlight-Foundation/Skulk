@@ -170,6 +170,13 @@ const config: Config = {
           type: "dropdown",
           label: process.env.DOCS_CHANNEL === "next" ? "Next (dev)" : "Stable",
           position: "right",
+          // Full URLs (not root-relative) for the same reason as the TypeDoc
+          // link above: a navbar `href` that looks internal is run through the
+          // broken-link checker, and a cross-channel path like /Skulk/next/ is
+          // not a routable page on the stable build (and vice versa), so it
+          // would fail the build. Full URLs are treated as external and skipped.
+          // (The announcementBar can use root-relative paths because its raw
+          // HTML string is not parsed by the link checker.)
           items: [
             {
               label: "Stable",
