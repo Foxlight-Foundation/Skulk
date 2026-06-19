@@ -45,6 +45,7 @@ from skulk.shared.types.worker.runners import (
     RunnerIdle,
     RunnerLoading,
     RunnerReady,
+    RunnerRunning,
     RunnerShutdown,
     RunnerShuttingDown,
     RunnerStatus,
@@ -260,7 +261,13 @@ class Runner:
 
     def _generate(self, task: Task) -> None:
         assert isinstance(task, TextGeneration)
-        self.update_status(RunnerReady())
+        # Must be an ACTIVE status (not RunnerReady) for the whole task: the
+        # supervisor asserts the runner is RunnerRunning/Loading/etc. when the
+        # terminal TaskStatus arrives (runner_supervisor._forward_events). main()
+        # sends Complete after this returns, so we stay RunnerRunning until then
+        # and only flip current_status back to Ready (without an event) at the
+        # end, so the Ready event is ordered after Complete.
+        self.update_status(RunnerRunning())
         self.acknowledge_task(task)
         assert self.model is not None
 

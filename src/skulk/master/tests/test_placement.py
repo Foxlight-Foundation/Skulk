@@ -1246,3 +1246,57 @@ def test_replacement_at_full_cluster_width_is_terminal() -> None:
     assert replacement.min_nodes == 4
     with pytest.raises(PlacementError):
         place_instance(replacement, topology, {}, node_memory, node_network)
+
+
+def _llama_cpp_card() -> ModelCard:
+    """A GGUF-style card whose compatible backends are all llama_cpp tags."""
+    from skulk.shared.models.model_cards import PlacementCardConfig
+
+    return ModelCard(
+        model_id=ModelId("test-gguf"),
+        storage_size=Memory.from_mb(500),
+        n_layers=10,
+        hidden_size=1000,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        placement=PlacementCardConfig(
+            compatible_backends=frozenset({"llama_cpp-vulkan", "llama_cpp-cpu"})
+        ),
+    )
+
+
+def test_llama_cpp_multi_node_placement_is_rejected() -> None:
+    """llama.cpp is single-node only; a forced multi-node placement of a
+    llama.cpp-only card is rejected up front rather than crashing at runner
+    startup (world_size != 1)."""
+    topology = Topology()
+    node_a = NodeId()
+    node_b = NodeId()
+    topology.add_node(node_a)
+    topology.add_node(node_b)
+    topology.add_connection(
+        Connection(source=node_a, sink=node_b, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=node_b, sink=node_a, edge=create_socket_connection(2))
+    )
+    node_memory = {
+        node_a: create_node_memory(Memory.from_gb(8).in_bytes),
+        node_b: create_node_memory(Memory.from_gb(8).in_bytes),
+    }
+    node_network = {node_a: create_node_network(), node_b: create_node_network()}
+    command = place_instance_command(_llama_cpp_card()).model_copy(
+        update={"min_nodes": 2}
+    )
+    with pytest.raises(ValueError, match="single-node only"):
+        place_instance(command, topology, {}, node_memory, node_network)
+
+
+def test_llama_cpp_single_node_placement_succeeds() -> None:
+    """The single-node guard must not block a legitimate single-node placement."""
+    topology, _node_a, _node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_llama_cpp_card())
+    placements = place_instance(command, topology, {}, node_memory, node_network)
+    assert len(placements) == 1
+    instance = next(iter(placements.values()))
+    assert len(instance.shard_assignments.node_to_runner) == 1

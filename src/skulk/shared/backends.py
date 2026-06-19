@@ -137,7 +137,7 @@ def _probe_llama_cpp_backends() -> frozenset[str]:
 def probe_node_backends() -> frozenset[str]:
     """Probe the backend tags this node can actually serve.
 
-    Apple-Silicon nodes advertise ``{"mlx", "mlx-metal"}`` (the bare engine tag
+    macOS nodes (``sys.platform == "darwin"``) advertise ``{"mlx", "mlx-metal"}`` (the bare engine tag
     is kept for backward compatibility with cards written against the original
     ``{"mlx"}`` vocabulary). Any node with an importable ``llama_cpp`` adds its
     llama.cpp tags. A bare Linux node with neither advertises an empty set and

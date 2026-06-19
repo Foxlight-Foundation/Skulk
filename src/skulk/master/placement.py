@@ -12,6 +12,7 @@ from skulk.master.placement_utils import (
     get_shard_assignments,
     get_smallest_cycles,
 )
+from skulk.shared.backends import engine_of
 from skulk.shared.models.memory_estimate import instance_context_token_limit
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.topology import Topology
@@ -136,7 +137,7 @@ def _cycle_backend_preference_score(
     """Rank a cycle by how well its nodes satisfy the card's backend preference.
 
     ``backend_preference`` is an ordered list of backend tags (most preferred
-    first). The score is ``len(preference) - i`` for the earliest index ``i``
+    first). The score is ``len(backend_preference) - i`` for the earliest index ``i``
     whose tag is advertised by every node in the cycle that has a resources
     entry, or ``0`` when no preferred tag is satisfiable (and when there is no
     preference at all). Higher is better, so a cycle that can serve the top
@@ -262,6 +263,24 @@ def place_instance(
                     f"the model's compatible_backends "
                     f"({sorted(compatible_backends)})."
                 )
+
+    # Single-node engine guard. The llama.cpp runner is single-node only (no ring
+    # / ConnectToGroup), so a multi-node placement of a llama.cpp-only model would
+    # download and then crash at runner startup (world_size != 1). Reject it up
+    # front: restrict candidates to single-node cycles when every compatible
+    # backend resolves to the llama_cpp engine. (A card that also allows an MLX
+    # backend can still place multi-node via MLX, so this only bites llama.cpp-only
+    # models.) This also forecloses a mixed-backend multi-node cycle (no single
+    # backend shared by all ranks), since llama.cpp is the only non-MLX engine.
+    card_backends = command.model_card.placement.compatible_backends
+    if card_backends and all(engine_of(tag) == "llama_cpp" for tag in card_backends):
+        candidate_cycles = [cycle for cycle in candidate_cycles if len(cycle) == 1]
+        if not candidate_cycles:
+            raise PlacementError(
+                "llama.cpp models are single-node only, but no single-node cycle "
+                "is available/eligible for this model. Place it on one node, or "
+                "free a node that advertises a compatible llama.cpp backend."
+            )
 
     # Filter to cycles containing all required nodes (subset matching)
     if required_nodes:
