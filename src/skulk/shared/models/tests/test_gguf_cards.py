@@ -1,6 +1,8 @@
 # pyright: reportPrivateUsage=false
 """Tests for GGUF-repo detection and llama.cpp card creation (slice 3a)."""
 
+import struct
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +14,61 @@ from skulk.shared.models.model_cards import (
     _gguf_shard_base,
     gguf_weight_siblings,
 )
+
+# --- GGUF binary header builders (for #327 header-parse tests) --------------
+#
+# Minimal encoders for the GGUF metadata block: magic, version, tensor count,
+# kv count, then typed key/value pairs. Mirrors the spec well enough to exercise
+# read_gguf_structural_fields without a real multi-GB weights file.
+
+_GGUF_T_FLOAT32 = 6
+_GGUF_T_UINT32 = 4
+_GGUF_T_STRING = 8
+_GGUF_T_ARRAY = 9
+
+
+def _g_str(value: str) -> bytes:
+    encoded = value.encode("utf-8")
+    return struct.pack("<Q", len(encoded)) + encoded
+
+
+def _kv_string(key: str, value: str) -> bytes:
+    return _g_str(key) + struct.pack("<I", _GGUF_T_STRING) + _g_str(value)
+
+
+def _kv_u32(key: str, value: int) -> bytes:
+    return _g_str(key) + struct.pack("<I", _GGUF_T_UINT32) + struct.pack("<I", value)
+
+
+def _kv_string_array(key: str, values: list[str]) -> bytes:
+    body = struct.pack("<I", _GGUF_T_STRING) + struct.pack("<Q", len(values))
+    for value in values:
+        body += _g_str(value)
+    return _g_str(key) + struct.pack("<I", _GGUF_T_ARRAY) + body
+
+
+def _kv_f32_array(key: str, values: list[float]) -> bytes:
+    body = struct.pack("<I", _GGUF_T_FLOAT32) + struct.pack("<Q", len(values))
+    for value in values:
+        body += struct.pack("<f", value)
+    return _g_str(key) + struct.pack("<I", _GGUF_T_ARRAY) + body
+
+
+def _build_gguf(kvs: list[bytes], *, version: int = 3, tensor_count: int = 0) -> bytes:
+    return (
+        model_cards._GGUF_MAGIC
+        + struct.pack("<I", version)
+        + struct.pack("<Q", tensor_count)
+        + struct.pack("<Q", len(kvs))
+        + b"".join(kvs)
+    )
+
+
+def _mem_fetch(blob: bytes) -> "Callable[[int, int], Awaitable[bytes]]":
+    async def _fetch(offset: int, length: int) -> bytes:
+        return blob[offset : offset + length]
+
+    return _fetch
 
 
 def _fake_model_info(filenames: list[str]):
@@ -82,11 +139,11 @@ async def test_fetch_gguf_card_stamps_llama_cpp_backends(
     assert card.storage_size.in_bytes == 100  # the single selected gguf
 
 
-async def test_fetch_gguf_card_without_config_fails_clearly(
+async def test_fetch_gguf_card_reads_header_when_no_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A bare GGUF repo (no config.json) needs the GGUF-header parse (#327); until
-    # then we fail with a clear, actionable error rather than fabricate metadata.
+    # A bare GGUF repo (no config.json) has its structural fields read from the
+    # GGUF binary header instead (#327), rather than failing or fabricating them.
     monkeypatch.setattr(model_cards, "model_info", _fake_model_info(["model-q4.gguf"]))
 
     async def _raises(_model_id: object) -> object:
@@ -94,8 +151,122 @@ async def test_fetch_gguf_card_without_config_fails_clearly(
 
     monkeypatch.setattr(model_cards, "fetch_config_data", _raises)
 
-    with pytest.raises(ValueError, match="#327"):
-        await ModelCard.fetch_from_hf(ModelId("bare/gguf-repo"))
+    blob = _build_gguf(
+        [
+            _kv_string("general.architecture", "llama"),
+            _kv_u32("llama.block_count", 24),
+            _kv_u32("llama.embedding_length", 3072),
+            _kv_u32("llama.attention.head_count_kv", 6),
+            _kv_u32("llama.context_length", 16384),
+        ]
+    )
+
+    from skulk.download import download_utils
+
+    async def _range(
+        _model_id: object, _revision: str, _path: str, start: int, length: int
+    ) -> bytes:
+        return blob[start : start + length]
+
+    monkeypatch.setattr(download_utils, "range_read", _range)
+
+    card = await ModelCard.fetch_from_hf(ModelId("bare/gguf-repo"))
+    assert card.n_layers == 24 and card.hidden_size == 3072
+    assert card.num_key_value_heads == 6 and card.context_length == 16384
+    assert card.gguf_file == "model-q4.gguf"
+
+
+async def test_read_gguf_structural_fields_basic() -> None:
+    blob = _build_gguf(
+        [
+            _kv_string("general.architecture", "llama"),
+            _kv_u32("llama.block_count", 32),
+            _kv_u32("llama.embedding_length", 4096),
+            _kv_u32("llama.attention.head_count_kv", 8),
+            _kv_u32("llama.context_length", 8192),
+        ]
+    )
+    fields = await model_cards.read_gguf_structural_fields(_mem_fetch(blob))
+    assert fields == model_cards.GgufStructuralFields(32, 4096, 8, 8192)
+
+
+async def test_read_gguf_skips_arrays_before_structural_keys() -> None:
+    # A multi-thousand-entry tokenizer array sitting before the structural keys
+    # must be skipped, not parsed into the metadata, and not block the read.
+    blob = _build_gguf(
+        [
+            _kv_string("general.architecture", "qwen2"),
+            _kv_string_array("tokenizer.ggml.tokens", [f"t{i}" for i in range(5000)]),
+            _kv_f32_array("tokenizer.ggml.scores", [0.1] * 5000),
+            _kv_u32("qwen2.block_count", 28),
+            _kv_u32("qwen2.embedding_length", 3584),
+            _kv_u32("qwen2.attention.head_count_kv", 4),
+            _kv_u32("qwen2.context_length", 32768),
+        ]
+    )
+    fields = await model_cards.read_gguf_structural_fields(_mem_fetch(blob))
+    assert fields.n_layers == 28 and fields.hidden_size == 3584
+    assert fields.num_key_value_heads == 4 and fields.context_length == 32768
+
+
+async def test_read_gguf_missing_kv_heads_is_none() -> None:
+    blob = _build_gguf(
+        [
+            _kv_string("general.architecture", "llama"),
+            _kv_u32("llama.block_count", 16),
+            _kv_u32("llama.embedding_length", 2048),
+            _kv_u32("llama.context_length", 4096),
+        ]
+    )
+    fields = await model_cards.read_gguf_structural_fields(_mem_fetch(blob))
+    assert fields.num_key_value_heads is None
+    assert fields.n_layers == 16 and fields.context_length == 4096
+
+
+async def test_read_gguf_bad_magic_raises() -> None:
+    with pytest.raises(ValueError, match="not a GGUF"):
+        await model_cards.read_gguf_structural_fields(_mem_fetch(b"XXXX" + b"\x00" * 64))
+
+
+async def test_read_gguf_unsupported_version_raises() -> None:
+    blob = (
+        model_cards._GGUF_MAGIC
+        + struct.pack("<I", 1)  # v1: 32-bit lengths, obsolete
+        + struct.pack("<Q", 0)
+        + struct.pack("<Q", 0)
+    )
+    with pytest.raises(ValueError, match="version"):
+        await model_cards.read_gguf_structural_fields(_mem_fetch(blob))
+
+
+async def test_read_gguf_missing_architecture_raises() -> None:
+    blob = _build_gguf([_kv_u32("llama.block_count", 8)])
+    with pytest.raises(ValueError, match="architecture"):
+        await model_cards.read_gguf_structural_fields(_mem_fetch(blob))
+
+
+async def test_read_gguf_windowed_fetch() -> None:
+    # A transport that returns only a few bytes per call must be reassembled,
+    # not mistaken for EOF after the first short read.
+    blob = _build_gguf(
+        [
+            _kv_string("general.architecture", "llama"),
+            _kv_u32("llama.block_count", 10),
+            _kv_u32("llama.embedding_length", 100),
+            _kv_u32("llama.attention.head_count_kv", 2),
+            _kv_u32("llama.context_length", 2048),
+        ]
+    )
+    calls = 0
+
+    async def _chunked(offset: int, length: int) -> bytes:
+        nonlocal calls
+        calls += 1
+        return blob[offset : offset + min(length, 7)]
+
+    fields = await model_cards.read_gguf_structural_fields(_chunked)
+    assert fields.n_layers == 10 and fields.hidden_size == 100
+    assert calls > 1  # required multiple fetches to assemble the header
 
 
 def test_select_preferred_gguf_prefers_quant_over_bf16() -> None:

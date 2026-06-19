@@ -1,7 +1,8 @@
 import json
-from collections.abc import Iterable
+import struct
+from collections.abc import Awaitable, Callable, Iterable
 from enum import Enum
-from typing import Annotated, Any, Final, Literal, cast
+from typing import Annotated, Any, Final, Literal, NamedTuple, cast
 
 import aiofiles
 import aiofiles.os as aios
@@ -542,45 +543,52 @@ class ModelCard(CamelCaseModel):
         Sizes the weights from the GGUF file the runner would actually load
         (`select_gguf_file` picks the first sorted file + its shard group).
         Structural fields come from `config.json` when the repo ships one (most
-        community GGUF repos do). A bare repo with no config.json **raises a
-        clear error** pointing at the GGUF-header-parse follow-up (#327) rather
-        than fabricating metadata (a `ModelCard` also cannot be constructed with
-        0 for its `PositiveInt` layer/hidden fields). Stamps the llama.cpp backend
-        tags so placement routes the model only to nodes with a llama.cpp engine
-        and prefers a GPU backend.
+        community GGUF repos do); a bare repo with no usable config.json has its
+        metadata read straight from the selected GGUF file's binary header via a
+        ranged read of the file start (#327), so neither path fabricates the
+        layer/hidden sizes placement's memory and KV-budget math depend on.
+        Stamps the llama.cpp backend tags so placement routes the model only to
+        nodes with a llama.cpp engine and prefers a GPU backend.
         """
         selected = select_preferred_gguf(gguf_files)
         selected_size = gguf_shard_group_size(selected, gguf_files)
 
         # Structural metadata comes from config.json, which most community GGUF
         # repos (bartowski, unsloth, mlx-community) ship alongside the weights.
-        # A bare GGUF repo with no config.json needs the metadata read from the
-        # GGUF header instead (#327); until that lands, fail clearly rather than
-        # fabricate placeholder layer/hidden sizes that would skew placement's
-        # memory and KV-budget math. Catch only the missing-file case so HF
-        # auth / rate-limit / transient network errors propagate unchanged
-        # instead of being mislabeled as "no config.json".
+        # Catch only the missing-file case so HF auth / rate-limit / transient
+        # network errors propagate unchanged instead of being mislabeled as
+        # "no config.json".
         try:
             config_data = await fetch_config_data(model_id)
-        except FileNotFoundError as exc:
-            raise ValueError(
-                f"GGUF repo {model_id} has no usable config.json ({exc}); "
-                "reading model metadata from the GGUF header is not yet "
-                "supported (#327). Use a GGUF repo that ships config.json."
-            ) from exc
-        # ModelCard requires positive n_layers/hidden_size (PositiveInt). If the
-        # config.json is present but lacks usable values, fail with the same clear
-        # error rather than a raw pydantic ValidationError.
-        if not config_data.layer_count or not config_data.hidden_size:
-            raise ValueError(
-                f"GGUF repo {model_id} config.json is missing usable layer/hidden "
-                "sizes; reading model metadata from the GGUF header is not yet "
-                "supported (#327)."
+        except FileNotFoundError:
+            config_data = None
+
+        if config_data is not None and config_data.layer_count and (
+            config_data.hidden_size
+        ):
+            n_layers = config_data.layer_count
+            hidden_size = config_data.hidden_size
+            num_key_value_heads = config_data.num_key_value_heads
+            context_length = config_data.max_position_embeddings or 0
+        else:
+            # No usable config.json: read the structural fields from the GGUF
+            # binary header. ``selected`` is the first shard, which carries the
+            # metadata block, so a ranged read of its start is enough.
+            reason = "absent" if config_data is None else "missing layer/hidden sizes"
+            logger.info(
+                f"GGUF repo {model_id} config.json {reason}; reading model "
+                f"metadata from the GGUF header of {selected}"
             )
-        n_layers = config_data.layer_count
-        hidden_size = config_data.hidden_size
-        num_key_value_heads = config_data.num_key_value_heads
-        context_length = config_data.max_position_embeddings or 0
+            from skulk.download.download_utils import range_read
+
+            async def _fetch(offset: int, length: int) -> bytes:
+                return await range_read(model_id, "main", selected, offset, length)
+
+            fields = await read_gguf_structural_fields(_fetch)
+            n_layers = fields.n_layers
+            hidden_size = fields.hidden_size
+            num_key_value_heads = fields.num_key_value_heads
+            context_length = fields.context_length
 
         return ModelCard(
             model_id=ModelId(model_id),
@@ -900,3 +908,224 @@ def _gguf_shard_base(name: str) -> str | None:
     ):
         return parts[0]
     return None
+
+
+# --- GGUF binary header parsing (#327) -------------------------------------
+#
+# A GGUF file begins with a metadata block (magic, version, tensor count, then
+# a list of typed key/value pairs) followed by the tensor data. The structural
+# fields a model card needs (layer count, hidden size, KV-head count, context
+# length) live in that block under arch-prefixed keys, so they can be read from
+# the start of the file via a ranged HTTP read instead of pulling the multi-GB
+# weights. This is the fallback for GGUF repos that ship no ``config.json``.
+#
+# Spec: https://github.com/ggml-org/ggml/blob/master/docs/gguf.md
+
+_GGUF_MAGIC: Final = b"GGUF"
+# Lengths/counts are 64-bit in GGUF v2/v3; v1 used 32-bit and is obsolete.
+_GGUF_SUPPORTED_VERSIONS: Final = frozenset({2, 3})
+
+# GGUF metadata value type tags.
+_GGUF_TYPE_STRING: Final = 8
+_GGUF_TYPE_ARRAY: Final = 9
+# Scalar value type tag -> struct format. ``bool`` (tag 7) is read as a byte;
+# we deliberately do not store it as an int field (see the parse loop).
+_GGUF_SCALAR_FMT: Final[dict[int, str]] = {
+    0: "<B",  # uint8
+    1: "<b",  # int8
+    2: "<H",  # uint16
+    3: "<h",  # int16
+    4: "<I",  # uint32
+    5: "<i",  # int32
+    6: "<f",  # float32
+    7: "<B",  # bool (stored as one byte)
+    10: "<Q",  # uint64
+    11: "<q",  # int64
+    12: "<d",  # float64
+}
+_GGUF_SCALAR_SIZE: Final[dict[int, int]] = {
+    tag: struct.calcsize(fmt) for tag, fmt in _GGUF_SCALAR_FMT.items()
+}
+
+# Structural keys we read, relative to ``general.architecture`` (e.g. for arch
+# ``llama`` we read ``llama.block_count``). These mirror config.json's
+# layer_count / hidden_size / num_key_value_heads / max_position_embeddings.
+_GGUF_KEY_BLOCK_COUNT: Final = "block_count"
+_GGUF_KEY_EMBEDDING_LENGTH: Final = "embedding_length"
+_GGUF_KEY_HEAD_COUNT_KV: Final = "attention.head_count_kv"
+_GGUF_KEY_CONTEXT_LENGTH: Final = "context_length"
+_GGUF_WANTED_SUFFIXES: Final = (
+    _GGUF_KEY_BLOCK_COUNT,
+    _GGUF_KEY_EMBEDDING_LENGTH,
+    _GGUF_KEY_HEAD_COUNT_KV,
+    _GGUF_KEY_CONTEXT_LENGTH,
+)
+
+
+class GgufStructuralFields(NamedTuple):
+    """Structural model dimensions read from a GGUF metadata header (#327)."""
+
+    n_layers: int
+    hidden_size: int
+    num_key_value_heads: int | None
+    context_length: int
+
+
+class _GgufHeaderReader:
+    """Sequential cursor over a GGUF metadata header fetched on demand.
+
+    Bytes are pulled through an injected ``fetch(offset, length)`` coroutine
+    (HTTP range in production, an in-memory blob in tests) into a growing buffer
+    and cached, so the header is read in a few windows rather than one giant
+    request. The cursor advances as typed values are read; large arrays (e.g. a
+    tokenizer vocabulary) are skipped by advancing the cursor, fetching more
+    only if a wanted key happens to sit past them.
+    """
+
+    _WINDOW: Final = 1 << 20  # 1 MiB per fetch; structural keys sit well inside.
+
+    def __init__(self, fetch: "Callable[[int, int], Awaitable[bytes]]") -> None:
+        self._fetch = fetch
+        self._buf = bytearray()
+        self._eof = False
+        self.pos = 0
+
+    async def _ensure(self, end: int) -> None:
+        """Fetch until the buffer holds at least ``end`` bytes (or EOF)."""
+        while len(self._buf) < end and not self._eof:
+            start = len(self._buf)
+            length = max(self._WINDOW, end - start)
+            chunk = await self._fetch(start, length)
+            # Only an empty read is EOF; a short read is a partial transport
+            # chunk, so keep fetching from the new offset rather than stopping.
+            if not chunk:
+                self._eof = True
+                return
+            self._buf.extend(chunk)
+
+    async def _take(self, n: int) -> bytes:
+        await self._ensure(self.pos + n)
+        if self.pos + n > len(self._buf):
+            raise ValueError("GGUF header truncated before the wanted metadata")
+        data = bytes(self._buf[self.pos : self.pos + n])
+        self.pos += n
+        return data
+
+    async def _u32(self) -> int:
+        return cast(int, struct.unpack("<I", await self._take(4))[0])
+
+    async def _u64(self) -> int:
+        return cast(int, struct.unpack("<Q", await self._take(8))[0])
+
+    async def read_string(self) -> str:
+        length = await self._u64()
+        return (await self._take(length)).decode("utf-8", errors="replace")
+
+    async def read_value(self, value_type: int) -> "int | str | None":
+        """Read one metadata value; return ints/strings, skip everything else.
+
+        Returns the value for integer and string scalars (the only kinds the
+        wanted keys use), and ``None`` for floats, bools, and arrays after
+        advancing past them.
+        """
+        if value_type == _GGUF_TYPE_STRING:
+            return await self.read_string()
+        if value_type == _GGUF_TYPE_ARRAY:
+            await self._skip_array()
+            return None
+        fmt = _GGUF_SCALAR_FMT.get(value_type)
+        if fmt is None:
+            raise ValueError(f"unknown GGUF metadata value type {value_type}")
+        raw = await self._take(_GGUF_SCALAR_SIZE[value_type])
+        # Floats and bools are not structural fields we read; only surface ints.
+        if value_type in (6, 12, 7):  # float32, float64, bool
+            return None
+        return cast(int, struct.unpack(fmt, raw)[0])
+
+    async def _skip_array(self) -> None:
+        element_type = await self._u32()
+        count = await self._u64()
+        if element_type in _GGUF_SCALAR_SIZE:
+            # Bulk-skip fixed-width elements (e.g. a token-score float array).
+            self.pos += _GGUF_SCALAR_SIZE[element_type] * count
+        elif element_type == _GGUF_TYPE_STRING:
+            for _ in range(count):
+                _ = await self.read_string()
+        elif element_type == _GGUF_TYPE_ARRAY:
+            for _ in range(count):
+                await self._skip_array()
+        else:
+            raise ValueError(f"unknown GGUF array element type {element_type}")
+
+    async def parse_structural_fields(self) -> GgufStructuralFields:
+        """Read the structural model dimensions from this GGUF header.
+
+        Reads ``general.architecture`` and the arch-prefixed ``block_count`` /
+        ``embedding_length`` / ``attention.head_count_kv`` / ``context_length``
+        keys, stopping as soon as all are seen (so a trailing multi-megabyte
+        tokenizer array is never fetched).
+
+        Raises:
+            ValueError: The bytes are not a supported GGUF header, or the header
+                lacks the architecture / layer / hidden-size keys needed to
+                build a card.
+        """
+        if (await self._take(4)) != _GGUF_MAGIC:
+            raise ValueError("not a GGUF file (bad magic)")
+        version = await self._u32()
+        if version not in _GGUF_SUPPORTED_VERSIONS:
+            raise ValueError(f"unsupported GGUF version {version}")
+        _ = await self._u64()  # tensor_count
+        kv_count = await self._u64()
+
+        architecture: str | None = None
+        collected: dict[str, int] = {}
+        for _ in range(kv_count):
+            key = await self.read_string()
+            value = await self.read_value(await self._u32())
+            if key == "general.architecture" and isinstance(value, str):
+                architecture = value
+            elif isinstance(value, int):
+                collected[key] = value
+            if architecture is not None and all(
+                f"{architecture}.{suffix}" in collected
+                for suffix in _GGUF_WANTED_SUFFIXES
+            ):
+                break
+
+        if architecture is None:
+            raise ValueError("GGUF header missing general.architecture")
+
+        def field(suffix: str) -> int | None:
+            return collected.get(f"{architecture}.{suffix}")
+
+        n_layers = field(_GGUF_KEY_BLOCK_COUNT)
+        hidden_size = field(_GGUF_KEY_EMBEDDING_LENGTH)
+        if not n_layers or not hidden_size:
+            raise ValueError(
+                f"GGUF header for arch {architecture!r} is missing block_count / "
+                "embedding_length"
+            )
+        return GgufStructuralFields(
+            n_layers=n_layers,
+            hidden_size=hidden_size,
+            num_key_value_heads=field(_GGUF_KEY_HEAD_COUNT_KV) or None,
+            context_length=field(_GGUF_KEY_CONTEXT_LENGTH) or 0,
+        )
+
+
+async def read_gguf_structural_fields(
+    fetch: "Callable[[int, int], Awaitable[bytes]]",
+) -> GgufStructuralFields:
+    """Parse structural model dimensions from a GGUF metadata header.
+
+    ``fetch(offset, length)`` supplies bytes from the start of the GGUF file
+    (an HTTP range read in production, an in-memory blob in tests). See
+    :meth:`_GgufHeaderReader.parse_structural_fields` for what is read.
+
+    Raises:
+        ValueError: The bytes are not a supported GGUF header, or the header
+            lacks the architecture / layer / hidden-size keys needed to build a
+            card.
+    """
+    return await _GgufHeaderReader(fetch).parse_structural_fields()

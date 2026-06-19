@@ -25,6 +25,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **GGUF cards can be built from the binary header when no `config.json` is
+  present (#327).** A GGUF repo that ships only the `.gguf` weights (no
+  `config.json`) now has its structural fields (layer count, hidden size,
+  KV-head count, context length) read directly from the selected file's GGUF
+  metadata header via a ranged read of the file start, instead of failing the
+  card build. Repos that ship `config.json` (most community GGUF repos) still
+  use it; the header read is the fallback. Completes the selective-quant GGUF
+  download/load path so more llama.cpp repos work without a hand-written card.
+
 - **Zenoh data-plane hardening toward default-on (#308 + #309).** Security
   (#308): the Zenoh session now sets a **namespace** (a collision-resistant
   SHA-256 hash of the exact token libp2p isolates on: `SKULK_LIBP2P_NAMESPACE`

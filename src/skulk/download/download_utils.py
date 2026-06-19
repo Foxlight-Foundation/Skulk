@@ -766,6 +766,61 @@ async def file_meta(
         return content_length, etag
 
 
+async def range_read(
+    model_id: ModelId, revision: str, path: str, start: int, length: int
+) -> bytes:
+    """Read a byte range ``[start, start + length)`` of a repo file over HTTP.
+
+    Used to read a file's header (for example, a GGUF metadata block) without
+    downloading the whole multi-gigabyte weights file. Reuses the download
+    auth/SSL/proxy session and follows Hugging Face's ``resolve`` to CDN
+    redirect (the CDN serves range requests, which the resumable downloader
+    already depends on).
+
+    Args:
+        model_id: The Hugging Face repo id.
+        revision: The git revision to read (for example, ``"main"``).
+        path: The repo-relative file path.
+        start: The first byte offset to read (0-based, inclusive).
+        length: The number of bytes to read.
+
+    Returns:
+        The bytes the server returned for the range. This may be shorter than
+        ``length`` when the range runs past the end of the file.
+
+    Raises:
+        HuggingFaceAuthenticationError: The repo requires auth the caller lacks.
+        FileNotFoundError: The file does not exist in the repo at ``revision``.
+    """
+    url = urljoin(f"{get_hf_endpoint()}/{model_id}/resolve/{revision}/", path)
+    headers = {
+        **(await get_download_headers()),
+        "Range": f"bytes={start}-{start + length - 1}",
+    }
+    async with (
+        create_http_session(timeout_profile="short") as session,
+        session.get(url, headers=headers) as r,
+    ):
+        if r.status in (401, 403):
+            raise HuggingFaceAuthenticationError(
+                await _build_auth_error_message(r.status, model_id)
+            )
+        if r.status == 404:
+            raise FileNotFoundError(
+                f"File {path} not found in {model_id}@{revision}"
+            )
+        # A range starting at/after EOF yields 416; surface it as an empty read
+        # so callers see a clean end-of-file instead of an HTTP error.
+        if r.status == 416:
+            return b""
+        r.raise_for_status()
+        # Read at most ``length`` bytes from the body. With a 206 Partial Content
+        # response this is the requested range; if the CDN ever ignored the
+        # Range header (returning 200), capping the read still bounds memory to
+        # the header window instead of pulling the whole weights file.
+        return await r.content.read(length)
+
+
 async def download_file_with_retry(
     model_id: ModelId,
     revision: str,
