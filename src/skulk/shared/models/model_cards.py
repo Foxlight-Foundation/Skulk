@@ -815,7 +815,7 @@ _GGUF_RANK_UNRECOGNIZED: Final = 1_000  # unknown quant: after known quants
 _GGUF_RANK_UNQUANTIZED: Final = 10_000  # full precision: dead last
 
 
-def _gguf_quant_rank(name: str) -> int:
+def gguf_quant_rank(name: str) -> int:
     """Preference rank for a GGUF filename (lower is better); see #334."""
     low = name.rsplit("/", 1)[-1].lower()
     for index, marker in enumerate(_GGUF_QUANT_PREFERENCE):
@@ -849,7 +849,7 @@ def select_preferred_gguf(gguf_files: "list[tuple[str, int]]") -> str:
     """
     return min(
         (name for name, _ in gguf_files),
-        key=lambda name: (_gguf_quant_rank(name), name.rsplit("/", 1)[-1]),
+        key=lambda name: (gguf_quant_rank(name), name.rsplit("/", 1)[-1]),
     )
 
 

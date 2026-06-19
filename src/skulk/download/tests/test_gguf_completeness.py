@@ -49,3 +49,38 @@ def test_sharded_gguf_incomplete_missing_shard(tmp_path: Path) -> None:
     (tmp_path / "model-00001-of-00003.gguf").write_bytes(b"GGUF")
     assert not directory_has_gguf_weights(tmp_path)
     assert not is_model_directory_complete(tmp_path)
+
+
+async def test_resolve_allow_patterns_gguf_vs_safetensors() -> None:
+    """A GGUF card restricts the download to its pinned shard group + config.json;
+    a non-GGUF card keeps the broad ["*"] fetch (#332)."""
+    from skulk.download.download_utils import resolve_allow_patterns
+    from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
+    from skulk.shared.types.memory import Memory
+    from skulk.shared.types.worker.shards import PipelineShardMetadata
+
+    def _shard(card: ModelCard) -> PipelineShardMetadata:
+        return PipelineShardMetadata(
+            model_card=card,
+            device_rank=0,
+            world_size=1,
+            start_layer=0,
+            end_layer=card.n_layers,
+            n_layers=card.n_layers,
+        )
+
+    base = dict(
+        storage_size=Memory.from_gb(1),
+        n_layers=16,
+        hidden_size=2048,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+    )
+    gguf = ModelCard(model_id=ModelId("o/r"), gguf_file="m-Q4_K_M.gguf", **base)
+    assert await resolve_allow_patterns(_shard(gguf)) == [
+        "m-Q4_K_M.gguf",
+        "config.json",
+    ]
+
+    mlx = ModelCard(model_id=ModelId("o/r2"), **base)
+    assert await resolve_allow_patterns(_shard(mlx)) == ["*"]

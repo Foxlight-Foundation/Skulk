@@ -57,24 +57,23 @@ from skulk.worker.runner.bootstrap import logger
 def select_gguf_file(model_dir: Path) -> Path:
     """Pick the GGUF weights file to load from a staged model directory.
 
-    Returns the first ``*.gguf`` in sorted order, skipping multimodal projector
-    files (``mmproj*``). Sorted order puts the first shard (``*-00001-of-*``)
-    first, and llama.cpp discovers the remaining shards from it. Raises
-    ``FileNotFoundError`` when the directory contains no usable GGUF.
-
-    Searches recursively and sorts by file basename so the three GGUF-selection
-    sites agree on which file is "first": this runner, the card's
-    ``_selected_gguf_shard_size`` (sizing), and ``directory_has_gguf_weights``
-    (completeness) all use recursive discovery + basename order. Otherwise they
-    could disagree and a model would size/complete but fail to load.
+    Fallback for when the card does not pin a file (``gguf_file``): scans
+    recursively, skips ``mmproj*`` projectors, and ranks by the same
+    quant preference the card uses (``gguf_quant_rank``: a real quant over BF16),
+    then basename, so this fallback agrees with the card's sizing
+    (``gguf_shard_group_size``) and selection (``select_preferred_gguf``) and
+    never silently loads the full-precision BF16. Raises ``FileNotFoundError``
+    when the directory has no usable GGUF.
     """
+    from skulk.shared.models.model_cards import gguf_quant_rank
+
     candidates = sorted(
         (
             path
             for path in model_dir.glob("**/*.gguf")
             if "mmproj" not in path.name.lower()
         ),
-        key=lambda path: path.name,
+        key=lambda path: (gguf_quant_rank(path.name), path.name),
     )
     if not candidates:
         raise FileNotFoundError(f"no .gguf weights file found in {model_dir}")
@@ -264,11 +263,22 @@ class Runner:
         model_id = self.shard_metadata.model_card.model_id
         model_dir = build_model_path(ModelId(model_id))
         # Load the exact file the card pinned at creation (the selected quant);
-        # only fall back to scanning if it's somehow absent (older card / manual
-        # staging), so download, sizing, and loading stay in agreement.
+        # fall back to scanning if it's absent (older card / manual staging), so
+        # download, sizing, and loading stay in agreement.
         pinned = self.shard_metadata.model_card.gguf_file
-        gguf_path = model_dir / pinned if pinned else select_gguf_file(model_dir)
-        if not gguf_path.is_file():
+        gguf_path: Path | None = None
+        if pinned:
+            candidate = (model_dir / pinned).resolve()
+            # Reject a hand-edited card whose gguf_file is absolute or uses ".."
+            # to escape the model directory; fall back to the in-dir scan.
+            if candidate.is_file() and candidate.is_relative_to(model_dir.resolve()):
+                gguf_path = candidate
+            else:
+                logger.warning(
+                    f"card gguf_file {pinned!r} is missing or outside the model "
+                    f"dir; scanning {model_dir} instead"
+                )
+        if gguf_path is None:
             gguf_path = select_gguf_file(model_dir)
         logger.info(f"loading GGUF {gguf_path.name} for {model_id}")
         # n_gpu_layers=-1 offloads every layer to the GPU backend the binding was
