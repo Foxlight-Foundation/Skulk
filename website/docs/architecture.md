@@ -195,7 +195,8 @@ string: the engine selects the worker runner class (`mlx` or `llama_cpp`), and
 the compute names the accelerator (`metal`, `vulkan`, `rocm`, `cuda`, `cpu`). A
 macOS node advertises `{mlx, mlx-metal}`; a Linux node with an importable
 `llama_cpp` built for its GPU adds `{llama_cpp, llama_cpp-vulkan}` (the compute
-backends come from `SKULK_LLAMA_CPP_BACKENDS`). Backends are probed per node and
+backends come from `SKULK_LLAMA_CPP_BACKENDS`, defaulting to `cpu` when that env
+var is unset so a node never over-claims a GPU). Backends are probed per node and
 gossiped on the telemetry plane as part of `NodeResources`.
 
 A model card declares two placement axes that are deliberately separate from the
