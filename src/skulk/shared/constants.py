@@ -31,8 +31,9 @@ _SKULK_HOME_ENV = _env("SKULK_HOME")
 def _get_home_dir() -> Path:
     """Determine the home directory for Skulk data.
 
-    Priority: ``SKULK_HOME`` env var > ``~/.skulk``. On Linux, respects XDG
-    directories when no home override is set.
+    Priority: ``SKULK_HOME`` env var > ``~/.skulk``. XDG base-directory
+    handling for Linux lives in :func:`_get_xdg_dir`; this is the plain home
+    root used when no XDG location applies.
     """
     if _SKULK_HOME_ENV is not None:
         return Path.home() / _SKULK_HOME_ENV
@@ -41,7 +42,7 @@ def _get_home_dir() -> Path:
 
 
 def _get_xdg_dir(env_var: str, fallback: str) -> Path:
-    """Get XDG directory, prioritising SKULK_HOME/SKULK_HOME if set. On non-Linux platforms, default to ~/.skulk."""
+    """Get XDG directory, prioritising SKULK_HOME if set. On non-Linux platforms, default to ~/.skulk."""
 
     if _SKULK_HOME_ENV is not None:
         return Path.home() / _SKULK_HOME_ENV
