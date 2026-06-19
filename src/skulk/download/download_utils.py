@@ -198,6 +198,7 @@ def companion_download_specs(
     base), while MTP sidecars and assistants degrade gracefully to
     run-without-speculation (best-effort).
     """
+
     def _bare_shard(repo: str) -> PipelineShardMetadata:
         return PipelineShardMetadata(
             model_card=ModelCard(
@@ -216,9 +217,7 @@ def companion_download_specs(
         )
 
     specs: list[tuple[PipelineShardMetadata, list[str], bool]] = []
-    if model_card.vision and model_card.vision.weights_repo != str(
-        model_card.model_id
-    ):
+    if model_card.vision and model_card.vision.weights_repo != str(model_card.model_id):
         specs.append(
             (
                 _bare_shard(model_card.vision.weights_repo),
@@ -273,9 +272,7 @@ def model_companions_present_on_disk(
     model complete after ensure_shard returns, so the gate cannot loop
     within a session.
     """
-    if model_card.vision and model_card.vision.weights_repo != str(
-        model_card.model_id
-    ):
+    if model_card.vision and model_card.vision.weights_repo != str(model_card.model_id):
         vision_repo = ModelId(model_card.vision.weights_repo)
         # Probe BOTH search roots: SKULK_MODELS_PATH (staging/store) and
         # SKULK_MODELS_DIR (where download_shard writes) — a vision repo
@@ -441,10 +438,67 @@ def _scan_model_directory(
     return list(entries_by_path.values())
 
 
+def directory_has_gguf_weights(model_dir: Path) -> bool:
+    """True if the directory holds a llama.cpp GGUF weights file.
+
+    Recognizes a staged GGUF model, which has no ``*.safetensors.index.json``
+    (the completeness probe used for MLX/safetensors repos). Excludes ``mmproj*``
+    multimodal projector files, which are not the LM weights. An in-progress
+    download is named ``*.gguf.partial`` and is not matched here.
+
+    For a **sharded** GGUF (``<base>-00001-of-000NN.gguf``) the llama.cpp runner
+    opens the first shard and needs the rest beside it, so a directory counts as
+    complete only when the whole shard group of the file the runner would load
+    (the first sorted one, matching ``select_gguf_file``) is present; otherwise
+    an interrupted stage that left only some shards would falsely look complete.
+    """
+    names = sorted(
+        path.name
+        for path in model_dir.glob("**/*.gguf")
+        if "mmproj" not in path.name.lower()
+    )
+    if not names:
+        return False
+    shard_info = _gguf_shard_info(names[0])
+    if shard_info is None:
+        return True  # single-file quant present
+    base, total = shard_info
+    present = set(names)
+    return all(
+        f"{base}-{index:05d}-of-{total:05d}.gguf" in present
+        for index in range(1, total + 1)
+    )
+
+
+def _gguf_shard_info(name: str) -> "tuple[str, int] | None":
+    """Parse a GGUF shard filename into ``(base, total_shards)``, or ``None``.
+
+    ``foo-00001-of-00003.gguf`` -> ``("foo", 3)``; ``foo.gguf`` -> ``None``. The
+    base may contain dashes, so only the trailing three ``-`` tokens are split.
+    """
+    if not name.endswith(".gguf"):
+        return None
+    parts = name[: -len(".gguf")].rsplit("-", 3)
+    if (
+        len(parts) == 4
+        and parts[1].isdigit()
+        and parts[2] == "of"
+        and parts[3].isdigit()
+    ):
+        return parts[0], int(parts[3])
+    return None
+
+
 def is_model_directory_complete(model_dir: Path) -> bool:
     """Check if a model directory contains all required weight files."""
     file_list = _scan_model_directory(model_dir, recursive=True)
-    return file_list is not None and all(f.size is not None for f in file_list)
+    if file_list is not None:
+        # A safetensors index is present: completeness is governed entirely by it
+        # (do NOT let a stray .gguf mask a partially-downloaded safetensors set).
+        return all(f.size is not None for f in file_list)
+    # No safetensors index -> this may be a GGUF repo; complete once its weights
+    # (the full shard group) are present.
+    return directory_has_gguf_weights(model_dir)
 
 
 async def _build_file_list_from_local_directory(
@@ -453,18 +507,48 @@ async def _build_file_list_from_local_directory(
 ) -> list[FileListEntry] | None:
     """Build a file list from locally existing model files.
 
-    We can only figure out the files we need from safetensors index, so
-    a local directory must contain a *.safetensors.index.json and
-    safetensors listed there.
+    Safetensors repos are resolved from their ``*.safetensors.index.json``. GGUF
+    repos have no index, so when the scanner finds none we fall back to listing
+    the files on disk directly, which lets a pre-staged GGUF serve under
+    ``--offline`` (no cached HF file-list), where the remote fetch would
+    otherwise report ``not_started``.
     """
     model_dir = (await ensure_models_dir()) / model_id.normalize()
     if not await aios.path.exists(model_dir):
         return None
 
     file_list = await asyncio.to_thread(_scan_model_directory, model_dir, recursive)
-    if not file_list:
-        return None
-    return file_list
+    if file_list:
+        return file_list
+    # No safetensors index: serve a complete GGUF directory from the local files.
+    if await asyncio.to_thread(directory_has_gguf_weights, model_dir):
+        return await asyncio.to_thread(_list_local_files, model_dir, recursive)
+    return None
+
+
+def _list_local_files(model_dir: Path, recursive: bool) -> list[FileListEntry]:
+    """List on-disk files as FileListEntry (skipping ``.partial`` temporaries)."""
+    entries: list[FileListEntry] = []
+    if recursive:
+        for dirpath, _, filenames in os.walk(model_dir):
+            for filename in filenames:
+                if filename.endswith(".partial"):
+                    continue
+                full_path = Path(dirpath) / filename
+                entries.append(
+                    FileListEntry(
+                        type="file",
+                        path=str(full_path.relative_to(model_dir)),
+                        size=full_path.stat().st_size,
+                    )
+                )
+    else:
+        for item in model_dir.iterdir():
+            if item.is_file() and not item.name.endswith(".partial"):
+                entries.append(
+                    FileListEntry(type="file", path=item.name, size=item.stat().st_size)
+                )
+    return entries
 
 
 _fetched_file_lists_this_session: set[str] = set()
