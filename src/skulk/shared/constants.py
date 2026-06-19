@@ -5,54 +5,37 @@ from pathlib import Path
 from skulk.utils.dashboard_path import find_dashboard_optional, find_resources
 
 
-def _env(skulk_key: str, legacy_key: str, default: str | None = None) -> str | None:
-    """Read an env var by its SKULK_* name.
+def _env(key: str, default: str | None = None) -> str | None:
+    """Read a ``SKULK_*`` env var, or *default* when unset."""
+    return os.environ.get(key, default)
 
-    Legacy EXO_* values from pre-rename deployments are honored via the
-    package-import alias shim in ``skulk/__init__.py`` (EXO_X is copied to
-    SKULK_X when SKULK_X is unset), so both arguments now usually carry the
-    same key; the two-key signature is kept for call-site stability.
+
+def preferred_env_value(*keys: str, default: str | None = None) -> str | None:
+    """Return the value of the first *present* env var among *keys*, else default.
+
+    Blank-preserving variant of :func:`_env` for debug/config toggles where an
+    empty string should disable the feature rather than fall through. Multiple
+    keys support a primary name with a renamed-but-still-honored alias (e.g.
+    ``SKULK_MAX_OUTPUT_TOKENS`` falling back to ``SKULK_MAX_TOKENS``); the first
+    key that is *set* (even to an empty string) wins.
     """
-    return os.environ.get(skulk_key, os.environ.get(legacy_key, default))
+    for key in keys:
+        if key in os.environ:
+            return os.environ[key]
+    return default
 
 
-def preferred_env_value(
-    skulk_key: str,
-    legacy_key: str,
-    default: str | None = None,
-) -> str | None:
-    """Return the env value for *skulk_key*, preserving explicitly blank values.
-
-    Blank-preserving variant of :func:`_env` for debug/config toggles where
-    an empty string should disable the feature rather than fall through.
-    Legacy EXO_* spellings are honored via the ``skulk/__init__.py`` alias
-    shim; the two-key signature is kept for call-site stability.
-    """
-    if skulk_key in os.environ:
-        return os.environ[skulk_key]
-    return os.environ.get(legacy_key, default)
-
-
-_SKULK_HOME_ENV = _env("SKULK_HOME", "EXO_HOME")
+_SKULK_HOME_ENV = _env("SKULK_HOME")
 
 
 def _get_home_dir() -> Path:
     """Determine the home directory for Skulk data.
 
-    Priority: SKULK_HOME env var > SKULK_HOME env var > ~/.skulk (if exists
-    or ~/.exo doesn't) > ~/.exo (legacy fallback).  On Linux, respects
-    XDG directories when no home override is set.
+    Priority: ``SKULK_HOME`` env var > ``~/.skulk``. On Linux, respects XDG
+    directories when no home override is set.
     """
     if _SKULK_HOME_ENV is not None:
         return Path.home() / _SKULK_HOME_ENV
-
-    if sys.platform != "linux":
-        skulk_path = Path.home() / ".skulk"
-        exo_path = Path.home() / ".exo"
-        # Prefer .skulk; fall back to .exo only if it exists and .skulk doesn't
-        if exo_path.exists() and not skulk_path.exists():
-            return exo_path
-        return skulk_path
 
     return Path.home() / ".skulk"
 
@@ -77,7 +60,7 @@ SKULK_DATA_HOME = _get_xdg_dir("XDG_DATA_HOME", ".local/share")
 SKULK_CACHE_HOME = _get_xdg_dir("XDG_CACHE_HOME", ".cache")
 
 # Models directory (data)
-_SKULK_MODELS_DIR_ENV = _env("SKULK_MODELS_DIR", "EXO_MODELS_DIR")
+_SKULK_MODELS_DIR_ENV = _env("SKULK_MODELS_DIR")
 SKULK_MODELS_DIR = (
     SKULK_DATA_HOME / "models"
     if _SKULK_MODELS_DIR_ENV is None
@@ -85,7 +68,7 @@ SKULK_MODELS_DIR = (
 )
 
 # Read-only search path for pre-downloaded models (colon-separated directories)
-_SKULK_MODELS_PATH_ENV = _env("SKULK_MODELS_PATH", "EXO_MODELS_PATH")
+_SKULK_MODELS_PATH_ENV = _env("SKULK_MODELS_PATH")
 _extra_model_paths: list[Path] = []
 SKULK_MODELS_PATH: tuple[Path, ...] | None = (
     tuple(Path(p).expanduser() for p in _SKULK_MODELS_PATH_ENV.split(":") if p)
@@ -120,11 +103,11 @@ def add_model_search_path(path: Path) -> None:
     SKULK_MODELS_PATH = SKULK_MODELS_PATH  # pyright: ignore[reportConstantRedefinition] — keep alias in sync
 
 
-_RESOURCES_DIR_ENV = _env("SKULK_RESOURCES_DIR", "EXO_RESOURCES_DIR")
+_RESOURCES_DIR_ENV = _env("SKULK_RESOURCES_DIR")
 RESOURCES_DIR = (
     find_resources() if _RESOURCES_DIR_ENV is None else Path.home() / _RESOURCES_DIR_ENV
 )
-_DASHBOARD_DIR_ENV = _env("SKULK_DASHBOARD_DIR", "EXO_DASHBOARD_DIR")
+_DASHBOARD_DIR_ENV = _env("SKULK_DASHBOARD_DIR")
 # ``None`` on a headless/worker node that has no built dashboard assets and no
 # explicit override: importing constants (a boot-path module) must not fail just
 # because the UI was never built. The API skips serving the dashboard when this
@@ -162,24 +145,24 @@ SKULK_IMAGE_CACHE_DIR = SKULK_CACHE_HOME / "images"
 SKULK_TRACING_CACHE_DIR = SKULK_CACHE_HOME / "traces"
 
 SKULK_ENABLE_IMAGE_MODELS = (
-    _env("SKULK_ENABLE_IMAGE_MODELS", "EXO_ENABLE_IMAGE_MODELS", "false") or "false"
+    _env("SKULK_ENABLE_IMAGE_MODELS", "false") or "false"
 ).lower() == "true"
 
 SKULK_OFFLINE = (
-    _env("SKULK_OFFLINE", "EXO_OFFLINE", "false") or "false"
+    _env("SKULK_OFFLINE", "false") or "false"
 ).lower() == "true"
 
 SKULK_TRACING_ENABLED = (
-    _env("SKULK_TRACING_ENABLED", "EXO_TRACING_ENABLED", "false") or "false"
+    _env("SKULK_TRACING_ENABLED", "false") or "false"
 ).lower() == "true"
 
 SKULK_IMAGE_TRANSPORT_DEBUG = (
-    _env("SKULK_IMAGE_TRANSPORT_DEBUG", "EXO_IMAGE_TRANSPORT_DEBUG", "false")
+    _env("SKULK_IMAGE_TRANSPORT_DEBUG", "false")
     or "false"
 ).lower() == "true"
 
 SKULK_MAX_CONCURRENT_REQUESTS = int(
-    _env("SKULK_MAX_CONCURRENT_REQUESTS", "EXO_MAX_CONCURRENT_REQUESTS", "8") or "8"
+    _env("SKULK_MAX_CONCURRENT_REQUESTS", "8") or "8"
 )
 
 

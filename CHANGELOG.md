@@ -7,6 +7,20 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Removed
+
+- **The `EXO_*` environment-variable deprecation runway is gone (#324).** Legacy
+  `EXO_*` env vars from the pre-rename (exo to skulk) deployments are no longer
+  honored: the package-import alias shim (`skulk/__init__.py`), every `EXO_*`
+  fallback in `constants.py` and across the worker/API/store, and the
+  `~/.exo` path fallbacks (home dir, model staging, download staging) were
+  removed. Only the `SKULK_*` names and `~/.skulk/` paths are read now. The
+  whole fleet must run the same Skulk version, so re-set any `EXO_*` vars to
+  their `SKULK_*` names before upgrading. (The libp2p private-network pre-shared
+  key still derives from the `exo_discovery_network` seed in `swarm.rs`; changing
+  that is a wire-compatibility break handled separately as a coordinated
+  fleet-wide upgrade.)
+
 ### Changed
 
 - **Zenoh data plane is now soft default-on (#315).** The `DATA` topic (per-token

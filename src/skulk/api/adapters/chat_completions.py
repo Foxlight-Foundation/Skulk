@@ -49,7 +49,6 @@ def _thinking_stream_debug_enabled() -> bool:
     """Return whether opt-in thinking stream tracing is enabled."""
     value = preferred_env_value(
         "SKULK_TRACE_THINKING_STREAM",
-        "EXO_TRACE_THINKING_STREAM",
     )
     if value is None:
         return False

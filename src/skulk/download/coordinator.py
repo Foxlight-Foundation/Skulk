@@ -206,15 +206,10 @@ class DownloadCoordinator:
             inference = _coerce_json_object(raw.get("inference"))
             if "kv_cache_backend" in inference:
                 # Don't overwrite if user provided the env var at launch
-                if not os.environ.get("_SKULK_KV_BACKEND_USER_SET") and not os.environ.get(
-                    "_EXO_KV_BACKEND_USER_SET"
-                ):
+                if not os.environ.get("_SKULK_KV_BACKEND_USER_SET"):
                     os.environ["SKULK_KV_CACHE_BACKEND"] = str(
                         inference["kv_cache_backend"]
                     )
-                    os.environ["SKULK_KV_CACHE_BACKEND"] = str(
-                        inference["kv_cache_backend"]
-                    )  # legacy compat
                     logger.info(
                         f"DownloadCoordinator: updated KV_CACHE_BACKEND={inference['kv_cache_backend']}"
                     )
@@ -541,7 +536,7 @@ class DownloadCoordinator:
             logger.warning(f"Model {model_id} was not found on disk")
 
         # Also remove the staging directory if the model was downloaded from the
-        # store into a non-default location (e.g. ~/.exo/staging/<model>).
+        # store into a non-default location (e.g. ~/.skulk/staging/<model>).
         # delete_model() only removes SKULK_MODELS_DIR, so the staged copy would
         # otherwise survive and make the model reappear on the next activation.
         if model_id in self.download_status:

@@ -98,7 +98,7 @@ def resolve_metal_fast_synch(card_runtime: RuntimeCapabilityCardConfig | None) -
 
     Returns ``True`` when ``MLX_METAL_FAST_SYNCH`` should be ``"1"``.
     """
-    override = preferred_env_value("SKULK_FAST_SYNCH", "EXO_FAST_SYNCH")
+    override = preferred_env_value("SKULK_FAST_SYNCH")
     if override is not None:
         normalized = override.strip().lower()
         if normalized == "on":
@@ -170,7 +170,7 @@ Override with SKULK_GROUP_CONNECT_DEADLINE_SECONDS.
 def resolve_group_connect_deadline_seconds() -> float:
     """Resolve the group-connect deadline, honoring the operator override."""
     raw = preferred_env_value(
-        "SKULK_GROUP_CONNECT_DEADLINE_SECONDS", "EXO_GROUP_CONNECT_DEADLINE_SECONDS"
+        "SKULK_GROUP_CONNECT_DEADLINE_SECONDS"
     )
     if raw is not None:
         try:
@@ -201,7 +201,7 @@ wedge, so the watchdog's default Metal guidance would mislead operators."""
 def resolve_warmup_deadline_seconds() -> float:
     """Resolve the warmup deadline, honoring the operator env override."""
     raw = preferred_env_value(
-        "SKULK_WARMUP_DEADLINE_SECONDS", "EXO_WARMUP_DEADLINE_SECONDS"
+        "SKULK_WARMUP_DEADLINE_SECONDS"
     )
     if raw is not None:
         try:
@@ -212,7 +212,7 @@ def resolve_warmup_deadline_seconds() -> float:
             pass
         logger.warning(
             "Ignoring invalid warmup-deadline override "
-            f"(SKULK_WARMUP_DEADLINE_SECONDS / SKULK_WARMUP_DEADLINE_SECONDS) "
+            f"(SKULK_WARMUP_DEADLINE_SECONDS) "
             f"value {raw!r}; using default "
             f"{WARMUP_DEADLINE_SECONDS_DEFAULT:.0f}s"
         )

@@ -73,7 +73,7 @@ from pathlib import Path
 from typing import Literal, final
 
 import yaml
-from pydantic import Field, model_validator
+from pydantic import Field
 
 from skulk.utils.pydantic_ext import FrozenModel
 
@@ -144,11 +144,8 @@ class StagingNodeConfig(FrozenModel):
         node_cache_path: Absolute or ``~``-prefixed path to the directory
             where staged model files are written.  Each model occupies a
             subdirectory named ``<org>--<model>`` (e.g.
-            ``mlx-community--Qwen3-30B-A3B-4bit``).  When left at the
-            default, a populated legacy ``~/.exo/staging`` directory from a
-            pre-rename deployment is used instead of an empty
-            ``~/.skulk/staging`` so existing staged copies are not re-paid
-            (see the model validator below).
+            ``mlx-community--Qwen3-30B-A3B-4bit``).  Defaults to
+            ``~/.skulk/staging``.
         cleanup_on_deactivate: When ``True`` (the default), staged copies
             become eviction candidates when their model instance is shut
             down, and the staging directory is held to the
@@ -170,23 +167,6 @@ class StagingNodeConfig(FrozenModel):
     node_cache_path: str = "~/.skulk/staging"
     cleanup_on_deactivate: bool = True
     staging_keep_recent_gb: float = Field(default=40.0, ge=0)
-
-    @model_validator(mode="after")
-    def _prefer_populated_legacy_staging(self) -> "StagingNodeConfig":  # pyright: ignore[reportUnusedFunction]
-        """Keep using a populated pre-rename staging dir when unconfigured.
-
-        Only fires for the DEFAULT path: an explicit ``node_cache_path``
-        is always respected verbatim. Without this, the 2026-06 exo->skulk
-        rename would silently orphan every staged copy (eviction never
-        looks outside the active staging root) and re-stage everything.
-        """
-        if self.node_cache_path != "~/.skulk/staging":
-            return self
-        legacy = Path("~/.exo/staging").expanduser()
-        current = Path(self.node_cache_path).expanduser()
-        if legacy.is_dir() and any(legacy.iterdir()) and not current.is_dir():
-            object.__setattr__(self, "node_cache_path", "~/.exo/staging")
-        return self
 
 
 @final

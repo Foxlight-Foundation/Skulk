@@ -331,7 +331,7 @@ def build_model_path(model_id: ModelId) -> Path:
     # Fallback: check the default staging directory directly.
     # This covers cases where the staging path wasn't registered in
     # SKULK_MODELS_PATH (e.g., config not yet synced) but files exist.
-    staging_fallback = Path.home() / ".exo" / "staging" / model_id.normalize()
+    staging_fallback = Path.home() / ".skulk" / "staging" / model_id.normalize()
     if staging_fallback.is_dir() and (
         (staging_fallback / "config.json").exists()
         or directory_has_gguf_weights(staging_fallback)

@@ -37,9 +37,7 @@ def _clear_warmup_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reset warmup debug env vars so tests are independent from the shell."""
     for env_name in (
         "SKULK_DEBUG_WARMUP_REPEAT_COUNT",
-        "EXO_DEBUG_WARMUP_REPEAT_COUNT",
         "SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS",
-        "EXO_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS",
     ):
         monkeypatch.delenv(env_name, raising=False)
 
@@ -317,13 +315,13 @@ def test_warmup_inference_stops_after_first_generated_token(
     assert check_every == 100
 
 
-def test_warmup_helpers_prefer_blank_skulk_values_over_legacy_env(
+def test_warmup_helpers_ignore_legacy_exo_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The EXO_ deprecation runway is gone (#324): legacy EXO_ warmup vars must
+    # not be honored when the SKULK_ names are unset; the defaults apply.
     _clear_warmup_env(monkeypatch)
-    monkeypatch.setenv("SKULK_DEBUG_WARMUP_REPEAT_COUNT", "")
     monkeypatch.setenv("EXO_DEBUG_WARMUP_REPEAT_COUNT", "4")
-    monkeypatch.setenv("SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS", "")
     monkeypatch.setenv("EXO_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS", "1")
 
     repeat_count = cast(

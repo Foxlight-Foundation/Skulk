@@ -151,7 +151,7 @@ def _current_frames() -> dict[int, types.FrameType]:
 
 def _mlx_hang_debug_enabled() -> bool:
     """Return whether verbose warmup/prefill hang diagnostics are enabled."""
-    value = preferred_env_value("SKULK_MLX_HANG_DEBUG", "EXO_MLX_HANG_DEBUG")
+    value = preferred_env_value("SKULK_MLX_HANG_DEBUG")
     if value is None:
         return False
     return value.strip().lower() not in {"", "0", "false", "no", "off"}
@@ -161,7 +161,6 @@ def _mlx_hang_debug_interval_seconds() -> float:
     """Return the periodic interval for hang-debug watchdog logs."""
     raw = preferred_env_value(
         "SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS",
-        "EXO_MLX_HANG_DEBUG_INTERVAL_SECONDS",
     )
     if raw is None:
         return 30.0
@@ -174,7 +173,6 @@ def _warmup_repeat_count() -> int:
     """Return the neutral warmup token repeat count used for debugging."""
     raw = preferred_env_value(
         "SKULK_DEBUG_WARMUP_REPEAT_COUNT",
-        "EXO_DEBUG_WARMUP_REPEAT_COUNT",
     )
     if raw is None:
         return 1
@@ -206,7 +204,6 @@ def _warmup_instructions(group: mx.distributed.Group | None) -> str | None:
         return None
     raw = preferred_env_value(
         "SKULK_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS",
-        "EXO_DEBUG_WARMUP_INCLUDE_INSTRUCTIONS",
     )
     if raw is None:
         return None

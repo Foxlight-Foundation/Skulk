@@ -107,10 +107,9 @@ def test_macos_uses_skulk_directory():
     c = _reload_constants_clean(env, "darwin")
 
     home = Path.home()
-    # On a fresh install, .skulk is used. If .exo exists and .skulk
-    # doesn't, the fallback logic picks .exo — but we can't easily
-    # test filesystem state here, so just check it's one of the two.
-    assert c.SKULK_CONFIG_HOME in (home / ".skulk", home / ".exo")
+    # macOS always uses ~/.skulk by default; the legacy ~/.exo fallback was
+    # removed with the EXO_ deprecation runway (#324).
+    assert home / ".skulk" == c.SKULK_CONFIG_HOME
 
 
 def test_node_id_in_config_dir():
