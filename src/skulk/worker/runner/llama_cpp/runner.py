@@ -61,9 +61,19 @@ def select_gguf_file(model_dir: Path) -> Path:
     files (``mmproj*``). Sorted order puts the first shard (``*-00001-of-*``)
     first, and llama.cpp discovers the remaining shards from it. Raises
     ``FileNotFoundError`` when the directory contains no usable GGUF.
+
+    Searches recursively and sorts by the directory-relative path so it selects
+    the SAME file the card sized and the completeness check recognized
+    (``gguf_weight_siblings`` / ``_selected_gguf_shard_size`` use repo-relative
+    names); otherwise a nested-layout repo could size/complete but fail to load.
     """
     candidates = sorted(
-        path for path in model_dir.glob("*.gguf") if "mmproj" not in path.name.lower()
+        (
+            path
+            for path in model_dir.glob("**/*.gguf")
+            if "mmproj" not in path.name.lower()
+        ),
+        key=lambda path: str(path.relative_to(model_dir)),
     )
     if not candidates:
         raise FileNotFoundError(f"no .gguf weights file found in {model_dir}")
