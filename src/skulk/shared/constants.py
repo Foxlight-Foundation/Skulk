@@ -128,7 +128,10 @@ _DASHBOARD_DIR_ENV = _env("SKULK_DASHBOARD_DIR", "EXO_DASHBOARD_DIR")
 # ``None`` on a headless/worker node that has no built dashboard assets and no
 # explicit override: importing constants (a boot-path module) must not fail just
 # because the UI was never built. The API skips serving the dashboard when this
-# is None; an explicit SKULK_DASHBOARD_DIR is honored as-is (#333).
+# is None. An explicit SKULK_DASHBOARD_DIR is resolved under the home directory
+# with the same ``Path.home() / value`` convention as the other ``*_DIR`` env
+# vars (so a relative value is home-relative and an absolute value is used as
+# given), matching prior behavior (#333).
 DASHBOARD_DIR: Path | None = (
     find_dashboard_optional()
     if _DASHBOARD_DIR_ENV is None
