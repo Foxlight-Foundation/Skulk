@@ -736,7 +736,13 @@ class API:
         self._setup_cors()
         self._setup_routes()
 
-        if mount_dashboard:
+        # A headless/worker node may have no built dashboard assets
+        # (DASHBOARD_DIR is None); serving the UI is then skipped so the node
+        # still boots and serves the API (#333). The control/data planes and
+        # all API routes are unaffected.
+        if mount_dashboard and DASHBOARD_DIR is not None:
+            dashboard_dir = DASHBOARD_DIR
+
             # The dashboard is a SPA that restores its active view from the
             # URL path (App.tsx reads location.pathname), so deep links and
             # browser refreshes hit these paths directly. StaticFiles only
@@ -746,7 +752,7 @@ class API:
             # dashboard-react/src/components/layout/HeaderNav.tsx.
             async def _spa_index() -> FileResponse:
                 """Serve the dashboard SPA shell for client-routed paths."""
-                return FileResponse(os.path.join(DASHBOARD_DIR, "index.html"))
+                return FileResponse(os.path.join(dashboard_dir, "index.html"))
 
             # Both slash forms: the StaticFiles mount at "/" swallows
             # unmatched paths before FastAPI's redirect-slashes logic can
@@ -758,10 +764,16 @@ class API:
             self.app.mount(
                 "/",
                 StaticFiles(
-                    directory=DASHBOARD_DIR,
+                    directory=dashboard_dir,
                     html=True,
                 ),
                 name="dashboard",
+            )
+        elif mount_dashboard:
+            logger.info(
+                "Dashboard assets not found (DASHBOARD_DIR is unset); serving the "
+                "API without the dashboard UI. Build it with `cd dashboard-react "
+                "&& npm run build` or set SKULK_DASHBOARD_DIR to serve the UI."
             )
 
         self._text_generation_queues: dict[

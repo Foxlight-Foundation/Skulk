@@ -85,6 +85,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Headless/non-Mac nodes boot without the built dashboard (#333).** A worker
+  node with no `dashboard-react/dist` (for example a Linux node with no node/npm
+  to build the UI) previously failed to start: `constants.py` resolved
+  `DASHBOARD_DIR` at import and raised `FileNotFoundError`, and the API's
+  `StaticFiles` mount raised when the directory was absent. `DASHBOARD_DIR` is
+  now `None` when the assets are absent and no `SKULK_DASHBOARD_DIR` override is
+  set, and the API skips serving the dashboard (logging a notice) while serving
+  the full API. Nodes that have the assets, or set `SKULK_DASHBOARD_DIR`, serve
+  the UI unchanged.
+
 - **Embedding tasks reach a clean terminal state (#326).** The embedding runner
   held `RunnerReady` across the `TextEmbedding` forward pass, but the supervisor
   asserts the runner is in an active state when it forwards a task's terminal

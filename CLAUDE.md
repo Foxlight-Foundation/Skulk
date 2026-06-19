@@ -9,7 +9,8 @@ Skulk is a distributed AI inference system that connects multiple devices into o
 ## Build & Run Commands
 
 ```bash
-# Build the dashboard (required before running skulk)
+# Build the dashboard (needed to serve the web UI; a headless node can run
+# without it, in which case the API serves without the dashboard)
 cd dashboard-react && npm install && npm run build && cd ..
 
 # Run skulk (starts both master and worker with API at http://localhost:52415)
@@ -142,7 +143,7 @@ Rust code in `rust/` provides:
 - `system_custodian`: System-level operations
 
 ### Dashboard
-React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API.
+React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API when present. A node without the built assets (a headless/non-Mac worker, or with no `SKULK_DASHBOARD_DIR`) sets `DASHBOARD_DIR=None`, skips the mount, and serves the API without the UI.
 
 ### Model Capability System
 Skulk now treats model capability handling as two layers:

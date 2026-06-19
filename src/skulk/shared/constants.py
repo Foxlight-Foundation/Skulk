@@ -2,7 +2,7 @@ import os
 import sys
 from pathlib import Path
 
-from skulk.utils.dashboard_path import find_dashboard, find_resources
+from skulk.utils.dashboard_path import find_dashboard_optional, find_resources
 
 
 def _env(skulk_key: str, legacy_key: str, default: str | None = None) -> str | None:
@@ -125,8 +125,17 @@ RESOURCES_DIR = (
     find_resources() if _RESOURCES_DIR_ENV is None else Path.home() / _RESOURCES_DIR_ENV
 )
 _DASHBOARD_DIR_ENV = _env("SKULK_DASHBOARD_DIR", "EXO_DASHBOARD_DIR")
-DASHBOARD_DIR = (
-    find_dashboard() if _DASHBOARD_DIR_ENV is None else Path.home() / _DASHBOARD_DIR_ENV
+# ``None`` on a headless/worker node that has no built dashboard assets and no
+# explicit override: importing constants (a boot-path module) must not fail just
+# because the UI was never built. The API skips serving the dashboard when this
+# is None. An explicit SKULK_DASHBOARD_DIR is resolved under the home directory
+# with the same ``Path.home() / value`` convention as the other ``*_DIR`` env
+# vars (so a relative value is home-relative and an absolute value is used as
+# given), matching prior behavior (#333).
+DASHBOARD_DIR: Path | None = (
+    find_dashboard_optional()
+    if _DASHBOARD_DIR_ENV is None
+    else Path.home() / _DASHBOARD_DIR_ENV
 )
 
 # Log files (data/logs or cache)

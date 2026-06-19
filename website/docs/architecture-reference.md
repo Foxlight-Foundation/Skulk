@@ -76,7 +76,7 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Role:** HTTP entry point; FastAPI app; OpenAI / Ollama / Claude / Responses / Skulk-native adapters; serves dashboard
 - **Lives in:** `src/skulk/api/main.py`; adapters at `src/skulk/api/adapters/`
 - **Default port:** 52415
-- **Mounts:** dashboard at `/`; OpenAPI at `/api/openapi.json`
+- **Mounts:** dashboard at `/` (skipped when the built assets are absent, e.g. a headless/non-Mac worker node with no `dashboard-react/dist`; `DASHBOARD_DIR` is then `None` and the API serves without the UI, #333); OpenAPI at `/api/openapi.json`
 - **Background tasks:** `_apply_state` (consumes `GLOBAL_EVENTS` and persists merged traces), `_pause_on_new_election`, `_cleanup_expired_images` (image-store TTL), `_prune_old_traces` (hourly trace janitor backed by `prune_old_trace_files`; retention via `tracing.retention_days`)
 
 ### Dashboard
