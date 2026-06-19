@@ -9,6 +9,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- **The libp2p private-network key seed is now `skulk_discovery_network` (#324).**
+  `swarm.rs` derived the PNET pre-shared key from the literal
+  `exo_discovery_network` (an exo-rename residue). The seed is now
+  `skulk_discovery_network`. **This is a wire-compatibility break**: a node built
+  with the new seed cannot form a libp2p cluster with a node built on the old
+  seed, so it must roll out as a single coordinated whole-fleet rebuild and
+  restart (do not roll nodes one at a time). The Zenoh data-plane namespace is
+  unaffected (it derives from `NETWORK_VERSION` / `SKULK_LIBP2P_NAMESPACE`, not
+  this seed).
+
 - **Zenoh data plane is now soft default-on (#315).** The `DATA` topic (per-token
   generation output) uses the Eclipse Zenoh transport by default when a node is
   configured for it. `SKULK_ZENOH_DATA_PLANE` is now tri-state
