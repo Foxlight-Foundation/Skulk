@@ -978,10 +978,17 @@ async def get_weight_map(model_id: ModelId, revision: str = "main") -> dict[str,
 
 
 async def resolve_allow_patterns(shard: ShardMetadata) -> list[str]:
-    # TODO: 'Smart' downloads are disabled because:
-    #  (i) We don't handle all kinds of files;
-    # (ii) We don't have sticky sessions.
-    # (iii) Tensor parallel requires all files.
+    # GGUF: the card pins the one quant to load (model_card.gguf_file), so fetch
+    # only that shard group + config.json instead of every quant the repo hosts
+    # (#332). Multi-quant repos otherwise download tens of GB of unused weights.
+    gguf_file = shard.model_card.gguf_file
+    if gguf_file:
+        from skulk.shared.models.model_cards import gguf_allow_patterns
+
+        return [*gguf_allow_patterns(gguf_file), "config.json"]
+    # Non-GGUF (safetensors/MLX): 'Smart' downloads stay disabled because
+    #  (i) we don't handle all kinds of files; (ii) no sticky sessions;
+    #  (iii) tensor parallel requires all files.
     return ["*"]
     try:
         weight_map = await get_weight_map(str(shard.model_card.model_id))

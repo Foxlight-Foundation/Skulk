@@ -1,7 +1,7 @@
 import json
 from collections.abc import Iterable
 from enum import Enum
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Final, Literal, cast
 
 import aiofiles
 import aiofiles.os as aios
@@ -430,6 +430,11 @@ class ModelCard(CamelCaseModel):
     family: str = ""
     quantization: str = ""
     base_model: str = ""
+    gguf_file: str | None = None
+    """For GGUF (llama.cpp) models: the repo-relative path of the weights file the
+    runner loads (the selected quant's first shard). Resolved once at card creation
+    (preferring a quant over BF16) so the download fetches only that quant and the
+    runner loads deterministically, instead of each layer re-globbing/guessing."""
     capabilities: list[str] = []
     context_length: int = 0
     uses_cfg: bool = False
@@ -544,7 +549,8 @@ class ModelCard(CamelCaseModel):
         tags so placement routes the model only to nodes with a llama.cpp engine
         and prefers a GPU backend.
         """
-        selected_size = _selected_gguf_shard_size(gguf_files)
+        selected = select_preferred_gguf(gguf_files)
+        selected_size = gguf_shard_group_size(selected, gguf_files)
 
         # Structural metadata comes from config.json, which most community GGUF
         # repos (bartowski, unsloth, mlx-community) ship alongside the weights.
@@ -586,6 +592,8 @@ class ModelCard(CamelCaseModel):
             num_key_value_heads=num_key_value_heads,
             context_length=context_length,
             tasks=[ModelTask.TextGeneration],
+            quantization=_gguf_quant_label(selected),
+            gguf_file=selected,
             trust_remote_code=False,
             is_custom=True,
             placement=PlacementCardConfig(
@@ -779,26 +787,96 @@ def gguf_weight_siblings(model_id: ModelId) -> "list[tuple[str, int]]":
     ]
 
 
-def _selected_gguf_shard_size(gguf_files: "list[tuple[str, int]]") -> Memory:
-    """Total bytes of the GGUF file the runner would load (with its shards).
+# Preferred GGUF quantizations, best first. Q4_K_M is the de-facto default
+# (good quality/size); unquantized (BF16/F16/F32) is deprioritized hard so a
+# multi-quant repo never defaults to the full-precision weights (#334).
+_GGUF_QUANT_PREFERENCE: Final[tuple[str, ...]] = (
+    "q4_k_m",
+    "q4_k_s",
+    "q5_k_m",
+    "q5_k_s",
+    "q6_k",
+    "q4_0",
+    "q5_0",
+    "q8_0",
+    "q3_k_m",
+    "q3_k_l",
+    "q3_k_s",
+    "q2_k",
+    "iq4_xs",
+    "iq4_nl",
+    "iq4",
+    "iq3",
+    "iq2",
+    "iq1",
+)
+_GGUF_UNQUANTIZED: Final[tuple[str, ...]] = ("bf16", "f16", "fp16", "f32", "fp32")
+_GGUF_RANK_UNRECOGNIZED: Final = 1_000  # unknown quant: after known quants
+_GGUF_RANK_UNQUANTIZED: Final = 10_000  # full precision: dead last
 
-    Mirrors ``llama_cpp.runner.select_gguf_file``: the first file in sorted
-    order is the one loaded. Sharded GGUFs are named ``<base>-00001-of-000NN.gguf``
-    and llama.cpp pulls the whole group from the first shard, so we sum the
-    sizes of all files sharing that shard base. A single-file quant sums to just
-    itself. This keeps the card's ``storage_size`` consistent with what actually
-    loads (rather than summing every quant a multi-quant repo happens to host).
+
+def gguf_quant_rank(name: str) -> int:
+    """Preference rank for a GGUF filename (lower is better); see #334."""
+    low = name.rsplit("/", 1)[-1].lower()
+    for index, marker in enumerate(_GGUF_QUANT_PREFERENCE):
+        if marker in low:
+            return index
+    if any(token in low for token in _GGUF_UNQUANTIZED):
+        return _GGUF_RANK_UNQUANTIZED
+    return _GGUF_RANK_UNRECOGNIZED
+
+
+def _gguf_quant_label(name: str) -> str:
+    """Human quant label parsed from a GGUF filename (e.g. ``Q4_K_M``), or ``""``."""
+    low = name.rsplit("/", 1)[-1].lower()
+    for marker in _GGUF_QUANT_PREFERENCE:
+        if marker in low:
+            return marker.upper()
+    for token in _GGUF_UNQUANTIZED:
+        if token in low:
+            return token.upper()
+    return ""
+
+
+def select_preferred_gguf(gguf_files: "list[tuple[str, int]]") -> str:
+    """Pick the GGUF weights file to load: best quant, then basename order.
+
+    Prefers a real quantization (Q4_K_M first) over the unquantized BF16/F16 a
+    multi-quant repo also ships (#334). The basename tie-break makes the choice
+    deterministic and, for a shard group, picks the first shard. The runner's
+    ``select_gguf_file`` falls back to this same ranking when the card does not
+    pin a file, so download, sizing, and loading all agree.
     """
-    # Sort by basename to agree with select_gguf_file / directory_has_gguf_weights
-    # on which file is "first" (so sizing, completeness, and loading match).
-    names = sorted(
-        (name for name, _ in gguf_files), key=lambda name: name.rsplit("/", 1)[-1]
+    return min(
+        (name for name, _ in gguf_files),
+        key=lambda name: (gguf_quant_rank(name), name.rsplit("/", 1)[-1]),
     )
-    selected = names[0]
-    sizes = dict(gguf_files)
+
+
+def gguf_allow_patterns(gguf_file: str) -> list[str]:
+    """Download allow-patterns for a card's selected GGUF (its shard group only).
+
+    A single-file quant downloads just itself; a sharded quant downloads its
+    whole ``<base>-NNNNN-of-NNNNN`` group via a glob. This is what lets the
+    downloader fetch only the chosen quant instead of every quant a multi-quant
+    repo hosts (#332). Caller adds non-weight files (e.g. ``config.json``).
+    """
+    base = _gguf_shard_base(gguf_file)
+    if base is None:
+        return [gguf_file]
+    return [f"{base}-*-of-*.gguf"]
+
+
+def gguf_shard_group_size(selected: str, gguf_files: "list[tuple[str, int]]") -> Memory:
+    """Total bytes of ``selected`` plus its sibling shards (its shard group).
+
+    A single-file quant sums to itself; a sharded quant sums every file sharing
+    its ``<base>-NNNNN-of-NNNNN`` group. Keeps ``storage_size`` consistent with
+    what actually loads, not the sum of every quant the repo hosts.
+    """
     base = _gguf_shard_base(selected)
     if base is None:
-        return Memory.from_bytes(sizes[selected])
+        return Memory.from_bytes(dict(gguf_files)[selected])
     return Memory.from_bytes(
         sum(size for name, size in gguf_files if _gguf_shard_base(name) == base)
     )
