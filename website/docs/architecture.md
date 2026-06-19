@@ -183,6 +183,42 @@ client's own timeout.
 
 A snapshot-bootstrap rollout has one operational rule: once a master starts compacting old replay history after writing snapshots, older nodes that only know how to "replay from event 0" should be considered temporary guests during the rollout window. Upgrade all nodes before relying on bounded retention as the steady state.
 
+### Heterogeneous nodes and capability-aware placement
+
+A cluster can mix node types: Apple Silicon nodes serving MLX models and
+non-Mac (for example AMD/Linux) nodes serving GGUF models through llama.cpp.
+Placement is capability-aware so each model runs only where it can.
+
+Every node advertises the compute **backends** it can serve as
+`<engine>-<compute>` tags. The tag folds two axes into one self-describing
+string: the engine selects the worker runner class (`mlx` or `llama_cpp`), and
+the compute names the accelerator (`metal`, `vulkan`, `rocm`, `cuda`, `cpu`). A
+macOS node advertises `{mlx, mlx-metal}`; a Linux node with an importable
+`llama_cpp` built for its GPU adds `{llama_cpp, llama_cpp-vulkan}` (the compute
+backends come from `SKULK_LLAMA_CPP_BACKENDS`). Backends are probed per node and
+gossiped on the telemetry plane as part of `NodeResources`.
+
+A model card declares two placement axes that are deliberately separate from the
+memory/topology axes above:
+
+- `compatible_backends` is a **hard filter**: the planner excludes any node whose
+  advertised backends do not intersect it. A GGUF card lists the llama.cpp
+  backends, so it can only land on a llama.cpp node; an MLX card lists MLX, so it
+  stays on the Macs. This is what keeps an MLX model off an AMD node and a GGUF
+  model off a Mac without an MLX llama.cpp shim.
+- `backend_preference` is a **soft score**: when several compatible nodes
+  qualify, the planner prefers the node whose backend ranks earliest in the
+  card's preference list (for example preferring a GPU backend over CPU).
+
+The engine axis (which runtime) is orthogonal to the node axis (which machine):
+the same card mechanism that routes a GGUF model to a Vulkan llama.cpp node would
+route a future engine to whichever nodes advertise it. The worker resolves the
+concrete engine for its node at runner-spawn time by intersecting the card's
+`compatible_backends` with the node's advertised backends, ordered by
+`backend_preference`. See the
+[AMD Strix Halo nodes](./amd-strix-halo-nodes.md) guide for bringing up a
+non-Mac node.
+
 ## The inference engine
 
 Inference happens entirely inside the runner subprocess. Skulk wraps MLX (and the upstream mlx-lm model implementations) in a layer that handles distributed coordination, family-specific behavior, and operator-controlled knobs.

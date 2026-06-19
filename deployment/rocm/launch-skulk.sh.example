@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Skulk launcher for an AMD / ROCm worker node (Strix Halo, gfx1151) on Linux.
+#
+# Copy to ~/launch-skulk.sh, set SKULK_ZENOH_CONNECT to your other nodes' IPs,
+# then start it. To survive an SSH disconnect (Linux has no launchd), start it
+# detached:
+#
+#   setsid bash -c 'exec ~/launch-skulk.sh > ~/skulk.log 2>&1' </dev/null >/dev/null 2>&1 &
+#
+# A headless node needs no dashboard build: SKULK_DASHBOARD_DIR is intentionally
+# left unset, so the API serves without the UI.
+set -euo pipefail
+
+cd "$HOME/projects/foxlight/Skulk"
+
+# uv and the Rust toolchain that built the bindings.
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+
+# Isolate this cluster (must match the rest of the fleet). The default is the
+# NETWORK_VERSION token; set it explicitly when several clusters share a LAN.
+export SKULK_LIBP2P_NAMESPACE=foxlight-main
+
+# Data plane over Eclipse Zenoh. LISTEN is this node's bind; CONNECT lists the
+# peers to dial (set these to YOUR nodes' addresses).
+export SKULK_ZENOH_DATA_PLANE=1
+export SKULK_ZENOH_LISTEN=tcp/0.0.0.0:7447
+export SKULK_ZENOH_CONNECT=tcp/192.168.0.115:7447,tcp/192.168.0.117:7447,tcp/192.168.0.122:7447
+
+# Advertise the llama.cpp compute backend(s) this node can serve. The node also
+# needs llama-cpp-python importable (built with the matching backend); see
+# deployment/rocm/README.md. The master routes GGUF models whose
+# compatible_backends include `llama_cpp-vulkan` here.
+export SKULK_LLAMA_CPP_BACKENDS=vulkan
+
+exec uv run skulk -v
