@@ -368,9 +368,9 @@ class Node:
 
         logger.info(f"Starting node {node_id}")
 
-        # Load exo.yaml (returns None if absent — zero-config compatibility:
-        # when exo.yaml is missing, all store references stay None and exo
-        # behaves identically to the upstream default).
+        # Load skulk.yaml (returns None if absent, for zero-config compatibility:
+        # when skulk.yaml is missing, all store references stay None and the
+        # node behaves identically to the zero-config default).
         skulk_config = load_skulk_config()
 
         # Track whether user provided the KV backend env var at launch —
@@ -386,9 +386,6 @@ class Node:
             and not _user_set_kv_backend
         ):
             os.environ["SKULK_KV_CACHE_BACKEND"] = skulk_config.inference.kv_cache_backend
-            os.environ["SKULK_KV_CACHE_BACKEND"] = (
-                skulk_config.inference.kv_cache_backend
-            )  # legacy compat
             logger.info(
                 f"Inference config: kv_cache_backend={skulk_config.inference.kv_cache_backend}"
             )

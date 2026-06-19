@@ -367,21 +367,14 @@ class InferenceConfig(FrozenModel):
 
 
 def resolve_config_path() -> Path:
-    """Find the config file, preferring ``skulk.yaml`` over legacy ``skulk.yaml``."""
-    skulk = Path("skulk.yaml")
-    legacy = Path("exo.yaml")
-    if skulk.exists():
-        return skulk
-    if legacy.exists():
-        return legacy
-    # Neither exists — return the preferred name so callers get a clear path
-    return skulk
+    """Return the cluster config path (``skulk.yaml`` in the working directory)."""
+    return Path("skulk.yaml")
 
 
 def load_skulk_config(
     path: Path | None = None,
 ) -> SkulkConfig | None:
-    """Load cluster config from ``skulk.yaml`` (preferred) or ``skulk.yaml`` (legacy fallback).
+    """Load cluster config from ``skulk.yaml``.
 
     Returns ``None`` if no config file exists, preserving zero-config
     compatibility: all downstream code must check for ``None`` before using
@@ -389,8 +382,7 @@ def load_skulk_config(
 
     Args:
         path: Explicit path override.  When ``None`` (the default), the
-              function checks for ``skulk.yaml`` first, then ``skulk.yaml``
-              in the current working directory.
+              function reads ``skulk.yaml`` in the current working directory.
 
     Returns:
         Parsed :class:`SkulkConfig` instance, or ``None`` if the file is absent.
