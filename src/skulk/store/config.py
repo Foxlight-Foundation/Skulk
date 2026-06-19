@@ -391,10 +391,26 @@ def load_skulk_config(
         :class:`pydantic.ValidationError`: If the file exists but contains
             invalid configuration.
         :class:`yaml.YAMLError`: If the file exists but is not valid YAML.
+        :class:`FileNotFoundError`: If ``skulk.yaml`` is absent but a legacy
+            ``exo.yaml`` sits beside it. The legacy file is no longer read, and
+            booting zero-config would silently drop the operator's
+            ``model_store``/``logging``/``hf_token``/tracing/Tailscale settings,
+            so we fail loudly with the rename instead.
     """
     if path is None:
         path = resolve_config_path()
     if not path.exists():
+        # Don't silently degrade to zero-config when a pre-rename node still
+        # only has exo.yaml: that would drop every store/logging/auth setting
+        # without warning. exo.yaml is no longer parsed (#324), so point the
+        # operator at the one-step rename rather than booting misconfigured.
+        legacy = path.with_name("exo.yaml")
+        if legacy.exists():
+            raise FileNotFoundError(
+                f"Found legacy {legacy} but no {path}. exo.yaml is no longer "
+                f"read as of the EXO_ deprecation runway removal (#324). Rename "
+                f"it: `mv {legacy} {path}`."
+            )
         return None
     with path.open() as f:
         raw = yaml.safe_load(f)

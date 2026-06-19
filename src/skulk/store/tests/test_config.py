@@ -7,6 +7,7 @@ from skulk.store.config import (
     NodeOverrideConfig,
     StagingNodeConfig,
     hostname_aliases,
+    load_skulk_config,
     node_matches_store_host,
     resolve_node_staging,
 )
@@ -98,3 +99,17 @@ def test_resolve_node_staging_matches_local_hostname_alias(monkeypatch: pytest.M
 
     assert resolved.node_cache_path == "/Volumes/foxlight/models"
     assert not resolved.cleanup_on_deactivate
+
+
+def test_load_skulk_config_absent_returns_none(tmp_path: Path) -> None:
+    """A missing skulk.yaml with no legacy file boots zero-config (returns None)."""
+    assert load_skulk_config(tmp_path / "skulk.yaml") is None
+
+
+def test_load_skulk_config_fails_loud_on_legacy_exo_yaml(tmp_path: Path) -> None:
+    """A leftover exo.yaml without skulk.yaml fails loudly with the rename, not
+    a silent zero-config boot that would drop store/logging/auth settings (#324)."""
+    (tmp_path / "exo.yaml").write_text("model_store:\n  enabled: true\n")
+    target = tmp_path / "skulk.yaml"
+    with pytest.raises(FileNotFoundError, match="exo.yaml is no longer read"):
+        load_skulk_config(target)
