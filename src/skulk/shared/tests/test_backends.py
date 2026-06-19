@@ -11,6 +11,7 @@ from skulk.shared.backends import (
     engine_of,
     make_backend_tag,
     probe_node_backends,
+    resolve_node_engine,
 )
 
 
@@ -72,3 +73,29 @@ def test_llama_cpp_probe_defaults_to_cpu(monkeypatch: pytest.MonkeyPatch) -> Non
     tags = backends._probe_llama_cpp_backends()
     # Without an operator declaration we claim only CPU, never over-claim GPU.
     assert tags == frozenset({"llama_cpp", "llama_cpp-cpu"})
+
+
+def test_resolve_node_engine_existing_mlx_cards_unchanged() -> None:
+    # An original {"mlx"} card on a Mac node ({"mlx","mlx-metal"}) -> mlx.
+    engine = resolve_node_engine(
+        frozenset({"mlx"}), (), frozenset({"mlx", "mlx-metal"})
+    )
+    assert engine == "mlx"
+
+
+def test_resolve_node_engine_picks_llama_cpp() -> None:
+    engine = resolve_node_engine(
+        frozenset({"llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cpu"}),
+        ("llama_cpp-vulkan", "llama_cpp-rocm"),
+        frozenset({"llama_cpp", "llama_cpp-vulkan"}),
+    )
+    assert engine == "llama_cpp"
+
+
+def test_resolve_node_engine_none_when_no_intersection() -> None:
+    # Node advertises only mlx but the card requires llama_cpp -> no match
+    # (placement would have excluded this node; caller falls back to default).
+    engine = resolve_node_engine(
+        frozenset({"llama_cpp-vulkan"}), (), frozenset({"mlx", "mlx-metal"})
+    )
+    assert engine is None

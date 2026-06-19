@@ -76,6 +76,29 @@ def engine_of(tag: str) -> EngineType | None:
     return None
 
 
+def resolve_node_engine(
+    compatible_backends: frozenset[str],
+    backend_preference: tuple[str, ...],
+    node_backends: frozenset[str],
+) -> EngineType | None:
+    """Resolve which engine a node should use to serve a model.
+
+    Intersects the card's ``compatible_backends`` (hard filter) with the node's
+    advertised ``node_backends``, orders the result by ``backend_preference``
+    (preferred tags first, then the rest deterministically), and returns the
+    engine of the winning tag. Returns ``None`` when the node advertises none of
+    the model's compatible backends (which placement should already have ruled
+    out, so the caller treats it as "fall back to the default engine"). This is
+    the single point that turns the backend-tag vocabulary into a runner choice.
+    """
+    intersection = compatible_backends & node_backends
+    if not intersection:
+        return None
+    ordered = [tag for tag in backend_preference if tag in intersection]
+    ordered += [tag for tag in sorted(intersection) if tag not in backend_preference]
+    return engine_of(ordered[0])
+
+
 def _probe_llama_cpp_backends() -> frozenset[str]:
     """Probe whether llama.cpp is usable here and which compute backends it offers.
 
