@@ -553,8 +553,17 @@ class ModelCard(CamelCaseModel):
                 "reading model metadata from the GGUF header is not yet "
                 "supported (#327). Use a GGUF repo that ships config.json."
             ) from exc
+        # ModelCard requires positive n_layers/hidden_size (PositiveInt). If the
+        # config.json is present but lacks usable values, fail with the same clear
+        # error rather than a raw pydantic ValidationError.
+        if not config_data.layer_count or not config_data.hidden_size:
+            raise ValueError(
+                f"GGUF repo {model_id} config.json is missing usable layer/hidden "
+                "sizes; reading model metadata from the GGUF header is not yet "
+                "supported (#327)."
+            )
         n_layers = config_data.layer_count
-        hidden_size = config_data.hidden_size or 0
+        hidden_size = config_data.hidden_size
         num_key_value_heads = config_data.num_key_value_heads
         context_length = config_data.max_position_embeddings or 0
 
@@ -771,7 +780,11 @@ def _selected_gguf_shard_size(gguf_files: "list[tuple[str, int]]") -> Memory:
     itself. This keeps the card's ``storage_size`` consistent with what actually
     loads (rather than summing every quant a multi-quant repo happens to host).
     """
-    names = sorted(name for name, _ in gguf_files)
+    # Sort by basename to agree with select_gguf_file / directory_has_gguf_weights
+    # on which file is "first" (so sizing, completeness, and loading match).
+    names = sorted(
+        (name for name, _ in gguf_files), key=lambda name: name.rsplit("/", 1)[-1]
+    )
     selected = names[0]
     sizes = dict(gguf_files)
     base = _gguf_shard_base(selected)
