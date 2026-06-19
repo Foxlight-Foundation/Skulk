@@ -82,6 +82,19 @@ def test_non_gguf_repo_unchanged() -> None:
     assert kept == files  # no .gguf weights: returned unchanged
 
 
+def test_matches_repo_relative_paths_like_the_direct_path() -> None:
+    # Patterns match repo-relative paths (HuggingFace's allow_patterns basis):
+    # a non-root config.json is not the model config and is dropped, just as the
+    # direct path's "config.json" allow-pattern would not match a subdir file.
+    files = [
+        _entry("config.json"),
+        _entry("nested/config.json"),
+        _entry("model-Q4_K_M.gguf", 800),
+    ]
+    kept = {e.path for e in select_store_gguf_download_files(files)}
+    assert kept == {"config.json", "model-Q4_K_M.gguf"}
+
+
 def test_single_quant_repo_keeps_quant_and_config() -> None:
     files = [
         _entry("config.json"),

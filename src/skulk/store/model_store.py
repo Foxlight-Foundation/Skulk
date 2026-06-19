@@ -113,14 +113,15 @@ def select_store_gguf_download_files(
     )
     # Match the direct-HF GGUF allow-list exactly: the selected shard group
     # (``gguf_allow_patterns`` returns either the single file or the
-    # ``<base>-*-of-*.gguf`` glob, basename-based) plus ``config.json``. Every
-    # other file (other quants, original/* full-precision weights, metal/*,
-    # tokenizer, README) is dropped, just as the direct path drops them.
-    keep_patterns = [*gguf_allow_patterns(selected.rsplit("/", 1)[-1]), "config.json"]
+    # ``<base>-*-of-*.gguf`` glob) plus ``config.json``. Patterns and paths are
+    # both repo-relative, the same basis HuggingFace's ``allow_patterns`` matches
+    # on, so a GGUF in a subdirectory aligns with the direct path. Every other
+    # file (other quants, original/* full-precision weights, metal/*, tokenizer,
+    # README) is dropped, just as the direct path drops them.
+    keep_patterns = [*gguf_allow_patterns(selected), "config.json"]
 
     def _keep(entry: FileListEntry) -> bool:
-        name = entry.path.rsplit("/", 1)[-1]
-        return any(fnmatch(name, pattern) for pattern in keep_patterns)
+        return any(fnmatch(entry.path, pattern) for pattern in keep_patterns)
 
     return [entry for entry in file_list if _keep(entry)]
 
@@ -424,15 +425,15 @@ class ModelStore:
             file_list = await fetch_file_list_with_cache(
                 ModelId(model_id), "main", recursive=True
             )
-            # For a multi-quant GGUF repo, fetch only the preferred quant's
-            # shard group (+ config/tokenizer/mmproj) rather than every quant,
+            # For a GGUF repo, fetch only the preferred quant's shard group plus
+            # config.json (dropping other quants, original/*, metal/*, etc.),
             # mirroring the direct-HF selective download (#339).
             selected_files = select_store_gguf_download_files(file_list)
             if len(selected_files) != len(file_list):
                 logger.info(
-                    f"ModelStore: {model_id} is a multi-quant GGUF repo; "
-                    f"downloading {len(selected_files)}/{len(file_list)} files "
-                    "(selected quant only, skipping other quantizations)"
+                    f"ModelStore: {model_id} is a GGUF repo; downloading "
+                    f"{len(selected_files)}/{len(file_list)} files (selected "
+                    "quant's shard group + config.json only)"
                 )
             file_list = selected_files
             total_bytes = sum(f.size or 0 for f in file_list)
