@@ -1,8 +1,9 @@
 """Store-host selective GGUF download (#339).
 
 When the store host downloads a multi-quant GGUF repo from HuggingFace, it
-should fetch only the preferred quant's shard group plus the non-weight files,
-not every quantization, mirroring the direct-HF selective allow-patterns.
+should fetch exactly what the direct-HuggingFace path fetches: the preferred
+quant's shard group plus ``config.json``, and nothing else (not other quants,
+not ``original/*`` full-precision weights, not ``metal/*`` artifacts).
 """
 
 from skulk.shared.types.worker.downloads import FileListEntry
@@ -13,7 +14,7 @@ def _entry(path: str, size: int = 100) -> FileListEntry:
     return FileListEntry(type="file", path=path, size=size)
 
 
-def test_multi_quant_repo_keeps_only_preferred_quant() -> None:
+def test_multi_quant_repo_keeps_only_preferred_quant_and_config() -> None:
     files = [
         _entry("config.json"),
         _entry("tokenizer.json"),
@@ -22,8 +23,9 @@ def test_multi_quant_repo_keeps_only_preferred_quant() -> None:
         _entry("model-Q8_0.gguf", 1300),
     ]
     kept = {e.path for e in select_store_gguf_download_files(files)}
-    # Q4_K_M is the preferred quant; other quants are dropped; non-weights stay.
-    assert kept == {"config.json", "tokenizer.json", "model-Q4_K_M.gguf"}
+    # Q4_K_M is preferred; other quants and tokenizer.json are dropped to match
+    # the direct-HF allow-list (gguf group + config.json only).
+    assert kept == {"config.json", "model-Q4_K_M.gguf"}
 
 
 def test_sharded_preferred_quant_keeps_whole_group() -> None:
@@ -43,16 +45,30 @@ def test_sharded_preferred_quant_keeps_whole_group() -> None:
     }
 
 
-def test_mmproj_projector_is_kept() -> None:
-    # An mmproj projector is a companion, not an alternate quant: keep it.
+def test_original_and_metal_weight_artifacts_are_dropped() -> None:
+    # Some GGUF repos ship the original full-precision weights and metal/*
+    # artifacts; these must NOT be downloaded (the direct-HF path ignores them).
     files = [
         _entry("config.json"),
         _entry("model-Q4_K_M.gguf", 800),
-        _entry("model-BF16.gguf", 4000),
+        _entry("original/consolidated.safetensors", 16000),
+        _entry("original/params.json"),
+        _entry("metal/ggml-common.h"),
+    ]
+    kept = {e.path for e in select_store_gguf_download_files(files)}
+    assert kept == {"config.json", "model-Q4_K_M.gguf"}
+
+
+def test_mmproj_projector_is_dropped_to_match_direct_path() -> None:
+    # The direct-HF GGUF allow-list does not include the projector, so the store
+    # matches it (multimodal GGUF projector handling is a separate concern).
+    files = [
+        _entry("config.json"),
+        _entry("model-Q4_K_M.gguf", 800),
         _entry("mmproj-model-f16.gguf", 600),
     ]
     kept = {e.path for e in select_store_gguf_download_files(files)}
-    assert kept == {"config.json", "model-Q4_K_M.gguf", "mmproj-model-f16.gguf"}
+    assert kept == {"config.json", "model-Q4_K_M.gguf"}
 
 
 def test_non_gguf_repo_unchanged() -> None:
@@ -66,8 +82,11 @@ def test_non_gguf_repo_unchanged() -> None:
     assert kept == files  # no .gguf weights: returned unchanged
 
 
-def test_single_quant_repo_unchanged() -> None:
-    # A repo that ships exactly one quant should keep it (and config).
-    files = [_entry("config.json"), _entry("model-Q4_K_M.gguf", 800)]
+def test_single_quant_repo_keeps_quant_and_config() -> None:
+    files = [
+        _entry("config.json"),
+        _entry("tokenizer.json"),
+        _entry("model-Q4_K_M.gguf", 800),
+    ]
     kept = {e.path for e in select_store_gguf_download_files(files)}
     assert kept == {"config.json", "model-Q4_K_M.gguf"}
