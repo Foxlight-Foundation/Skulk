@@ -33,6 +33,10 @@ export SKULK_LLAMA_CPP_BACKENDS=vulkan
 # different namespace) or its generated tokens never reach the API node (a
 # different DATA transport).
 #
+# Peers on the SAME LAN segment are found automatically (mDNS). If this node is
+# on a different segment from the cluster, dial the existing nodes explicitly:
+#   export SKULK_BOOTSTRAP_PEERS=/ip4/<peer-ip>/tcp/<port>/p2p/<peer-id>,...
+#
 # Custom libp2p namespace (use the same value the other nodes use):
 #   export SKULK_LIBP2P_NAMESPACE=your-cluster-namespace
 #

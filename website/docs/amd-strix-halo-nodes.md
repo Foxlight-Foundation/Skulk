@@ -66,10 +66,12 @@ in the repo. In outline:
      --python .venv/bin/python llama-cpp-python
    ```
    Re-run this after any `uv sync`, which restores the CPU wheel.
-4. **Launch the node**: point it at the rest of the cluster and declare its
-   backend, using the `launch-skulk.sh.example` template (sets
-   `SKULK_LLAMA_CPP_BACKENDS=vulkan`). On Linux there is no launchd, so start it
-   detached so it survives an SSH disconnect:
+4. **Launch the node**: declare its backend and point it at the rest of the
+   cluster, using the `launch-skulk.sh.example` template (sets
+   `SKULK_LLAMA_CPP_BACKENDS=vulkan`). Nodes on the same LAN segment find each
+   other automatically (mDNS); if this node is on a different segment, set
+   `SKULK_BOOTSTRAP_PEERS` to dial the existing nodes. On Linux there is no
+   launchd, so start it detached so it survives an SSH disconnect:
    ```bash
    setsid bash -c 'exec ~/launch-skulk.sh > ~/skulk.log 2>&1' </dev/null >/dev/null 2>&1 &
    ```
