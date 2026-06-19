@@ -198,6 +198,7 @@ def companion_download_specs(
     base), while MTP sidecars and assistants degrade gracefully to
     run-without-speculation (best-effort).
     """
+
     def _bare_shard(repo: str) -> PipelineShardMetadata:
         return PipelineShardMetadata(
             model_card=ModelCard(
@@ -216,9 +217,7 @@ def companion_download_specs(
         )
 
     specs: list[tuple[PipelineShardMetadata, list[str], bool]] = []
-    if model_card.vision and model_card.vision.weights_repo != str(
-        model_card.model_id
-    ):
+    if model_card.vision and model_card.vision.weights_repo != str(model_card.model_id):
         specs.append(
             (
                 _bare_shard(model_card.vision.weights_repo),
@@ -273,9 +272,7 @@ def model_companions_present_on_disk(
     model complete after ensure_shard returns, so the gate cannot loop
     within a session.
     """
-    if model_card.vision and model_card.vision.weights_repo != str(
-        model_card.model_id
-    ):
+    if model_card.vision and model_card.vision.weights_repo != str(model_card.model_id):
         vision_repo = ModelId(model_card.vision.weights_repo)
         # Probe BOTH search roots: SKULK_MODELS_PATH (staging/store) and
         # SKULK_MODELS_DIR (where download_shard writes) — a vision repo
@@ -441,10 +438,28 @@ def _scan_model_directory(
     return list(entries_by_path.values())
 
 
+def directory_has_gguf_weights(model_dir: Path) -> bool:
+    """True if the directory holds a llama.cpp GGUF weights file.
+
+    Recognizes a staged GGUF model, which has no ``*.safetensors.index.json``
+    (the completeness probe used for MLX/safetensors repos). Excludes ``mmproj*``
+    multimodal projector files, which are not the LM weights. An in-progress
+    download is named ``*.gguf.partial`` and is not matched here, so this is true
+    only once at least one GGUF weight file has finished downloading.
+    """
+    return any(
+        "mmproj" not in path.name.lower() for path in model_dir.glob("**/*.gguf")
+    )
+
+
 def is_model_directory_complete(model_dir: Path) -> bool:
     """Check if a model directory contains all required weight files."""
     file_list = _scan_model_directory(model_dir, recursive=True)
-    return file_list is not None and all(f.size is not None for f in file_list)
+    if file_list is not None and all(f.size is not None for f in file_list):
+        return True
+    # GGUF repos have no safetensors index, so _scan_model_directory returns
+    # None; treat the directory as complete once the GGUF weights are present.
+    return directory_has_gguf_weights(model_dir)
 
 
 async def _build_file_list_from_local_directory(
