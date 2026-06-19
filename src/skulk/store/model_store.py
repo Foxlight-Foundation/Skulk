@@ -70,6 +70,64 @@ import aiofiles.os as aios
 from loguru import logger
 from pydantic import BaseModel, ConfigDict
 
+from skulk.shared.types.worker.downloads import FileListEntry
+
+
+def select_store_gguf_download_files(
+    file_list: "list[FileListEntry]",
+) -> "list[FileListEntry]":
+    """Filter a repo's file list to what the store host should download (#339).
+
+    A multi-quant GGUF repo ships every quantization; the store host should
+    fetch only the quant the runner would actually load (the preferred quant's
+    shard group) plus the small non-weight files (``config.json``, tokenizer),
+    mirroring the selective allow-patterns the direct-HuggingFace path already
+    applies. A non-GGUF repo (no ``.gguf`` LM weights) is returned unchanged.
+
+    Multimodal projector files (``mmproj*.gguf``) are kept: they are companion
+    weights, not an alternate quantization of the LM.
+
+    Args:
+        file_list: The full recursive repo file list.
+
+    Returns:
+        The subset to download. Identical to the input for non-GGUF repos.
+    """
+    from fnmatch import fnmatch
+
+    from skulk.shared.models.model_cards import (
+        gguf_allow_patterns,
+        select_preferred_gguf,
+    )
+
+    def _is_mmproj(name: str) -> bool:
+        return "mmproj" in name.lower()
+
+    gguf_weights = [
+        entry
+        for entry in file_list
+        if entry.path.endswith(".gguf") and not _is_mmproj(entry.path)
+    ]
+    if not gguf_weights:
+        return file_list  # not a GGUF repo (or vision-only projector): unchanged
+
+    selected = select_preferred_gguf(
+        [(entry.path, entry.size or 0) for entry in gguf_weights]
+    )
+    # gguf_allow_patterns works on the basename (a single file, or the shard
+    # group's ``<base>-*-of-*.gguf`` glob); match repo paths by basename.
+    patterns = gguf_allow_patterns(selected.rsplit("/", 1)[-1])
+
+    def _keep(entry: "FileListEntry") -> bool:
+        name = entry.path.rsplit("/", 1)[-1]
+        if not name.endswith(".gguf"):
+            return True  # config.json, tokenizer, etc.
+        if _is_mmproj(name):
+            return True
+        return any(fnmatch(name, pattern) for pattern in patterns)
+
+    return [entry for entry in file_list if _keep(entry)]
+
 
 @final
 class StoreModelEntry(BaseModel):
@@ -370,6 +428,17 @@ class ModelStore:
             file_list = await fetch_file_list_with_cache(
                 ModelId(model_id), "main", recursive=True
             )
+            # For a multi-quant GGUF repo, fetch only the preferred quant's
+            # shard group (+ config/tokenizer/mmproj) rather than every quant,
+            # mirroring the direct-HF selective download (#339).
+            selected_files = select_store_gguf_download_files(file_list)
+            if len(selected_files) != len(file_list):
+                logger.info(
+                    f"ModelStore: {model_id} is a multi-quant GGUF repo; "
+                    f"downloading {len(selected_files)}/{len(file_list)} files "
+                    "(selected quant only, skipping other quantizations)"
+                )
+            file_list = selected_files
             total_bytes = sum(f.size or 0 for f in file_list)
             downloaded_bytes = 0
 

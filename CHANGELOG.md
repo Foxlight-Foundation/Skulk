@@ -25,6 +25,14 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **The model store downloads only the selected GGUF quant (#339).** When the
+  store host downloads a multi-quant GGUF repo from HuggingFace on a worker's
+  behalf, it now fetches only the preferred quant's shard group plus the
+  non-weight files (`config.json`, tokenizer) and any `mmproj` projector, rather
+  than every quantization. This mirrors the selective allow-patterns the direct
+  HuggingFace download path already applies, so a store-routed download is no
+  longer larger than a direct one. Non-GGUF repos are unaffected.
+
 - **GGUF cards can be built from the binary header when no `config.json` is
   present (#327).** A GGUF repo that ships only the `.gguf` weights (no
   `config.json`) now has its structural fields (layer count, hidden size,
