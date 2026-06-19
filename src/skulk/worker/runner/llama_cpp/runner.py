@@ -263,7 +263,13 @@ class Runner:
 
         model_id = self.shard_metadata.model_card.model_id
         model_dir = build_model_path(ModelId(model_id))
-        gguf_path = select_gguf_file(model_dir)
+        # Load the exact file the card pinned at creation (the selected quant);
+        # only fall back to scanning if it's somehow absent (older card / manual
+        # staging), so download, sizing, and loading stay in agreement.
+        pinned = self.shard_metadata.model_card.gguf_file
+        gguf_path = model_dir / pinned if pinned else select_gguf_file(model_dir)
+        if not gguf_path.is_file():
+            gguf_path = select_gguf_file(model_dir)
         logger.info(f"loading GGUF {gguf_path.name} for {model_id}")
         # n_gpu_layers=-1 offloads every layer to the GPU backend the binding was
         # built with (Vulkan/ROCm/CUDA); n_ctx=0 uses the model's trained context.

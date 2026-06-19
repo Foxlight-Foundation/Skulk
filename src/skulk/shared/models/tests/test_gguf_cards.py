@@ -96,3 +96,60 @@ async def test_fetch_gguf_card_without_config_fails_clearly(
 
     with pytest.raises(ValueError, match="#327"):
         await ModelCard.fetch_from_hf(ModelId("bare/gguf-repo"))
+
+
+def test_select_preferred_gguf_prefers_quant_over_bf16() -> None:
+    from skulk.shared.models.model_cards import (
+        gguf_allow_patterns,
+        gguf_shard_group_size,
+        select_preferred_gguf,
+    )
+
+    files = [
+        ("M-BF16.gguf", 2_000),
+        ("M-Q4_K_M.gguf", 800),
+        ("M-Q8_0.gguf", 1_300),
+    ]
+    sel = select_preferred_gguf(files)
+    assert sel == "M-Q4_K_M.gguf"  # quant beats BF16; Q4_K_M is top preference
+    assert gguf_shard_group_size(sel, files).in_bytes == 800
+    assert gguf_allow_patterns(sel) == ["M-Q4_K_M.gguf"]
+
+
+def test_select_preferred_gguf_sharded_group() -> None:
+    from skulk.shared.models.model_cards import (
+        gguf_allow_patterns,
+        gguf_shard_group_size,
+        select_preferred_gguf,
+    )
+
+    files = [
+        ("big-Q4_K_M-00001-of-00002.gguf", 500),
+        ("big-Q4_K_M-00002-of-00002.gguf", 600),
+        ("big-BF16.gguf", 4_000),
+    ]
+    sel = select_preferred_gguf(files)
+    assert sel == "big-Q4_K_M-00001-of-00002.gguf"
+    assert gguf_shard_group_size(sel, files).in_bytes == 1_100  # both shards
+    assert gguf_allow_patterns(sel) == ["big-Q4_K_M-*-of-*.gguf"]
+
+
+async def test_gguf_card_pins_selected_quant(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        model_cards,
+        "model_info",
+        _fake_model_info(["model-BF16.gguf", "model-Q4_K_M.gguf"]),
+    )
+
+    async def _cfg(_m: object) -> object:
+        return SimpleNamespace(
+            layer_count=16,
+            hidden_size=2048,
+            num_key_value_heads=8,
+            max_position_embeddings=8192,
+        )
+
+    monkeypatch.setattr(model_cards, "fetch_config_data", _cfg)
+    card = await ModelCard.fetch_from_hf(ModelId("some/gguf-repo"))
+    assert card.gguf_file == "model-Q4_K_M.gguf"
+    assert card.quantization == "Q4_K_M"
