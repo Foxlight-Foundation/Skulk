@@ -492,7 +492,14 @@ class ModelCard(CamelCaseModel):
 
         This is a pure fetch — it does NOT save to disk or update the cache.
         Persistence is handled by the event-sourcing layer (worker event handler).
+
+        Detects GGUF repos (which `mlx-lm` cannot load) and builds a llama.cpp
+        card for them instead of the default MLX/safetensors card.
         """
+        gguf_files = gguf_weight_siblings(model_id)
+        if gguf_files:
+            return await ModelCard._fetch_gguf_from_hf(model_id, gguf_files)
+
         # TODO: failure if files do not exist
         config_data = await fetch_config_data(model_id)
         num_layers = config_data.layer_count
@@ -510,6 +517,74 @@ class ModelCard(CamelCaseModel):
             trust_remote_code=True,
             is_custom=True,
             vision=config_data.vision,
+        )
+
+    @staticmethod
+    async def _fetch_gguf_from_hf(
+        model_id: ModelId, gguf_files: "list[tuple[str, int]]"
+    ) -> "ModelCard":
+        """Build a llama.cpp model card for a GGUF repo.
+
+        Sizes the weights from the GGUF file the runner would actually load
+        (`select_gguf_file` picks the first sorted file + its shard group).
+        Structural fields come from `config.json` when the repo ships one (most
+        community GGUF repos do); when it does not they default to 0 and a
+        follow-up (GGUF-header parse, #327) can fill them in. Stamps the
+        llama.cpp backend tags so placement routes the model only to nodes with a
+        llama.cpp engine and prefers a GPU backend.
+        """
+        selected_size = _selected_gguf_shard_size(gguf_files)
+
+        # Structural metadata comes from config.json, which most community GGUF
+        # repos (bartowski, unsloth, mlx-community) ship alongside the weights.
+        # A bare GGUF repo with no config.json needs the metadata read from the
+        # GGUF header instead (#327); until that lands, fail clearly rather than
+        # fabricate placeholder layer/hidden sizes that would skew placement's
+        # memory and KV-budget math.
+        try:
+            config_data = await fetch_config_data(model_id)
+        except Exception as exc:
+            raise ValueError(
+                f"GGUF repo {model_id} has no usable config.json ({exc}); "
+                "reading model metadata from the GGUF header is not yet "
+                "supported (#327). Use a GGUF repo that ships config.json."
+            ) from exc
+        n_layers = config_data.layer_count
+        hidden_size = config_data.hidden_size or 0
+        num_key_value_heads = config_data.num_key_value_heads
+        context_length = config_data.max_position_embeddings or 0
+
+        return ModelCard(
+            model_id=ModelId(model_id),
+            storage_size=selected_size,
+            n_layers=n_layers,
+            hidden_size=hidden_size,
+            # llama.cpp runs single-node in Skulk (no tensor parallelism).
+            supports_tensor=False,
+            num_key_value_heads=num_key_value_heads,
+            context_length=context_length,
+            tasks=[ModelTask.TextGeneration],
+            trust_remote_code=False,
+            is_custom=True,
+            placement=PlacementCardConfig(
+                compatible_backends=frozenset(
+                    {
+                        "llama_cpp-vulkan",
+                        "llama_cpp-rocm",
+                        "llama_cpp-cuda",
+                        "llama_cpp-cpu",
+                    }
+                ),
+                # Prefer a GPU backend over CPU; the GPU ordering is a sensible
+                # default a card author can tune per model (Vulkan vs ROCm
+                # performance is model-dependent).
+                backend_preference=(
+                    "llama_cpp-vulkan",
+                    "llama_cpp-rocm",
+                    "llama_cpp-cuda",
+                    "llama_cpp-cpu",
+                ),
+            ),
         )
 
 
@@ -663,3 +738,61 @@ async def fetch_safetensors_size(model_id: ModelId) -> Memory:
     if info.safetensors is None:
         raise ValueError(f"No safetensors info found for {model_id}")
     return Memory.from_bytes(info.safetensors.total)
+
+
+def gguf_weight_siblings(model_id: ModelId) -> "list[tuple[str, int]]":
+    """List a repo's GGUF weight files (filename, size) via the HF API.
+
+    Excludes multimodal projector files (``mmproj*``), which are not the LM
+    weights. Returns an empty list for a non-GGUF repo, so callers use this as a
+    "is this a GGUF model?" probe. Sizes are bytes (0 when HF omits the size).
+    """
+    info = model_info(model_id, files_metadata=True)
+    siblings = info.siblings or []
+    return [
+        (sibling.rfilename, sibling.size or 0)
+        for sibling in siblings
+        if sibling.rfilename.endswith(".gguf")
+        and "mmproj" not in sibling.rfilename.lower()
+    ]
+
+
+def _selected_gguf_shard_size(gguf_files: "list[tuple[str, int]]") -> Memory:
+    """Total bytes of the GGUF file the runner would load (with its shards).
+
+    Mirrors ``llama_cpp.runner.select_gguf_file``: the first file in sorted
+    order is the one loaded. Sharded GGUFs are named ``<base>-00001-of-000NN.gguf``
+    and llama.cpp pulls the whole group from the first shard, so we sum the
+    sizes of all files sharing that shard base. A single-file quant sums to just
+    itself. This keeps the card's ``storage_size`` consistent with what actually
+    loads (rather than summing every quant a multi-quant repo happens to host).
+    """
+    names = sorted(name for name, _ in gguf_files)
+    selected = names[0]
+    sizes = dict(gguf_files)
+    base = _gguf_shard_base(selected)
+    if base is None:
+        return Memory.from_bytes(sizes[selected])
+    return Memory.from_bytes(
+        sum(size for name, size in gguf_files if _gguf_shard_base(name) == base)
+    )
+
+
+def _gguf_shard_base(name: str) -> str | None:
+    """Return the shard-group base of a GGUF filename, or ``None`` if unsharded.
+
+    ``foo-00001-of-00003.gguf`` -> ``foo``; ``foo.gguf`` -> ``None``. Detects the
+    ``-NNNNN-of-NNNNN.gguf`` suffix without a regex (re is not imported here).
+    The base itself may contain dashes (e.g. ``Qwen2.5-7B-Instruct-Q4_K_M``), so
+    we split only the trailing three ``-`` tokens.
+    """
+    stem = name[: -len(".gguf")] if name.endswith(".gguf") else name
+    parts = stem.rsplit("-", 3)
+    if (
+        len(parts) == 4
+        and parts[1].isdigit()
+        and parts[2] == "of"
+        and parts[3].isdigit()
+    ):
+        return parts[0]
+    return None
