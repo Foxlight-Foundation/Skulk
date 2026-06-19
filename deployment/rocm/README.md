@@ -42,10 +42,11 @@ git clone https://github.com/Foxlight-Foundation/Skulk.git
 cd Skulk
 uv sync
 
-# 2. Build llama-cpp-python with the Vulkan backend (NOT the default CPU wheel).
-#    Re-run this after any `uv sync`, which reinstalls the CPU wheel.
+# 2. Build llama-cpp-python from source with the Vulkan backend. --no-binary
+#    forces the source build; without it uv installs the prebuilt CPU wheel and
+#    CMAKE_ARGS is ignored. Re-run after any `uv sync`, which restores the wheel.
 CMAKE_ARGS="-DGGML_VULKAN=on" uv pip install --force-reinstall --no-cache-dir \
-  --python .venv/bin/python llama-cpp-python
+  --no-binary llama-cpp-python --python .venv/bin/python llama-cpp-python
 
 # 3. Tell Skulk this node serves a Vulkan llama.cpp backend, then launch.
 cp deployment/rocm/launch-skulk.sh.example ~/launch-skulk.sh

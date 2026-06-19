@@ -57,10 +57,13 @@ in the repo. In outline:
 2. **Build the Skulk environment**: `git clone` the repo and run `uv sync`. The
    Rust networking bindings compile here. No MLX is needed on a non-Mac node.
 3. **Build llama-cpp-python with Vulkan**: the default install is a CPU wheel,
-   so reinstall it with the Vulkan backend:
+   so reinstall it built from source with the Vulkan backend. `--no-binary`
+   forces the source build, otherwise uv installs the prebuilt CPU wheel and
+   `CMAKE_ARGS` is ignored:
    ```bash
    CMAKE_ARGS="-DGGML_VULKAN=on" uv pip install --force-reinstall \
-     --no-cache-dir --python .venv/bin/python llama-cpp-python
+     --no-cache-dir --no-binary llama-cpp-python \
+     --python .venv/bin/python llama-cpp-python
    ```
    Re-run this after any `uv sync`, which restores the CPU wheel.
 4. **Launch the node**: point it at the rest of the cluster and declare its
