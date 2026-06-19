@@ -205,7 +205,15 @@ class Runner:
                 self.cancelled_tasks.discard(CANCEL_ALL_TASKS)
                 self.send_task_status(task, TaskStatus.Running)
                 self.handle_task(task)
-                was_cancelled = self._is_cancelled(task.task_id)
+                # Use only cancellations OBSERVED during execution (the streaming
+                # loop drains the cancel pipe via _is_cancelled as it runs). Do
+                # NOT re-drain here: a cancel that loses the race with completion
+                # must not retroactively flip an already-finished task (which has
+                # streamed its tokens + finish chunk) to Cancelled.
+                was_cancelled = (
+                    task.task_id in self.cancelled_tasks
+                    or CANCEL_ALL_TASKS in self.cancelled_tasks
+                )
                 self.send_task_status(
                     task,
                     TaskStatus.Cancelled if was_cancelled else TaskStatus.Complete,
