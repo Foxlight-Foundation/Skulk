@@ -49,7 +49,9 @@ CMAKE_ARGS="-DGGML_VULKAN=on" uv pip install --force-reinstall --no-cache-dir \
 
 # 3. Tell Skulk this node serves a Vulkan llama.cpp backend, then launch.
 cp deployment/rocm/launch-skulk.sh.example ~/launch-skulk.sh
-# edit ~/launch-skulk.sh: set SKULK_ZENOH_CONNECT to your other nodes' IPs
+# Edit ~/launch-skulk.sh only if your checkout is not at ~/projects/foxlight/Skulk
+# (set SKULK_DIR), or if your cluster uses a custom libp2p namespace or the Zenoh
+# DATA plane (then match the rest of the fleet; a stock cluster needs neither).
 chmod +x ~/launch-skulk.sh
 ~/launch-skulk.sh           # foreground, to watch the first boot
 
