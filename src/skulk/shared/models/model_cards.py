@@ -496,7 +496,16 @@ class ModelCard(CamelCaseModel):
         Detects GGUF repos (which `mlx-lm` cannot load) and builds a llama.cpp
         card for them instead of the default MLX/safetensors card.
         """
-        gguf_files = gguf_weight_siblings(model_id)
+        # GGUF detection is a best-effort probe: it hits the HF model-info API,
+        # which the safetensors path below does NOT require (it has its own retry
+        # and local-file fallback). A transient/offline/rate-limited probe must
+        # therefore NOT block a safetensors card that could otherwise load from
+        # cache: treat any probe failure as "not proven GGUF" and fall through.
+        try:
+            gguf_files = gguf_weight_siblings(model_id)
+        except Exception as exc:  # noqa: BLE001  (best-effort probe, see above)
+            logger.debug(f"GGUF probe for {model_id} failed ({exc}); assuming non-GGUF")
+            gguf_files = []
         if gguf_files:
             return await ModelCard._fetch_gguf_from_hf(model_id, gguf_files)
 
