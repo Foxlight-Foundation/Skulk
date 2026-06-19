@@ -74,15 +74,16 @@ from skulk.shared.types.worker.downloads import FileListEntry
 
 
 def select_store_gguf_download_files(
-    file_list: "list[FileListEntry]",
-) -> "list[FileListEntry]":
+    file_list: list[FileListEntry],
+) -> list[FileListEntry]:
     """Filter a repo's file list to what the store host should download (#339).
 
     A multi-quant GGUF repo ships every quantization; the store host should
     fetch only the quant the runner would actually load (the preferred quant's
-    shard group) plus the small non-weight files (``config.json``, tokenizer),
-    mirroring the selective allow-patterns the direct-HuggingFace path already
-    applies. A non-GGUF repo (no ``.gguf`` LM weights) is returned unchanged.
+    shard group) plus every non-``.gguf`` file (``config.json``, tokenizer, and
+    other ancillary files), mirroring the selective allow-patterns the
+    direct-HuggingFace path already applies. A non-GGUF repo (no ``.gguf`` LM
+    weights) is returned unchanged.
 
     Multimodal projector files (``mmproj*.gguf``) are kept: they are companion
     weights, not an alternate quantization of the LM.
@@ -118,7 +119,7 @@ def select_store_gguf_download_files(
     # group's ``<base>-*-of-*.gguf`` glob); match repo paths by basename.
     patterns = gguf_allow_patterns(selected.rsplit("/", 1)[-1])
 
-    def _keep(entry: "FileListEntry") -> bool:
+    def _keep(entry: FileListEntry) -> bool:
         name = entry.path.rsplit("/", 1)[-1]
         if not name.endswith(".gguf"):
             return True  # config.json, tokenizer, etc.
