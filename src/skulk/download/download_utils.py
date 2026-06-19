@@ -319,14 +319,23 @@ def build_model_path(model_id: ModelId) -> Path:
     found = resolve_model_in_path(model_id)
     if found is not None:
         return found
+    # A safetensors/MLX repo is identified by its config.json; a bare GGUF repo
+    # (no config.json) is identified by a complete GGUF shard group on disk. Both
+    # must be accepted here or a bare GGUF model that downloaded fine would fail
+    # to load with FileNotFoundError (#327).
     default = SKULK_MODELS_DIR / model_id.normalize()
-    if default.is_dir() and (default / "config.json").exists():
+    if default.is_dir() and (
+        (default / "config.json").exists() or directory_has_gguf_weights(default)
+    ):
         return default
     # Fallback: check the default staging directory directly.
     # This covers cases where the staging path wasn't registered in
     # SKULK_MODELS_PATH (e.g., config not yet synced) but files exist.
     staging_fallback = Path.home() / ".exo" / "staging" / model_id.normalize()
-    if staging_fallback.is_dir() and (staging_fallback / "config.json").exists():
+    if staging_fallback.is_dir() and (
+        (staging_fallback / "config.json").exists()
+        or directory_has_gguf_weights(staging_fallback)
+    ):
         return staging_fallback
     raise FileNotFoundError(
         f"Model {model_id} not found on disk. "
@@ -764,6 +773,61 @@ async def file_meta(
         assert etag is not None, f"No remote hash for {url}"
         etag = trim_etag(etag)
         return content_length, etag
+
+
+async def range_read(
+    model_id: ModelId, revision: str, path: str, start: int, length: int
+) -> bytes:
+    """Read a byte range ``[start, start + length)`` of a repo file over HTTP.
+
+    Used to read a file's header (for example, a GGUF metadata block) without
+    downloading the whole multi-gigabyte weights file. Reuses the download
+    auth/SSL/proxy session and follows Hugging Face's ``resolve`` to CDN
+    redirect (the CDN serves range requests, which the resumable downloader
+    already depends on).
+
+    Args:
+        model_id: The Hugging Face repo id.
+        revision: The git revision to read (for example, ``"main"``).
+        path: The repo-relative file path.
+        start: The first byte offset to read (0-based, inclusive).
+        length: The number of bytes to read.
+
+    Returns:
+        The bytes the server returned for the range. This may be shorter than
+        ``length`` when the range runs past the end of the file.
+
+    Raises:
+        HuggingFaceAuthenticationError: The repo requires auth the caller lacks.
+        FileNotFoundError: The file does not exist in the repo at ``revision``.
+    """
+    url = urljoin(f"{get_hf_endpoint()}/{model_id}/resolve/{revision}/", path)
+    headers = {
+        **(await get_download_headers()),
+        "Range": f"bytes={start}-{start + length - 1}",
+    }
+    async with (
+        create_http_session(timeout_profile="short") as session,
+        session.get(url, headers=headers) as r,
+    ):
+        if r.status in (401, 403):
+            raise HuggingFaceAuthenticationError(
+                await _build_auth_error_message(r.status, model_id)
+            )
+        if r.status == 404:
+            raise FileNotFoundError(
+                f"File {path} not found in {model_id}@{revision}"
+            )
+        # A range starting at/after EOF yields 416; surface it as an empty read
+        # so callers see a clean end-of-file instead of an HTTP error.
+        if r.status == 416:
+            return b""
+        r.raise_for_status()
+        # Read at most ``length`` bytes from the body. With a 206 Partial Content
+        # response this is the requested range; if the CDN ever ignored the
+        # Range header (returning 200), capping the read still bounds memory to
+        # the header window instead of pulling the whole weights file.
+        return await r.content.read(length)
 
 
 async def download_file_with_retry(
