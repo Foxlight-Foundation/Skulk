@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Skulk launcher for an AMD / ROCm worker node (Strix Halo, gfx1151) on Linux.
+#
+# Copy to ~/launch-skulk.sh, set SKULK_DIR if your checkout is elsewhere, then
+# start it. To survive an SSH disconnect (Linux has no launchd), start it
+# detached:
+#
+#   setsid bash -c 'exec ~/launch-skulk.sh > ~/skulk.log 2>&1' </dev/null >/dev/null 2>&1 &
+#
+# A headless node needs no dashboard build: SKULK_DASHBOARD_DIR is intentionally
+# left unset, so the API serves without the UI.
+set -euo pipefail
+
+# Path to your Skulk checkout (override with SKULK_DIR=... if it lives elsewhere).
+SKULK_DIR="${SKULK_DIR:-$HOME/projects/foxlight/Skulk}"
+cd "$SKULK_DIR"
+
+# uv and the Rust toolchain that built the bindings.
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+
+# This node serves llama.cpp on its GPU. It also needs llama-cpp-python
+# importable (built with the matching backend); see deployment/rocm/README.md.
+# The master routes GGUF models whose compatible_backends include
+# `llama_cpp-vulkan` here.
+export SKULK_LLAMA_CPP_BACKENDS=vulkan
+
+# --- Match the rest of your cluster (these settings MUST agree on every node) -
+#
+# A stock Skulk cluster leaves the settings below unset: every node shares the
+# built-in libp2p namespace and runs the DATA plane on gossipsub. Joining such a
+# cluster needs nothing here. Only set these if the rest of your fleet does, and
+# then use the SAME values on every node, or this worker is isolated (a
+# different namespace) or its generated tokens never reach the API node (a
+# different DATA transport).
+#
+# Peers on the SAME LAN segment are found automatically (mDNS). If this node is
+# on a different segment from the cluster, dial the existing nodes explicitly:
+#   export SKULK_BOOTSTRAP_PEERS=/ip4/<peer-ip>/tcp/<port>/p2p/<peer-id>,...
+#
+# Custom libp2p namespace (use the same value the other nodes use):
+#   export SKULK_LIBP2P_NAMESPACE=your-cluster-namespace
+#
+# DATA plane over Eclipse Zenoh (only if the whole cluster uses Zenoh):
+#   export SKULK_ZENOH_DATA_PLANE=1
+#   export SKULK_ZENOH_LISTEN=tcp/0.0.0.0:7447
+#   export SKULK_ZENOH_CONNECT=tcp/<peer1-ip>:7447,tcp/<peer2-ip>:7447
+
+exec uv run skulk -v

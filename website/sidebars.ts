@@ -23,6 +23,7 @@ const sidebars: SidebarsConfig = {
         "api-guide",
         "build-and-runtime",
         "thunderbolt-clustering",
+        "amd-strix-halo-nodes",
         "run-skulk-as-a-service",
         "external-logging",
         {
