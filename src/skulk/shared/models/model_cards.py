@@ -528,10 +528,12 @@ class ModelCard(CamelCaseModel):
         Sizes the weights from the GGUF file the runner would actually load
         (`select_gguf_file` picks the first sorted file + its shard group).
         Structural fields come from `config.json` when the repo ships one (most
-        community GGUF repos do); when it does not they default to 0 and a
-        follow-up (GGUF-header parse, #327) can fill them in. Stamps the
-        llama.cpp backend tags so placement routes the model only to nodes with a
-        llama.cpp engine and prefers a GPU backend.
+        community GGUF repos do). A bare repo with no config.json **raises a
+        clear error** pointing at the GGUF-header-parse follow-up (#327) rather
+        than fabricating metadata (a `ModelCard` also cannot be constructed with
+        0 for its `PositiveInt` layer/hidden fields). Stamps the llama.cpp backend
+        tags so placement routes the model only to nodes with a llama.cpp engine
+        and prefers a GPU backend.
         """
         selected_size = _selected_gguf_shard_size(gguf_files)
 
@@ -540,10 +542,12 @@ class ModelCard(CamelCaseModel):
         # A bare GGUF repo with no config.json needs the metadata read from the
         # GGUF header instead (#327); until that lands, fail clearly rather than
         # fabricate placeholder layer/hidden sizes that would skew placement's
-        # memory and KV-budget math.
+        # memory and KV-budget math. Catch only the missing-file case so HF
+        # auth / rate-limit / transient network errors propagate unchanged
+        # instead of being mislabeled as "no config.json".
         try:
             config_data = await fetch_config_data(model_id)
-        except Exception as exc:
+        except FileNotFoundError as exc:
             raise ValueError(
                 f"GGUF repo {model_id} has no usable config.json ({exc}); "
                 "reading model metadata from the GGUF header is not yet "
