@@ -49,6 +49,38 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **AMD / Linux GPU nodes can join a cluster and serve GGUF models through
+  llama.cpp (#325, #331).** A non-Mac box (validated on an AMD Ryzen AI Max+ 395
+  "Strix Halo", `gfx1151`, via the Vulkan backend) joins as a worker that serves
+  GGUF models on its GPU alongside Apple Silicon nodes serving MLX. Backends are
+  self-describing `<engine>-<compute>` tags (`mlx-metal`, `llama_cpp-vulkan`,
+  ...); a model card declares `compatible_backends` (a hard placement filter) and
+  `backend_preference` (a soft, graceful-fallback ranking), so a GGUF model lands
+  only on a llama.cpp node and an MLX model only on the Macs, automatically. The
+  llama.cpp runner is single-node and streams tokens onto the existing data
+  plane. See `website/docs/amd-strix-halo-nodes.md`.
+
+- **The llama.cpp engine matches MLX on logprobs and tool calling (#356).** GGUF
+  models served on an AMD node support per-token `logprobs` / `top_logprobs`
+  (the model is loaded retaining per-token logits; `SKULK_LLAMA_CPP_LOGITS_ALL=0`
+  opts out to reclaim memory) and tool calling (a request's `tools` are forwarded;
+  a structured tool call is emitted when the model returns one, else its prose).
+  Multi-token prediction / speculative decoding remains MLX-only: GGUF models
+  advertise no MTP capability, so an AMD node serves plain autoregressive without
+  promising a speedup it cannot deliver.
+
+- **Collector-agnostic accelerator telemetry (#353, #354).** Node telemetry now
+  carries a vendor-neutral `accelerator` block (vendor / utilization / VRAM /
+  power / temperature / clock) filled at the collector boundary: mactop on Apple,
+  and a passive-sysfs collector for AMD/Linux GPUs, so a non-Mac GPU node is not a
+  telemetry blind spot. The dashboard renders it in a vendor-aware accelerator
+  panel.
+
+- **Heterogeneous-node identity in the topology (#355).** A Linux node reports a
+  real model / chip / OS (DMI + `/proc/cpuinfo` + `os-release`) instead of
+  "Unknown", and the dashboard labels non-Mac nodes correctly rather than
+  prefixing "macOS".
+
 - **The model store downloads only the selected GGUF quant (#339).** When the
   store host downloads a multi-quant GGUF repo from HuggingFace on a worker's
   behalf, it now fetches exactly what the direct-HuggingFace path fetches: the
@@ -117,6 +149,23 @@ This project records release notes here and mirrors public-facing notes in
   interchangeable behind the flag.
 
 ### Fixed
+
+- **The source-built GPU llama.cpp wheel survives `uv sync` (#358).** On a node
+  that declares a GPU llama.cpp backend, the service entrypoint now runs
+  `uv sync --inexact`, so a routine sync no longer prunes the out-of-resolution
+  source-built wheel (which previously dropped the node to CPU-only until a manual
+  rebuild). As a safety net, the node cross-checks a declared GPU backend against
+  the actual build (`llama_cpp.llama_supports_gpu_offload()`): if the wheel has no
+  GPU offload compiled in, it advertises only `llama_cpp-cpu` so GPU work is never
+  routed to a degraded build. `SKULK_AUTO_UPDATE=0` is no longer required as a
+  workaround on GPU nodes.
+
+- **The llama.cpp tool path honors cancellation (#357).** A tool-enabled request
+  runs one blocking, uninterruptible `create_chat_completion`; it now checks
+  cancellation at the boundaries around that call (skip if already cancelled,
+  suppress the result if a cancel landed while it ran), so a cancelled tool
+  request neither delivers output nor is marked complete, matching the streaming
+  path's cancellation semantics.
 
 - **Headless/non-Mac nodes boot without the built dashboard (#333).** A worker
   node with no `dashboard-react/dist` (for example a Linux node with no node/npm

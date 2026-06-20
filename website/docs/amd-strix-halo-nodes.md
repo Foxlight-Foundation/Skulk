@@ -99,6 +99,32 @@ Skulk downloads only the preferred quantization (not every quant in a multi-quan
 repo), loads it through llama.cpp on the Radeon GPU, and serves it through the
 same OpenAI-compatible endpoints as any other model.
 
+## What the AMD node can serve
+
+A GGUF model on the AMD node uses the same OpenAI-compatible endpoints as any
+other Skulk model, with the same streaming behavior. It matches the MLX nodes on
+the generation capabilities llama.cpp supports:
+
+- **Text generation**, streamed token by token.
+- **Logprobs**: per-token logprobs and ranked alternatives (`logprobs` /
+  `top_logprobs`). The model is loaded so it retains the per-token logits this
+  needs; an operator who never uses logprobs can turn that off to reclaim memory
+  with `SKULK_LLAMA_CPP_LOGITS_ALL=0`.
+- **Tool calling**: a request's `tools` are passed to the model. Whether the
+  model returns a *structured* tool call or describes the call in prose depends
+  on the model and its embedded chat template, which Skulk uses as-is; either way
+  the request completes through the normal streaming path.
+
+Two things are deliberately not on the AMD path today:
+
+- **Multi-token prediction (MTP) / speculative decoding is MLX-only.** Those
+  speedups come from MLX-specific drafting (model-native prediction heads or a
+  sidecar drafter) and cross-rank coordination, which the llama.cpp engine does
+  not implement, so an AMD node runs plain autoregressive decoding. GGUF models
+  advertise no MTP capability, so nothing promises it and silently falls short;
+  the AMD node simply serves at its native decode speed.
+- **Vision / multimodal GGUF** models are not served yet (text generation only).
+
 ## Scope
 
 A single AMD node serves GGUF models on its own GPU. Sharding one model across an
