@@ -50,6 +50,16 @@ placement check and the worker's local guard derive the ceiling from
 worker on the same heuristic makes the two checks agree); the worker's advantage
 is using *current local* ``ram_available`` rather than the gossiped value."""
 
+GPU_VRAM_WORKING_SET_FRACTION: float = 0.90
+"""Fraction of a node's *discrete GPU VRAM* usable for weights + KV on a
+GPU-offload node (AMD/NVIDIA running llama.cpp/vLLM/CUDA), as opposed to
+``GPU_WORKING_SET_FRACTION`` for Apple unified memory. Discrete VRAM is a
+dedicated pool the engine allocates from, not shared with the OS and app
+working set, so only driver/runtime/fragmentation overhead is unavailable
+(hence a higher fraction than Apple's 0.75). 0.90 matches the de-facto GPU
+default (e.g. vLLM ``gpu_memory_utilization``). Used only when a node reports
+discrete VRAM telemetry; Apple unified-memory nodes keep the 0.75 path."""
+
 KV_CONTEXT_BUDGET_TOKENS: int = 8192
 """Per-sequence context length reserved for KV cache during the fit check.
 Reserving a model's advertised max (e.g. GLM-4.7-Flash: 131072) would over-

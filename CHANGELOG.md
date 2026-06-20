@@ -151,6 +151,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Placement now admits GPU-offload nodes against their discrete VRAM, not
+  system RAM.** The memory fit check capped every node at
+  `GPU_WORKING_SET_FRACTION` (0.75) of *system* RAM, a Metal/Apple-unified-memory
+  assumption. On a discrete-VRAM node (a Strix Halo box whose BIOS carves 128 GB
+  into ~64 GB system + 64 GB GPU VRAM) that refused models that fit fine in the
+  64 GB VRAM the llama.cpp/Vulkan engine actually allocates from (e.g.
+  `Llama-3.3-70B` at ~40 GB: "needs 54.2 GB but can use 46.1 GB"). Placement now
+  detects discrete VRAM from the node's accelerator telemetry
+  (`usable_vram_by_node`: AMD/NVIDIA `vram_total_bytes`) and admits against
+  `min(vram_total − vram_used, GPU_VRAM_WORKING_SET_FRACTION (0.90) × vram_total)`.
+  Apple unified-memory nodes are unchanged (they report no discrete VRAM). This
+  is engine-agnostic, so it carries forward to vLLM/CUDA nodes.
+
 - **A large-context GGUF no longer OOM-kills the node on load.** The llama.cpp
   runner loaded models with `n_ctx=0`, which sizes the KV cache for the model's
   full trained context (e.g. gemma-4's 128k) instead of the per-instance context
