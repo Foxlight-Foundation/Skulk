@@ -121,8 +121,8 @@ Two things are deliberately not on the AMD path today:
   speedups come from MLX-specific drafting (model-native prediction heads or a
   sidecar drafter) and cross-rank coordination, which the llama.cpp engine does
   not implement, so an AMD node runs plain autoregressive decoding. GGUF models
-  advertise no MTP capability, so nothing promises it and silently falls short;
-  the AMD node simply serves at its native decode speed.
+  advertise no MTP capability, so it is never shown as available for them (there
+  is no promise to fall short of); the AMD node serves at its native decode speed.
 - **Vision / multimodal GGUF** models are not served yet (text generation only).
 
 ## Scope
