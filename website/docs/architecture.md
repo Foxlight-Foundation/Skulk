@@ -220,6 +220,17 @@ concrete engine for its node at runner-spawn time by intersecting the card's
 [AMD Strix Halo nodes](./amd-strix-halo-nodes.md) guide for bringing up a
 non-Mac node.
 
+The llama.cpp runner serves GGUF models single-node and matches the MLX runner
+on the capabilities llama.cpp supports natively: per-token logprobs (with the
+top alternatives) and tool calling. A tool-enabled request runs unstreamed so
+the caller receives an assembled tool call rather than fragile token-by-token
+deltas; if the model answers in prose instead, that prose streams back normally.
+Logprobs requires the model to be loaded so it retains per-token logits, which
+the runner does by default; an operator who never uses logprobs can turn that
+off to reclaim memory. Whether a given GGUF emits a structured tool call (versus
+describing one in prose) depends on the model and its embedded chat template,
+which the runner uses as-is.
+
 ## The inference engine
 
 Inference happens entirely inside the runner subprocess. Skulk wraps MLX (and the upstream mlx-lm model implementations) in a layer that handles distributed coordination, family-specific behavior, and operator-controlled knobs.

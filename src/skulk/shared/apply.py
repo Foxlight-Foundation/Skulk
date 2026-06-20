@@ -44,6 +44,7 @@ from skulk.shared.types.worker.downloads import DownloadProgress
 from skulk.shared.types.worker.instances import Instance, InstanceId
 from skulk.shared.types.worker.runners import RunnerId, RunnerShutdown, RunnerStatus
 from skulk.utils.info_gatherer.info_gatherer import (
+    LinuxGpuMetrics,
     MacmonMetrics,
     MacThunderboltConnections,
     MacThunderboltIdentifiers,
@@ -364,7 +365,11 @@ def apply_node_gathered_info(event: NodeGatheredInfo, state: State) -> State:
         # match exhaustive and to no-op a legacy event from an un-upgraded
         # worker during a rolling upgrade (its readings ride telemetry once it
         # restarts on the new binary). last_seen is still bumped above.
-        case MactopMetrics() | MacmonMetrics():
+        case MactopMetrics() | MacmonMetrics() | LinuxGpuMetrics():
+            # GPU/SoC readings ride the telemetry plane (#279 / accelerator
+            # telemetry), not the event log; applied to TelemetryView, not State.
+            # Kept as explicit no-op cases so the GatheredInfo match stays
+            # exhaustive and a stray log-path delivery is harmless.
             pass
         case MemoryUsage():
             pass
