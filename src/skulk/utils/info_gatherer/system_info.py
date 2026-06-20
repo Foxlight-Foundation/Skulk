@@ -8,24 +8,68 @@ from anyio import run_process
 
 from skulk.shared.types.profiling import InterfaceType, NetworkInterfaceInfo
 
+# DMI fields are frequently populated with OEM placeholder junk; treat these
+# (case-insensitively) as "not set" so a node reports a real name or nothing.
+_DMI_JUNK = {
+    "",
+    "to be filled by o.e.m.",
+    "default string",
+    "system product name",
+    "system manufacturer",
+    "none",
+    "not applicable",
+    "not specified",
+    "oem",
+    "o.e.m.",
+}
+
+
+def _read_text(path: str) -> str:
+    """Read and strip a small system file, or return '' if unavailable."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def _clean_dmi(value: str) -> str:
+    """Return a DMI value, or '' if it is empty or a known OEM placeholder."""
+    return "" if value.strip().lower() in _DMI_JUNK else value.strip()
+
+
+def _linux_os_pretty_name() -> str:
+    """Return /etc/os-release PRETTY_NAME (e.g. 'Ubuntu 26.04 LTS') or ''."""
+    for line in _read_text("/etc/os-release").splitlines():
+        if line.startswith("PRETTY_NAME="):
+            return line.split("=", 1)[1].strip().strip('"')
+    return ""
+
 
 def get_os_version() -> str:
     """Return the OS version string for this node.
 
-    On macOS this is the macOS version (e.g. ``"15.3"``).
-    On other platforms it falls back to the platform name (e.g. ``"Linux"``).
+    On macOS this is the macOS version (e.g. ``"15.3"``). On Linux it is the
+    distro pretty name from ``/etc/os-release`` (e.g. ``"Ubuntu 26.04 LTS"``),
+    falling back to the bare platform name.
     """
     if sys.platform == "darwin":
         version = platform.mac_ver()[0]
         return version if version else "Unknown"
+    if sys.platform.startswith("linux"):
+        return _linux_os_pretty_name() or platform.system() or "Unknown"
     return platform.system() or "Unknown"
 
 
 async def get_os_build_version() -> str:
-    """Return the macOS build version string (e.g. ``"24D5055b"``).
+    """Return the OS build version string.
 
-    On non-macOS platforms, returns ``"Unknown"``.
+    macOS: the build version (e.g. ``"24D5055b"``). Linux: the kernel release
+    (e.g. ``"6.14.0-12-generic"``), the closest build analog. Other platforms:
+    ``"Unknown"``.
     """
+    if sys.platform.startswith("linux"):
+        return platform.release() or "Unknown"
     if sys.platform != "darwin":
         return "Unknown"
 
@@ -139,12 +183,45 @@ async def get_network_interfaces() -> list[NetworkInterfaceInfo]:
     return interfaces_info
 
 
+def _linux_model_and_chip() -> tuple[str, str]:
+    """Derive (model, chip) for a Linux node from sysfs/procfs (no subprocess).
+
+    Model comes from DMI (``/sys/class/dmi/id``): the product name, falling back
+    to the board name, prefixed with the vendor when it adds information (e.g.
+    ``"Nimo Direct Inc. MME3L"``). Chip is the CPU brand string from
+    ``/proc/cpuinfo`` (``"AMD RYZEN AI MAX+ 395 w/ Radeon 8060S"``), which on an
+    APU usefully also names the integrated GPU. Either falls back to the Mac-style
+    ``"Unknown Model"`` / ``"Unknown Chip"`` so callers stay uniform.
+    """
+    dmi = "/sys/class/dmi/id"
+    product = _clean_dmi(_read_text(f"{dmi}/product_name")) or _clean_dmi(
+        _read_text(f"{dmi}/board_name")
+    )
+    vendor = _clean_dmi(_read_text(f"{dmi}/sys_vendor"))
+    if product and vendor and vendor.lower() not in product.lower():
+        model = f"{vendor} {product}"
+    else:
+        model = product or "Unknown Model"
+
+    chip = "Unknown Chip"
+    for line in _read_text("/proc/cpuinfo").splitlines():
+        if line.lower().startswith("model name"):
+            chip = line.split(":", 1)[1].strip() or "Unknown Chip"
+            break
+    return (model, chip)
+
+
 async def get_model_and_chip() -> tuple[str, str]:
-    """Get Mac system information using system_profiler."""
+    """Get this node's hardware model and chip names.
+
+    macOS uses ``system_profiler``; Linux reads DMI + ``/proc/cpuinfo`` (see
+    ``_linux_model_and_chip``); other platforms report ``Unknown``.
+    """
     model = "Unknown Model"
     chip = "Unknown Chip"
 
-    # TODO: better non mac support
+    if sys.platform.startswith("linux"):
+        return _linux_model_and_chip()
     if sys.platform != "darwin":
         return (model, chip)
 
