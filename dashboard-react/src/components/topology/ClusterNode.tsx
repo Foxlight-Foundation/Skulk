@@ -51,8 +51,14 @@ function buildDebugContent(
 
   const chip = nodeInfo.system_info?.chip ?? '';
   const modelId = nodeInfo.system_info?.model_id ?? 'Unknown';
+  // macOS reports a bare version ("15.3"), so prefix "macOS"; Linux reports a
+  // self-naming string ("Ubuntu 26.04 LTS"), so show it as-is rather than
+  // mislabeling a non-Mac node "macOS".
+  const osBuild = nodeInfo.os_build_version ? ` (${nodeInfo.os_build_version})` : '';
   const os = nodeInfo.os_version
-    ? `macOS ${nodeInfo.os_version}${nodeInfo.os_build_version ? ` (${nodeInfo.os_build_version})` : ''}`
+    ? /^\d/.test(nodeInfo.os_version)
+      ? `macOS ${nodeInfo.os_version}${osBuild}`
+      : `${nodeInfo.os_version}${osBuild}`
     : '';
   // Group outbound connections by target node
   const byTarget = new Map<string, string[]>();

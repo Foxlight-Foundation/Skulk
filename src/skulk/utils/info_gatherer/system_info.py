@@ -62,10 +62,14 @@ def get_os_version() -> str:
 
 
 async def get_os_build_version() -> str:
-    """Return the macOS build version string (e.g. ``"24D5055b"``).
+    """Return the OS build version string.
 
-    On non-macOS platforms, returns ``"Unknown"``.
+    macOS: the build version (e.g. ``"24D5055b"``). Linux: the kernel release
+    (e.g. ``"6.14.0-12-generic"``), the closest build analog. Other platforms:
+    ``"Unknown"``.
     """
+    if sys.platform.startswith("linux"):
+        return platform.release() or "Unknown"
     if sys.platform != "darwin":
         return "Unknown"
 
