@@ -9,8 +9,9 @@ sidebar_position: 96
 # Configuration Taxonomy and Re-homing
 
 This is a design record for reorganizing Skulk's configuration surface. Today
-that surface is roughly sixty `SKULK_*` environment variables, most inherited
-from the exo era and accreted during debugging. They are read at ~116 sites
+that surface is roughly fifty `SKULK_*` environment variables (plus a dozen
+`SKULK_`-prefixed *derived path constants* that are not env vars at all), most
+inherited from the exo era and accreted during debugging. They are read at ~116 sites
 across ~21 files, with no shared parsing rules and no categorization.
 
 The original framing (issue: "typed env config migration") was to wrap the env
@@ -38,7 +39,8 @@ A few `SKULK_`-prefixed names are not environment variables and are out of scope
 
 - `SKULK_RUNNER_MUST_FAIL` / `SKULK_RUNNER_MUST_OOM` /
   `SKULK_RUNNER_MUST_TIMEOUT` are magic strings matched in prompt **content**
-  for fault injection (`batch_generator.py`), not env vars.
+  for fault injection (`src/skulk/worker/runner/llm_inference/batch_generator.py`),
+  not env vars.
 - `SKULK_MAX_CHUNK_SIZE`, `SKULK_MODELS_DIRS`, `SKULK_MODELS_READ_ONLY_DIRS` are
   internal Python constants derived in `constants.py`, not env reads.
 
@@ -47,16 +49,21 @@ A few `SKULK_`-prefixed names are not environment variables and are out of scope
 ### A. Filesystem layout (keep as node env; already centralized)
 
 Deployment layout, not user-facing knobs. Already resolved in one place
-(`shared/constants.py`) with XDG support. Leave as env; the only cleanup is to
-make sure new code reads the `constants.py` value rather than calling
-`os.environ` again.
+(`src/skulk/shared/constants.py`) with XDG support. Leave as env; the only
+cleanup is to make sure new code reads the `constants.py` value rather than
+calling `os.environ` again.
 
-`SKULK_HOME`, `SKULK_CONFIG_HOME`, `SKULK_DATA_HOME`, `SKULK_CACHE_HOME`,
-`SKULK_CONFIG_FILE`, `SKULK_NODE_ID_KEYPAIR`, `SKULK_MODELS_DIR`,
-`SKULK_MODELS_PATH`, `SKULK_CUSTOM_MODEL_CARDS_DIR`, `SKULK_EVENT_LOG_DIR`,
-`SKULK_IMAGE_CACHE_DIR`, `SKULK_TRACING_CACHE_DIR`, `SKULK_LOG`, `SKULK_LOG_DIR`,
-`SKULK_RESOURCES_DIR`, `SKULK_DASHBOARD_DIR`, `SKULK_RUNTIME_DIR`,
-`SKULK_VECTOR_DATA_DIR`.
+Most of this bucket is **not** an environment variable: only a few roots are
+read from the environment, and the rest are Python constants in `constants.py`
+**derived** from those roots (and XDG), so they need no re-homing at all.
+
+- Env-read roots: `SKULK_HOME`, `SKULK_MODELS_DIR`, `SKULK_MODELS_PATH`,
+  `SKULK_RESOURCES_DIR`, `SKULK_DASHBOARD_DIR`, `SKULK_RUNTIME_DIR`.
+- Derived constants (not env vars): `SKULK_CONFIG_HOME`, `SKULK_DATA_HOME`,
+  `SKULK_CACHE_HOME`, `SKULK_CONFIG_FILE`, `SKULK_NODE_ID_KEYPAIR`,
+  `SKULK_CUSTOM_MODEL_CARDS_DIR`, `SKULK_EVENT_LOG_DIR`, `SKULK_IMAGE_CACHE_DIR`,
+  `SKULK_TRACING_CACHE_DIR`, `SKULK_LOG`, `SKULK_LOG_DIR`,
+  `SKULK_VECTOR_DATA_DIR`.
 
 ### B. Per-model behavior (move to configurable model cards)
 
@@ -123,16 +130,18 @@ belt-and-suspenders override), `SKULK_TEST_DISTRIBUTED_MODEL`, `SKULK_TEST_LOG`.
 
 | Home | Count (approx) | Action |
 |---|---|---|
-| A. Filesystem layout | ~18 | Keep (already centralized); read constants, not env |
+| A. Filesystem layout | ~6 env-read (+~12 derived constants) | Keep (already centralized); read constants, not env |
 | B. Per-model behavior | ~12 | Move to model-card fields |
 | C. Cluster policy | ~9 | Move to runtime Settings (gossipsub + UI, retained) |
 | D. Node-local launch | ~9 | Keep as env; type + validate centrally |
 | E. Per-request | ~4 | API parameter (+ cluster default for max tokens) |
 | F. Dev / test only | ~12 | Quarantine under a developer-only namespace |
 
-The headline: only homes A + D (~27) are truly node configuration. Homes B and C
-(~21) are model behavior and cluster policy that should never have been env vars,
-and home F (~12) should be invisible to operators.
+The headline: of the genuine env vars, only homes A + D (~15) are truly node
+configuration. Homes B and C (~21) are model behavior and cluster policy that
+should never have been env vars, and home F (~12) should be invisible to
+operators. The bulk of the filesystem "bucket" is not even env vars but derived
+path constants that need no re-homing.
 
 ## Re-homing roadmap
 
