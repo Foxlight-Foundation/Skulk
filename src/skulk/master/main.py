@@ -611,7 +611,8 @@ class Master:
                                         download_status=self.state.downloads,
                                         node_resources=self._telemetry_view.node_resources,
                                         node_vram=usable_vram_by_node(
-                                            self._telemetry_view.node_system
+                                            self._telemetry_view.node_system,
+                                            self._telemetry_view.node_resources,
                                         ),
                                     )
                                     logger.warning(
@@ -674,7 +675,8 @@ class Master:
                                 # Discrete-GPU VRAM (AMD/NVIDIA) so big models
                                 # admit against VRAM, not 0.75 x system RAM.
                                 node_vram=usable_vram_by_node(
-                                    self._telemetry_view.node_system
+                                    self._telemetry_view.node_system,
+                                    self._telemetry_view.node_resources,
                                 ),
                             )
                             transition_events = get_transition_events(
@@ -689,6 +691,10 @@ class Master:
                                 # telemetry plane (#279 slice 2) — stamp the
                                 # memory-derived ceiling on exact placements too
                                 self._telemetry_view.node_memory,
+                                node_vram=usable_vram_by_node(
+                                    self._telemetry_view.node_system,
+                                    self._telemetry_view.node_resources,
+                                ),
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks

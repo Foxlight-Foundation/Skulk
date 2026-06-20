@@ -28,6 +28,7 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
     MemoryUsage,
     NodeNetworkInfo,
+    NodeResources,
     SystemPerformanceProfile,
 )
 from skulk.shared.types.topology import Cycle, RDMAConnection, SocketConnection
@@ -69,18 +70,35 @@ class CycleMemoryDiagnostics(CamelCaseModel):
     """One human-readable line per cycle rejected on real memory grounds."""
 
 
+def _has_gpu_offload_backend(backends: frozenset[str]) -> bool:
+    """Whether a node advertises a discrete-GPU-offload llama.cpp backend.
+
+    True only for a non-CPU llama.cpp compute tag (``llama_cpp-vulkan/rocm/cuda``).
+    A node that exposes a GPU but advertises only ``llama_cpp-cpu`` (the default
+    when ``SKULK_LLAMA_CPP_BACKENDS`` is unset, or after a GPU wheel is replaced)
+    runs GGUF on the CPU out of system RAM, so it must NOT be admitted against
+    VRAM it will not use.
+    """
+    return any(
+        tag.startswith("llama_cpp-") and not tag.endswith("-cpu") for tag in backends
+    )
+
+
 def usable_vram_by_node(
     node_system: Mapping[NodeId, SystemPerformanceProfile],
+    node_resources: Mapping[NodeId, NodeResources] | None = None,
 ) -> dict[NodeId, Memory]:
     """Per-node usable discrete-GPU VRAM for placement, keyed by node.
 
-    Only nodes with a discrete-VRAM accelerator (AMD/NVIDIA reporting a nonzero
-    ``vram_total_bytes`` in their ``node_system`` telemetry) appear here. A
-    GPU-offload engine (llama.cpp/vLLM/CUDA) allocates weights + KV from that
-    VRAM pool, which the OS reports separately from system RAM (e.g. a Strix Halo
-    box's BIOS carves 128 GB into ~64 GB system + 64 GB VRAM), so placement must
-    admit against VRAM, not ``0.75 * system_ram``. Apple unified-memory nodes
-    report no discrete VRAM and are absent here, keeping the system-RAM path.
+    A node appears here only when it both (a) reports a discrete-VRAM accelerator
+    (AMD/NVIDIA with a nonzero ``vram_total_bytes`` in ``node_system``) and
+    (b) advertises a GPU-offload llama.cpp backend (``_has_gpu_offload_backend``),
+    so its engine actually allocates weights + KV from that VRAM pool. That pool
+    is reported separately from system RAM (e.g. a Strix Halo box's BIOS carves
+    128 GB into ~64 GB system + 64 GB VRAM), so placement admits against VRAM, not
+    ``0.75 * system_ram``. Apple unified-memory nodes report no discrete VRAM and
+    are absent, keeping the system-RAM path. When ``node_resources`` is omitted
+    the backend gate is skipped (test/simple use).
 
     The usable figure mirrors the RAM path: ``min(vram_total - vram_used,
     vram_total * GPU_VRAM_WORKING_SET_FRACTION)`` so it accounts for VRAM already
@@ -94,6 +112,10 @@ def usable_vram_by_node(
         total = accelerator.vram_total_bytes
         if not total or total <= 0:
             continue
+        if node_resources is not None:
+            resources = node_resources.get(node_id)
+            if resources is None or not _has_gpu_offload_backend(resources.backends):
+                continue
         used = accelerator.vram_used_bytes or 0
         available = max(0, total - used)
         ceiling = int(total * GPU_VRAM_WORKING_SET_FRACTION)
@@ -241,7 +263,7 @@ def filter_cycles_by_memory(
             available = _node_usable_memory(node_memory[node_id], node_vram_usable)
             if required_with_overhead > available:
                 pool = (
-                    f"{GPU_VRAM_WORKING_SET_FRACTION:.0%} of GPU VRAM"
+                    "usable GPU VRAM"
                     if node_vram_usable is not None
                     else f"min of available and {GPU_WORKING_SET_FRACTION:.0%} of RAM"
                 )

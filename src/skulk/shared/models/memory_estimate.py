@@ -166,6 +166,7 @@ def shard_fraction_of_model(shard: ShardMetadata) -> float | None:
 def instance_context_token_limit(
     shard_assignments: ShardAssignments,
     node_ram_totals: Mapping[NodeId, Memory],
+    node_vram: Mapping[NodeId, Memory] | None = None,
 ) -> int | None:
     """Deterministic context-token ceiling for one placed instance.
 
@@ -177,14 +178,21 @@ def instance_context_token_limit(
 
     Determinism is load-bearing: on multi-rank instances every rank admits or
     rejects a request independently, and divergent verdicts deadlock the
-    collectives. All inputs here are static — ``ram_total`` never changes for
-    a node, and placement only happens after the master has indexed memory
-    for every hosting node, so every worker computes the identical value.
-    Time-varying ``ram_available`` must NOT be used here.
+    collectives. All inputs here are static (``ram_total`` and a node's discrete
+    VRAM total never change for a node), and placement only happens after the
+    master has indexed memory for every hosting node, so every worker computes
+    the identical value. Time-varying ``ram_available`` must NOT be used here.
+
+    ``node_vram`` (a node's usable discrete-GPU VRAM, see ``usable_vram_by_node``)
+    is the working-set ceiling for a GPU-offload node, mirroring the memory-fit
+    admission: without it a model whose weights exceed ``0.75 * ram_total`` but
+    fit in VRAM would get a negative KV budget and a 0-token ceiling (every
+    request rejected), even though placement admitted it against VRAM.
 
     Returns ``None`` when no ceiling is enforceable (unknown KV cost or
     missing node memory, falling back to the card limit when that exists).
     """
+    node_vram = node_vram or {}
     model_card: ModelCard | None = None
     memory_limit: int | None = None
     for shard in shard_assignments.runner_to_shard.values():
@@ -203,8 +211,9 @@ def instance_context_token_limit(
             if fraction is None or fraction <= 0.0 or ram_total is None:
                 memory_limit = None
                 break
+            working_set = node_vram.get(node_id) or gpu_working_set_ceiling(ram_total)
             kv_budget = (
-                gpu_working_set_ceiling(ram_total)
+                working_set
                 - model_card.storage_size * fraction * MEMORY_OVERHEAD_FACTOR
                 - MEMORY_OVERHEAD_FLOOR
             )

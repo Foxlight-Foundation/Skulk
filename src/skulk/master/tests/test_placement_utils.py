@@ -19,8 +19,10 @@ from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
     AcceleratorMetrics,
+    AcceleratorVendor,
     NetworkInterfaceInfo,
     NodeNetworkInfo,
+    NodeResources,
     SystemPerformanceProfile,
 )
 from skulk.shared.types.topology import Connection, SocketConnection
@@ -359,10 +361,10 @@ def test_usable_vram_by_node_selects_discrete_gpus_only():
     nvidia_busy = NodeId()
 
     def _profile(
-        vendor: str, total_gb: float | None, used_gb: float = 0.0
+        vendor: AcceleratorVendor, total_gb: float | None, used_gb: float = 0.0
     ) -> SystemPerformanceProfile:
         acc = AcceleratorMetrics(
-            vendor=vendor,  # pyright: ignore[reportArgumentType]
+            vendor=vendor,
             vram_total_bytes=(
                 Memory.from_gb(total_gb).in_bytes if total_gb is not None else None
             ),
@@ -370,10 +372,12 @@ def test_usable_vram_by_node_selects_discrete_gpus_only():
         )
         return SystemPerformanceProfile(accelerator=acc)
 
+    cpu_only = NodeId()
     node_system = {
         amd: _profile("amd", 64.0),
         apple: _profile("apple", None),
         nvidia_busy: _profile("nvidia", 24.0, used_gb=20.0),
+        cpu_only: _profile("amd", 64.0),
     }
     usable = usable_vram_by_node(node_system)
 
@@ -383,6 +387,18 @@ def test_usable_vram_by_node_selects_discrete_gpus_only():
     # NVIDIA with 20/24 GB in use: available (4 GB) is below the 0.90 cap, so it
     # nets out the in-use VRAM rather than assuming the whole card is free.
     assert usable[nvidia_busy].in_bytes == Memory.from_gb(4).in_bytes
+
+    # Backend gate: with node_resources, a discrete-GPU node that advertises only
+    # llama_cpp-cpu (runs GGUF on CPU out of system RAM) is excluded, while a
+    # vulkan node keeps its VRAM entry.
+    resources = {
+        amd: NodeResources(backends=frozenset({"llama_cpp", "llama_cpp-vulkan"})),
+        cpu_only: NodeResources(backends=frozenset({"llama_cpp", "llama_cpp-cpu"})),
+    }
+    gated = usable_vram_by_node(node_system, resources)
+    assert amd in gated
+    assert cpu_only not in gated  # CPU-only backend -> no VRAM admission
+    assert nvidia_busy not in gated  # no resources entry -> excluded under gating
 
 
 def test_filter_cycles_respects_gpu_working_set_ceiling():

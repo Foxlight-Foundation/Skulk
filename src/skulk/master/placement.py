@@ -64,6 +64,7 @@ def add_instance_to_placements(
     topology: Topology,
     current_instances: Mapping[InstanceId, Instance],
     node_memory: Mapping[NodeId, MemoryUsage],
+    node_vram: Mapping[NodeId, Memory] | None = None,
 ) -> Mapping[InstanceId, Instance]:
     # TODO: validate against topology
 
@@ -85,6 +86,7 @@ def add_instance_to_placements(
             for node_id in assignments.node_to_runner
             if node_id in node_memory
         },
+        node_vram=node_vram,
     )
     instance = command.instance.model_copy(update={"context_token_limit": ceiling})
     return {**current_instances, instance.instance_id: instance}
@@ -412,6 +414,7 @@ def place_instance(
             node_id: node_memory[node_id].ram_total
             for node_id in selected_cycle.node_ids
         },
+        node_vram=node_vram,
     )
 
     cycle_digraph: Topology = topology.get_subgraph_from_nodes(selected_cycle.node_ids)

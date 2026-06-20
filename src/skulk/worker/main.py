@@ -15,6 +15,7 @@ from skulk.download.download_utils import resolve_model_in_path
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
 from skulk.shared.models.memory_estimate import (
+    GPU_VRAM_WORKING_SET_FRACTION,
     estimate_shard_footprint,
     gpu_working_set_ceiling,
 )
@@ -50,6 +51,7 @@ from skulk.shared.types.events import (
     TopologyEdgeCreated,
     TopologyEdgeDeleted,
 )
+from skulk.shared.types.memory import Memory
 from skulk.shared.types.multiaddr import Multiaddr
 from skulk.shared.types.profiling import MemoryUsage
 from skulk.shared.types.state import State
@@ -153,6 +155,37 @@ def _runner_failed_wedged(status: RunnerStatus | None) -> bool:
         and status.error_message is not None
         and WEDGE_FAILURE_MARKER in status.error_message
     )
+
+
+def _local_usable_vram() -> Memory | None:
+    """Usable discrete-GPU VRAM on THIS node, or ``None`` if it has no discrete GPU.
+
+    The worker counterpart of the master's ``usable_vram_by_node``: a GPU-offload
+    node (AMD/Linux amdgpu) allocates a shard from its VRAM pool, not system RAM,
+    so the local pre-spawn fit guard must size against VRAM or it would falsely
+    refuse a placement the VRAM-aware master correctly admitted. Reads the local
+    amdgpu sysfs (passive, the same source as the telemetry collector) and applies
+    the same ``min(vram_total - vram_used, GPU_VRAM_WORKING_SET_FRACTION x
+    vram_total)`` ceiling. Returns ``None`` on Apple unified-memory nodes (no
+    amdgpu device), which keep the system-RAM path. The master is the backend
+    authority that decides a shard belongs on this GPU node in the first place.
+    """
+    from skulk.utils.info_gatherer.linux_gpu import (
+        find_amd_gpu_device,
+        read_accelerator_metrics,
+    )
+
+    device = find_amd_gpu_device()
+    if device is None:
+        return None
+    accelerator = read_accelerator_metrics(device)
+    total = accelerator.vram_total_bytes
+    if not total or total <= 0:
+        return None
+    used = accelerator.vram_used_bytes or 0
+    available = max(0, total - used)
+    ceiling = int(total * GPU_VRAM_WORKING_SET_FRACTION)
+    return Memory.from_bytes(min(available, ceiling))
 
 
 def _summarize_worker_task(task: Task) -> str:
@@ -418,16 +451,27 @@ class Worker:
         footprint = estimate_shard_footprint(
             shard.model_card, self._shard_memory_fraction(shard)
         )
-        local = MemoryUsage.from_local_gpu_wireable()
-        usable = min(local.ram_available, gpu_working_set_ceiling(local.ram_total))
+        # On a discrete-GPU node the engine allocates from VRAM, not system RAM,
+        # so size the guard against local usable VRAM or it would falsely refuse
+        # the very placement the (VRAM-aware) master just admitted. None on
+        # unified-memory (Apple) nodes, which keep the system-RAM path.
+        vram = _local_usable_vram()
+        if vram is not None:
+            usable = vram
+            pool = f"{vram.in_gb:.1f}GB usable GPU VRAM"
+        else:
+            local = MemoryUsage.from_local_gpu_wireable()
+            usable = min(local.ram_available, gpu_working_set_ceiling(local.ram_total))
+            pool = (
+                f"{local.ram_available.in_gb:.1f}GB GPU-wireable, capped at "
+                "the GPU working-set ceiling"
+            )
         if footprint > usable:
             return (
                 f"Refusing to load a shard of {shard.model_card.model_id} on "
                 f"{self.node_id}: ~{footprint.in_gb:.1f}GB needed but only "
-                f"~{usable.in_gb:.1f}GB usable locally "
-                f"({local.ram_available.in_gb:.1f}GB GPU-wireable, capped at "
-                "the GPU working-set ceiling). Refusing before load to avoid "
-                "an OOM abort that leaks GPU memory."
+                f"~{usable.in_gb:.1f}GB usable locally ({pool}). Refusing before "
+                "load to avoid an OOM abort that leaks GPU memory."
             )
         return None
 
