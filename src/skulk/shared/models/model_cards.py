@@ -111,12 +111,21 @@ class ModelTask(str, Enum):
 
 
 class ComponentInfo(CamelCaseModel):
+    """One weight component of a multi-component model (e.g. a diffusion stack)."""
+
     component_name: str
+    """Logical name of this component (e.g. ``text_encoder``, ``transformer``)."""
     component_path: str
+    """Repo-relative subdirectory holding this component's weights."""
     storage_size: Memory
+    """On-disk size of this component's weights."""
     n_layers: PositiveInt | None = None
+    """Layer count for this component when it is shardable; ``None`` otherwise."""
     can_shard: bool
+    """Whether this component may be split across nodes (vs. loaded whole)."""
     safetensors_index_filename: str | None = None
+    """The component's ``*.safetensors.index.json`` filename when sharded across
+    files; ``None`` for a single-file component."""
 
 
 class VisionCardConfig(CamelCaseModel):
@@ -126,12 +135,20 @@ class VisionCardConfig(CamelCaseModel):
     auto-detected from ``config.json`` during card creation."""
 
     image_token_id: int
+    """Token id the model uses as the image placeholder in the prompt."""
     model_type: str
+    """Vision model-type tag from ``config.json``, selecting the image processor."""
     weights_repo: str = ""
+    """Repo holding the vision-tower weights when separate from the LM; empty if
+    bundled with the main weights."""
     image_token: str | None = None
+    """The literal image placeholder string, when distinct from ``image_token_id``."""
     processor_repo: str | None = None
+    """Repo providing the image processor/preprocessor config, if not the main repo."""
     boi_token_id: int | None = None
+    """Begin-of-image token id, for families that bracket image spans."""
     eoi_token_id: int | None = None
+    """End-of-image token id, for families that bracket image spans."""
 
 
 def multi_node_speculation_disabled(
@@ -196,10 +213,16 @@ class ReasoningCardConfig(CamelCaseModel):
     """Optional advanced reasoning capability declarations for a model card."""
 
     supports_toggle: bool | None = None
+    """Whether the model can have reasoning turned on/off per request."""
     supports_budget: bool | None = None
+    """Whether the model accepts a reasoning-effort/budget control."""
     format: ReasoningFormat | None = None
+    """How reasoning is marked in the output stream: ``none``, ``token_delimited``
+    (special tokens), or ``channel_delimited`` (a separate reasoning channel)."""
     default_effort: ReasoningEffort | None = None
+    """Reasoning effort applied when the request does not specify one."""
     disabled_effort: ReasoningEffort | None = None
+    """The effort value that means "reasoning off" for this model."""
 
     @field_validator("format", mode="before")
     @classmethod
@@ -215,15 +238,22 @@ class ModalitiesCardConfig(CamelCaseModel):
     """Optional advanced modality declarations for a model card."""
 
     supports_audio_input: bool | None = None
+    """Whether the model accepts audio input."""
     supports_native_multimodal: bool | None = None
+    """Whether the model natively interleaves modalities (vs. a bolt-on adapter)."""
 
 
 class ToolingCardConfig(CamelCaseModel):
     """Optional tool-calling behavior declarations for a model card."""
 
     supports_tool_calling: bool | None = None
+    """Whether the model supports function/tool calling."""
     tool_call_format: ToolCallFormat | None = None
+    """The wire format the model emits tool calls in (``generic``, ``gemma4``,
+    ``gpt_oss``, ``dsml``), selecting the output parser."""
     builtin_tools: list[BuiltinToolType] | None = None
+    """Builtin tools Skulk advertises to this model (e.g. ``web_search``,
+    ``open_url``, ``extract_page``)."""
 
     @field_validator("tool_call_format", mode="before")
     @classmethod
@@ -316,7 +346,12 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     """Optional runtime behavior hints for a model card."""
 
     prompt_renderer: PromptRendererType | None = None
+    """How prompts are rendered for this model (``tokenizer`` chat template,
+    ``gemma4``, ``dsml``); ``None`` uses the family default."""
     output_parser: OutputParserType | None = None
+    """How model output is parsed (``generic``, ``gemma4``, ``gpt_oss``,
+    ``deepseek_v32``), e.g. for reasoning/tool-call extraction; ``None`` uses the
+    family default."""
     metal_fast_synch: bool | None = None
     """Per-model override for the MLX ``MLX_METAL_FAST_SYNCH`` flag.
 
@@ -420,33 +455,97 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
 
 
 class ModelCard(CamelCaseModel):
+    """The persisted, declarative metadata Skulk holds for one model.
+
+    This is the **model-card interface**: the single source of truth for how a
+    model is sized, sharded, placed, and run. It is created once (from a
+    HuggingFace repo or hand-authored), broadcast cluster-wide, and read by the
+    planner (placement), the downloader (sizing + which files to fetch), and the
+    worker runner (engine + behavior). As a ``CamelCaseModel`` it is camelCase on
+    the wire and strict (``extra="forbid"``), so every node in a cluster must run
+    the same Skulk version (a stale node rejects newer fields).
+
+    Two layers live here: the *card* (this declarative metadata) and the
+    normalized *resolved capability profile* derived from it plus family defaults
+    (see ``capabilities.py`` and ``website/docs/model-capabilities.md``). The
+    optional ``reasoning`` / ``modalities`` / ``tooling`` / ``runtime`` /
+    ``vision`` / ``placement`` sub-configs refine that resolution; when absent,
+    conservative family defaults apply.
+    """
+
     model_id: ModelId
+    """The model's identifier (a HuggingFace repo id, e.g.
+    ``mlx-community/Qwen3.5-9B-4bit``, or a custom id). Slashes become ``--`` in
+    the on-disk store directory name."""
     storage_size: Memory
+    """On-disk size of the weights this card loads (for a GGUF card, just the
+    selected quant's shard group, not every quant the repo hosts). The planner
+    uses this for memory-fit and placement-width decisions."""
     n_layers: PositiveInt
+    """Number of transformer layers. Drives pipeline sharding (how layers split
+    across nodes) and KV-cache sizing."""
     hidden_size: PositiveInt
+    """Model hidden dimension, used in memory/KV-cache estimates."""
     supports_tensor: bool
+    """Whether the model may be served with tensor parallelism (``Sharding.Tensor``).
+    GGUF/llama.cpp cards set this ``False`` (single-node engine)."""
     num_key_value_heads: PositiveInt | None = None
+    """KV-head count for grouped-query attention, used in KV-cache sizing. ``None``
+    when unknown/not applicable."""
     tasks: list[ModelTask]
+    """The task types this model serves (``TextGeneration``, ``TextEmbedding``,
+    ``TextToImage``, ``ImageToImage``); selects which runner handles it."""
     components: list[ComponentInfo] | None = None
+    """For multi-component models (e.g. a diffusion stack), the per-component
+    weight layout. ``None`` for a single-weights model."""
     family: str = ""
+    """Model family token (e.g. ``qwen3``, ``gemma4``) used to pick family-specific
+    defaults during capability resolution. Empty when not classified."""
     quantization: str = ""
+    """Human quantization label (e.g. ``4bit``, ``Q4_K_M``); informational."""
     base_model: str = ""
+    """The upstream base model id when this is a quant/finetune of another; empty
+    if not applicable."""
     gguf_file: str | None = None
     """For GGUF (llama.cpp) models: the repo-relative path of the weights file the
     runner loads (the selected quant's first shard). Resolved once at card creation
     (preferring a quant over BF16) so the download fetches only that quant and the
-    runner loads deterministically, instead of each layer re-globbing/guessing."""
+    runner loads deterministically, instead of each layer re-globbing/guessing.
+    ``None`` for non-GGUF (safetensors/MLX) cards."""
     capabilities: list[str] = []
+    """Free-form capability tags carried for compatibility/auxiliary use; the
+    structured ``reasoning``/``modalities``/``tooling`` configs are authoritative
+    for capability resolution."""
     context_length: int = 0
+    """The model's advertised maximum context length in tokens (``0`` if unknown).
+    The admission ceiling is the smaller of this and what fits in memory."""
     uses_cfg: bool = False
+    """Whether the model uses classifier-free guidance (relevant to some image /
+    diffusion models)."""
     trust_remote_code: bool = True
+    """Passed to the model loader: whether to execute the repo's custom Python.
+    Defaults ``True`` to match upstream loaders; set ``False`` to refuse it."""
     is_custom: bool = False
+    """Marks an operator-added custom card (not from the curated catalog). Excluded
+    from the persisted card file so it is recomputed per environment."""
     vision: VisionCardConfig | None = None
+    """Optional vision (image-input) configuration; ``None`` for text-only models."""
     reasoning: ReasoningCardConfig | None = None
+    """Optional reasoning/thinking configuration (toggle, budget, format, default
+    effort); ``None`` falls back to family defaults."""
     modalities: ModalitiesCardConfig | None = None
+    """Optional extra-modality flags (audio input, native multimodal); ``None``
+    falls back to family defaults."""
     tooling: ToolingCardConfig | None = None
+    """Optional tool-calling configuration (support, call format, builtin tools);
+    ``None`` falls back to family defaults."""
     runtime: RuntimeCapabilityCardConfig | None = None
+    """Optional runtime-behavior configuration (prompt renderer, output parser,
+    MTP/speculative-decoding sidecar, MLX knobs); ``None`` falls back to defaults."""
     placement: PlacementCardConfig = PlacementCardConfig()
+    """Where the model is allowed to run and which backend is preferred: the
+    ``compatible_backends`` hard filter and ``backend_preference`` soft score the
+    planner uses to route the model to suitable nodes."""
 
     @model_validator(mode="after")
     def _fill_vision_weights_repo(self) -> "ModelCard":

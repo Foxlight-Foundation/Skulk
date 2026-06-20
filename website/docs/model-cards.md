@@ -39,6 +39,21 @@ Built-in cards are shipped in:
 
 Custom cards are stored under the user data directory and synced through the cluster event flow.
 
+## The card interface (source of truth)
+
+The authoritative definition of the model-card interface is the `ModelCard`
+type in
+[`src/skulk/shared/models/model_cards.py`](https://github.com/Foxlight-Foundation/Skulk/tree/main/src/skulk/shared/models/model_cards.py).
+Every field is documented in that model, and the exhaustive, always-current field
+reference is the generated API schema (`ModelCard` and its nested
+`PlacementCardConfig` / `RuntimeCapabilityCardConfig` / `VisionCardConfig` /
+`ReasoningCardConfig` / `ModalitiesCardConfig` / `ToolingCardConfig` /
+`ComponentInfo`) in the [API reference](/api/skulk-api). This page is the curated
+narrative; when in doubt about an exact field, the schema is canonical.
+
+Cards are camelCase on the wire and strict (unknown fields are rejected), so every
+node in a cluster must run the same Skulk version.
+
 ## Core Fields
 
 ### Identity and size
@@ -53,15 +68,21 @@ Custom cards are stored under the user data directory and synced through the clu
   - hidden dimension used for placement and compatibility checks
 - `num_key_value_heads`
   - optional KV head count for tensor compatibility decisions
+- `gguf_file`
+  - for GGUF (llama.cpp) models only: the repo-relative weights file the runner loads (the selected quant's first shard), resolved once at card creation; `null` for safetensors/MLX cards
+- `components`
+  - for multi-component models (such as a diffusion stack): the per-component weight layout; `null` for a single-weights model
 
 ### Runtime and placement
 
 - `supports_tensor`
-  - whether tensor-style placement is allowed
+  - whether tensor-style placement is allowed (GGUF/llama.cpp cards set this `false`)
 - `tasks`
   - supported task families such as `TextGeneration`, `TextEmbedding`, or image tasks
 - `trust_remote_code`
   - whether the loader may enable remote-code behavior for this model
+- `uses_cfg`
+  - whether the model uses classifier-free guidance (relevant to some image/diffusion models)
 
 ### Catalog metadata
 
@@ -98,6 +119,27 @@ Fields include:
   - optional begin-of-image token id
 - `eoi_token_id`
   - optional end-of-image token id
+
+## Placement Section
+
+`[placement]` declares where a model is allowed to run and which backend is
+preferred. It is what the planner reads to route a model to suitable nodes, and
+it is how a heterogeneous cluster keeps each model on hardware that can run it.
+
+Backends are named `<engine>-<compute>` tags (for example `mlx-metal`,
+`llama_cpp-vulkan`, `llama_cpp-rocm`, `llama_cpp-cpu`). The engine selects the
+worker runner; the compute names the accelerator. A bare engine tag (e.g. `mlx`)
+is also valid vocabulary: nodes advertise it alongside their compound tags, so a
+card written against the original `{"mlx"}` set keeps matching.
+
+- `compatible_backends`
+  - the hard filter: the set of backend tags this model may run on. The planner excludes any node whose advertised backends do not intersect this set. The default is `{"mlx"}` (so an unannotated card stays on MLX nodes); a GGUF card lists the llama.cpp tags. This is what keeps an MLX model off an AMD node and a GGUF model off a Mac.
+- `backend_preference`
+  - the soft score: an ordered list of preferred tags. When several compatible nodes qualify, the planner prefers the node whose backend ranks earliest, with graceful fallback to the rest. This lets a card say "fastest on Vulkan, but ROCm is fine."
+- `min_vram_gib`
+  - optional minimum accelerator memory a node must have to be eligible.
+- `max_context_tokens`
+  - optional cap on the admission context for this model, independent of the model's trained context length.
 
 ## Extended Capability Sections
 
@@ -156,14 +198,22 @@ Declares runtime integration preferences:
   - maximum draft depth the MTP heads support; start at `1` for Apple Silicon (deeper values rarely amortize on Metal due to near-linear verify-pass scaling)
 - `mtp_sidecar_repo`
   - Hugging Face repo ID containing the published `mtp.safetensors` sidecar (e.g. `"FoxlightAI/qwen3-5-7b-instruct-mtp-q4k"`); produced by SWP from the original BF16 checkpoint
+- `mtp_norm_convention`
+  - how the MTP heads normalize hidden states (`zero_centered` or `actual_scale`); must match how the sidecar was produced
+- `mtp_concat_order`
+  - the order the MTP heads concatenate the embedding and hidden state (`embed_first` or `hidden_first`); must match the sidecar
+- `speculative_multi_node`
+  - set to `false` to forbid speculative decoding when the model is sharded across multiple nodes (it stays single-node speculative); the runner and the generation loop read this to make the same rank-symmetric decision
+- `assistant_model_repo`
+  - Hugging Face repo of a small companion model used as an external drafter for speculative decoding (the Gemma 4 path), as opposed to native MTP heads
 
 ## MTP Speculative Decoding
 
-Some models include native multi-token prediction (MTP) heads baked into their checkpoint weights. Skulk uses these heads for speculative decoding: the MTP heads draft candidate tokens cheaply, a full forward pass verifies them, and accepted tokens are emitted in bulk — substantially increasing throughput with no accuracy loss.
+Some models include native multi-token prediction (MTP) heads baked into their checkpoint weights. Skulk uses these heads for speculative decoding: the MTP heads draft candidate tokens cheaply, a full forward pass verifies them, and accepted tokens are emitted in bulk, substantially increasing throughput with no accuracy loss.
 
 ### Why a sidecar
 
-Standard quantization pipelines — including mlx-lm's `sanitize()` — strip `mtp.*` tensor keys at conversion time. The MLX-quantized checkpoint you download from Hugging Face typically does not contain MTP weights.
+Standard quantization pipelines (including mlx-lm's `sanitize()`) strip `mtp.*` tensor keys at conversion time. The MLX-quantized checkpoint you download from Hugging Face typically does not contain MTP weights.
 
 SWP (Skulk Weights Publisher) solves this by re-extracting the `mtp.*` tensors from the original BF16 checkpoint, quantizing only those tensors, and publishing the result as `mtp.safetensors` to a dedicated sidecar repo on Hugging Face. This is the same pattern Skulk uses for vision encoder weights.
 
@@ -183,7 +233,7 @@ If the sidecar is declared but the file is not found locally, Skulk logs a warni
 - Qwen3.6 variants
 - DeepSeek V3 / R1
 
-Gemma 4 does **not** use native MTP heads — it uses an external drafter model for speculative decoding, which is a separate feature.
+Gemma 4 does **not** use native MTP heads; it uses an external drafter model (`assistant_model_repo`) for speculative decoding, which is a separate feature.
 
 ### Adding MTP to a card
 
