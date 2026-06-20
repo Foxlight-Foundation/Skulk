@@ -463,13 +463,27 @@ class Runner:
         calls, emits a ``ToolCallChunk``; otherwise it chose to answer in prose,
         so emits that content as a normal ``TokenChunk``. Either way a single
         terminal chunk closes the consumer's stream.
+
+        Cancellation: unlike the streaming path (which checks per token), the
+        tool call runs through one blocking ``create_chat_completion`` that
+        cannot be interrupted mid-flight. So cancellation is honored at the two
+        boundaries around it: skip the (possibly long) call entirely if the task
+        is already cancelled, and suppress the result if a cancel landed while it
+        ran. In both cases nothing is emitted and ``main`` reads the drained
+        cancellation to mark the task ``Cancelled`` rather than ``Complete``.
         """
+        if self._is_cancelled(task.task_id):
+            logger.info(f"llama.cpp tool generation skipped (cancelled): {task.task_id}")
+            return
         result = self.model.create_chat_completion(
             messages=messages,
             stream=False,
             tools=task.task_params.tools,
             **kwargs,
         )
+        if self._is_cancelled(task.task_id):
+            logger.info(f"llama.cpp tool generation cancelled: {task.task_id}")
+            return
         choice = result["choices"][0]
         message = choice.get("message", {})
         tool_calls = _tool_calls_from_message(message)
