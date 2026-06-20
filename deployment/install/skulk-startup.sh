@@ -56,6 +56,8 @@ unset _d
 
 AUTO_UPDATE="${SKULK_AUTO_UPDATE:-1}"
 VERBOSITY="${SKULK_VERBOSITY:--v}"
+# Headless nodes serve the API without the web UI (no dashboard build).
+HEADLESS="${SKULK_HEADLESS:-0}"
 
 run_prep() {
     # `git pull` — non-fatal. Common failure modes (offline at boot,
@@ -78,6 +80,16 @@ run_prep() {
         log "warning: uv sync failed (continuing with current venv)"
     fi
 
+    # Headless nodes (e.g. a non-Mac worker like a Strix Halo / ROCm box)
+    # intentionally serve the API without the web UI: the node sets
+    # DASHBOARD_DIR=None and skips the mount when assets are absent (#333).
+    # For those, skip the dashboard build and its fatal dist/ check entirely
+    # so the service can run without Node/npm installed.
+    if [[ "$HEADLESS" == "1" ]]; then
+        log "SKULK_HEADLESS=1: skipping dashboard build; API serves without the web UI"
+        return
+    fi
+
     # Dashboard build — non-fatal on success path (we boot with the
     # previously built dist/), fatal only if dist/ ends up missing.
     if [[ -d dashboard-react ]]; then
@@ -94,6 +106,7 @@ run_prep() {
     if [[ ! -d dashboard-react/dist ]]; then
         log "ERROR: dashboard-react/dist is missing — cannot start without a built dashboard."
         log "fix: run 'cd dashboard-react && npm install && npm run build' manually, then restart the service."
+        log "     (headless nodes that serve the API without the UI: set SKULK_HEADLESS=1 in $ENV_FILE)"
         exit 1
     fi
 }
@@ -102,9 +115,10 @@ if [[ "$AUTO_UPDATE" == "1" ]]; then
     run_prep
 else
     log "SKULK_AUTO_UPDATE=$AUTO_UPDATE — skipping boot-time update"
-    if [[ ! -d dashboard-react/dist ]]; then
+    if [[ "$HEADLESS" != "1" && ! -d dashboard-react/dist ]]; then
         log "ERROR: dashboard-react/dist is missing and auto-update is off."
         log "fix: build the dashboard once, or set SKULK_AUTO_UPDATE=1 in $ENV_FILE."
+        log "     (headless nodes that serve the API without the UI: set SKULK_HEADLESS=1 in $ENV_FILE)"
         exit 1
     fi
 fi

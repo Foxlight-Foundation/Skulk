@@ -56,9 +56,50 @@ cp deployment/rocm/launch-skulk.sh.example ~/launch-skulk.sh
 chmod +x ~/launch-skulk.sh
 ~/launch-skulk.sh           # foreground, to watch the first boot
 
-# 4. Once it joins cleanly, run it detached so it survives the SSH session:
-setsid bash -c 'exec ~/launch-skulk.sh > ~/skulk.log 2>&1' </dev/null >/dev/null 2>&1 &
+# 4. Once it joins cleanly, run it detached so it survives the SSH session.
+#    nohup + disown matter: a bare `setsid ... &` inside an SSH command can be
+#    SIGHUP'd during session teardown before it fully detaches.
+nohup setsid bash ~/launch-skulk.sh > ~/skulk.log 2>&1 < /dev/null & disown
 ```
+
+The detached launcher above is fine for first-boot watching, but it does **not**
+restart skulk after a crash or reboot. For a permanent node, install the managed
+service instead (next section).
+
+## Running as a managed service (recommended)
+
+For a node that should rejoin the cluster automatically after a crash or reboot,
+run Skulk under the same systemd user service the rest of the fleet uses, rather
+than the detached launcher. This mirrors the macOS LaunchAgent on Apple Silicon
+nodes: start-on-boot (via linger), restart-on-failure, and boot-time `git pull` /
+`uv sync` through `deployment/install/skulk-startup.sh`.
+
+```bash
+# 1. Put this node's cluster env in the service env file. Headless is required
+#    so the boot-time prep skips the (absent) dashboard build. Add the same
+#    backend/namespace/Zenoh knobs you'd otherwise set in launch-skulk.sh.
+mkdir -p ~/.skulk
+cat >> ~/.skulk/skulk.env <<'ENV'
+SKULK_HEADLESS=1
+SKULK_LLAMA_CPP_BACKENDS=vulkan
+# Skip boot-time `uv sync`: it reinstalls the CPU llama-cpp-python wheel and
+# clobbers the Vulkan build below. Pin the revision and update manually instead.
+SKULK_AUTO_UPDATE=0
+# SKULK_LIBP2P_NAMESPACE=...   # match the rest of the fleet
+# SKULK_ZENOH_DATA_PLANE / SKULK_ZENOH_LISTEN / SKULK_ZENOH_CONNECT as needed
+ENV
+
+# 2. Install + enable the user service (enables linger for boot autostart).
+deployment/install/install-systemd.sh
+```
+
+The Vulkan `llama-cpp-python` build from Quick-start step 2 must already be in the
+`.venv` before you start the service. With `SKULK_AUTO_UPDATE=0` the service runs
+whatever is on disk, so the Vulkan wheel survives restarts; to update the node,
+`git pull` and re-run the `uv sync` + `--no-binary` Vulkan install by hand, then
+`systemctl --user restart skulk`. Manage the service with
+`systemctl --user {status,restart,stop} skulk` and follow logs via
+`journalctl --user -u skulk -f`.
 
 The node advertises `llama_cpp` + `llama_cpp-vulkan` backends (because
 `SKULK_LLAMA_CPP_BACKENDS=vulkan` is set and `llama_cpp` imports), and the

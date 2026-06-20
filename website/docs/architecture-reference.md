@@ -432,7 +432,7 @@ Selection logic: `src/skulk/worker/engines/mlx/cache.py::make_kv_cache`. Some ba
 
 ### Environment variables
 
-`SKULK_*` is preferred; `SKULK_*` accepted as legacy. Migration tracked under #110.
+Only `SKULK_*` names are read. The legacy `EXO_*` deprecation runway was removed in #324; typed-config migration is tracked under #110. (Some rows below still show a duplicated `SKULK_X / SKULK_X` artifact from that rename and will be de-duplicated in the #110 sweep.)
 
 | Var | What |
 |---|---|
@@ -457,6 +457,7 @@ Selection logic: `src/skulk/worker/engines/mlx/cache.py::make_kv_cache`. Some ba
 | `SKULK_VISION_DEBUG_SAVE_DIR` | Save debug image artifacts |
 | `SKULK_NATIVE_VISION_REFERENCE_PATH` | Force native-vision reference path (Gemma 4) |
 | `SKULK_OFFLINE` | Run without internet checks (no model fetching) |
+| `SKULK_HEADLESS` | Deploy knob read by `deployment/install/skulk-startup.sh` (the LaunchAgent/systemd entrypoint). `1` on a node that serves the API without the web UI (e.g. a non-Mac worker like a Strix Halo/ROCm box with no Node/npm): boot-time prep skips the dashboard build and its otherwise-fatal `dashboard-react/dist` missing check, and the node runs with `DASHBOARD_DIR` unset (#333). Default `0` keeps the fail-loud behavior so a Mac with an accidentally-absent build is caught. |
 | `SKULK_TEST_DISTRIBUTED_MODEL` | Tests only: force the distributed/prefix-cache slow-test model (`gpt-oss-20b` or `llama-3.2-1b`); default auto-selects by Metal working-set size |
 | `MLX_METAL_FAST_SYNCH` | Set by Skulk based on resolved card preference; not for direct operator use |
 | `MLX_HOSTFILE`, `MLX_RANK`, `MLX_RING_VERBOSE`, `MLX_IBV_DEVICES`, `MLX_JACCL_COORDINATOR` | MLX upstream env vars; auto-set by Skulk during distributed init. Ring hostfile addresses are chosen per neighbor pair from OBSERVED libp2p connections, ranked thunderbolt > maybe_ethernet > ethernet > wifi > unknown > VPN/overlay — Tailscale CGNAT (100.64/10, fd7a:115c:a1e0::/48) addresses are detected by ADDRESS (utun types don't gossip) and rank strictly last: the overlay exists for external reachability and may be DERP-relayed, so it is only used when a pair has no local candidate (#265). Selection lives in `_find_ip_prioritised` / `get_mlx_ring_hosts_by_node` (`src/skulk/master/placement_utils.py`) |
