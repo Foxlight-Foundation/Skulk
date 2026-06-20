@@ -151,14 +151,27 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **A large-context GGUF no longer OOM-kills the node on load.** The llama.cpp
+  runner loaded models with `n_ctx=0`, which sizes the KV cache for the model's
+  full trained context (e.g. gemma-4's 128k) instead of the per-instance context
+  budget placement actually reserved memory for. On a memory-tight node (observed
+  loading gemma-4-31B on a Strix Halo Vulkan node) the kernel OOM-killed the whole
+  worker process, so the instance vanished instead of failing cleanly. The runner
+  now bounds `n_ctx` to the KV budget placement actually reserved memory for
+  (`KV_CONTEXT_BUDGET_TOKENS`, 8192 tokens), clamped down by the instance's
+  admission ceiling (#145) on a smaller node, so the up-front KV cache never
+  exceeds what the cluster sized for the placement. (Serving llama.cpp beyond that
+  budget needs placement to reserve the larger KV footprint, tracked separately
+  with VRAM-aware admission.)
+
 - **llama.cpp logprobs no longer OOM a node on load.** Defaulting the runner to
   `logits_all=True` for logprobs parity made llama.cpp pre-allocate an
   `n_ctx * vocab * 4` logits buffer at the model's full trained context, e.g.
   `131072 * 152064 * 4` = 74 GiB for a Qwen2.5-7B GGUF, failing the load with an
   allocation error. logprobs is now opt-in (`SKULK_LLAMA_CPP_LOGITS_ALL=1`) and,
   when enabled, caps the served context (`SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX`,
-  default 8192) so the buffer stays bounded; the default path serves at full
-  context with no oversized allocation.
+  default 8192) so the buffer stays bounded; with it off the served context is
+  the instance's admission ceiling, not the model's full trained context.
 
 - **The source-built GPU llama.cpp wheel survives `uv sync` (#358).** On a node
   that declares a GPU llama.cpp backend, the service entrypoint now runs
