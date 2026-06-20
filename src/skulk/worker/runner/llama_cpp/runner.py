@@ -197,7 +197,12 @@ def _logits_all_enabled() -> bool:
     ``_logits_all_n_ctx``) so the buffer stays bounded. With it off the runner
     serves at full context and a logprobs request degrades to a clear error.
     """
-    return os.getenv("SKULK_LLAMA_CPP_LOGITS_ALL", "0") == "1"
+    return os.getenv("SKULK_LLAMA_CPP_LOGITS_ALL", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 def _logits_all_n_ctx() -> int:

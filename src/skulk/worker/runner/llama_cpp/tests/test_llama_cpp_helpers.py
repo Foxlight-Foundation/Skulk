@@ -94,6 +94,12 @@ def test_logits_all_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _logits_all_enabled() is True  # explicit opt-in
     monkeypatch.setenv("SKULK_LLAMA_CPP_LOGITS_ALL", "0")
     assert _logits_all_enabled() is False
+    # case-insensitive truthy strings also opt in (matches repo env convention)
+    for truthy in ("true", "TRUE", "Yes", " on "):
+        monkeypatch.setenv("SKULK_LLAMA_CPP_LOGITS_ALL", truthy)
+        assert _logits_all_enabled() is True
+    monkeypatch.setenv("SKULK_LLAMA_CPP_LOGITS_ALL", "off")
+    assert _logits_all_enabled() is False
 
 
 def test_logits_all_n_ctx(monkeypatch: pytest.MonkeyPatch) -> None:
