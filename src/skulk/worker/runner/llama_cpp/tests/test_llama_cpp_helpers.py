@@ -9,6 +9,7 @@ from skulk.shared.types.common import ModelId
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from skulk.worker.runner.llama_cpp.runner import (
     _generation_kwargs,
+    _logits_all_enabled,
     _logprob_fields,
     _map_finish_reason,
     _tool_calls_from_message,
@@ -81,6 +82,15 @@ def test_generation_kwargs_passes_logprobs() -> None:
     # logprobs requested without a top-N: flag on, no top_logprobs key
     kw2 = _generation_kwargs(_params(logprobs=True))
     assert kw2["logprobs"] is True and "top_logprobs" not in kw2
+
+
+def test_logits_all_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SKULK_LLAMA_CPP_LOGITS_ALL", raising=False)
+    assert _logits_all_enabled() is True  # default on (logprobs parity)
+    monkeypatch.setenv("SKULK_LLAMA_CPP_LOGITS_ALL", "0")
+    assert _logits_all_enabled() is False  # explicit opt-out
+    monkeypatch.setenv("SKULK_LLAMA_CPP_LOGITS_ALL", "1")
+    assert _logits_all_enabled() is True
 
 
 def test_tool_calls_from_message() -> None:

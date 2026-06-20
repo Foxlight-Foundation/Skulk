@@ -16,6 +16,7 @@ warmup), mirroring the embeddings runner's group-less lifecycle.
 cleanly on nodes (e.g. Macs) where the binding is not installed.
 """
 
+import os
 import time
 from pathlib import Path
 from typing import Any, Literal
@@ -181,6 +182,18 @@ def _logprob_fields(
         return (None, None)
 
 
+def _logits_all_enabled() -> bool:
+    """Whether to load the model with ``logits_all=True`` (enables logprobs).
+
+    llama-cpp-python gates all logprobs behind ``logits_all=True`` at model
+    construction, and the runner is loaded once but serves logprobs per request,
+    so the flag cannot be toggled per request. Defaults on for MLX parity;
+    ``SKULK_LLAMA_CPP_LOGITS_ALL=0`` turns it off to reclaim the extra logits
+    memory when an operator never uses logprobs.
+    """
+    return os.getenv("SKULK_LLAMA_CPP_LOGITS_ALL", "1") != "0"
+
+
 def _map_finish_reason(
     reason: str | None,
 ) -> Literal["stop", "length", "content_filter"] | None:
@@ -335,12 +348,16 @@ class Runner:
         if gguf_path is None:
             gguf_path = select_gguf_file(model_dir)
         logger.info(f"loading GGUF {gguf_path.name} for {model_id}")
+        # logits_all enables logprobs (see _logits_all_enabled); the cost is
+        # extra logits memory during prompt eval (proportional to prompt length
+        # x vocab — generation stays incremental).
         # n_gpu_layers=-1 offloads every layer to the GPU backend the binding was
         # built with (Vulkan/ROCm/CUDA); n_ctx=0 uses the model's trained context.
         self.model = Llama(
             model_path=str(gguf_path),
             n_gpu_layers=-1,
             n_ctx=0,
+            logits_all=_logits_all_enabled(),
             verbose=False,
         )
         self.current_status = RunnerReady()
