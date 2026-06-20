@@ -65,7 +65,12 @@ in the repo. In outline:
      --no-cache-dir --no-binary llama-cpp-python \
      --python .venv/bin/python llama-cpp-python
    ```
-   Re-run this after any `uv sync`, which restores the CPU wheel.
+   You build this once. The service entrypoint runs `uv sync --inexact` on a node
+   that declares a GPU backend, so a routine sync no longer prunes this
+   source-built wheel; rebuild it by hand only when bumping the llama.cpp version.
+   As a safety net, if the wheel is ever replaced by a CPU-only one (no GPU
+   offload compiled in), the node detects that and advertises `llama_cpp-cpu`
+   instead of its GPU backend, so GPU work is never routed to a degraded build.
 4. **Launch the node**: declare its backend and point it at the rest of the
    cluster, using the `launch-skulk.sh.example` template (sets
    `SKULK_LLAMA_CPP_BACKENDS=vulkan`). Nodes on the same LAN segment find each
