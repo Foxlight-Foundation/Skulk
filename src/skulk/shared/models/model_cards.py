@@ -493,8 +493,8 @@ class ModelCard(CamelCaseModel):
     """KV-head count for grouped-query attention, used in KV-cache sizing. ``None``
     when unknown/not applicable."""
     tasks: list[ModelTask]
-    """The task types this model serves (e.g. ``TextGeneration``, ``TextEmbedding``,
-    ``ImageGeneration``); selects which runner handles it."""
+    """The task types this model serves (``TextGeneration``, ``TextEmbedding``,
+    ``TextToImage``, ``ImageToImage``); selects which runner handles it."""
     components: list[ComponentInfo] | None = None
     """For multi-component models (e.g. a diffusion stack), the per-component
     weight layout. ``None`` for a single-weights model."""

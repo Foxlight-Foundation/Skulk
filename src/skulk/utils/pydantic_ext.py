@@ -20,6 +20,10 @@ class CamelCaseModel(BaseModel):
         validate_by_name=True,
         extra="forbid",
         strict=True,
+        # Include each field's attribute docstring as its JSON-schema description,
+        # so in-code field docs (e.g. on ModelCard) become the published OpenAPI
+        # reference instead of needing a parallel hand-maintained description.
+        use_attribute_docstrings=True,
     )
 
 
@@ -30,6 +34,7 @@ class FrozenModel(BaseModel):
         extra="forbid",
         strict=True,
         frozen=True,
+        use_attribute_docstrings=True,
     )
 
 

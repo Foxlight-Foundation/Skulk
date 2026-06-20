@@ -48,8 +48,8 @@ Every field is documented in that model, and the exhaustive, always-current fiel
 reference is the generated API schema (`ModelCard` and its nested
 `PlacementCardConfig` / `RuntimeCapabilityCardConfig` / `VisionCardConfig` /
 `ReasoningCardConfig` / `ModalitiesCardConfig` / `ToolingCardConfig` /
-`ComponentInfo`) in the [API reference](api). This page is the curated narrative;
-when in doubt about an exact field, the schema is canonical.
+`ComponentInfo`) in the [API reference](/api/skulk-api). This page is the curated
+narrative; when in doubt about an exact field, the schema is canonical.
 
 Cards are camelCase on the wire and strict (unknown fields are rejected), so every
 node in a cluster must run the same Skulk version.
@@ -128,10 +128,12 @@ it is how a heterogeneous cluster keeps each model on hardware that can run it.
 
 Backends are named `<engine>-<compute>` tags (for example `mlx-metal`,
 `llama_cpp-vulkan`, `llama_cpp-rocm`, `llama_cpp-cpu`). The engine selects the
-worker runner; the compute names the accelerator.
+worker runner; the compute names the accelerator. A bare engine tag (e.g. `mlx`)
+is also valid vocabulary: nodes advertise it alongside their compound tags, so a
+card written against the original `{"mlx"}` set keeps matching.
 
 - `compatible_backends`
-  - the hard filter: the set of backend tags this model may run on. The planner excludes any node whose advertised backends do not intersect this set. An MLX card lists MLX tags (default `{"mlx"}`); a GGUF card lists the llama.cpp tags. This is what keeps an MLX model off an AMD node and a GGUF model off a Mac.
+  - the hard filter: the set of backend tags this model may run on. The planner excludes any node whose advertised backends do not intersect this set. The default is `{"mlx"}` (so an unannotated card stays on MLX nodes); a GGUF card lists the llama.cpp tags. This is what keeps an MLX model off an AMD node and a GGUF model off a Mac.
 - `backend_preference`
   - the soft score: an ordered list of preferred tags. When several compatible nodes qualify, the planner prefers the node whose backend ranks earliest, with graceful fallback to the rest. This lets a card say "fastest on Vulkan, but ROCm is fine."
 - `min_vram_gib`
