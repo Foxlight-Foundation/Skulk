@@ -142,7 +142,9 @@ export function AcceleratorPanel({ accelerator }: AcceleratorPanelProps) {
       <Row>
         <Key>VRAM</Key>
         <Value>
-          {total == null ? NOT_REPORTED : `${gib(used)} / ${gib(total)}`}
+          {/* Collapse to a single "not reported" only when BOTH are absent;
+              otherwise show each side via gib() so a partial reading isn't lost. */}
+          {used == null && total == null ? NOT_REPORTED : `${gib(used)} / ${gib(total)}`}
         </Value>
       </Row>
       {vramRatio != null && (
