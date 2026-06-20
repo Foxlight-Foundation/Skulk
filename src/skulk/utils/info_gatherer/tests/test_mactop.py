@@ -39,7 +39,7 @@ def test_fills_normalized_accelerator():
     assert acc.vendor == "apple"
     assert acc.name == "Apple GPU"
     assert acc.utilization_ratio == 8.66 / 100
-    assert acc.power_watts == 11.36
+    assert acc.power_watts == 0.09  # gpu_power, not whole-SoC system_power
     assert acc.temperature_celsius == 39.46
     assert acc.vram_total_bytes is None
     assert acc.vram_used_bytes is None
