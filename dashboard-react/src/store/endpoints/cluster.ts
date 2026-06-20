@@ -17,12 +17,24 @@ export interface RawMemoryUsage {
   ramAvailable?: { inBytes: number };
 }
 
+export interface RawAcceleratorMetrics {
+  vendor?: string;
+  name?: string;
+  utilizationRatio?: number | null;
+  vramTotalBytes?: number | null;
+  vramUsedBytes?: number | null;
+  powerWatts?: number | null;
+  temperatureCelsius?: number | null;
+  clockMhz?: number | null;
+}
+
 export interface RawSystemPerformanceProfile {
   gpuUsage?: number;
   temp?: number;
   sysPower?: number;
   pcpuUsage?: number;
   ecpuUsage?: number;
+  accelerator?: RawAcceleratorMetrics | null;
 }
 
 export interface RawNetworkInterfaceInfo {
