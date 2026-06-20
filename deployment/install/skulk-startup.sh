@@ -84,8 +84,13 @@ run_prep() {
     # `--inexact` tells uv to leave packages outside the resolution in place, so
     # the source-built GPU wheel survives the sync. Macs / CPU nodes keep an
     # exact sync. (SC2086: SYNC_FLAGS is a controlled "--inexact" or empty.)
+    # Strip spaces first: probe_node_backends accepts "vulkan, rocm" (it strips
+    # each token), so the comma-pattern match below must too or a GPU token with a
+    # leading space (e.g. "cpu, vulkan") would miss and the wheel get pruned.
     SYNC_FLAGS=""
-    case ",${SKULK_LLAMA_CPP_BACKENDS:-}," in
+    DECLARED_BACKENDS="${SKULK_LLAMA_CPP_BACKENDS:-}"
+    DECLARED_BACKENDS="${DECLARED_BACKENDS// /}"
+    case ",${DECLARED_BACKENDS}," in
     *,vulkan,* | *,rocm,* | *,cuda,*)
         SYNC_FLAGS="--inexact"
         log "GPU llama.cpp node: 'uv sync --inexact' to preserve the source-built wheel"
