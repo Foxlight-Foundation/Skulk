@@ -3,7 +3,7 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import ClassVar, cast
 
 import anyio
 import yaml
@@ -73,8 +73,29 @@ class DownloadCoordinator:
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
     _stopped: anyio.Event = field(init=False, default_factory=anyio.Event)
 
-    # Per-model throttle for download progress events
+    # Per-model throttle for in-progress download events. Each emission is a
+    # FULL ordered event (master indexes it, appends the event log, persists a
+    # snapshot, and rebroadcasts to every node), so the in_progress stream must be
+    # bounded by total count, not by rate: the raw downloader fires per 8MB chunk
+    # across parallel files (thousands of callbacks for a large model), and a
+    # pure time gate still scales event volume with download DURATION, which
+    # saturates the gossip send queue and can drop the terminal DownloadCompleted
+    # so a placement wedges in RunnerLoading (#364). The fraction-delta gate caps
+    # a download to ~ (1 / _PROGRESS_STEP) in_progress events regardless of size
+    # or duration; the heartbeat still shows life on a slow download; terminal
+    # complete/failed transitions always pass.
     _last_progress_time: dict[ModelId, float] = field(default_factory=dict)
+    _last_progress_fraction: dict[ModelId, float] = field(default_factory=dict)
+
+    # Emit an in_progress update only after the download advances this fraction
+    # (so ~20 events total), never faster than the min interval (no bursts on a
+    # fast/cached download), and at least once per heartbeat (so a slow download
+    # still updates). Dropping intermediate updates is loss-free: apply()
+    # overwrites the per-(node, model) download entry, so only the dashboard
+    # progress bar is coarser.
+    _PROGRESS_STEP: ClassVar[float] = 0.05
+    _MIN_INTERVAL_SECS: ClassVar[float] = 1.0
+    _HEARTBEAT_SECS: ClassVar[float] = 30.0
 
     def __post_init__(self) -> None:
         self.shard_downloader.on_progress(self._download_progress_callback)
@@ -82,11 +103,31 @@ class DownloadCoordinator:
     def _model_dir(self, model_id: ModelId) -> str:
         return str(SKULK_MODELS_DIR / model_id.normalize())
 
+    def _should_emit_in_progress(self, model_id: ModelId, fraction: float) -> bool:
+        """Whether to emit an in_progress event given how far the download advanced.
+
+        Bounds the high-frequency in_progress stream so it cannot saturate the
+        ordered control plane (#364): emit on a fraction-delta step (rate-floored
+        to avoid bursts) or a slow-download heartbeat.
+        """
+        now = current_time()
+        last_time = self._last_progress_time.get(model_id, 0.0)
+        last_fraction = self._last_progress_fraction.get(model_id, -1.0)
+        advanced = (
+            fraction - last_fraction >= self._PROGRESS_STEP
+            and now - last_time >= self._MIN_INTERVAL_SECS
+        )
+        heartbeat = now - last_time >= self._HEARTBEAT_SECS
+        if advanced or heartbeat:
+            self._last_progress_time[model_id] = now
+            self._last_progress_fraction[model_id] = fraction
+            return True
+        return False
+
     async def _download_progress_callback(
         self, callback_shard: ShardMetadata, progress: RepoDownloadProgress
     ) -> None:
         model_id = callback_shard.model_card.model_id
-        throttle_interval_secs = 1.0
 
         if progress.status == "complete":
             completed = DownloadCompleted(
@@ -100,11 +141,14 @@ class DownloadCoordinator:
                 NodeDownloadProgress(download_progress=completed)
             )
             self._last_progress_time.pop(model_id, None)
-        elif (
-            progress.status == "in_progress"
-            and current_time() - self._last_progress_time.get(model_id, 0.0)
-            > throttle_interval_secs
-        ):
+            self._last_progress_fraction.pop(model_id, None)
+        elif progress.status == "in_progress":
+            total_bytes = progress.total.in_bytes
+            fraction = (
+                progress.downloaded.in_bytes / total_bytes if total_bytes > 0 else 0.0
+            )
+            if not self._should_emit_in_progress(model_id, fraction):
+                return
             ongoing = DownloadOngoing(
                 node_id=self.node_id,
                 shard_metadata=callback_shard,
@@ -117,7 +161,6 @@ class DownloadCoordinator:
             await self.event_sender.send(
                 NodeDownloadProgress(download_progress=ongoing)
             )
-            self._last_progress_time[model_id] = current_time()
 
     async def run(self) -> None:
         logger.info(
