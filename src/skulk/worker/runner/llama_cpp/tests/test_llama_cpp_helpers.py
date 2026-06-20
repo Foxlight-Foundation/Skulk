@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from skulk.shared.models.memory_estimate import KV_CONTEXT_BUDGET_TOKENS
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from skulk.worker.runner.llama_cpp.runner import (
@@ -13,6 +14,7 @@ from skulk.worker.runner.llama_cpp.runner import (
     _logits_all_n_ctx,
     _logprob_fields,
     _map_finish_reason,
+    _serving_n_ctx,
     _tool_calls_from_message,
     messages_for_llama,
     select_gguf_file,
@@ -112,6 +114,22 @@ def test_logits_all_n_ctx(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _logits_all_n_ctx() == 8192
     monkeypatch.setenv("SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX", "abc")
     assert _logits_all_n_ctx() == 8192
+
+
+def test_serving_n_ctx_never_full_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX", raising=False)
+    # The admission ceiling is used verbatim when logits_all is off, and is NEVER
+    # 0 (which would size the KV cache for the model's full trained context and
+    # OOM-kill the node on a large-context model like gemma-4 @ 128k).
+    assert _serving_n_ctx(32768, logits_all=False) == 32768
+    assert _serving_n_ctx(4096, logits_all=False) == 4096
+    # Unset / non-positive ceiling falls back to the placement KV budget, not 0.
+    assert _serving_n_ctx(None, logits_all=False) == KV_CONTEXT_BUDGET_TOKENS
+    assert _serving_n_ctx(0, logits_all=False) == KV_CONTEXT_BUDGET_TOKENS
+    # With logits_all on, the logits-buffer window further bounds the ceiling but
+    # never raises it (a smaller ceiling wins).
+    assert _serving_n_ctx(32768, logits_all=True) == _logits_all_n_ctx()
+    assert _serving_n_ctx(2048, logits_all=True) == 2048
 
 
 def test_tool_calls_from_message() -> None:

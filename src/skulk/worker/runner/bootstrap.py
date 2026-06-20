@@ -478,7 +478,11 @@ def entrypoint(
             from skulk.worker.runner.llama_cpp.runner import Runner as LlamaCppRunner
 
             runner = LlamaCppRunner(
-                bound_instance, event_sender, task_receiver, cancel_receiver
+                bound_instance,
+                event_sender,
+                task_receiver,
+                cancel_receiver,
+                context_token_limit=context_token_limit,
             )
             runner.main()
         else:

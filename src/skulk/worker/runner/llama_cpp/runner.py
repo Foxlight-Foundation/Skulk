@@ -24,6 +24,7 @@ from typing import Any, Literal
 from anyio import WouldBlock
 
 from skulk.api.types import ToolCallItem, TopLogprobItem
+from skulk.shared.models.memory_estimate import KV_CONTEXT_BUDGET_TOKENS
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
@@ -190,12 +191,14 @@ def _logits_all_enabled() -> bool:
     so the flag cannot be toggled per request.
 
     Defaults **off**. ``logits_all=True`` makes llama.cpp pre-allocate a logits
-    buffer of ``n_ctx * vocab * 4`` bytes up front, which at the model's full
-    trained context is enormous (e.g. 131072 * 152064 * 4 = 74 GiB for a Qwen2.5
-    vocab) and OOMs the node on load. So logprobs is opt-in via
-    ``SKULK_LLAMA_CPP_LOGITS_ALL=1``, and when on the context is capped (see
-    ``_logits_all_n_ctx``) so the buffer stays bounded. With it off the runner
-    serves at full context and a logprobs request degrades to a clear error.
+    buffer of ``n_ctx * vocab * 4`` bytes up front, which at a large context is
+    enormous (e.g. 131072 * 152064 * 4 = 74 GiB for a Qwen2.5 vocab) and OOMs the
+    node on load. So logprobs is opt-in via ``SKULK_LLAMA_CPP_LOGITS_ALL=1``, and
+    when on the context is further capped (see ``_logits_all_n_ctx``) so the
+    buffer stays bounded. With it off a logprobs request degrades to a clear
+    error. Either way the serving context window is bounded by the instance's
+    admission ceiling (see ``_serving_n_ctx``), never the model's full trained
+    context.
     """
     return os.getenv("SKULK_LLAMA_CPP_LOGITS_ALL", "0").strip().lower() in (
         "1",
@@ -209,10 +212,9 @@ def _logits_all_n_ctx() -> int:
     """Context cap (tokens) to use when ``logits_all`` is on, to bound the buffer.
 
     The ``logits_all`` logits buffer is ``n_ctx * vocab * 4`` bytes, so it must
-    not ride the model's full trained context. This caps it to a modest window
-    (default 8192, override with ``SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX``): at an
-    ~150k vocab that is ~5 GiB, the price of opting into logprobs. Ignored when
-    ``logits_all`` is off (the runner then uses the full trained context).
+    not ride a large context. This caps it to a modest window (default 8192,
+    override with ``SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX``): at an ~150k vocab that is
+    ~5 GiB, the price of opting into logprobs.
     """
     raw = os.getenv("SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX", "8192")
     try:
@@ -220,6 +222,29 @@ def _logits_all_n_ctx() -> int:
     except ValueError:
         value = 8192
     return value if value > 0 else 8192
+
+
+def _serving_n_ctx(context_token_limit: int | None, logits_all: bool) -> int:
+    """Context window (tokens) to allocate for the llama.cpp KV cache on load.
+
+    Never 0: ``n_ctx=0`` tells llama.cpp to size the KV cache for the model's
+    FULL trained context (e.g. gemma-4's 128k), which far exceeds the per-instance
+    budget placement reserved memory for and OOM-kills the whole node on load
+    (observed loading gemma-4-31B on a Vulkan node: the process was oom-killed and
+    the instance vanished). Instead allocate for the instance's static
+    context-admission ceiling (#145) -- the value placement actually sized node
+    memory against -- falling back to the placement KV budget when it is unset.
+    When ``logits_all`` is on, also bound by the logits-buffer window since that
+    buffer scales with ``n_ctx``.
+    """
+    ceiling = (
+        context_token_limit
+        if context_token_limit and context_token_limit > 0
+        else KV_CONTEXT_BUDGET_TOKENS
+    )
+    if logits_all:
+        return min(ceiling, _logits_all_n_ctx())
+    return ceiling
 
 
 def _map_finish_reason(
@@ -248,11 +273,17 @@ class Runner:
         event_sender: MpSender[Event],
         task_receiver: MpReceiver[Task],
         cancel_receiver: MpReceiver[TaskId],
+        context_token_limit: int | None = None,
     ):
         self.event_sender = event_sender
         self.task_receiver = task_receiver
         self.cancel_receiver = cancel_receiver
         self.bound_instance = bound_instance
+        # Static per-instance context ceiling for request admission (#145),
+        # computed by the worker from gossiped node memory before spawn. Bounds
+        # the KV cache the runner allocates on load so it matches the memory
+        # placement reserved (see _serving_n_ctx); never the model's full context.
+        self.context_token_limit = context_token_limit
         self.instance, self.runner_id, self.shard_metadata = (
             bound_instance.instance,
             bound_instance.bound_runner_id,
@@ -375,16 +406,18 @@ class Runner:
                 )
         if gguf_path is None:
             gguf_path = select_gguf_file(model_dir)
-        logger.info(f"loading GGUF {gguf_path.name} for {model_id}")
         # n_gpu_layers=-1 offloads every layer to the GPU backend the binding was
-        # built with (Vulkan/ROCm/CUDA). n_ctx=0 uses the model's full trained
-        # context for normal serving. logits_all (logprobs, opt-in) is the
-        # exception: it pre-allocates an n_ctx*vocab*4 logits buffer, which at the
-        # full trained context OOMs the node on load (131072*152064*4 = 74 GiB),
-        # so when it is on we cap the context to a bounded window. See
-        # _logits_all_enabled / _logits_all_n_ctx.
+        # built with (Vulkan/ROCm/CUDA). n_ctx is bounded by the instance's
+        # admission ceiling (never 0/full-context, which OOM-kills the node on a
+        # large-context model -- see _serving_n_ctx). logits_all (logprobs,
+        # opt-in) further bounds it because it pre-allocates an n_ctx*vocab*4
+        # logits buffer. See _logits_all_enabled / _logits_all_n_ctx.
         logits_all = _logits_all_enabled()
-        n_ctx = _logits_all_n_ctx() if logits_all else 0
+        n_ctx = _serving_n_ctx(self.context_token_limit, logits_all)
+        logger.info(
+            f"loading GGUF {gguf_path.name} for {model_id} "
+            f"(n_ctx={n_ctx}, logits_all={logits_all})"
+        )
         self.model = Llama(
             model_path=str(gguf_path),
             n_gpu_layers=-1,

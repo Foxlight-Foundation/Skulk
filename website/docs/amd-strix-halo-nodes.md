@@ -109,11 +109,14 @@ the generation capabilities llama.cpp supports:
 - **Logprobs** (opt-in): per-token logprobs and ranked alternatives (`logprobs`
   / `top_logprobs`). This needs the model loaded so it retains per-token logits,
   which pre-allocates a large buffer (context length x vocab), so it is off by
-  default to keep loads safe at full context. Enable it per node with
-  `SKULK_LLAMA_CPP_LOGITS_ALL=1`; doing so caps the served context to a bounded
-  window (`SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX`, default 8192) so the buffer stays
-  small. With it off, a logprobs request returns a clear error rather than
-  silently omitting them.
+  default. Enable it per node with `SKULK_LLAMA_CPP_LOGITS_ALL=1`; doing so
+  further caps the served context to a bounded window
+  (`SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX`, default 8192) so the buffer stays small.
+  With it off, a logprobs request returns a clear error rather than silently
+  omitting them. Either way the served context window is sized to the memory the
+  cluster admitted for the instance, never the model's full trained context (a
+  128k-context model loaded at full context would otherwise allocate a KV cache
+  far larger than placement reserved and could exhaust the node on load).
 - **Tool calling**: a request's `tools` are passed to the model. Whether the
   model returns a *structured* tool call or describes the call in prose depends
   on the model and its embedded chat template, which Skulk uses as-is; either way
