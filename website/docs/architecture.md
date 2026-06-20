@@ -226,10 +226,13 @@ top alternatives) and tool calling. A tool-enabled request runs unstreamed so
 the caller receives an assembled tool call rather than fragile token-by-token
 deltas; if the model answers in prose instead, that prose streams back normally.
 Logprobs requires the model to be loaded so it retains per-token logits, which
-the runner does by default; an operator who never uses logprobs can turn that
-off to reclaim memory. Whether a given GGUF emits a structured tool call (versus
-describing one in prose) depends on the model and its embedded chat template,
-which the runner uses as-is.
+pre-allocates a buffer proportional to context length times vocabulary. At a
+model's full trained context that buffer is large enough to exhaust a node's
+memory on load, so logprobs is off by default and opt-in per node; enabling it
+also caps the served context so the buffer stays bounded. The default path
+serves at full context without it. Whether a given GGUF emits a structured tool
+call (versus describing one in prose) depends on the model and its embedded chat
+template, which the runner uses as-is.
 
 ## The inference engine
 
