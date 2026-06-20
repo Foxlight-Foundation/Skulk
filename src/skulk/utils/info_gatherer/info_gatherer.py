@@ -26,7 +26,6 @@ from skulk.shared.types.profiling import (
     MemoryUsage,
     NetworkInterfaceInfo,
     NodeResources,
-    SystemPerformanceProfile,
     ThunderboltBridgeStatus,
     parse_vm_stat_output,
 )
@@ -43,7 +42,7 @@ from skulk.utils.task_group import TaskGroup
 from .linux_gpu import (
     LinuxGpuMetrics,
     find_amd_gpu_device,
-    read_accelerator_metrics,
+    read_system_profile,
 )
 from .mactop import MacmonMetrics, MactopMetrics
 from .system_info import (
@@ -766,11 +765,7 @@ class InfoGatherer:
             try:
                 with fail_after(5):
                     await self.info_sender.send(
-                        LinuxGpuMetrics(
-                            system_profile=SystemPerformanceProfile(
-                                accelerator=read_accelerator_metrics(device)
-                            )
-                        )
+                        LinuxGpuMetrics(system_profile=read_system_profile(device))
                     )
             except (ClosedResourceError, BrokenResourceError):
                 # Consumer gone (worker shutdown/replacement): a stop signal,

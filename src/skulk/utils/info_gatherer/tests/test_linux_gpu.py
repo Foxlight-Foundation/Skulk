@@ -5,6 +5,7 @@ from pathlib import Path
 from skulk.utils.info_gatherer.linux_gpu import (
     find_amd_gpu_device,
     read_accelerator_metrics,
+    read_system_profile,
 )
 
 
@@ -47,6 +48,17 @@ def test_missing_nodes_yield_none_not_zero(tmp_path: Path) -> None:
     assert acc.temperature_celsius is None
     assert acc.clock_mhz is None
     assert acc.vram_total_bytes is None
+
+
+def test_system_profile_fills_legacy_scalars(tmp_path: Path) -> None:
+    # Legacy Mac-shaped readers (topology GPU bar, power sampler) must see real
+    # AMD values, not a default 0%/0C/0W (the no-fake-zero contract).
+    prof = read_system_profile(_make_device(tmp_path))
+    assert prof.gpu_usage == 42.0  # ratio 0.42 surfaced back as a percentage
+    assert prof.temp == 39.0
+    assert prof.sys_power == 9.03
+    assert prof.accelerator is not None
+    assert prof.accelerator.vram_total_bytes == 68719476736
 
 
 def test_find_device_picks_the_render_card(tmp_path: Path) -> None:

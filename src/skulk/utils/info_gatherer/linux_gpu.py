@@ -97,10 +97,34 @@ def read_accelerator_metrics(device: Path) -> AcceleratorMetrics:
     return AcceleratorMetrics(
         vendor="amd",
         name="AMD GPU",
-        utilization_ratio=(busy / 100) if busy is not None else None,
+        # Clamp to the 0..1 contract defensively; the kernel reports 0..100 so
+        # this is belt-and-suspenders against a bad reading rather than letting
+        # an out-of-range value reach the planner/dashboard.
+        utilization_ratio=(min(max(busy / 100, 0.0), 1.0))
+        if busy is not None
+        else None,
         vram_total_bytes=_read_int(device / "mem_info_vram_total"),
         vram_used_bytes=_read_int(device / "mem_info_vram_used"),
         power_watts=(power_uw / 1_000_000) if power_uw is not None else None,
         temperature_celsius=(temp_mc / 1000) if temp_mc is not None else None,
         clock_mhz=_read_current_sclk_mhz(device),
+    )
+
+
+def read_system_profile(device: Path) -> SystemPerformanceProfile:
+    """Build the node's system profile from an amdgpu sysfs device.
+
+    Fills BOTH the normalized ``accelerator`` block and the legacy scalar fields
+    (``gpu_usage`` percent, ``temp``, ``sys_power``) from the same readings, so
+    existing Mac-shaped readers (the topology GPU bar, the power sampler) show an
+    AMD node's real values instead of a misleading default 0%/0C/0W.
+    """
+    acc = read_accelerator_metrics(device)
+    return SystemPerformanceProfile(
+        gpu_usage=(acc.utilization_ratio * 100)
+        if acc.utilization_ratio is not None
+        else 0.0,
+        temp=acc.temperature_celsius if acc.temperature_celsius is not None else 0.0,
+        sys_power=acc.power_watts if acc.power_watts is not None else 0.0,
+        accelerator=acc,
     )

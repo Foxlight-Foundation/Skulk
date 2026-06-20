@@ -37,6 +37,7 @@ def test_fills_normalized_accelerator():
     acc = MactopMetrics.from_raw_json(_SAMPLE).system_profile.accelerator
     assert acc is not None
     assert acc.vendor == "apple"
+    assert acc.name == "Apple GPU"
     assert acc.utilization_ratio == 8.66 / 100
     assert acc.power_watts == 11.36
     assert acc.temperature_celsius == 39.46

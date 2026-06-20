@@ -103,7 +103,8 @@ class MactopMetrics(TaggedModel):
                 # SoC package power (closest available accelerator-power proxy).
                 accelerator=AcceleratorMetrics(
                     vendor="apple",
-                    utilization_ratio=raw.gpu_usage / 100,
+                    name="Apple GPU",
+                    utilization_ratio=min(max(raw.gpu_usage / 100, 0.0), 1.0),
                     power_watts=raw.soc_metrics.system_power,
                     temperature_celsius=raw.soc_metrics.gpu_temp,
                 ),
