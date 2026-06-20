@@ -187,11 +187,34 @@ def _logits_all_enabled() -> bool:
 
     llama-cpp-python gates all logprobs behind ``logits_all=True`` at model
     construction, and the runner is loaded once but serves logprobs per request,
-    so the flag cannot be toggled per request. Defaults on for MLX parity;
-    ``SKULK_LLAMA_CPP_LOGITS_ALL=0`` turns it off to reclaim the extra logits
-    memory when an operator never uses logprobs.
+    so the flag cannot be toggled per request.
+
+    Defaults **off**. ``logits_all=True`` makes llama.cpp pre-allocate a logits
+    buffer of ``n_ctx * vocab * 4`` bytes up front, which at the model's full
+    trained context is enormous (e.g. 131072 * 152064 * 4 = 74 GiB for a Qwen2.5
+    vocab) and OOMs the node on load. So logprobs is opt-in via
+    ``SKULK_LLAMA_CPP_LOGITS_ALL=1``, and when on the context is capped (see
+    ``_logits_all_n_ctx``) so the buffer stays bounded. With it off the runner
+    serves at full context and a logprobs request degrades to a clear error.
     """
-    return os.getenv("SKULK_LLAMA_CPP_LOGITS_ALL", "1") != "0"
+    return os.getenv("SKULK_LLAMA_CPP_LOGITS_ALL", "0") == "1"
+
+
+def _logits_all_n_ctx() -> int:
+    """Context cap (tokens) to use when ``logits_all`` is on, to bound the buffer.
+
+    The ``logits_all`` logits buffer is ``n_ctx * vocab * 4`` bytes, so it must
+    not ride the model's full trained context. This caps it to a modest window
+    (default 8192, override with ``SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX``): at an
+    ~150k vocab that is ~5 GiB, the price of opting into logprobs. Ignored when
+    ``logits_all`` is off (the runner then uses the full trained context).
+    """
+    raw = os.getenv("SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX", "8192")
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 8192
+    return value if value > 0 else 8192
 
 
 def _map_finish_reason(
@@ -348,16 +371,20 @@ class Runner:
         if gguf_path is None:
             gguf_path = select_gguf_file(model_dir)
         logger.info(f"loading GGUF {gguf_path.name} for {model_id}")
-        # logits_all enables logprobs (see _logits_all_enabled); the cost is
-        # extra logits memory during prompt eval (proportional to prompt length
-        # x vocab — generation stays incremental).
         # n_gpu_layers=-1 offloads every layer to the GPU backend the binding was
-        # built with (Vulkan/ROCm/CUDA); n_ctx=0 uses the model's trained context.
+        # built with (Vulkan/ROCm/CUDA). n_ctx=0 uses the model's full trained
+        # context for normal serving. logits_all (logprobs, opt-in) is the
+        # exception: it pre-allocates an n_ctx*vocab*4 logits buffer, which at the
+        # full trained context OOMs the node on load (131072*152064*4 = 74 GiB),
+        # so when it is on we cap the context to a bounded window. See
+        # _logits_all_enabled / _logits_all_n_ctx.
+        logits_all = _logits_all_enabled()
+        n_ctx = _logits_all_n_ctx() if logits_all else 0
         self.model = Llama(
             model_path=str(gguf_path),
             n_gpu_layers=-1,
-            n_ctx=0,
-            logits_all=_logits_all_enabled(),
+            n_ctx=n_ctx,
+            logits_all=logits_all,
             verbose=False,
         )
         self.current_status = RunnerReady()

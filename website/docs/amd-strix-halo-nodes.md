@@ -106,10 +106,14 @@ other Skulk model, with the same streaming behavior. It matches the MLX nodes on
 the generation capabilities llama.cpp supports:
 
 - **Text generation**, streamed token by token.
-- **Logprobs**: per-token logprobs and ranked alternatives (`logprobs` /
-  `top_logprobs`). The model is loaded so it retains the per-token logits this
-  needs; an operator who never uses logprobs can turn that off to reclaim memory
-  with `SKULK_LLAMA_CPP_LOGITS_ALL=0`.
+- **Logprobs** (opt-in): per-token logprobs and ranked alternatives (`logprobs`
+  / `top_logprobs`). This needs the model loaded so it retains per-token logits,
+  which pre-allocates a large buffer (context length x vocab), so it is off by
+  default to keep loads safe at full context. Enable it per node with
+  `SKULK_LLAMA_CPP_LOGITS_ALL=1`; doing so caps the served context to a bounded
+  window (`SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX`, default 8192) so the buffer stays
+  small. With it off, a logprobs request returns a clear error rather than
+  silently omitting them.
 - **Tool calling**: a request's `tools` are passed to the model. Whether the
   model returns a *structured* tool call or describes the call in prose depends
   on the model and its embedded chat template, which Skulk uses as-is; either way

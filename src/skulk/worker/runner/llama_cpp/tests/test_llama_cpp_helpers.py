@@ -10,6 +10,7 @@ from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskP
 from skulk.worker.runner.llama_cpp.runner import (
     _generation_kwargs,
     _logits_all_enabled,
+    _logits_all_n_ctx,
     _logprob_fields,
     _map_finish_reason,
     _tool_calls_from_message,
@@ -85,12 +86,26 @@ def test_generation_kwargs_passes_logprobs() -> None:
 
 
 def test_logits_all_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Default OFF: logits_all at full context pre-allocates an n_ctx*vocab*4
+    # buffer that OOMs the node on load, so logprobs is opt-in.
     monkeypatch.delenv("SKULK_LLAMA_CPP_LOGITS_ALL", raising=False)
-    assert _logits_all_enabled() is True  # default on (logprobs parity)
-    monkeypatch.setenv("SKULK_LLAMA_CPP_LOGITS_ALL", "0")
-    assert _logits_all_enabled() is False  # explicit opt-out
+    assert _logits_all_enabled() is False  # default off (avoids the OOM)
     monkeypatch.setenv("SKULK_LLAMA_CPP_LOGITS_ALL", "1")
-    assert _logits_all_enabled() is True
+    assert _logits_all_enabled() is True  # explicit opt-in
+    monkeypatch.setenv("SKULK_LLAMA_CPP_LOGITS_ALL", "0")
+    assert _logits_all_enabled() is False
+
+
+def test_logits_all_n_ctx(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX", raising=False)
+    assert _logits_all_n_ctx() == 8192  # bounded default, not the full context
+    monkeypatch.setenv("SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX", "16384")
+    assert _logits_all_n_ctx() == 16384
+    # garbage / non-positive falls back to the safe default, never 0 (full ctx)
+    monkeypatch.setenv("SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX", "0")
+    assert _logits_all_n_ctx() == 8192
+    monkeypatch.setenv("SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX", "abc")
+    assert _logits_all_n_ctx() == 8192
 
 
 def test_tool_calls_from_message() -> None:

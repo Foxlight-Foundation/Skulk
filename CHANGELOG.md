@@ -62,8 +62,9 @@ This project records release notes here and mirrors public-facing notes in
 
 - **The llama.cpp engine matches MLX on logprobs and tool calling (#356).** GGUF
   models served on an AMD node support per-token `logprobs` / `top_logprobs`
-  (the model is loaded retaining per-token logits; `SKULK_LLAMA_CPP_LOGITS_ALL=0`
-  opts out to reclaim memory) and tool calling (a request's `tools` are forwarded;
+  (opt-in via `SKULK_LLAMA_CPP_LOGITS_ALL=1`, which loads the model retaining
+  per-token logits and caps the served context so the logits buffer stays
+  bounded; off by default) and tool calling (a request's `tools` are forwarded;
   a structured tool call is emitted when the model returns one, else its prose).
   Multi-token prediction / speculative decoding remains MLX-only: GGUF models
   advertise no MTP capability, so an AMD node serves plain autoregressive without
@@ -149,6 +150,15 @@ This project records release notes here and mirrors public-facing notes in
   interchangeable behind the flag.
 
 ### Fixed
+
+- **llama.cpp logprobs no longer OOM a node on load.** Defaulting the runner to
+  `logits_all=True` for logprobs parity made llama.cpp pre-allocate an
+  `n_ctx * vocab * 4` logits buffer at the model's full trained context, e.g.
+  `131072 * 152064 * 4` = 74 GiB for a Qwen2.5-7B GGUF, failing the load with an
+  allocation error. logprobs is now opt-in (`SKULK_LLAMA_CPP_LOGITS_ALL=1`) and,
+  when enabled, caps the served context (`SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX`,
+  default 8192) so the buffer stays bounded; the default path serves at full
+  context with no oversized allocation.
 
 - **The source-built GPU llama.cpp wheel survives `uv sync` (#358).** On a node
   that declares a GPU llama.cpp backend, the service entrypoint now runs
