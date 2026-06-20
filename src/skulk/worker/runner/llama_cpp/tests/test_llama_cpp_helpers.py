@@ -9,7 +9,9 @@ from skulk.shared.types.common import ModelId
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from skulk.worker.runner.llama_cpp.runner import (
     _generation_kwargs,
+    _logprob_fields,
     _map_finish_reason,
+    _tool_calls_from_message,
     messages_for_llama,
     select_gguf_file,
 )
@@ -70,3 +72,52 @@ def test_messages_fallback_from_input_and_instructions() -> None:
     result = messages_for_llama(params)
     assert result[0] == {"role": "system", "content": "be brief"}
     assert result[1]["role"] == "user"
+
+
+def test_generation_kwargs_passes_logprobs() -> None:
+    assert "logprobs" not in _generation_kwargs(_params())
+    kw = _generation_kwargs(_params(logprobs=True, top_logprobs=3))
+    assert kw["logprobs"] is True and kw["top_logprobs"] == 3
+    # logprobs requested without a top-N: flag on, no top_logprobs key
+    kw2 = _generation_kwargs(_params(logprobs=True))
+    assert kw2["logprobs"] is True and "top_logprobs" not in kw2
+
+
+def test_tool_calls_from_message() -> None:
+    msg = {
+        "tool_calls": [
+            {"id": "call_1", "type": "function",
+             "function": {"name": "get_weather", "arguments": '{"city":"SF"}'}},
+            {"function": {"name": "noid", "arguments": "{}"}},  # no id -> still parsed
+            {"function": {"arguments": "{}"}},  # no name -> skipped
+        ]
+    }
+    items = _tool_calls_from_message(msg)
+    assert [i.name for i in items] == ["get_weather", "noid"]
+    assert items[0].id == "call_1"
+    assert items[0].arguments == '{"city":"SF"}'
+
+
+def test_tool_calls_from_message_none() -> None:
+    assert _tool_calls_from_message({"content": "hi"}) == []
+
+
+def test_logprob_fields_parses_openai_shape() -> None:
+    choice = {
+        "logprobs": {
+            "content": [
+                {"token": "Hi", "logprob": -0.2,
+                 "top_logprobs": [{"token": "Hi", "logprob": -0.2},
+                                  {"token": "Hey", "logprob": -1.5}]}
+            ]
+        }
+    }
+    lp, top = _logprob_fields(choice)
+    assert lp == -0.2
+    assert top is not None and [t.token for t in top] == ["Hi", "Hey"]
+
+
+def test_logprob_fields_absent_or_malformed() -> None:
+    assert _logprob_fields({}) == (None, None)
+    assert _logprob_fields({"logprobs": None}) == (None, None)
+    assert _logprob_fields({"logprobs": {"content": []}}) == (None, None)

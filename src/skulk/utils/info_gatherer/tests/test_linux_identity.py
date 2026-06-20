@@ -22,8 +22,11 @@ _FILES = {
 
 
 @pytest.fixture
-def fake_files(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(system_info, "_read_text", lambda path: _FILES.get(path, ""))
+def fake_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_read_text(path: str) -> str:
+        return _FILES.get(path, "")
+
+    monkeypatch.setattr(system_info, "_read_text", fake_read_text)
 
 
 def test_linux_model_and_chip(fake_files: None) -> None:
@@ -52,7 +55,10 @@ def test_linux_model_falls_back_to_board_then_unknown(
         "/sys/class/dmi/id/board_name": "NIMO Mini PC",
         "/sys/class/dmi/id/sys_vendor": "Default string",
     }
-    monkeypatch.setattr(system_info, "_read_text", lambda path: files.get(path, ""))
+    def fake_read_text(path: str) -> str:
+        return files.get(path, "")
+
+    monkeypatch.setattr(system_info, "_read_text", fake_read_text)
     model, chip = system_info._linux_model_and_chip()
     assert model == "NIMO Mini PC"  # vendor was junk, product junk -> board name
     assert chip == "Unknown Chip"

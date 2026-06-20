@@ -22,7 +22,9 @@ from typing import Any, Literal
 
 from anyio import WouldBlock
 
-from skulk.shared.types.chunks import ErrorChunk, TokenChunk
+from skulk.api.types import ToolCallItem, TopLogprobItem
+from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
+from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
     ChunkGenerated,
     Event,
@@ -123,7 +125,60 @@ def _generation_kwargs(task_params: TextGenerationTaskParams) -> dict[str, Any]:
         kwargs["stop"] = task_params.stop
     if task_params.seed is not None:
         kwargs["seed"] = task_params.seed
+    if task_params.logprobs:
+        kwargs["logprobs"] = True
+        if task_params.top_logprobs is not None:
+            kwargs["top_logprobs"] = task_params.top_logprobs
     return kwargs
+
+
+def _tool_calls_from_message(message: dict[str, Any]) -> list[ToolCallItem]:
+    """Extract Skulk ToolCallItems from a llama.cpp chat-completion message.
+
+    llama.cpp returns OpenAI-shaped tool calls:
+    ``{"tool_calls": [{"id", "type": "function", "function": {"name", "arguments"}}]}``
+    where ``arguments`` is a JSON string. Returns [] when the message has none.
+    """
+    items: list[ToolCallItem] = []
+    for call in message.get("tool_calls") or []:
+        function = call.get("function") or {}
+        name = function.get("name")
+        if not name:
+            continue
+        item_kwargs: dict[str, Any] = {
+            "name": name,
+            "arguments": function.get("arguments") or "",
+        }
+        if call.get("id"):
+            item_kwargs["id"] = call["id"]
+        items.append(ToolCallItem(**item_kwargs))
+    return items
+
+
+def _logprob_fields(
+    choice: dict[str, Any],
+) -> tuple[float | None, list[TopLogprobItem] | None]:
+    """Pull (logprob, top_logprobs) for one streamed token from a chat chunk.
+
+    llama.cpp mirrors the OpenAI chat-logprobs shape:
+    ``choice["logprobs"]["content"] = [{"token", "logprob", "top_logprobs": [...]}]``.
+    Best-effort: any shape mismatch yields ``(None, None)`` so a logprobs request
+    never breaks generation. A streamed chunk carries one content entry.
+    """
+    try:
+        content = (choice.get("logprobs") or {}).get("content") or []
+        if not content:
+            return (None, None)
+        entry = content[0]
+        top = [
+            TopLogprobItem(
+                token=t["token"], logprob=t["logprob"], bytes=t.get("bytes")
+            )
+            for t in (entry.get("top_logprobs") or [])
+        ] or None
+        return (entry.get("logprob"), top)
+    except (KeyError, TypeError, IndexError):
+        return (None, None)
 
 
 def _map_finish_reason(
@@ -258,7 +313,6 @@ class Runner:
         from llama_cpp import Llama  # pyright: ignore[reportAttributeAccessIssue]
 
         from skulk.download.download_utils import build_model_path
-        from skulk.shared.types.common import ModelId
 
         model_id = self.shard_metadata.model_card.model_id
         model_dir = build_model_path(ModelId(model_id))
@@ -312,6 +366,15 @@ class Runner:
         kwargs = _generation_kwargs(task.task_params)
 
         try:
+            # Tool calling can't be streamed token-by-token usefully (the caller
+            # wants the assembled call), and accumulating OpenAI tool-call deltas
+            # is fragile; run it non-streamed and emit one ToolCallChunk.
+            if task.task_params.tools:
+                self._generate_with_tools(task, messages, kwargs, model_id, command_id)
+                self.current_status = RunnerReady()
+                return
+
+            want_logprobs = task.task_params.logprobs
             stream = self.model.create_chat_completion(
                 messages=messages, stream=True, **kwargs
             )
@@ -323,7 +386,10 @@ class Runner:
                 choice = chunk["choices"][0]
                 text = choice.get("delta", {}).get("content") or ""
                 finish = _map_finish_reason(choice.get("finish_reason"))
-                if not text and finish is None:
+                logprob, top_logprobs = (
+                    _logprob_fields(choice) if want_logprobs else (None, None)
+                )
+                if not text and finish is None and logprob is None:
                     continue
                 emitted_finish = emitted_finish or finish is not None
                 self.event_sender.send(
@@ -335,6 +401,8 @@ class Runner:
                             token_id=-1,  # llama.cpp chat stream does not expose ids
                             usage=None,
                             finish_reason=finish,
+                            logprob=logprob,
+                            top_logprobs=top_logprobs,
                         ),
                     )
                 )
@@ -363,3 +431,52 @@ class Runner:
             )
 
         self.current_status = RunnerReady()
+
+    def _generate_with_tools(
+        self,
+        task: TextGeneration,
+        messages: list[dict[str, Any]],
+        kwargs: dict[str, Any],
+        model_id: ModelId,
+        command_id: CommandId,
+    ) -> None:
+        """Serve a tool-enabled request (non-streamed) and emit one terminal chunk.
+
+        Passes the request's ``tools`` to llama.cpp. If the model returns tool
+        calls, emits a ``ToolCallChunk``; otherwise it chose to answer in prose,
+        so emits that content as a normal ``TokenChunk``. Either way a single
+        terminal chunk closes the consumer's stream.
+        """
+        result = self.model.create_chat_completion(
+            messages=messages,
+            stream=False,
+            tools=task.task_params.tools,
+            **kwargs,
+        )
+        choice = result["choices"][0]
+        message = choice.get("message", {})
+        tool_calls = _tool_calls_from_message(message)
+        if tool_calls:
+            self.event_sender.send(
+                ChunkGenerated(
+                    command_id=command_id,
+                    chunk=ToolCallChunk(
+                        model=model_id, tool_calls=tool_calls, usage=None
+                    ),
+                )
+            )
+            return
+        # No tool call: the model answered in prose. Emit it as a final token.
+        self.event_sender.send(
+            ChunkGenerated(
+                command_id=command_id,
+                chunk=TokenChunk(
+                    model=model_id,
+                    text=message.get("content") or "",
+                    token_id=-1,
+                    usage=None,
+                    finish_reason=_map_finish_reason(choice.get("finish_reason"))
+                    or "stop",
+                ),
+            )
+        )
