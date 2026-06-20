@@ -3,6 +3,7 @@ import { copyToClipboard } from '../../utils/clipboard';
 import { useTailscaleStatus } from '../../hooks/useTailscaleStatus';
 import styled from 'styled-components';
 import { Button } from '../common/Button';
+import { AcceleratorPanel } from './AcceleratorPanel';
 import { CenteredSpinner, Spinner } from '../common/Spinner';
 import { formatBytes } from '../../utils/format';
 import { useClusterState } from '../../hooks/useClusterState';
@@ -584,6 +585,13 @@ export function NodeTab({ nodeId }: NodeTabProps) {
               <Row><Key>Temp</Key><Value>{system?.temp != null ? `${Math.round(system.temp)}°C` : 'unknown'}</Value></Row>
               <Row><Key>Power</Key><Value>{system?.sysPower != null ? `${Math.round(system.sysPower)}W` : 'unknown'}</Value></Row>
             </Section>
+
+            {system?.accelerator && (
+              <Section>
+                <SectionTitle>Accelerator</SectionTitle>
+                <AcceleratorPanel accelerator={system.accelerator} />
+              </Section>
+            )}
 
             <Section>
               <SectionTitle>Placements</SectionTitle>
