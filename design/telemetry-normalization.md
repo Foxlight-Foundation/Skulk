@@ -17,19 +17,23 @@ future CUDA) renders and is reasoned about uniformly.
 Node metrics today are Mac-shaped and Mac-only:
 
 - The normalized carrier `SystemPerformanceProfile`
-  (`shared/types/profiling.py`) has `gpu_usage`, `temp`, `sys_power`,
+  (`src/skulk/shared/types/profiling.py`) has `gpu_usage`, `temp`, `sys_power`,
   `pcpu_usage`, `ecpu_usage`. The CPU split is Apple P-core / E-core specific,
   and there is no VRAM, no GPU-distinct power/temperature, no accelerator
   identity.
 - Only the Darwin path fills it: `InfoGatherer` runs the `mactop` collector when
   `sys.platform == "darwin"`, else falls back to psutil for memory only
-  (`info_gatherer.py`). An AMD/Linux node (kite4) contributes zeros: it is a GPU
-  telemetry blind spot.
+  (`src/skulk/utils/info_gatherer/info_gatherer.py`). An AMD/Linux node (kite4)
+  sends memory but **no `system_profile` at all** (no `node_system` entry),
+  rather than a profile of zeros: it is a GPU telemetry blind spot.
 
-The collector pattern is already right, though: `MactopMetrics` and
-`MacmonMetrics` are two collectors that both normalize into the same
-`memory` + `system_profile` shape in `TelemetryView.apply()`. We extend that
-precedent rather than invent a new mechanism.
+The collector pattern is already right, though: the active Darwin collector is
+`mactop`, which produces the normalized `memory` + `system_profile` shape in its
+own `MactopMetrics.from_raw*` constructors (`src/skulk/utils/info_gatherer/mactop.py`);
+`TelemetryView.apply()` then just coalesces those already-normalized readings.
+(`MacmonMetrics` is not an active collector: it is a decode-only rolling-upgrade
+shim with the same normalized shape.) We extend that precedent, normalizing in
+the collector, rather than invent a new mechanism.
 
 ## Principle
 
@@ -63,11 +67,18 @@ class AcceleratorMetrics(CamelCaseModel):
     accelerator: AcceleratorMetrics | None = None
 ```
 
+Units convention: `utilization_ratio` is a 0..1 fraction, so each collector
+divides its native percentage. mactop's `gpu_usage` is already a percentage
+(e.g. `8.66`), so the Mac mapping is `utilization_ratio = gpu_usage / 100`;
+AMD sysfs `gpu_busy_percent` (0..100) divides likewise. Power is watts and
+temperature is degrees Celsius, so sysfs values in microwatts / millidegrees
+are scaled at the collector.
+
 The existing Mac-specific scalars (`gpu_usage`, `pcpu_usage`, `ecpu_usage`,
 `temp`, `sys_power`) stay for back-compat with the current dashboard and power
 sampler; the Mac collector also fills `accelerator` (vendor=`apple`,
-`utilization_ratio = gpu_usage`, `power_watts = sys_power`, etc.) so new readers
-use the normalized block uniformly. New cross-vendor readers (dashboard GPU card,
+`utilization_ratio = gpu_usage / 100`, `power_watts = sys_power`, etc.) so new
+readers use the normalized block uniformly. New cross-vendor readers (dashboard GPU card,
 any capacity/energy aggregate) read `accelerator` only.
 
 Why a nested block rather than more flat fields: it carries its own vendor/name
