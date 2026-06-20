@@ -227,21 +227,31 @@ def _logits_all_n_ctx() -> int:
 def _serving_n_ctx(context_token_limit: int | None, logits_all: bool) -> int:
     """Context window (tokens) to allocate for the llama.cpp KV cache on load.
 
-    Never 0: ``n_ctx=0`` tells llama.cpp to size the KV cache for the model's
-    FULL trained context (e.g. gemma-4's 128k), which far exceeds the per-instance
-    budget placement reserved memory for and OOM-kills the whole node on load
-    (observed loading gemma-4-31B on a Vulkan node: the process was oom-killed and
-    the instance vanished). Instead allocate for the instance's static
-    context-admission ceiling (#145) -- the value placement actually sized node
-    memory against -- falling back to the placement KV budget when it is unset.
-    When ``logits_all`` is on, also bound by the logits-buffer window since that
-    buffer scales with ``n_ctx``.
+    llama.cpp allocates the whole KV cache up front from ``n_ctx`` (unlike MLX,
+    which grows it per request), so ``n_ctx`` must not exceed the memory placement
+    actually reserved. Two failure modes this guards against:
+
+    - ``n_ctx=0`` tells llama.cpp to size the cache for the model's FULL trained
+      context (e.g. gemma-4's 128k), which OOM-killed the whole worker on load
+      (observed loading gemma-4-31B on a Vulkan node: the process was oom-killed
+      and the instance vanished).
+    - The instance's request-admission ceiling (#145, ``context_token_limit``) is
+      NOT a safe size either: it is derived from ~0.75 x total RAM and can be tens
+      of thousands of tokens, whereas placement's fit check
+      (``filter_cycles_by_memory``) only reserved KV for ``KV_CONTEXT_BUDGET_TOKENS``
+      (8192). Allocating the larger ceiling up front would again exceed reserved
+      memory and OOM the node.
+
+    So the load-time window is the placement KV budget -- the value placement
+    sized node memory against -- additionally clamped down by the admission
+    ceiling on the (degenerate) tiny node where it is even smaller, and by the
+    logits-buffer window when ``logits_all`` is on (that buffer scales with
+    ``n_ctx``). Serving llama.cpp beyond this budget requires placement to reserve
+    the larger KV footprint first (tracked separately with VRAM-aware admission).
     """
-    ceiling = (
-        context_token_limit
-        if context_token_limit and context_token_limit > 0
-        else KV_CONTEXT_BUDGET_TOKENS
-    )
+    ceiling = KV_CONTEXT_BUDGET_TOKENS
+    if context_token_limit and 0 < context_token_limit < ceiling:
+        ceiling = context_token_limit
     if logits_all:
         return min(ceiling, _logits_all_n_ctx())
     return ceiling
@@ -280,9 +290,10 @@ class Runner:
         self.cancel_receiver = cancel_receiver
         self.bound_instance = bound_instance
         # Static per-instance context ceiling for request admission (#145),
-        # computed by the worker from gossiped node memory before spawn. Bounds
-        # the KV cache the runner allocates on load so it matches the memory
-        # placement reserved (see _serving_n_ctx); never the model's full context.
+        # computed by the worker from gossiped node memory before spawn. Only a
+        # lower-bound clamp on the load-time KV window here: the window is the
+        # placement KV budget, not this (larger) ceiling, so the up-front KV cache
+        # never exceeds the memory placement reserved (see _serving_n_ctx).
         self.context_token_limit = context_token_limit
         self.instance, self.runner_id, self.shard_metadata = (
             bound_instance.instance,
@@ -407,11 +418,12 @@ class Runner:
         if gguf_path is None:
             gguf_path = select_gguf_file(model_dir)
         # n_gpu_layers=-1 offloads every layer to the GPU backend the binding was
-        # built with (Vulkan/ROCm/CUDA). n_ctx is bounded by the instance's
-        # admission ceiling (never 0/full-context, which OOM-kills the node on a
-        # large-context model -- see _serving_n_ctx). logits_all (logprobs,
-        # opt-in) further bounds it because it pre-allocates an n_ctx*vocab*4
-        # logits buffer. See _logits_all_enabled / _logits_all_n_ctx.
+        # built with (Vulkan/ROCm/CUDA). n_ctx is bounded by the KV budget
+        # placement reserved (never 0/full-context nor the larger admission
+        # ceiling, either of which OOM-kills the node on a large-context model --
+        # see _serving_n_ctx). logits_all (logprobs, opt-in) further bounds it
+        # because it pre-allocates an n_ctx*vocab*4 logits buffer. See
+        # _logits_all_enabled / _logits_all_n_ctx.
         logits_all = _logits_all_enabled()
         n_ctx = _serving_n_ctx(self.context_token_limit, logits_all)
         logger.info(

@@ -116,20 +116,26 @@ def test_logits_all_n_ctx(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _logits_all_n_ctx() == 8192
 
 
-def test_serving_n_ctx_never_full_context(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_serving_n_ctx_capped_to_placement_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX", raising=False)
-    # The admission ceiling is used verbatim when logits_all is off, and is NEVER
-    # 0 (which would size the KV cache for the model's full trained context and
-    # OOM-kill the node on a large-context model like gemma-4 @ 128k).
-    assert _serving_n_ctx(32768, logits_all=False) == 32768
-    assert _serving_n_ctx(4096, logits_all=False) == 4096
-    # Unset / non-positive ceiling falls back to the placement KV budget, not 0.
+    # llama.cpp allocates the KV cache up front, so n_ctx is capped to the budget
+    # placement reserved (KV_CONTEXT_BUDGET_TOKENS), NEVER the full trained context
+    # (n_ctx=0) and NEVER the larger request-admission ceiling -- either would
+    # exceed reserved memory and OOM-kill the node (the bug this fixes).
+    assert _serving_n_ctx(32768, logits_all=False) == KV_CONTEXT_BUDGET_TOKENS
     assert _serving_n_ctx(None, logits_all=False) == KV_CONTEXT_BUDGET_TOKENS
     assert _serving_n_ctx(0, logits_all=False) == KV_CONTEXT_BUDGET_TOKENS
-    # With logits_all on, the logits-buffer window further bounds the ceiling but
-    # never raises it (a smaller ceiling wins).
-    assert _serving_n_ctx(32768, logits_all=True) == _logits_all_n_ctx()
-    assert _serving_n_ctx(2048, logits_all=True) == 2048
+    # On a degenerate tiny node whose admission ceiling is even smaller than the
+    # budget, clamp down to it (never allocate more than admitted).
+    assert _serving_n_ctx(4096, logits_all=False) == 4096
+    # With logits_all on, the logits-buffer window further bounds it (a smaller
+    # window wins), never raising it above the budget.
+    monkeypatch.setenv("SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX", "2048")
+    assert _serving_n_ctx(32768, logits_all=True) == 2048
+    monkeypatch.setenv("SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX", "16384")
+    assert _serving_n_ctx(32768, logits_all=True) == KV_CONTEXT_BUDGET_TOKENS
 
 
 def test_tool_calls_from_message() -> None:

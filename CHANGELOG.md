@@ -157,9 +157,12 @@ This project records release notes here and mirrors public-facing notes in
   budget placement actually reserved memory for. On a memory-tight node (observed
   loading gemma-4-31B on a Strix Halo Vulkan node) the kernel OOM-killed the whole
   worker process, so the instance vanished instead of failing cleanly. The runner
-  now bounds `n_ctx` to the instance's static context-admission ceiling (#145),
-  falling back to the placement KV budget (8192 tokens) when unset, so the KV
-  cache always matches the memory the cluster sized for the placement.
+  now bounds `n_ctx` to the KV budget placement actually reserved memory for
+  (`KV_CONTEXT_BUDGET_TOKENS`, 8192 tokens), clamped down by the instance's
+  admission ceiling (#145) on a smaller node, so the up-front KV cache never
+  exceeds what the cluster sized for the placement. (Serving llama.cpp beyond that
+  budget needs placement to reserve the larger KV footprint, tracked separately
+  with VRAM-aware admission.)
 
 - **llama.cpp logprobs no longer OOM a node on load.** Defaulting the runner to
   `logits_all=True` for logprobs parity made llama.cpp pre-allocate an
