@@ -27,6 +27,7 @@ from skulk.shared.types.profiling import (
 )
 from skulk.utils.info_gatherer.info_gatherer import (
     GatheredInfo,
+    LinuxGpuMetrics,
     MacmonMetrics,
     MactopMetrics,
     MiscData,
@@ -53,6 +54,7 @@ TELEMETRY_PLANE_INFO = (
     MemoryUsage,
     MactopMetrics,
     MacmonMetrics,
+    LinuxGpuMetrics,
     NodeDiskUsage,
     MiscData,
     StaticNodeInformation,
@@ -117,6 +119,10 @@ class TelemetryView:
             # MacmonMetrics is a decode-only rolling-upgrade shim with the same
             # normalized memory/system_profile shape as MactopMetrics.
             self.node_memory[node_id] = info.memory
+            self.node_system[node_id] = info.system_profile
+        elif isinstance(info, LinuxGpuMetrics):
+            # AMD/Linux GPU collector: carries only the system profile (with its
+            # accelerator block); node memory arrives separately via MemoryUsage.
             self.node_system[node_id] = info.system_profile
         elif isinstance(info, NodeDiskUsage):
             self.node_disk[node_id] = info.disk_usage

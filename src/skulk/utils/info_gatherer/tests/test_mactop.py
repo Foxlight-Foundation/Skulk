@@ -31,6 +31,20 @@ def test_parses_system_profile():
     assert m.system_profile.pcpu_usage == 0.55
 
 
+def test_fills_normalized_accelerator():
+    # The collector-agnostic block: gpu_usage is a percentage, so the ratio is
+    # /100; Apple is unified memory so vram_* stay None.
+    acc = MactopMetrics.from_raw_json(_SAMPLE).system_profile.accelerator
+    assert acc is not None
+    assert acc.vendor == "apple"
+    assert acc.name == "Apple GPU"
+    assert acc.utilization_ratio == 8.66 / 100
+    assert acc.power_watts == 0.09  # gpu_power, not whole-SoC system_power
+    assert acc.temperature_celsius == 39.46
+    assert acc.vram_total_bytes is None
+    assert acc.vram_used_bytes is None
+
+
 def test_parses_memory():
     m = MactopMetrics.from_raw_json(_SAMPLE)
     assert m.memory.ram_total.in_bytes == 17179869184

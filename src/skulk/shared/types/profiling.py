@@ -187,6 +187,32 @@ class DiskUsage(CamelCaseModel):
         )
 
 
+AcceleratorVendor = Literal["apple", "amd", "nvidia", "intel", "cpu", "unknown"]
+
+
+class AcceleratorMetrics(CamelCaseModel):
+    """One accelerator's live readings, normalized across collectors.
+
+    The collector-agnostic GPU/accelerator expression: any platform's collector
+    (mactop on Apple Silicon, rocm-smi/sysfs on AMD, nvidia-smi on CUDA) fills
+    the same shape, so the planner and dashboard reason about a heterogeneous
+    fleet uniformly. A field a given collector cannot measure stays ``None``
+    (never a fake zero), so a reader can tell "0%" apart from "not reported".
+    Units are fixed here so collectors normalize at their boundary:
+    ``utilization_ratio`` is a 0..1 fraction, power is watts, temperature is
+    degrees Celsius.
+    """
+
+    vendor: AcceleratorVendor = "unknown"
+    name: str = "Unknown"
+    utilization_ratio: float | None = None
+    vram_total_bytes: int | None = None
+    vram_used_bytes: int | None = None
+    power_watts: float | None = None
+    temperature_celsius: float | None = None
+    clock_mhz: int | None = None
+
+
 class SystemPerformanceProfile(CamelCaseModel):
     # TODO: flops_fp16: float
 
@@ -195,6 +221,11 @@ class SystemPerformanceProfile(CamelCaseModel):
     sys_power: float = 0.0
     pcpu_usage: float = 0.0
     ecpu_usage: float = 0.0
+    # Collector-agnostic accelerator readings (None when unreported, e.g. a
+    # management or CPU-only node, or a collector that cannot measure them).
+    # The scalars above stay for back-compat with existing Mac-only readers;
+    # cross-vendor readers use this block.
+    accelerator: AcceleratorMetrics | None = None
 
 
 InterfaceType = Literal["wifi", "ethernet", "maybe_ethernet", "thunderbolt", "unknown"]
