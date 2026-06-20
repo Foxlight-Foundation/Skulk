@@ -3,6 +3,7 @@ from typing import Self
 from pydantic import BaseModel
 
 from skulk.shared.types.profiling import (
+    AcceleratorMetrics,
     MachMemoryCategories,
     MemoryUsage,
     SystemPerformanceProfile,
@@ -95,6 +96,17 @@ class MactopMetrics(TaggedModel):
                 sys_power=raw.soc_metrics.system_power,
                 pcpu_usage=raw.pcpu_usage[1],
                 ecpu_usage=raw.ecpu_usage[1],
+                # Also fill the collector-agnostic block so cross-vendor readers
+                # see Apple nodes uniformly. mactop's gpu_usage is a percentage,
+                # so divide to the 0..1 ratio convention. Apple is unified memory
+                # with no distinct VRAM pool, so vram_* stay None; sys_power is
+                # SoC package power (closest available accelerator-power proxy).
+                accelerator=AcceleratorMetrics(
+                    vendor="apple",
+                    utilization_ratio=raw.gpu_usage / 100,
+                    power_watts=raw.soc_metrics.system_power,
+                    temperature_celsius=raw.soc_metrics.gpu_temp,
+                ),
             ),
             memory=MemoryUsage.from_bytes(
                 ram_total=raw.memory.total,

@@ -10,6 +10,7 @@ from skulk.routing.topics import TELEMETRY
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
+    AcceleratorMetrics,
     DiskUsage,
     MemoryUsage,
     NodeResources,
@@ -17,6 +18,7 @@ from skulk.shared.types.profiling import (
 )
 from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
 from skulk.utils.info_gatherer.info_gatherer import (
+    LinuxGpuMetrics,
     MactopMetrics,
     MiscData,
     NodeDiskUsage,
@@ -215,3 +217,36 @@ def test_prune_drops_all_telemetry_for_a_node() -> None:
     ):
         assert a not in m
         assert b in m  # only the pruned node is dropped
+
+
+def test_linux_gpu_metrics_round_trip_and_apply() -> None:
+    # The AMD/Linux collector must survive the gossip codec and land its
+    # accelerator block in node_system (memory arrives separately).
+    msg = NodeTelemetry(
+        node_id=NodeId("kite4"),
+        info=LinuxGpuMetrics(
+            system_profile=SystemPerformanceProfile(
+                accelerator=AcceleratorMetrics(
+                    vendor="amd",
+                    name="AMD GPU",
+                    utilization_ratio=0.42,
+                    vram_total_bytes=68719476736,
+                    vram_used_bytes=163233792,
+                    power_watts=9.03,
+                    temperature_celsius=39.0,
+                    clock_mhz=1100,
+                )
+            )
+        ),
+    )
+    restored = TELEMETRY.deserialize(TELEMETRY.serialize(msg))
+    assert restored == msg
+    assert isinstance(restored.info, LinuxGpuMetrics)
+
+    view = TelemetryView()
+    view.apply(restored)
+    acc = view.node_system[NodeId("kite4")].accelerator
+    assert acc is not None
+    assert acc.vendor == "amd"
+    assert acc.vram_total_bytes == 68719476736
+    assert acc.utilization_ratio == 0.42
