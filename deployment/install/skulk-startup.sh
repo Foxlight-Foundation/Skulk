@@ -75,8 +75,25 @@ run_prep() {
     # `uv sync` — non-fatal. If the lockfile is unchanged, this is a
     # no-op; if PyPI is down or wheels can't build, fall back to the
     # currently installed environment.
+    #
+    # On a node that declares a GPU llama.cpp backend, the GPU wheel is built
+    # from source out-of-band (CMAKE_ARGS=...; see deployment/rocm) and is NOT in
+    # uv's locked resolution (llama-cpp-python is an optional extra). A plain
+    # `uv sync` would PRUNE that wheel as extraneous, dropping the node to
+    # CPU-only (or off the llama.cpp roster entirely) until a manual rebuild.
+    # `--inexact` tells uv to leave packages outside the resolution in place, so
+    # the source-built GPU wheel survives the sync. Macs / CPU nodes keep an
+    # exact sync. (SC2086: SYNC_FLAGS is a controlled "--inexact" or empty.)
+    SYNC_FLAGS=""
+    case ",${SKULK_LLAMA_CPP_BACKENDS:-}," in
+    *,vulkan,* | *,rocm,* | *,cuda,*)
+        SYNC_FLAGS="--inexact"
+        log "GPU llama.cpp node: 'uv sync --inexact' to preserve the source-built wheel"
+        ;;
+    esac
     log "uv sync (non-fatal)"
-    if ! uv sync 2>&1 | tee -a "$PREP_LOG" >&2; then
+    # shellcheck disable=SC2086
+    if ! uv sync $SYNC_FLAGS 2>&1 | tee -a "$PREP_LOG" >&2; then
         log "warning: uv sync failed (continuing with current venv)"
     fi
 

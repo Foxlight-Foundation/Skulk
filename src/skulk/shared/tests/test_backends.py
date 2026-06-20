@@ -75,6 +75,57 @@ def test_llama_cpp_probe_defaults_to_cpu(monkeypatch: pytest.MonkeyPatch) -> Non
     assert tags == frozenset({"llama_cpp", "llama_cpp-cpu"})
 
 
+def _fake_llama_cpp(gpu_offload: bool | None) -> object:
+    """A stand-in llama_cpp module whose llama_supports_gpu_offload is controllable.
+
+    ``gpu_offload=None`` omits the symbol so the introspection call raises and the
+    probe treats the build as unverifiable.
+    """
+    from types import SimpleNamespace
+
+    if gpu_offload is None:
+        return SimpleNamespace()
+
+    def _supports() -> bool:
+        return gpu_offload
+
+    return SimpleNamespace(llama_supports_gpu_offload=_supports)
+
+
+def test_llama_cpp_probe_keeps_gpu_when_build_supports_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "llama_cpp", _fake_llama_cpp(gpu_offload=True))
+    monkeypatch.setenv(LLAMA_CPP_BACKENDS_ENV, "vulkan")
+    tags = backends._probe_llama_cpp_backends()
+    assert "llama_cpp-vulkan" in tags  # GPU build verified -> advertised
+
+
+def test_llama_cpp_probe_drops_gpu_when_build_is_cpu_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The clobber case: env declares vulkan but the wheel has no GPU offload
+    # compiled in (e.g. uv sync restored the CPU PyPI wheel). The node must NOT
+    # advertise vulkan, only cpu, so GPU GGUF work is not routed here.
+    monkeypatch.setitem(sys.modules, "llama_cpp", _fake_llama_cpp(gpu_offload=False))
+    monkeypatch.setenv(LLAMA_CPP_BACKENDS_ENV, "vulkan, rocm")
+    tags = backends._probe_llama_cpp_backends()
+    assert "llama_cpp-vulkan" not in tags
+    assert "llama_cpp-rocm" not in tags
+    assert tags == frozenset({"llama_cpp", "llama_cpp-cpu"})
+
+
+def test_llama_cpp_probe_trusts_declaration_when_unverifiable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Introspection unavailable -> trust the operator's declaration rather than
+    # punish a possibly-working GPU node for a binding quirk.
+    monkeypatch.setitem(sys.modules, "llama_cpp", _fake_llama_cpp(gpu_offload=None))
+    monkeypatch.setenv(LLAMA_CPP_BACKENDS_ENV, "vulkan")
+    tags = backends._probe_llama_cpp_backends()
+    assert "llama_cpp-vulkan" in tags
+
+
 def test_resolve_node_engine_existing_mlx_cards_unchanged() -> None:
     # An original {"mlx"} card on a Mac node ({"mlx","mlx-metal"}) -> mlx.
     engine = resolve_node_engine(

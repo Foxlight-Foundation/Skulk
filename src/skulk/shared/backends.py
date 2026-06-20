@@ -31,6 +31,8 @@ import os
 import sys
 from typing import Final, Literal
 
+from loguru import logger
+
 EngineType = Literal["mlx", "llama_cpp"]
 """Inference runtime that loads and runs a model; selects the worker runner."""
 
@@ -99,6 +101,25 @@ def resolve_node_engine(
     return engine_of(ordered[0])
 
 
+def _llama_cpp_gpu_offload_supported() -> bool | None:
+    """Whether the installed llama-cpp-python build has GPU offload compiled in.
+
+    Returns the result of ``llama_cpp.llama_supports_gpu_offload()`` (a stable
+    llama.cpp C API), or ``None`` when the binding cannot be introspected so the
+    caller can treat it as "cannot verify" rather than "no GPU". A CPU-only wheel
+    -- e.g. the PyPI prebuilt that ``uv sync`` reinstalls over a source-built
+    Vulkan/ROCm wheel -- returns ``False`` here even on a GPU host, which is what
+    lets a node notice its GPU build was clobbered and stop over-claiming.
+    """
+    try:
+        import llama_cpp  # pyright: ignore[reportMissingImports]
+
+        # llama_cpp ships no type stubs, so the member + its result are Unknown.
+        return bool(llama_cpp.llama_supports_gpu_offload())  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+    except Exception:  # noqa: BLE001 -- any binding/ABI quirk means "unverifiable"
+        return None
+
+
 def _probe_llama_cpp_backends() -> frozenset[str]:
     """Probe whether llama.cpp is usable here and which compute backends it offers.
 
@@ -108,6 +129,14 @@ def _probe_llama_cpp_backends() -> frozenset[str]:
     back to the always-correct ``cpu`` tag so a node never over-claims GPU
     capability it might not have built. Returns an empty set when the binding is
     not importable, so a node without llama.cpp simply does not advertise it.
+
+    Declared GPU backends are cross-checked against the actual build: if an
+    operator declares e.g. ``vulkan`` but the installed wheel has no GPU offload
+    compiled in (the classic failure where ``uv sync`` restores the CPU-only PyPI
+    wheel over a source-built GPU wheel), the GPU tags are dropped and the node
+    advertises only ``llama_cpp-cpu``. That keeps GPU GGUF work from being routed
+    to a node that would silently run it on CPU or fail, until the build is
+    rebuilt (see ``deployment/rocm``).
     """
     try:
         import llama_cpp  # noqa: F401  # pyright: ignore[reportMissingImports, reportUnusedImport]
@@ -129,6 +158,25 @@ def _probe_llama_cpp_backends() -> frozenset[str]:
     if not computes:
         # No operator declaration: claim only CPU, which any llama.cpp build can do.
         computes = ["cpu"]
+
+    gpu_computes = [cb for cb in computes if cb != "cpu"]
+    if gpu_computes:
+        supported = _llama_cpp_gpu_offload_supported()
+        if supported is False:
+            logger.warning(
+                f"{LLAMA_CPP_BACKENDS_ENV} declares GPU backend(s) {gpu_computes} but the "
+                "installed llama-cpp-python has no GPU offload compiled in (likely a "
+                "CPU-only wheel that replaced a source-built GPU wheel, e.g. after "
+                "`uv sync`). Advertising llama_cpp-cpu only so GPU GGUF work is not "
+                "routed here; rebuild the GPU wheel (see deployment/rocm) to restore it."
+            )
+            computes = ["cpu"]
+        elif supported is None:
+            logger.warning(
+                "could not verify llama.cpp GPU offload support; trusting "
+                f"{LLAMA_CPP_BACKENDS_ENV}={gpu_computes}"
+            )
+
     for compute in computes:
         tags.add(make_backend_tag("llama_cpp", compute))
     return frozenset(tags)

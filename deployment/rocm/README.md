@@ -28,8 +28,10 @@ This setup is validated on:
 1. **A working GPU compute stack**: ROCm runtime + a Vulkan driver (RADV).
 2. **The Skulk repo + its `uv` environment** (the Rust bindings build via
    `uv sync`; no MLX is required or used on a non-Mac node).
-3. **`llama-cpp-python` built with Vulkan**: `uv sync` installs the CPU wheel,
-   so the Vulkan build must be (re)installed after any `uv sync`.
+3. **`llama-cpp-python` built with Vulkan**: built from source once (a plain
+   install or `uv sync` would otherwise leave/replace it with a CPU-only wheel).
+   The service entrypoint runs `uv sync --inexact` on a GPU node so a routine sync
+   does not prune this wheel; rebuild it by hand only on a llama.cpp version bump.
 4. **A launcher** that exports the node's cluster env and starts skulk detached
    so it survives an SSH disconnect (Linux has no launchd; see
    `launch-skulk.sh.example`).
@@ -44,7 +46,8 @@ uv sync
 
 # 2. Build llama-cpp-python from source with the Vulkan backend. --no-binary
 #    forces the source build; without it uv installs the prebuilt CPU wheel and
-#    CMAKE_ARGS is ignored. Re-run after any `uv sync`, which restores the wheel.
+#    CMAKE_ARGS is ignored. Built once: the service runs `uv sync --inexact` on a
+#    GPU node so a routine sync won't prune it; rebuild only on a version bump.
 CMAKE_ARGS="-DGGML_VULKAN=on" uv pip install --force-reinstall --no-cache-dir \
   --no-binary llama-cpp-python --python .venv/bin/python llama-cpp-python
 
@@ -82,9 +85,10 @@ mkdir -p ~/.skulk
 cat >> ~/.skulk/skulk.env <<'ENV'
 SKULK_HEADLESS=1
 SKULK_LLAMA_CPP_BACKENDS=vulkan
-# Skip boot-time `uv sync`: it reinstalls the CPU llama-cpp-python wheel and
-# clobbers the Vulkan build below. Pin the revision and update manually instead.
-SKULK_AUTO_UPDATE=0
+# Optional: SKULK_AUTO_UPDATE=0 pins the node to what's on disk. It is no longer
+# required to protect the Vulkan wheel: with a GPU backend declared above, the
+# entrypoint runs `uv sync --inexact`, which leaves the source-built wheel in
+# place. Leave auto-update on (the default) to track the fleet like the Macs.
 # SKULK_LIBP2P_NAMESPACE=...   # match the rest of the fleet
 # SKULK_ZENOH_DATA_PLANE / SKULK_ZENOH_LISTEN / SKULK_ZENOH_CONNECT as needed
 ENV
@@ -94,10 +98,11 @@ deployment/install/install-systemd.sh
 ```
 
 The Vulkan `llama-cpp-python` build from Quick-start step 2 must already be in the
-`.venv` before you start the service. With `SKULK_AUTO_UPDATE=0` the service runs
-whatever is on disk, so the Vulkan wheel survives restarts; to update the node,
-`git pull` and re-run the `uv sync` + `--no-binary` Vulkan install by hand, then
-`systemctl --user restart skulk`. Manage the service with
+`.venv` before you start the service. The entrypoint's `uv sync --inexact` (used
+because a GPU backend is declared) leaves that wheel in place across restarts and
+updates, so it survives without `SKULK_AUTO_UPDATE=0`. Rebuild the wheel by hand
+only when bumping the llama.cpp version (`git pull`, re-run the `--no-binary`
+Vulkan install, then `systemctl --user restart skulk`). Manage the service with
 `systemctl --user {status,restart,stop} skulk` and follow logs via
 `journalctl --user -u skulk -f`.
 
