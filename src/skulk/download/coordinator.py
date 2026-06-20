@@ -111,8 +111,21 @@ class DownloadCoordinator:
         to avoid bursts) or a slow-download heartbeat.
         """
         now = current_time()
+        # First observation, or a fraction regression (a restarted/cancelled
+        # download whose fraction reset back toward 0): always emit and re-seat
+        # the baseline. Otherwise the delta gate would measure against a stale,
+        # higher baseline and suppress the new download's progress until it
+        # surpassed the old attempt -- a frozen progress bar on download churn.
+        if model_id not in self._last_progress_fraction:
+            self._last_progress_time[model_id] = now
+            self._last_progress_fraction[model_id] = fraction
+            return True
         last_time = self._last_progress_time.get(model_id, 0.0)
-        last_fraction = self._last_progress_fraction.get(model_id, -1.0)
+        last_fraction = self._last_progress_fraction[model_id]
+        if fraction < last_fraction:
+            self._last_progress_time[model_id] = now
+            self._last_progress_fraction[model_id] = fraction
+            return True
         advanced = (
             fraction - last_fraction >= self._PROGRESS_STEP
             and now - last_time >= self._MIN_INTERVAL_SECS

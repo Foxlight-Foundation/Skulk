@@ -70,6 +70,38 @@ def test_in_progress_throttle_gates_by_fraction_rate_and_heartbeat(
     assert co._should_emit_in_progress(mid, 0.24) is True
 
 
+def test_in_progress_throttle_resets_baseline_on_fraction_regression(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A restarted/cancelled download whose fraction resets back toward 0 must
+    # re-seat the baseline and emit, not stay frozen against the old high
+    # baseline until it surpasses the prior attempt (download churn on
+    # placement re-tries). The heartbeat alone is too coarse for that case.
+    co = _make_coordinator()
+    mid = ModelId("org/model")
+    clock = {"now": 1000.0}
+
+    def fake_now() -> float:
+        return clock["now"]
+
+    monkeypatch.setattr(coordinator_mod, "current_time", fake_now)
+
+    # Climb to a high baseline.
+    assert co._should_emit_in_progress(mid, 0.0) is True
+    clock["now"] = 1002.0
+    assert co._should_emit_in_progress(mid, 0.80) is True
+
+    # A regression (new download started) emits immediately, even within the
+    # rate floor and far below the heartbeat interval.
+    clock["now"] = 1002.2
+    assert co._should_emit_in_progress(mid, 0.01) is True
+
+    # And the baseline is now the regressed value: a small further advance is
+    # gated again as usual (no longer measured against the stale 0.80).
+    clock["now"] = 1002.3
+    assert co._should_emit_in_progress(mid, 0.02) is False
+
+
 def test_in_progress_throttle_bounds_event_count_for_a_long_download(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
