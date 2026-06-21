@@ -157,7 +157,7 @@ from skulk.api.types.openai_responses import (
 from skulk.connectivity.remote_access import RemoteAccessInfo, build_remote_access_info
 from skulk.connectivity.tailscale import TailscaleStatus, query_tailscale_status
 from skulk.master.image_store import ImageStore
-from skulk.master.placement import PlacementError, PlacementInfoPendingError
+from skulk.master.placement import PlacementInfoPendingError, PlacementMemoryError
 from skulk.master.placement import place_instance as get_instance_placements
 from skulk.master.placement_utils import usable_vram_by_node
 from skulk.shared.apply import apply
@@ -1585,11 +1585,13 @@ class API:
                         detail=f"{exc} (waited {_PLACEMENT_INFO_WAIT_SECONDS:.0f}s)",
                     ) from exc
                 await anyio.sleep(1)
-            except PlacementError as exc:
+            except PlacementMemoryError as exc:
                 # A memory shortfall right after this node tore an instance down
                 # is usually transient (freed memory not yet gossiped). Wait for
                 # the settle window rather than failing the placement; outside it,
-                # treat the shortfall as real and 400.
+                # treat the shortfall as real and 400. Only a *memory* shortfall
+                # is retried; a backend/topology/sharding error never clears by
+                # waiting and falls through to an immediate 400.
                 if self._post_teardown_settle_remaining() > 0:
                     await anyio.sleep(1)
                     continue
@@ -1681,20 +1683,22 @@ class API:
     ) -> PlacementPreviewResponse:
         """Enumerate viable placements, settling through the post-teardown lag.
 
-        Re-runs the enumeration while no combination yields a viable placement and
-        this node is still inside the post-teardown settle window: the just-freed
-        memory of a torn-down instance may not have reflected in gossiped telemetry
-        yet, so an immediate all-errored result would be a transient false negative
-        (the tear-down-then-preview matrix loop). Outside the window the first pass
-        stands, so a genuine no-fit returns its error previews immediately.
+        Re-runs the enumeration while no combination yields a viable placement,
+        the no-fit was a *memory* shortfall, and this node is still inside the
+        post-teardown settle window: the just-freed memory of a torn-down instance
+        may not have reflected in gossiped telemetry yet, so that all-errored
+        result is a transient false negative (the tear-down-then-preview matrix
+        loop). A deterministic no-fit (backend mismatch, excluded nodes,
+        unsupported sharding) does not retry — waiting cannot change it — and
+        outside the window the first pass stands.
         """
         while True:
-            response = await self._compute_placement_previews(
+            response, memory_shortfall = await self._compute_placement_previews(
                 model_id, node_ids, excluded_node_ids
             )
             if any(p.instance is not None for p in response.previews):
                 return response
-            if self._post_teardown_settle_remaining() <= 0:
+            if not memory_shortfall or self._post_teardown_settle_remaining() <= 0:
                 return response
             await anyio.sleep(1)
 
@@ -1703,12 +1707,19 @@ class API:
         model_id: ModelId,
         node_ids: list[NodeId] | None = None,
         excluded_node_ids: list[NodeId] | None = None,
-    ) -> PlacementPreviewResponse:
+    ) -> tuple[PlacementPreviewResponse, bool]:
+        """Enumerate placement previews once.
+
+        Returns the previews plus whether any combination failed specifically on
+        a *memory* shortfall (``PlacementMemoryError``), which the caller uses to
+        decide whether a no-fit is worth retrying through the post-teardown lag.
+        """
         required_nodes = set(node_ids) if node_ids else None
         excluded_nodes = set(excluded_node_ids) if excluded_node_ids else None
+        saw_memory_shortfall = False
 
         if len(list(self.state.topology.list_nodes())) == 0:
-            return PlacementPreviewResponse(previews=[])
+            return PlacementPreviewResponse(previews=[]), saw_memory_shortfall
 
         try:
             model_card = await ModelCard.load(model_id)
@@ -1755,6 +1766,8 @@ class API:
                     ),
                 )
             except ValueError as exc:
+                if isinstance(exc, PlacementMemoryError):
+                    saw_memory_shortfall = True
                 if (model_card.model_id, sharding, instance_meta, 0) not in seen:
                     previews.append(
                         PlacementPreview(
@@ -1827,7 +1840,7 @@ class API:
                 )
             )
 
-        return PlacementPreviewResponse(previews=previews)
+        return PlacementPreviewResponse(previews=previews), saw_memory_shortfall
 
     def get_instance(self, instance_id: InstanceId) -> Instance:
         if instance_id not in self.state.instances:

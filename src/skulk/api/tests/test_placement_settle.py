@@ -74,14 +74,15 @@ async def test_previews_retry_within_settle_window(
 
     calls = {"n": 0}
 
-    async def fake_compute(*_a: Any, **_k: Any) -> PlacementPreviewResponse:
+    async def fake_compute(*_a: Any, **_k: Any) -> tuple[PlacementPreviewResponse, bool]:
         calls["n"] += 1
-        return _errored() if calls["n"] < 3 else viable
+        # (response, saw_memory_shortfall): errored-on-memory until the 3rd pass.
+        return (_errored(), True) if calls["n"] < 3 else (viable, False)
 
     api._compute_placement_previews = fake_compute
     result = await api.get_placement_previews(ModelId("m"))
     assert any(p.instance is not None for p in result.previews)
-    assert calls["n"] == 3  # retried twice, then viable
+    assert calls["n"] == 3  # retried twice through the memory lag, then viable
 
 
 async def test_previews_no_retry_outside_window(
@@ -94,11 +95,32 @@ async def test_previews_no_retry_outside_window(
 
     calls = {"n": 0}
 
-    async def fake_compute(*_a: Any, **_k: Any) -> PlacementPreviewResponse:
+    async def fake_compute(*_a: Any, **_k: Any) -> tuple[PlacementPreviewResponse, bool]:
         calls["n"] += 1
-        return _errored()
+        return _errored(), True  # memory shortfall, but out of window
 
     api._compute_placement_previews = fake_compute
     result = await api.get_placement_previews(ModelId("m"))
     assert all(p.instance is None for p in result.previews)
     assert calls["n"] == 1  # single pass, no retry
+
+
+async def test_previews_no_retry_on_deterministic_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In-window but a non-memory error (backend/topology) does not retry,
+    since waiting cannot change it, so it returns immediately."""
+    api = _api()
+    api._last_teardown_monotonic = time.monotonic()  # in-window
+    monkeypatch.setattr(anyio, "sleep", AsyncMock())
+
+    calls = {"n": 0}
+
+    async def fake_compute(*_a: Any, **_k: Any) -> tuple[PlacementPreviewResponse, bool]:
+        calls["n"] += 1
+        return _errored(), False  # deterministic (non-memory) failure
+
+    api._compute_placement_previews = fake_compute
+    result = await api.get_placement_previews(ModelId("m"))
+    assert all(p.instance is None for p in result.previews)
+    assert calls["n"] == 1  # no retry despite being in-window
