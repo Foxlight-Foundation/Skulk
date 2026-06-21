@@ -1,17 +1,23 @@
 from skulk.shared.models.memory_estimate import (
     GPU_WORKING_SET_FRACTION,
+    LLAMA_CPP_MEMORY_OVERHEAD_FACTOR,
     MEMORY_OVERHEAD_FACTOR,
     MEMORY_OVERHEAD_FLOOR,
     estimate_kv_cache_bytes,
     estimate_shard_footprint,
     gpu_working_set_ceiling,
+    memory_overhead_factor,
 )
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.memory import Memory
 
 
 def _card(
-    storage_gb: float, *, kv_heads: int | None = None, n_layers: int = 32
+    storage_gb: float,
+    *,
+    kv_heads: int | None = None,
+    n_layers: int = 32,
+    gguf_file: str | None = None,
 ) -> ModelCard:
     return ModelCard(
         model_id=ModelId("test-model"),
@@ -20,8 +26,30 @@ def _card(
         hidden_size=1000,
         supports_tensor=True,
         num_key_value_heads=kv_heads,
+        gguf_file=gguf_file,
         tasks=[ModelTask.TextGeneration],
     )
+
+
+def test_memory_overhead_factor_is_engine_aware():
+    """GGUF (llama.cpp C++ runtime) gets the lighter factor; MLX gets 1.30."""
+    assert memory_overhead_factor(_card(8)) == MEMORY_OVERHEAD_FACTOR
+    assert (
+        memory_overhead_factor(_card(8, gguf_file="model.gguf"))
+        == LLAMA_CPP_MEMORY_OVERHEAD_FACTOR
+    )
+
+
+def test_shard_footprint_uses_lighter_factor_for_gguf():
+    """A GGUF card's footprint uses the 1.10 factor, so it is smaller than the
+    same weights under the MLX 1.30 factor."""
+    mlx = estimate_shard_footprint(_card(40), 1.0)
+    gguf = estimate_shard_footprint(_card(40, gguf_file="model.gguf"), 1.0)
+    assert gguf.in_bytes < mlx.in_bytes
+    expected = (
+        Memory.from_gb(40) * LLAMA_CPP_MEMORY_OVERHEAD_FACTOR + MEMORY_OVERHEAD_FLOOR
+    )
+    assert gguf.in_bytes == expected.in_bytes
 
 
 def test_kv_is_zero_without_kv_heads():

@@ -60,6 +60,22 @@ working set, so only driver/runtime/fragmentation overhead is unavailable
 default (e.g. vLLM ``gpu_memory_utilization``). Used only when a node reports
 discrete VRAM telemetry; Apple unified-memory nodes keep the 0.75 path."""
 
+UMA_GPU_OS_HEADROOM: Memory = Memory.from_gb(16)
+"""System RAM to leave for the OS on a unified-memory GPU node (AMD APU, e.g.
+Strix Halo) when counting host memory the GPU can map via GTT toward the usable
+pool. On such a node the GPU addresses the BIOS VRAM carve-out *plus* system RAM
+through GTT, so a model larger than the carve-out runs there; this reserve keeps
+the OS + worker + download staging from being squeezed out of the shared pool.
+16 GB is generous for a headless inference node; the worker's local pre-spawn
+guard backstops it with current free memory."""
+
+LLAMA_CPP_MEMORY_OVERHEAD_FACTOR: float = 1.10
+"""``MEMORY_OVERHEAD_FACTOR`` for the llama.cpp (GGUF) engine. The 1.30 default
+covers MLX's buffer cache + Python/MLX runtime, which the C++ llama.cpp runtime
+does not carry; its resident footprint is ~weights + KV + a modest compute
+buffer, so 1.10 is the right margin. Over-applying 1.30 to a GGUF wrongly refuses
+models that fit (e.g. a 58.5 GB gpt-oss-120B looked like 76 GB)."""
+
 KV_CONTEXT_BUDGET_TOKENS: int = 8192
 """Per-sequence context length reserved for KV cache during the fit check.
 Reserving a model's advertised max (e.g. GLM-4.7-Flash: 131072) would over-
@@ -73,6 +89,22 @@ persist ``head_dim``). 128 dominates current MLX families (Llama/Qwen/GLM)."""
 KV_DTYPE_BYTES: int = 2
 """Bytes per KV-cache element. MLX keeps the KV cache in fp16 even for 4-bit
 weights unless quantized-KV is explicitly enabled, which Skulk does not."""
+
+
+def memory_overhead_factor(model_card: ModelCard) -> float:
+    """Engine-appropriate weight-overhead multiplier for a model.
+
+    Returns ``LLAMA_CPP_MEMORY_OVERHEAD_FACTOR`` for a GGUF model (the card
+    carries a ``gguf_file``, so it runs on the llama.cpp/C++ engine) and the
+    MLX-tuned ``MEMORY_OVERHEAD_FACTOR`` otherwise. GGUF is lighter because the
+    C++ runtime carries no MLX buffer cache and no Python/MLX interpreter
+    overhead; its resident footprint is essentially weights + KV + a modest
+    compute buffer. Applying the 1.30 MLX factor to a GGUF over-refuses models
+    that fit (a 58.5 GB gpt-oss-120B looked like ~76 GB).
+    """
+    if model_card.gguf_file:
+        return LLAMA_CPP_MEMORY_OVERHEAD_FACTOR
+    return MEMORY_OVERHEAD_FACTOR
 
 
 def estimate_kv_cache_bytes(
@@ -122,7 +154,11 @@ def estimate_shard_footprint(
     weights_share = model_card.storage_size * shard_fraction
     full_kv = estimate_kv_cache_bytes(model_card, model_card.n_layers, context_budget)
     kv_share = full_kv * shard_fraction
-    return weights_share * MEMORY_OVERHEAD_FACTOR + kv_share + MEMORY_OVERHEAD_FLOOR
+    return (
+        weights_share * memory_overhead_factor(model_card)
+        + kv_share
+        + MEMORY_OVERHEAD_FLOOR
+    )
 
 
 def gpu_working_set_ceiling(ram_total: Memory) -> Memory:
@@ -214,7 +250,7 @@ def instance_context_token_limit(
             working_set = node_vram.get(node_id) or gpu_working_set_ceiling(ram_total)
             kv_budget = (
                 working_set
-                - model_card.storage_size * fraction * MEMORY_OVERHEAD_FACTOR
+                - model_card.storage_size * fraction * memory_overhead_factor(model_card)
                 - MEMORY_OVERHEAD_FLOOR
             )
             node_tokens = max(

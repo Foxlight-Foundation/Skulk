@@ -208,6 +208,12 @@ class AcceleratorMetrics(CamelCaseModel):
     utilization_ratio: float | None = None
     vram_total_bytes: int | None = None
     vram_used_bytes: int | None = None
+    gtt_total_bytes: int | None = None
+    """GPU-mappable host (GTT) memory, for unified-memory APUs (e.g. AMD Strix
+    Halo). On such a node the GPU addresses system RAM beyond the BIOS VRAM
+    carve-out through GTT, so the usable GPU pool is far larger than
+    ``vram_total_bytes`` (placement uses this to admit big models on a UMA node).
+    ``None`` on discrete GPUs / collectors that do not report it."""
     power_watts: float | None = None
     temperature_celsius: float | None = None
     clock_mhz: int | None = None
