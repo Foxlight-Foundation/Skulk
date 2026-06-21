@@ -1,5 +1,6 @@
 import styled from 'styled-components';
 import { RunningInstanceCard, type InstanceStatus } from '../cluster/RunningInstanceCard';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -68,10 +69,12 @@ const CardList = styled.div`
 /* ── Component ────────────────────────────────────────── */
 
 export function InstancePanel({ instances, onDelete, onChat, className }: InstancePanelProps) {
+  const { t } = useSkulkTranslation();
+
   return (
     <Panel className={className}>
       <PanelHeader>
-        Active Instances
+        {t('instancePanel.activeInstances', 'Active Instances')}
         <Count>{instances.length}</Count>
       </PanelHeader>
       <CardList>

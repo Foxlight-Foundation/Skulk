@@ -159,10 +159,10 @@ export type Capability = (typeof CAPABILITIES)[number];
 
 /** Size range presets for the filter popover. */
 export const SIZE_RANGES = [
-  { label: '< 10 GB', min: 0, max: 10 * 1024 },
-  { label: '10–50 GB', min: 10 * 1024, max: 50 * 1024 },
-  { label: '50–200 GB', min: 50 * 1024, max: 200 * 1024 },
-  { label: '> 200 GB', min: 200 * 1024, max: Infinity },
+  { min: 0, max: 10 * 1024 },
+  { min: 10 * 1024, max: 50 * 1024 },
+  { min: 50 * 1024, max: 200 * 1024 },
+  { min: 200 * 1024, max: Infinity },
 ] as const;
 
 export type PickerMode = 'launch' | 'store-download';

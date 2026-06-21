@@ -87,6 +87,8 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **State:** Redux Toolkit + RTK Query (`dashboard-react/src/store/`). Slices at `store/slices/uiSlice.ts` and `store/slices/chatSlice.ts`; query endpoints injected from `store/endpoints/cluster.ts`, `store/endpoints/config.ts`, `store/endpoints/observability.ts` into a single `apiSlice` (`store/api.ts`).
 - **Routing:** activity-style enum (`activeRoute` in `uiSlice`); no react-router
 - **Persistence:** sessionStorage for in-session UI; localStorage for cross-session preferences (theme, panel widths)
+- **Localization:** Tolgee provider in `dashboard-react/src/i18n/tolgee.ts`; app wrapper in `dashboard-react/src/main.tsx`; English namespace data in `dashboard-react/src/i18n/en/skulk.json`. All dashboard keys use the `skulk` namespace and are called through `t(key, englishFallback, params?)`, not `<T>`.
+- **Translation loading:** `BackendFetch` reads CDN/static JSON from `VITE_TOLGEE_CDN_PREFIX` (default `/i18n`) with bundled English fallback; `VITE_TOLGEE_AVAILABLE_LANGUAGES` controls the comma-separated language allow/preload list and always includes `en`.
 
 ### Storage
 
@@ -462,6 +464,8 @@ Only `SKULK_*` names are read. The legacy `EXO_*` deprecation runway was removed
 | `SKULK_NATIVE_VISION_REFERENCE_PATH` | Force native-vision reference path (Gemma 4) |
 | `SKULK_OFFLINE` | Run without internet checks (no model fetching) |
 | `SKULK_HEADLESS` | Deploy knob read by `deployment/install/skulk-startup.sh` (the LaunchAgent/systemd entrypoint). `1` on a node that serves the API without the web UI (e.g. a non-Mac worker like a Strix Halo/ROCm box with no Node/npm): boot-time prep skips the dashboard build and its otherwise-fatal `dashboard-react/dist` missing check, and the node runs with `DASHBOARD_DIR` unset (#333). Default `0` keeps the fail-loud behavior so a Mac with an accidentally-absent build is caught. |
+| `VITE_TOLGEE_CDN_PREFIX` | Dashboard build-time env var. CDN/static prefix for Tolgee JSON bundles, default `/i18n`; Tolgee fetches namespaced bundles as `{prefix}/{namespace}/{language}.json`, and the dashboard uses the `skulk` namespace. |
+| `VITE_TOLGEE_AVAILABLE_LANGUAGES` | Dashboard build-time env var. Comma-separated language tags available from the Tolgee CDN/static prefix; `en` is always included and bundled as the fallback namespace. |
 | `SKULK_TEST_DISTRIBUTED_MODEL` | Tests only: force the distributed/prefix-cache slow-test model (`gpt-oss-20b` or `llama-3.2-1b`); default auto-selects by Metal working-set size |
 | `MLX_METAL_FAST_SYNCH` | Set by Skulk based on resolved card preference; not for direct operator use |
 | `MLX_HOSTFILE`, `MLX_RANK`, `MLX_RING_VERBOSE`, `MLX_IBV_DEVICES`, `MLX_JACCL_COORDINATOR` | MLX upstream env vars; auto-set by Skulk during distributed init. Ring hostfile addresses are chosen per neighbor pair from OBSERVED libp2p connections, ranked thunderbolt > maybe_ethernet > ethernet > wifi > unknown > VPN/overlay — Tailscale CGNAT (100.64/10, fd7a:115c:a1e0::/48) addresses are detected by ADDRESS (utun types don't gossip) and rank strictly last: the overlay exists for external reachability and may be DERP-relayed, so it is only used when a pair has no local candidate (#265). Selection lives in `_find_ip_prioritised` / `get_mlx_ring_hosts_by_node` (`src/skulk/master/placement_utils.py`) |

@@ -9,6 +9,7 @@ import { TokenHeatmap } from '../display/TokenHeatmap';
 import { PrefillProgressBar, type PrefillProgress } from '../display/PrefillProgressBar';
 import { ImageLightbox } from '../display/ImageLightbox';
 import { Button } from '../common/Button';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 export interface ChatMessagesProps {
   messages: ChatMessage[];
@@ -330,6 +331,7 @@ export function ChatMessages({
   onToggleThinking: externalToggle,
   className,
 }: ChatMessagesProps) {
+  const { t } = useSkulkTranslation();
   const containerRef = useRef<HTMLDivElement>(null);
   const pinnedToBottomRef = useRef(true);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
@@ -457,7 +459,7 @@ export function ChatMessages({
             <Circle $size={56} $opacity={0.25} style={{ top: 12, left: 12 }} />
             <Circle $size={32} $opacity={0.18} style={{ top: 24, left: 24 }} />
           </div>
-          Awaiting Input
+          {t('chat.messages.empty', 'Awaiting Input')}
         </EmptyState>
       </Container>
     );
@@ -472,16 +474,22 @@ export function ChatMessages({
             {msg.role === 'assistant' ? (
               <>
                 <Dot $color={theme.colors.gold} />
-                <RoleLabel $role="assistant">Skulk</RoleLabel>
+                <RoleLabel $role="assistant">{t('chat.messages.assistantRole', 'Skulk')}</RoleLabel>
                 <Timestamp>{formatTime(msg.timestamp)}</Timestamp>
-                {msg.ttftMs != null && <StatLabel>TTFT <span>{Math.round(msg.ttftMs)}ms</span></StatLabel>}
-                {msg.tps != null && <StatLabel>TPS <span>{msg.tps.toFixed(1)}</span></StatLabel>}
+                {msg.ttftMs != null && (
+                  <StatLabel>
+                    {t('chat.messages.ttftLabel', 'TTFT')} <span>{Math.round(msg.ttftMs)}{t('chat.messages.milliseconds', 'ms')}</span>
+                  </StatLabel>
+                )}
+                {msg.tps != null && (
+                  <StatLabel>{t('chat.messages.tpsLabel', 'TPS')} <span>{msg.tps.toFixed(1)}</span></StatLabel>
+                )}
               </>
             ) : (
               <>
                 <Timestamp>{formatTime(msg.timestamp)}</Timestamp>
                 <Spacer />
-                <RoleLabel $role="user">Query</RoleLabel>
+                <RoleLabel $role="user">{t('chat.messages.userRole', 'Query')}</RoleLabel>
                 <Dot $color={theme.colors.textSecondary} />
               </>
             )}
@@ -497,16 +505,20 @@ export function ChatMessages({
                 autoFocus
               />
               <BtnRow>
-                <Button variant="primary" size="sm" onClick={saveEdit}>Save</Button>
-                <Button variant="outline" size="sm" onClick={() => setEditingId(null)}>Cancel</Button>
+                <Button variant="primary" size="sm" onClick={saveEdit}>{t('common.save', 'Save')}</Button>
+                <Button variant="outline" size="sm" onClick={() => setEditingId(null)}>{t('common.cancel', 'Cancel')}</Button>
               </BtnRow>
             </div>
           ) : deleteConfirmId === msg.id ? (
             <ConfirmBox>
-              Delete this message?
+              {t('chat.messages.deleteConfirm', 'Delete this message?')}
               <BtnRow>
-                <Button variant="danger" size="sm" onClick={() => { onDelete?.(msg.id); setDeleteConfirmId(null); }}>Delete</Button>
-                <Button variant="outline" size="sm" onClick={() => setDeleteConfirmId(null)}>Cancel</Button>
+                <Button variant="danger" size="sm" onClick={() => { onDelete?.(msg.id); setDeleteConfirmId(null); }}>
+                  {t('common.delete', 'Delete')}
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => setDeleteConfirmId(null)}>
+                  {t('common.cancel', 'Cancel')}
+                </Button>
               </BtnRow>
             </ConfirmBox>
           ) : (
@@ -529,10 +541,12 @@ export function ChatMessages({
                 <ThinkingBlock $open={expandedThinking.has(msg.id)}>
                   <ThinkingHeader onClick={() => toggleThinking(msg.id)}>
                     <ThinkingChevron $open={expandedThinking.has(msg.id)}>▶</ThinkingChevron>
-                    Thinking
+                    {t('chat.messages.thinking', 'Thinking')}
                     <Spacer />
                     <ShowHideBtn onClick={(e) => { e.stopPropagation(); toggleThinking(msg.id); }}>
-                      {expandedThinking.has(msg.id) ? 'Hide' : 'Show'}
+                      {expandedThinking.has(msg.id)
+                        ? t('common.hide', 'Hide')
+                        : t('common.show', 'Show')}
                     </ShowHideBtn>
                   </ThinkingHeader>
                   {expandedThinking.has(msg.id) && (
@@ -550,7 +564,12 @@ export function ChatMessages({
               {msg.generatedImages && msg.generatedImages.length > 0 && (
                 <ImageGrid>
                   {msg.generatedImages.map((src, j) => (
-                    <GenImage key={j} src={src} alt={`Generated ${j + 1}`} onClick={() => setLightboxSrc(src)} />
+                    <GenImage
+                      key={j}
+                      src={src}
+                      alt={t('chat.messages.generatedImageAlt', 'Generated {index}', { index: j + 1 })}
+                      onClick={() => setLightboxSrc(src)}
+                    />
                   ))}
                 </ImageGrid>
               )}
@@ -577,7 +596,7 @@ export function ChatMessages({
               {/* Action buttons */}
               <Actions>
                 <Button variant="ghost" size="sm" onClick={() => copyMessage(msg.id, msg.content)}>
-                  {copiedId === msg.id ? '✓' : 'Copy'}
+                  {copiedId === msg.id ? '✓' : t('common.copy', 'Copy')}
                 </Button>
                 {msg.role === 'assistant' && msg.tokens && (
                   <ActiveGhostBtn
@@ -586,19 +605,23 @@ export function ChatMessages({
                     $active={heatmapVisible.has(msg.id)}
                     onClick={() => toggleHeatmap(msg.id)}
                   >
-                    Heatmap
+                    {t('chat.messages.heatmap', 'Heatmap')}
                   </ActiveGhostBtn>
                 )}
                 {msg.role === 'user' && onEdit && (
                   <Button variant="ghost" size="sm" onClick={() => { setEditingId(msg.id); setEditContent(msg.content); }}>
-                    Edit
+                    {t('common.edit', 'Edit')}
                   </Button>
                 )}
                 {msg.role === 'assistant' && isLastAssistant(i) && !isLoading && onRegenerate && (
-                  <Button variant="ghost" size="sm" onClick={onRegenerate}>Regenerate</Button>
+                  <Button variant="ghost" size="sm" onClick={onRegenerate}>
+                    {t('chat.messages.regenerate', 'Regenerate')}
+                  </Button>
                 )}
                 {onDelete && (
-                  <Button variant="danger" size="sm" onClick={() => setDeleteConfirmId(msg.id)}>Delete</Button>
+                  <Button variant="danger" size="sm" onClick={() => setDeleteConfirmId(msg.id)}>
+                    {t('common.delete', 'Delete')}
+                  </Button>
                 )}
               </Actions>
             </>
@@ -611,16 +634,16 @@ export function ChatMessages({
         <MessageCard $role="assistant">
           <MsgHeader>
             <Dot $color={theme.colors.gold} />
-            <RoleLabel $role="assistant">Skulk</RoleLabel>
+            <RoleLabel $role="assistant">{t('chat.messages.assistantRole', 'Skulk')}</RoleLabel>
           </MsgHeader>
           {streamingThinking && (
             <ThinkingBlock $open={streamThinkingOpen}>
               <ThinkingHeader onClick={() => setStreamThinkingOpen((v) => !v)}>
                 <ThinkingChevron $open={streamThinkingOpen}>▶</ThinkingChevron>
-                Thinking...
+                {t('chat.messages.thinkingStreaming', 'Thinking...')}
                 <Spacer />
                 <ShowHideBtn onClick={(e) => { e.stopPropagation(); setStreamThinkingOpen((v) => !v); }}>
-                  {streamThinkingOpen ? 'Hide' : 'Show'}
+                  {streamThinkingOpen ? t('common.hide', 'Hide') : t('common.show', 'Show')}
                 </ShowHideBtn>
               </ThinkingHeader>
               {streamThinkingOpen && (
@@ -642,7 +665,7 @@ export function ChatMessages({
       )}
 
       {showScrollBtn && (
-        <ScrollBtn onClick={scrollToBottom} aria-label="Scroll to bottom">
+        <ScrollBtn onClick={scrollToBottom} aria-label={t('chat.messages.scrollToBottom', 'Scroll to bottom')}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polyline points="6 9 12 15 18 9" />
           </svg>

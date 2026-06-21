@@ -11,6 +11,7 @@ import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import { chatActions } from '../../store/slices/chatSlice';
 import { store } from '../../store';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -423,6 +424,7 @@ async function readUploadedImageAsDataUrl(file: ChatUploadedFile): Promise<strin
 /* ── Component ────────────────────────────────────────── */
 
 export function ChatView({ readyInstances, className }: ChatViewProps) {
+  const { t } = useSkulkTranslation();
   // Store state
   const selectedModelId = useAppSelector((s) => s.chat.selectedModelId);
   const activeConversationId = useAppSelector((s) => s.chat.activeConversationId);
@@ -769,7 +771,9 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
           try {
             toolOutput = await executeBuiltinToolCall(toolCall);
           } catch (error) {
-            const message = error instanceof Error ? error.message : 'Tool execution failed.';
+            const message = error instanceof Error
+              ? error.message
+              : t('chat.view.errors.toolExecutionFailed', 'Tool execution failed.');
             toolOutput = JSON.stringify({ error: message });
           }
 
@@ -799,16 +803,27 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
       }
 
       if (!finalRawContent && toolLoopLimitHit) {
-        finalRawContent = 'Error: web search tool loop exceeded the safety limit.';
+        finalRawContent = t(
+          'chat.view.errors.toolLoopLimit',
+          'Error: web search tool loop exceeded the safety limit.',
+        );
       }
     } catch (err) {
       if ((err as Error).name === 'AbortError') {
         // User cancelled
         if (requestTimedOut) {
-          finalRawContent = `Error: generation stalled for more than ${Math.round(lastStallTimeoutMs / 1000)} seconds.`;
+          finalRawContent = t(
+            'chat.view.errors.generationStalled',
+            'Error: generation stalled for more than {seconds} seconds.',
+            { seconds: Math.round(lastStallTimeoutMs / 1000) },
+          );
         }
       } else {
-        finalRawContent = finalRawContent || `Error: ${(err as Error).message}`;
+        finalRawContent = finalRawContent || t(
+          'chat.view.errors.generic',
+          'Error: {message}',
+          { message: (err as Error).message },
+        );
       }
     } finally {
       if (stallTimer !== null) {
@@ -842,7 +857,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     abortRef.current = null;
     activeCommandIdRef.current = null;
 
-  }, [selectedModelId, isLoading, thinkingEnabled, supportsThinking, selectedBuiltinTools, addMessage]);
+  }, [selectedModelId, isLoading, thinkingEnabled, supportsThinking, selectedBuiltinTools, addMessage, t]);
 
   const handleCancel = useCallback(async () => {
     const commandId = activeCommandIdRef.current;
@@ -905,7 +920,10 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   if (readyModels.length === 0) {
     return (
       <NoModels>
-        No models are ready. Launch a model from the Model Store to start chatting.
+        {t(
+          'chat.view.noReadyModels',
+          'No models are ready. Launch a model from the Model Store to start chatting.',
+        )}
       </NoModels>
     );
   }
@@ -949,7 +967,11 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
           thinkingEnabled={thinkingEnabled}
           onToggleThinking={() => setThinkingEnabled((v) => !v)}
           supportsImageAttachments={supportsImageAttachments}
-          placeholder={selectedModelId ? `Message ${selectedLabel}…` : 'Select a model to chat'}
+          placeholder={selectedModelId
+            ? t('chat.view.messagePlaceholder', 'Message {model}...', {
+                model: selectedLabel ?? t('chat.view.selectedModel', 'selected model'),
+              })
+            : t('chat.view.selectModelPlaceholder', 'Select a model to chat')}
         />
       </InputArea>
     </Container>

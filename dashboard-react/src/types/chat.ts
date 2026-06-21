@@ -1,3 +1,8 @@
+import type { SkulkTranslate } from '../i18n/tolgee';
+
+/** Persisted sentinel used until the first user message can name the thread. */
+export const DEFAULT_CONVERSATION_NAME = 'New conversation';
+
 /** User-selected file staged for chat upload before sending. */
 export interface ChatUploadedFile {
   id: string;
@@ -83,12 +88,20 @@ export function getFileIcon(type: string, name: string): string {
 }
 
 /** Format a byte count into a compact human-readable file-size string. */
-export function formatFileSize(bytes: number): string {
-  if (bytes === 0) return '0 B';
+export function formatFileSize(bytes: number, t: SkulkTranslate): string {
+  if (bytes === 0) return t('fileSize.zeroBytes', '0 B');
   const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const sizes = [
+    t('fileSize.bytesUnit', 'B'),
+    t('fileSize.kilobytesUnit', 'KB'),
+    t('fileSize.megabytesUnit', 'MB'),
+    t('fileSize.gigabytesUnit', 'GB'),
+  ];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  return t('fileSize.valueWithUnit', '{value} {unit}', {
+    value: parseFloat((bytes / Math.pow(k, i)).toFixed(1)),
+    unit: sizes[i],
+  });
 }
 
 /** Shorten long file names while preserving the extension when possible. */

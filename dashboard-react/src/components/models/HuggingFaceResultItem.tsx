@@ -4,6 +4,7 @@ import type { HuggingFaceModel } from '../../types/models';
 import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
 import type { Theme } from '../../theme';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 export interface HuggingFaceResultItemProps {
   model: HuggingFaceModel;
@@ -88,6 +89,7 @@ export function HuggingFaceResultItem({
   onAdd,
   onSelect,
 }: HuggingFaceResultItemProps) {
+  const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
   const CheckIcon = () => <FiCheck size={16} color={theme.colors.accent} strokeWidth={2.5} />;
   const shortName = model.id.startsWith('mlx-community/')
@@ -110,25 +112,25 @@ export function HuggingFaceResultItem({
           style={{ color: theme.colors.textMuted, display: 'flex', transition: 'color 0.15s' }}
           onMouseEnter={(e) => { e.currentTarget.style.color = theme.colors.gold; }}
           onMouseLeave={(e) => { e.currentTarget.style.color = theme.colors.textMuted; }}
-          title="Open on HuggingFace"
+          title={t('common.openOnHuggingFace', 'Open on HuggingFace')}
         >
           <FiExternalLink size={14} />
         </a>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
-        <span style={{ color: theme.colors.textMuted }}>Author</span>
+        <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.author', 'Author')}</span>
         <span>{model.author}</span>
-        <span style={{ color: theme.colors.textMuted }}>Downloads</span>
+        <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.downloads', 'Downloads')}</span>
         <span>{formatCount(model.downloads)}</span>
-        <span style={{ color: theme.colors.textMuted }}>Likes</span>
+        <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.likes', 'Likes')}</span>
         <span>{formatCount(model.likes)}</span>
-        <span style={{ color: theme.colors.textMuted }}>Updated</span>
+        <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.updated', 'Updated')}</span>
         <span>{new Date(model.last_modified).toLocaleDateString()}</span>
       </div>
       {sizeTags.length > 0 && (
         <div style={{ marginTop: 8, borderTop: `1px solid ${theme.colors.borderLight}`, paddingTop: 6 }}>
           <div style={{ color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
-            Tags
+            {t('huggingFaceResult.tags', 'Tags')}
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
             {sizeTags.map((t) => (
@@ -151,19 +153,19 @@ export function HuggingFaceResultItem({
       <InfoTooltip filled size={16} placement="left" delay={100} content={tooltipContent} />
 
       {/* Stats */}
-      <StatBadge title="Downloads">↓ {formatCount(model.downloads)}</StatBadge>
-      <StatBadge title="Likes">♥ {formatCount(model.likes)}</StatBadge>
+      <StatBadge title={t('huggingFaceResult.downloads', 'Downloads')}>↓ {formatCount(model.downloads)}</StatBadge>
+      <StatBadge title={t('huggingFaceResult.likes', 'Likes')}>♥ {formatCount(model.likes)}</StatBadge>
 
       {/* Action */}
       {isInStore ? (
-        <AddedBadge><CheckIcon /> In Store</AddedBadge>
+        <AddedBadge><CheckIcon /> {t('huggingFaceResult.inStore', 'In Store')}</AddedBadge>
       ) : isAdded ? (
         <SelectBtn variant="primary" size="sm" onClick={onSelect}>
-          <StoreDownloadIcon /> Download
+          <StoreDownloadIcon /> {t('huggingFaceResult.download', 'Download')}
         </SelectBtn>
       ) : (
         <Button variant="outline" size="sm" onClick={onAdd} disabled={isAdding}>
-          {isAdding ? '…' : <><StoreDownloadIcon /> Add & Download</>}
+          {isAdding ? '…' : <><StoreDownloadIcon /> {t('huggingFaceResult.addAndDownload', 'Add & Download')}</>}
         </Button>
       )}
     </Row>

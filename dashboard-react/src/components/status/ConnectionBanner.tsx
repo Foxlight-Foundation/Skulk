@@ -1,4 +1,5 @@
 import styled, { keyframes } from 'styled-components';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 export interface ConnectionBannerProps {
   connected: boolean;
@@ -38,12 +39,14 @@ const Text = styled.span`
 `;
 
 export function ConnectionBanner({ connected }: ConnectionBannerProps) {
+  const { t } = useSkulkTranslation();
+
   if (connected) return null;
 
   return (
     <Banner role="alert" aria-live="assertive">
       <Dot />
-      <Text>Connection lost — Reconnecting to backend…</Text>
+      <Text>{t('connectionBanner.reconnecting', 'Connection lost - Reconnecting to backend...')}</Text>
     </Banner>
   );
 }

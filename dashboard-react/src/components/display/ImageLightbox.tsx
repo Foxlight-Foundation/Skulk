@@ -1,6 +1,7 @@
 import { useCallback, useEffect } from 'react';
 import styled, { keyframes } from 'styled-components';
 import { Button } from '../common/Button';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 export interface ImageLightboxProps {
   src: string | null;
@@ -79,6 +80,7 @@ const IconButton = styled(Button)`
 /* ---- component ---- */
 
 export function ImageLightbox({ src, onClose }: ImageLightboxProps) {
+  const { t } = useSkulkTranslation();
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -107,7 +109,7 @@ export function ImageLightbox({ src, onClose }: ImageLightboxProps) {
           size="lg"
           icon
           onClick={(e) => { e.stopPropagation(); downloadImage(src); }}
-          aria-label="Download image"
+          aria-label={t('imageLightbox.downloadImage', 'Download image')}
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
@@ -120,7 +122,7 @@ export function ImageLightbox({ src, onClose }: ImageLightboxProps) {
           size="lg"
           icon
           onClick={(e) => { e.stopPropagation(); onClose(); }}
-          aria-label="Close lightbox"
+          aria-label={t('imageLightbox.close', 'Close lightbox')}
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M6 18L18 6M6 6l12 12" />
@@ -129,7 +131,7 @@ export function ImageLightbox({ src, onClose }: ImageLightboxProps) {
       </ButtonBar>
       <Image
         src={src}
-        alt="Full size preview"
+        alt={t('imageLightbox.fullSizePreview', 'Full size preview')}
         onClick={(e) => e.stopPropagation()}
       />
     </Overlay>

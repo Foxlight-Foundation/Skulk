@@ -1,10 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { FiChevronRight } from 'react-icons/fi';
 import { Button } from '../common/Button';
 import { CenteredSpinner, Spinner } from '../common/Spinner';
-import { useAppDispatch } from '../../store/hooks';
-import { uiActions } from '../../store/slices/uiSlice';
 import {
   useGetTracesListQuery,
   useGetTraceQuery,
@@ -16,6 +14,7 @@ import {
 } from '../../types/observabilityEvents';
 import type { TraceEventResponse } from '../../types/traces';
 import { TraceWaterfall } from './TraceWaterfall';
+import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 /**
  * "Traces" tab body for the observability panel.
@@ -306,9 +305,13 @@ function totalWallTimeUs(events: readonly TraceEventResponse[]): number {
   return max - min;
 }
 
-async function downloadRawTrace(scope: Scope, taskId: string): Promise<void> {
+async function downloadRawTrace(scope: Scope, taskId: string, t: SkulkTranslate): Promise<void> {
   const response = await fetch(`${basePath(scope)}/${encodeURIComponent(taskId)}/raw`);
-  if (!response.ok) throw new Error(`Failed to download trace (${response.status})`);
+  if (!response.ok) {
+    throw new Error(t('observability.traces.errors.downloadTraceFailed', 'Failed to download trace ({status})', {
+      status: response.status,
+    }));
+  }
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
@@ -319,7 +322,7 @@ async function downloadRawTrace(scope: Scope, taskId: string): Promise<void> {
 }
 
 export function TracesTab() {
-  const dispatch = useAppDispatch();
+  const { t } = useSkulkTranslation();
 
   const [scope, setScope] = useState<Scope>('local');
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
@@ -343,7 +346,7 @@ export function TracesTab() {
 
   const traces = listQuery.data?.traces ?? null;
   const listError = listQuery.isError
-    ? (listQuery.error as { error?: string })?.error ?? 'Failed to load traces'
+    ? (listQuery.error as { error?: string })?.error ?? t('observability.traces.errors.loadTracesFailed', 'Failed to load traces')
     : null;
   const listLoading = listQuery.isLoading;
 
@@ -353,21 +356,22 @@ export function TracesTab() {
   // mis-attribution issue we fixed for NodeTab.
   const traceData = traceQuery.currentData ?? null;
   const traceError = traceQuery.isError
-    ? (traceQuery.error as { error?: string })?.error ?? 'Failed to load trace'
+    ? (traceQuery.error as { error?: string })?.error ?? t('observability.traces.errors.loadTraceFailed', 'Failed to load trace')
     : null;
   const traceLoading = traceQuery.isFetching;
 
-  // Selection doesn't necessarily survive a scope flip (a local trace may not
-  // exist under the cluster proxy or vice versa) — clear it explicitly when
-  // scope changes.
-  useEffect(() => {
+  function selectScope(nextScope: Scope) {
+    setScope(nextScope);
     setSelectedTaskId(null);
     setSelectedEvent(null);
-  }, [scope]);
+    setDownloadError(null);
+  }
 
-  useEffect(() => {
+  function toggleSelectedTrace(taskId: string) {
+    setSelectedTaskId((current) => (current === taskId ? null : taskId));
     setSelectedEvent(null);
-  }, [selectedTaskId]);
+    setDownloadError(null);
+  }
 
   // Models present in the current list — drives the model dropdown options.
   // Kept stable across renders that don't change the trace list so the
@@ -444,30 +448,30 @@ export function TracesTab() {
     if (!selectedTaskId) return;
     setDownloadError(null);
     try {
-      await downloadRawTrace(scope, selectedTaskId);
+      await downloadRawTrace(scope, selectedTaskId, t);
     } catch (err) {
-      setDownloadError(err instanceof Error ? err.message : 'Download failed');
+      setDownloadError(err instanceof Error ? err.message : t('observability.traces.errors.downloadFailed', 'Download failed'));
     }
   }
 
   return (
     <Wrap>
-      <ScopeToggle role="tablist" aria-label="Trace scope">
+      <ScopeToggle role="tablist" aria-label={t('observability.traces.scope', 'Trace scope')}>
         <ScopeButton
           role="tab"
           aria-selected={scope === 'local'}
           $active={scope === 'local'}
-          onClick={() => setScope('local')}
+          onClick={() => selectScope('local')}
         >
-          This node
+          {t('observability.traces.thisNode', 'This node')}
         </ScopeButton>
         <ScopeButton
           role="tab"
           aria-selected={scope === 'cluster'}
           $active={scope === 'cluster'}
-          onClick={() => setScope('cluster')}
+          onClick={() => selectScope('cluster')}
         >
-          Cluster
+          {t('observability.traces.cluster', 'Cluster')}
         </ScopeButton>
       </ScopeToggle>
 
@@ -475,20 +479,20 @@ export function TracesTab() {
         <FilterSelect
           value={taskKindFilter}
           onChange={(e) => setTaskKindFilter(e.target.value)}
-          aria-label="Filter by task kind"
+          aria-label={t('observability.traces.filterByTaskKind', 'Filter by task kind')}
         >
-          <option value="all">All kinds</option>
-          <option value="text">text</option>
-          <option value="embedding">embedding</option>
-          <option value="image">image</option>
+          <option value="all">{t('observability.traces.allKinds', 'All kinds')}</option>
+          <option value="text">{t('common.text', 'text')}</option>
+          <option value="embedding">{t('common.embedding', 'embedding')}</option>
+          <option value="image">{t('common.image', 'image')}</option>
         </FilterSelect>
         <FilterSelect
           value={modelFilter}
           onChange={(e) => setModelFilter(e.target.value)}
-          aria-label="Filter by model"
+          aria-label={t('observability.traces.filterByModel', 'Filter by model')}
           disabled={availableModels.length === 0}
         >
-          <option value="all">All models</option>
+          <option value="all">{t('observability.traces.allModels', 'All models')}</option>
           {availableModels.map((m) => (
             <option key={m} value={m}>{m}</option>
           ))}
@@ -496,10 +500,10 @@ export function TracesTab() {
         <FilterSelect
           value={sourceNodeFilter}
           onChange={(e) => setSourceNodeFilter(e.target.value)}
-          aria-label="Filter by source node"
+          aria-label={t('observability.traces.filterBySourceNode', 'Filter by source node')}
           disabled={availableSourceNodes.length === 0}
         >
-          <option value="all">All nodes</option>
+          <option value="all">{t('observability.traces.allNodes', 'All nodes')}</option>
           {availableSourceNodes.map((n) => (
             <option key={n.id} value={n.id}>{n.label}</option>
           ))}
@@ -508,8 +512,8 @@ export function TracesTab() {
           type="text"
           value={searchFilter}
           onChange={(e) => setSearchFilter(e.target.value)}
-          placeholder="Search task id, model, categories, tags…"
-          aria-label="Search traces"
+          placeholder={t('observability.traces.searchPlaceholder', 'Search task id, model, categories, tags...')}
+          aria-label={t('observability.traces.searchTraces', 'Search traces')}
         />
         <FilterToggle>
           <input
@@ -517,7 +521,7 @@ export function TracesTab() {
             checked={toolOnly}
             onChange={(e) => setToolOnly(e.target.checked)}
           />
-          Tools only
+          {t('observability.traces.toolsOnly', 'Tools only')}
         </FilterToggle>
       </FilterBar>
 
@@ -530,11 +534,14 @@ export function TracesTab() {
         {listError && <ErrorNotice>{listError}</ErrorNotice>}
         {!listLoading && !listError && traces && traces.length === 0 && (
           <Notice>
-            No saved traces yet. Enable tracing for the cluster and re-run a request to record one.
+            {t(
+              'observability.traces.noSavedTraces',
+              'No saved traces yet. Enable tracing for the cluster and re-run a request to record one.',
+            )}
           </Notice>
         )}
         {!listLoading && filteredTraces && filteredTraces.length === 0 && traces && traces.length > 0 && (
-          <Notice>No traces match the current filters.</Notice>
+          <Notice>{t('observability.traces.noFilterMatches', 'No traces match the current filters.')}</Notice>
         )}
         {!listLoading && filteredTraces && filteredTraces.map((trace) => {
           const isExpanded = selectedTaskId === trace.taskId;
@@ -542,7 +549,7 @@ export function TracesTab() {
             <RowGroup key={trace.taskId}>
               <ListRow
                 $selected={isExpanded}
-                onClick={() => setSelectedTaskId(isExpanded ? null : trace.taskId)}
+                onClick={() => toggleSelectedTrace(trace.taskId)}
                 type="button"
                 aria-expanded={isExpanded}
               >
@@ -550,7 +557,7 @@ export function TracesTab() {
                   {trace.modelId ?? trace.taskId}
                 </RowMain>
                 <RowSecondary>
-                  {trace.taskKind ?? 'unknown'} · {formatBytes(trace.fileSize)}
+                  {trace.taskKind ?? t('common.unknownLower', 'unknown')} · {formatBytes(trace.fileSize)}
                 </RowSecondary>
                 <RowTime>{formatTime(trace.createdAt)}</RowTime>
                 <Chevron $expanded={isExpanded} size={14} />
@@ -561,9 +568,9 @@ export function TracesTab() {
                     <DetailMeta>
                       {selectedTraceListItem?.modelId && <span>{selectedTraceListItem.modelId}</span>}
                       {selectedTraceListItem?.taskKind && <span>{selectedTraceListItem.taskKind}</span>}
-                      {totalUs > 0 && <span>wall {formatDuration(totalUs)}</span>}
+                      {totalUs > 0 && <span>{t('observability.traces.wallDuration', 'wall {duration}', { duration: formatDuration(totalUs) })}</span>}
                       {traceData?.sourceNodes && traceData.sourceNodes.length > 0 && (
-                        <span>{traceData.sourceNodes.length} source nodes</span>
+                        <span>{t('observability.traces.sourceNodeCount', '{count} source nodes', { count: traceData.sourceNodes.length })}</span>
                       )}
                     </DetailMeta>
                     <Button
@@ -571,7 +578,7 @@ export function TracesTab() {
                       size="sm"
                       onClick={() => { void handleDownload(); }}
                     >
-                      Download JSON
+                      {t('common.downloadJson', 'Download JSON')}
                     </Button>
                   </DetailHeader>
                   {downloadError && <ErrorNotice>{downloadError}</ErrorNotice>}
@@ -591,24 +598,24 @@ export function TracesTab() {
                       {selectedEvent && (
                         <div>
                           <SelectedRow>
-                            <SelectedKey>Event</SelectedKey>
+                            <SelectedKey>{t('observability.traces.event', 'Event')}</SelectedKey>
                             <SelectedValue>{selectedEvent.name}</SelectedValue>
                           </SelectedRow>
                           <SelectedRow>
-                            <SelectedKey>Lane</SelectedKey>
+                            <SelectedKey>{t('observability.traces.lane', 'Lane')}</SelectedKey>
                             <SelectedValue>{selectedEvent.laneLabel}</SelectedValue>
                           </SelectedRow>
                           <SelectedRow>
-                            <SelectedKey>Category</SelectedKey>
+                            <SelectedKey>{t('observability.traces.category', 'Category')}</SelectedKey>
                             <SelectedValue>{selectedEvent.category}</SelectedValue>
                           </SelectedRow>
                           <SelectedRow>
-                            <SelectedKey>Duration</SelectedKey>
+                            <SelectedKey>{t('observability.traces.duration', 'Duration')}</SelectedKey>
                             <SelectedValue>{formatDuration(selectedEvent.durationUs)}</SelectedValue>
                           </SelectedRow>
                           {selectedEvent.tags && selectedEvent.tags.length > 0 && (
                             <SelectedRow>
-                              <SelectedKey>Tags</SelectedKey>
+                              <SelectedKey>{t('observability.traces.tags', 'Tags')}</SelectedKey>
                               <SelectedValue>{selectedEvent.tags.join(', ')}</SelectedValue>
                             </SelectedRow>
                           )}

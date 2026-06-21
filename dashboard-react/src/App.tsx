@@ -3,7 +3,7 @@ import styled from 'styled-components';
 import { ThemeProvider } from 'styled-components';
 import { darkTheme, lightTheme, GlobalStyle } from './theme';
 import { useClusterState } from './hooks/useClusterState';
-import { HeaderNav, type NavRoute } from './components/layout/HeaderNav';
+import { HeaderNav } from './components/layout/HeaderNav';
 import { TopologyGraph } from './components/topology/TopologyGraph';
 // ClusterWarnings replaced by inline header warning indicator
 import { ConnectionBanner } from './components/status/ConnectionBanner';
@@ -21,6 +21,7 @@ import type { InstanceStatus } from './components/cluster/RunningInstanceCard';
 import { chatActions } from './store/slices/chatSlice';
 import { useAppDispatch, useAppSelector } from './store/hooks';
 import { uiActions, type ObservabilityTab } from './store/slices/uiSlice';
+import { useSkulkTranslation, type SkulkTranslate } from './i18n/tolgee';
 
 const Shell = styled.div`
   position: relative;
@@ -58,8 +59,14 @@ interface StoreDownload {
 function deriveInstanceStatus(
   runnerIds: string[],
   runners: Record<string, Record<string, unknown>>,
+  t: SkulkTranslate,
 ): { status: InstanceStatus; message?: string; progress?: number } {
-  if (runnerIds.length === 0) return { status: 'loading', message: 'Waiting for runners...' };
+  if (runnerIds.length === 0) {
+    return {
+      status: 'loading',
+      message: t('app.instanceStatus.waitingForRunners', 'Waiting for runners...'),
+    };
+  }
 
   const statuses = runnerIds.map((rid) => runners[rid]);
 
@@ -97,16 +104,17 @@ function deriveInstanceStatus(
       ? Math.round((loaded / total) * 100)
       : undefined;
     const message = loaded != null && total != null
-      ? `Downloading layers ${loaded}/${total}...`
-      : 'Loading model...';
+      ? t('app.instanceStatus.downloadingLayers', 'Downloading layers {loaded}/{total}...', { loaded, total })
+      : t('app.instanceStatus.loadingModel', 'Loading model...');
     return { status: 'loading', message, progress };
   }
 
   // Connecting or idle
-  return { status: 'loading', message: 'Connecting...' };
+  return { status: 'loading', message: t('app.instanceStatus.connecting', 'Connecting...') };
 }
 
 export function App() {
+  const { t } = useSkulkTranslation();
   const {
     topology,
     connected,
@@ -186,9 +194,16 @@ export function App() {
         const details = entries.map((n) => {
           const ver = n.skulk_version ?? '?';
           const commit = n.skulk_commit?.slice(0, 7);
-          return `${n.friendly_name ?? 'Unknown'} (${ver}${commit ? `-${commit}` : ''})`;
+          return `${n.friendly_name ?? t('common.unknown', 'Unknown')} (${ver}${commit ? `-${commit}` : ''})`;
         }).join(', ');
-        items.push({ level: 'error', message: `Version mismatch: ${details}. Update all nodes with git pull && uv sync.` });
+        items.push({
+          level: 'error',
+          message: t(
+            'app.warnings.versionMismatch',
+            'Version mismatch: {details}. Update all nodes with git pull && uv sync.',
+            { details },
+          ),
+        });
       }
     }
 
@@ -205,7 +220,11 @@ export function App() {
           .join(', ');
         items.push({
           level: 'warning',
-          message: `macOS version mismatch: ${details}. Keep cluster nodes on the same macOS build for best compatibility.`,
+          message: t(
+            'app.warnings.macosVersionMismatch',
+            'macOS version mismatch: {details}. Keep cluster nodes on the same macOS build for best compatibility.',
+            { details },
+          ),
         });
       }
     }
@@ -215,7 +234,13 @@ export function App() {
       (n) => n.rdma_enabled && n.rdma_interfaces_present === false,
     );
     if (hasRdmaPhantom) {
-      items.push({ level: 'warning', message: 'RDMA reported as enabled but no RDMA interfaces exist. Thunderbolt 5 (M4 Pro/Max+) is required for tensor parallel.' });
+      items.push({
+        level: 'warning',
+        message: t(
+          'app.warnings.rdmaMissingInterfaces',
+          'RDMA reported as enabled but no RDMA interfaces exist. Thunderbolt 5 (M4 Pro/Max+) is required for tensor parallel.',
+        ),
+      });
     }
 
     // TB5 present but RDMA disabled (warning)
@@ -228,7 +253,11 @@ export function App() {
         const details = nodesWithRdmaDisabled.map(getNodeName).join(', ');
         items.push({
           level: 'warning',
-          message: `Thunderbolt 5 detected but RDMA is not enabled on: ${details}. Enable rdma_ctl on those nodes to unlock tensor parallel.`,
+          message: t(
+            'app.warnings.thunderboltRdmaDisabled',
+            'Thunderbolt 5 detected but RDMA is not enabled on: {details}. Enable rdma_ctl on those nodes to unlock tensor parallel.',
+            { details },
+          ),
         });
       }
     }
@@ -252,7 +281,11 @@ export function App() {
     if (affectedMacStudioNodes.size > 0) {
       items.push({
         level: 'warning',
-        message: `Mac Studio RDMA is using the Ethernet-adjacent en2 Thunderbolt port on: ${[...affectedMacStudioNodes].join(', ')}. Move those cables to one of the other TB ports.`,
+        message: t(
+          'app.warnings.macStudioRdmaEn2',
+          'Mac Studio RDMA is using the Ethernet-adjacent en2 Thunderbolt port on: {details}. Move those cables to one of the other TB ports.',
+          { details: [...affectedMacStudioNodes].join(', ') },
+        ),
       });
     }
 
@@ -261,17 +294,22 @@ export function App() {
       const cycle = thunderboltBridgeCycles[0];
       const serviceName = cycle
         .map((nodeId) => nodeThunderboltBridge[nodeId]?.serviceName)
-        .find((name): name is string => typeof name === 'string' && name.length > 0) ?? 'Thunderbolt Bridge';
+        .find((name): name is string => typeof name === 'string' && name.length > 0)
+        ?? t('app.warnings.thunderboltBridgeServiceName', 'Thunderbolt Bridge');
       items.push({
         level: 'warning',
-        message: `Thunderbolt Bridge cycle detected across ${cycle.map(getNodeName).join(' -> ')}. Disable "${serviceName}" on one affected node to break the loop.`,
+        message: t(
+          'app.warnings.thunderboltBridgeCycle',
+          'Thunderbolt Bridge cycle detected across {path}. Disable "{serviceName}" on one affected node to break the loop.',
+          { path: cycle.map(getNodeName).join(' -> '), serviceName },
+        ),
       });
     }
 
     if (items.length === 0) return null;
     const worstLevel = items.some((i) => i.level === 'error') ? 'error' : 'warning';
     return { level: worstLevel as 'error' | 'warning', items };
-  }, [nodeRdmaCtl, nodeThunderbolt, nodeThunderboltBridge, thunderboltBridgeCycles, topology]);
+  }, [nodeRdmaCtl, nodeThunderbolt, nodeThunderboltBridge, thunderboltBridgeCycles, topology, t]);
 
   // Poll store downloads for the header progress indicator
   const pollStoreDownloads = useCallback(async () => {
@@ -356,13 +394,13 @@ export function App() {
       }
 
       // Derive status from runners
-      const derived = deriveInstanceStatus(runnerIds, runners);
+      const derived = deriveInstanceStatus(runnerIds, runners, t);
 
       // Get first node's friendly name
       const firstNodeId = nodeIds[0];
       const nodeName = firstNodeId && topology?.nodes[firstNodeId]?.friendly_name
         ? topology.nodes[firstNodeId].friendly_name
-        : firstNodeId?.slice(0, 8) ?? 'unknown';
+        : firstNodeId?.slice(0, 8) ?? t('common.unknownLower', 'unknown');
 
       cards.push({
         instanceId,
@@ -378,7 +416,7 @@ export function App() {
       });
     }
     return cards;
-  }, [instances, runners, topology]);
+  }, [instances, runners, topology, t]);
 
   const hasInstances = instanceCards.length > 0;
 
@@ -386,14 +424,14 @@ export function App() {
     try {
       const res = await fetch(`/instance/${instanceId}`, { method: 'DELETE' });
       if (res.ok) {
-        addToast({ type: 'success', message: 'Instance deleted' });
+        addToast({ type: 'success', message: t('app.toasts.instanceDeleted', 'Instance deleted') });
       } else {
-        addToast({ type: 'error', message: 'Failed to delete instance' });
+        addToast({ type: 'error', message: t('app.toasts.instanceDeleteFailed', 'Failed to delete instance') });
       }
     } catch {
-      addToast({ type: 'error', message: 'Failed to delete instance' });
+      addToast({ type: 'error', message: t('app.toasts.instanceDeleteFailed', 'Failed to delete instance') });
     }
-  }, []);
+  }, [t]);
 
   return (
     <ThemeProvider theme={activeTheme}>
@@ -447,7 +485,9 @@ export function App() {
               />
             ) : (
               <EmptyState>
-                {connected ? 'Loading cluster state…' : 'Connecting to backend…'}
+                {connected
+                  ? t('app.empty.loadingClusterState', 'Loading cluster state...')
+                  : t('app.empty.connectingBackend', 'Connecting to backend...')}
               </EmptyState>
             )}
           </Main>

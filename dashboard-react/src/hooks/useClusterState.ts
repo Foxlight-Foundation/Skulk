@@ -86,7 +86,7 @@ function transformTopology(
 
     nodes[nodeId] = {
       system_info: {
-        model_id: identity?.modelId ?? 'Unknown',
+        model_id: identity?.modelId,
         chip: identity?.chipId,
         memory: ramTotal,
       },
@@ -186,7 +186,7 @@ function ensureLocalNodePresent(
       ...topology.nodes,
       [localNodeId]: {
         system_info: {
-          model_id: localIdentity?.modelId ?? 'Unknown',
+          model_id: localIdentity?.modelId,
           chip: localIdentity?.chipId,
           memory: 0,
         },
@@ -196,7 +196,7 @@ function ensureLocalNodePresent(
           memory: { ram_usage: 0, ram_total: 0 },
         },
         last_mactop_update: Date.now() / 1000,
-        friendly_name: localIdentity?.friendlyName ?? 'Local node (syncing)',
+        friendly_name: localIdentity?.friendlyName,
         os_version: localIdentity?.osVersion,
         os_build_version: localIdentity?.osBuildVersion,
         skulk_version: localIdentity?.skulkVersion,

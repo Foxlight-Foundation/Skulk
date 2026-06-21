@@ -8,6 +8,7 @@ import { formatBytes } from '../../utils/format';
 import { Button } from '../common/Button';
 import { InfoTooltip } from '../common/InfoTooltip';
 import { ClusterCard, type ClusterCardProps } from '../cluster/ClusterCard';
+import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 /* ================================================================
    Types
@@ -68,15 +69,15 @@ export interface StoreRegistryTableProps {
 
 /* ---- helpers ---- */
 
-function timeAgo(iso: string): string {
+function timeAgo(iso: string, t: SkulkTranslate): string {
   const diff = Date.now() - new Date(iso).getTime();
   const sec = Math.floor(diff / 1000);
-  if (sec < 60) return 'just now';
+  if (sec < 60) return t('storeRegistry.time.justNow', 'just now');
   const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
+  if (min < 60) return t('storeRegistry.time.minutesAgo', '{count}m ago', { count: min });
   const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  return `${Math.floor(hr / 24)}d ago`;
+  if (hr < 24) return t('storeRegistry.time.hoursAgo', '{count}h ago', { count: hr });
+  return t('storeRegistry.time.daysAgo', '{count}d ago', { count: Math.floor(hr / 24) });
 }
 
 /* ================================================================
@@ -434,6 +435,7 @@ const ActionsCell = styled.div`
 const LinkIcon = () => <FiExternalLink size={14} style={{ flexShrink: 0 }} />;
 
 function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: ModelCardInfo }) {
+  const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
   const hfUrl = entry.model_id.includes('/')
     ? `https://huggingface.co/${entry.model_id}`
@@ -454,68 +456,68 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
             style={{ color: theme.colors.textMuted, display: 'flex', transition: 'color 0.15s' }}
             onMouseEnter={(e) => { e.currentTarget.style.color = theme.colors.gold; }}
             onMouseLeave={(e) => { e.currentTarget.style.color = theme.colors.textMuted; }}
-            title="Open on HuggingFace"
+            title={t('common.openOnHuggingFace', 'Open on HuggingFace')}
           >
             <LinkIcon />
           </a>
         )}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
-        <span style={{ color: theme.colors.textMuted }}>Size</span>
+        <span style={{ color: theme.colors.textMuted }}>{t('common.size', 'Size')}</span>
         <span>{formatBytes(entry.total_bytes)}</span>
         {card?.baseModel && (
           <>
-            <span style={{ color: theme.colors.textMuted }}>Base model</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.baseModel', 'Base model')}</span>
             <span>{card.baseModel}</span>
           </>
         )}
         {card?.family && (
           <>
-            <span style={{ color: theme.colors.textMuted }}>Family</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.family', 'Family')}</span>
             <span>{card.family}</span>
           </>
         )}
         {card?.quantization && (
           <>
-            <span style={{ color: theme.colors.textMuted }}>Quantization</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.quantization', 'Quantization')}</span>
             <span>{card.quantization}</span>
           </>
         )}
-        <span style={{ color: theme.colors.textMuted }}>Tensor parallel</span>
+        <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.tensorParallel', 'Tensor parallel')}</span>
         <span style={{ color: card?.supportsTensor ? theme.colors.healthy : theme.colors.textSecondary }}>
-          {card?.supportsTensor ? 'Yes' : 'No'}
+          {card?.supportsTensor ? t('common.yes', 'Yes') : t('common.no', 'No')}
         </span>
         {card?.capabilities && card.capabilities.length > 0 && (
           <>
-            <span style={{ color: theme.colors.textMuted }}>Capabilities</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.capabilities', 'Capabilities')}</span>
             <span>{card.capabilities.join(', ')}</span>
           </>
         )}
         {resolved && (
           <>
-            <span style={{ color: theme.colors.textMuted }}>Thinking toggle</span>
-            <span>{resolved.supportsThinkingToggle ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: theme.colors.textMuted }}>Thinking budget</span>
-            <span>{resolved.supportsThinkingBudget ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: theme.colors.textMuted }}>Tool calling</span>
-            <span>{resolved.supportsToolCalling ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: theme.colors.textMuted }}>Image input</span>
-            <span>{resolved.supportsImageInput ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: theme.colors.textMuted }}>Audio input</span>
-            <span>{resolved.supportsAudioInput ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: theme.colors.textMuted }}>Reasoning format</span>
-            <span>{resolved.thinkingFormat ?? 'none'}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.thinkingToggle', 'Thinking toggle')}</span>
+            <span>{resolved.supportsThinkingToggle ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.thinkingBudget', 'Thinking budget')}</span>
+            <span>{resolved.supportsThinkingBudget ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.toolCalling', 'Tool calling')}</span>
+            <span>{resolved.supportsToolCalling ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.imageInput', 'Image input')}</span>
+            <span>{resolved.supportsImageInput ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.audioInput', 'Audio input')}</span>
+            <span>{resolved.supportsAudioInput ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.reasoningFormat', 'Reasoning format')}</span>
+            <span>{resolved.thinkingFormat ?? t('common.none', 'none')}</span>
           </>
         )}
-        <span style={{ color: theme.colors.textMuted }}>Files</span>
+        <span style={{ color: theme.colors.textMuted }}>{t('common.files', 'Files')}</span>
         <span>{entry.files.length}</span>
-        <span style={{ color: theme.colors.textMuted }}>Downloaded</span>
+        <span style={{ color: theme.colors.textMuted }}>{t('storeRegistry.downloaded', 'Downloaded')}</span>
         <span>{new Date(entry.downloaded_at).toLocaleString()}</span>
       </div>
       {entry.files.length > 0 && (
         <div style={{ marginTop: 8, borderTop: `1px solid ${theme.colors.borderLight}`, paddingTop: 6 }}>
           <div style={{ color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
-            Files
+            {t('common.files', 'Files')}
           </div>
           <div style={{ color: theme.colors.textSecondary, maxHeight: 120, overflowY: 'auto' }}>
             {entry.files.map((f) => (
@@ -545,6 +547,7 @@ export function StoreRegistryTable({
   totalClusterMemoryBytes = 0,
   onOptimize,
 }: StoreRegistryTableProps) {
+  const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
   const TAG_COLORS = useMemo(() => buildTagColors(theme), [theme]);
   const registeredIds = useMemo(() => new Set(entries.map((e) => e.model_id)), [entries]);
@@ -565,12 +568,15 @@ export function StoreRegistryTable({
     <Container>
       <HeaderRow>
         <HeaderText>
-          {entries.length} model{entries.length !== 1 ? 's' : ''} in store
-          {downloadingCount > 0 && `, ${downloadingCount} downloading`}
+          {t('storeRegistry.modelCount', '{count} model{plural} in store', {
+            count: entries.length,
+            plural: entries.length !== 1 ? 's' : '',
+          })}
+          {downloadingCount > 0 && t('storeRegistry.downloadingCount', ', {count} downloading', { count: downloadingCount })}
         </HeaderText>
         <HeaderActions>
           {actions}
-          <RefreshBtn onClick={onRefresh} $spinning={loading} title="Refresh">
+          <RefreshBtn onClick={onRefresh} $spinning={loading} title={t('common.refresh', 'Refresh')}>
             <FiRefreshCw size={16} />
           </RefreshBtn>
         </HeaderActions>
@@ -581,16 +587,16 @@ export function StoreRegistryTable({
           {[1, 2, 3, 4].map((i) => <ShimmerRow key={i} />)}
         </div>
       ) : entries.length === 0 && pendingDownloads.length === 0 ? (
-        <EmptyBox>No models in store.</EmptyBox>
+        <EmptyBox>{t('storeRegistry.empty', 'No models in store.')}</EmptyBox>
       ) : (
         <Table>
           <THead>
             <div />
             <div />
-            <div>Model</div>
-            <div style={{ textAlign: 'right' }}>Size</div>
-            <div style={{ textAlign: 'right' }}>Files</div>
-            <div style={{ textAlign: 'right' }}>Status</div>
+            <div>{t('common.model', 'Model')}</div>
+            <div style={{ textAlign: 'right' }}>{t('common.size', 'Size')}</div>
+            <div style={{ textAlign: 'right' }}>{t('common.files', 'Files')}</div>
+            <div style={{ textAlign: 'right' }}>{t('common.status', 'Status')}</div>
             <div />
           </THead>
 
@@ -626,18 +632,18 @@ export function StoreRegistryTable({
               <TRow key={entry.model_id}>
                 <PlayCell>
                   {active && onStop ? (
-                    <StopBtn onClick={() => onStop(entry.model_id)} title="Stop model">
+                    <StopBtn onClick={() => onStop(entry.model_id)} title={t('storeRegistry.stopModel', 'Stop model')}>
                       <MdClose size={20} />
                     </StopBtn>
                   ) : !active && !dl && onLaunch ? (
                     tooLarge ? (
-                      <InfoTooltip content="Insufficient cluster memory" placement="right" delay={0}>
-                        <DisabledBtn aria-label="Insufficient memory">
+                      <InfoTooltip content={t('storeRegistry.insufficientClusterMemory', 'Insufficient cluster memory')} placement="right" delay={0}>
+                        <DisabledBtn aria-label={t('storeRegistry.insufficientMemory', 'Insufficient memory')}>
                           <MdPlayArrow size={20} />
                         </DisabledBtn>
                       </InfoTooltip>
                     ) : (
-                      <PlayBtn onClick={() => onLaunch(entry.model_id)} title="Launch model">
+                      <PlayBtn onClick={() => onLaunch(entry.model_id)} title={t('storeRegistry.launchModel', 'Launch model')}>
                         <MdPlayArrow size={20} />
                       </PlayBtn>
                     )
@@ -645,7 +651,11 @@ export function StoreRegistryTable({
                 </PlayCell>
                 <PlayCell>
                   {!active && !dl && onPlacement ? (
-                    <PlacementBtn onClick={() => onPlacement(entry.model_id)} title="Configure placement" aria-label="Configure placement">
+                    <PlacementBtn
+                      onClick={() => onPlacement(entry.model_id)}
+                      title={t('storeRegistry.configurePlacement', 'Configure placement')}
+                      aria-label={t('storeRegistry.configurePlacement', 'Configure placement')}
+                    >
                       <MdTune size={18} />
                     </PlacementBtn>
                   ) : null}
@@ -668,8 +678,8 @@ export function StoreRegistryTable({
                     const card = clusterCards[entry.model_id];
                     const ready = card?.isReady ?? false;
                     const badge = ready
-                      ? <ReadyBadge><PulseDot /> Ready</ReadyBadge>
-                      : <ActiveBadge><ActiveDot /> Loading</ActiveBadge>;
+                      ? <ReadyBadge><PulseDot /> {t('common.ready', 'Ready')}</ReadyBadge>
+                      : <ActiveBadge><ActiveDot /> {t('common.loading', 'Loading')}</ActiveBadge>;
                     return <>
                       {card ? (
                         <InfoTooltip
@@ -681,7 +691,7 @@ export function StoreRegistryTable({
                         </InfoTooltip>
                       ) : badge}
                       {ready && onChat && !modelCards?.[entry.model_id]?.tags?.includes('embedding') && (
-                        <ChatBubble onClick={() => onChat(entry.model_id)} title="Chat with model">
+                        <ChatBubble onClick={() => onChat(entry.model_id)} title={t('storeRegistry.chatWithModel', 'Chat with model')}>
                           <BsChatDotsFill size={14} />
                         </ChatBubble>
                       )}
@@ -699,7 +709,7 @@ export function StoreRegistryTable({
                       <ProgressText>{(dl.progress * 100).toFixed(0)}%</ProgressText>
                     </div>
                   ) : (
-                    timeAgo(entry.downloaded_at)
+                    timeAgo(entry.downloaded_at, t)
                   )}
                 </Cell>
                 <ActionsCell>
@@ -710,13 +720,32 @@ export function StoreRegistryTable({
                     delay={100}
                   />
                   {!active && onOptimize && !(modelCards?.[entry.model_id]?.tags ?? []).includes('optiq') && !entry.model_id.toLowerCase().includes('optiq') && (
-                    <InfoTooltip content="Create an OptiQ mixed-precision version. Analyzes each layer's sensitivity and assigns precision individually for better quality." placement="left" delay={0}>
-                      <Button variant="outline" size="sm" icon onClick={() => onOptimize(entry.model_id)} title="Optimize model">
+                    <InfoTooltip
+                      content={t(
+                        'storeRegistry.optimizeTooltip',
+                        "Create an OptiQ mixed-precision version. Analyzes each layer's sensitivity and assigns precision individually for better quality.",
+                      )}
+                      placement="left"
+                      delay={0}
+                    >
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        icon
+                        onClick={() => onOptimize(entry.model_id)}
+                        title={t('storeRegistry.optimizeModel', 'Optimize model')}
+                      >
                         <MdAutoFixHigh size={16} />
                       </Button>
                     </InfoTooltip>
                   )}
-                  <Button variant="danger" size="sm" icon onClick={() => onDelete(entry, active)} title="Delete model">
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    icon
+                    onClick={() => onDelete(entry, active)}
+                    title={t('storeRegistry.deleteModel', 'Delete model')}
+                  >
                     <FiTrash2 size={18} />
                   </Button>
                 </ActionsCell>

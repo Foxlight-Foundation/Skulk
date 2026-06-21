@@ -3,6 +3,7 @@ import { FiExternalLink } from 'react-icons/fi';
 import { BsChatDotsFill } from 'react-icons/bs';
 import { InfoTooltip } from '../common/InfoTooltip';
 import type { Theme } from '../../theme';
+import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -40,14 +41,15 @@ export interface RunningInstanceCardProps {
  *  status colors track theme switches. */
 function buildStatusConfig(
   theme: Theme,
+  t: SkulkTranslate,
 ): Record<InstanceStatus, { label: string; color: string; glow: string; defaultMessage: string }> {
   return {
-    loading:       { label: 'Loading',       color: theme.colors.gold,    glow: theme.colors.goldDim,    defaultMessage: 'Downloading model...' },
-    warming_up:    { label: 'Warming Up',    color: theme.colors.gold,    glow: theme.colors.goldDim,    defaultMessage: 'Preparing for inference...' },
-    ready:         { label: 'Ready',         color: theme.colors.healthy, glow: theme.colors.accentBg,   defaultMessage: 'Ready to chat!' },
-    running:       { label: 'Running',       color: theme.colors.healthy, glow: theme.colors.accentBg,   defaultMessage: 'Processing inference...' },
-    failed:        { label: 'Failed',        color: theme.colors.error,   glow: theme.colors.errorBg,    defaultMessage: 'Instance failed' },
-    shutting_down: { label: 'Shutting Down', color: theme.colors.warning, glow: theme.colors.warningBg,  defaultMessage: 'Shutting down...' },
+    loading:       { label: t('instance.status.loading', 'Loading'),       color: theme.colors.gold,    glow: theme.colors.goldDim,    defaultMessage: t('instance.status.loadingMessage', 'Downloading model...') },
+    warming_up:    { label: t('instance.status.warmingUp', 'Warming Up'),    color: theme.colors.gold,    glow: theme.colors.goldDim,    defaultMessage: t('instance.status.warmingUpMessage', 'Preparing for inference...') },
+    ready:         { label: t('instance.status.ready', 'Ready'),         color: theme.colors.healthy, glow: theme.colors.accentBg,   defaultMessage: t('instance.status.readyMessage', 'Ready to chat!') },
+    running:       { label: t('instance.status.running', 'Running'),       color: theme.colors.healthy, glow: theme.colors.accentBg,   defaultMessage: t('instance.status.runningMessage', 'Processing inference...') },
+    failed:        { label: t('instance.status.failed', 'Failed'),        color: theme.colors.error,   glow: theme.colors.errorBg,    defaultMessage: t('instance.status.failedMessage', 'Instance failed') },
+    shutting_down: { label: t('instance.status.shuttingDown', 'Shutting Down'), color: theme.colors.warning, glow: theme.colors.warningBg,  defaultMessage: t('instance.status.shuttingDownMessage', 'Shutting down...') },
   };
 }
 
@@ -55,8 +57,8 @@ function formatInstanceId(id: string): string {
   return id.slice(0, 8).toUpperCase();
 }
 
-function formatInstanceType(type: 'MlxRing' | 'MlxJaccl'): string {
-  return type === 'MlxRing' ? 'MLX Ring' : 'MLX Jaccl';
+function formatInstanceType(type: 'MlxRing' | 'MlxJaccl', t: SkulkTranslate): string {
+  return type === 'MlxRing' ? t('placement.mlxRing', 'MLX Ring') : t('placement.mlxJaccl', 'MLX Jaccl');
 }
 
 function hfUrl(modelId: string): string | null {
@@ -267,10 +269,11 @@ export function RunningInstanceCard({
   speculation,
   className,
 }: RunningInstanceCardProps) {
+  const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
-  const baseCfg = buildStatusConfig(theme)[status];
+  const baseCfg = buildStatusConfig(theme, t)[status];
   const cfg = isEmbedding && status === 'ready'
-    ? { ...baseCfg, defaultMessage: 'Ready for embedding' }
+    ? { ...baseCfg, defaultMessage: t('instance.status.readyForEmbedding', 'Ready for embedding') }
     : baseCfg;
   const link = hfUrl(modelId);
   const showProgress = (status === 'loading' || status === 'warming_up') && loadProgress != null;
@@ -283,24 +286,31 @@ export function RunningInstanceCard({
           <StatusDot $color={cfg.color} />
           <InstanceIdText>{formatInstanceId(instanceId)}</InstanceIdText>
         </IdGroup>
-        {onDelete && <DeleteBtn onClick={onDelete}>Delete</DeleteBtn>}
+        {onDelete && <DeleteBtn onClick={onDelete}>{t('common.delete', 'Delete')}</DeleteBtn>}
       </Header>
 
       <ModelIdText>{modelId}</ModelIdText>
 
       <MetaRow>
-        <span>{sharding} &middot; {formatInstanceType(instanceType)}</span>
+        <span>
+          {sharding === 'Pipeline' ? t('common.pipeline', 'Pipeline') : t('common.tensor', 'Tensor')} &middot; {formatInstanceType(instanceType, t)}
+        </span>
         <StatusBadge $color={cfg.color}>{cfg.label}</StatusBadge>
         {speculation && (
           <InfoTooltip
-            content={
-              `Speculative decoding active: ` +
-              `${speculation.kind === 'assistant' ? 'assistant drafter' : 'MTP sidecar'}, ` +
-              `draft depth ${speculation.depth}`
-            }
+            content={t(
+              'instance.speculationTooltip',
+              'Speculative decoding active: {kind}, draft depth {depth}',
+              {
+                kind: speculation.kind === 'assistant'
+                  ? t('instance.speculation.assistantDrafter', 'assistant drafter')
+                  : t('instance.speculation.mtpSidecar', 'MTP sidecar'),
+                depth: speculation.depth,
+              },
+            )}
           >
             <StatusBadge $color={theme.colors.accent}>
-              MTP D{speculation.depth}
+              {t('instance.speculationDepthBadge', 'MTP D{depth}', { depth: speculation.depth })}
             </StatusBadge>
           </InfoTooltip>
         )}
@@ -308,7 +318,7 @@ export function RunningInstanceCard({
 
       {link && (
         <HfLink href={link} target="_blank" rel="noopener noreferrer">
-          Hugging Face <FiExternalLink size={11} />
+          {t('common.huggingFace', 'Hugging Face')} <FiExternalLink size={11} />
         </HfLink>
       )}
 
@@ -327,7 +337,7 @@ export function RunningInstanceCard({
         </div>
         {canChat && onChat && (
           <ChatBtn onClick={onChat}>
-            <BsChatDotsFill size={14} /> Chat
+            <BsChatDotsFill size={14} /> {t('header.nav.chat', 'Chat')}
           </ChatBtn>
         )}
       </Footer>

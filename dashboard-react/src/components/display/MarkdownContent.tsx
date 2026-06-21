@@ -4,6 +4,7 @@ import { Marked } from 'marked';
 import hljs from 'highlight.js';
 import katex from 'katex';
 import styled from 'styled-components';
+import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 export interface MarkdownContentProps {
   content: string;
@@ -18,7 +19,16 @@ interface ProcessedMarkdown {
   html: string;
 }
 
-function processMarkdown(content: string): ProcessedMarkdown {
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function processMarkdown(content: string, t: SkulkTranslate): ProcessedMarkdown {
   const mathExpressions = new Map<string, { content: string; displayMode: boolean }>();
   let mathCounter = 0;
 
@@ -81,7 +91,7 @@ function processMarkdown(content: string): ProcessedMarkdown {
           highlighted = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         }
         const langLabel = lang || 'code';
-        return `<div class="mc-code-block"><div class="mc-code-header"><span class="mc-code-lang">${langLabel}</span><button class="mc-copy-btn" data-code="${encodeURIComponent(text)}">Copy</button></div><pre><code class="hljs">${highlighted}</code></pre></div>`;
+        return `<div class="mc-code-block"><div class="mc-code-header"><span class="mc-code-lang">${langLabel}</span><button class="mc-copy-btn" data-code="${encodeURIComponent(text)}">${escapeHtml(t('markdown.copy', 'Copy'))}</button></div><pre><code class="hljs">${highlighted}</code></pre></div>`;
       },
       codespan({ text }: { text: string }) {
         const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -251,8 +261,9 @@ const Container = styled.div`
    ================================================================ */
 
 export function MarkdownContent({ content, className }: MarkdownContentProps) {
+  const { t } = useSkulkTranslation();
   const containerRef = useRef<HTMLDivElement>(null);
-  const processed = useMemo(() => processMarkdown(content), [content]);
+  const processed = useMemo(() => processMarkdown(content, t), [content, t]);
 
   const handleClick = useCallback((e: MouseEvent) => {
     const target = e.target as HTMLElement;
@@ -260,11 +271,11 @@ export function MarkdownContent({ content, className }: MarkdownContentProps) {
       const code = decodeURIComponent(target.getAttribute('data-code') || '');
       void copyToClipboard(code).then(() => {
         const original = target.textContent;
-        target.textContent = '✓ Copied';
+        target.textContent = t('markdown.copied', 'Copied');
         setTimeout(() => { target.textContent = original; }, 2000);
       });
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     const el = containerRef.current;

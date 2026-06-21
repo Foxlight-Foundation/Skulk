@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import styled, { css, keyframes } from 'styled-components';
+import styled, { keyframes } from 'styled-components';
 import { useConfig, type StoreConfig, type FullConfig, type LoggingConfig } from '../../hooks/useConfig';
 import { Button } from '../common/Button';
 import { Field } from '../common/Field';
@@ -8,6 +8,7 @@ import { addToast } from '../../hooks/useToast';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import type { ThemeName } from '../../theme';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 export interface SettingsPanelProps {
   open: boolean;
@@ -231,7 +232,10 @@ const Spacer = styled.span`
 /* ---- component ---- */
 
 export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
-  const { fullConfig, effective, configPath, loading, saving, error, fetchConfig, saveFullConfig } = useConfig();
+  const { t } = useSkulkTranslation();
+  const { fullConfig, effective, configPath, loading, saving, error, fetchConfig, saveFullConfig } = useConfig(
+    t('settings.errors.fetchConfigFailed', 'Failed to fetch config'),
+  );
   const themeName = useAppSelector((s) => s.ui.theme);
   const dispatch = useAppDispatch();
   const setTheme = (name: ThemeName) => dispatch(uiActions.setTheme(name));
@@ -292,12 +296,18 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     if (hfToken && hfToken !== '') updated.hf_token = hfToken;
     const ok = await saveFullConfig(updated);
     if (ok) {
-      addToast({ type: 'success', message: 'Settings saved — KV cache change takes effect on next model launch' });
+      addToast({
+        type: 'success',
+        message: t(
+          'settings.toasts.saved',
+          'Settings saved - KV cache change takes effect on next model launch',
+        ),
+      });
       onClose();
     } else {
-      addToast({ type: 'error', message: 'Failed to save settings' });
+      addToast({ type: 'error', message: t('settings.toasts.saveFailed', 'Failed to save settings') });
     }
-  }, [draft, kvBackend, saveFullConfig, onClose]);
+  }, [draft, fullConfig, hfToken, kvBackend, loggingDraft, onClose, saveFullConfig, t]);
 
   // ESC to close
   useEffect(() => {
@@ -314,8 +324,14 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
       <Backdrop onClick={onClose} />
       <Drawer>
         <Header>
-          <Title>Settings</Title>
-          <Button variant="ghost" size="sm" icon onClick={onClose} aria-label="Close settings">
+          <Title>{t('settings.title', 'Settings')}</Title>
+          <Button
+            variant="ghost"
+            size="sm"
+            icon
+            onClick={onClose}
+            aria-label={t('settings.close', 'Close settings')}
+          >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M6 18L18 6M6 6l12 12" />
             </svg>
@@ -323,36 +339,45 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
         </Header>
 
         <Body>
-          {loading && <LoadingText>Loading config…</LoadingText>}
+          {loading && <LoadingText>{t('settings.loadingConfig', 'Loading config...')}</LoadingText>}
           {error && <ErrorText>{error}</ErrorText>}
 
           {/* Appearance */}
           <Fieldset>
-            <Legend>Appearance</Legend>
+            <Legend>{t('settings.appearance.legend', 'Appearance')}</Legend>
             <Row>
-              <FieldLabel>Color theme</FieldLabel>
+              <FieldLabel>{t('settings.appearance.colorTheme', 'Color theme')}</FieldLabel>
               <Toggle
                 $on={themeName === 'light'}
                 onClick={() => setTheme(themeName === 'dark' ? 'light' : 'dark')}
                 role="switch"
                 aria-checked={themeName === 'light'}
-                aria-label={themeName === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
+                aria-label={themeName === 'light'
+                  ? t('settings.appearance.switchToDark', 'Switch to dark theme')
+                  : t('settings.appearance.switchToLight', 'Switch to light theme')}
               />
               <Spacer />
-              <span style={{ fontSize: 13, opacity: 0.7 }}>{themeName === 'light' ? 'Light' : 'Dark'}</span>
+              <span style={{ fontSize: 13, opacity: 0.7 }}>
+                {themeName === 'light'
+                  ? t('settings.appearance.light', 'Light')
+                  : t('settings.appearance.dark', 'Dark')}
+              </span>
             </Row>
           </Fieldset>
 
           <>
             {/* Model Store */}
             <Fieldset>
-              <Legend>Model Store</Legend>
+              <Legend>{t('settings.modelStore.legend', 'Model Store')}</Legend>
               <Row>
                 <FieldLabel>
-                  Enabled
+                  {t('settings.common.enabled', 'Enabled')}
                   <InfoTooltip
                     filled
-                    content="When enabled, model store allows specification of a single cluster attached storage device where downloaded models will be saved."
+                    content={t(
+                      'settings.modelStore.enabledTooltip',
+                      'When enabled, model store allows specification of a single cluster attached storage device where downloaded models will be saved.',
+                    )}
                   />
                 </FieldLabel>
                 <Toggle $on={modelStoreDraft.enabled} onClick={() => update({ enabled: !modelStoreDraft.enabled })} />
@@ -360,25 +385,25 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               {modelStoreDraft.enabled && (
                 <>
                   <Row>
-                    <FieldLabel>Store host</FieldLabel>
+                    <FieldLabel>{t('settings.modelStore.storeHost', 'Store host')}</FieldLabel>
                     <StyledField
                       size="sm"
                       value={modelStoreDraft.store_host}
                       onChange={(e) => update({ store_host: (e.target as HTMLInputElement).value })}
-                      placeholder="hostname or node_id"
+                      placeholder={t('settings.modelStore.storeHostPlaceholder', 'hostname or node_id')}
                     />
                   </Row>
                   <Row>
-                    <FieldLabel>HTTP host</FieldLabel>
+                    <FieldLabel>{t('settings.modelStore.httpHost', 'HTTP host')}</FieldLabel>
                     <StyledField
                       size="sm"
                       value={modelStoreDraft.store_http_host}
                       onChange={(e) => update({ store_http_host: (e.target as HTMLInputElement).value })}
-                      placeholder="defaults to store host"
+                      placeholder={t('settings.modelStore.httpHostPlaceholder', 'defaults to store host')}
                     />
                   </Row>
                   <Row>
-                    <FieldLabel>Port</FieldLabel>
+                    <FieldLabel>{t('settings.modelStore.port', 'Port')}</FieldLabel>
                     <StyledField
                       size="sm"
                       type="number"
@@ -388,12 +413,12 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                     />
                   </Row>
                   <Row>
-                    <FieldLabel>Store path</FieldLabel>
+                    <FieldLabel>{t('settings.modelStore.storePath', 'Store path')}</FieldLabel>
                     <StyledField
                       size="sm"
                       value={modelStoreDraft.store_path}
                       onChange={(e) => update({ store_path: (e.target as HTMLInputElement).value })}
-                      placeholder="/path/to/models"
+                      placeholder={t('settings.modelStore.storePathPlaceholder', '/path/to/models')}
                     />
                   </Row>
                 </>
@@ -402,13 +427,16 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
 
             {/* Download */}
             <Fieldset>
-              <Legend>Download</Legend>
+              <Legend>{t('settings.download.legend', 'Download')}</Legend>
               <Row>
                 <FieldLabel>
-                  Allow HuggingFace fallback
+                  {t('settings.download.allowHuggingFaceFallback', 'Allow HuggingFace fallback')}
                   <InfoTooltip
                     filled
-                    content="When enabled, nodes can download models directly from HuggingFace if the model is not in the store. Disable for air-gapped clusters where all models must be pre-loaded into the store."
+                    content={t(
+                      'settings.download.allowHuggingFaceFallbackTooltip',
+                      'When enabled, nodes can download models directly from HuggingFace if the model is not in the store. Disable for air-gapped clusters where all models must be pre-loaded into the store.',
+                    )}
                   />
                 </FieldLabel>
                 <Toggle
@@ -420,13 +448,16 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
 
             {/* Staging */}
             <Fieldset>
-              <Legend>Staging</Legend>
+              <Legend>{t('settings.staging.legend', 'Staging')}</Legend>
               <Row>
                 <FieldLabel>
-                  Enabled
+                  {t('settings.common.enabled', 'Enabled')}
                   <InfoTooltip
                     filled
-                    content="When enabled, worker nodes copy model files from the store to a local cache directory before loading. This gives MLX a local filesystem path for fast access. Disable only on the store host to load directly from the store path."
+                    content={t(
+                      'settings.staging.enabledTooltip',
+                      'When enabled, worker nodes copy model files from the store to a local cache directory before loading. This gives MLX a local filesystem path for fast access. Disable only on the store host to load directly from the store path.',
+                    )}
                   />
                 </FieldLabel>
                 <Toggle
@@ -437,20 +468,23 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               {modelStoreDraft.staging.enabled && (
                 <>
                   <Row>
-                    <FieldLabel>Cache path</FieldLabel>
+                    <FieldLabel>{t('settings.staging.cachePath', 'Cache path')}</FieldLabel>
                     <StyledField
                       size="sm"
                       value={modelStoreDraft.staging.node_cache_path}
                       onChange={(e) => updateStaging({ node_cache_path: (e.target as HTMLInputElement).value })}
-                      placeholder="~/.skulk/staging"
+                      placeholder={t('settings.staging.cachePathPlaceholder', '~/.skulk/staging')}
                     />
                   </Row>
                   <Row>
                     <FieldLabel>
-                      Cleanup on deactivate
+                      {t('settings.staging.cleanupOnDeactivate', 'Cleanup on deactivate')}
                       <InfoTooltip
                         filled
-                        content="When enabled, staged models are removed when instances stop. Leave this off for faster re-placement from the local staging cache; use the model-store purge action when you need disk space back."
+                        content={t(
+                          'settings.staging.cleanupOnDeactivateTooltip',
+                          'When enabled, staged models are removed when instances stop. Leave this off for faster re-placement from the local staging cache; use the model-store purge action when you need disk space back.',
+                        )}
                       />
                     </FieldLabel>
                     <Toggle
@@ -462,49 +496,66 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               )}
             </Fieldset>
 
-            {configPath && <ConfigPath>Config: {configPath}</ConfigPath>}
+            {configPath && (
+              <ConfigPath>
+                {t('settings.configPath', 'Config: {configPath}', { configPath })}
+              </ConfigPath>
+            )}
           </>
 
           {/* Inference — always shown, not gated on model_store config */}
           <Fieldset>
-            <Legend>Inference</Legend>
+            <Legend>{t('settings.inference.legend', 'Inference')}</Legend>
             <FieldLabel>
-              KV Cache Backend
+              {t('settings.inference.kvCacheBackend', 'KV Cache Backend')}
               <InfoTooltip
                 filled
                 content={
-                  `• Default — No cache quantization. Best baseline quality, highest memory use.\n` +
-                  `• OptiQ — Rotation-based quantization via mlx-optiq. Best long-context quality.\n` +
-                  `• TurboQuant Adaptive — Quantizes middle KV layers, keeps edge layers in FP16. Proven stable.\n` +
-                  `• TurboQuant — Quantizes all KV layers. Most aggressive compression, higher quality risk.\n` +
-                  `• MLX Quantized — MLX's built-in cache quantization.\n\n` +
-                  `Takes effect on next model launch. Incompatible models fall back to Default automatically.`
+                  t(
+                    'settings.inference.kvCacheTooltip',
+                    'Default - No cache quantization. Best baseline quality, highest memory use.\nOptiQ - Rotation-based quantization via mlx-optiq. Best long-context quality.\nTurboQuant Adaptive - Quantizes middle KV layers, keeps edge layers in FP16. Proven stable.\nTurboQuant - Quantizes all KV layers. Most aggressive compression, higher quality risk.\nMLX Quantized - MLX built-in cache quantization.\n\nTakes effect on next model launch. Incompatible models fall back to Default automatically.',
+                  )
                 }
               />
             </FieldLabel>
             <Select value={kvBackend} onChange={(e) => setKvBackend(e.target.value)} disabled={!!envOverride}>
-              <option value="default">Default (no quantization)</option>
-              <option value="optiq">OptiQ (rotation-based)</option>
-              <option value="turboquant_adaptive">TurboQuant Adaptive</option>
-              <option value="turboquant">TurboQuant</option>
-              <option value="mlx_quantized">MLX Quantized (requires SKULK_KV_CACHE_BITS env)</option>
+              <option value="default">{t('settings.inference.defaultOption', 'Default (no quantization)')}</option>
+              <option value="optiq">{t('settings.inference.optiqOption', 'OptiQ (rotation-based)')}</option>
+              <option value="turboquant_adaptive">{t('settings.inference.turboquantAdaptiveOption', 'TurboQuant Adaptive')}</option>
+              <option value="turboquant">{t('settings.inference.turboquantOption', 'TurboQuant')}</option>
+              <option value="mlx_quantized">
+                {t('settings.inference.mlxQuantizedOption', 'MLX Quantized (requires SKULK_KV_CACHE_BITS env)')}
+              </option>
             </Select>
             {envOverride ? (
-              <HintText>Overridden by SKULK_KV_CACHE_BACKEND environment variable. Remove the env var to configure here.</HintText>
+              <HintText>
+                {t(
+                  'settings.inference.envOverrideHint',
+                  'Overridden by SKULK_KV_CACHE_BACKEND environment variable. Remove the env var to configure here.',
+                )}
+              </HintText>
             ) : (
-              <HintText>Changes take effect on the next model launch. Models with incompatible architectures (GQA, non-power-of-two head_dim) will automatically fall back to default.</HintText>
+              <HintText>
+                {t(
+                  'settings.inference.changeHint',
+                  'Changes take effect on the next model launch. Models with incompatible architectures (GQA, non-power-of-two head_dim) will automatically fall back to default.',
+                )}
+              </HintText>
             )}
           </Fieldset>
 
           {/* HuggingFace */}
           <Fieldset>
-            <Legend>HuggingFace</Legend>
+            <Legend>{t('settings.huggingFace.legend', 'HuggingFace')}</Legend>
             <Row>
               <FieldLabel>
-                API Token
+                {t('settings.huggingFace.apiToken', 'API Token')}
                 <InfoTooltip
                   filled
-                  content="Your HuggingFace API token enables faster downloads, higher rate limits, and access to gated models. Get one at huggingface.co/settings/tokens"
+                  content={t(
+                    'settings.huggingFace.apiTokenTooltip',
+                    'Your HuggingFace API token enables faster downloads, higher rate limits, and access to gated models. Get one at huggingface.co/settings/tokens',
+                  )}
                 />
               </FieldLabel>
               <StyledField
@@ -512,24 +563,29 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                 type="password"
                 value={hfToken}
                 onChange={(e) => setHfToken((e.target as HTMLInputElement).value)}
-                placeholder={effective?.has_hf_token ? "Token is set — enter new to replace" : "hf_..."}
+                placeholder={effective?.has_hf_token
+                  ? t('settings.huggingFace.tokenSetPlaceholder', 'Token is set - enter new to replace')
+                  : t('settings.huggingFace.tokenPlaceholder', 'hf_...')}
               />
             </Row>
             <HintText>
-              {effective?.has_hf_token ? 'Token is configured. ' : ''}
-              Synced to all nodes. Env var HF_TOKEN takes precedence if set.
+              {effective?.has_hf_token ? t('settings.huggingFace.tokenConfigured', 'Token is configured. ') : ''}
+              {t('settings.huggingFace.syncHint', 'Synced to all nodes. Env var HF_TOKEN takes precedence if set.')}
             </HintText>
           </Fieldset>
 
           {/* Logging */}
           <Fieldset>
-            <Legend>Logging</Legend>
+            <Legend>{t('settings.logging.legend', 'Logging')}</Legend>
             <Row>
               <FieldLabel>
-                Enabled
+                {t('settings.common.enabled', 'Enabled')}
                 <InfoTooltip
                   filled
-                  content="When enabled, nodes emit structured JSON logs on stdout for collection by Vector. Requires an ingest URL to be set."
+                  content={t(
+                    'settings.logging.enabledTooltip',
+                    'When enabled, nodes emit structured JSON logs on stdout for collection by Vector. Requires an ingest URL to be set.',
+                  )}
                 />
               </FieldLabel>
               <Toggle $on={loggingDraft.enabled} onClick={() => setLoggingDraft(prev => ({ ...prev, enabled: !prev.enabled }))} />
@@ -537,16 +593,19 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
             {loggingDraft.enabled && (
               <>
                 <Row>
-                  <FieldLabel>Ingest URL</FieldLabel>
+                  <FieldLabel>{t('settings.logging.ingestUrl', 'Ingest URL')}</FieldLabel>
                   <StyledField
                     size="sm"
                     value={loggingDraft.ingest_url}
                     onChange={(e) => setLoggingDraft(prev => ({ ...prev, ingest_url: (e.target as HTMLInputElement).value }))}
-                    placeholder="http://host:9428/insert/jsonline?_stream_fields=..."
+                    placeholder={t('settings.logging.ingestUrlPlaceholder', 'http://host:9428/insert/jsonline?_stream_fields=...')}
                   />
                 </Row>
                 <HintText>
-                  Settings are synced to all nodes. Nodes will start shipping logs when saved.
+                  {t(
+                    'settings.logging.syncHint',
+                    'Settings are synced to all nodes. Nodes will start shipping logs when saved.',
+                  )}
                 </HintText>
               </>
             )}
@@ -555,9 +614,11 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
 
         <Footer>
           <Spacer />
-          <Button variant="outline" size="md" onClick={onClose}>Cancel</Button>
+          <Button variant="outline" size="md" onClick={onClose}>
+            {t('common.cancel', 'Cancel')}
+          </Button>
           <Button variant="primary" size="md" loading={saving} onClick={handleSave} disabled={loading}>
-            Save
+            {t('common.save', 'Save')}
           </Button>
         </Footer>
       </Drawer>

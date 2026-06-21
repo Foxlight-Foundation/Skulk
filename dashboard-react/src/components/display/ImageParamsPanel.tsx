@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import styled, { css } from 'styled-components';
 import { Button } from '../common/Button';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 /* ================================================================
    Types
@@ -247,6 +248,7 @@ const ResetBtn = styled(Button)`
    ================================================================ */
 
 export function ImageParamsPanel({ params, onChange, isEditMode = false }: ImageParamsPanelProps) {
+  const { t } = useSkulkTranslation();
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   const update = (patch: Partial<ImageGenerationParams>) => onChange({ ...params, ...patch });
@@ -262,7 +264,7 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
     <Panel>
       {/* Size */}
       <ParamGroup>
-        <Label>Size</Label>
+        <Label>{t('common.size', 'Size')}</Label>
         <Select value={params.size} onChange={(e) => update({ size: e.target.value })}>
           {SIZE_OPTIONS.map((s) => (
             <option key={s} value={s}>{s}</option>
@@ -272,11 +274,15 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
 
       {/* Quality */}
       <ParamGroup>
-        <Label>Quality</Label>
+        <Label>{t('imageParams.quality', 'Quality')}</Label>
         <ToggleGroup>
           {QUALITY_OPTIONS.map((q) => (
             <ToggleBtn key={q} $active={params.quality === q} onClick={() => update({ quality: q })}>
-              {q}
+              {q === 'low'
+                ? t('imageParams.qualityLow', 'low')
+                : q === 'medium'
+                  ? t('imageParams.qualityMedium', 'medium')
+                  : t('imageParams.qualityHigh', 'high')}
             </ToggleBtn>
           ))}
         </ToggleGroup>
@@ -284,11 +290,11 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
 
       {/* Format */}
       <ParamGroup>
-        <Label>Format</Label>
+        <Label>{t('imageParams.format', 'Format')}</Label>
         <ToggleGroup>
           {(['png', 'jpeg'] as const).map((f) => (
             <ToggleBtn key={f} $active={params.outputFormat === f} onClick={() => update({ outputFormat: f })}>
-              {f}
+              {f === 'png' ? t('imageParams.formatPng', 'png') : t('imageParams.formatJpeg', 'jpeg')}
             </ToggleBtn>
           ))}
         </ToggleGroup>
@@ -297,18 +303,18 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
       {/* Num images or Input Fidelity */}
       {isEditMode ? (
         <ParamGroup>
-          <Label>Fidelity</Label>
+          <Label>{t('imageParams.fidelity', 'Fidelity')}</Label>
           <ToggleGroup>
             {(['low', 'high'] as const).map((f) => (
               <ToggleBtn key={f} $active={params.inputFidelity === f} onClick={() => update({ inputFidelity: f })}>
-                {f}
+                {f === 'low' ? t('imageParams.fidelityLow', 'low') : t('imageParams.fidelityHigh', 'high')}
               </ToggleBtn>
             ))}
           </ToggleGroup>
         </ParamGroup>
       ) : (
         <ParamGroup>
-          <Label>Images</Label>
+          <Label>{t('imageParams.images', 'Images')}</Label>
           <NumberInput
             type="number"
             min={1}
@@ -321,11 +327,11 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
       {/* Stream toggle */}
       {!isEditMode && (
         <ParamGroup>
-          <Label>Stream</Label>
+          <Label>{t('imageParams.stream', 'Stream')}</Label>
           <Switch $on={params.stream} onClick={() => update({ stream: !params.stream })} />
           {params.stream && (
             <>
-              <Label>Partial</Label>
+              <Label>{t('imageParams.partial', 'Partial')}</Label>
               <NumberInput
                 type="number"
                 min={0}
@@ -345,14 +351,14 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
         $hasParams={hasAdvancedParams && !showAdvanced}
         onClick={() => setShowAdvanced(!showAdvanced)}
       >
-        {showAdvanced ? '▾' : '▸'} Advanced
+        {showAdvanced ? '▾' : '▸'} {t('imageParams.advanced', 'Advanced')}
       </AdvancedToggle>
 
       {showAdvanced && (
         <AdvancedSection>
           {/* Seed + Steps */}
           <ParamGroup style={{ flexWrap: 'wrap' }}>
-            <Label>Seed</Label>
+            <Label>{t('imageParams.seed', 'Seed')}</Label>
             <NumberInput
               type="number"
               min={0}
@@ -360,7 +366,7 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
               onChange={(e) => update({ seed: e.target.value === '' ? null : parseInt(e.target.value) })}
               placeholder="—"
             />
-            <Label>Steps</Label>
+            <Label>{t('imageParams.steps', 'Steps')}</Label>
             <SliderRow>
               <RangeInput
                 type="range" min={1} max={100}
@@ -376,7 +382,7 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
 
           {/* Guidance */}
           <ParamGroup>
-            <Label>Guidance</Label>
+            <Label>{t('imageParams.guidance', 'Guidance')}</Label>
             <SliderRow>
               <RangeInput
                 type="range" min={1} max={20} step={0.5}
@@ -392,10 +398,10 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
 
           {/* Negative prompt */}
           <div style={{ width: '100%' }}>
-            <Label>Negative prompt</Label>
+            <Label>{t('imageParams.negativePrompt', 'Negative prompt')}</Label>
             <TextArea
               rows={2}
-              placeholder="Things to avoid…"
+              placeholder={t('imageParams.negativePromptPlaceholder', 'Things to avoid...')}
               value={params.negativePrompt ?? ''}
               onChange={(e) => update({ negativePrompt: e.target.value || null })}
             />
@@ -406,7 +412,7 @@ export function ImageParamsPanel({ params, onChange, isEditMode = false }: Image
             onChange({ ...DEFAULT_IMAGE_PARAMS });
             setShowAdvanced(false);
           }}>
-            Reset all
+            {t('imageParams.resetAll', 'Reset all')}
           </ResetBtn>
         </AdvancedSection>
       )}

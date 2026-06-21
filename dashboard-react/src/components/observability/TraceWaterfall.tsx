@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import styled from 'styled-components';
 import type { TraceEventLike } from '../../types/observabilityEvents';
+import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 /**
  * Inline trace waterfall renderer for the observability panel.
@@ -178,6 +179,7 @@ interface ResolvedLane {
 }
 
 export function TraceWaterfall({ events, selectedId, onSelect }: TraceWaterfallProps) {
+  const { t } = useSkulkTranslation();
   const containerRef = useRef<HTMLDivElement | null>(null);
   // Live pixel width of the lane area; recomputed on resize via ResizeObserver
   // so the waterfall stays responsive across panel resizes without re-rendering
@@ -236,7 +238,7 @@ export function TraceWaterfall({ events, selectedId, onSelect }: TraceWaterfallP
   if (events.length === 0) {
     return (
       <Wrap ref={containerRef}>
-        <EmptyState>No events in this trace.</EmptyState>
+        <EmptyState>{t('observability.traceWaterfall.noEvents', 'No events in this trace.')}</EmptyState>
       </Wrap>
     );
   }
@@ -253,7 +255,7 @@ export function TraceWaterfall({ events, selectedId, onSelect }: TraceWaterfallP
       </Legend>
       <svg
         role="img"
-        aria-label="Trace waterfall"
+        aria-label={t('observability.traceWaterfall.ariaLabel', 'Trace waterfall')}
         width={containerWidth}
         height={svgHeight}
         viewBox={`0 0 ${Math.max(containerWidth, 1)} ${svgHeight}`}
@@ -287,6 +289,7 @@ export function TraceWaterfall({ events, selectedId, onSelect }: TraceWaterfallP
                       width={unit.widthPx}
                       height={h}
                       events={unit.events}
+                      t={t}
                     />
                   );
                 }
@@ -302,6 +305,7 @@ export function TraceWaterfall({ events, selectedId, onSelect }: TraceWaterfallP
                     selected={isSelected}
                     event={unit.event}
                     onSelect={onSelect}
+                    t={t}
                   />
                 );
               })}
@@ -411,6 +415,7 @@ function EventBar({
   selected,
   event,
   onSelect,
+  t,
 }: {
   x: number;
   y: number;
@@ -420,6 +425,7 @@ function EventBar({
   selected: boolean;
   event: TraceEventLike;
   onSelect?: (event: TraceEventLike | null) => void;
+  t: SkulkTranslate;
 }) {
   return (
     <g
@@ -427,7 +433,10 @@ function EventBar({
       onClick={onSelect ? () => onSelect(event) : undefined}
       tabIndex={onSelect ? 0 : undefined}
       role={onSelect ? 'button' : undefined}
-      aria-label={`${event.name} (${formatDuration(event.durationUs)})`}
+      aria-label={t('observability.traceWaterfall.eventAriaLabel', '{name} ({duration})', {
+        name: event.name,
+        duration: formatDuration(event.durationUs),
+      })}
       onKeyDown={
         onSelect
           ? (e) => {
@@ -446,12 +455,18 @@ function EventBar({
         height={height}
         fill={color}
         fillOpacity={0.85}
-        stroke="rgba(0, 0, 0, 0.35)"
-        strokeWidth={0.5}
+        stroke={selected ? 'currentColor' : 'rgba(0, 0, 0, 0.35)'}
+        strokeWidth={selected ? 1.5 : 0.5}
         rx={2}
         ry={2}
       >
-        <title>{`${event.name} · ${event.category} · ${formatDuration(event.durationUs)}`}</title>
+        <title>
+          {t('observability.traceWaterfall.eventTitle', '{name} · {category} · {duration}', {
+            name: event.name,
+            category: event.category,
+            duration: formatDuration(event.durationUs),
+          })}
+        </title>
       </rect>
     </g>
   );
@@ -474,12 +489,14 @@ function ClusterBar({
   width,
   height,
   events,
+  t,
 }: {
   x: number;
   y: number;
   width: number;
   height: number;
   events: TraceEventLike[];
+  t: SkulkTranslate;
 }) {
   const totalDurationUs = events.reduce((sum, e) => sum + Math.max(0, e.durationUs), 0);
   const categoryCount = new Set(events.map((e) => e.category)).size;
@@ -499,9 +516,18 @@ function ClusterBar({
         ry={2}
       >
         <title>
-          {`${events.length} events · ${formatDuration(totalDurationUs)} total · ${
-            categoryCount === 1 ? categories : `${categoryCount} categories: ${categories}`
-          }`}
+          {categoryCount === 1
+            ? t('observability.traceWaterfall.clusterTitleOneCategory', '{count} events · {duration} total · {categories}', {
+                count: events.length,
+                duration: formatDuration(totalDurationUs),
+                categories,
+              })
+            : t('observability.traceWaterfall.clusterTitleMultipleCategories', '{count} events · {duration} total · {categoryCount} categories: {categories}', {
+                count: events.length,
+                duration: formatDuration(totalDurationUs),
+                categoryCount,
+                categories,
+              })}
         </title>
       </rect>
     </g>

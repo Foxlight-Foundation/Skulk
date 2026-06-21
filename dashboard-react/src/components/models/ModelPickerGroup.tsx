@@ -11,6 +11,7 @@ import type {
 } from '../../types/models';
 import { formatBytes } from '../../utils/format';
 import { InfoTooltip } from '../common/InfoTooltip';
+import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 export interface ModelPickerGroupProps {
   group: ModelGroup;
@@ -43,14 +44,14 @@ function fitColor(status: ModelFitStatus, theme: Theme): string {
   return theme.colors.error;
 }
 
-function timeAgo(ts: number): string {
+function timeAgo(ts: number, t: SkulkTranslate): string {
   const diff = Date.now() - ts;
   const mins = Math.floor(diff / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
+  if (mins < 1) return t('storeRegistry.time.justNow', 'just now');
+  if (mins < 60) return t('storeRegistry.time.minutesAgo', '{count}m ago', { count: mins });
   const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
+  if (hrs < 24) return t('storeRegistry.time.hoursAgo', '{count}h ago', { count: hrs });
+  return t('storeRegistry.time.daysAgo', '{count}d ago', { count: Math.floor(hrs / 24) });
 }
 
 const CAPABILITY_ICONS: Record<string, string> = {
@@ -203,6 +204,7 @@ const InfoIconWrapper = styled.span`
 /* ---------- component ---------- */
 
 function ModelGroupInfo({ group }: { group: ModelGroup }) {
+  const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
   const v = group.smallestVariant;
   const resolved = v.resolved_capabilities;
@@ -214,41 +216,41 @@ function ModelGroupInfo({ group }: { group: ModelGroup }) {
       <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
         {v.family && (
           <>
-            <span style={{ color: theme.colors.textMuted }}>Family</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.family', 'Family')}</span>
             <span>{v.family}</span>
           </>
         )}
-        <span style={{ color: theme.colors.textMuted }}>Variants</span>
+        <span style={{ color: theme.colors.textMuted }}>{t('modelPickerGroup.variants', 'Variants')}</span>
         <span>{group.variants.length}</span>
-        <span style={{ color: theme.colors.textMuted }}>Smallest</span>
+        <span style={{ color: theme.colors.textMuted }}>{t('modelPickerGroup.smallest', 'Smallest')}</span>
         <span>{v.storage_size_megabytes ? formatBytes(v.storage_size_megabytes * 1024 * 1024) : '—'}</span>
-        <span style={{ color: theme.colors.textMuted }}>Tensor parallel</span>
+        <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.tensorParallel', 'Tensor parallel')}</span>
         <span style={{ color: v.supports_tensor ? theme.colors.healthy : theme.colors.textSecondary }}>
-          {v.supports_tensor ? 'Yes' : 'No'}
+          {v.supports_tensor ? t('common.yes', 'Yes') : t('common.no', 'No')}
         </span>
         {group.capabilities.length > 0 && (
           <>
-            <span style={{ color: theme.colors.textMuted }}>Capabilities</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.capabilities', 'Capabilities')}</span>
             <span>{group.capabilities.join(', ')}</span>
           </>
         )}
         {resolved && (
           <>
-            <span style={{ color: theme.colors.textMuted }}>Thinking toggle</span>
-            <span>{resolved.supports_thinking_toggle ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: theme.colors.textMuted }}>Tool calling</span>
-            <span>{resolved.supports_tool_calling ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: theme.colors.textMuted }}>Image input</span>
-            <span>{resolved.supports_image_input ? 'Supported' : 'Not supported'}</span>
-            <span style={{ color: theme.colors.textMuted }}>Audio input</span>
-            <span>{resolved.supports_audio_input ? 'Supported' : 'Not supported'}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.thinkingToggle', 'Thinking toggle')}</span>
+            <span>{resolved.supports_thinking_toggle ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.toolCalling', 'Tool calling')}</span>
+            <span>{resolved.supports_tool_calling ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.imageInput', 'Image input')}</span>
+            <span>{resolved.supports_image_input ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.audioInput', 'Audio input')}</span>
+            <span>{resolved.supports_audio_input ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
           </>
         )}
       </div>
       {group.hasMultipleVariants && (
         <div style={{ marginTop: 8, borderTop: `1px solid ${theme.colors.borderLight}`, paddingTop: 6 }}>
           <div style={{ color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
-            Quantizations
+            {t('modelPickerGroup.quantizations', 'Quantizations')}
           </div>
           {group.variants.map((variant) => (
             <div key={variant.id} style={{ color: theme.colors.textSecondary }}>
@@ -278,6 +280,7 @@ export function ModelPickerGroup({
   instanceStatuses,
   mode: _mode = 'launch',
 }: ModelPickerGroupProps) {
+  const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
   const DownloadIcon = () => <FiDownload size={14} color={theme.colors.accent} />;
   const CheckMark = () => <FiCheck size={16} color={theme.colors.accent} strokeWidth={2.5} />;
@@ -317,7 +320,8 @@ export function ModelPickerGroup({
     const largest = sizeText(variants[variants.length - 1].storage_size_megabytes);
     sizeDisplay = (
       <Badge>
-        {variants.length} variants{smallest && largest ? ` (${smallest}–${largest})` : ''}
+        {t('modelPickerGroup.variantCount', '{count} variants', { count: variants.length })}
+        {smallest && largest ? ` (${smallest}–${largest})` : ''}
       </Badge>
     );
   } else if (singleVariant?.storage_size_megabytes) {
@@ -349,7 +353,7 @@ export function ModelPickerGroup({
 
         {/* Time ago */}
         {launchedAt != null && (
-          <Badge>{timeAgo(launchedAt)}</Badge>
+          <Badge>{timeAgo(launchedAt, t)}</Badge>
         )}
 
         {/* Download / in-store indicator */}
@@ -368,7 +372,9 @@ export function ModelPickerGroup({
             e.stopPropagation();
             onToggleFavorite(group.id);
           }}
-          title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
+          title={isFavorite
+            ? t('modelPickerGroup.removeFromFavorites', 'Remove from favorites')
+            : t('modelPickerGroup.addToFavorites', 'Add to favorites')}
         >
           {isFavorite ? '★' : '☆'}
         </FavStar>

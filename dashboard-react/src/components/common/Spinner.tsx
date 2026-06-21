@@ -1,4 +1,5 @@
 import styled, { css, keyframes } from 'styled-components';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 /**
  * Circular-arc indicator for in-flight loads. The host component is
@@ -36,13 +37,15 @@ export interface SpinnerProps {
 }
 
 export function Spinner({ size = 28, spinning = true, className }: SpinnerProps) {
+  const { t } = useSkulkTranslation();
+
   return (
     <SpinnerEl
       $size={size}
       $spinning={spinning}
       className={className}
       role="status"
-      aria-label={spinning ? 'Loading' : undefined}
+      aria-label={spinning ? t('common.loading', 'Loading') : undefined}
     />
   );
 }

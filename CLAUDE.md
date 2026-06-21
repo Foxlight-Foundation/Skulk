@@ -145,6 +145,14 @@ Rust code in `rust/` provides:
 ### Dashboard
 React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API when present. A node without the built assets (a headless/non-Mac worker, or with no `SKULK_DASHBOARD_DIR`) sets `DASHBOARD_DIR=None`, skips the mount, and serves the API without the UI.
 
+Dashboard localization uses Tolgee in `dashboard-react/src/i18n/tolgee.ts`.
+All dashboard strings must use the `skulk` namespace through Tolgee's `t()`
+function with an English fallback; do not use the `<T>` component. Runtime
+translations are loaded from `VITE_TOLGEE_CDN_PREFIX` (default `/i18n`) with
+the bundled English namespace at `dashboard-react/src/i18n/en/skulk.json` as
+fallback. `VITE_TOLGEE_AVAILABLE_LANGUAGES` is a comma-separated build-time
+language list; English is always included.
+
 ### Model Capability System
 Skulk now treats model capability handling as two layers:
 - **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `tooling`, and `runtime` sections for refined model support

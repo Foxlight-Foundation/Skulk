@@ -1,11 +1,11 @@
 import { createSlice, nanoid, type PayloadAction } from '@reduxjs/toolkit';
-import type { ChatMessage, Conversation } from '../../types/chat';
+import { DEFAULT_CONVERSATION_NAME, type ChatMessage, type Conversation } from '../../types/chat';
 
 /* ── Helpers ──────────────────────────────────────────── */
 
 function autoName(content: string): string {
   const trimmed = content.trim();
-  if (!trimmed) return 'New conversation';
+  if (!trimmed) return DEFAULT_CONVERSATION_NAME;
   if (trimmed.length <= 50) return trimmed;
   return trimmed.slice(0, 50) + '...';
 }
@@ -131,7 +131,7 @@ const slice = createSlice({
         const newId = nanoid();
         state.conversations[newId] = {
           id: newId,
-          name: 'New conversation',
+          name: DEFAULT_CONVERSATION_NAME,
           modelId,
           createdAt: now,
           updatedAt: now,
@@ -149,7 +149,7 @@ const slice = createSlice({
       const convo = state.conversations[convoId];
       if (!convo) return;
       convo.messages.push(action.payload);
-      if (convo.name === 'New conversation' && action.payload.role === 'user') {
+      if (convo.name === DEFAULT_CONVERSATION_NAME && action.payload.role === 'user') {
         convo.name = autoName(action.payload.content);
       }
       convo.updatedAt = Date.now();
@@ -204,7 +204,7 @@ const slice = createSlice({
         const now = Date.now();
         state.conversations[id] = {
           id,
-          name: 'New conversation',
+          name: DEFAULT_CONVERSATION_NAME,
           modelId,
           createdAt: now,
           updatedAt: now,

@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react';
 import styled, { useTheme } from 'styled-components';
 import { Button } from '../common/Button';
 import type { Theme } from '../../theme';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 export interface TokenData {
   token: string;
@@ -127,6 +128,7 @@ export function TokenHeatmap({
   onRegenerateFrom,
   className,
 }: TokenHeatmapProps) {
+  const { t } = useSkulkTranslation();
   const [hovered, setHovered] = useState<{
     index: number;
     x: number;
@@ -197,7 +199,9 @@ export function TokenHeatmap({
               {(hoveredToken.probability * 100).toFixed(1)}%
             </span>
           </TooltipHeader>
-          <LogprobText>logprob: {hoveredToken.logprob.toFixed(3)}</LogprobText>
+          <LogprobText>
+            {t('tokenHeatmap.logprob', 'logprob: {value}', { value: hoveredToken.logprob.toFixed(3) })}
+          </LogprobText>
 
           {hoveredToken.topLogprobs && hoveredToken.topLogprobs.length > 0 && (
             <div style={{ borderTop: '1px solid rgba(75,85,99,0.3)', paddingTop: 6, marginBottom: 4 }}>
@@ -219,7 +223,7 @@ export function TokenHeatmap({
                 onRegenerateFrom(hovered.index);
               }}
             >
-              ↻ Regenerate from here
+              {t('tokenHeatmap.regenerateFromHere', '↻ Regenerate from here')}
             </RegenButton>
           )}
         </Tooltip>
