@@ -387,16 +387,26 @@ def _metal_cleanup_signal_handler(signum: int, _frame: object) -> None:
 def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
     """Resolve which engine serves this (non-image, non-embedding) text model here.
 
-    Returns the engine of the winning backend tag (the model card's
-    ``compatible_backends`` intersected with this node's advertised backends,
-    ordered by the card's ``backend_preference``), or ``None`` to fall through to
-    the default MLX runner. Placement has already guaranteed the intersection is
-    non-empty, so ``None`` only happens off the normal path (e.g. a manual
-    single-node launch on a node whose advertised backends do not match).
+    Prefers the backend the master already resolved for this node and persisted
+    on the shard (``resolved_backend``, #330): dispatch is then deterministic
+    from replicated state and cannot disagree with the placement decision. Only
+    when that is absent (a master that did not record one, or a manual launch off
+    the normal placement path) does it fall back to a node-local probe of the
+    card's ``compatible_backends`` intersected with this node's advertised
+    backends, ordered by ``backend_preference``. Returns the engine, or ``None``
+    to fall through to the default MLX runner.
     """
-    from skulk.shared.backends import probe_node_backends, resolve_node_engine
+    from skulk.shared.backends import (
+        engine_of,
+        probe_node_backends,
+        resolve_node_engine,
+    )
 
-    placement = bound_instance.bound_shard.model_card.placement
+    shard = bound_instance.bound_shard
+    if shard.resolved_backend is not None:
+        return engine_of(shard.resolved_backend)
+
+    placement = shard.model_card.placement
     return resolve_node_engine(
         placement.compatible_backends,
         placement.backend_preference,

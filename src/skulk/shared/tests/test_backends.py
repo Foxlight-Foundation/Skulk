@@ -11,6 +11,7 @@ from skulk.shared.backends import (
     engine_of,
     make_backend_tag,
     probe_node_backends,
+    resolve_node_backend,
     resolve_node_engine,
 )
 
@@ -150,3 +151,42 @@ def test_resolve_node_engine_none_when_no_intersection() -> None:
         frozenset({"llama_cpp-vulkan"}), (), frozenset({"mlx", "mlx-metal"})
     )
     assert engine is None
+
+
+def test_resolve_node_backend_returns_preferred_tag() -> None:
+    # The winning tag (not just the engine) honors backend_preference order.
+    tag = resolve_node_backend(
+        frozenset({"llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cpu"}),
+        ("llama_cpp-rocm", "llama_cpp-vulkan"),
+        frozenset({"llama_cpp-vulkan", "llama_cpp-rocm"}),
+    )
+    assert tag == "llama_cpp-rocm"
+
+
+def test_resolve_node_backend_falls_back_to_sorted_when_no_preference() -> None:
+    # With no preference match, the intersection is ordered deterministically.
+    tag = resolve_node_backend(
+        frozenset({"llama_cpp-vulkan", "llama_cpp-cpu"}),
+        (),
+        frozenset({"llama_cpp-vulkan", "llama_cpp-cpu"}),
+    )
+    assert tag == "llama_cpp-cpu"  # sorted() puts cpu before vulkan
+
+
+def test_resolve_node_backend_none_when_no_intersection() -> None:
+    assert (
+        resolve_node_backend(
+            frozenset({"llama_cpp-vulkan"}), (), frozenset({"mlx", "mlx-metal"})
+        )
+        is None
+    )
+
+
+def test_resolve_node_engine_matches_backend_engine() -> None:
+    # resolve_node_engine is exactly engine_of(resolve_node_backend(...)).
+    compatible = frozenset({"llama_cpp-vulkan", "mlx"})
+    preference = ("llama_cpp-vulkan",)
+    node = frozenset({"llama_cpp-vulkan", "mlx"})
+    tag = resolve_node_backend(compatible, preference, node)
+    assert tag == "llama_cpp-vulkan"
+    assert resolve_node_engine(compatible, preference, node) == engine_of(tag)
