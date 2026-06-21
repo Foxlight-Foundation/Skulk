@@ -37,15 +37,20 @@ const availableLanguages = parseConfiguredLanguages(
   import.meta.env.VITE_TOLGEE_AVAILABLE_LANGUAGES,
 );
 
-export const tolgee = Tolgee()
+const tolgeeBuilder = Tolgee()
   .use(LanguageStorage())
   .use(LanguageDetector())
   .use(BackendFetch({
     prefix: import.meta.env.VITE_TOLGEE_CDN_PREFIX ?? DEFAULT_CDN_PREFIX,
     fallbackOnFail: true,
     timeout: CDN_TIMEOUT_MS,
-  }))
-  .use(DevTools())
+  }));
+
+if (import.meta.env.DEV) {
+  tolgeeBuilder.use(DevTools());
+}
+
+export const tolgee = tolgeeBuilder
   .use(FormatSimple())
   .init({
     defaultLanguage: DEFAULT_LANGUAGE,

@@ -90,7 +90,7 @@ function processMarkdown(content: string, t: SkulkTranslate): ProcessedMarkdown 
         } catch {
           highlighted = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         }
-        const langLabel = lang || 'code';
+        const langLabel = escapeHtml(lang || 'code');
         return `<div class="mc-code-block"><div class="mc-code-header"><span class="mc-code-lang">${langLabel}</span><button class="mc-copy-btn" data-code="${encodeURIComponent(text)}">${escapeHtml(t('markdown.copy', 'Copy'))}</button></div><pre><code class="hljs">${highlighted}</code></pre></div>`;
       },
       codespan({ text }: { text: string }) {
