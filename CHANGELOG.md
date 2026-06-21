@@ -155,10 +155,12 @@ This project records release notes here and mirrors public-facing notes in
   just its BIOS VRAM carve-out, and uses a lighter overhead factor for GGUF.** On
   an AMD APU (Strix Halo / Ryzen AI Max) the GPU addresses the BIOS VRAM
   carve-out plus system RAM through GTT, so a model larger than the carve-out
-  runs there. `usable_vram_by_node` now detects a unified-memory node (its
-  accelerator reports `gtt_total_bytes ≥ vram_total_bytes`) and counts available
-  VRAM plus GTT-mappable system RAM (minus a 16 GB OS headroom) toward the usable
-  pool. The weight-overhead factor is now engine-aware: GGUF/llama.cpp models use
+  runs there. `usable_vram_by_node` now detects a unified-memory node (its GTT
+  aperture spans the whole system: `gtt_total_bytes > vram_total_bytes` AND
+  `gtt_total_bytes ≥ ram_total`, which a discrete card whose GTT default merely
+  equals VRAM does not satisfy) and counts working-set-capped VRAM plus
+  GTT-mappable system RAM (minus a 16 GB OS headroom) toward the usable pool. The
+  weight-overhead factor is now engine-aware: GGUF/llama.cpp models use
   1.10 (lighter C++ runtime) instead of MLX's 1.30. Together these let large GGUF
   MoEs place on a 128 GB Strix Halo node (e.g. a 58.5 GiB gpt-oss-120B on a node
   with a 64 GiB VRAM carve-out). The worker's local pre-spawn guard mirrors the
