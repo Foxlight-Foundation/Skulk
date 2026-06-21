@@ -157,7 +157,7 @@ from skulk.api.types.openai_responses import (
 from skulk.connectivity.remote_access import RemoteAccessInfo, build_remote_access_info
 from skulk.connectivity.tailscale import TailscaleStatus, query_tailscale_status
 from skulk.master.image_store import ImageStore
-from skulk.master.placement import PlacementInfoPendingError
+from skulk.master.placement import PlacementError, PlacementInfoPendingError
 from skulk.master.placement import place_instance as get_instance_placements
 from skulk.master.placement_utils import usable_vram_by_node
 from skulk.shared.apply import apply
@@ -377,6 +377,20 @@ _TERMINAL_TASK_STATUSES: frozenset[task_types.TaskStatus] = frozenset(
 # formation (identities present) and the first NodeGatheredInfo from every
 # node — observed to resolve within a few seconds on a LAN cluster.
 _PLACEMENT_INFO_WAIT_SECONDS = 15.0
+
+# After this node tears an instance down, the freed GPU memory takes a moment to
+# reflect in gossiped `ram_available` (telemetry plane, last-write-wins: the
+# worker re-samples memory only after the runner process exits and Metal/VRAM
+# reclaims, then gossips it). A placement attempted in that window sees stale-low
+# memory and spuriously finds no fit. So within this window after a teardown the
+# placement dry-run and previews wait+retry for the telemetry to settle rather
+# than failing, so back-to-back "tear down model A, place model B" (the test
+# harness's matrix loop, and any redeploy) stops failing on a transient. We WAIT
+# for memory to actually free rather than optimistically crediting it, so there
+# is no over-admit; the worker's local pre-spawn guard remains the backstop. A
+# cold request with no recent teardown is unaffected (a genuine "too big" still
+# fails fast).
+_POST_TEARDOWN_SETTLE_SECONDS = 30.0
 ONBOARDING_COMPLETE_FILE = SKULK_CACHE_HOME / "onboarding_complete"
 
 # A node with no live runners should sit near its idle wired baseline
@@ -690,6 +704,11 @@ class API:
         )
         self._event_log = DiskEventLog(_API_EVENT_LOG_DIR) if enable_event_log else None
         self._event_log_appends_since_retention_check = 0
+        # Monotonic time of the last instance teardown this node served. Within
+        # _POST_TEARDOWN_SETTLE_SECONDS of it, the placement dry-run and previews
+        # wait for the freed memory to reflect in gossiped telemetry instead of
+        # failing on a transient shortfall (see _POST_TEARDOWN_SETTLE_SECONDS).
+        self._last_teardown_monotonic: float = 0.0
         self._system_id = SystemId()
         self.command_sender = command_sender
         self.download_command_sender = download_command_sender
@@ -1566,6 +1585,15 @@ class API:
                         detail=f"{exc} (waited {_PLACEMENT_INFO_WAIT_SECONDS:.0f}s)",
                     ) from exc
                 await anyio.sleep(1)
+            except PlacementError as exc:
+                # A memory shortfall right after this node tore an instance down
+                # is usually transient (freed memory not yet gossiped). Wait for
+                # the settle window rather than failing the placement; outside it,
+                # treat the shortfall as real and 400.
+                if self._post_teardown_settle_remaining() > 0:
+                    await anyio.sleep(1)
+                    continue
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1651,8 +1679,31 @@ class API:
         node_ids: Annotated[list[NodeId] | None, Query()] = None,
         excluded_node_ids: Annotated[list[NodeId] | None, Query()] = None,
     ) -> PlacementPreviewResponse:
-        seen: set[tuple[ModelId, Sharding, InstanceMeta, int]] = set()
-        previews: list[PlacementPreview] = []
+        """Enumerate viable placements, settling through the post-teardown lag.
+
+        Re-runs the enumeration while no combination yields a viable placement and
+        this node is still inside the post-teardown settle window: the just-freed
+        memory of a torn-down instance may not have reflected in gossiped telemetry
+        yet, so an immediate all-errored result would be a transient false negative
+        (the tear-down-then-preview matrix loop). Outside the window the first pass
+        stands, so a genuine no-fit returns its error previews immediately.
+        """
+        while True:
+            response = await self._compute_placement_previews(
+                model_id, node_ids, excluded_node_ids
+            )
+            if any(p.instance is not None for p in response.previews):
+                return response
+            if self._post_teardown_settle_remaining() <= 0:
+                return response
+            await anyio.sleep(1)
+
+    async def _compute_placement_previews(
+        self,
+        model_id: ModelId,
+        node_ids: list[NodeId] | None = None,
+        excluded_node_ids: list[NodeId] | None = None,
+    ) -> PlacementPreviewResponse:
         required_nodes = set(node_ids) if node_ids else None
         excluded_nodes = set(excluded_node_ids) if excluded_node_ids else None
 
@@ -1679,6 +1730,8 @@ class API:
         # TODO: PDD
         # instance_combinations.append((Sharding.PrefillDecodeDisaggregation, InstanceMeta.MlxRing, 1))
 
+        seen: set[tuple[ModelId, Sharding, InstanceMeta, int]] = set()
+        previews: list[PlacementPreview] = []
         for sharding, instance_meta, min_nodes in instance_combinations:
             try:
                 placements = get_instance_placements(
@@ -1789,11 +1842,25 @@ class API:
             instance_id=instance_id,
         )
         await self._send(command)
+        # The freed GPU memory lags in gossiped telemetry; remember the teardown
+        # so a back-to-back placement waits for it to settle rather than failing
+        # on a transient shortfall (see _post_teardown_settle_remaining).
+        self._last_teardown_monotonic = time.monotonic()
         return DeleteInstanceResponse(
             message="Command received.",
             command_id=command.command_id,
             instance_id=instance_id,
         )
+
+    def _post_teardown_settle_remaining(self) -> float:
+        """Seconds left in the post-teardown placement settle window (0 if none).
+
+        Within this window the freed memory of a just-torn-down instance may not
+        yet be reflected in gossiped ``ram_available``, so placement should wait
+        for it to settle rather than fail on the transient shortfall.
+        """
+        elapsed = time.monotonic() - self._last_teardown_monotonic
+        return max(0.0, _POST_TEARDOWN_SETTLE_SECONDS - elapsed)
 
     async def cancel_command(self, command_id: CommandId) -> CancelCommandResponse:
         """Cancel an active command by closing its stream and notifying workers."""
