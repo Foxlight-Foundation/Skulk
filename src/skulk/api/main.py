@@ -1689,7 +1689,7 @@ class API:
         may not have reflected in gossiped telemetry yet, so that all-errored
         result is a transient false negative (the tear-down-then-preview matrix
         loop). A deterministic no-fit (backend mismatch, excluded nodes,
-        unsupported sharding) does not retry — waiting cannot change it — and
+        unsupported sharding) does not retry, since waiting cannot change it, and
         outside the window the first pass stands.
         """
         while True:
