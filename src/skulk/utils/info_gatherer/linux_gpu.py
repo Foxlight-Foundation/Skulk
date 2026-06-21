@@ -105,6 +105,10 @@ def read_accelerator_metrics(device: Path) -> AcceleratorMetrics:
         else None,
         vram_total_bytes=_read_int(device / "mem_info_vram_total"),
         vram_used_bytes=_read_int(device / "mem_info_vram_used"),
+        # GTT aperture: host RAM the GPU can map beyond the VRAM carve-out. On a
+        # Strix Halo APU this is ~the unified pool, which is what lets a model
+        # larger than the BIOS VRAM carve-out run on the GPU.
+        gtt_total_bytes=_read_int(device / "mem_info_gtt_total"),
         power_watts=(power_uw / 1_000_000) if power_uw is not None else None,
         temperature_celsius=(temp_mc / 1000) if temp_mc is not None else None,
         clock_mhz=_read_current_sclk_mhz(device),

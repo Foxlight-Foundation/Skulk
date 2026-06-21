@@ -613,6 +613,7 @@ class Master:
                                         node_vram=usable_vram_by_node(
                                             self._telemetry_view.node_system,
                                             self._telemetry_view.node_resources,
+                                            node_memory=self._telemetry_view.node_memory,
                                         ),
                                     )
                                     logger.warning(
@@ -677,6 +678,7 @@ class Master:
                                 node_vram=usable_vram_by_node(
                                     self._telemetry_view.node_system,
                                     self._telemetry_view.node_resources,
+                                    node_memory=self._telemetry_view.node_memory,
                                 ),
                             )
                             transition_events = get_transition_events(
@@ -694,6 +696,7 @@ class Master:
                                 node_vram=usable_vram_by_node(
                                     self._telemetry_view.node_system,
                                     self._telemetry_view.node_resources,
+                                    node_memory=self._telemetry_view.node_memory,
                                 ),
                             )
                             transition_events = get_transition_events(

@@ -16,6 +16,7 @@ from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
+    UMA_GPU_OS_HEADROOM,
     estimate_shard_footprint,
     gpu_working_set_ceiling,
 )
@@ -164,11 +165,20 @@ def _local_usable_vram() -> Memory | None:
     node (AMD/Linux amdgpu) allocates a shard from its VRAM pool, not system RAM,
     so the local pre-spawn fit guard must size against VRAM or it would falsely
     refuse a placement the VRAM-aware master correctly admitted. Reads the local
-    amdgpu sysfs (passive, the same source as the telemetry collector) and applies
-    the same ``min(vram_total - vram_used, GPU_VRAM_WORKING_SET_FRACTION x
-    vram_total)`` ceiling. Returns ``None`` on Apple unified-memory nodes (no
-    amdgpu device), which keep the system-RAM path. The master is the backend
-    authority that decides a shard belongs on this GPU node in the first place.
+    amdgpu sysfs (passive, the same source as the telemetry collector). It mirrors
+    the master's two architectures so the two checks agree:
+
+    * Discrete GPU: ``min(vram_total - vram_used, GPU_VRAM_WORKING_SET_FRACTION x
+      vram_total)``.
+    * Unified-memory APU (``gtt_total_bytes >= vram_total``, e.g. Strix Halo):
+      ``vram_avail + min(max(0, local_ram_available - UMA_GPU_OS_HEADROOM),
+      gtt_total)`` so the GPU's GTT-mapped system RAM counts toward the pool.
+      ``local_ram_available`` is the live GPU-wireable snapshot, matching the
+      ceiling the master derives from gossiped telemetry.
+
+    Returns ``None`` on Apple unified-memory nodes (no amdgpu device), which keep
+    the system-RAM path. The master is the backend authority that decides a shard
+    belongs on this GPU node in the first place.
     """
     from skulk.utils.info_gatherer.linux_gpu import (
         find_amd_gpu_device,
@@ -184,6 +194,16 @@ def _local_usable_vram() -> Memory | None:
         return None
     used = accelerator.vram_used_bytes or 0
     available = max(0, total - used)
+    gtt_total = accelerator.gtt_total_bytes
+    if gtt_total is not None and gtt_total >= total:
+        # UMA APU: the GPU maps host RAM via GTT beyond the BIOS VRAM carve-out,
+        # so count current free system RAM (minus OS headroom, capped by GTT).
+        local_ram_available = MemoryUsage.from_local_gpu_wireable().ram_available
+        sys_for_gpu = min(
+            max(0, local_ram_available.in_bytes - UMA_GPU_OS_HEADROOM.in_bytes),
+            gtt_total,
+        )
+        return Memory.from_bytes(available + sys_for_gpu)
     ceiling = int(total * GPU_VRAM_WORKING_SET_FRACTION)
     return Memory.from_bytes(min(available, ceiling))
 

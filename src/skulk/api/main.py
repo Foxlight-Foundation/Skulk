@@ -1556,6 +1556,7 @@ class API:
                     node_vram=usable_vram_by_node(
                         self._telemetry_view.node_system,
                         self._telemetry_view.node_resources,
+                        node_memory=self._telemetry_view.node_memory,
                     ),
                 )
                 break
@@ -1628,6 +1629,7 @@ class API:
                 node_vram=usable_vram_by_node(
                     self._telemetry_view.node_system,
                     self._telemetry_view.node_resources,
+                    node_memory=self._telemetry_view.node_memory,
                 ),
             )
         except ValueError as exc:
@@ -1699,6 +1701,7 @@ class API:
                     node_vram=usable_vram_by_node(
                         self._telemetry_view.node_system,
                         self._telemetry_view.node_resources,
+                        node_memory=self._telemetry_view.node_memory,
                     ),
                 )
             except ValueError as exc:

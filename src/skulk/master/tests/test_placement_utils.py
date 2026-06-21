@@ -39,12 +39,14 @@ def _card(
     kv_heads: int | None = None,
     n_layers: int = 1,
     context_length: int = 0,
+    gguf_file: str | None = None,
 ) -> ModelCard:
     """Minimal ModelCard for memory-filter tests.
 
     Defaults to no KV heads so the KV reservation is zero and the
     weight-overhead path is exercised in isolation; pass ``kv_heads`` /
-    ``n_layers`` / ``context_length`` to drive the KV term.
+    ``n_layers`` / ``context_length`` to drive the KV term. Pass ``gguf_file`` to
+    mark the card as a GGUF/llama.cpp model (lighter overhead factor).
     """
     return ModelCard(
         model_id=ModelId("test-model"),
@@ -54,6 +56,7 @@ def _card(
         supports_tensor=True,
         num_key_value_heads=kv_heads,
         context_length=context_length,
+        gguf_file=gguf_file,
         tasks=[ModelTask.TextGeneration],
     )
 
@@ -399,6 +402,93 @@ def test_usable_vram_by_node_selects_discrete_gpus_only():
     assert amd in gated
     assert cpu_only not in gated  # CPU-only backend -> no VRAM admission
     assert nvidia_busy not in gated  # no resources entry -> excluded under gating
+
+
+def test_usable_vram_by_node_uma_counts_gtt():
+    """A unified-memory APU (Strix Halo: GTT spans system RAM) must count the
+    GPU's GTT-mapped system RAM, not just the BIOS VRAM carve-out. With 64 GiB
+    VRAM, 124 GiB GTT, and 59 GiB free of 61 GiB system RAM, usable GPU memory is
+    VRAM (64) + (59 - 16 headroom) = 107 GiB, far above the bare 0.9*64, so a
+    58.5 GiB GGUF (e.g. gpt-oss-120B) places."""
+    node_id = NodeId()
+    accelerator = AcceleratorMetrics(
+        vendor="amd",
+        vram_total_bytes=Memory.from_gb(64).in_bytes,
+        vram_used_bytes=0,
+        gtt_total_bytes=Memory.from_gb(124).in_bytes,
+    )
+    node_system = {node_id: SystemPerformanceProfile(accelerator=accelerator)}
+    node_memory = {
+        node_id: create_node_memory(
+            Memory.from_gb(59).in_bytes, ram_total=Memory.from_gb(61).in_bytes
+        )
+    }
+    resources = {
+        node_id: NodeResources(backends=frozenset({"llama_cpp", "llama_cpp-vulkan"}))
+    }
+
+    usable = usable_vram_by_node(node_system, resources, node_memory=node_memory)
+
+    expected = Memory.from_gb(64).in_bytes + (
+        Memory.from_gb(59).in_bytes - Memory.from_gb(16).in_bytes
+    )
+    assert usable[node_id].in_bytes == expected
+    # Clearly above the VRAM-only ceiling and large enough for a 58.5 GiB model.
+    assert usable[node_id].in_bytes > int(Memory.from_gb(64).in_bytes * 0.90)
+    assert usable[node_id].in_bytes > Memory.from_gb(58.5).in_bytes
+
+    # The same node admits the 58.5 GiB GGUF through filter_cycles_by_memory,
+    # which it would not against the bare 0.9*64 = 57.6 GiB VRAM ceiling.
+    topology = Topology()
+    topology.add_node(node_id)
+    fitting, diagnostics = filter_cycles_by_memory(
+        topology.get_cycles(),
+        node_memory,
+        _card(58.5, gguf_file="gpt-oss-120b.gguf"),
+        node_vram=usable,
+    )
+    assert len(fitting) == 1, diagnostics.rejection_reasons
+
+
+def test_usable_vram_by_node_discrete_without_gtt_uses_vram_only():
+    """A discrete GPU (no GTT, or GTT smaller than VRAM) must keep the VRAM-only
+    0.9*vram path even when node_memory is supplied: the UMA branch is for APUs
+    whose GTT spans system memory, not for dedicated cards."""
+    no_gtt = NodeId()
+    small_gtt = NodeId()
+    node_system = {
+        no_gtt: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="nvidia",
+                vram_total_bytes=Memory.from_gb(48).in_bytes,
+                vram_used_bytes=0,
+                gtt_total_bytes=None,
+            )
+        ),
+        small_gtt: SystemPerformanceProfile(
+            accelerator=AcceleratorMetrics(
+                vendor="amd",
+                vram_total_bytes=Memory.from_gb(48).in_bytes,
+                vram_used_bytes=0,
+                # GTT present but smaller than VRAM -> not a system-spanning APU.
+                gtt_total_bytes=Memory.from_gb(8).in_bytes,
+            )
+        ),
+    }
+    node_memory = {
+        no_gtt: create_node_memory(
+            Memory.from_gb(120).in_bytes, ram_total=Memory.from_gb(128).in_bytes
+        ),
+        small_gtt: create_node_memory(
+            Memory.from_gb(120).in_bytes, ram_total=Memory.from_gb(128).in_bytes
+        ),
+    }
+
+    usable = usable_vram_by_node(node_system, node_memory=node_memory)
+
+    vram_only = int(Memory.from_gb(48).in_bytes * 0.90)
+    assert usable[no_gtt].in_bytes == vram_only
+    assert usable[small_gtt].in_bytes == vram_only
 
 
 def test_filter_cycles_respects_gpu_working_set_ceiling():

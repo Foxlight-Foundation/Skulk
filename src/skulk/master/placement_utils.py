@@ -8,12 +8,11 @@ from pydantic import Field
 from skulk.shared.models.memory_estimate import (
     GPU_VRAM_WORKING_SET_FRACTION,
     GPU_WORKING_SET_FRACTION,
+    UMA_GPU_OS_HEADROOM,
+    memory_overhead_factor,
 )
 from skulk.shared.models.memory_estimate import (
     KV_CONTEXT_BUDGET_TOKENS as PLACEMENT_KV_CONTEXT_BUDGET_TOKENS,
-)
-from skulk.shared.models.memory_estimate import (
-    MEMORY_OVERHEAD_FACTOR as PLACEMENT_MEMORY_OVERHEAD_FACTOR,
 )
 from skulk.shared.models.memory_estimate import (
     MEMORY_OVERHEAD_FLOOR as PLACEMENT_MEMORY_OVERHEAD_FLOOR,
@@ -87,23 +86,35 @@ def _has_gpu_offload_backend(backends: frozenset[str]) -> bool:
 def usable_vram_by_node(
     node_system: Mapping[NodeId, SystemPerformanceProfile],
     node_resources: Mapping[NodeId, NodeResources] | None = None,
+    node_memory: Mapping[NodeId, MemoryUsage] | None = None,
 ) -> dict[NodeId, Memory]:
-    """Per-node usable discrete-GPU VRAM for placement, keyed by node.
+    """Per-node usable GPU memory for placement, keyed by node.
 
-    A node appears here only when it both (a) reports a discrete-VRAM accelerator
+    A node appears here only when it both (a) reports a VRAM-bearing accelerator
     (AMD/NVIDIA with a nonzero ``vram_total_bytes`` in ``node_system``) and
     (b) advertises a GPU-offload llama.cpp backend (``_has_gpu_offload_backend``),
-    so its engine actually allocates weights + KV from that VRAM pool. That pool
-    is reported separately from system RAM (e.g. a Strix Halo box's BIOS carves
-    128 GB into ~64 GB system + 64 GB VRAM), so placement admits against VRAM, not
-    ``0.75 * system_ram``. Apple unified-memory nodes report no discrete VRAM and
-    are absent, keeping the system-RAM path. When ``node_resources`` is omitted
-    the backend gate is skipped (test/simple use).
+    so its engine actually allocates weights + KV from the GPU. Apple
+    unified-memory nodes report no discrete VRAM and are absent, keeping the
+    system-RAM path. When ``node_resources`` is omitted the backend gate is
+    skipped (test/simple use).
 
-    The usable figure mirrors the RAM path: ``min(vram_total - vram_used,
-    vram_total * GPU_VRAM_WORKING_SET_FRACTION)`` so it accounts for VRAM already
-    in use by a resident instance and never assumes the whole card is free.
+    The usable figure depends on the node's memory architecture:
+
+    * Discrete GPU: ``min(vram_total - vram_used, vram_total *
+      GPU_VRAM_WORKING_SET_FRACTION)``. VRAM is a dedicated pool reported
+      separately from system RAM, so placement admits against VRAM, not
+      ``0.75 * system_ram``, and never assumes the whole card is free.
+    * Unified-memory APU (e.g. AMD Strix Halo, where the accelerator reports
+      ``gtt_total_bytes >= vram_total_bytes``, i.e. GTT spans system memory):
+      the GPU addresses the BIOS VRAM carve-out PLUS system RAM mapped through
+      GTT, so a model larger than the carve-out runs there. Usable GPU memory is
+      the available VRAM plus the system RAM the GPU can map via GTT, leaving
+      ``UMA_GPU_OS_HEADROOM`` for the OS + worker + download staging:
+      ``vram_avail + min(max(0, ram_available - UMA_GPU_OS_HEADROOM),
+      gtt_total)``. The UMA path needs the node's current ``ram_available`` from
+      ``node_memory``; without that entry it falls back to the discrete path.
     """
+    node_memory = node_memory or {}
     usable: dict[NodeId, Memory] = {}
     for node_id, profile in node_system.items():
         accelerator = profile.accelerator
@@ -117,9 +128,21 @@ def usable_vram_by_node(
             if resources is None or not _has_gpu_offload_backend(resources.backends):
                 continue
         used = accelerator.vram_used_bytes or 0
-        available = max(0, total - used)
+        vram_avail = max(0, total - used)
+        gtt_total = accelerator.gtt_total_bytes
+        memory = node_memory.get(node_id)
+        if gtt_total is not None and gtt_total >= total and memory is not None:
+            # GTT spans host RAM, so the GPU can map system memory beyond the
+            # BIOS VRAM carve-out; count it (minus OS headroom) toward the pool,
+            # capped by what GTT itself can address.
+            sys_for_gpu = min(
+                max(0, memory.ram_available.in_bytes - UMA_GPU_OS_HEADROOM.in_bytes),
+                gtt_total,
+            )
+            usable[node_id] = Memory.from_bytes(vram_avail + sys_for_gpu)
+            continue
         ceiling = int(total * GPU_VRAM_WORKING_SET_FRACTION)
-        usable[node_id] = Memory.from_bytes(min(available, ceiling))
+        usable[node_id] = Memory.from_bytes(min(vram_avail, ceiling))
     return usable
 
 
@@ -140,7 +163,7 @@ def _per_node_required_memory(
     The continuous fraction is an estimate of the integer layer allocation:
     the two can differ by up to one layer per node (a few percent of the
     weights on realistic layer counts), which sits comfortably inside the
-    ``PLACEMENT_MEMORY_OVERHEAD_FACTOR`` margin applied on top.
+    ``memory_overhead_factor`` margin applied on top.
 
     Both the split here and the per-node admission below weigh by
     ``_node_usable_memory`` (capped at the Metal working-set ceiling), not raw
@@ -209,7 +232,7 @@ def filter_cycles_by_memory(
     whose even split overloads the 16 GB node, and a sum check would happily
     admit it. Each node must satisfy::
 
-        weights_share * PLACEMENT_MEMORY_OVERHEAD_FACTOR
+        weights_share * memory_overhead_factor(model_card)
             + kv_share + PLACEMENT_MEMORY_OVERHEAD_FLOOR
             <= node usable memory
 
@@ -251,13 +274,14 @@ def filter_cycles_by_memory(
         node_shares = _per_node_required_memory(
             cycle, node_memory, required_memory, sharding, node_vram
         )
+        # GGUF runs on the lighter llama.cpp C++ runtime, so its weight overhead
+        # is smaller than MLX's; use the engine-aware factor for the fit decision.
+        overhead_factor = memory_overhead_factor(model_card)
         overloaded: list[str] = []
         for node_id, share in node_shares.items():
             kv_share = share * kv_ratio
             required_with_overhead = (
-                share * PLACEMENT_MEMORY_OVERHEAD_FACTOR
-                + kv_share
-                + PLACEMENT_MEMORY_OVERHEAD_FLOOR
+                share * overhead_factor + kv_share + PLACEMENT_MEMORY_OVERHEAD_FLOOR
             )
             node_vram_usable = node_vram.get(node_id)
             available = _node_usable_memory(node_memory[node_id], node_vram_usable)
