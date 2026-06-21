@@ -18,6 +18,7 @@ from skulk.master.placement import (
     place_instance,
     replacement_command_for_refused_instance,
 )
+from skulk.master.placement_utils import usable_vram_by_node
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_EVENT_LOG_DIR, SKULK_TRACING_ENABLED
 from skulk.shared.types.commands import (
@@ -609,6 +610,10 @@ class Master:
                                         self.state.node_network,
                                         download_status=self.state.downloads,
                                         node_resources=self._telemetry_view.node_resources,
+                                        node_vram=usable_vram_by_node(
+                                            self._telemetry_view.node_system,
+                                            self._telemetry_view.node_resources,
+                                        ),
                                     )
                                     logger.warning(
                                         "Re-placing "
@@ -667,6 +672,12 @@ class Master:
                                 download_status=self.state.downloads,
                                 excluded_nodes=set(command.excluded_nodes),
                                 node_resources=self._telemetry_view.node_resources,
+                                # Discrete-GPU VRAM (AMD/NVIDIA) so big models
+                                # admit against VRAM, not 0.75 x system RAM.
+                                node_vram=usable_vram_by_node(
+                                    self._telemetry_view.node_system,
+                                    self._telemetry_view.node_resources,
+                                ),
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
@@ -680,6 +691,10 @@ class Master:
                                 # telemetry plane (#279 slice 2) — stamp the
                                 # memory-derived ceiling on exact placements too
                                 self._telemetry_view.node_memory,
+                                node_vram=usable_vram_by_node(
+                                    self._telemetry_view.node_system,
+                                    self._telemetry_view.node_resources,
+                                ),
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks

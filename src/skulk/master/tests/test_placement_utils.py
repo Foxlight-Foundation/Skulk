@@ -7,6 +7,7 @@ from skulk.master.placement_utils import (
     get_shard_assignments,
     get_shard_assignments_for_pipeline_parallel,
     get_smallest_cycles,
+    usable_vram_by_node,
 )
 from skulk.master.tests.conftest import (
     create_node_memory,
@@ -17,8 +18,12 @@ from skulk.shared.topology import Topology
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import (
+    AcceleratorMetrics,
+    AcceleratorVendor,
     NetworkInterfaceInfo,
     NodeNetworkInfo,
+    NodeResources,
+    SystemPerformanceProfile,
 )
 from skulk.shared.types.topology import Connection, SocketConnection
 from skulk.shared.types.worker.shards import (
@@ -314,6 +319,86 @@ def test_filter_cycles_rejects_exact_fit_without_headroom():
     # (5 * 1.30 + 0.25 floor = ~6.8 GB <= 8 GB), so it is admitted.
     fitting_with_slack, _ = filter_cycles_by_memory(cycles, node_memory, _card(5))
     assert len(fitting_with_slack) == 1
+
+
+def test_filter_cycles_admits_against_discrete_vram():
+    """A discrete-VRAM GPU node (e.g. Strix Halo: ~64 GB system + 64 GB VRAM)
+    must admit a model that fits its VRAM even though it exceeds 0.75 x system
+    RAM, because the GPU-offload engine (llama.cpp/vLLM) allocates from VRAM, not
+    system RAM. This is the kite4 big-model placement bug."""
+    node_id = NodeId()
+    topology = Topology()
+    topology.add_node(node_id)
+    # 50 GB system RAM -> system ceiling = 0.75 * 50 = 37.5 GB; 80 GB VRAM ->
+    # usable = 0.90 * 80 = 72 GB.
+    node_memory = {
+        node_id: create_node_memory(
+            Memory.from_gb(48).in_bytes, ram_total=Memory.from_gb(50).in_bytes
+        )
+    }
+    node_vram = {node_id: Memory.from_gb(80) * 0.90}
+    cycles = topology.get_cycles()
+
+    # 40 GB weights: 40 * 1.30 + floor ~= 52.25 GB. Exceeds the 37.5 GB system
+    # ceiling, so VRAM-blind admission rejects it.
+    rejected, diagnostics = filter_cycles_by_memory(cycles, node_memory, _card(40))
+    assert rejected == []
+    assert diagnostics.rejection_reasons
+
+    # With the node's discrete VRAM, 52.25 GB fits the 72 GB VRAM budget.
+    fitting, _ = filter_cycles_by_memory(
+        cycles, node_memory, _card(40), node_vram=node_vram
+    )
+    assert len(fitting) == 1
+
+
+def test_usable_vram_by_node_selects_discrete_gpus_only():
+    """The VRAM map covers only AMD/NVIDIA nodes with a nonzero VRAM reading,
+    nets out VRAM already in use, and caps at the working-set fraction. Apple
+    unified-memory nodes (no discrete VRAM) are absent, keeping the RAM path."""
+    amd = NodeId()
+    apple = NodeId()
+    nvidia_busy = NodeId()
+
+    def _profile(
+        vendor: AcceleratorVendor, total_gb: float | None, used_gb: float = 0.0
+    ) -> SystemPerformanceProfile:
+        acc = AcceleratorMetrics(
+            vendor=vendor,
+            vram_total_bytes=(
+                Memory.from_gb(total_gb).in_bytes if total_gb is not None else None
+            ),
+            vram_used_bytes=Memory.from_gb(used_gb).in_bytes,
+        )
+        return SystemPerformanceProfile(accelerator=acc)
+
+    cpu_only = NodeId()
+    node_system = {
+        amd: _profile("amd", 64.0),
+        apple: _profile("apple", None),
+        nvidia_busy: _profile("nvidia", 24.0, used_gb=20.0),
+        cpu_only: _profile("amd", 64.0),
+    }
+    usable = usable_vram_by_node(node_system)
+
+    assert apple not in usable  # unified memory -> no discrete VRAM entry
+    # AMD idle: min(64 - 0, 0.90 * 64) = 57.6 GB.
+    assert usable[amd].in_bytes == int(Memory.from_gb(64).in_bytes * 0.90)
+    # NVIDIA with 20/24 GB in use: available (4 GB) is below the 0.90 cap, so it
+    # nets out the in-use VRAM rather than assuming the whole card is free.
+    assert usable[nvidia_busy].in_bytes == Memory.from_gb(4).in_bytes
+
+    # Backend gate: with node_resources, a discrete-GPU node that advertises only
+    # llama_cpp-cpu (runs GGUF on CPU out of system RAM) is excluded, while a
+    # vulkan node keeps its VRAM entry.
+    resources = {
+        amd: NodeResources(backends=frozenset({"llama_cpp", "llama_cpp-vulkan"})),
+        cpu_only: NodeResources(backends=frozenset({"llama_cpp", "llama_cpp-cpu"})),
+    }
+    gated = usable_vram_by_node(node_system, resources)
+    assert amd in gated
+    assert cpu_only not in gated  # CPU-only backend -> no VRAM admission
+    assert nvidia_busy not in gated  # no resources entry -> excluded under gating
 
 
 def test_filter_cycles_respects_gpu_working_set_ceiling():

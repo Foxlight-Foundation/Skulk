@@ -64,6 +64,7 @@ def add_instance_to_placements(
     topology: Topology,
     current_instances: Mapping[InstanceId, Instance],
     node_memory: Mapping[NodeId, MemoryUsage],
+    node_vram: Mapping[NodeId, Memory] | None = None,
 ) -> Mapping[InstanceId, Instance]:
     # TODO: validate against topology
 
@@ -85,6 +86,7 @@ def add_instance_to_placements(
             for node_id in assignments.node_to_runner
             if node_id in node_memory
         },
+        node_vram=node_vram,
     )
     instance = command.instance.model_copy(update={"context_token_limit": ceiling})
     return {**current_instances, instance.instance_id: instance}
@@ -190,6 +192,7 @@ def place_instance(
     download_status: Mapping[NodeId, Sequence[DownloadProgress]] | None = None,
     excluded_nodes: set[NodeId] | None = None,
     node_resources: Mapping[NodeId, NodeResources] | None = None,
+    node_vram: Mapping[NodeId, Memory] | None = None,
 ) -> dict[InstanceId, Instance]:
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
@@ -299,6 +302,7 @@ def place_instance(
         node_memory,
         command.model_card,
         command.sharding,
+        node_vram=node_vram,
     )
     if len(cycles_with_sufficient_memory) == 0:
         if memory_diagnostics.pending_info_node_ids:
@@ -397,7 +401,7 @@ def place_instance(
         command.sharding = Sharding.Pipeline
 
     shard_assignments = get_shard_assignments(
-        command.model_card, selected_cycle, command.sharding, node_memory
+        command.model_card, selected_cycle, command.sharding, node_memory, node_vram
     )
 
     # Stamp the context-admission ceiling into the placement decision (#279
@@ -410,6 +414,7 @@ def place_instance(
             node_id: node_memory[node_id].ram_total
             for node_id in selected_cycle.node_ids
         },
+        node_vram=node_vram,
     )
 
     cycle_digraph: Topology = topology.get_subgraph_from_nodes(selected_cycle.node_ids)

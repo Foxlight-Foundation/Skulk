@@ -159,6 +159,7 @@ from skulk.connectivity.tailscale import TailscaleStatus, query_tailscale_status
 from skulk.master.image_store import ImageStore
 from skulk.master.placement import PlacementInfoPendingError
 from skulk.master.placement import place_instance as get_instance_placements
+from skulk.master.placement_utils import usable_vram_by_node
 from skulk.shared.apply import apply
 from skulk.shared.constants import (
     DASHBOARD_DIR,
@@ -1552,6 +1553,10 @@ class API:
                     download_status=self.state.downloads,
                     excluded_nodes=set(command.excluded_nodes),
                     node_resources=self._telemetry_view.node_resources,
+                    node_vram=usable_vram_by_node(
+                        self._telemetry_view.node_system,
+                        self._telemetry_view.node_resources,
+                    ),
                 )
                 break
             except PlacementInfoPendingError as exc:
@@ -1620,6 +1625,10 @@ class API:
                 current_instances=self.state.instances,
                 download_status=self.state.downloads,
                 node_resources=self._telemetry_view.node_resources,
+                node_vram=usable_vram_by_node(
+                    self._telemetry_view.node_system,
+                    self._telemetry_view.node_resources,
+                ),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1687,6 +1696,10 @@ class API:
                     download_status=self.state.downloads,
                     excluded_nodes=excluded_nodes,
                     node_resources=self._telemetry_view.node_resources,
+                    node_vram=usable_vram_by_node(
+                        self._telemetry_view.node_system,
+                        self._telemetry_view.node_resources,
+                    ),
                 )
             except ValueError as exc:
                 if (model_card.model_id, sharding, instance_meta, 0) not in seen:

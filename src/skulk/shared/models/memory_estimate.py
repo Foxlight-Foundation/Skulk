@@ -50,6 +50,16 @@ placement check and the worker's local guard derive the ceiling from
 worker on the same heuristic makes the two checks agree); the worker's advantage
 is using *current local* ``ram_available`` rather than the gossiped value."""
 
+GPU_VRAM_WORKING_SET_FRACTION: float = 0.90
+"""Fraction of a node's *discrete GPU VRAM* usable for weights + KV on a
+GPU-offload node (AMD/NVIDIA running llama.cpp/vLLM/CUDA), as opposed to
+``GPU_WORKING_SET_FRACTION`` for Apple unified memory. Discrete VRAM is a
+dedicated pool the engine allocates from, not shared with the OS and app
+working set, so only driver/runtime/fragmentation overhead is unavailable
+(hence a higher fraction than Apple's 0.75). 0.90 matches the de-facto GPU
+default (e.g. vLLM ``gpu_memory_utilization``). Used only when a node reports
+discrete VRAM telemetry; Apple unified-memory nodes keep the 0.75 path."""
+
 KV_CONTEXT_BUDGET_TOKENS: int = 8192
 """Per-sequence context length reserved for KV cache during the fit check.
 Reserving a model's advertised max (e.g. GLM-4.7-Flash: 131072) would over-
@@ -156,6 +166,7 @@ def shard_fraction_of_model(shard: ShardMetadata) -> float | None:
 def instance_context_token_limit(
     shard_assignments: ShardAssignments,
     node_ram_totals: Mapping[NodeId, Memory],
+    node_vram: Mapping[NodeId, Memory] | None = None,
 ) -> int | None:
     """Deterministic context-token ceiling for one placed instance.
 
@@ -167,14 +178,21 @@ def instance_context_token_limit(
 
     Determinism is load-bearing: on multi-rank instances every rank admits or
     rejects a request independently, and divergent verdicts deadlock the
-    collectives. All inputs here are static — ``ram_total`` never changes for
-    a node, and placement only happens after the master has indexed memory
-    for every hosting node, so every worker computes the identical value.
-    Time-varying ``ram_available`` must NOT be used here.
+    collectives. All inputs here are static (``ram_total`` and a node's discrete
+    VRAM total never change for a node), and placement only happens after the
+    master has indexed memory for every hosting node, so every worker computes
+    the identical value. Time-varying ``ram_available`` must NOT be used here.
+
+    ``node_vram`` (a node's usable discrete-GPU VRAM, see ``usable_vram_by_node``)
+    is the working-set ceiling for a GPU-offload node, mirroring the memory-fit
+    admission: without it a model whose weights exceed ``0.75 * ram_total`` but
+    fit in VRAM would get a negative KV budget and a 0-token ceiling (every
+    request rejected), even though placement admitted it against VRAM.
 
     Returns ``None`` when no ceiling is enforceable (unknown KV cost or
     missing node memory, falling back to the card limit when that exists).
     """
+    node_vram = node_vram or {}
     model_card: ModelCard | None = None
     memory_limit: int | None = None
     for shard in shard_assignments.runner_to_shard.values():
@@ -193,8 +211,9 @@ def instance_context_token_limit(
             if fraction is None or fraction <= 0.0 or ram_total is None:
                 memory_limit = None
                 break
+            working_set = node_vram.get(node_id) or gpu_working_set_ceiling(ram_total)
             kv_budget = (
-                gpu_working_set_ceiling(ram_total)
+                working_set
                 - model_card.storage_size * fraction * MEMORY_OVERHEAD_FACTOR
                 - MEMORY_OVERHEAD_FLOOR
             )
