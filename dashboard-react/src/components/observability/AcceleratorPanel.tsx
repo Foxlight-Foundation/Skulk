@@ -1,4 +1,5 @@
 import styled from 'styled-components';
+import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 /**
  * Normalized accelerator metrics as they arrive from the API (camelCase).
@@ -87,30 +88,32 @@ const BarFill = styled.div<{ $ratio: number }>`
   background: ${({ theme }) => theme.colors.accent};
 `;
 
-const NOT_REPORTED = 'not reported';
+function notReported(t: SkulkTranslate): string {
+  return t('observability.accelerator.notReported', 'not reported');
+}
 
-function gib(bytes?: number | null): string {
-  if (bytes == null) return NOT_REPORTED;
+function gib(bytes: number | null | undefined, t: SkulkTranslate): string {
+  if (bytes == null) return notReported(t);
   return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
 }
 
-function pct(ratio?: number | null): string {
-  if (ratio == null) return NOT_REPORTED;
+function pct(ratio: number | null | undefined, t: SkulkTranslate): string {
+  if (ratio == null) return notReported(t);
   return `${Math.round(ratio * 100)}%`;
 }
 
-function watts(w?: number | null): string {
-  if (w == null) return NOT_REPORTED;
+function watts(w: number | null | undefined, t: SkulkTranslate): string {
+  if (w == null) return notReported(t);
   return `${w.toFixed(1)} W`;
 }
 
-function celsius(c?: number | null): string {
-  if (c == null) return NOT_REPORTED;
+function celsius(c: number | null | undefined, t: SkulkTranslate): string {
+  if (c == null) return notReported(t);
   return `${Math.round(c)}°C`;
 }
 
-function mhz(m?: number | null): string {
-  if (m == null) return NOT_REPORTED;
+function mhz(m: number | null | undefined, t: SkulkTranslate): string {
+  if (m == null) return notReported(t);
   return `${m} MHz`;
 }
 
@@ -123,6 +126,7 @@ function mhz(m?: number | null): string {
  * reported at all (e.g. a management node).
  */
 export function AcceleratorPanel({ accelerator }: AcceleratorPanelProps) {
+  const { t } = useSkulkTranslation();
   if (!accelerator) return null;
   const vendor = accelerator.vendor ?? 'unknown';
   const used = accelerator.vramUsedBytes;
@@ -133,18 +137,23 @@ export function AcceleratorPanel({ accelerator }: AcceleratorPanelProps) {
     <Panel>
       <Header>
         <VendorPill $vendor={vendor}>{vendor}</VendorPill>
-        <Name>{accelerator.name ?? 'Unknown'}</Name>
+        <Name>{accelerator.name ?? t('common.unknown', 'Unknown')}</Name>
       </Header>
       <Row>
-        <Key>Utilization</Key>
-        <Value>{pct(accelerator.utilizationRatio)}</Value>
+        <Key>{t('observability.accelerator.utilization', 'Utilization')}</Key>
+        <Value>{pct(accelerator.utilizationRatio, t)}</Value>
       </Row>
       <Row>
-        <Key>VRAM</Key>
+        <Key>{t('observability.accelerator.vram', 'VRAM')}</Key>
         <Value>
           {/* Collapse to a single "not reported" only when BOTH are absent;
               otherwise show each side via gib() so a partial reading isn't lost. */}
-          {used == null && total == null ? NOT_REPORTED : `${gib(used)} / ${gib(total)}`}
+          {used == null && total == null
+            ? notReported(t)
+            : t('observability.accelerator.vramUsage', '{used} / {total}', {
+                used: gib(used, t),
+                total: gib(total, t),
+              })}
         </Value>
       </Row>
       {vramRatio != null && (
@@ -153,16 +162,16 @@ export function AcceleratorPanel({ accelerator }: AcceleratorPanelProps) {
         </BarTrack>
       )}
       <Row>
-        <Key>Power</Key>
-        <Value>{watts(accelerator.powerWatts)}</Value>
+        <Key>{t('observability.accelerator.power', 'Power')}</Key>
+        <Value>{watts(accelerator.powerWatts, t)}</Value>
       </Row>
       <Row>
-        <Key>Temperature</Key>
-        <Value>{celsius(accelerator.temperatureCelsius)}</Value>
+        <Key>{t('observability.accelerator.temperature', 'Temperature')}</Key>
+        <Value>{celsius(accelerator.temperatureCelsius, t)}</Value>
       </Row>
       <Row>
-        <Key>Clock</Key>
-        <Value>{mhz(accelerator.clockMhz)}</Value>
+        <Key>{t('observability.accelerator.clock', 'Clock')}</Key>
+        <Value>{mhz(accelerator.clockMhz, t)}</Value>
       </Row>
     </Panel>
   );

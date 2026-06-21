@@ -2,6 +2,7 @@ import { useMemo, useState, useCallback, useRef } from 'react';
 import styled, { css } from 'styled-components';
 import type { ChatModelInfo } from '../../types/chat';
 import { Button } from '../common/Button';
+import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 export interface ChatModelSelectorProps {
   models: ChatModelInfo[];
@@ -40,12 +41,26 @@ interface Recommendation {
   tooltip: string;
 }
 
-const CATEGORY_META: Record<Category, { label: string; tooltip: string }> = {
-  coding: { label: 'Coding', tooltip: 'Best for code generation, debugging, and technical tasks' },
-  writing: { label: 'Writing', tooltip: 'Best for creative writing, summarization, and general text' },
-  agentic: { label: 'Agentic', tooltip: 'Best for reasoning, planning, and multi-step tasks' },
-  biggest: { label: 'Biggest', tooltip: 'Largest model that fits in your cluster memory' },
-};
+function categoryMeta(t: SkulkTranslate): Record<Category, { label: string; tooltip: string }> {
+  return {
+    coding: {
+      label: t('chat.modelSelector.category.coding', 'Coding'),
+      tooltip: t('chat.modelSelector.category.codingTooltip', 'Best for code generation, debugging, and technical tasks'),
+    },
+    writing: {
+      label: t('chat.modelSelector.category.writing', 'Writing'),
+      tooltip: t('chat.modelSelector.category.writingTooltip', 'Best for creative writing, summarization, and general text'),
+    },
+    agentic: {
+      label: t('chat.modelSelector.category.agentic', 'Agentic'),
+      tooltip: t('chat.modelSelector.category.agenticTooltip', 'Best for reasoning, planning, and multi-step tasks'),
+    },
+    biggest: {
+      label: t('chat.modelSelector.category.biggest', 'Biggest'),
+      tooltip: t('chat.modelSelector.category.biggestTooltip', 'Largest model that fits in your cluster memory'),
+    },
+  };
+}
 
 /* ================================================================
    Selection logic
@@ -240,7 +255,9 @@ export function ChatModelSelector({
   onAddModel,
   className,
 }: ChatModelSelectorProps) {
+  const { t } = useSkulkTranslation();
   const [tooltip, setTooltip] = useState<{ cat: Category; x: number; y: number } | null>(null);
+  const meta = useMemo(() => categoryMeta(t), [t]);
 
   const recommendations = useMemo<Recommendation[]>(() => {
     const cats: Category[] = ['coding', 'writing', 'agentic', 'biggest'];
@@ -252,9 +269,9 @@ export function ChatModelSelector({
         const ranking = cat === 'coding' ? CODING_RANKING : cat === 'writing' ? WRITING_RANKING : AGENTIC_RANKING;
         model = pickFromRanking(models, ranking, totalMemoryGB);
       }
-      return { category: cat, label: CATEGORY_META[cat].label, model, tooltip: CATEGORY_META[cat].tooltip };
+      return { category: cat, label: meta[cat].label, model, tooltip: meta[cat].tooltip };
     });
-  }, [models, totalMemoryGB]);
+  }, [meta, models, totalMemoryGB]);
 
   const showTooltip = useCallback((cat: Category, e: React.MouseEvent) => {
     const rect = (e.target as HTMLElement).getBoundingClientRect();
@@ -263,13 +280,15 @@ export function ChatModelSelector({
 
   const formatSize = (mb: number) => {
     const gb = mb / 1024;
-    return gb >= 100 ? `${Math.round(gb)} GB` : `${gb.toFixed(1)} GB`;
+    return gb >= 100
+      ? t('common.sizeGbInteger', '{size} GB', { size: Math.round(gb) })
+      : t('common.sizeGbDecimal', '{size} GB', { size: gb.toFixed(1) });
   };
 
   return (
     <Container className={className}>
       <div>
-        <Header>Recommended for your</Header>
+        <Header>{t('chat.modelSelector.recommendedForYour', 'Recommended for your')}</Header>
         <ClusterName>{clusterLabel}</ClusterName>
       </div>
 
@@ -299,18 +318,20 @@ export function ChatModelSelector({
                 </ModelMeta>
               </>
             ) : (
-              <ModelMeta>No model fits</ModelMeta>
+              <ModelMeta>{t('chat.modelSelector.noModelFits', 'No model fits')}</ModelMeta>
             )}
           </Card>
         ))}
       </Grid>
 
-      <Button variant="outline" size="sm" onClick={onAddModel}>+ Add Model</Button>
-      <Hint>Or just start typing — we'll pick the best model automatically</Hint>
+      <Button variant="outline" size="sm" onClick={onAddModel}>
+        {t('chat.modelSelector.addModel', '+ Add Model')}
+      </Button>
+      <Hint>{t('chat.modelSelector.autoPickHint', "Or just start typing - we'll pick the best model automatically")}</Hint>
 
       {tooltip && (
         <Tooltip $x={tooltip.x} $y={tooltip.y}>
-          {CATEGORY_META[tooltip.cat].tooltip}
+          {meta[tooltip.cat].tooltip}
         </Tooltip>
       )}
     </Container>

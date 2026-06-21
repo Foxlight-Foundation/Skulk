@@ -8,6 +8,7 @@
     "build": "vite build",
     "lint": "eslint .",
     "docs:typedoc": "typedoc --options typedoc.json",
+    "tolgee:export": "node scripts/export-tolgee-import.mjs",
     "preview": "vite preview",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build"

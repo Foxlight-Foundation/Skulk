@@ -7,6 +7,7 @@ import SkulkIcon from '../icons/SkulkIcon';
 import type { Theme } from '../../theme';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 export type NavRoute = 'cluster' | 'model-store' | 'chat' | 'operator';
 
@@ -291,6 +292,7 @@ export function HeaderNav({
   onOpenSettings,
   className,
 }: HeaderNavProps) {
+  const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
   const dispatch = useAppDispatch();
   const themeName = useAppSelector((s) => s.ui.theme);
@@ -311,18 +313,30 @@ export function HeaderNav({
     <Nav className={className}>
       <LeftGroup>
         {showMobileMenuToggle && (
-          <ToggleBtn variant="outline" size="lg" icon $active={mobileMenuOpen} onClick={onToggleMobileMenu} aria-label="Toggle mobile menu" aria-pressed={mobileMenuOpen}>
+          <ToggleBtn
+            variant="outline"
+            size="lg"
+            icon
+            $active={mobileMenuOpen}
+            onClick={onToggleMobileMenu}
+            aria-label={t('header.toggleMobileMenu', 'Toggle mobile menu')}
+            aria-pressed={mobileMenuOpen}
+          >
             {mobileMenuOpen ? <CloseIcon /> : <MenuIcon />}
           </ToggleBtn>
         )}
         {showSidebarToggle && (
-          <IconToggle $active={sidebarVisible} onClick={onToggleSidebar} aria-label="Toggle sidebar">
+          <IconToggle
+            $active={sidebarVisible}
+            onClick={onToggleSidebar}
+            aria-label={t('header.toggleSidebar', 'Toggle sidebar')}
+          >
             <SidebarIcon />
           </IconToggle>
         )}
         <LogoBtn $disabled={!showHome} onClick={showHome ? () => navigate('cluster') : undefined}>
           <SkulkIcon size={32} color={theme.colors.text} />
-          <LogoText>Skulk<VersionTag>{__APP_VERSION__}</VersionTag></LogoText>
+          <LogoText>{t('header.brand', 'Skulk')}<VersionTag>{__APP_VERSION__}</VersionTag></LogoText>
         </LogoBtn>
         {warnings && warnings.items.length > 0 && (
           <WarningDot $level={warnings.level}>
@@ -342,15 +356,15 @@ export function HeaderNav({
         {downloadProgress && <ProgressCircle count={downloadProgress.count} percentage={downloadProgress.percentage} />}
 
         <NavLink $active={activeRoute === 'cluster'} onClick={() => navigate('cluster')}>
-          <ClusterIcon /> Cluster
+          <ClusterIcon /> {t('header.nav.cluster', 'Cluster')}
         </NavLink>
 
         <NavLink $active={activeRoute === 'model-store'} onClick={() => navigate('model-store')}>
-          <StoreIcon /> Model Store
+          <StoreIcon /> {t('header.nav.modelStore', 'Model Store')}
         </NavLink>
 
         <NavLink $active={activeRoute === 'chat'} onClick={() => navigate('chat')}>
-          <ChatIcon /> Chat
+          <ChatIcon /> {t('header.nav.chat', 'Chat')}
         </NavLink>
 
         {instanceCount > 0 && (
@@ -358,7 +372,7 @@ export function HeaderNav({
             $healthy={instancesHealthy}
             $active={mobileRightOpen}
             onClick={onToggleMobileRight}
-            aria-label="Toggle instances panel"
+            aria-label={t('header.toggleInstancesPanel', 'Toggle instances panel')}
             aria-pressed={mobileRightOpen}
           >
             <svg width="28" height="28" viewBox="0 0 28 28">
@@ -389,9 +403,13 @@ export function HeaderNav({
           size="lg"
           icon
           onClick={toggleTheme}
-          aria-label={themeName === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          aria-label={themeName === 'dark'
+            ? t('header.switchToLightTheme', 'Switch to light theme')
+            : t('header.switchToDarkTheme', 'Switch to dark theme')}
           aria-pressed={themeName === 'light'}
-          title={themeName === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          title={themeName === 'dark'
+            ? t('header.switchToLightTheme', 'Switch to light theme')
+            : t('header.switchToDarkTheme', 'Switch to dark theme')}
         >
           {themeName === 'dark' ? <FiSun size={16} /> : <FiMoon size={16} />}
         </Button>
@@ -401,14 +419,20 @@ export function HeaderNav({
           size="lg"
           icon
           onClick={() => (observabilityPanelOpen ? closeObservability() : openObservability())}
-          aria-label="Observability"
+          aria-label={t('header.observability', 'Observability')}
           aria-pressed={observabilityPanelOpen}
-          title="Observability"
+          title={t('header.observability', 'Observability')}
         >
           <ObservabilityIcon />
         </Button>
 
-        <Button variant="ghost" size="lg" icon onClick={() => onOpenSettings?.()} aria-label="Settings">
+        <Button
+          variant="ghost"
+          size="lg"
+          icon
+          onClick={() => onOpenSettings?.()}
+          aria-label={t('header.settings', 'Settings')}
+        >
           <SettingsIcon />
         </Button>
       </RightGroup>

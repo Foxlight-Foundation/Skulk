@@ -4,6 +4,7 @@ import { VscBug } from 'react-icons/vsc';
 import { formatBytes } from '../../utils/format';
 import { InfoTooltip } from '../common/InfoTooltip';
 import type { Theme } from '../../theme';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 export interface NodeLabelProps {
   name: string;
@@ -40,6 +41,7 @@ export function NodeLabel({
   onInspect,
   statusText,
 }: NodeLabelProps) {
+  const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
   const ramPercent = ramTotal > 0 ? ((ramUsed / ramTotal) * 100).toFixed(0) : '0';
   const usedStr = formatBytes(ramUsed);
@@ -83,14 +85,18 @@ export function NodeLabel({
         >
           <InfoTooltip
             placement="left"
-            content={confirming ? 'Click again to confirm restart' : 'Restart this node — releases GPU memory and rejoins the cluster'}
+            content={confirming
+              ? t('nodeLabel.confirmRestartTooltip', 'Click again to confirm restart')
+              : t('nodeLabel.restartTooltip', 'Restart this node - releases GPU memory and rejoins the cluster')}
           >
             <svg
               width="16" height="16" viewBox="0 0 16 16" fill="none"
               style={{ cursor: 'pointer', opacity: confirming ? 1 : 0.5, transition: 'opacity 0.15s' }}
               role="button"
               tabIndex={0}
-              aria-label={confirming ? 'Confirm restart of this node' : 'Restart this node'}
+              aria-label={confirming
+                ? t('nodeLabel.confirmRestart', 'Confirm restart of this node')
+                : t('nodeLabel.restart', 'Restart this node')}
               onClick={handleRestartClick}
               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleRestartClick(); } }}
               onMouseEnter={(e) => { (e.currentTarget as SVGElement).style.opacity = '1'; }}
@@ -112,10 +118,10 @@ export function NodeLabel({
           height={20}
           style={{ overflow: 'visible' }}
         >
-          <InfoTooltip placement="left" content="Inspect live node diagnostics">
+          <InfoTooltip placement="left" content={t('nodeLabel.inspectDiagnostics', 'Inspect live node diagnostics')}>
             <button
               type="button"
-              aria-label="Inspect live node diagnostics"
+              aria-label={t('nodeLabel.inspectDiagnostics', 'Inspect live node diagnostics')}
               onClick={onInspect}
               style={{
                 all: 'unset',

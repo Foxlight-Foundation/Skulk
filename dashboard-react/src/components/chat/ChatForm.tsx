@@ -3,6 +3,7 @@ import styled, { css, keyframes } from 'styled-components';
 import type { ChatUploadedFile } from '../../types/chat';
 import { ChatAttachments } from './ChatAttachments';
 import { Button } from '../common/Button';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 export interface ChatFormProps {
   onSend: (message: string, files: ChatUploadedFile[]) => void;
@@ -170,7 +171,7 @@ export function ChatForm({
   onSend,
   onCancel,
   isLoading = false,
-  placeholder = 'Type a message…',
+  placeholder,
   autoFocus = true,
   modelLabel,
   onOpenModelPicker,
@@ -184,6 +185,7 @@ export function ChatForm({
   supportsImageAttachments = false,
   className,
 }: ChatFormProps) {
+  const { t } = useSkulkTranslation();
   const [message, setMessage] = useState('');
   const [files, setFiles] = useState<ChatUploadedFile[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -192,6 +194,7 @@ export function ChatForm({
   const filesRef = useRef<ChatUploadedFile[]>([]);
 
   const canSend = message.trim().length > 0 || files.length > 0;
+  const inputPlaceholder = placeholder ?? t('chat.form.placeholder', 'Type a message...');
 
   // Auto-resize textarea
   const resize = useCallback(() => {
@@ -318,31 +321,38 @@ export function ChatForm({
     >
       <AccentLine />
 
-      {isDragOver && <DragOverlay>Drop files here</DragOverlay>}
+      {isDragOver && <DragOverlay>{t('chat.form.dropFilesHere', 'Drop files here')}</DragOverlay>}
 
       {/* Header: model + thinking + stats */}
       {showHeader && (
         <HeaderRow>
           {(modelLabel || modelSelector) && (
             <>
-              <span>Model:</span>
+              <span>{t('chat.form.modelLabel', 'Model:')}</span>
               {modelSelector ?? <ModelBtn onClick={onOpenModelPicker}>{modelLabel}</ModelBtn>}
             </>
           )}
           {contextLength > 0 && (
-            <Stat>{(contextLength / 1024).toFixed(0)}K ctx</Stat>
+            <Stat>
+              {t('chat.form.contextShort', '{count}K ctx', { count: (contextLength / 1024).toFixed(0) })}
+            </Stat>
           )}
           {showThinkingToggle && (
             <ThinkingBtn $active={thinkingEnabled} onClick={onToggleThinking}>
-              Thinking
+              {t('chat.form.thinking', 'Thinking')}
             </ThinkingBtn>
           )}
           <Spacer />
           {ttftMs != null && (
-            <Stat>TTFT <StatValue>{ttftMs.toFixed(1)}ms</StatValue></Stat>
+            <Stat>
+              {t('chat.form.ttftLabel', 'TTFT')} <StatValue>{ttftMs.toFixed(1)}{t('chat.form.milliseconds', 'ms')}</StatValue>
+            </Stat>
           )}
           {tps != null && (
-            <Stat>TPS <StatValue>{tps.toFixed(1)} tok/s</StatValue> ({(1000 / tps).toFixed(1)} ms/tok)</Stat>
+            <Stat>
+              {t('chat.form.tpsLabel', 'TPS')} <StatValue>{tps.toFixed(1)} {t('chat.form.tokensPerSecond', 'tok/s')}</StatValue>{' '}
+              ({(1000 / tps).toFixed(1)} {t('chat.form.millisecondsPerToken', 'ms/tok')})
+            </Stat>
           )}
         </HeaderRow>
       )}
@@ -363,7 +373,7 @@ export function ChatForm({
           type="button"
           onClick={() => fileInputRef.current?.click()}
           disabled={!supportsImageAttachments}
-          aria-label="Attach file"
+          aria-label={t('chat.form.attachFile', 'Attach file')}
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48" />
@@ -378,18 +388,32 @@ export function ChatForm({
             resize();
           }}
           onKeyDown={handleKeyDown}
-          placeholder={placeholder}
+          placeholder={inputPlaceholder}
           rows={1}
           autoFocus={autoFocus}
         />
         {isLoading ? (
-          <SendBtn variant="danger" size="sm" icon type="button" onClick={onCancel} aria-label="Cancel generation">
+          <SendBtn
+            variant="danger"
+            size="sm"
+            icon
+            type="button"
+            onClick={onCancel}
+            aria-label={t('chat.form.cancelGeneration', 'Cancel generation')}
+          >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
               <rect x="6" y="6" width="12" height="12" rx="2" />
             </svg>
           </SendBtn>
         ) : (
-          <SendBtn variant="primary" size="sm" icon type="submit" disabled={!canSend} aria-label="Send message">
+          <SendBtn
+            variant="primary"
+            size="sm"
+            icon
+            type="submit"
+            disabled={!canSend}
+            aria-label={t('chat.form.sendMessage', 'Send message')}
+          >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <line x1="22" y1="2" x2="11" y2="13" />
               <polygon points="22 2 15 22 11 13 2 9 22 2" />
@@ -401,8 +425,11 @@ export function ChatForm({
       <AccentLine />
       <HelperText>
         {supportsImageAttachments
-          ? 'Enter to send · Shift+Enter for new line · Drag & drop images'
-          : 'Enter to send · Shift+Enter for new line'}
+          ? t(
+              'chat.form.helperWithImages',
+              'Enter to send - Shift+Enter for new line - Drag & drop images',
+            )
+          : t('chat.form.helper', 'Enter to send - Shift+Enter for new line')}
       </HelperText>
 
       {/* Hidden file input */}

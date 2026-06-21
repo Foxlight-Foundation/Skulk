@@ -15,6 +15,7 @@ import { FamilySidebar } from './FamilySidebar';
 import { ModelFilterPopover } from './ModelFilterPopover';
 import { ModelPickerGroup } from './ModelPickerGroup';
 import { HuggingFaceResultItem } from './HuggingFaceResultItem';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 export interface ModelBrowserProps {
   models: ModelInfo[];
@@ -132,6 +133,7 @@ export function ModelBrowser({
   mlxOnly = false,
   onToggleMlxOnly,
 }: ModelBrowserProps) {
+  const { t } = useSkulkTranslation();
   const picker = useModelPicker({
     models,
     favorites,
@@ -175,7 +177,11 @@ export function ModelBrowser({
               picker.setSearchQuery(q);
               if (isHf && onHfSearch) onHfSearch(q);
             }}
-            placeholder={isHf ? (mlxOnly ? 'Search mlx-community…' : 'Search all of HuggingFace…') : 'Search models…'}
+            placeholder={isHf
+              ? (mlxOnly
+                  ? t('modelBrowser.searchMlxCommunity', 'Search mlx-community...')
+                  : t('modelBrowser.searchHuggingFace', 'Search all of HuggingFace...'))
+              : t('modelBrowser.searchModels', 'Search models...')}
             autoFocus
           />
           {isHf && onToggleMlxOnly && (
@@ -191,7 +197,7 @@ export function ModelBrowser({
                 }
               }}
             >
-              MLX only
+              {t('modelBrowser.mlxOnly', 'MLX only')}
             </FilterBtn>
           )}
           {!isHf && (
@@ -202,7 +208,7 @@ export function ModelBrowser({
               onClick={() => picker.setShowFilters(!picker.showFilters)}
             >
               <FilterIcon />
-              Filters
+              {t('modelBrowser.filters', 'Filters')}
             </FilterBtn>
           )}
           {picker.showFilters && !isHf && (
@@ -220,12 +226,12 @@ export function ModelBrowser({
           {isHf ? (
             /* HuggingFace results */
             <>
-              {hfIsSearching && <EmptyMsg>Searching…</EmptyMsg>}
+              {hfIsSearching && <EmptyMsg>{t('modelBrowser.searching', 'Searching...')}</EmptyMsg>}
               {!hfIsSearching && hfModels.length === 0 && picker.searchQuery && (
-                <EmptyMsg>No results found</EmptyMsg>
+                <EmptyMsg>{t('modelBrowser.noResultsFound', 'No results found')}</EmptyMsg>
               )}
               {!picker.searchQuery.trim() && hfModels.length > 0 && (
-                <SectionHeader>Trending</SectionHeader>
+                <SectionHeader>{t('modelBrowser.trending', 'Trending')}</SectionHeader>
               )}
               {hfModels.map((m) => (
                 <HuggingFaceResultItem
@@ -247,7 +253,7 @@ export function ModelBrowser({
             <>
               {picker.recommendedGroups.length > 0 && (
                 <>
-                  <SectionHeader>Recommended</SectionHeader>
+                  <SectionHeader>{t('modelBrowser.recommended', 'Recommended')}</SectionHeader>
                   {picker.recommendedGroups.map((g) => (
                     <ModelPickerGroup
                       key={g.id}
@@ -271,7 +277,7 @@ export function ModelBrowser({
               {picker.otherGroups.length > 0 && (
                 <>
                   {picker.recommendedGroups.length > 0 && (
-                    <SectionHeader>Other</SectionHeader>
+                    <SectionHeader>{t('modelBrowser.other', 'Other')}</SectionHeader>
                   )}
                   {picker.otherGroups.map((g) => (
                     <ModelPickerGroup
@@ -295,7 +301,9 @@ export function ModelBrowser({
               )}
               {picker.filteredGroups.length === 0 && (
                 <EmptyMsg>
-                  {picker.searchQuery ? 'No models match your search' : 'No models available'}
+                  {picker.searchQuery
+                    ? t('modelBrowser.noModelsMatch', 'No models match your search')
+                    : t('modelBrowser.noModelsAvailable', 'No models available')}
                 </EmptyMsg>
               )}
             </>

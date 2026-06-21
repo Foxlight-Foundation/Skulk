@@ -1,4 +1,5 @@
 import styled from 'styled-components';
+import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 export interface PrefillProgress {
   processed: number;
@@ -18,7 +19,7 @@ function formatTokenCount(n: number | null | undefined): string {
   return `${(n / 1000).toFixed(1)}k`;
 }
 
-function computeEta(progress: PrefillProgress): string | null {
+function computeEta(progress: PrefillProgress, t: SkulkTranslate): string | null {
   const elapsed = performance.now() - progress.startedAt;
   if (elapsed < 200 || progress.processed <= 0) return null;
 
@@ -28,10 +29,10 @@ function computeEta(progress: PrefillProgress): string | null {
   const remainingSec = Math.ceil(remainingMs / 1000);
 
   if (remainingSec <= 0) return null;
-  if (remainingSec < 60) return `~${remainingSec}s remaining`;
+  if (remainingSec < 60) return t('prefillProgress.secondsRemaining', '~{seconds}s remaining', { seconds: remainingSec });
   const m = Math.floor(remainingSec / 60);
   const s = remainingSec % 60;
-  return `~${m}m ${s}s remaining`;
+  return t('prefillProgress.minutesRemaining', '~{minutes}m {seconds}s remaining', { minutes: m, seconds: s });
 }
 
 /* ---- styles ---- */
@@ -81,18 +82,22 @@ const FooterRow = styled.div`
 /* ---- component ---- */
 
 export function PrefillProgressBar({ progress, className }: PrefillProgressBarProps) {
+  const { t } = useSkulkTranslation();
   const percentage = progress.total > 0
     ? Math.round((progress.processed / progress.total) * 100)
     : 0;
 
-  const eta = computeEta(progress);
+  const eta = computeEta(progress, t);
 
   return (
     <Container className={className}>
       <LabelRow>
-        <span>Processing prompt</span>
+        <span>{t('prefillProgress.processingPrompt', 'Processing prompt')}</span>
         <TokenCount>
-          {formatTokenCount(progress.processed)} / {formatTokenCount(progress.total)} tokens
+          {t('prefillProgress.tokenCount', '{processed} / {total} tokens', {
+            processed: formatTokenCount(progress.processed),
+            total: formatTokenCount(progress.total),
+          })}
         </TokenCount>
       </LabelRow>
       <Track>

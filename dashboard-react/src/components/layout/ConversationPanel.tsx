@@ -1,5 +1,6 @@
 import styled from 'styled-components';
-import type { Conversation } from '../../types/chat';
+import { DEFAULT_CONVERSATION_NAME, type Conversation } from '../../types/chat';
+import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -14,7 +15,7 @@ export interface ConversationPanelProps {
 
 /* ── Helpers ──────────────────────────────────────────── */
 
-function formatDate(ts: number): string {
+function formatDate(ts: number, t: SkulkTranslate): string {
   const d = new Date(ts);
   const now = new Date();
   const diffMs = now.getTime() - ts;
@@ -23,7 +24,7 @@ function formatDate(ts: number): string {
   if (diffDays === 0) {
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
-  if (diffDays === 1) return 'Yesterday';
+  if (diffDays === 1) return t('chat.sidebar.yesterday', 'Yesterday');
   if (diffDays < 7) return d.toLocaleDateString([], { weekday: 'long' });
   return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
@@ -36,6 +37,12 @@ function modelLabel(modelId: string): string {
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
   return text.slice(0, max) + '...';
+}
+
+function conversationDisplayName(name: string, t: SkulkTranslate): string {
+  return name === DEFAULT_CONVERSATION_NAME
+    ? t('chat.conversation.newConversation', 'New conversation')
+    : name;
 }
 
 /* ── Styles ───────────────────────────────────────────── */
@@ -172,15 +179,17 @@ export function ConversationPanel({
   onNewChat,
   className,
 }: ConversationPanelProps) {
+  const { t } = useSkulkTranslation();
+
   return (
     <Panel className={className}>
       <PanelHeader>
-        History
-        <NewChatBtn onClick={onNewChat}>+ New</NewChatBtn>
+        {t('conversationPanel.history', 'History')}
+        <NewChatBtn onClick={onNewChat}>{t('conversationPanel.new', '+ New')}</NewChatBtn>
       </PanelHeader>
       <CardList>
         {conversations.length === 0 ? (
-          <EmptyText>No conversations yet</EmptyText>
+          <EmptyText>{t('conversationPanel.empty', 'No conversations yet')}</EmptyText>
         ) : (
           conversations.map((convo) => {
             const active = convo.id === activeConversationId;
@@ -194,10 +203,10 @@ export function ConversationPanel({
                 onClick={() => onSelect(convo.id)}
               >
                 <CardTitle $active={active}>
-                  {truncate(convo.name, 40)}
+                  {truncate(conversationDisplayName(convo.name, t), 40)}
                 </CardTitle>
                 <CardMeta>
-                  <span>{formatDate(convo.updatedAt)}</span>
+                  <span>{formatDate(convo.updatedAt, t)}</span>
                   <Dot>&middot;</Dot>
                   <span>{modelLabel(convo.modelId)}</span>
                   <DeleteBtn onClick={(e) => { e.stopPropagation(); onDelete(convo.id); }}>

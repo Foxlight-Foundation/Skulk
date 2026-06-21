@@ -12,6 +12,7 @@ import type {
   ClusterTimelineEntry,
   ClusterTimelineRunner,
 } from '../../types/diagnostics';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 /**
  * "Live" tab body for the observability panel. Polls the cluster-timeline
@@ -285,6 +286,7 @@ function summarizeAttrs(attrs: Record<string, unknown>): string {
 }
 
 export function LiveTab() {
+  const { t } = useSkulkTranslation();
   // Pause polling whenever the panel is closed. RTK Query treats `skip: true`
   // as "this consumer doesn't need data right now"; the cache entry is kept
   // and polling resumes on the next render with `skip: false`.
@@ -318,10 +320,10 @@ export function LiveTab() {
   };
 
   const error = timelineQuery.isError
-    ? (timelineQuery.error as { error?: string })?.error ?? 'Failed to load cluster timeline'
+    ? (timelineQuery.error as { error?: string })?.error ?? t('observability.live.errors.loadTimelineFailed', 'Failed to load cluster timeline')
     : null;
   const tracingError = tracingMutation.isError
-    ? (tracingMutation.error as { error?: string })?.error ?? 'Tracing toggle failed'
+    ? (tracingMutation.error as { error?: string })?.error ?? t('observability.live.errors.tracingToggleFailed', 'Tracing toggle failed')
     : null;
   const tracingToggling = tracingMutation.isLoading;
 
@@ -349,8 +351,10 @@ export function LiveTab() {
 
   const reachableLabel = timeline
     ? timeline.unreachableNodes.length === 0
-      ? 'all reachable'
-      : `${timeline.unreachableNodes.length} unreachable`
+      ? t('observability.live.connectivity.allReachable', 'all reachable')
+      : t('observability.live.connectivity.unreachableCount', '{count} unreachable', {
+          count: timeline.unreachableNodes.length,
+        })
     : '—';
 
   return (
@@ -361,31 +365,34 @@ export function LiveTab() {
           size="sm"
           icon
           onClick={() => { void handleManualRefresh(); }}
-          aria-label="Refresh cluster timeline"
-          title="Refresh"
+          aria-label={t('observability.live.refreshTimeline', 'Refresh cluster timeline')}
+          title={t('common.refresh', 'Refresh')}
         >
           <Spinner size={12} spinning={userRefreshing} />
         </Button>
         <HeaderField>
-          <HeaderLabel>Master</HeaderLabel>
+          <HeaderLabel>{t('observability.live.master', 'Master')}</HeaderLabel>
           <HeaderValue>
             {timeline?.masterNodeId ? shortId(timeline.masterNodeId) : '—'}
           </HeaderValue>
         </HeaderField>
         <HeaderField>
-          <HeaderLabel>Connectivity</HeaderLabel>
+          <HeaderLabel>{t('observability.live.connectivity.label', 'Connectivity')}</HeaderLabel>
           <HeaderValue $tone={timeline && timeline.unreachableNodes.length > 0 ? 'warn' : 'good'}>
             {reachableLabel}
           </HeaderValue>
         </HeaderField>
         <HeaderField>
-          <HeaderLabel>Hangs</HeaderLabel>
+          <HeaderLabel>{t('observability.live.hangs', 'Hangs')}</HeaderLabel>
           <HeaderValue $tone={hangCount > 0 ? 'warn' : 'good'}>
-            {hangCount} runner{hangCount === 1 ? '' : 's'} stuck
+            {t('observability.live.runnerStuckCount', '{count} runner{plural} stuck', {
+              count: hangCount,
+              plural: hangCount === 1 ? '' : 's',
+            })}
           </HeaderValue>
         </HeaderField>
         <HeaderField>
-          <HeaderLabel>Tracing</HeaderLabel>
+          <HeaderLabel>{t('observability.live.tracing', 'Tracing')}</HeaderLabel>
           {tracingEnabled == null ? (
             <HeaderValue>—</HeaderValue>
           ) : (
@@ -393,7 +400,11 @@ export function LiveTab() {
               $on={tracingEnabled}
               role="switch"
               aria-checked={tracingEnabled}
-              aria-label={tracingEnabled ? 'Disable cluster tracing' : 'Enable cluster tracing'}
+              aria-label={
+                tracingEnabled
+                  ? t('observability.live.disableClusterTracing', 'Disable cluster tracing')
+                  : t('observability.live.enableClusterTracing', 'Enable cluster tracing')
+              }
               disabled={tracingToggling}
               onClick={() => { void toggleTracing(); }}
             />
@@ -412,9 +423,9 @@ export function LiveTab() {
 
       {timeline && (
         <Section>
-        <SectionTitle>Runners</SectionTitle>
+        <SectionTitle>{t('observability.live.runners', 'Runners')}</SectionTitle>
         {timeline.runners.length === 0 && (
-          <Notice>No runners reported across the cluster.</Notice>
+          <Notice>{t('observability.live.noRunners', 'No runners reported across the cluster.')}</Notice>
         )}
         {timeline.runners.length > 0 && (
           <RunnerGrid>
@@ -424,28 +435,31 @@ export function LiveTab() {
                 <RunnerCard key={runner.runnerId} $hung={hung}>
                   <RunnerLine>
                     <Pill $tone={runner.processAlive ? 'good' : 'warn'}>
-                      rank {runner.deviceRank}/{runner.worldSize}
+                      {t('observability.live.rankValue', 'rank {rank}/{worldSize}', {
+                        rank: runner.deviceRank,
+                        worldSize: runner.worldSize,
+                      })}
                     </Pill>
                     <RunnerLabel>{shortId(runner.nodeId)}</RunnerLabel>
                   </RunnerLine>
                   <RunnerLine>
-                    <RunnerLabel>model</RunnerLabel>
+                    <RunnerLabel>{t('observability.live.model', 'model')}</RunnerLabel>
                     {runner.modelId}
                   </RunnerLine>
                   <RunnerLine>
-                    <RunnerLabel>phase</RunnerLabel>
+                    <RunnerLabel>{t('observability.live.phase', 'phase')}</RunnerLabel>
                     <Pill $tone={hung ? 'warn' : 'neutral'}>{runner.phase}</Pill>
-                    <span>{Math.round(runner.secondsInPhase)}s</span>
+                    <span>{t('common.secondsShort', '{count}s', { count: Math.round(runner.secondsInPhase) })}</span>
                   </RunnerLine>
                   {runner.phaseDetail && (
                     <RunnerLine>
-                      <RunnerLabel>detail</RunnerLabel>
+                      <RunnerLabel>{t('observability.live.detail', 'detail')}</RunnerLabel>
                       <span>{runner.phaseDetail}</span>
                     </RunnerLine>
                   )}
                   {runner.activeTaskId && (
                     <RunnerLine>
-                      <RunnerLabel>task</RunnerLabel>
+                      <RunnerLabel>{t('observability.live.task', 'task')}</RunnerLabel>
                       {shortId(runner.activeTaskId)}
                     </RunnerLine>
                   )}
@@ -459,9 +473,9 @@ export function LiveTab() {
 
       {timeline && (
         <FillSection>
-        <SectionTitle>Cross-rank timeline (newest first)</SectionTitle>
+        <SectionTitle>{t('observability.live.crossRankTimeline', 'Cross-rank timeline (newest first)')}</SectionTitle>
         {recentTimeline.length === 0 && (
-          <Notice>No flight-recorder entries reported yet.</Notice>
+          <Notice>{t('observability.live.noFlightRecorderEntries', 'No flight-recorder entries reported yet.')}</Notice>
         )}
         {recentTimeline.length > 0 && (
           <TimelineList>
@@ -470,7 +484,7 @@ export function LiveTab() {
               return (
                 <TimelineItem key={`${entry.at}-${entry.runnerId}-${idx}`}>
                   <TimelineMeta>{formatLocalTime(entry.at)}</TimelineMeta>
-                  <TimelineMeta>r{entry.deviceRank}</TimelineMeta>
+                  <TimelineMeta>{t('observability.live.rankShort', 'r{rank}', { rank: entry.deviceRank })}</TimelineMeta>
                   <TimelineMeta>{entry.phase}</TimelineMeta>
                   {entry.event}
                   {entry.detail && <span> · {entry.detail}</span>}

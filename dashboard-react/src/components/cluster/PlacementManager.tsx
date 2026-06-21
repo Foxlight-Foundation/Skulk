@@ -6,6 +6,7 @@ import type { TopologyData } from '../../types/topology';
 import type { PlacementPreview } from '../../types/models';
 import { ModelCard } from '../models/ModelCard';
 import { Button } from '../common/Button';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -293,6 +294,7 @@ const CardWrapper = styled.div`
 /* ── Component ────────────────────────────────────────── */
 
 export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose, onLaunch, isEmbedding }: PlacementManagerProps) {
+  const { t } = useSkulkTranslation();
   const [previews, setPreviews] = useState<PlacementPreview[]>([]);
   const [loading, setLoading] = useState(false);
   const [minNodes, setMinNodes] = useState(1);
@@ -367,7 +369,10 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
   // Group previews by node count
   const optionsByNodeCount = useMemo(() => {
     const map: Record<number, NodeCountOptions> = {};
-    const empty: ComboStatus = { available: false, error: 'No preview available' };
+    const empty: ComboStatus = {
+      available: false,
+      error: t('placement.noPreviewAvailable', 'No preview available'),
+    };
 
     for (let n = 1; n <= totalNodes; n++) {
       map[n] = { pipeline_ring: { ...empty }, pipeline_jaccl: { ...empty }, tensor_ring: { ...empty }, tensor_jaccl: { ...empty } };
@@ -394,7 +399,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
     }
 
     return map;
-  }, [previews, totalNodes]);
+  }, [previews, totalNodes, t]);
 
   // Default to first valid node count + combo after previews load
   const defaultsSet = useRef(false);
@@ -493,7 +498,8 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
 
   // Find the most relevant error to show when nothing works
   const placementError = noComboAvailable
-    ? (pipelineRing?.error ?? tensorRing?.error ?? pipelineJaccl?.error ?? tensorJaccl?.error ?? 'No valid placement found')
+    ? (pipelineRing?.error ?? tensorRing?.error ?? pipelineJaccl?.error ?? tensorJaccl?.error
+      ?? t('placement.error.noValidPlacement', 'No valid placement found'))
     : null;
 
   const shardingError = !noComboAvailable && sharding === 'Tensor'
@@ -507,18 +513,18 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
     <Overlay onClick={onClose}>
       <Modal onClick={(e) => e.stopPropagation()}>
         <Header>
-          <Title>Place <ModelName>{modelLabel(modelId)}</ModelName></Title>
-          <CloseBtn onClick={onClose} aria-label="Close placement manager"><FiX size={18} /></CloseBtn>
+          <Title>{t('placement.title', 'Place')} <ModelName>{modelLabel(modelId)}</ModelName></Title>
+          <CloseBtn onClick={onClose} aria-label={t('placement.close', 'Close placement manager')}><FiX size={18} /></CloseBtn>
         </Header>
 
         <Body>
           {loading ? (
-            <Loading>Analyzing placement options...</Loading>
+            <Loading>{t('placement.loading', 'Analyzing placement options...')}</Loading>
           ) : isEmbedding ? (
             /* ── Simplified embedding placement ─────────────── */
             <>
               <Section>
-                <SectionLabel>Cluster Preview</SectionLabel>
+                <SectionLabel>{t('placement.clusterPreview', 'Cluster Preview')}</SectionLabel>
                 <CardWrapper>
                   <ModelCard
                     model={{ id: modelId, name: modelLabel(modelId), storage_size_megabytes: modelSizeMb }}
@@ -542,7 +548,10 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
               {anyPlacementPossible && (
                 <Callout>
                   <FiInfo size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-                  Embedding models run on a single node. The cluster will automatically select the best node.
+                  {t(
+                    'placement.embeddingCallout',
+                    'Embedding models run on a single node. The cluster will automatically select the best node.',
+                  )}
                 </Callout>
               )}
             </>
@@ -550,7 +559,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
             <>
               {/* Cluster visualization via ModelCard */}
               <Section>
-                <SectionLabel>Cluster Preview</SectionLabel>
+                <SectionLabel>{t('placement.clusterPreview', 'Cluster Preview')}</SectionLabel>
                 <CardWrapper>
                   <ModelCard
                     model={{ id: modelId, name: modelLabel(modelId), storage_size_megabytes: modelSizeMb }}
@@ -569,7 +578,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                   the node are unaffected. */}
               {totalNodes > 0 && (
                 <Section>
-                  <SectionLabel>Available Nodes</SectionLabel>
+                  <SectionLabel>{t('placement.availableNodes', 'Available Nodes')}</SectionLabel>
                   <NodePillRow>
                     {Object.entries(topology?.nodes ?? {})
                       .map(([nodeId, info]) => ({
@@ -588,7 +597,9 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                             $excluded={isExcluded}
                             onClick={() => toggleNodeExclusion(nodeId)}
                             aria-pressed={!isExcluded}
-                            title={isExcluded ? 'Click to include this node' : 'Click to exclude this node from this placement'}
+                            title={isExcluded
+                              ? t('placement.includeNodeTitle', 'Click to include this node')
+                              : t('placement.excludeNodeTitle', 'Click to exclude this node from this placement')}
                           >
                             {label}
                           </NodePill>
@@ -596,7 +607,10 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                       })}
                   </NodePillRow>
                   <NodePillHint>
-                    Click a node to exclude it from this placement. Excluded nodes are skipped only for this launch — already-running instances on them are unaffected.
+                    {t(
+                      'placement.nodeExclusionHint',
+                      'Click a node to exclude it from this placement. Excluded nodes are skipped only for this launch - already-running instances on them are unaffected.',
+                    )}
                   </NodePillHint>
                 </Section>
               )}
@@ -612,7 +626,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
               {/* Node count slider — only when placement is possible */}
               {anyPlacementPossible && (
                 <Section>
-                  <SectionLabel>Nodes</SectionLabel>
+                  <SectionLabel>{t('placement.nodes', 'Nodes')}</SectionLabel>
                   <SliderRow>
                     <Slider
                       type="range"
@@ -621,7 +635,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                       value={minNodes}
                       onChange={(e) => setMinNodes(Number(e.target.value))}
                     />
-                    <SliderValue>{minNodes} of {totalNodes}</SliderValue>
+                    <SliderValue>{t('placement.nodeCount', '{selected} of {total}', { selected: minNodes, total: totalNodes })}</SliderValue>
                   </SliderRow>
                 </Section>
               )}
@@ -638,7 +652,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                 <>
                   {/* Sharding */}
                   <Section>
-                    <SectionLabel>Sharding</SectionLabel>
+                    <SectionLabel>{t('placement.sharding', 'Sharding')}</SectionLabel>
                     <OptionRow>
                       <OptionBtn
                         $selected={sharding === 'Pipeline'}
@@ -647,8 +661,8 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                           if (pipelineRing?.available || pipelineJaccl?.available) setSharding('Pipeline');
                         }}
                       >
-                        <OptionLabel $selected={sharding === 'Pipeline'}>Pipeline</OptionLabel>
-                        <OptionSub>Layers split across nodes</OptionSub>
+                        <OptionLabel $selected={sharding === 'Pipeline'}>{t('common.pipeline', 'Pipeline')}</OptionLabel>
+                        <OptionSub>{t('placement.pipelineDescription', 'Layers split across nodes')}</OptionSub>
                       </OptionBtn>
                       <OptionBtn
                         $selected={sharding === 'Tensor'}
@@ -657,8 +671,8 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                           if (tensorRing?.available || tensorJaccl?.available) setSharding('Tensor');
                         }}
                       >
-                        <OptionLabel $selected={sharding === 'Tensor'}>Tensor</OptionLabel>
-                        <OptionSub>Weights split across nodes</OptionSub>
+                        <OptionLabel $selected={sharding === 'Tensor'}>{t('common.tensor', 'Tensor')}</OptionLabel>
+                        <OptionSub>{t('placement.tensorDescription', 'Weights split across nodes')}</OptionSub>
                       </OptionBtn>
                     </OptionRow>
                     {shardingError && !canLaunch && (
@@ -668,7 +682,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
 
                   {/* Networking */}
                   <Section>
-                    <SectionLabel>Networking</SectionLabel>
+                    <SectionLabel>{t('placement.networking', 'Networking')}</SectionLabel>
                     <OptionRow>
                       <OptionBtn
                         $selected={instanceMeta === 'MlxRing'}
@@ -678,8 +692,8 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                           if (combo?.available) setInstanceMeta('MlxRing');
                         }}
                       >
-                        <OptionLabel $selected={instanceMeta === 'MlxRing'}>MLX Ring</OptionLabel>
-                        <OptionSub>Works over any network</OptionSub>
+                        <OptionLabel $selected={instanceMeta === 'MlxRing'}>{t('placement.mlxRing', 'MLX Ring')}</OptionLabel>
+                        <OptionSub>{t('placement.mlxRingDescription', 'Works over any network')}</OptionSub>
                       </OptionBtn>
                       <OptionBtn
                         $selected={instanceMeta === 'MlxJaccl'}
@@ -689,8 +703,8 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                           if (combo?.available) setInstanceMeta('MlxJaccl');
                         }}
                       >
-                        <OptionLabel $selected={instanceMeta === 'MlxJaccl'}>MLX Jaccl</OptionLabel>
-                        <OptionSub>RDMA / Thunderbolt 5</OptionSub>
+                        <OptionLabel $selected={instanceMeta === 'MlxJaccl'}>{t('placement.mlxJaccl', 'MLX Jaccl')}</OptionLabel>
+                        <OptionSub>{t('placement.mlxJacclDescription', 'RDMA / Thunderbolt 5')}</OptionSub>
                       </OptionBtn>
                     </OptionRow>
                     {networkError && (
@@ -711,7 +725,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
               disabled={!canLaunch || loading}
               onClick={handleLaunch}
             >
-              <MdPlayArrow size={18} /> Launch Model
+              <MdPlayArrow size={18} /> {t('placement.launchModel', 'Launch Model')}
             </LaunchBtn>
           </Footer>
         )}

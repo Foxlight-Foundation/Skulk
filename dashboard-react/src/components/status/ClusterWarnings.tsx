@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import styled from 'styled-components';
 import { FiAlertTriangle, FiX } from 'react-icons/fi';
 import type { TopologyData } from '../../types/topology';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 interface ClusterWarningsProps {
   topology: TopologyData | null;
@@ -16,6 +17,7 @@ interface VersionEntry {
 // Icons now from react-icons
 
 export function ClusterWarnings({ topology }: ClusterWarningsProps) {
+  const { t } = useSkulkTranslation();
   const nodes = topology?.nodes;
   const [versionDismissed, setVersionDismissed] = useState(false);
   const [rdmaDismissed, setRdmaDismissed] = useState(false);
@@ -29,11 +31,11 @@ export function ClusterWarnings({ topology }: ClusterWarningsProps) {
     const commits = new Set(entries.map((n) => n.skulk_commit));
     if (commits.size <= 1) return null;
     return entries.map((n) => ({
-      friendlyName: n.friendly_name ?? 'Unknown',
-      version: n.skulk_version ?? 'Unknown',
+      friendlyName: n.friendly_name ?? t('common.unknown', 'Unknown'),
+      version: n.skulk_version ?? t('common.unknown', 'Unknown'),
       commit: n.skulk_commit!,
     }));
-  }, [nodes]);
+  }, [nodes, t]);
 
   const rdmaPhantom = useMemo(() => {
     if (!nodes) return false;
@@ -52,27 +54,33 @@ export function ClusterWarnings({ topology }: ClusterWarningsProps) {
       {showVersion && (
         <WarningPill $color="error">
           <WarningIcon $color="error" />
-          <WarningLabel $color="error">Version Mismatch</WarningLabel>
-          <DismissButton $color="error" onClick={() => setVersionDismissed(true)} aria-label="Dismiss">
+          <WarningLabel $color="error">{t('clusterWarnings.versionMismatch', 'Version Mismatch')}</WarningLabel>
+          <DismissButton $color="error" onClick={() => setVersionDismissed(true)} aria-label={t('common.dismiss', 'Dismiss')}>
             <FiX size={14} />
           </DismissButton>
           <Tooltip className="warning-tooltip" $color="error">
             <TooltipInner $color="error">
               <p>
-                Nodes in this cluster are running different versions.
-                This will cause inference failures and unexpected behavior.
+                {t(
+                  'clusterWarnings.versionMismatchDescription',
+                  'Nodes in this cluster are running different versions. This will cause inference failures and unexpected behavior.',
+                )}
               </p>
               <NodeList>
                 {versionMismatch.map((n) => (
                   <li key={n.friendlyName}>
-                    {n.friendlyName} — v{n.version} ({n.commit})
+                    {t('clusterWarnings.versionEntry', '{friendlyName} - v{version} ({commit})', {
+                      friendlyName: n.friendlyName,
+                      version: n.version,
+                      commit: n.commit,
+                    })}
                   </li>
                 ))}
               </NodeList>
               <p>
-                <Emphasis $color="error">Action required:</Emphasis> Update all
-                nodes to the same version with{' '}
-                <Code>git pull && uv sync</Code>.
+                <Emphasis $color="error">{t('clusterWarnings.actionRequired', 'Action required:')}</Emphasis>{' '}
+                {t('clusterWarnings.updateAllNodesPrefix', 'Update all nodes to the same version with')}{' '}
+                <Code>git pull && uv sync</Code>{t('common.period', '.') }
               </p>
             </TooltipInner>
           </Tooltip>
@@ -82,22 +90,24 @@ export function ClusterWarnings({ topology }: ClusterWarningsProps) {
       {showRdma && (
         <WarningPill $color="warning">
           <WarningIcon $color="warning" />
-          <WarningLabel $color="warning">RDMA Not Available</WarningLabel>
-          <DismissButton $color="warning" onClick={() => setRdmaDismissed(true)} aria-label="Dismiss">
+          <WarningLabel $color="warning">{t('clusterWarnings.rdmaNotAvailable', 'RDMA Not Available')}</WarningLabel>
+          <DismissButton $color="warning" onClick={() => setRdmaDismissed(true)} aria-label={t('common.dismiss', 'Dismiss')}>
             <FiX size={14} />
           </DismissButton>
           <Tooltip className="warning-tooltip" $color="warning">
             <TooltipInner $color="warning">
               <p>
-                macOS reports RDMA as enabled but no RDMA network interfaces
-                exist. This typically means your hardware has Thunderbolt 4
-                ports, which do not support RDMA. Thunderbolt 5 (M4 Pro/Max
-                or newer) is required.
+                {t(
+                  'clusterWarnings.rdmaNotAvailableDescription',
+                  'macOS reports RDMA as enabled but no RDMA network interfaces exist. This typically means your hardware has Thunderbolt 4 ports, which do not support RDMA. Thunderbolt 5 (M4 Pro/Max or newer) is required.',
+                )}
               </p>
               <p>
-                <Emphasis $color="warning">Impact:</Emphasis> Tensor parallel
-                (MlxJaccl) is not available. Pipeline parallel (MlxRing) works
-                normally over Thunderbolt.
+                <Emphasis $color="warning">{t('clusterWarnings.impact', 'Impact:')}</Emphasis>{' '}
+                {t(
+                  'clusterWarnings.rdmaImpact',
+                  'Tensor parallel (MlxJaccl) is not available. Pipeline parallel (MlxRing) works normally over Thunderbolt.',
+                )}
               </p>
             </TooltipInner>
           </Tooltip>

@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import styled, { css } from 'styled-components';
 import { CAPABILITIES, SIZE_RANGES, type FilterState } from '../../types/models';
 import { Button } from '../common/Button';
+import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 export interface ModelFilterPopoverProps {
   filters: FilterState;
@@ -53,16 +54,27 @@ const ClearBtn = styled(Button)`
   align-self: flex-end;
 `;
 
-const CAPABILITY_LABELS: Record<string, string> = {
-  text: 'Text',
-  thinking: 'Thinking',
-  code: 'Code',
-  vision: 'Vision',
-  image_gen: 'Image Gen',
-  image_edit: 'Image Edit',
-};
+function capabilityLabel(capability: string, t: SkulkTranslate): string {
+  const labels: Record<string, string> = {
+    text: t('capability.text', 'Text'),
+    thinking: t('capability.thinking', 'Thinking'),
+    code: t('capability.code', 'Code'),
+    vision: t('capability.vision', 'Vision'),
+    image_gen: t('capability.imageGen', 'Image Gen'),
+    image_edit: t('capability.imageEdit', 'Image Edit'),
+  };
+  return labels[capability] ?? capability;
+}
+
+function sizeRangeLabel(range: (typeof SIZE_RANGES)[number], t: SkulkTranslate): string {
+  if (range.max === 10 * 1024) return t('modelFilter.sizeUnder10Gb', '< 10 GB');
+  if (range.max === 50 * 1024) return t('modelFilter.size10To50Gb', '10-50 GB');
+  if (range.max === 200 * 1024) return t('modelFilter.size50To200Gb', '50-200 GB');
+  return t('modelFilter.sizeOver200Gb', '> 200 GB');
+}
 
 export function ModelFilterPopover({ filters, onChange, onClear, onClose }: ModelFilterPopoverProps) {
+  const { t } = useSkulkTranslation();
   const ref = useRef<HTMLDivElement>(null);
 
   // Click-outside handler
@@ -101,7 +113,7 @@ export function ModelFilterPopover({ filters, onChange, onClear, onClose }: Mode
     <Panel ref={ref}>
       {/* Capabilities */}
       <div>
-        <SectionLabel>Capabilities</SectionLabel>
+        <SectionLabel>{t('modelInfo.capabilities', 'Capabilities')}</SectionLabel>
         <ChipRow>
           {CAPABILITIES.map((cap) => (
             <Chip
@@ -111,7 +123,7 @@ export function ModelFilterPopover({ filters, onChange, onClear, onClose }: Mode
               $active={filters.capabilities.includes(cap)}
               onClick={() => toggleCapability(cap)}
             >
-              {CAPABILITY_LABELS[cap] ?? cap}
+              {capabilityLabel(cap, t)}
             </Chip>
           ))}
         </ChipRow>
@@ -119,17 +131,17 @@ export function ModelFilterPopover({ filters, onChange, onClear, onClose }: Mode
 
       {/* Size range */}
       <div>
-        <SectionLabel>Size</SectionLabel>
+        <SectionLabel>{t('common.size', 'Size')}</SectionLabel>
         <ChipRow>
           {SIZE_RANGES.map((r) => (
             <Chip
-              key={r.label}
+              key={`${r.min}-${r.max}`}
               variant="outline"
               size="sm"
               $active={filters.sizeRange?.min === r.min && filters.sizeRange?.max === r.max}
               onClick={() => toggleSizeRange(r.min, r.max)}
             >
-              {r.label}
+              {sizeRangeLabel(r, t)}
             </Chip>
           ))}
         </ChipRow>
@@ -137,7 +149,7 @@ export function ModelFilterPopover({ filters, onChange, onClear, onClose }: Mode
 
       {/* Availability */}
       <div>
-        <SectionLabel>Availability</SectionLabel>
+        <SectionLabel>{t('modelFilter.availability', 'Availability')}</SectionLabel>
         <ChipRow>
           <Chip
             variant="outline"
@@ -145,7 +157,7 @@ export function ModelFilterPopover({ filters, onChange, onClear, onClose }: Mode
             $active={filters.downloadedOnly}
             onClick={() => onChange({ ...filters, downloadedOnly: !filters.downloadedOnly })}
           >
-            Downloaded
+            {t('modelFilter.downloaded', 'Downloaded')}
           </Chip>
           <Chip
             variant="outline"
@@ -153,12 +165,12 @@ export function ModelFilterPopover({ filters, onChange, onClear, onClose }: Mode
             $active={filters.readyOnly}
             onClick={() => onChange({ ...filters, readyOnly: !filters.readyOnly })}
           >
-            Ready
+            {t('common.ready', 'Ready')}
           </Chip>
         </ChipRow>
       </div>
 
-      {hasActiveFilters && <ClearBtn variant="ghost" size="sm" onClick={onClear}>Clear all</ClearBtn>}
+      {hasActiveFilters && <ClearBtn variant="ghost" size="sm" onClick={onClear}>{t('modelFilter.clearAll', 'Clear all')}</ClearBtn>}
     </Panel>
   );
 }

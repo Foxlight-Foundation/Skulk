@@ -12,6 +12,7 @@ import {
 import { LiveTab } from './LiveTab';
 import { NodeTab } from './NodeTab';
 import { TracesTab } from './TracesTab';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 /**
  * Right-side resizable panel that hosts every observability surface — live cluster
@@ -150,13 +151,14 @@ const Body = styled.div`
   flex-direction: column;
 `;
 
-const TAB_ORDER: { key: ObservabilityTab; label: string }[] = [
-  { key: 'live', label: 'Live' },
-  { key: 'node', label: 'Node' },
-  { key: 'traces', label: 'Traces' },
+const TAB_ORDER: { key: ObservabilityTab }[] = [
+  { key: 'live' },
+  { key: 'node' },
+  { key: 'traces' },
 ];
 
 export function ObservabilityPanel() {
+  const { t } = useSkulkTranslation();
   const dispatch = useAppDispatch();
   const open = useAppSelector((s) => s.ui.observabilityPanelOpen);
   const activeTab = useAppSelector((s) => s.ui.observabilityActiveTab);
@@ -248,21 +250,21 @@ export function ObservabilityPanel() {
         $width={width}
         ref={asideRef}
         id="observability-panel"
-        aria-label="Observability panel"
+        aria-label={t('observability.panelAria', 'Observability panel')}
       >
         <ResizeHandle
           onPointerDown={onResizeStart}
           role="separator"
           aria-orientation="vertical"
-          aria-label="Resize observability panel"
+          aria-label={t('observability.resizePanel', 'Resize observability panel')}
         />
         <Header>
-          <Title>Observability</Title>
-          <Button variant="ghost" size="sm" onClick={close} aria-label="Close observability panel">
+          <Title>{t('header.observability', 'Observability')}</Title>
+          <Button variant="ghost" size="sm" onClick={close} aria-label={t('observability.closePanel', 'Close observability panel')}>
             <FiX size={16} />
           </Button>
         </Header>
-        <TabBar role="tablist" aria-label="Observability views">
+        <TabBar role="tablist" aria-label={t('observability.views', 'Observability views')}>
           {TAB_ORDER.map((tab) => (
             <TabButton
               key={tab.key}
@@ -273,7 +275,11 @@ export function ObservabilityPanel() {
               id={`observability-tab-${tab.key}`}
               onClick={() => setTab(tab.key)}
             >
-              {tab.label}
+              {tab.key === 'live'
+                ? t('observability.tabs.live', 'Live')
+                : tab.key === 'node'
+                  ? t('observability.tabs.node', 'Node')
+                  : t('observability.tabs.traces', 'Traces')}
             </TabButton>
           ))}
         </TabBar>
