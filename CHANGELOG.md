@@ -151,19 +151,6 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
-- **Back-to-back placements no longer spuriously fail right after a teardown.**
-  Tearing an instance down frees GPU memory that takes a moment to reflect in
-  gossiped `ram_available` (the worker re-samples only after the runner process
-  exits and Metal/VRAM reclaims, then gossips it). A placement attempted in that
-  window saw stale-low memory and returned "No usable placement preview found" /
-  a 400, which made tear-down-then-place loops (the test matrix, redeploys) fail
-  on a transient. The API placement dry-run and previews now wait for the freed
-  memory to settle (`_POST_TEARDOWN_SETTLE_SECONDS`) before declaring no fit,
-  only within a window after a teardown this node served. It waits for memory to
-  actually free rather than crediting it optimistically, so there is no
-  over-admit; the worker's local pre-spawn guard stays the backstop, and a cold
-  request with no recent teardown still fails fast on a genuine shortfall.
-
 - **Placement now admits GPU-offload nodes against their discrete VRAM, not
   system RAM.** The memory fit check capped every node at
   `GPU_WORKING_SET_FRACTION` (0.75) of *system* RAM, a Metal/Apple-unified-memory

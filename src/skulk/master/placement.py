@@ -182,18 +182,6 @@ class PlacementInfoPendingError(PlacementError):
     """
 
 
-class PlacementMemoryError(PlacementError):
-    """No cycle has enough memory to hold the model right now.
-
-    Distinct from other ``PlacementError``s (excluded nodes, backend mismatch,
-    unsupported sharding) so a caller can treat it as possibly-transient: right
-    after an instance teardown the freed memory may not have reflected in
-    gossiped telemetry yet, so a memory shortfall can clear on its own where a
-    backend/topology error never will. The API placement path waits out a
-    post-teardown settle window only for this subclass.
-    """
-
-
 def place_instance(
     command: PlaceInstance,
     topology: Topology,
@@ -328,7 +316,7 @@ def place_instance(
             if memory_diagnostics.rejection_reasons
             else "no candidate cycles to evaluate"
         )
-        raise PlacementMemoryError(
+        raise PlacementError(
             f"No candidate cycle fits {command.model_card.model_id} "
             f"({command.model_card.storage_size.in_gb:.1f}GB of weights): {detail}"
         )
