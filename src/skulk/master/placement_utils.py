@@ -104,15 +104,18 @@ def usable_vram_by_node(
       GPU_VRAM_WORKING_SET_FRACTION)``. VRAM is a dedicated pool reported
       separately from system RAM, so placement admits against VRAM, not
       ``0.75 * system_ram``, and never assumes the whole card is free.
-    * Unified-memory APU (e.g. AMD Strix Halo, where the accelerator reports
-      ``gtt_total_bytes >= vram_total_bytes``, i.e. GTT spans system memory):
-      the GPU addresses the BIOS VRAM carve-out PLUS system RAM mapped through
-      GTT, so a model larger than the carve-out runs there. Usable GPU memory is
-      the available VRAM plus the system RAM the GPU can map via GTT, leaving
-      ``UMA_GPU_OS_HEADROOM`` for the OS + worker + download staging:
-      ``vram_avail + min(max(0, ram_available - UMA_GPU_OS_HEADROOM),
-      gtt_total)``. The UMA path needs the node's current ``ram_available`` from
-      ``node_memory``; without that entry it falls back to the discrete path.
+    * Unified-memory APU (e.g. AMD Strix Halo), detected when the GTT aperture
+      spans the whole system (``gtt_total > vram_total`` AND ``gtt_total >=
+      ram_total``): the GPU addresses the BIOS VRAM carve-out PLUS system RAM
+      mapped through GTT, so a model larger than the carve-out runs there. Usable
+      GPU memory is the working-set-capped VRAM plus the system RAM the GPU can
+      map via GTT, leaving ``UMA_GPU_OS_HEADROOM`` for the OS + worker + download
+      staging: ``min(vram_avail, vram_total * GPU_VRAM_WORKING_SET_FRACTION) +
+      min(max(0, ram_available - UMA_GPU_OS_HEADROOM), gtt_total)``. The UMA path
+      needs the node's current memory from ``node_memory``; without that entry it
+      falls back to the discrete path. A discrete GPU also exposes a GTT total
+      (often ~= VRAM), so requiring GTT to cover all of system RAM is what keeps
+      it off this path.
     """
     node_memory = node_memory or {}
     usable: dict[NodeId, Memory] = {}
@@ -129,20 +132,34 @@ def usable_vram_by_node(
                 continue
         used = accelerator.vram_used_bytes or 0
         vram_avail = max(0, total - used)
+        ceiling = int(total * GPU_VRAM_WORKING_SET_FRACTION)
+        vram_usable = min(vram_avail, ceiling)
         gtt_total = accelerator.gtt_total_bytes
         memory = node_memory.get(node_id)
-        if gtt_total is not None and gtt_total >= total and memory is not None:
+        # UMA signature: the GTT aperture spans the WHOLE system, i.e. it both
+        # exceeds the VRAM carve-out AND covers all of system RAM. A discrete AMD
+        # GPU also exposes ``mem_info_gtt_total`` (its default can equal VRAM), so
+        # ``gtt_total >= vram_total`` alone would misclassify a discrete card as
+        # unified and over-admit; requiring ``gtt_total >= ram_total`` keeps a
+        # discrete GPU (gtt ~= vram < system RAM) on the conservative VRAM-only
+        # path.
+        if (
+            gtt_total is not None
+            and gtt_total > total
+            and memory is not None
+            and gtt_total >= memory.ram_total.in_bytes
+        ):
             # GTT spans host RAM, so the GPU can map system memory beyond the
             # BIOS VRAM carve-out; count it (minus OS headroom) toward the pool,
-            # capped by what GTT itself can address.
+            # capped by what GTT itself can address. The VRAM portion still keeps
+            # its working-set headroom for driver/fragmentation overhead.
             sys_for_gpu = min(
                 max(0, memory.ram_available.in_bytes - UMA_GPU_OS_HEADROOM.in_bytes),
                 gtt_total,
             )
-            usable[node_id] = Memory.from_bytes(vram_avail + sys_for_gpu)
+            usable[node_id] = Memory.from_bytes(vram_usable + sys_for_gpu)
             continue
-        ceiling = int(total * GPU_VRAM_WORKING_SET_FRACTION)
-        usable[node_id] = Memory.from_bytes(min(vram_avail, ceiling))
+        usable[node_id] = Memory.from_bytes(vram_usable)
     return usable
 
 
