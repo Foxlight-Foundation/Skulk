@@ -22,6 +22,16 @@ class BaseShardMetadata(TaggedModel):
     device_rank: int
     world_size: int
 
+    # The backend tag (e.g. "llama_cpp-vulkan") the master resolved for THIS
+    # node at placement time, intersecting the card's compatible_backends with
+    # the node's advertised backends. Persisting it makes worker engine dispatch
+    # deterministic from replicated state instead of a node-local re-probe, and
+    # lets a card legitimately resolve to different engines per node on a
+    # heterogeneous cycle. ``None`` means the master did not record one (e.g. it
+    # lacked the node's resources at placement); the worker then falls back to
+    # its local backend probe. See #330.
+    resolved_backend: str | None = None
+
     # Error handling; equivalent to monkey-patch, but we can't monkey-patch runner.py
     # This is kinda annoying because it allocates memory in the ShardMetadata object. Can be rethought after Shanghai.
     immediate_exception: bool = False

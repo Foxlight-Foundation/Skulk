@@ -78,6 +78,30 @@ def engine_of(tag: str) -> EngineType | None:
     return None
 
 
+def resolve_node_backend(
+    compatible_backends: frozenset[str],
+    backend_preference: tuple[str, ...],
+    node_backends: frozenset[str],
+) -> str | None:
+    """Resolve the winning backend TAG a node should use to serve a model.
+
+    Intersects the card's ``compatible_backends`` (hard filter) with the node's
+    advertised ``node_backends``, orders the result by ``backend_preference``
+    (preferred tags first, then the rest deterministically), and returns the top
+    tag (e.g. ``"llama_cpp-vulkan"``). Returns ``None`` when the node advertises
+    none of the model's compatible backends. This is the single point that turns
+    the backend-tag vocabulary into a concrete choice; both the master (to stamp
+    ``resolved_backend`` on a shard at placement, #330) and the worker (to pick a
+    runner) go through it so the two cannot disagree.
+    """
+    intersection = compatible_backends & node_backends
+    if not intersection:
+        return None
+    ordered = [tag for tag in backend_preference if tag in intersection]
+    ordered += [tag for tag in sorted(intersection) if tag not in backend_preference]
+    return ordered[0]
+
+
 def resolve_node_engine(
     compatible_backends: frozenset[str],
     backend_preference: tuple[str, ...],
@@ -85,20 +109,13 @@ def resolve_node_engine(
 ) -> EngineType | None:
     """Resolve which engine a node should use to serve a model.
 
-    Intersects the card's ``compatible_backends`` (hard filter) with the node's
-    advertised ``node_backends``, orders the result by ``backend_preference``
-    (preferred tags first, then the rest deterministically), and returns the
-    engine of the winning tag. Returns ``None`` when the node advertises none of
-    the model's compatible backends (which placement should already have ruled
-    out, so the caller treats it as "fall back to the default engine"). This is
-    the single point that turns the backend-tag vocabulary into a runner choice.
+    Thin wrapper over :func:`resolve_node_backend` that maps the winning tag to
+    its engine. Returns ``None`` when the node advertises none of the model's
+    compatible backends (which placement should already have ruled out, so the
+    caller treats it as "fall back to the default engine").
     """
-    intersection = compatible_backends & node_backends
-    if not intersection:
-        return None
-    ordered = [tag for tag in backend_preference if tag in intersection]
-    ordered += [tag for tag in sorted(intersection) if tag not in backend_preference]
-    return engine_of(ordered[0])
+    tag = resolve_node_backend(compatible_backends, backend_preference, node_backends)
+    return engine_of(tag) if tag is not None else None
 
 
 def _llama_cpp_gpu_offload_supported() -> bool | None:

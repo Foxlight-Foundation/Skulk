@@ -263,6 +263,63 @@ def test_placement_stamps_context_token_limit() -> None:
     assert instance.context_token_limit <= 4096
 
 
+def test_placement_stamps_resolved_backend() -> None:
+    # #330: the master resolves each node's backend at placement time and stamps
+    # it on the shard, so the worker dispatches from replicated state instead of
+    # re-probing. A node advertising {"mlx"} for an mlx card -> resolved "mlx".
+    topology = Topology()
+    node_id = NodeId()
+    topology.add_node(node_id)
+    node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
+    node_network = {node_id: create_node_network()}
+    node_resources = {
+        node_id: NodeResources(
+            backends=frozenset({"mlx", "mlx-metal"}), participation="full"
+        )
+    }
+    cic = place_instance_command(
+        ModelCard(
+            model_id=ModelId("test-model"),
+            storage_size=Memory.from_gb(5),
+            n_layers=10,
+            hidden_size=1000,
+            supports_tensor=True,
+            tasks=[ModelTask.TextGeneration],
+        ),
+    )
+    placements = place_instance(
+        cic, topology, {}, node_memory, node_network, node_resources=node_resources
+    )
+    instance = next(iter(placements.values()))
+    shard = next(iter(instance.shard_assignments.runner_to_shard.values()))
+    assert shard.resolved_backend == "mlx"
+
+
+def test_placement_leaves_resolved_backend_none_without_node_resources() -> None:
+    # When the master has no resources entry for the node (gossip warming up), it
+    # cannot resolve a backend; resolved_backend stays None and the worker falls
+    # back to its local probe.
+    topology = Topology()
+    node_id = NodeId()
+    topology.add_node(node_id)
+    node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
+    node_network = {node_id: create_node_network()}
+    cic = place_instance_command(
+        ModelCard(
+            model_id=ModelId("test-model"),
+            storage_size=Memory.from_gb(5),
+            n_layers=10,
+            hidden_size=1000,
+            supports_tensor=True,
+            tasks=[ModelTask.TextGeneration],
+        ),
+    )
+    placements = place_instance(cic, topology, {}, node_memory, node_network)
+    instance = next(iter(placements.values()))
+    shard = next(iter(instance.shard_assignments.runner_to_shard.values()))
+    assert shard.resolved_backend is None
+
+
 def test_get_instance_placements_one_node_not_fit() -> None:
     topology = Topology()
     node_id = NodeId()

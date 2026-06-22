@@ -7,6 +7,20 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Changed
+
+- **Placement now records the resolved backend on each shard (#330).** The master
+  resolves which backend a node will use (the card's `compatible_backends`
+  intersected with that node's advertised backends, ordered by
+  `backend_preference`) at placement time and stamps the winning tag onto the
+  node's shard as `resolved_backend`. The worker reads it at runner-spawn instead
+  of re-probing its own backends, so engine dispatch is deterministic from
+  replicated state and cannot disagree with the placement decision; it also lets
+  a card resolve to different engines per node on a heterogeneous cycle. The
+  worker falls back to its local probe when the field is absent (a node whose
+  resources had not yet gossiped at placement). Foundation for pluggable engines
+  (#284) and multi-node llama.cpp (#328).
+
 ### Removed
 
 - **The `EXO_*` environment-variable deprecation runway is gone (#324).** Legacy

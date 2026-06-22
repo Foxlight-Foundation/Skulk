@@ -12,7 +12,7 @@ from skulk.master.placement_utils import (
     get_shard_assignments,
     get_smallest_cycles,
 )
-from skulk.shared.backends import engine_of
+from skulk.shared.backends import engine_of, resolve_node_backend
 from skulk.shared.models.memory_estimate import instance_context_token_limit
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.topology import Topology
@@ -51,6 +51,7 @@ from skulk.shared.types.worker.instances import (
     MlxJacclInstance,
     MlxRingInstance,
 )
+from skulk.shared.types.worker.runners import ShardAssignments
 from skulk.shared.types.worker.shards import Sharding, TensorShardMetadata
 
 
@@ -402,6 +403,35 @@ def place_instance(
 
     shard_assignments = get_shard_assignments(
         command.model_card, selected_cycle, command.sharding, node_memory, node_vram
+    )
+
+    # Persist the per-node resolved backend tag on each shard (#330). The worker
+    # then dispatches its runner from this replicated value instead of
+    # re-probing its own backends at spawn time, which also lets a card resolve
+    # to different engines per node on a heterogeneous cycle. Resolution uses the
+    # same resolve_node_backend the worker would, against the master's telemetry
+    # view of each node's advertised backends. A node absent from node_resources
+    # leaves resolved_backend=None, and the worker falls back to its local probe.
+    compatible_backends = command.model_card.placement.compatible_backends
+    stamped_runner_to_shard = dict(shard_assignments.runner_to_shard)
+    for node_id, runner_id in shard_assignments.node_to_runner.items():
+        resources = resolved_node_resources.get(node_id)
+        resolved_backend = (
+            resolve_node_backend(
+                compatible_backends, backend_preference, resources.backends
+            )
+            if resources is not None
+            else None
+        )
+        if resolved_backend is not None:
+            shard = stamped_runner_to_shard[runner_id]
+            stamped_runner_to_shard[runner_id] = shard.model_copy(
+                update={"resolved_backend": resolved_backend}
+            )
+    shard_assignments = ShardAssignments(
+        model_id=shard_assignments.model_id,
+        runner_to_shard=stamped_runner_to_shard,
+        node_to_runner=shard_assignments.node_to_runner,
     )
 
     # Stamp the context-admission ceiling into the placement decision (#279
