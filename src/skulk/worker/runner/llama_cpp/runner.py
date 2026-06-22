@@ -19,7 +19,7 @@ cleanly on nodes (e.g. Macs) where the binding is not installed.
 import os
 import time
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from anyio import WouldBlock
 
@@ -84,15 +84,153 @@ def select_gguf_file(model_dir: Path) -> Path:
     return candidates[0]
 
 
+# Map a model card's vision family (``VisionCardConfig.model_type``) to the
+# llama-cpp-python chat handler that knows how to splice that family's image
+# features. ``MTMDChatHandler`` is the modern unified multimodal handler in
+# current llama.cpp and the safe default for any family without a bespoke entry.
+# Handler classes are resolved lazily (by name) so importing this module never
+# requires the vision symbols, which only exist on a vision-capable build.
+_VISION_HANDLER_BY_MODEL_TYPE: dict[str, str] = {
+    "gemma4": "Gemma4ChatHandler",
+    "gemma3": "Gemma4ChatHandler",
+    "qwen-vl": "Qwen25VLChatHandler",
+    "qwen2.5-vl": "Qwen25VLChatHandler",
+    "qwen2_vl": "Qwen25VLChatHandler",
+    "minicpm": "MiniCPMv26ChatHandler",
+    "minicpmv": "MiniCPMv26ChatHandler",
+    "llava": "Llava16ChatHandler",
+    "llava-1.6": "Llava16ChatHandler",
+    "llava-1.5": "Llava15ChatHandler",
+    "moondream": "MoondreamChatHandler",
+    "nanollava": "NanoLlavaChatHandler",
+}
+_DEFAULT_VISION_HANDLER: Final = "MTMDChatHandler"
+
+
+def find_mmproj_file(model_dir: "Path") -> "Path | None":
+    """Return the multimodal projector GGUF in a staged model dir, or ``None``.
+
+    A vision GGUF repo ships its projector as a separate ``*mmproj*.gguf`` (kept
+    by the download allow-list since #346). ``select_gguf_file`` deliberately
+    skips it when picking the LM weights, so the runner locates it here to hand
+    to the vision chat handler. Returns the first match (repos ship one), or
+    ``None`` for a text-only model.
+    """
+    candidates = sorted(model_dir.glob("**/*.gguf"))
+    for path in candidates:
+        if "mmproj" in path.name.lower():
+            return path
+    return None
+
+
+def _build_vision_chat_handler(model_type: str, mmproj_path: "Path") -> object | None:
+    """Construct the llama-cpp-python vision chat handler for a model family.
+
+    Resolves the handler class named by ``_VISION_HANDLER_BY_MODEL_TYPE`` (or the
+    ``MTMDChatHandler`` default) from ``llama_cpp.llama_chat_format`` and builds
+    it with the projector path. Returns ``None`` if the installed binding lacks
+    the chosen handler (an older / non-vision build), so the caller can fail with
+    a clear message rather than crash on import.
+    """
+    handler_name = _VISION_HANDLER_BY_MODEL_TYPE.get(
+        model_type.lower(), _DEFAULT_VISION_HANDLER
+    )
+    import llama_cpp.llama_chat_format as chat_format
+
+    handler_cls = getattr(chat_format, handler_name, None)
+    if handler_cls is None:
+        handler_cls = getattr(chat_format, _DEFAULT_VISION_HANDLER, None)
+    if handler_cls is None:
+        return None
+    logger.info(
+        f"vision: {handler_cls.__name__} clip_model_path={mmproj_path.name}"
+    )
+    return handler_cls(clip_model_path=str(mmproj_path), verbose=False)
+
+
+def _image_data_uri(b64: str) -> str:
+    """Wrap a raw base64 image as a ``data:`` URI llama.cpp's vision handler reads.
+
+    Sniffs the format from the decoded magic bytes (PNG vs JPEG vs GIF vs WEBP)
+    so the MIME label is accurate; defaults to ``image/png`` when unrecognized.
+    The handler base64-decodes and re-sniffs anyway, so the label is advisory,
+    but an accurate one avoids surprising a stricter decoder.
+    """
+    import base64
+
+    mime = "image/png"
+    try:
+        head = base64.b64decode(b64[:24], validate=False)
+        if head.startswith(b"\xff\xd8\xff"):
+            mime = "image/jpeg"
+        elif head.startswith(b"GIF8"):
+            mime = "image/gif"
+        elif head[8:12] == b"WEBP":
+            mime = "image/webp"
+    except Exception:  # noqa: BLE001 - format sniff is best-effort, default png
+        pass
+    return f"data:{mime};base64,{b64}"
+
+
+def _splice_images_into_messages(
+    messages: list[dict[str, Any]], images: list[str]
+) -> list[dict[str, Any]]:
+    """Turn the MLX-shaped ``{"type": "image"}`` placeholders into llama.cpp's
+    OpenAI ``image_url`` parts, pulling base64 data from ``images`` in order.
+
+    The API renders ``chat_template_messages`` for the MLX path: image parts are
+    bare ``{"type": "image"}`` placeholders and the actual base64 lives in the
+    ordered ``task_params.images`` list (embedding fusion happens later for MLX).
+    llama.cpp instead wants the image bytes inline in the message content as
+    ``{"type": "image_url", "image_url": {"url": "data:..."}}``, which its vision
+    chat handler decodes. Walk the messages and replace each placeholder with the
+    next image (by position), leaving text parts untouched. Returns the messages
+    unchanged when there are no images.
+    """
+    if not images:
+        return messages
+    image_iter = iter(images)
+    spliced: list[dict[str, Any]] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            spliced.append(message)
+            continue
+        new_parts: list[dict[str, Any]] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "image":
+                b64 = next(image_iter, None)
+                if b64 is None:
+                    # More placeholders than images: drop the stray placeholder
+                    # rather than emit a malformed part.
+                    continue
+                new_parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": _image_data_uri(b64)},
+                    }
+                )
+            else:
+                new_parts.append(part)
+        spliced.append({**message, "content": new_parts})
+    return spliced
+
+
 def messages_for_llama(task_params: TextGenerationTaskParams) -> list[dict[str, Any]]:
     """Build the chat-completion messages llama.cpp's chat template expects.
 
     Prefers ``chat_template_messages`` (already-rendered OpenAI-style dicts that
-    the API populates on the chat path). Falls back to reconstructing a minimal
-    message list from ``instructions`` + ``input`` when that is absent.
+    the API populates on the chat path). When the request carries images, the
+    MLX-shaped ``{"type": "image"}`` placeholders are rewritten into llama.cpp's
+    inline ``image_url`` data-URI parts (see ``_splice_images_into_messages``) so
+    a vision GGUF's chat handler receives the image bytes. Falls back to
+    reconstructing a minimal message list from ``instructions`` + ``input`` when
+    no rendered messages are present.
     """
     if task_params.chat_template_messages:
-        return task_params.chat_template_messages
+        return _splice_images_into_messages(
+            task_params.chat_template_messages, task_params.images
+        )
     messages: list[dict[str, Any]] = []
     if task_params.instructions:
         messages.append({"role": "system", "content": task_params.instructions})
@@ -426,9 +564,29 @@ class Runner:
         # _logits_all_enabled / _logits_all_n_ctx.
         logits_all = _logits_all_enabled()
         n_ctx = _serving_n_ctx(self.context_token_limit, logits_all)
+        # Vision GGUF (#128): when the card declares a vision config, load the
+        # multimodal projector via the family's chat handler so image inputs are
+        # spliced server-side by llama.cpp. Text-only cards take the plain path.
+        vision = self.shard_metadata.model_card.vision
+        chat_handler: object | None = None
+        if vision is not None:
+            mmproj_path = find_mmproj_file(model_dir)
+            if mmproj_path is None:
+                raise RuntimeError(
+                    f"vision model {model_id} declares a vision config but no "
+                    f"mmproj projector GGUF was found in {model_dir}; the "
+                    "projector download may have failed"
+                )
+            chat_handler = _build_vision_chat_handler(vision.model_type, mmproj_path)
+            if chat_handler is None:
+                raise RuntimeError(
+                    f"vision model {model_id} needs a llama.cpp vision chat "
+                    f"handler for model_type={vision.model_type!r}, but the "
+                    "installed llama-cpp-python build exposes none"
+                )
         logger.info(
             f"loading GGUF {gguf_path.name} for {model_id} "
-            f"(n_ctx={n_ctx}, logits_all={logits_all})"
+            f"(n_ctx={n_ctx}, logits_all={logits_all}, vision={vision is not None})"
         )
         self.model = Llama(
             model_path=str(gguf_path),
@@ -436,6 +594,7 @@ class Runner:
             n_ctx=n_ctx,
             logits_all=logits_all,
             verbose=False,
+            chat_handler=chat_handler,
         )
         self.current_status = RunnerReady()
         logger.info(
