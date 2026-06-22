@@ -12,7 +12,11 @@ from skulk.master.placement_utils import (
     get_shard_assignments,
     get_smallest_cycles,
 )
-from skulk.shared.backends import engine_of, resolve_node_backend
+from skulk.shared.backends import (
+    engine_of,
+    engine_supports_multi_node,
+    resolve_node_backend,
+)
 from skulk.shared.models.memory_estimate import instance_context_token_limit
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.topology import Topology
@@ -268,22 +272,30 @@ def place_instance(
                     f"({sorted(compatible_backends)})."
                 )
 
-    # Single-node engine guard. The llama.cpp runner is single-node only (no ring
-    # / ConnectToGroup), so a multi-node placement of a llama.cpp-only model would
-    # download and then crash at runner startup (world_size != 1). Reject it up
-    # front: restrict candidates to single-node cycles when every compatible
-    # backend resolves to the llama_cpp engine. (A card that also allows an MLX
-    # backend can still place multi-node via MLX, so this only bites llama.cpp-only
-    # models.) This also forecloses a mixed-backend multi-node cycle (no single
-    # backend shared by all ranks), since llama.cpp is the only non-MLX engine.
+    # Single-node engine guard. Some engines cannot shard a model across nodes
+    # (today: llama.cpp -- single-node only, its multi-node RPC backend is not yet
+    # wired into the runner, which asserts world_size == 1; see #328). A
+    # multi-node placement of a model whose only compatible engine is single-node
+    # would download and then crash at runner startup. Reject it up front: when
+    # none of the card's compatible backends resolve to a multi-node-capable
+    # engine, restrict candidates to single-node cycles. A card that also allows a
+    # multi-node engine (e.g. MLX) can still place multi-node via that engine, so
+    # this only bites models whose every engine is single-node. The capability
+    # lives in `engine_supports_multi_node`; flipping llama.cpp there (once its
+    # RPC runner lands) lets such models place multi-node with no change here.
     card_backends = command.model_card.placement.compatible_backends
-    if card_backends and all(engine_of(tag) == "llama_cpp" for tag in card_backends):
+    has_multi_node_engine = any(
+        engine_supports_multi_node(engine)
+        for tag in card_backends
+        if (engine := engine_of(tag)) is not None
+    )
+    if card_backends and not has_multi_node_engine:
         candidate_cycles = [cycle for cycle in candidate_cycles if len(cycle) == 1]
         if not candidate_cycles:
             raise PlacementError(
-                "llama.cpp models are single-node only, but no single-node cycle "
-                "is available/eligible for this model. Place it on one node, or "
-                "free a node that advertises a compatible llama.cpp backend."
+                "This model's engine is single-node only, but no single-node "
+                "cycle is available/eligible for it. Place it on one node, or "
+                "free a node that advertises a compatible backend."
             )
 
     # Filter to cycles containing all required nodes (subset matching)

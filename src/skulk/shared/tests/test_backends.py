@@ -9,6 +9,7 @@ from skulk.shared import backends
 from skulk.shared.backends import (
     LLAMA_CPP_BACKENDS_ENV,
     engine_of,
+    engine_supports_multi_node,
     make_backend_tag,
     probe_node_backends,
     resolve_node_backend,
@@ -190,3 +191,10 @@ def test_resolve_node_engine_matches_backend_engine() -> None:
     tag = resolve_node_backend(compatible, preference, node)
     assert tag == "llama_cpp-vulkan"
     assert resolve_node_engine(compatible, preference, node) == engine_of(tag)
+
+
+def test_engine_supports_multi_node() -> None:
+    # MLX shards across nodes (ring/jaccl); llama.cpp is single-node until its
+    # RPC runner lands (#328). This is the placement single-node guard's hinge.
+    assert engine_supports_multi_node("mlx") is True
+    assert engine_supports_multi_node("llama_cpp") is False
