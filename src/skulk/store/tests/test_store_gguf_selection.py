@@ -105,3 +105,60 @@ def test_single_quant_repo_keeps_quant_and_config() -> None:
     ]
     kept = {e.path for e in select_store_gguf_download_files(files)}
     assert kept == {"config.json", "model-Q4_K_M.gguf"}
+
+
+def test_pinned_quant_overrides_default_preference() -> None:
+    # #344: when the card pins a non-default quant, the store fetches THAT quant's
+    # shard group, not its default preference (Q4_K_M).
+    files = [
+        _entry("config.json"),
+        _entry("model-Q4_K_M.gguf", 800),  # would be the default pick
+        _entry("model-Q8_0.gguf", 1300),
+    ]
+    kept = {e.path for e in select_store_gguf_download_files(files, "model-Q8_0.gguf")}
+    assert kept == {"config.json", "model-Q8_0.gguf"}
+
+
+def test_pinned_sharded_quant_keeps_its_whole_group() -> None:
+    files = [
+        _entry("config.json"),
+        _entry("m-Q4_K_M.gguf", 800),
+        _entry("m-Q6_K-00001-of-00002.gguf", 900),
+        _entry("m-Q6_K-00002-of-00002.gguf", 950),
+    ]
+    kept = {
+        e.path
+        for e in select_store_gguf_download_files(files, "m-Q6_K-00001-of-00002.gguf")
+    }
+    assert kept == {
+        "config.json",
+        "m-Q6_K-00001-of-00002.gguf",
+        "m-Q6_K-00002-of-00002.gguf",
+    }
+
+
+def test_pin_absent_from_repo_falls_back_to_default() -> None:
+    # A stale/typo'd pin not present in the repo degrades to the default pick
+    # rather than selecting nothing.
+    files = [
+        _entry("config.json"),
+        _entry("model-Q4_K_M.gguf", 800),
+        _entry("model-Q8_0.gguf", 1300),
+    ]
+    kept = {
+        e.path for e in select_store_gguf_download_files(files, "model-Q3_K_M.gguf")
+    }
+    assert kept == {"config.json", "model-Q4_K_M.gguf"}  # default preference
+
+
+def test_pinned_none_matches_prior_default_behavior() -> None:
+    files = [
+        _entry("config.json"),
+        _entry("model-Q4_K_M.gguf", 800),
+        _entry("model-Q8_0.gguf", 1300),
+    ]
+    assert (
+        {e.path for e in select_store_gguf_download_files(files, None)}
+        == {e.path for e in select_store_gguf_download_files(files)}
+        == {"config.json", "model-Q4_K_M.gguf"}
+    )

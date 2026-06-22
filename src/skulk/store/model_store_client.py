@@ -432,6 +432,7 @@ class ModelStoreClient:
         on_progress: Callable[[float], Awaitable[None]] | None = None,
         timeout: float = 7200,
         poll_interval: float = 5.0,
+        pinned_gguf: str | None = None,
     ) -> bool:
         """Request the store host download a model from HuggingFace, then wait.
 
@@ -443,6 +444,10 @@ class ModelStoreClient:
             on_progress: Called with progress (0.0-1.0) on each poll.
             timeout: Maximum wait time in seconds.
             poll_interval: Seconds between status polls.
+            pinned_gguf: The card's pinned GGUF file (``ModelCard.gguf_file``),
+                sent in the POST body so the store fetches that quant's shard
+                group rather than its default (#344). ``None`` for non-GGUF
+                models or when no pin applies.
 
         Returns:
             ``True`` if download completed successfully.
@@ -455,13 +460,17 @@ class ModelStoreClient:
 
         encoded_id = quote(model_id, safe="")
 
-        # Request download
+        # Request download. Send the pinned quant in the body when present; an
+        # older store host ignores the unknown body and uses its default (#344).
         url = _make_store_url(
             self._store_host, self._store_port, f"/models/{encoded_id}/download"
         )
+        post_kwargs: dict[str, object] = (
+            {"json": {"gguf_file": pinned_gguf}} if pinned_gguf else {}
+        )
         async with (
             create_http_session(timeout_profile="short") as session,
-            session.post(url) as resp,
+            session.post(url, **post_kwargs) as resp,  # pyright: ignore[reportArgumentType]
         ):
             if resp.status not in (200, 201):
                 raise RuntimeError(f"Store download request failed: HTTP {resp.status}")
@@ -921,6 +930,9 @@ class ModelStoreDownloader(ShardDownloader):
                     on_progress=lambda _p: self._emit_progress(
                         shard, status="in_progress"
                     ),
+                    # Forward the card's pinned quant so the store fetches it
+                    # rather than its default preference (#344).
+                    pinned_gguf=shard.model_card.gguf_file,
                 )
             except (RuntimeError, TimeoutError) as exc:
                 raise ModelNotInStoreError(

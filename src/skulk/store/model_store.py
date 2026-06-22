@@ -75,6 +75,7 @@ from skulk.shared.types.worker.downloads import FileListEntry
 
 def select_store_gguf_download_files(
     file_list: list[FileListEntry],
+    pinned_gguf: str | None = None,
 ) -> list[FileListEntry]:
     """Filter a repo's file list to what the store host should download (#339).
 
@@ -89,6 +90,11 @@ def select_store_gguf_download_files(
 
     Args:
         file_list: The full recursive repo file list.
+        pinned_gguf: The card's pinned GGUF file (``ModelCard.gguf_file``), when
+            the requester carries one. The store fetches *that* quant's shard
+            group, honoring a custom/non-default pin (#344). When ``None`` (or
+            the pin is absent from the repo) the store falls back to the default
+            quant preference, matching the prior behavior.
 
     Returns:
         The subset to download. Identical to the input for non-GGUF repos.
@@ -108,9 +114,22 @@ def select_store_gguf_download_files(
     if not gguf_weights:
         return file_list  # not a GGUF repo (or vision-only projector): unchanged
 
-    selected = select_preferred_gguf(
-        [(entry.path, entry.size or 0) for entry in gguf_weights]
-    )
+    # Honor a card's pinned quant when it names a file actually in the repo;
+    # otherwise fall back to the default preference (#344). The pin is matched by
+    # exact repo-relative path so a stale/typo'd pin can't silently select the
+    # wrong file -- it just degrades to the default.
+    pinned_paths = {entry.path for entry in gguf_weights}
+    if pinned_gguf and pinned_gguf in pinned_paths:
+        selected = pinned_gguf
+    else:
+        if pinned_gguf:
+            logger.warning(
+                f"ModelStore: pinned GGUF {pinned_gguf!r} not found in repo; "
+                "falling back to the default quant preference"
+            )
+        selected = select_preferred_gguf(
+            [(entry.path, entry.size or 0) for entry in gguf_weights]
+        )
     # Match the direct-HF GGUF allow-list exactly: the selected shard group
     # (``gguf_allow_patterns`` returns either the single file or the
     # ``<base>-*-of-*.gguf`` glob) plus ``config.json``. Patterns and paths are
@@ -361,11 +380,16 @@ class ModelStore:
     # Store-side HuggingFace downloads
     # ------------------------------------------------------------------
 
-    async def request_download(self, model_id: str) -> StoreDownloadStatus:
+    async def request_download(
+        self, model_id: str, pinned_gguf: str | None = None
+    ) -> StoreDownloadStatus:
         """Request that the store download a model from HuggingFace.
 
         Deduplicates: if the model is already downloading, returns the
         existing status.  If already in the store, returns "complete".
+
+        ``pinned_gguf`` is the requester's card-pinned GGUF file, forwarded so a
+        GGUF repo fetches that quant's shard group rather than the default (#344).
         """
         async with self._download_lock:
             existing = self._active_downloads.get(model_id)
@@ -380,7 +404,7 @@ class ModelStore:
                 )
             status = StoreDownloadStatus(model_id=model_id, status="pending")
             self._active_downloads[model_id] = status
-        task = asyncio.create_task(self._do_download(model_id))
+        task = asyncio.create_task(self._do_download(model_id, pinned_gguf))
         self._download_tasks.add(task)
         task.add_done_callback(self._download_tasks.discard)
         return status
@@ -403,8 +427,14 @@ class ModelStore:
             if s.status in ("pending", "downloading")
         ]
 
-    async def _do_download(self, model_id: str) -> None:
-        """Download a model from HuggingFace into the store and register it."""
+    async def _do_download(
+        self, model_id: str, pinned_gguf: str | None = None
+    ) -> None:
+        """Download a model from HuggingFace into the store and register it.
+
+        ``pinned_gguf`` (the requester's ``ModelCard.gguf_file``) selects which
+        GGUF quant's shard group to fetch, honoring a custom pin (#344).
+        """
         from skulk.download.download_utils import (
             download_file_with_retry,
             fetch_file_list_with_cache,
@@ -428,7 +458,7 @@ class ModelStore:
             # For a GGUF repo, fetch only the preferred quant's shard group plus
             # config.json (dropping other quants, original/*, metal/*, etc.),
             # mirroring the direct-HF selective download (#339).
-            selected_files = select_store_gguf_download_files(file_list)
+            selected_files = select_store_gguf_download_files(file_list, pinned_gguf)
             if len(selected_files) != len(file_list):
                 logger.info(
                     f"ModelStore: {model_id} is a GGUF repo; downloading "
