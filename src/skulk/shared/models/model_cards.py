@@ -134,10 +134,17 @@ class VisionCardConfig(CamelCaseModel):
     Populated from the ``[vision]`` section of a TOML model card or
     auto-detected from ``config.json`` during card creation."""
 
-    image_token_id: int
-    """Token id the model uses as the image placeholder in the prompt."""
-    model_type: str
-    """Vision model-type tag from ``config.json``, selecting the image processor."""
+    image_token_id: int | None = None
+    """Token id the model uses as the image placeholder in the prompt. Required by
+    the MLX vision path (which splices image embeddings at this token); ``None``
+    is allowed for a llama.cpp-only vision GGUF, whose chat handler inserts image
+    features itself and never reads this. MLX cards always set it (from
+    ``config.json``)."""
+    model_type: str = ""
+    """Vision model-type tag (from ``config.json``'s ``vision_config``), selecting
+    the image processor (MLX) or chat handler (llama.cpp). Empty when a bare GGUF
+    repo only signals vision via its ``mmproj`` projector; the llama.cpp runner
+    then falls back to its general multimodal handler."""
     weights_repo: str = ""
     """Repo holding the vision-tower weights when separate from the LM; empty if
     bundled with the main weights."""
@@ -149,6 +156,20 @@ class VisionCardConfig(CamelCaseModel):
     """Begin-of-image token id, for families that bracket image spans."""
     eoi_token_id: int | None = None
     """End-of-image token id, for families that bracket image spans."""
+
+    @property
+    def required_image_token_id(self) -> int:
+        """``image_token_id`` for the MLX vision path, which requires it.
+
+        The MLX VisionProcessor splices image embeddings at this token, so it
+        must be present. Raises if absent (a llama.cpp-only vision GGUF may leave
+        it ``None``, but such a model never routes to the MLX path)."""
+        if self.image_token_id is None:
+            raise ValueError(
+                "vision_config.image_token_id is required for the MLX vision "
+                "path but was not set on this card"
+            )
+        return self.image_token_id
 
 
 def multi_node_speculation_disabled(
@@ -691,6 +712,23 @@ class ModelCard(CamelCaseModel):
             num_key_value_heads = fields.num_key_value_heads
             context_length = fields.context_length
 
+        # Mark the card vision-capable so the llama.cpp runner loads the mmproj
+        # projector (#128, #346). Prefer the rich config.json vision_config when
+        # the repo ships one (image_token_id, model_type). Otherwise, many popular
+        # GGUF VLM repos (e.g. bartowski) ship NO config.json at all, so fall back
+        # to the projector's presence as the vision signal and stamp a minimal
+        # vision config: the llama.cpp chat handler inserts image features itself
+        # and never needs image_token_id, and an empty model_type routes it to the
+        # general multimodal handler. The mmproj weights are fetched via the
+        # projector glob in gguf_allow_patterns, not from config.json.
+        vision = getattr(config_data, "vision", None) if config_data is not None else None
+        if vision is None and gguf_repo_has_projector(model_id):
+            logger.info(
+                f"GGUF repo {model_id} ships an mmproj projector but no vision "
+                "config; marking vision-capable with the general handler"
+            )
+            vision = VisionCardConfig()
+
         return ModelCard(
             model_id=ModelId(model_id),
             storage_size=selected_size,
@@ -703,6 +741,7 @@ class ModelCard(CamelCaseModel):
             tasks=[ModelTask.TextGeneration],
             quantization=_gguf_quant_label(selected),
             gguf_file=selected,
+            vision=vision,
             trust_remote_code=False,
             is_custom=True,
             placement=PlacementCardConfig(
@@ -877,6 +916,26 @@ async def fetch_safetensors_size(model_id: ModelId) -> Memory:
     if info.safetensors is None:
         raise ValueError(f"No safetensors info found for {model_id}")
     return Memory.from_bytes(info.safetensors.total)
+
+
+def gguf_repo_has_projector(model_id: ModelId) -> bool:
+    """Whether a GGUF repo ships a multimodal projector (``*mmproj*.gguf``).
+
+    A vision GGUF (LLaVA/Qwen-VL style) carries its projector as a separate
+    ``mmproj`` file. Many popular GGUF VLM repos ship no ``config.json`` (so the
+    config-based vision detection cannot fire), but the projector's presence is
+    itself a reliable "this is a vision model" signal. Best-effort: returns
+    ``False`` if the HF probe fails, so a transient error never misclassifies.
+    """
+    try:
+        info = model_info(model_id, files_metadata=True)
+    except Exception:  # noqa: BLE001 - best-effort probe, mirror gguf_weight_siblings
+        return False
+    siblings = info.siblings or []
+    return any(
+        sibling.rfilename.endswith(".gguf") and "mmproj" in sibling.rfilename.lower()
+        for sibling in siblings
+    )
 
 
 def gguf_weight_siblings(model_id: ModelId) -> "list[tuple[str, int]]":

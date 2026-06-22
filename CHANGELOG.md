@@ -7,6 +7,22 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- **Vision GGUF VLMs now run on the llama.cpp engine (#128).** A vision GGUF
+  (LLaVA / Qwen-VL style, with a separate `mmproj` projector) can be served on a
+  llama.cpp node: the runner loads the projector through llama-cpp-python's
+  multimodal chat handler (the general `MTMDChatHandler` by default, or a
+  family-specific handler selected from the card's vision `model_type`), and an
+  image request's content is passed inline so the handler splices the image
+  features itself. A GGUF repo is marked vision-capable from its `config.json`
+  vision section when present, or, for the many GGUF VLM repos that ship no
+  `config.json`, from the mere presence of an `mmproj` projector. Validated live
+  on an AMD Strix Halo (Vulkan) node serving `Qwen2-VL-2B-Instruct-GGUF`
+  (reads text in images and describes structured scenes). `image_token_id` on
+  the vision card config is now optional: it is required only by the MLX vision
+  path; the llama.cpp handler inserts image features without it.
+
 ### Fixed
 
 - **Vision GGUF models now download their multimodal projector (#346).** The

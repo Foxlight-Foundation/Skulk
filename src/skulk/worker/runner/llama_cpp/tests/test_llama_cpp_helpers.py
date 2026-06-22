@@ -1,4 +1,4 @@
-# pyright: reportPrivateUsage=false
+# pyright: reportPrivateUsage=false, reportAny=false, reportUnknownMemberType=false
 """Tests for the pure helpers of the llama.cpp runner (no llama_cpp needed)."""
 
 from pathlib import Path
@@ -9,13 +9,18 @@ from skulk.shared.models.memory_estimate import KV_CONTEXT_BUDGET_TOKENS
 from skulk.shared.types.common import ModelId
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from skulk.worker.runner.llama_cpp.runner import (
+    _DEFAULT_VISION_HANDLER,
+    _VISION_HANDLER_BY_MODEL_TYPE,
     _generation_kwargs,
+    _image_data_uri,
     _logits_all_enabled,
     _logits_all_n_ctx,
     _logprob_fields,
     _map_finish_reason,
     _serving_n_ctx,
+    _splice_images_into_messages,
     _tool_calls_from_message,
+    find_mmproj_file,
     messages_for_llama,
     select_gguf_file,
 )
@@ -176,3 +181,99 @@ def test_logprob_fields_absent_or_malformed() -> None:
     assert _logprob_fields({}) == (None, None)
     assert _logprob_fields({"logprobs": None}) == (None, None)
     assert _logprob_fields({"logprobs": {"content": []}}) == (None, None)
+
+
+# --- vision (#128) ---------------------------------------------------------
+
+
+def test_image_data_uri_sniffs_png_and_jpeg() -> None:
+    import base64
+
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16).decode()
+    jpeg = base64.b64encode(b"\xff\xd8\xff\xe0" + b"\x00" * 16).decode()
+    assert _image_data_uri(png).startswith("data:image/png;base64,")
+    assert _image_data_uri(jpeg).startswith("data:image/jpeg;base64,")
+    # Unrecognized bytes default to png rather than raising.
+    assert _image_data_uri(base64.b64encode(b"zzzz").decode()).startswith(
+        "data:image/png;base64,"
+    )
+
+
+def test_splice_images_replaces_placeholders_in_order() -> None:
+    messages = [
+        {"role": "system", "content": "be brief"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "compare"},
+                {"type": "image"},
+                {"type": "image"},
+            ],
+        },
+    ]
+    import base64
+
+    a = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+    b = base64.b64encode(b"\xff\xd8\xff\xe0").decode()
+    out = _splice_images_into_messages(messages, [a, b])
+    # system message untouched (string content)
+    assert out[0] == {"role": "system", "content": "be brief"}
+    parts = out[1]["content"]
+    assert parts[0] == {"type": "text", "text": "compare"}
+    assert parts[1]["type"] == "image_url"
+    assert parts[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert parts[2]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+def test_splice_images_noop_without_images() -> None:
+    messages = [{"role": "user", "content": "hi"}]
+    assert _splice_images_into_messages(messages, []) is messages
+
+
+def test_splice_images_drops_extra_placeholder() -> None:
+    # More placeholders than images: stray placeholder dropped, not malformed.
+    messages = [
+        {"role": "user", "content": [{"type": "image"}, {"type": "image"}]}
+    ]
+    import base64
+
+    only = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+    out = _splice_images_into_messages(messages, [only])
+    parts = out[0]["content"]
+    assert len(parts) == 1
+    assert parts[0]["type"] == "image_url"
+
+
+def test_messages_for_llama_splices_images() -> None:
+    import base64
+
+    img = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+    params = _params(
+        chat_template_messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what is this?"},
+                    {"type": "image"},
+                ],
+            }
+        ],
+        images=[img],
+    )
+    out = messages_for_llama(params)
+    assert out[0]["content"][1]["type"] == "image_url"
+
+
+def test_find_mmproj_file(tmp_path: Path) -> None:
+    (tmp_path / "model-Q4_K_M.gguf").touch()
+    assert find_mmproj_file(tmp_path) is None
+    (tmp_path / "mmproj-model-f16.gguf").touch()
+    found = find_mmproj_file(tmp_path)
+    assert found is not None and "mmproj" in found.name.lower()
+
+
+def test_vision_handler_map_defaults_to_mtmd() -> None:
+    # Known families map to a bespoke handler; unknown falls back to MTMD.
+    assert _VISION_HANDLER_BY_MODEL_TYPE["qwen2.5-vl"] == "Qwen25VLChatHandler"
+    assert _VISION_HANDLER_BY_MODEL_TYPE.get("some-new-vlm") is None
+    assert _DEFAULT_VISION_HANDLER == "MTMDChatHandler"

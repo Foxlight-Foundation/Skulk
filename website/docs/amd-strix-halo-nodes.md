@@ -106,6 +106,9 @@ other Skulk model, with the same streaming behavior. It matches the MLX nodes on
 the generation capabilities llama.cpp supports:
 
 - **Text generation**, streamed token by token.
+- **Vision / image input** for a vision GGUF (with an `mmproj` projector): send
+  images as OpenAI `image_url` content and the model describes or reasons over
+  them. The projector loads through llama.cpp's multimodal chat handler.
 - **Logprobs** (opt-in): per-token logprobs and ranked alternatives (`logprobs`
   / `top_logprobs`). This needs the model loaded so it retains per-token logits,
   which pre-allocates a large buffer (context length x vocab), so it is off by
@@ -122,7 +125,14 @@ the generation capabilities llama.cpp supports:
   on the model and its embedded chat template, which Skulk uses as-is; either way
   the request completes through the normal streaming path.
 
-Two things are deliberately not on the AMD path today:
+**Vision / multimodal GGUF** models are served. A vision GGUF that ships a
+separate `mmproj` projector (LLaVA / Qwen-VL style) runs on an AMD node: the
+projector downloads alongside the weights and the runner loads it through
+llama.cpp's multimodal chat handler, so image chat requests (OpenAI `image_url`
+content) work. A repo is recognized as a vision model from its `config.json`
+vision section, or, when it ships none, from the presence of the `mmproj` file.
+
+One thing is deliberately not on the AMD path today:
 
 - **Multi-token prediction (MTP) / speculative decoding is MLX-only.** Those
   speedups come from MLX-specific drafting (model-native prediction heads or a
@@ -130,7 +140,6 @@ Two things are deliberately not on the AMD path today:
   not implement, so an AMD node runs plain autoregressive decoding. GGUF models
   advertise no MTP capability, so it is never shown as available for them (there
   is no promise to fall short of); the AMD node serves at its native decode speed.
-- **Vision / multimodal GGUF** models are not served yet (text generation only).
 
 ## Scope
 

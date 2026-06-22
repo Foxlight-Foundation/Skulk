@@ -1448,7 +1448,7 @@ class VisionProcessor:
 
         image_token = self.vision_config.image_token
         if image_token is None:
-            image_token = tokenizer.decode([self.vision_config.image_token_id])
+            image_token = tokenizer.decode([self.vision_config.required_image_token_id])
 
         formatted_messages = _format_vlm_messages(
             chat_template_messages, self.vision_config.model_type, task_id=task_id
@@ -1478,7 +1478,7 @@ class VisionProcessor:
         prompt_tokens: mx.array = encode_prompt(tokenizer, prompt)
         prompt_tokens = fix_unmatched_think_end_tokens(prompt_tokens, tokenizer)
         n_image_tokens = int(
-            mx.sum(mx.equal(prompt_tokens, self.vision_config.image_token_id)).item()
+            mx.sum(mx.equal(prompt_tokens, self.vision_config.required_image_token_id)).item()
         )
         record_runner_phase(
             "vision_preprocess",
@@ -1498,14 +1498,14 @@ class VisionProcessor:
             model,
             prompt_tokens,
             image_features,
-            self.vision_config.image_token_id,
+            self.vision_config.required_image_token_id,
         )
         mx.eval(embeddings)
 
         media_regions = _find_media_regions(
             prompt_tokens,
             images,
-            self.vision_config.image_token_id,
+            self.vision_config.required_image_token_id,
             boi_token_id=self.vision_config.boi_token_id,
             eoi_token_id=self.vision_config.eoi_token_id,
         )
@@ -1640,7 +1640,7 @@ class VisionProcessor:
 
         image_token = self.vision_config.image_token
         if image_token is None:
-            image_token = tokenizer.decode([self.vision_config.image_token_id])
+            image_token = tokenizer.decode([self.vision_config.required_image_token_id])
 
         formatted_messages = _format_vlm_messages(
             chat_template_messages, self.vision_config.model_type, task_id=task_id
@@ -1665,7 +1665,7 @@ class VisionProcessor:
         prompt_tokens: mx.array = encode_prompt(tokenizer, prompt)
         prompt_tokens = fix_unmatched_think_end_tokens(prompt_tokens, tokenizer)
         n_image_tokens = int(
-            mx.sum(mx.equal(prompt_tokens, self.vision_config.image_token_id)).item()
+            mx.sum(mx.equal(prompt_tokens, self.vision_config.required_image_token_id)).item()
         )
         record_runner_phase(
             "vision_preprocess",
@@ -1686,7 +1686,7 @@ class VisionProcessor:
         media_regions = _find_media_regions(
             prompt_tokens,
             images,
-            self.vision_config.image_token_id,
+            self.vision_config.required_image_token_id,
             boi_token_id=self.vision_config.boi_token_id,
             eoi_token_id=self.vision_config.eoi_token_id,
         )
