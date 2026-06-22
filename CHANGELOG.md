@@ -9,6 +9,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **The centralized store now honors a card's pinned GGUF quant on download
+  (#344).** A store-routed download re-derived the quant from the model id alone
+  (the default preference), so a custom card pinning a non-default quant (e.g.
+  `Q8_0`, `Q3_K_M`) silently got the default instead. The store download request
+  now carries the card's `gguf_file`: the worker's store client sends it in the
+  `POST /models/{id}/download` body, the store fetches that quant's shard group,
+  and a pin absent from the repo falls back to the default. Auto-built cards
+  (whose pin matches the default) are unaffected.
+
 - **A llama.cpp request between the KV budget and the model's context ceiling is
   now cleanly rejected instead of failing at the runner (#362).** The llama.cpp
   runner allocates its KV cache up front and caps the loaded context to

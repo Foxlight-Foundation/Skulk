@@ -717,6 +717,11 @@ Use this to inspect in-progress shared-store download activity.
 
 Use this when you want the store host to fetch and register a model.
 
+Optional JSON body `{"gguf_file": "<repo-relative path>"}` pins which GGUF quant
+the store fetches for a multi-quant GGUF repo (it downloads that file's shard
+group plus `config.json`). Omit the body to use the default quant preference.
+A pin naming a file not present in the repo falls back to the default.
+
 ### Store download status
 
 **GET** `/store/models/{model_id}/download/status`
