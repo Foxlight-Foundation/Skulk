@@ -7,6 +7,22 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- **A llama.cpp request between the KV budget and the model's context ceiling is
+  now cleanly rejected instead of failing at the runner (#362).** The llama.cpp
+  runner allocates its KV cache up front and caps the loaded context to
+  `KV_CONTEXT_BUDGET_TOKENS` (8192; `_serving_n_ctx`), but the API's admission
+  ceiling (`instance_context_token_limit`) was the memory/card value, often tens
+  of thousands of tokens. A request above the budget was therefore admitted and
+  then failed or truncated at generation. The admission ceiling for a
+  GGUF/llama.cpp instance is now capped to the same budget, so the API returns a
+  clear `context_length_exceeded` up front and admission matches what the runner
+  serves. (Enabling logprobs lowers the runner window further; this was the
+  originally reported case, now subsumed. A node that overrides
+  `SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX` *below* the budget remains a narrow per-node
+  residual, since the master cannot see node-local env at placement.)
+
 ### Added
 
 - **Vision GGUF VLMs now run on the llama.cpp engine (#128).** A vision GGUF

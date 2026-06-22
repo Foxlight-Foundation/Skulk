@@ -99,6 +99,7 @@ def test_gpu_working_set_ceiling_is_fraction_of_total():
 # --- Context-admission ceiling (#145) ---------------------------------------
 
 from skulk.shared.models.memory_estimate import (  # noqa: E402
+    KV_CONTEXT_BUDGET_TOKENS,
     KV_DTYPE_BYTES,
     KV_HEAD_DIM_FALLBACK,
     instance_context_token_limit,
@@ -230,6 +231,63 @@ def test_instance_limit_none_when_nothing_enforceable():
         card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
     )
     assert instance_context_token_limit(assignments, {}) is None
+
+
+def test_instance_limit_gguf_capped_to_kv_budget():
+    # #362: a GGUF/llama.cpp instance whose memory + card ceiling exceed the
+    # runner's loaded window (KV_CONTEXT_BUDGET_TOKENS, _serving_n_ctx) must admit
+    # only up to that window, else a request beyond it is admitted then fails at
+    # the runner. Card advertises a large context, lots of memory -> would be huge.
+    card = _card(1, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
+        update={"context_length": 131072}
+    )
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    assert (
+        instance_context_token_limit(assignments, {NodeId("n0"): Memory.from_gb(64)})
+        == KV_CONTEXT_BUDGET_TOKENS
+    )
+
+
+def test_instance_limit_gguf_capped_even_without_memory_or_card_limit():
+    # A bare GGUF card (no advertised context, no node memory) still serves a
+    # bounded n_ctx, so admission is the budget, not None.
+    card = _card(4, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf")
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    assert instance_context_token_limit(assignments, {}) == KV_CONTEXT_BUDGET_TOKENS
+
+
+def test_instance_limit_gguf_below_budget_unchanged():
+    # A GGUF card whose advertised context is already below the budget keeps that
+    # smaller limit (the cap is a ceiling, never raises a smaller real limit).
+    card = _card(1, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(
+        update={"context_length": 2048}
+    )
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    assert (
+        instance_context_token_limit(assignments, {NodeId("n0"): Memory.from_gb(64)})
+        == 2048
+    )
+
+
+def test_instance_limit_mlx_not_capped_to_kv_budget():
+    # The cap is GGUF-only: an MLX card (no gguf_file) keeps its memory/card
+    # ceiling, which grows the KV cache per request rather than allocating up front.
+    card = _card(1, kv_heads=8, n_layers=32).model_copy(
+        update={"context_length": 131072}
+    )
+    assignments = _assignments(
+        card, {"r0": (_pipeline_shard(card, start=0, end=32), "n0")}
+    )
+    limit = instance_context_token_limit(
+        assignments, {NodeId("n0"): Memory.from_gb(64)}
+    )
+    assert limit is not None and limit > KV_CONTEXT_BUDGET_TOKENS
 
 
 def test_instance_limit_unknown_kv_cost_falls_back_to_card():

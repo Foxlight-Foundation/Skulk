@@ -262,7 +262,28 @@ def instance_context_token_limit(
 
     card_limit = model_card.context_length if model_card.context_length > 0 else None
     if memory_limit is None:
-        return card_limit
-    if card_limit is None:
-        return memory_limit
-    return min(memory_limit, card_limit)
+        limit = card_limit
+    elif card_limit is None:
+        limit = memory_limit
+    else:
+        limit = min(memory_limit, card_limit)
+
+    # The llama.cpp runner allocates its KV cache up front and caps the loaded
+    # context to KV_CONTEXT_BUDGET_TOKENS (the same budget placement reserves; see
+    # the runner's _serving_n_ctx). The memory/card ceiling above can be far
+    # larger (tens of thousands of tokens), so without this a request between the
+    # budget and that ceiling is ADMITTED by the API but exceeds the runner's
+    # loaded window and fails/truncates at generation instead of being cleanly
+    # rejected (#362; logprobs lowers the runner window further, the original
+    # report). Cap a GGUF/llama.cpp instance's admission ceiling to the budget so
+    # admission matches what the runner actually serves. (Serving beyond the
+    # budget needs placement to reserve the larger KV footprint first, tracked
+    # with VRAM-aware admission; when that lands both this cap and _serving_n_ctx
+    # move together off the shared constant.)
+    if model_card.gguf_file:
+        limit = (
+            KV_CONTEXT_BUDGET_TOKENS
+            if limit is None
+            else min(limit, KV_CONTEXT_BUDGET_TOKENS)
+        )
+    return limit
