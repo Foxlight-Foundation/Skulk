@@ -7,6 +7,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- **Vision GGUF models now download their multimodal projector (#346).** The
+  selective GGUF allow-list (`gguf_allow_patterns`, used by both the direct-
+  HuggingFace download and the centralized store) only matched the selected LM
+  quant's shard group, so a LLaVA-style vision GGUF fetched its weights but not
+  its separate `mmproj-*.gguf` projector, and llama.cpp could not do image
+  inference. The allow-list now always includes a `*mmproj*.gguf` glob: it
+  matches nothing on a text-only repo (no cost) and pulls the projector on a
+  vision repo. Foundation for vision GGUF VLMs on llama.cpp (#128).
+
 ### Changed
 
 - **Placement now records the resolved backend on each shard (#330).** The master

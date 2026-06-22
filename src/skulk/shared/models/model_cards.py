@@ -962,18 +962,32 @@ def select_preferred_gguf(gguf_files: "list[tuple[str, int]]") -> str:
     )
 
 
+# Glob for the multimodal projector a vision GGUF repo ships alongside the LM
+# weights (LLaVA-style: ``mmproj-<...>.gguf``). It never matches the selected LM
+# quant's shard group, so it must be allow-listed explicitly or llama.cpp cannot
+# do image inference (#346). ``*mmproj*`` (not ``mmproj*``) so it also matches a
+# projector nested in a subdirectory, since HuggingFace allow-patterns match the
+# whole repo-relative path. A text-only repo has none, so this matches nothing
+# and costs nothing; a repo shipping several projector quants downloads each
+# (small relative to the weights, and llama.cpp loads one).
+_GGUF_PROJECTOR_PATTERN: Final = "*mmproj*.gguf"
+
+
 def gguf_allow_patterns(gguf_file: str) -> list[str]:
-    """Download allow-patterns for a card's selected GGUF (its shard group only).
+    """Download allow-patterns for a card's selected GGUF (its shard group +
+    any multimodal projector).
 
     A single-file quant downloads just itself; a sharded quant downloads its
     whole ``<base>-NNNNN-of-NNNNN`` group via a glob. This is what lets the
     downloader fetch only the chosen quant instead of every quant a multi-quant
-    repo hosts (#332). Caller adds non-weight files (e.g. ``config.json``).
+    repo hosts (#332). The ``mmproj`` projector glob is always included so a
+    vision GGUF model fetches its projector too (#346); it matches nothing on a
+    text-only repo. Caller adds non-weight files (e.g. ``config.json``).
     """
     base = _gguf_shard_base(gguf_file)
     if base is None:
-        return [gguf_file]
-    return [f"{base}-*-of-*.gguf"]
+        return [gguf_file, _GGUF_PROJECTOR_PATTERN]
+    return [f"{base}-*-of-*.gguf", _GGUF_PROJECTOR_PATTERN]
 
 
 def gguf_shard_group_size(selected: str, gguf_files: "list[tuple[str, int]]") -> Memory:
