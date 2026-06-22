@@ -352,7 +352,8 @@ def test_select_preferred_gguf_prefers_quant_over_bf16() -> None:
     sel = select_preferred_gguf(files)
     assert sel == "M-Q4_K_M.gguf"  # quant beats BF16; Q4_K_M is top preference
     assert gguf_shard_group_size(sel, files).in_bytes == 800
-    assert gguf_allow_patterns(sel) == ["M-Q4_K_M.gguf"]
+    # Single-file LM quant plus the always-included projector glob (#346).
+    assert gguf_allow_patterns(sel) == ["M-Q4_K_M.gguf", "*mmproj*.gguf"]
 
 
 def test_select_preferred_gguf_sharded_group() -> None:
@@ -370,7 +371,8 @@ def test_select_preferred_gguf_sharded_group() -> None:
     sel = select_preferred_gguf(files)
     assert sel == "big-Q4_K_M-00001-of-00002.gguf"
     assert gguf_shard_group_size(sel, files).in_bytes == 1_100  # both shards
-    assert gguf_allow_patterns(sel) == ["big-Q4_K_M-*-of-*.gguf"]
+    # Sharded LM group glob plus the always-included projector glob (#346).
+    assert gguf_allow_patterns(sel) == ["big-Q4_K_M-*-of-*.gguf", "*mmproj*.gguf"]
 
 
 async def test_gguf_card_pins_selected_quant(monkeypatch: pytest.MonkeyPatch) -> None:

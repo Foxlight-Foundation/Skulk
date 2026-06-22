@@ -118,8 +118,10 @@ async def test_resolve_allow_patterns_gguf_vs_safetensors() -> None:
         )
 
     gguf = _card("o/r", gguf_file="m-Q4_K_M.gguf")
+    # LM quant + the always-included multimodal projector glob (#346) + config.
     assert await resolve_allow_patterns(_shard(gguf)) == [
         "m-Q4_K_M.gguf",
+        "*mmproj*.gguf",
         "config.json",
     ]
 

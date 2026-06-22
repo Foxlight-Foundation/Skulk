@@ -59,16 +59,18 @@ def test_original_and_metal_weight_artifacts_are_dropped() -> None:
     assert kept == {"config.json", "model-Q4_K_M.gguf"}
 
 
-def test_mmproj_projector_is_dropped_to_match_direct_path() -> None:
-    # The direct-HF GGUF allow-list does not include the projector, so the store
-    # matches it (multimodal GGUF projector handling is a separate concern).
+def test_mmproj_projector_is_kept_for_vision_models() -> None:
+    # The GGUF allow-list now includes the multimodal projector (#346), so the
+    # store keeps it alongside the LM quant and config -- a vision GGUF model
+    # needs the projector or llama.cpp cannot do image inference. Still matches
+    # the direct-HF path, which includes the same projector glob.
     files = [
         _entry("config.json"),
         _entry("model-Q4_K_M.gguf", 800),
         _entry("mmproj-model-f16.gguf", 600),
     ]
     kept = {e.path for e in select_store_gguf_download_files(files)}
-    assert kept == {"config.json", "model-Q4_K_M.gguf"}
+    assert kept == {"config.json", "model-Q4_K_M.gguf", "mmproj-model-f16.gguf"}
 
 
 def test_non_gguf_repo_unchanged() -> None:
