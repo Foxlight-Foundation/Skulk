@@ -78,6 +78,27 @@ def engine_of(tag: str) -> EngineType | None:
     return None
 
 
+# Engines that can serve a model sharded across multiple nodes. MLX has the
+# multi-node ring / jaccl path; llama.cpp is single-node today -- its RPC backend
+# (which shards a GGUF across machines) is not yet wired into the runner (#328),
+# and the runner asserts ``world_size == 1``. This is the single place that
+# constraint lives; flip llama_cpp in here (or make it conditional on an
+# RPC-capable build) when the multi-node llama.cpp runner lands.
+_MULTI_NODE_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx"})
+
+
+def engine_supports_multi_node(engine: EngineType) -> bool:
+    """Whether an engine can serve a model sharded across more than one node.
+
+    Placement uses this to pin a model to a single-node cycle when none of its
+    compatible engines can shard across nodes (otherwise the placement would
+    download and then crash at runner startup with ``world_size != 1``). MLX is
+    multi-node capable; llama.cpp is single-node until its RPC backend is wired
+    into the runner (#328).
+    """
+    return engine in _MULTI_NODE_ENGINES
+
+
 def resolve_node_backend(
     compatible_backends: frozenset[str],
     backend_preference: tuple[str, ...],

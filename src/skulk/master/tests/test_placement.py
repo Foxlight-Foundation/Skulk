@@ -1357,3 +1357,44 @@ def test_llama_cpp_single_node_placement_succeeds() -> None:
     assert len(placements) == 1
     instance = next(iter(placements.values()))
     assert len(instance.shard_assignments.node_to_runner) == 1
+
+
+def test_hybrid_card_with_multi_node_engine_places_multi_node() -> None:
+    """The single-node guard keys on engine capability, not on llama.cpp by name:
+    a card that also allows a multi-node engine (MLX) still places across nodes,
+    serving via that engine. Guards #328's generalization of the old
+    llama.cpp-only special-case."""
+    from skulk.shared.models.model_cards import PlacementCardConfig
+
+    topology = Topology()
+    node_a = NodeId()
+    node_b = NodeId()
+    topology.add_node(node_a)
+    topology.add_node(node_b)
+    topology.add_connection(
+        Connection(source=node_a, sink=node_b, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=node_b, sink=node_a, edge=create_socket_connection(2))
+    )
+    node_memory = {
+        node_a: create_node_memory(Memory.from_gb(8).in_bytes),
+        node_b: create_node_memory(Memory.from_gb(8).in_bytes),
+    }
+    node_network = {node_a: create_node_network(), node_b: create_node_network()}
+    hybrid_card = ModelCard(
+        model_id=ModelId("test-hybrid"),
+        storage_size=Memory.from_mb(500),
+        n_layers=10,
+        hidden_size=1000,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        placement=PlacementCardConfig(
+            compatible_backends=frozenset({"mlx", "llama_cpp-vulkan"})
+        ),
+    )
+    command = place_instance_command(hybrid_card).model_copy(update={"min_nodes": 2})
+    # Must NOT raise the single-node guard: MLX is multi-node capable.
+    placements = place_instance(command, topology, {}, node_memory, node_network)
+    instance = next(iter(placements.values()))
+    assert len(instance.shard_assignments.node_to_runner) == 2

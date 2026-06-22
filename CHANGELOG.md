@@ -20,6 +20,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Changed
 
+- **The placement single-node constraint is now a named engine capability
+  (#328 groundwork).** The hard-coded "llama.cpp is single-node only" check in
+  the planner became `engine_supports_multi_node` (MLX yes; llama.cpp not until
+  its RPC backend is wired into the runner). Behavior is unchanged today: a
+  model whose only compatible engine is single-node is still pinned to a
+  one-node cycle, and a card that also allows a multi-node engine (MLX) still
+  places across nodes. This is the single hinge to flip when multi-node
+  llama.cpp (RPC) lands.
+
 - **Placement now records the resolved backend on each shard (#330).** The master
   resolves which backend a node will use (the card's `compatible_backends`
   intersected with that node's advertised backends, ordered by
