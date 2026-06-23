@@ -120,6 +120,20 @@ If it doesn't, jump to [Things that go wrong](#things-that-go-wrong).
 | Stop it (stays stopped) | `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/foundation.foxlight.skulk.plist` | `systemctl --user stop skulk` |
 | Start it back up | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/foundation.foxlight.skulk.plist` | `systemctl --user start skulk` |
 
+### Log files and rotation
+
+Skulk keeps its **durable** log at `~/.skulk/logs/skulk.log`. It starts fresh on
+every launch (the previous run is kept as a compressed `skulk.log.<n>.zst`
+archive) and rotates again whenever it reaches 100 MB, keeping the last few
+archives. That bound holds no matter how long a node runs, so the log directory
+cannot fill the disk.
+
+The `skulk.stdout.log` / `skulk.stderr.log` files are the raw stream the service
+manager captures. They are a boot- and crash-time safety net, not the durable
+record: each is truncated on restart (with the tail of the previous run kept as
+`*.log.1`), and at the default info verbosity they stay small. For day-to-day
+tailing either file is fine; for after-the-fact history, read `skulk.log`.
+
 ### Customizing how the service runs (`~/.skulk/skulk.env`)
 
 The installer puts a plain-text env file at `~/.skulk/skulk.env`. Open it in any editor — every line is `KEY=value` and the comments explain what each setting does. After saving, restart the service to pick up your changes:
@@ -137,7 +151,8 @@ Common things to change:
 | Setting | What it does | Default |
 | --- | --- | --- |
 | `SKULK_AUTO_UPDATE` | `1` = auto-update on every boot, `0` = run whatever's already on disk | `1` |
-| `SKULK_VERBOSITY` | Verbosity flag passed to skulk. `-v` is normal verbose, `-vv` is debug, empty string is info-only | `-v` |
+| `SKULK_VERBOSITY` | Verbosity flag passed to skulk. Empty (the default) is info-only, `-v` is verbose, `-vv` is debug. Debug logs the libp2p transport at a high rate, so leave it empty unless you are actively debugging | empty (info) |
+| `SKULK_CAPTURE_KEEP_BYTES` | How much of the previous run's captured stdout/stderr to keep (as `*.log.1`) when the service restarts. The live capture file is truncated on each launch so it cannot grow without bound | `5242880` (5 MB) |
 | `SKULK_LIBP2P_NAMESPACE` | Cluster namespace — nodes only join clusters with the same value. Use a unique value per cluster | `foxlight-main` |
 | `SKULK_LOGGING_INGEST_URL` | Where Vector ships logs (only relevant if you have the Vector agent installed) | the in-house VictoriaLogs endpoint |
 
