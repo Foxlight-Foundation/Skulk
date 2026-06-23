@@ -141,6 +141,53 @@ export const NoTelemetry: Story = {
   name: 'No telemetry data',
 };
 
+export const HealthError: Story = {
+  args: {
+    nodeId: 'err001',
+    nodeInfo: makeNode({
+      friendly_name: 'kite2',
+      node_health: {
+        level: 'error',
+        reasons: [
+          {
+            code: 'download_failed',
+            message: 'Download of mlx-community/Devstral-24B failed: No space left on device',
+            remediation:
+              'Free disk space (or lower staging_keep_recent_gb), check the node\'s network, then retry the model.',
+          },
+        ],
+      },
+    }),
+    x: 200,
+    y: 150,
+    scale: 1,
+  },
+  name: 'Health: error (download failed)',
+};
+
+export const HealthWarn: Story = {
+  args: {
+    nodeId: 'warn001',
+    nodeInfo: makeNode({
+      friendly_name: 'kite1',
+      node_health: {
+        level: 'warn',
+        reasons: [
+          {
+            code: 'disk_low',
+            message: 'Models volume is low on space: 6.2 GB free of 460.0 GB.',
+            remediation: 'Free disk space or lower staging_keep_recent_gb before pulling a large model.',
+          },
+        ],
+      },
+    }),
+    x: 200,
+    y: 150,
+    scale: 1,
+  },
+  name: 'Health: warn (disk low)',
+};
+
 export const ScaledDown: Story = {
   args: {
     nodeId: 'small01',

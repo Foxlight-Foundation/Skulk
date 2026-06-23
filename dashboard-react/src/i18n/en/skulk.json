@@ -573,5 +573,10 @@
   "topology.clusterNode.rdmaEnabledNoHardware": "Enabled (no HW support)",
   "topology.clusterNode.rdmaStatus": "RDMA: {status}",
   "topology.clusterNode.replayingEventLog": "This dashboard is still replaying the cluster event log for the current master session.",
-  "topology.clusterNode.syncingClusterState": "Syncing cluster state"
+  "topology.clusterNode.syncingClusterState": "Syncing cluster state",
+  "topology.nodeHealth.errorAria": "Node problem",
+  "topology.nodeHealth.errorHeading": "This node has a problem",
+  "topology.nodeHealth.fixPrefix": "Fix: {remediation}",
+  "topology.nodeHealth.warnAria": "Node warning",
+  "topology.nodeHealth.warnHeading": "This node needs attention"
 }

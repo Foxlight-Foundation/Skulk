@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { TopologyData, NodeInfo, TopologyEdge } from '../types/topology';
+import type { TopologyData, NodeInfo, NodeHealth, TopologyEdge } from '../types/topology';
 import {
   useGetLocalNodeIdQuery,
   useGetLocalNodeIdentityQuery,
@@ -14,6 +14,7 @@ import {
   type RawThunderboltBridge,
   type RawThunderboltInfo,
   type RawRdmaCtl,
+  type RawNodeHealth,
   type RawConnectionEdge,
 } from '../store/endpoints/cluster';
 
@@ -39,6 +40,23 @@ function extractIpFromMultiaddr(addr?: string): string | undefined {
   return match?.[1];
 }
 
+// Coerce the wire health summary (#388) into the strict NodeInfo shape,
+// dropping malformed entries so a bad reading never throws in render. An
+// `ok`-with-no-reasons node is treated as no indicator at the render layer.
+function normalizeNodeHealth(raw: RawNodeHealth | undefined): NodeHealth | undefined {
+  if (!raw || (raw.level !== 'warn' && raw.level !== 'error' && raw.level !== 'ok')) {
+    return undefined;
+  }
+  const reasons = (raw.reasons ?? [])
+    .filter((r) => r && typeof r.message === 'string')
+    .map((r) => ({
+      code: typeof r.code === 'string' ? r.code : 'unknown',
+      message: r.message,
+      remediation: typeof r.remediation === 'string' ? r.remediation : '',
+    }));
+  return { level: raw.level, reasons };
+}
+
 function normalizeNodeLabel(value?: string): string {
   return (value ?? '')
     .trim()
@@ -55,6 +73,7 @@ function transformTopology(
   network: Record<string, RawNodeNetworkInfo>,
   tbBridge: Record<string, RawThunderboltBridge>,
   rdmaCtl: Record<string, RawRdmaCtl>,
+  health: Record<string, RawNodeHealth>,
 ): TopologyData {
   const nodes: Record<string, NodeInfo> = {};
   const edges: TopologyEdge[] = [];
@@ -111,6 +130,7 @@ function transformTopology(
       thunderbolt_bridge: tbBridge[nodeId]?.enabled ?? false,
       rdma_enabled: rdmaCtl[nodeId]?.enabled ?? false,
       rdma_interfaces_present: rdmaCtl[nodeId]?.interfacesPresent ?? true,
+      node_health: normalizeNodeHealth(health[nodeId]),
     };
   }
 
@@ -305,6 +325,7 @@ export function useClusterState(): ClusterState {
       data.nodeNetwork ?? {},
       data.nodeThunderboltBridge ?? {},
       data.nodeRdmaCtl ?? {},
+      data.nodeHealth ?? {},
     );
     return ensureLocalNodePresent(
       transformed,

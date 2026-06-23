@@ -4,6 +4,7 @@ import { detectDeviceModel } from '../../types/topology';
 import { DeviceIcon } from './DeviceIcon';
 import { GpuStatsBar } from './GpuStatsBar';
 import { NodeLabel } from './NodeLabel';
+import { NodeHealthBadge } from './NodeHealthBadge';
 import type { Theme } from '../../theme';
 import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
@@ -228,6 +229,10 @@ export function ClusterNode({
           height={barH}
         />
       </g>
+
+      {/* Health badge (#388): top-left of the device icon, only when a node
+          has a problem; explains the issue and its fix on hover. */}
+      <NodeHealthBadge health={nodeInfo.node_health} x={iconLeft - 4} y={iconTop} />
 
     </g>
   );

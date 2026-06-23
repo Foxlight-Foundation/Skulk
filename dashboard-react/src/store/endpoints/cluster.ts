@@ -81,6 +81,19 @@ export interface RawRdmaCtl {
   interfacesPresent?: boolean;
 }
 
+/** One derived health problem on a node, with its remediation (#388). */
+export interface RawNodeHealthReason {
+  code: string;
+  message: string;
+  remediation: string;
+}
+
+/** Derived per-node health summary, keyed by node id in `/state` (#388). */
+export interface RawNodeHealth {
+  level: 'ok' | 'warn' | 'error';
+  reasons?: RawNodeHealthReason[];
+}
+
 export interface RawStateResponse {
   topology?: RawTopology;
   instances?: Record<string, unknown>;
@@ -94,6 +107,7 @@ export interface RawStateResponse {
   nodeThunderbolt?: Record<string, RawThunderboltInfo>;
   nodeThunderboltBridge?: Record<string, RawThunderboltBridge>;
   nodeRdmaCtl?: Record<string, RawRdmaCtl>;
+  nodeHealth?: Record<string, RawNodeHealth>;
   thunderboltBridgeCycles?: string[][];
 }
 
