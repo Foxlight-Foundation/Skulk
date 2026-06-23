@@ -597,3 +597,80 @@ def test_is_gemma4_family_resource_cards_other_families_dont_match() -> None:
         assert is_gemma4_family(card) is False, (
             f"{path.name} should not match the gemma4 predicate"
         )
+
+
+def _autoimport_card(model_id: str, family: str) -> ModelCard:
+    """An auto-imported card: no built-in entry, so empty capabilities."""
+    return ModelCard(
+        model_id=ModelId(model_id),
+        storage_size=Memory.from_mb(100),
+        n_layers=10,
+        hidden_size=1024,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        family=family,
+        capabilities=[],
+    )
+
+
+def test_qwen3_autoimport_resolves_thinking_toggle() -> None:
+    # The #384 case: an auto-imported Qwen3.6 quant with empty capabilities and a
+    # raw family token must still resolve as a toggle-capable thinking model, or
+    # it reasons unconditionally and returns empty content.
+    card = _autoimport_card("mlx-community/Qwen3.6-35B-A3B-nvfp4", "Qwen3.6")
+
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+
+    assert profile.supports_thinking is True
+    assert profile.supports_thinking_toggle is True
+    assert profile.thinking_format == ReasoningFormat.TokenDelimited
+
+
+def test_qwen3_point_releases_match_by_id() -> None:
+    for model_id in (
+        "mlx-community/Qwen3-8B-4bit",
+        "mlx-community/Qwen3.5-9B-4bit",
+        "mlx-community/Qwen3.6-27B-4bit",
+    ):
+        card = _autoimport_card(model_id, "qwen")
+        profile = resolve_model_capability_profile(card.model_id, model_card=card)
+        assert profile.supports_thinking_toggle is True, model_id
+
+
+def test_qwen3_coder_excluded_from_thinking_default() -> None:
+    # Coder variants are instruct-only; the family default must not flip them to
+    # thinking when their card does not declare it.
+    card = _autoimport_card("mlx-community/Qwen3-Coder-30B-A3B-Instruct", "qwen")
+
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+
+    assert profile.supports_thinking is False
+    assert profile.supports_thinking_toggle is False
+
+
+def test_qwen2_not_matched_by_qwen3_default() -> None:
+    card = _autoimport_card("mlx-community/Qwen2.5-7B-Instruct", "qwen")
+
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+
+    assert profile.supports_thinking is False
+    assert profile.supports_thinking_toggle is False
+
+
+def test_qwen3_explicit_card_reasoning_still_overrides_family_default() -> None:
+    # A card that explicitly disables the toggle must win over the family default.
+    card = ModelCard(
+        model_id=ModelId("mlx-community/Qwen3.6-Custom"),
+        storage_size=Memory.from_mb(100),
+        n_layers=10,
+        hidden_size=1024,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        family="qwen",
+        capabilities=[],
+        reasoning=ReasoningCardConfig(supports_toggle=False),
+    )
+
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+
+    assert profile.supports_thinking_toggle is False

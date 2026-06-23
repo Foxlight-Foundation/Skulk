@@ -9,6 +9,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Auto-imported Qwen3 reasoning models no longer return empty content (#384).**
+  A Qwen3-family model with no built-in card (a fresh quant imported on demand,
+  e.g. `Qwen3.6-35B-A3B-nvfp4`) arrived with empty capabilities, so its resolved
+  profile reported no thinking and no thinking toggle. Thinking is on by default
+  for Qwen3, so the model reasoned unconditionally and a normal chat request
+  spent its whole token budget on the reasoning channel, returning empty
+  `content`. Capability resolution now recognizes the Qwen3 / Qwen3.5 / Qwen3.6
+  family (token-delimited `<think>` toggle), so an auto-imported variant is
+  treated as toggle-capable and the dashboard/API off-by-default path can
+  suppress thinking. Built-in cards keep their explicit declarations, an explicit
+  `reasoning` section still overrides the family default, and Coder variants
+  (instruct-only, no thinking) are excluded.
+
 - **Context-length and other runner errors now surface as structured errors on
   the Claude, Responses, and Ollama wire formats (#276).** Those adapters
   previously raised on a runner error (a 500 on the non-streaming path) or broke
