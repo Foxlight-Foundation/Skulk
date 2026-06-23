@@ -22,6 +22,27 @@ PREP_LOG="$HOME/.skulk/logs/skulk.prep.log"
 
 mkdir -p "$(dirname "$PREP_LOG")"
 
+LOG_DIR="$HOME/.skulk/logs"
+# Tail of the previous run kept across a restart for crash diagnosis before the
+# captured file is truncated. The authoritative, size-rotated record is
+# ~/.skulk/logs/skulk.log; these launchd/systemd capture files are a boot- and
+# crash-time safety net, not the durable log.
+CAPTURE_KEEP_BYTES="${SKULK_CAPTURE_KEEP_BYTES:-5242880}"  # 5 MB
+
+# Bound the launchd/systemd-captured stdout/stderr so they cannot accumulate
+# across restarts (#382). launchd holds these fds open for this process, so the
+# file must be truncated in place (same inode) rather than renamed: a renamed
+# file would still receive this run's output. We snapshot the tail to ".1"
+# first so the previous run's final output survives one restart.
+rotate_capture() {
+    local f="$1"
+    [[ -s "$f" ]] || return 0
+    tail -c "$CAPTURE_KEEP_BYTES" "$f" > "${f}.1" 2>/dev/null || true
+    : > "$f"
+}
+rotate_capture "$LOG_DIR/skulk.stdout.log"
+rotate_capture "$LOG_DIR/skulk.stderr.log"
+
 # Timestamped operator-facing log of what the prep phase did. Distinct
 # from the captured stdout/stderr launchd writes for the skulk process
 # itself so operators can audit boot-time updates separately.
@@ -55,7 +76,11 @@ export PATH
 unset _d
 
 AUTO_UPDATE="${SKULK_AUTO_UPDATE:-1}"
-VERBOSITY="${SKULK_VERBOSITY:--v}"
+# Default to INFO. DEBUG (-v) is opt-in via SKULK_VERBOSITY=-v because at DEBUG
+# the libp2p transport logs a per-dial firehose that grew skulk.stderr.log to
+# tens of GB on long-lived nodes (#382). The durable, size-rotated record lives
+# in ~/.skulk/logs/skulk.log regardless of this setting.
+VERBOSITY="${SKULK_VERBOSITY:-}"
 # Headless nodes serve the API without the web UI (no dashboard build).
 HEADLESS="${SKULK_HEADLESS:-0}"
 
