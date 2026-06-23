@@ -122,6 +122,25 @@ _RUNNER_CRASH_WINDOW_SECONDS = 60.0
 """Rolling window for ``_RUNNER_CRASH_THRESHOLD`` (see CrashWindow)."""
 
 
+_LOAD_FIT_TOLERANCE = 0.10
+"""Fraction by which a shard's estimated footprint may exceed live usable memory
+before the pre-load guard refuses (#383).
+
+The footprint from ``estimate_shard_footprint`` already bakes in the engine
+overhead factor (1.30 for MLX), a full ``KV_CONTEXT_BUDGET_TOKENS`` KV
+reservation, and a flat floor, so it overstates the real resident need. The
+master admits on the same padded estimate but against a *gossiped* usable
+figure, while this guard re-measures *live*; on a borderline multi-node split
+the live reading can sit a few hundred MB below the gossiped one (staging churn,
+telemetry lag), so requiring ``usable >= footprint`` exactly flips a placement
+the master already admitted into a refusal on a sub-GB jitter, observed as a
+0.2GB / 2% miss refusing Devstral-24B at the LoadModel re-check across the
+3-kite ring (#383, Phase 0). Allowing the footprint to exceed usable by this
+margin absorbs that jitter (the 30% pad means actual resident still fits) while
+a *gross* shortfall (a node that genuinely loaded another model since admission)
+still refuses, preserving the leak-on-OOM guard (#290/#239)."""
+
+
 _RUNNER_FIRST_REPORT_DEADLINE_SECONDS = 120.0
 """How long a spawned runner has to report its first status before the worker
 gives up on its instance (#272). A runner frozen between spawn and its first
@@ -181,6 +200,19 @@ def runners_never_reported(
                 (instance_id, supervisor.shard_metadata.model_card.model_id)
             )
     return stalled
+
+
+def footprint_exceeds_usable(
+    footprint: Memory, usable: Memory, tolerance: float
+) -> bool:
+    """Whether a shard footprint exceeds usable memory beyond the fit tolerance.
+
+    Pure for testability (#383). The footprint is already padded (engine overhead
+    factor + KV reservation + floor), so a marginal excess is within that pad and
+    within live-vs-gossip jitter; only a shortfall beyond ``tolerance`` (a
+    fraction of usable) is treated as a real refusal.
+    """
+    return footprint.in_bytes > usable.in_bytes * (1 + tolerance)
 
 
 def _runner_failed_wedged(status: RunnerStatus | None) -> bool:
@@ -539,12 +571,17 @@ class Worker:
                 f"{local.ram_available.in_gb:.1f}GB GPU-wireable, capped at "
                 "the GPU working-set ceiling"
             )
-        if footprint > usable:
+        # Refuse only on a shortfall beyond the tolerance (#383): the footprint
+        # is already padded (overhead factor + KV reservation + floor), so a
+        # marginal miss is within that pad and within live-vs-gossip jitter on a
+        # placement the master already admitted. A gross shortfall still trips.
+        if footprint_exceeds_usable(footprint, usable, _LOAD_FIT_TOLERANCE):
             return (
                 f"Refusing to load a shard of {shard.model_card.model_id} on "
                 f"{self.node_id}: ~{footprint.in_gb:.1f}GB needed but only "
-                f"~{usable.in_gb:.1f}GB usable locally ({pool}). Refusing before "
-                "load to avoid an OOM abort that leaks GPU memory."
+                f"~{usable.in_gb:.1f}GB usable locally ({pool}), beyond the "
+                f"{_LOAD_FIT_TOLERANCE:.0%} fit tolerance. Refusing before load "
+                "to avoid an OOM abort that leaks GPU memory."
             )
         return None
 

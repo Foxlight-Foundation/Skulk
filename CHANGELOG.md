@@ -7,6 +7,21 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- **A borderline multi-node placement is no longer refused on sub-GB memory
+  jitter (#383).** The master admits a placement on each node's *gossiped* usable
+  memory, but the worker's pre-load guard re-measures *live* at load; on a tight
+  multi-node split the live reading can sit a few hundred MB below the admitted
+  estimate, so the worker refused a placement the master had just admitted, the
+  master could not re-place wider (no spare node), and the model never loaded. A
+  24B model split across a 3-node ring was observed refusing at the load re-check
+  by 0.2GB (2%). The footprint already includes a 1.30x overhead factor, a full
+  KV reservation, and a flat floor, so a marginal miss is within that pad; the
+  guard now applies a 10% fit tolerance and refuses only on a shortfall beyond
+  it (the signature of a node that genuinely lost memory since admission),
+  preserving the leak-on-OOM guard while letting borderline placements load.
+
 ### Added
 
 - **macOS Local Network permission is now diagnosable and the denial warning is
