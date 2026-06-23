@@ -9,6 +9,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **A runner that never reports after spawn no longer stalls an instance forever
+  (#272).** A runner frozen between spawn and its first status report (a
+  SIGSTOP, a hang in early import or device init) left the instance stuck in
+  pre-init coordination indefinitely: `ConnectToGroup` is only planned once
+  every rank has reported, and the crash breaker never tripped because the
+  process was alive. The worker now applies a first-status-report deadline
+  (`_RUNNER_FIRST_REPORT_DEADLINE_SECONDS`, 120s); a runner silent past it gives
+  the instance up through the same circuit breaker, so the placement fails and
+  recovers instead of hanging. The deadline is generous enough for slow imports
+  and weight mmaps.
+
 - **A rank's failed download no longer wedges a multi-node instance forever
   (#381).** If one rank's model download failed terminally (disk full, a
   transient Hugging Face or network error), the ring still formed and every rank
