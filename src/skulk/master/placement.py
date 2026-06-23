@@ -1,5 +1,6 @@
 import random
 from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 from copy import deepcopy
 from typing import Sequence
 
@@ -18,7 +19,7 @@ from skulk.shared.backends import (
     resolve_node_backend,
 )
 from skulk.shared.models.memory_estimate import instance_context_token_limit
-from skulk.shared.models.model_cards import ModelId
+from skulk.shared.models.model_cards import ModelCard, ModelId
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import (
     CancelDownload,
@@ -517,25 +518,17 @@ def place_instance(
     return target_instances
 
 
-def replacement_command_for_refused_instance(instance: Instance) -> PlaceInstance:
-    """Build a *wider* placement command to recover a memory-refused instance.
+def _placement_intent_from_instance(
+    instance: Instance,
+) -> tuple[ModelCard, Sharding, InstanceMeta, int]:
+    """Recover the placement intent (model, sharding, backend, width) of an instance.
 
-    When a worker refuses its shard for lack of GPU-wireable memory at load
-    time (#290), the master re-places the same model one node wider so every
-    node holds a smaller share. The placement intent (model card, sharding
-    family, instance backend) is recovered from the instance itself; the
-    operator's original per-placement node exclusions are not retained on the
-    instance, so the wider re-placement searches the full topology.
-
-    ``min_nodes`` is the refused width plus one. Raising it past the cluster
-    size makes :func:`place_instance` raise :class:`PlacementError`, which the
-    caller treats as the terminal "cannot fit anywhere" outcome — this bounds
-    the refuse→re-place loop to at most ``cluster_size`` iterations.
-
-    Raises :class:`PlacementError` if the instance carries no shards (an empty
-    ``ShardAssignments`` is structurally allowed); there is no model to
-    re-place, and raising lets the caller tear the husk down on the same path
-    it uses for a genuine no-fit rather than crashing the command processor.
+    The model card, sharding family, and instance backend are read back off the
+    instance's shards so a recovery re-placement reproduces the original intent.
+    Returns the width (node count) too. Raises :class:`PlacementError` if the
+    instance carries no shards (a structurally-allowed empty ``ShardAssignments``
+    has no model to re-place), letting callers tear the husk down on the same
+    path they use for a genuine no-fit rather than crashing.
     """
     shards = list(instance.shard_assignments.runner_to_shard.values())
     if not shards:
@@ -554,12 +547,65 @@ def replacement_command_for_refused_instance(instance: Instance) -> PlaceInstanc
         if isinstance(instance, MlxJacclInstance)
         else InstanceMeta.MlxRing
     )
-    current_width = len(instance.shard_assignments.node_to_runner)
+    width = len(instance.shard_assignments.node_to_runner)
+    return model_card, sharding, instance_meta, width
+
+
+def replacement_command_for_refused_instance(instance: Instance) -> PlaceInstance:
+    """Build a *wider* placement command to recover a memory-refused instance.
+
+    When a worker refuses its shard for lack of GPU-wireable memory at load
+    time (#290), the master re-places the same model one node wider so every
+    node holds a smaller share. The placement intent (model card, sharding
+    family, instance backend) is recovered from the instance itself; the
+    operator's original per-placement node exclusions are not retained on the
+    instance, so the wider re-placement searches the full topology.
+
+    ``min_nodes`` is the refused width plus one. Raising it past the cluster
+    size makes :func:`place_instance` raise :class:`PlacementError`, which the
+    caller treats as the terminal "cannot fit anywhere" outcome — this bounds
+    the refuse→re-place loop to at most ``cluster_size`` iterations.
+
+    Raises :class:`PlacementError` if the instance carries no shards.
+    """
+    model_card, sharding, instance_meta, width = _placement_intent_from_instance(
+        instance
+    )
     return PlaceInstance(
         model_card=model_card,
         sharding=sharding,
         instance_meta=instance_meta,
-        min_nodes=current_width + 1,
+        min_nodes=width + 1,
+    )
+
+
+def replacement_command_for_download_failed_instance(
+    instance: Instance, excluded_nodes: AbstractSet[NodeId]
+) -> PlaceInstance:
+    """Build a *same-width* re-placement that avoids the download-failed nodes (#381).
+
+    When a rank's model download terminally fails (disk full, transient HF or
+    network error), the instance can never become ready. Recovery keeps the
+    same world size but excludes the node(s) whose download failed, forcing the
+    planner onto healthy nodes. If too few nodes remain to host the width,
+    :func:`place_instance` raises :class:`PlacementError`, which the caller
+    treats as the terminal "cannot recover" outcome and stops at the teardown —
+    bounding recovery to the available healthy nodes rather than looping.
+
+    The excluded set must be passed to :func:`place_instance` as well; it is
+    carried on the command only as a record of intent.
+
+    Raises :class:`PlacementError` if the instance carries no shards.
+    """
+    model_card, sharding, instance_meta, width = _placement_intent_from_instance(
+        instance
+    )
+    return PlaceInstance(
+        model_card=model_card,
+        sharding=sharding,
+        instance_meta=instance_meta,
+        min_nodes=width,
+        excluded_nodes=list(excluded_nodes),
     )
 
 

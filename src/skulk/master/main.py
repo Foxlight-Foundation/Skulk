@@ -16,6 +16,7 @@ from skulk.master.placement import (
     delete_instance,
     get_transition_events,
     place_instance,
+    replacement_command_for_download_failed_instance,
     replacement_command_for_refused_instance,
 )
 from skulk.master.placement_utils import usable_vram_by_node
@@ -82,7 +83,9 @@ from skulk.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
 )
 from skulk.shared.types.telemetry import TelemetryView
+from skulk.shared.types.worker.downloads import DownloadFailed
 from skulk.shared.types.worker.instances import InstanceId
+from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
 from skulk.store.config import resolve_config_path
 from skulk.utils.channels import Receiver, Sender
 from skulk.utils.disk_event_log import DiskEventLog
@@ -182,6 +185,52 @@ def orphaned_task_failure_events(
     return events
 
 
+def instances_wedged_by_download_failure(
+    state: State,
+) -> dict[InstanceId, tuple[frozenset[NodeId], str]]:
+    """Not-yet-ready instances that can never load because a rank's download failed.
+
+    A multi-node instance forms its ring and every rank waits for all ranks to
+    become load-ready. If one rank's model download terminally fails (disk full,
+    transient HF or network error) that rank never advances, so the whole
+    instance sits at ``RunnerConnected`` forever with nothing to fail or recover
+    it (#381). This detects exactly that wedge from the master's own state: an
+    instance not all-ready whose any rank node carries a terminal
+    ``DownloadFailed`` for the instance's model. Returns, per wedged instance,
+    the failed node id(s) and a human-readable cause. Pure for testability.
+
+    A fully-ready instance (all runners ``RunnerReady``/``RunnerRunning``) is
+    never reported even if a stale ``DownloadFailed`` lingers in state, so a
+    serving instance is never torn down by this path.
+    """
+    wedged: dict[InstanceId, tuple[frozenset[NodeId], str]] = {}
+    for instance_id, instance in state.instances.items():
+        runner_ids = list(instance.shard_assignments.runner_to_shard.keys())
+        if not runner_ids:
+            continue
+        all_ready = all(
+            isinstance(state.runners.get(runner_id), (RunnerReady, RunnerRunning))
+            for runner_id in runner_ids
+        )
+        if all_ready:
+            continue
+        shards = list(instance.shard_assignments.runner_to_shard.values())
+        model_id = shards[0].model_card.model_id
+        failed_nodes: set[NodeId] = set()
+        cause = ""
+        for node_id in instance.shard_assignments.node_to_runner:
+            for progress in state.downloads.get(node_id, []):
+                if (
+                    isinstance(progress, DownloadFailed)
+                    and progress.shard_metadata.model_card.model_id == model_id
+                ):
+                    failed_nodes.add(node_id)
+                    cause = progress.error_message
+        if failed_nodes:
+            wedged[instance_id] = (frozenset(failed_nodes), cause)
+    return wedged
+
+
 class Master:
     def __init__(
         self,
@@ -256,6 +305,13 @@ class Master:
         # or of redelivery. Grows only by refused ids (rare); never reused since
         # InstanceIds are unique.
         self._refusal_replaced: set[InstanceId] = set()
+        # Instance ids whose download-failure recovery has already been initiated
+        # (#381), same dedup rationale as _refusal_replaced: the plan pass emits
+        # events but does not apply them, so the wedged instance stays visible
+        # for several ticks until InstanceDeleted round-trips. Deduping on the
+        # id makes recovery fire once per wedged instance. Grows only by wedged
+        # ids (rare); never reused since InstanceIds are unique.
+        self._download_failure_recovered: set[InstanceId] = set()
 
     def _configure_expected_trace_ranks(
         self, task_id: TaskId, instance_id: InstanceId, *, trace_enabled: bool
@@ -845,7 +901,94 @@ class Master:
                 logger.info(f"Manually removing node {node_id} due to inactivity")
                 await self.event_sender.send(NodeTimedOut(node_id=node_id))
 
+            # Recover instances wedged because a rank's download failed (#381).
+            # Suppressed during the settle grace for the same reason as the
+            # liveness passes above: a freshly seeded master sees stale download
+            # state until live gossip refreshes it. A terminal DownloadFailed on
+            # a not-yet-ready instance can never clear on its own, so fail the
+            # instance (surfacing the cause to any waiting request) and re-place
+            # it excluding the failed node(s). Deduped so it acts once per wedged
+            # instance, not every tick while the events round-trip.
+            if topology_settled:
+                await self._recover_download_failed_instances()
+
             await anyio.sleep(10)
+
+    async def _recover_download_failed_instances(self) -> None:
+        """Fail and re-place instances stuck because a rank's download failed (#381).
+
+        See :func:`instances_wedged_by_download_failure`. For each newly-detected
+        wedged instance: fail any in-flight API task bound to it (so an open
+        request gets a clean error instead of hanging), tear the instance down,
+        and re-place the model at the same width excluding the failed node(s),
+        reusing the #290 placement machinery. If no healthy node set can host the
+        width, placement raises and we stop at the teardown, which bounds
+        recovery to the available nodes instead of looping.
+        """
+        wedged = instances_wedged_by_download_failure(self.state)
+        for instance_id, (failed_nodes, cause) in wedged.items():
+            if instance_id in self._download_failure_recovered:
+                continue
+            instance = self.state.instances.get(instance_id)
+            if instance is None:
+                continue
+            self._download_failure_recovered.add(instance_id)
+            failed_list = sorted(str(node_id) for node_id in failed_nodes)
+            logger.error(
+                f"Instance {instance_id} wedged: a rank's download failed on "
+                f"{failed_list} ({cause}). Failing it and re-placing without the "
+                "failed node(s)."
+            )
+            # Fail any in-flight API task bound to this instance before the
+            # teardown events index (the TaskFailed-before-removal invariant,
+            # #223): get_transition_events below emits InstanceDeleted, whose
+            # apply drops the instance's tasks.
+            for task_failed in orphaned_task_failure_events(self.state, {instance_id}):
+                await self.event_sender.send(task_failed)
+            after_delete = delete_instance(
+                DeleteInstance(instance_id=instance_id), self.state.instances
+            )
+            final_placement = after_delete
+            try:
+                replace_command = replacement_command_for_download_failed_instance(
+                    instance, failed_nodes
+                )
+                final_placement = place_instance(
+                    replace_command,
+                    self.state.topology,
+                    after_delete,
+                    self._telemetry_view.node_memory,
+                    self.state.node_network,
+                    download_status=self.state.downloads,
+                    excluded_nodes=set(failed_nodes),
+                    node_resources=self._telemetry_view.node_resources,
+                    node_vram=usable_vram_by_node(
+                        self._telemetry_view.node_system,
+                        self._telemetry_view.node_resources,
+                        node_memory=self._telemetry_view.node_memory,
+                    ),
+                )
+                logger.warning(
+                    f"Re-placing {replace_command.model_card.model_id} excluding "
+                    f"{failed_list} after a download failure"
+                )
+            except (PlacementError, PlacementInfoPendingError) as err:
+                final_placement = after_delete
+                logger.error(
+                    f"Cannot re-place {instance_id}'s model after a download "
+                    f"failure on {failed_list}: {err}. Torn down."
+                )
+            transition_events = get_transition_events(
+                self.state.instances, final_placement, self.state.tasks
+            )
+            for cmd in cancel_unnecessary_downloads(
+                final_placement, self.state.downloads
+            ):
+                await self.download_command_sender.send(
+                    ForwarderDownloadCommand(origin=self._system_id, command=cmd)
+                )
+            for event in transition_events:
+                await self.event_sender.send(event)
 
     async def _event_processor(self) -> None:
         with self.local_event_receiver as local_events:
