@@ -9,6 +9,20 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **A rank's failed download no longer wedges a multi-node instance forever
+  (#381).** If one rank's model download failed terminally (disk full, a
+  transient Hugging Face or network error), the ring still formed and every rank
+  waited for all ranks to become load-ready; the failed rank never would, and
+  nothing failed or recovered the instance, so it sat "loading" at
+  `RunnerConnected` indefinitely until a manual restart. The master's plan loop
+  now detects this from replicated state (a not-yet-ready instance whose any rank
+  node carries a terminal `DownloadFailed` for the model), fails any in-flight
+  request bound to it with the download error surfaced, tears the instance down,
+  and re-places the model at the same width excluding the failed node(s). A
+  transient or single-node failure self-heals onto healthy nodes; a cluster-wide
+  shortfall fails cleanly with the reason (`PlacementError` is terminal, bounding
+  recovery to the available nodes) instead of hanging.
+
 - **Node logs are now bounded and cannot fill the disk (#382).** Two paths grew
   without limit: the durable `~/.skulk/logs/skulk.log` rotated only once at
   startup, so a long-lived node grew it forever; and the service-manager capture
