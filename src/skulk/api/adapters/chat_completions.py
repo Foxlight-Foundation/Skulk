@@ -408,13 +408,13 @@ async def collect_chat_response(
                 finish_reason = chunk.finish_reason
 
     if error_message is not None:
-        if error_message.startswith(CONTEXT_LENGTH_EXCEEDED_PREFIX):
-            # The HTTP status is already committed (the body itself streams),
-            # so a runner-side context rejection surfaces as a structured
-            # OpenAI error envelope in the body rather than a broken stream.
-            yield error_chunk_response(error_message).model_dump_json()
-            return
-        raise ValueError(error_message)
+        # The HTTP status is already committed (the body itself streams), so a
+        # runner-side error surfaces as a structured OpenAI error envelope in the
+        # body rather than a broken stream or a bogus empty success.
+        # error_chunk_response maps the context sentinel to a 400 and everything
+        # else to the historical 500 internal-error shape.
+        yield error_chunk_response(error_message).model_dump_json()
+        return
 
     combined_text = "".join(text_parts)
     combined_thinking = "".join(thinking_parts) if thinking_parts else None

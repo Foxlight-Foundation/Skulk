@@ -5,7 +5,7 @@ import re
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from skulk.api.adapters.chat_completions import fetch_image_url
+from skulk.api.adapters.chat_completions import error_chunk_response, fetch_image_url
 from skulk.api.types import FinishReason, Usage
 from skulk.api.types.claude_api import (
     ClaudeContentBlock,
@@ -290,7 +290,12 @@ async def collect_claude_response(
             stop_reason = finish_reason_to_claude_stop_reason(chunk.finish_reason)
 
     if error_message is not None:
-        raise ValueError(error_message)
+        # The HTTP status is already committed (the body itself streams), so a
+        # runner-side error surfaces as a structured error envelope in the body
+        # rather than a 500 or a bogus empty success. error_chunk_response maps
+        # the context sentinel to a 400 and everything else to a 500.
+        yield error_chunk_response(error_message).model_dump_json()
+        return
 
     combined_text = "".join(text_parts)
     combined_thinking = "".join(thinking_parts)
@@ -347,6 +352,7 @@ async def generate_claude_stream(
     stop_reason: ClaudeStopReason | None = None
     last_usage: Usage | None = None
     next_block_index = 0
+    error_message: str | None = None
 
     # Track whether we've started thinking/text blocks
     thinking_block_started = False
@@ -359,7 +365,10 @@ async def generate_claude_stream(
             continue
 
         if isinstance(chunk, ErrorChunk):
-            # Close text block and bail
+            # Capture the message and bail out of the loop; the structured error
+            # is emitted below instead of falling through to the empty-success
+            # tail (which would be a bogus success for a real error).
+            error_message = chunk.error_message or "Internal server error"
             break
 
         last_usage = chunk.usage or last_usage
@@ -439,6 +448,16 @@ async def generate_claude_stream(
 
         if chunk.finish_reason is not None:
             stop_reason = finish_reason_to_claude_stop_reason(chunk.finish_reason)
+
+    if error_message is not None:
+        # The HTTP status is already committed (the body itself streams), so a
+        # runner-side error surfaces as a structured SSE error event in the body
+        # rather than falling through to the empty-success message_stop tail.
+        yield (
+            "event: error\n"
+            f"data: {error_chunk_response(error_message).model_dump_json()}\n\n"
+        )
+        return
 
     # Use actual token count from usage if available
     if last_usage is not None:
