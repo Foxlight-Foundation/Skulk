@@ -60,6 +60,43 @@ Click **Allow**. If you missed it (or are running over SSH and never saw it):
 Skulk detects this denial at startup and logs a warning telling you to grant
 access, so you are never left guessing.
 
+To see which process/app identity macOS is likely to attach the grant to, run
+the read-only probe from the same launch path you plan to use for Skulk:
+
+```bash
+uv run skulk-macos-local-network-probe
+```
+
+For scripts or issue reports, JSON output is also available:
+
+```bash
+uv run skulk-macos-local-network-probe --json
+```
+
+The probe may trigger the Local Network prompt because it performs one local
+TCP reachability attempt, but it does not grant permissions or change
+Thunderbolt/RDMA/network settings.
+
+To compare Terminal attribution with a Skulk-named app bundle during
+development, build the disposable native probe app and launch it with `open`:
+
+```bash
+uv run skulk-build-macos-local-network-probe-app --replace
+open -W /tmp/SkulkLocalNetworkProbe.app
+cat ~/Library/Logs/SkulkLocalNetworkProbe/launcher-preflight.json
+cat ~/Library/Logs/SkulkLocalNetworkProbe/latest.json
+```
+
+The generated app is not installed permanently; it is a throwaway bundle under
+`/tmp`. Its executable is a tiny native launcher, and its `Info.plist` includes
+`NSLocalNetworkUsageDescription`. The `launcher-preflight.json` file records
+the native bundled process's own Local Network status before it launches the
+Python probe, so we can distinguish app-bundle permission from child-process
+inheritance. Treat this as a diagnostic harness, not the final packaged Skulk
+runtime: if the launcher preflight reports `blocked`, a wrapper app is not
+sufficient on that machine and the next test should be a frozen/signed
+`Contents/MacOS/Skulk` runtime.
+
 > **The grant follows the launching app.** macOS attributes Local Network
 > access to the app a process is launched *from*. Run Skulk from the **Terminal
 > you granted** (i.e. `uv run skulk` in that Terminal) and it inherits the
