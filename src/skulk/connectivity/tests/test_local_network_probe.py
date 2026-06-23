@@ -1,4 +1,5 @@
-# pyright: reportPrivateUsage=false
+# pyright: reportPrivateUsage=false, reportUnknownLambdaType=false
+# pyright: reportUnknownArgumentType=false, reportUnknownMemberType=false
 """Tests for the macOS Local Network identity probe."""
 
 from __future__ import annotations
@@ -117,3 +118,39 @@ def test_run_probe_returns_zero_when_blocked_without_fail(
     )
 
     assert local_network_probe.run_local_network_identity_probe() == 0
+
+
+def test_friendly_executable_label_maps_python_variants() -> None:
+    assert local_network_probe._friendly_executable_label("/x/python3.13") == "Python"
+    assert local_network_probe._friendly_executable_label("/usr/bin/python") == "Python"
+    assert local_network_probe._friendly_executable_label("/opt/uv") == "uv"
+    assert local_network_probe._friendly_executable_label("/x/mylauncher") == "mylauncher"
+    assert local_network_probe._friendly_executable_label(None) is None
+
+
+def test_responsible_app_label_prefers_nearest_app_bundle(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # A process chain where an ancestor lives in a .app bundle: that bundle's
+    # display name is what macOS attributes the grant to.
+    bundle = local_network_probe.AppBundleIdentity(
+        path="/Applications/iTerm.app", display_name="iTerm2"
+    )
+    current = ProcessIdentity(pid=1, executable="/x/python3.13")
+    ancestor = ProcessIdentity(pid=2, executable="/Applications/iTerm.app/Contents/MacOS/iTerm2", app_bundle=bundle)
+    monkeypatch.setattr(local_network_probe.psutil, "Process", lambda: object())
+    monkeypatch.setattr(local_network_probe, "_process_identity", lambda _p: current)
+    monkeypatch.setattr(local_network_probe, "_ancestor_identities", lambda _p, _n: [ancestor])
+
+    assert local_network_probe.responsible_app_label() == "iTerm2"
+
+
+def test_responsible_app_label_falls_back_to_executable_when_no_bundle(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    current = ProcessIdentity(pid=1, executable="/opt/python3.13")
+    monkeypatch.setattr(local_network_probe.psutil, "Process", lambda: object())
+    monkeypatch.setattr(local_network_probe, "_process_identity", lambda _p: current)
+    monkeypatch.setattr(local_network_probe, "_ancestor_identities", lambda _p, _n: [])
+
+    assert local_network_probe.responsible_app_label() == "Python"

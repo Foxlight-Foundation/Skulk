@@ -252,6 +252,49 @@ def _notes(
     return notes
 
 
+_FRIENDLY_EXECUTABLE_LABELS = {"uv": "uv"}
+
+
+def _friendly_executable_label(executable: str | None) -> str | None:
+    """A human label for a bare executable (no .app), e.g. ``Python``."""
+    if not executable:
+        return None
+    name = Path(executable).name
+    if name.startswith("python"):
+        # pythonNN / python3.13 / Python -> "Python" (how macOS surfaces it).
+        return "Python"
+    return _FRIENDLY_EXECUTABLE_LABELS.get(name, name)
+
+
+def responsible_app_label(max_ancestors: int = 8) -> str | None:
+    """Best guess at the app macOS attributes a Local Network grant to.
+
+    macOS attributes local-network access to the "responsible" app in the launch
+    chain, not necessarily the python binary: a GUI terminal/launcher holds the
+    grant when present, otherwise the executable itself does. This returns the
+    display name of the nearest ancestor ``.app`` bundle (the terminal that
+    launched Skulk), or a friendly executable name (``"Python"`` for any
+    ``pythonNN``) when there is no ``.app`` in the chain (SSH / launchd /
+    headless), which is exactly the identity a user must enable in System
+    Settings. ``None`` when the process tree cannot be read. Does NOT touch the
+    network, so it is cheap and safe to call alongside the reachability check.
+    """
+    try:
+        current = psutil.Process()
+    except (psutil.Error, OSError):
+        return None
+    identity = _process_identity(current)
+    for item in (identity, *_ancestor_identities(current, max(0, max_ancestors))):
+        if item.app_bundle is not None:
+            bundle = item.app_bundle
+            return (
+                bundle.display_name
+                or bundle.bundle_name
+                or Path(bundle.path).stem
+            )
+    return _friendly_executable_label(identity.executable)
+
+
 def collect_local_network_identity_probe(
     max_ancestors: int = 8,
 ) -> LocalNetworkIdentityProbe:

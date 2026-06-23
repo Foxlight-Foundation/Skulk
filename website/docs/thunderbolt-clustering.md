@@ -58,7 +58,9 @@ Click **Allow**. If you missed it (or are running over SSH and never saw it):
 3. Restart Skulk.
 
 Skulk detects this denial at startup and logs a warning telling you to grant
-access, so you are never left guessing.
+access, naming the specific app to enable (the terminal you launched from, or
+`Python` when launched over SSH or as a service), so you are never left
+guessing.
 
 To see which process/app identity macOS is likely to attach the grant to, run
 the read-only probe from the same launch path you plan to use for Skulk:
