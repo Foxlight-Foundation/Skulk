@@ -7,7 +7,21 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
-### Fixed
+### Added
+
+- **macOS Local Network permission is now diagnosable and the denial warning is
+  actionable (#267).** macOS attributes Local Network access to the responsible
+  app in the launch chain (a terminal when run interactively, "Python" over SSH
+  / launchd / headless), so generic "grant the app you launched from" advice is
+  the part users get wrong. A new read-only probe, `uv run
+  skulk-macos-local-network-probe` (text or `--json`), walks the process tree,
+  resolves each process's nearest `.app` bundle identity, runs the existing
+  reachability check, and reports exactly which identity macOS will attribute the
+  grant to. A companion `skulk-build-macos-local-network-probe-app` builds a
+  throwaway ad-hoc-signed probe `.app` (with `NSLocalNetworkUsageDescription`) to
+  compare terminal vs Skulk-named attribution during development. The startup
+  DENIED warning now names the detected app to enable (e.g. "enable 'iTerm2'" or
+  "enable 'Python'") instead of generic advice, and points at the probe command.
 
 - **Auto-imported Qwen3 reasoning models no longer return empty content (#384).**
   A Qwen3-family model with no built-in card (a fresh quant imported on demand,

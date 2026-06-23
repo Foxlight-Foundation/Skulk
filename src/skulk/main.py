@@ -17,8 +17,8 @@ from pydantic import PositiveInt
 import skulk.routing.topics as topics
 from skulk.api.main import API
 from skulk.connectivity.local_network import (
-    LOCAL_NETWORK_DENIED_MESSAGE,
     check_local_network_access,
+    local_network_denied_message,
 )
 from skulk.connectivity.tailscale import query_tailscale_status
 from skulk.download.coordinator import DownloadCoordinator
@@ -1017,7 +1017,7 @@ def main():
     # / Thunderbolt peers (EHOSTUNREACH), so cluster discovery never forms.
     # Detect it early and tell the operator how to grant access.
     if check_local_network_access() == "blocked":
-        logger.warning(LOCAL_NETWORK_DENIED_MESSAGE)
+        logger.warning(local_network_denied_message())
 
     if args.offline:
         logger.info("Running in OFFLINE mode — no internet checks, local models only")

@@ -106,3 +106,34 @@ LOCAL_NETWORK_DENIED_MESSAGE = (
     "from (e.g. Terminal), then restart Skulk. See the Thunderbolt clustering "
     "guide in the Skulk documentation for details."
 )
+
+
+def local_network_denied_message() -> str:
+    """The DENIED warning, naming the exact app to grant when detectable (#267).
+
+    macOS attributes the Local Network grant to the responsible app in the launch
+    chain (a terminal when run interactively, or "Python" over SSH / launchd /
+    headless). Generic advice to "enable the app you launched from" is the part
+    users get wrong, so this resolves the actual identity via the process-tree
+    probe and names it. Falls back to :data:`LOCAL_NETWORK_DENIED_MESSAGE` if the
+    identity cannot be determined. Does not re-probe the network.
+    """
+    label: str | None = None
+    try:
+        from skulk.connectivity.local_network_probe import responsible_app_label
+
+        label = responsible_app_label()
+    except Exception:  # noqa: BLE001 - identity hint is best-effort
+        label = None
+    if not label:
+        return LOCAL_NETWORK_DENIED_MESSAGE
+    return (
+        "macOS Local Network access appears to be DENIED for this process. Skulk "
+        "cannot reach peers on your local network or Thunderbolt bridge, so the "
+        "cluster will not form over Ethernet/Thunderbolt (a Tailscale overlay, "
+        "if present, is exempt and still works). Grant access: System Settings → "
+        f"Privacy & Security → Local Network → enable '{label}', then restart "
+        "Skulk. (Run 'uv run skulk-macos-local-network-probe' to confirm which "
+        "identity macOS attributes the grant to.) See the Thunderbolt clustering "
+        "guide in the Skulk documentation for details."
+    )

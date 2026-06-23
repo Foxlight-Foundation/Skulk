@@ -1,10 +1,13 @@
-# pyright: reportPrivateUsage=false, reportAny=false
+# pyright: reportPrivateUsage=false, reportAny=false, reportUnknownLambdaType=false
+# pyright: reportUnknownArgumentType=false
 """Tests for macOS Local Network Privacy detection."""
 
 from __future__ import annotations
 
 import errno
 from unittest import mock
+
+from pytest import MonkeyPatch
 
 from skulk.connectivity import local_network
 
@@ -76,3 +79,27 @@ def test_blocked_message_is_actionable() -> None:
     msg = local_network.LOCAL_NETWORK_DENIED_MESSAGE
     assert "Local Network" in msg
     assert "System Settings" in msg
+
+
+def test_local_network_denied_message_names_detected_app(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # When the responsible app is detectable, the warning names it (#267).
+    import skulk.connectivity.local_network_probe as probe
+
+    monkeypatch.setattr(probe, "responsible_app_label", lambda *a, **k: "iTerm2")
+    message = local_network.local_network_denied_message()
+    assert "'iTerm2'" in message
+    assert "skulk-macos-local-network-probe" in message
+
+
+def test_local_network_denied_message_falls_back_when_unknown(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    import skulk.connectivity.local_network_probe as probe
+
+    monkeypatch.setattr(probe, "responsible_app_label", lambda *a, **k: None)
+    assert (
+        local_network.local_network_denied_message()
+        == local_network.LOCAL_NETWORK_DENIED_MESSAGE
+    )
