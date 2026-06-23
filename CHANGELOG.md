@@ -9,6 +9,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Auto-imported Qwen3 reasoning models no longer return empty content (#384).**
+  A Qwen3-family model with no built-in card (a fresh quant imported on demand,
+  e.g. `Qwen3.6-35B-A3B-nvfp4`) arrived with empty capabilities, so its resolved
+  profile reported no thinking and no thinking toggle. Thinking is on by default
+  for Qwen3, so the model reasoned unconditionally and a normal chat request
+  spent its whole token budget on the reasoning channel, returning empty
+  `content`. Capability resolution now recognizes the Qwen3 / Qwen3.5 / Qwen3.6
+  family (token-delimited `<think>` toggle), so an auto-imported variant is
+  treated as toggle-capable and the dashboard/API off-by-default path can
+  suppress thinking. Built-in cards keep their explicit declarations, an explicit
+  `reasoning` section still overrides the family default, and Coder variants
+  (instruct-only, no thinking) are excluded.
+
 - **A runner that never reports after spawn no longer stalls an instance forever
   (#272).** A runner frozen between spawn and its first status report (a
   SIGSTOP, a hang in early import or device init) left the instance stuck in

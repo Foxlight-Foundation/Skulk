@@ -128,6 +128,23 @@ def _is_gpt_oss_family(profile_family: str, normalized_model_id: str) -> bool:
     )
 
 
+def _is_qwen3_thinking_family(profile_family: str, normalized_model_id: str) -> bool:
+    """Qwen3 and its point releases (Qwen3.5, Qwen3.6) are hybrid thinking models.
+
+    They reason behind a token-delimited ``<think>`` toggle. Built-in cards
+    declare ``thinking``/``thinking_toggle`` explicitly, but an auto-imported
+    card (no built-in entry, e.g. a fresh quant) arrives with empty capabilities
+    and would otherwise resolve to no-thinking, so the model reasons
+    unconditionally and returns empty content under a normal request (#384).
+    Matched on the normalized id or the inferred family token. The ``Coder``
+    variants are instruct-only (no thinking mode) and are excluded; Qwen2.x and
+    earlier never contain ``qwen3`` so they fall through to generic handling.
+    """
+    if "coder" in normalized_model_id:
+        return False
+    return "qwen3" in normalized_model_id or profile_family.lower().startswith("qwen3")
+
+
 def resolve_model_capability_profile(
     model_id: ModelId,
     *,
@@ -232,6 +249,20 @@ def resolve_model_capability_profile(
                 "supports_tool_calling": True,
                 "output_parser": OutputParserType.GptOss,
                 "tool_call_format": ToolCallFormat.GptOss,
+            }
+        )
+    elif _is_qwen3_thinking_family(profile.family, normalized_model_id):
+        # Qwen3/3.5/3.6 reason behind a token-delimited <think> toggle. Default
+        # the thinking contract on so an auto-imported card (empty capabilities)
+        # is still treated as toggle-capable, instead of resolving to
+        # no-thinking and reasoning unconditionally into empty content (#384).
+        # Only the thinking fields are set; tool/prompt/parser behavior stays
+        # generic. Explicit card.reasoning still overrides below.
+        profile = profile.model_copy(
+            update={
+                "supports_thinking": True,
+                "supports_thinking_toggle": True,
+                "thinking_format": ReasoningFormat.TokenDelimited,
             }
         )
 
