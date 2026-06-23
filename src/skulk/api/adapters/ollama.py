@@ -4,6 +4,7 @@ import json
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from skulk.api.adapters.chat_completions import error_chunk_response
 from skulk.api.types.ollama_api import (
     OllamaChatRequest,
     OllamaChatResponse,
@@ -296,7 +297,12 @@ async def collect_ollama_chat_response(
                 continue
 
             case ErrorChunk():
-                raise ValueError(chunk.error_message or "Internal server error")
+                # The HTTP status is already committed (the body itself streams),
+                # so a runner-side error surfaces as a structured error envelope
+                # in the body rather than a 500. error_chunk_response maps the
+                # context sentinel to a 400 and everything else to a 500.
+                yield error_chunk_response(chunk.error_message).model_dump_json() + "\n"
+                return
 
             case TokenChunk():
                 if model is None:
@@ -479,7 +485,12 @@ async def collect_ollama_generate_response(
             case PrefillProgressChunk():
                 continue
             case ErrorChunk():
-                raise ValueError(chunk.error_message or "Internal server error")
+                # The HTTP status is already committed (the body itself streams),
+                # so a runner-side error surfaces as a structured error envelope
+                # in the body rather than a 500. error_chunk_response maps the
+                # context sentinel to a 400 and everything else to a 500.
+                yield error_chunk_response(chunk.error_message).model_dump_json() + "\n"
+                return
             case TokenChunk():
                 if model is None:
                     model = str(chunk.model)

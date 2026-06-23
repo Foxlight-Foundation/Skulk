@@ -5,6 +5,7 @@ from itertools import count
 from typing import Any
 
 from skulk.api.adapters.chat_completions import (
+    error_chunk_response,
     extract_base64_from_data_url,
     fetch_image_url,
 )
@@ -257,7 +258,12 @@ async def collect_responses_response(
         accumulated_text += chunk.text
 
     if error_message is not None:
-        raise ValueError(error_message)
+        # The HTTP status is already committed (the body itself streams), so a
+        # runner-side error surfaces as a structured error envelope in the body
+        # rather than a 500 or a bogus empty success. error_chunk_response maps
+        # the context sentinel to a 400 and everything else to a 500.
+        yield error_chunk_response(error_message).model_dump_json()
+        return
 
     # Create usage from usage data if available
     usage = None
@@ -333,6 +339,7 @@ async def generate_responses_stream(
     function_call_items: list[ResponseFunctionCallItem] = []
     last_usage: Usage | None = None
     next_output_index = 0
+    error_message: str | None = None
 
     # Track dynamic block creation
     reasoning_started = False
@@ -345,6 +352,10 @@ async def generate_responses_stream(
             continue
 
         if isinstance(chunk, ErrorChunk):
+            # Capture the message and bail out of the loop; the structured error
+            # is emitted below instead of falling through to the empty-success
+            # response.completed tail (a bogus success for a real error).
+            error_message = chunk.error_message or "Internal server error"
             break
 
         last_usage = chunk.usage or last_usage
@@ -522,6 +533,17 @@ async def generate_responses_stream(
             delta=chunk.text,
         )
         yield _format_sse(delta_event)
+
+    if error_message is not None:
+        # The HTTP status is already committed (the body itself streams), so a
+        # runner-side error surfaces as a structured SSE error event in the body
+        # rather than falling through to the empty-success response.completed
+        # tail.
+        yield (
+            "event: error\n"
+            f"data: {error_chunk_response(error_message).model_dump_json()}\n\n"
+        )
+        return
 
     # Close reasoning block if it was never followed by text
     if reasoning_started and not message_started:

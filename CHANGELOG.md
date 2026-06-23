@@ -22,6 +22,18 @@ This project records release notes here and mirrors public-facing notes in
   `reasoning` section still overrides the family default, and Coder variants
   (instruct-only, no thinking) are excluded.
 
+- **Context-length and other runner errors now surface as structured errors on
+  the Claude, Responses, and Ollama wire formats (#276).** Those adapters
+  previously raised on a runner error (a 500 on the non-streaming path) or broke
+  out of the stream and then emitted an empty successful completion (a bogus
+  success for what is actually a clean request rejection). Since the API streams
+  every response (the HTTP status is committed to 200 before generation), each
+  adapter now emits a structured error envelope in the body and stops, reusing
+  the same `error_chunk_response` mapping the OpenAI chat-completions surface
+  uses: a `context_length_exceeded` rejection becomes an `invalid_request_error`
+  (400), everything else an internal error (500). No more empty-success-on-error
+  for clients feeling out context limits.
+
 - **A runner that never reports after spawn no longer stalls an instance forever
   (#272).** A runner frozen between spawn and its first status report (a
   SIGSTOP, a hang in early import or device init) left the instance stuck in
