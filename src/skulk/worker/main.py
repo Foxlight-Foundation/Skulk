@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import io
+import time
 from collections import defaultdict
 from collections.abc import Container, Mapping
 from datetime import datetime, timezone
@@ -121,6 +122,16 @@ _RUNNER_CRASH_WINDOW_SECONDS = 60.0
 """Rolling window for ``_RUNNER_CRASH_THRESHOLD`` (see CrashWindow)."""
 
 
+_RUNNER_FIRST_REPORT_DEADLINE_SECONDS = 120.0
+"""How long a spawned runner has to report its first status before the worker
+gives up on its instance (#272). A runner frozen between spawn and its first
+report (SIGSTOP, a hang in early import, a stuck device init) otherwise stalls
+pre-init coordination forever: ``_init_distributed_backend`` only plans
+``ConnectToGroup`` once every rank has reported, and the crash breaker never
+trips because the process is alive. Generous enough to cover slow Python imports
+and weight mmaps, far under an indefinite hang."""
+
+
 def _wedged_live_instances(
     runners: Mapping[RunnerId, "RunnerSupervisor"],
     live_instances: Container[InstanceId],
@@ -141,6 +152,35 @@ def _wedged_live_instances(
         if supervisor.bound_instance.instance.instance_id in live_instances
         and _runner_failed_wedged(supervisor.status)
     ]
+
+
+def runners_never_reported(
+    runners: Mapping[RunnerId, "RunnerSupervisor"],
+    live_instances: Container[InstanceId],
+    now_monotonic: float,
+    deadline_seconds: float,
+) -> list[tuple[InstanceId, ModelId]]:
+    """Live instances whose spawned runner never reported a status in time (#272).
+
+    A runner frozen between spawn and its first status report stalls pre-init
+    coordination forever: the group-init gate only plans ``ConnectToGroup`` once
+    every rank has reported, and the crash breaker never trips because the
+    process is alive. Returns ``(instance_id, model_id)`` for each live-instance
+    supervisor older than ``deadline_seconds`` that has not yet reported. Pure for
+    testability.
+    """
+    stalled: list[tuple[InstanceId, ModelId]] = []
+    for supervisor in runners.values():
+        instance_id = supervisor.bound_instance.instance.instance_id
+        if instance_id not in live_instances:
+            continue
+        if supervisor.has_reported_status:
+            continue
+        if supervisor.seconds_since_created(now_monotonic) >= deadline_seconds:
+            stalled.append(
+                (instance_id, supervisor.shard_metadata.model_card.model_id)
+            )
+    return stalled
 
 
 def _runner_failed_wedged(status: RunnerStatus | None) -> bool:
@@ -699,6 +739,27 @@ class Worker:
                         "wedge attempt leaks wired GPU memory. If this node's "
                         "available memory dropped, a reboot is the only way "
                         "to reclaim it.",
+                    )
+
+            # First-report deadline (#272): a runner frozen between spawn and its
+            # first status report stalls pre-init coordination forever (the
+            # group-init gate waits for every rank, and the breaker never trips
+            # because the process is alive). Give the instance up via the same
+            # edge-latched breaker so it fires once and the master can recover or
+            # surface the failure instead of the instance "loading" forever.
+            for _stall_iid, _stall_model in runners_never_reported(
+                self.runners,
+                self.state.instances,
+                time.monotonic(),
+                _RUNNER_FIRST_REPORT_DEADLINE_SECONDS,
+            ):
+                if self._crash_breaker.record(_stall_iid):
+                    await self._give_up_on_instance(
+                        _stall_iid,
+                        f"runner for {_stall_model} did not report any status "
+                        f"within {_RUNNER_FIRST_REPORT_DEADLINE_SECONDS:.0f}s of "
+                        "spawn (suspected frozen process); giving up so it does "
+                        "not stall pre-init coordination forever.",
                     )
 
             task: Task | None = plan(

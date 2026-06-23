@@ -147,6 +147,15 @@ class RunnerSupervisor:
     )
     _status_since: str = field(default_factory=_now_utc_iso, init=False)
     _status_since_monotonic: float = field(default_factory=time.monotonic, init=False)
+    # Wall-clock baseline for the first-status-report deadline (#272). `status`
+    # defaults to RunnerIdle before the runner process ever reports, so it cannot
+    # distinguish "reported idle" from "never reported"; this flag does, and the
+    # created timestamp bounds how long the worker waits for that first report
+    # before giving the instance up (a runner frozen between spawn and its first
+    # report would otherwise stall ConnectToGroup forever, with no breaker since
+    # the process is alive).
+    _created_monotonic: float = field(default_factory=time.monotonic, init=False)
+    _first_status_reported: bool = field(default=False, init=False)
     _last_task_sent_at: str | None = field(default=None, init=False)
     _last_event_received_at: str | None = field(default=None, init=False)
     _last_event_type: str | None = field(default=None, init=False)
@@ -169,6 +178,19 @@ class RunnerSupervisor:
         """Seed the lifecycle buffer with runner-supervisor construction."""
 
         self._record_milestone("supervisor_created", self.status.__class__.__name__)
+
+    @property
+    def has_reported_status(self) -> bool:
+        """Whether the runner process has reported at least one status (#272).
+
+        ``status`` defaults to ``RunnerIdle`` before the process ever reports, so
+        it is not a reliable "has it come alive" signal on its own; this flag is.
+        """
+        return self._first_status_reported
+
+    def seconds_since_created(self, now_monotonic: float) -> float:
+        """Seconds since this supervisor (and its runner process) was created."""
+        return now_monotonic - self._created_monotonic
 
     @classmethod
     def create(
@@ -411,6 +433,7 @@ class RunnerSupervisor:
                     self._record_milestone("event_received", self._last_event_type)
                     if isinstance(event, RunnerStatusUpdated):
                         self.status = event.runner_status
+                        self._first_status_reported = True
                         self._status_since = _now_utc_iso()
                         self._status_since_monotonic = time.monotonic()
                         self._record_milestone(
