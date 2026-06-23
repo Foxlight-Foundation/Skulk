@@ -9,6 +9,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Node logs are now bounded and cannot fill the disk (#382).** Two paths grew
+  without limit: the durable `~/.skulk/logs/skulk.log` rotated only once at
+  startup, so a long-lived node grew it forever; and the service-manager capture
+  files (`skulk.stderr.log` / `skulk.stdout.log`) accumulated across restarts,
+  reaching tens of GB on the fleet. Now `skulk.log` rotates at 100 MB with the
+  last few runs kept as compressed archives; the capture files are truncated on
+  each restart (keeping a 5 MB tail of the previous run as `*.log.1`, tunable via
+  `SKULK_CAPTURE_KEEP_BYTES`); the console sink drops ANSI color when stderr is
+  not a terminal so captured logs are plain and greppable; and the service now
+  launches at info verbosity by default instead of `-v` debug (the libp2p
+  transport firehose was the bulk of the volume). Set `SKULK_VERBOSITY=-v` to opt
+  back into verbose logging while debugging.
+
 - **The centralized store now honors a card's pinned GGUF quant on download
   (#344).** A store-routed download re-derived the quant from the model id alone
   (the default preference), so a custom card pinning a non-default quant (e.g.
