@@ -7,7 +7,10 @@ not ``original/*`` full-precision weights, not ``metal/*`` artifacts).
 """
 
 from skulk.shared.types.worker.downloads import FileListEntry
-from skulk.store.model_store import select_store_gguf_download_files
+from skulk.store.model_store import (
+    has_gguf_projector,
+    select_store_gguf_download_files,
+)
 
 
 def _entry(path: str, size: int = 100) -> FileListEntry:
@@ -71,6 +74,22 @@ def test_mmproj_projector_is_kept_for_vision_models() -> None:
     ]
     kept = {e.path for e in select_store_gguf_download_files(files)}
     assert kept == {"config.json", "model-Q4_K_M.gguf", "mmproj-model-f16.gguf"}
+
+
+def test_has_gguf_projector_detects_mmproj() -> None:
+    # The store uses this to (a) detect a vision GGUF from its full repo listing
+    # and (b) verify the projector actually landed before registering (#346).
+    assert has_gguf_projector(["model-Q4_K_M.gguf", "mmproj-F16.gguf"]) is True
+    assert has_gguf_projector(["nested/mmproj-model-f16.gguf"]) is True
+    assert has_gguf_projector(["MMPROJ-F32.GGUF"]) is True  # case-insensitive
+
+
+def test_has_gguf_projector_false_without_projector() -> None:
+    # A text-only GGUF set has no projector; an mmproj-named non-gguf file does
+    # not count (the projector is always a .gguf).
+    assert has_gguf_projector(["model-Q4_K_M.gguf", "config.json"]) is False
+    assert has_gguf_projector(["mmproj-notes.txt"]) is False
+    assert has_gguf_projector([]) is False
 
 
 def test_non_gguf_repo_unchanged() -> None:

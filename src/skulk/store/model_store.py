@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -143,6 +144,19 @@ def select_store_gguf_download_files(
         return any(fnmatch(entry.path, pattern) for pattern in keep_patterns)
 
     return [entry for entry in file_list if _keep(entry)]
+
+
+def has_gguf_projector(paths: Iterable[str]) -> bool:
+    """Whether any path is a multimodal projector GGUF (``*mmproj*.gguf``).
+
+    A vision GGUF ships its projector as a separate ``mmproj`` file alongside the
+    LM weights; the store uses this both to detect that a repo is a vision GGUF
+    (from its full file list) and to verify the projector actually landed before
+    registering the model (#346).
+    """
+    return any(
+        p.lower().endswith(".gguf") and "mmproj" in p.lower() for p in paths
+    )
 
 
 @final
@@ -452,17 +466,31 @@ class ModelStore:
         try:
             await aios.makedirs(str(target_dir), exist_ok=True)
 
-            file_list = await fetch_file_list_with_cache(
+            repo_file_list = await fetch_file_list_with_cache(
                 ModelId(model_id), "main", recursive=True
+            )
+            # A vision GGUF (LLaVA/Qwen-VL/Gemma-VLM style) ships its multimodal
+            # projector as a separate ``*mmproj*.gguf`` alongside the LM weights;
+            # the llama.cpp runner cannot load the model without it. Detect that
+            # from the full repo listing so we can verify the projector actually
+            # lands before registering (see the post-download guard below): a
+            # store entry that omits the projector stages an unloadable vision
+            # model, which surfaces only as a runner crash at load time (#346).
+            repo_ships_projector = has_gguf_projector(
+                f.path for f in repo_file_list
             )
             # For a GGUF repo, fetch only the preferred quant's shard group plus
             # config.json (dropping other quants, original/*, metal/*, etc.),
-            # mirroring the direct-HF selective download (#339).
-            selected_files = select_store_gguf_download_files(file_list, pinned_gguf)
-            if len(selected_files) != len(file_list):
+            # mirroring the direct-HF selective download (#339). The projector
+            # glob is retained by ``gguf_allow_patterns``, so a vision GGUF keeps
+            # its ``*mmproj*.gguf``.
+            selected_files = select_store_gguf_download_files(
+                repo_file_list, pinned_gguf
+            )
+            if len(selected_files) != len(repo_file_list):
                 logger.info(
                     f"ModelStore: {model_id} is a GGUF repo; downloading "
-                    f"{len(selected_files)}/{len(file_list)} files (selected "
+                    f"{len(selected_files)}/{len(repo_file_list)} files (selected "
                     "quant's shard group + config.json only)"
                 )
             file_list = selected_files
@@ -497,6 +525,20 @@ class ModelStore:
                 for p in target_dir.rglob("*")
                 if p.is_file()
             ]
+            # Vision-projector completeness guard (#346): a vision GGUF whose repo
+            # ships an ``mmproj`` projector MUST land its projector, or staging it
+            # to a worker produces an unloadable model that only fails as a runner
+            # crash at load time. Refuse to register an incomplete vision model so
+            # the failure is a loud, fixable download error here (re-running the
+            # download re-fetches the projector, which the selective allow-list
+            # already retains) instead of a confusing crash on a remote node.
+            if repo_ships_projector and not has_gguf_projector(files):
+                raise RuntimeError(
+                    f"{model_id} is a vision GGUF whose repo ships an mmproj "
+                    "projector, but none landed in the store download; refusing to "
+                    "register an unusable vision model. Re-run the download to "
+                    "re-fetch the projector."
+                )
             total = sum(p.stat().st_size for p in target_dir.rglob("*") if p.is_file())
             self.register_model(model_id, target_dir, files, total)
 
