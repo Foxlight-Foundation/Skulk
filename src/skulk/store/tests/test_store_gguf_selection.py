@@ -92,6 +92,19 @@ def test_has_gguf_projector_false_without_projector() -> None:
     assert has_gguf_projector([]) is False
 
 
+def test_uppercase_projector_is_kept_matching_case_insensitive_detection() -> None:
+    # has_gguf_projector is case-insensitive, so the selection must keep an
+    # uppercase projector too -- otherwise it would be detected-as-vision but
+    # never selected, and the registration guard would fail every retry.
+    files = [
+        _entry("config.json"),
+        _entry("model-Q4_K_M.gguf", 800),
+        _entry("MMPROJ-F32.GGUF", 600),
+    ]
+    kept = {e.path for e in select_store_gguf_download_files(files)}
+    assert kept == {"config.json", "model-Q4_K_M.gguf", "MMPROJ-F32.GGUF"}
+
+
 def test_non_gguf_repo_unchanged() -> None:
     files = [
         _entry("config.json"),

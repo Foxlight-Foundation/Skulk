@@ -141,6 +141,14 @@ def select_store_gguf_download_files(
     keep_patterns = [*gguf_allow_patterns(selected), "config.json"]
 
     def _keep(entry: FileListEntry) -> bool:
+        # Keep the selected quant's shard group + config.json, plus the
+        # multimodal projector matched case-insensitively: ``has_gguf_projector``
+        # (used to detect a vision repo and to verify completeness) is
+        # case-insensitive, so the selection MUST be too, or an uppercase
+        # ``MMPROJ-*.gguf`` would be detected-but-never-selected and the
+        # registration guard would fail every retry.
+        if has_gguf_projector([entry.path]):
+            return True
         return any(fnmatch(entry.path, pattern) for pattern in keep_patterns)
 
     return [entry for entry in file_list if _keep(entry)]
@@ -394,7 +402,7 @@ class ModelStore:
     # Store-side HuggingFace downloads
     # ------------------------------------------------------------------
 
-    async def _store_entry_missing_projector(self, model_id: str) -> bool:
+    async def vision_entry_missing_projector(self, model_id: str) -> bool:
         """True when an in-store GGUF entry is a vision model missing its projector.
 
         Recovers stale entries registered before the projector was retained
@@ -442,7 +450,7 @@ class ModelStore:
         # Checked outside the lock: it may do a (cached) repo file-list fetch, and
         # holding the download lock across network I/O would serialize unrelated
         # requests.
-        missing_projector = await self._store_entry_missing_projector(model_id)
+        missing_projector = await self.vision_entry_missing_projector(model_id)
         async with self._download_lock:
             existing = self._active_downloads.get(model_id)
             if existing is not None:

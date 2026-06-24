@@ -190,6 +190,18 @@ class ModelStoreServer:
         model_path = self._store.get_store_path(model_id)
         if model_path is None:
             raise web.HTTPNotFound(reason=f"Model not in store: {model_id}")
+        # A stale vision-GGUF entry missing its mmproj projector is reported as
+        # NOT available so the worker's ensure_shard path (which stages directly
+        # on a 200 here) falls through to a download request, which re-fetches the
+        # projector and re-registers a complete entry (#346). Without this, the
+        # worker stages the incomplete entry and the runner crashes on load.
+        if await self._store.vision_entry_missing_projector(model_id):
+            raise web.HTTPNotFound(
+                reason=(
+                    f"Model in store but missing its vision projector "
+                    f"(will re-download): {model_id}"
+                )
+            )
         files = [
             str(p.relative_to(model_path)) for p in model_path.rglob("*") if p.is_file()
         ]
