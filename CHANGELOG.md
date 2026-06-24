@@ -13,8 +13,8 @@ This project records release notes here and mirrors public-facing notes in
   gossip-lagged memory (#314).** Node memory rides the telemetry plane
   (last-write-wins), so for a few gossip rounds after a runner teardown the
   freed memory is not yet reflected in `ramAvailable` (or the GPU-wireable
-  figure). A back-to-back placement (test harness, rapid model swap) read the
-  stale, deflated availability and was refused with "no candidate cycle fits"
+  figure). A back-to-back placement (test harness, rapid model swap) reads the
+  stale, deflated availability and is refused with "no candidate cycle fits"
   until a ~20-30s settle. The master now credits a just-deleted instance's
   per-node footprint (estimated with the same accounting placement admits
   against) back to the fit-check inputs for a short grace window

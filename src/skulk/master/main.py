@@ -387,19 +387,26 @@ class Master:
         """
         credit = self._freed_credit_by_node()
         base_memory = self._telemetry_view.node_memory
-        base_vram = usable_vram_by_node(
-            self._telemetry_view.node_system,
-            self._telemetry_view.node_resources,
-            node_memory=base_memory,
-        )
         if not credit:
+            base_vram = usable_vram_by_node(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=base_memory,
+            )
             return base_memory, base_vram
+        # Credit the freed bytes onto each node's ram_available, clamped to
+        # ram_total so credited availability never exceeds capacity (telemetry
+        # may already have partly caught up, or the footprint estimate may be
+        # conservative).
         memory = {
             node_id: (
                 usage.model_copy(
                     update={
                         "ram_available": Memory.from_bytes(
-                            usage.ram_available.in_bytes + credit[node_id]
+                            min(
+                                usage.ram_total.in_bytes,
+                                usage.ram_available.in_bytes + credit[node_id],
+                            )
                         )
                     }
                 )
@@ -408,10 +415,15 @@ class Master:
             )
             for node_id, usage in base_memory.items()
         }
-        vram = {
-            node_id: Memory.from_bytes(v.in_bytes + credit.get(node_id, 0))
-            for node_id, v in base_vram.items()
-        }
+        # Derive VRAM from the credited memory rather than crediting the VRAM
+        # figure directly: usable_vram_by_node applies its own working-set /
+        # GTT ceiling, so the credited VRAM is naturally capped and can never
+        # exceed the ceiling or total VRAM.
+        vram = usable_vram_by_node(
+            self._telemetry_view.node_system,
+            self._telemetry_view.node_resources,
+            node_memory=memory,
+        )
         return memory, vram
 
     def _configure_expected_trace_ranks(
