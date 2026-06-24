@@ -346,6 +346,28 @@ def _logits_all_enabled() -> bool:
     )
 
 
+def logprobs_unavailable_error(
+    want_logprobs: bool, logits_all_on: bool
+) -> str | None:
+    """Clear error message when logprobs are requested but cannot be produced.
+
+    Returns the message to fail the request with when a client asked for
+    per-token logprobs but the runner loaded the model without ``logits_all``
+    (the default), or ``None`` when the request can proceed. Surfacing this as a
+    clear error (#385) avoids silently returning a stream with empty logprobs.
+    """
+    if want_logprobs and not logits_all_on:
+        return (
+            "Per-token logprobs are unavailable on this llama.cpp node: they "
+            "require loading the model with logits_all=True (a large "
+            "pre-allocated logits buffer), which is off by default. Set "
+            "SKULK_LLAMA_CPP_LOGITS_ALL=1 on the serving node to enable them "
+            "(and optionally bound the buffer with "
+            "SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX)."
+        )
+    return None
+
+
 def _logits_all_n_ctx() -> int:
     """Context cap (tokens) to use when ``logits_all`` is on, to bound the buffer.
 
@@ -619,6 +641,19 @@ class Runner:
         kwargs = _generation_kwargs(task.task_params)
 
         try:
+            # Fail loud when logprobs are requested but the model was not loaded
+            # with logits_all (#385): llama-cpp-python gates ALL logprobs behind
+            # logits_all=True at construction, which the runner leaves off by
+            # default because the pre-allocated logits buffer is huge. Without
+            # this guard the request would "succeed" with silently-empty
+            # logprobs; instead surface a clear, actionable error (it propagates
+            # to the client as an ErrorChunk via the handler below).
+            logprobs_error = logprobs_unavailable_error(
+                task.task_params.logprobs, _logits_all_enabled()
+            )
+            if logprobs_error is not None:
+                raise RuntimeError(logprobs_error)
+
             # Tool calling can't be streamed token-by-token usefully (the caller
             # wants the assembled call), and accumulating OpenAI tool-call deltas
             # is fragile; run it non-streamed and emit one ToolCallChunk.

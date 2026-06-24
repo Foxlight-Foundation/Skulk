@@ -21,9 +21,25 @@ from skulk.worker.runner.llama_cpp.runner import (
     _splice_images_into_messages,
     _tool_calls_from_message,
     find_mmproj_file,
+    logprobs_unavailable_error,
     messages_for_llama,
     select_gguf_file,
 )
+
+
+def test_logprobs_request_without_logits_all_returns_clear_error() -> None:
+    msg = logprobs_unavailable_error(want_logprobs=True, logits_all_on=False)
+    assert msg is not None
+    assert "SKULK_LLAMA_CPP_LOGITS_ALL=1" in msg
+
+
+def test_logprobs_request_with_logits_all_proceeds() -> None:
+    assert logprobs_unavailable_error(want_logprobs=True, logits_all_on=True) is None
+
+
+def test_no_logprobs_request_never_errors() -> None:
+    assert logprobs_unavailable_error(want_logprobs=False, logits_all_on=False) is None
+    assert logprobs_unavailable_error(want_logprobs=False, logits_all_on=True) is None
 
 
 def test_select_gguf_picks_first_shard_skips_mmproj(tmp_path: Path) -> None:
