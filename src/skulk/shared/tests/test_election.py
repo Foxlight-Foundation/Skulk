@@ -436,19 +436,15 @@ def test_apply_connection_updates_reports_only_real_membership_changes() -> None
     """
     election = _make_election("ME")
 
-    # First sighting of a peer is a change.
+    # First sighting of a peer (its first connection) is a change.
     assert election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
         [ConnectionMessage(node_id=NodeId("A"), connected=True)]
     )
-    # Seeing the same peer again is not.
-    assert not election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
-        [ConnectionMessage(node_id=NodeId("A"), connected=True)]
-    )
-    # A disconnect for a tracked peer is a change.
+    # Its single connection closing (last close) is a change: the peer leaves.
     assert election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
         [ConnectionMessage(node_id=NodeId("A"), connected=False)]
     )
-    # A disconnect for an untracked peer is not.
+    # A disconnect for an untracked peer is not a change.
     assert not election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
         [ConnectionMessage(node_id=NodeId("A"), connected=False)]
     )
@@ -462,6 +458,36 @@ def test_apply_connection_updates_reports_only_real_membership_changes() -> None
             ConnectionMessage(node_id=NodeId("B"), connected=True),
             ConnectionMessage(node_id=NodeId("B"), connected=True),
         ]
+    )
+
+
+def test_apply_connection_updates_refcounts_multihomed_peer() -> None:
+    """A multi-homed peer stays present until its LAST connection closes.
+
+    The transport emits one update per connection, so dropping the peer on the
+    first close (and then ignoring the real last close as an untracked-peer
+    disconnect) could miss a genuine master loss. Ref-counting prevents that.
+    """
+    election = _make_election("ME")
+
+    # Two connections to the same peer: the first is a join, the second is not.
+    assert election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
+        [ConnectionMessage(node_id=NodeId("A"), connected=True)]
+    )
+    assert not election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
+        [ConnectionMessage(node_id=NodeId("A"), connected=True)]
+    )
+    # First of the two connections closes: peer is still present -> no change.
+    assert not election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
+        [ConnectionMessage(node_id=NodeId("A"), connected=False)]
+    )
+    # Last connection closes: the peer genuinely leaves -> change.
+    assert election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
+        [ConnectionMessage(node_id=NodeId("A"), connected=False)]
+    )
+    # And an extra close past zero is a harmless no-op (no negative counts).
+    assert not election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
+        [ConnectionMessage(node_id=NodeId("A"), connected=False)]
     )
 
 

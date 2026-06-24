@@ -92,10 +92,14 @@ class Election:
         self._candidates: list[ElectionMessage] = []
         self._campaign_cancel_scope: CancelScope | None = None
         self._campaign_done: Event | None = None
-        # Peers we currently hold a connection to. Only a genuine change to this
-        # set (a peer joining or leaving) should trigger a new election; a
-        # duplicate connect or a flap to an already-tracked peer must not.
-        self._connected_peers: set[NodeId] = set()
+        # Live connection count per peer. A multi-homed peer holds several
+        # connections at once and the transport emits one update per connection,
+        # so we ref-count (mirroring `connected_ips` in the Rust discovery layer)
+        # and treat a peer as present while it has at least one connection. Only
+        # a peer crossing 0<->1 connections changes membership and may trigger a
+        # new election; a duplicate connect or one of several connections closing
+        # must not, and the genuine last close must still register as a departure.
+        self._connected_peers: dict[NodeId, int] = {}
         self._tg = TaskGroup()
 
     async def run(self):
@@ -172,23 +176,36 @@ class Election:
                 self._candidates.append(message)
 
     def _apply_connection_updates(self, updates: list[ConnectionMessage]) -> bool:
-        """Fold connection updates into the tracked connected-peer set.
+        """Fold connection updates into the per-peer live-connection counts.
 
-        Returns ``True`` if the set of connected peers genuinely changed (a peer
-        joined or left), ``False`` if every update was a no-op: a duplicate
-        connect to a peer we already track, or a disconnect for one we did not.
-        Updates about ourselves are ignored. Only real membership changes should
-        trigger a new election, so that steady connection churn (ping-driven
-        re-dials of multi-homed peers) cannot restart the campaign forever.
+        Returns ``True`` if cluster membership genuinely changed: a peer's first
+        connection opened (it joined) or its last connection closed (it left).
+        Returns ``False`` if every update was a no-op: a second connection
+        opening or closing for a peer that stays present either way, or a
+        disconnect for a peer we were not tracking. Updates about ourselves are
+        ignored. Multi-homed peers hold several connections and the transport
+        emits one update per connection, so we ref-count rather than treat the
+        first close as a departure; otherwise a real master loss (the genuine
+        last close) could be dropped as an untracked-peer disconnect and never
+        trigger re-election. Only real membership changes should restart the
+        election, so steady connection churn cannot livelock formation.
         """
         before = frozenset(self._connected_peers)
         for update in updates:
             if update.node_id == self.node_id:
                 continue
             if update.connected:
-                self._connected_peers.add(update.node_id)
+                self._connected_peers[update.node_id] = (
+                    self._connected_peers.get(update.node_id, 0) + 1
+                )
             else:
-                self._connected_peers.discard(update.node_id)
+                remaining = self._connected_peers.get(update.node_id, 0) - 1
+                if remaining > 0:
+                    self._connected_peers[update.node_id] = remaining
+                else:
+                    # Last connection closed (or an unbalanced/untracked close):
+                    # drop the peer rather than letting the count go negative.
+                    self._connected_peers.pop(update.node_id, None)
         return frozenset(self._connected_peers) != before
 
     async def _connection_receiver(self) -> None:
