@@ -143,6 +143,33 @@ def _staged_directory_looks_complete(directory: Path) -> bool:
     return (directory / "mtp.safetensors").is_file()
 
 
+def _staged_vision_projector_missing(
+    shard: ShardMetadata, directory: Path
+) -> bool:
+    """True when a GGUF vision model's staged dir is missing its ``mmproj``.
+
+    The generic completeness probe (``_staged_directory_looks_complete``)
+    excludes ``mmproj`` files, so a GGUF vision model staged without its
+    projector still "looks complete" yet crashes the runner at load. Treating
+    such a dir as incomplete forces re-staging, which (with a projector-complete
+    store entry) pulls the projector down too (#346).
+
+    Scoped to GGUF vision models (``gguf_file`` set): an MLX / safetensors vision
+    model bundles its vision weights and has no separate projector, so it is
+    complete without one; flagging it here would wrongly disable the staged-cache
+    fast path and force needless store/HF re-resolution. Non-vision and non-GGUF
+    models are never affected.
+    """
+    card = shard.model_card
+    if card.vision is None or not card.gguf_file:
+        return False
+    from skulk.store.model_store import has_gguf_projector
+
+    return not has_gguf_projector(
+        path.name for path in directory.rglob("*") if path.is_file()
+    )
+
+
 @final
 class StoreHealthInfo:
     """Parsed response from ``GET /health`` on the store server.
@@ -863,8 +890,10 @@ class ModelStoreDownloader(ShardDownloader):
                 direct_path = self._store_client.local_store_path / _sanitize_model_id(
                     model_id
                 )
-                if direct_path.exists() and _staged_directory_looks_complete(
-                    direct_path
+                if (
+                    direct_path.exists()
+                    and _staged_directory_looks_complete(direct_path)
+                    and not _staged_vision_projector_missing(shard, direct_path)
                 ):
                     logger.info(
                         f"ModelStoreDownloader: staging disabled — loading {model_id} directly from store at {direct_path}"
@@ -881,7 +910,11 @@ class ModelStoreDownloader(ShardDownloader):
         # broken model, so incomplete dirs fall through to re-staging
         # (which resumes partial files via HTTP Range).
         dest_path = _staging_dir(self._staging_config.node_cache_path, model_id)
-        if dest_path.exists() and _staged_directory_looks_complete(dest_path):
+        if (
+            dest_path.exists()
+            and _staged_directory_looks_complete(dest_path)
+            and not _staged_vision_projector_missing(shard, dest_path)
+        ):
             logger.info(
                 f"ModelStoreDownloader: {model_id} already staged at {dest_path} — skipping availability probe"
             )
