@@ -218,7 +218,10 @@ async def chat_request_to_text_generation(
         chat_template_messages=chat_template_messages
         if chat_template_messages
         else None,
-        logprobs=request.logprobs or False,
+        # `top_logprobs` set alone implies a logprobs request (OpenAI semantics).
+        # Normalize it here, at the boundary, so every engine sees a consistent
+        # `logprobs` flag rather than each runner re-deriving it (#385).
+        logprobs=bool(request.logprobs) or request.top_logprobs is not None,
         top_logprobs=request.top_logprobs,
         min_p=request.min_p,
         repetition_penalty=request.repetition_penalty,
