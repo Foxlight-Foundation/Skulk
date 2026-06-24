@@ -418,6 +418,14 @@ class ModelStore:
         files = self.list_files_for_model(model_id)
         if files is None or has_gguf_projector(files):
             return False
+        # Only a GGUF repo carries a separate ``mmproj`` projector; an MLX /
+        # safetensors vision model bundles its vision weights and is complete
+        # without one. This runs on the store-availability hot path, so restrict
+        # the (cached, but occasionally networked) HF repo-list probe to
+        # registered GGUF entries; never probe HF for a non-GGUF model just to
+        # decide it isn't missing a projector it never has.
+        if not any(name.lower().endswith(".gguf") for name in files):
+            return False
         from skulk.download.download_utils import fetch_file_list_with_cache
         from skulk.shared.models.model_cards import ModelId
 

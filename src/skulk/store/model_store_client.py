@@ -146,16 +146,22 @@ def _staged_directory_looks_complete(directory: Path) -> bool:
 def _staged_vision_projector_missing(
     shard: ShardMetadata, directory: Path
 ) -> bool:
-    """True when a vision GGUF's staged dir is missing its ``mmproj`` projector.
+    """True when a GGUF vision model's staged dir is missing its ``mmproj``.
 
     The generic completeness probe (``_staged_directory_looks_complete``)
-    excludes ``mmproj`` files, so a vision GGUF staged without its projector
-    still "looks complete" yet crashes the runner at load. Treating such a dir
-    as incomplete forces re-staging, which (with a projector-complete store
-    entry) pulls the projector down too (#346). Non-vision models are never
-    affected.
+    excludes ``mmproj`` files, so a GGUF vision model staged without its
+    projector still "looks complete" yet crashes the runner at load. Treating
+    such a dir as incomplete forces re-staging, which (with a projector-complete
+    store entry) pulls the projector down too (#346).
+
+    Scoped to GGUF vision models (``gguf_file`` set): an MLX / safetensors vision
+    model bundles its vision weights and has no separate projector, so it is
+    complete without one; flagging it here would wrongly disable the staged-cache
+    fast path and force needless store/HF re-resolution. Non-vision and non-GGUF
+    models are never affected.
     """
-    if shard.model_card.vision is None:
+    card = shard.model_card
+    if card.vision is None or not card.gguf_file:
         return False
     from skulk.store.model_store import has_gguf_projector
 
