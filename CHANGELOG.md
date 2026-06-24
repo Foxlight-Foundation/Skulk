@@ -9,6 +9,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Cluster formation no longer livelocks under connection churn (#400).**
+  Master election restarted its whole campaign on every libp2p connection
+  update, and because peers are multi-homed (link-local, LAN, and overlay
+  addresses) and libp2p pings/re-dials every few seconds, those updates can
+  arrive faster than the election timeout. A campaign was then cancelled and
+  restarted before it could ever finish, so no master was elected and the
+  cluster never formed (most visible when several nodes start at once, e.g. a
+  fresh three-machine setup). Election now ignores connection updates that do
+  not change the set of connected peers, and lets an in-flight campaign finish
+  before starting the next one, so steady churn can no longer starve
+  convergence. Reducing the churn at its source (skipping unreachable
+  link-local dials, ping tuning) is tracked separately (#401).
+
 - **A placement right after a teardown is no longer spuriously refused on
   gossip-lagged memory (#314).** Node memory rides the telemetry plane
   (last-write-wins), so for a few gossip rounds after a runner teardown the

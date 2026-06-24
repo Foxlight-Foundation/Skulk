@@ -17,6 +17,17 @@ from skulk.utils.task_group import TaskGroup
 
 DEFAULT_ELECTION_TIMEOUT = 3.0
 
+# Connection updates arrive far more often than cluster membership actually
+# changes: libp2p re-dials multi-homed peers (link-local + LAN + overlay
+# addresses) and pings every few seconds, and a ping timeout briefly tears a
+# connection down before it re-establishes. Each update used to restart the
+# whole election campaign, and because that churn cadence (~2.5s) is shorter
+# than DEFAULT_ELECTION_TIMEOUT, a campaign could be cancelled-and-restarted
+# forever and never elect a master, so the cluster never forms. We coalesce a
+# burst of related updates over this window before deciding whether membership
+# truly changed.
+CONNECTION_SETTLE_DELAY = 0.2
+
 
 class ElectionMessage(CamelCaseModel):
     clock: int
@@ -81,6 +92,14 @@ class Election:
         self._candidates: list[ElectionMessage] = []
         self._campaign_cancel_scope: CancelScope | None = None
         self._campaign_done: Event | None = None
+        # Live connection count per peer. A multi-homed peer holds several
+        # connections at once and the transport emits one update per connection,
+        # so we ref-count (mirroring `connected_ips` in the Rust discovery layer)
+        # and treat a peer as present while it has at least one connection. Only
+        # a peer crossing 0<->1 connections changes membership and may trigger a
+        # new election; a duplicate connect or one of several connections closing
+        # must not, and the genuine last close must still register as a departure.
+        self._connected_peers: dict[NodeId, int] = {}
         self._tg = TaskGroup()
 
     async def run(self):
@@ -156,17 +175,71 @@ class Election:
                 # Now we are processing this rounds messages - including the message that triggered this round.
                 self._candidates.append(message)
 
+    def _apply_connection_updates(self, updates: list[ConnectionMessage]) -> bool:
+        """Fold connection updates into the per-peer live-connection counts.
+
+        Returns ``True`` if cluster membership genuinely changed: a peer's first
+        connection opened (it joined) or its last connection closed (it left).
+        Returns ``False`` if every update was a no-op: a second connection
+        opening or closing for a peer that stays present either way, or a
+        disconnect for a peer we were not tracking. Updates about ourselves are
+        ignored. Multi-homed peers hold several connections and the transport
+        emits one update per connection, so we ref-count rather than treat the
+        first close as a departure; otherwise a real master loss (the genuine
+        last close) could be dropped as an untracked-peer disconnect and never
+        trigger re-election. Only real membership changes should restart the
+        election, so steady connection churn cannot livelock formation.
+        """
+        before = frozenset(self._connected_peers)
+        for update in updates:
+            if update.node_id == self.node_id:
+                continue
+            if update.connected:
+                self._connected_peers[update.node_id] = (
+                    self._connected_peers.get(update.node_id, 0) + 1
+                )
+            else:
+                remaining = self._connected_peers.get(update.node_id, 0) - 1
+                if remaining > 0:
+                    self._connected_peers[update.node_id] = remaining
+                else:
+                    # Last connection closed (or an unbalanced/untracked close):
+                    # drop the peer rather than letting the count go negative.
+                    self._connected_peers.pop(update.node_id, None)
+        return frozenset(self._connected_peers) != before
+
     async def _connection_receiver(self) -> None:
         with self._cm_receiver as connection_messages:
             async for first in connection_messages:
-                # Delay after connection message for time to symmetrically setup
-                await anyio.sleep(0.2)
+                # Delay after a connection message so a burst of related updates
+                # (multi-homed dials, symmetric setup) coalesces into one
+                # decision instead of one campaign restart per socket event.
+                await anyio.sleep(CONNECTION_SETTLE_DELAY)
                 rest = connection_messages.collect()
 
                 logger.debug(
                     f"Connection messages received: {first} followed by {rest}"
                 )
-                logger.debug(f"Current clock: {self.clock}")
+                if not self._apply_connection_updates([first, *rest]):
+                    # No net change to cluster membership (a flap or a duplicate
+                    # update to a peer we already track). Restarting the election
+                    # here is exactly what let connection churn livelock cluster
+                    # formation, so we ignore it.
+                    logger.debug("Connection update with no membership change; ignoring")
+                    continue
+
+                # Let any in-flight campaign finish before starting a new one. A
+                # genuinely flapping peer then causes serialized campaigns that
+                # each complete (the cluster converges between flaps) rather than
+                # an endless cancel-and-restart loop that never elects a master.
+                done = self._campaign_done
+                if done is not None and not done.is_set():
+                    logger.debug(
+                        "Awaiting in-flight campaign before connection-driven round"
+                    )
+                    await done.wait()
+
+                logger.debug(f"Membership changed; current clock: {self.clock}")
                 # These messages are strictly peer to peer
                 self.clock += 1
                 logger.debug(f"New clock: {self.clock}")
