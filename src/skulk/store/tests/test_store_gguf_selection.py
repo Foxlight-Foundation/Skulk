@@ -87,6 +87,13 @@ def test_has_gguf_projector_detects_mmproj() -> None:
     assert has_gguf_projector(["mmproj-F32.GGUF"]) is False  # uppercase ext
 
 
+def test_has_gguf_projector_matches_basename_not_directory() -> None:
+    # Matches the runner's find_mmproj_file (basename), so a non-projector GGUF
+    # under a directory whose name contains "mmproj" is NOT a false positive.
+    assert has_gguf_projector(["mmproj-tools/model.gguf"]) is False
+    assert has_gguf_projector(["sub/mmproj-f16.gguf"]) is True
+
+
 def test_has_gguf_projector_false_without_projector() -> None:
     # A text-only GGUF set has no projector; an mmproj-named non-gguf file does
     # not count (the projector is always a .gguf).

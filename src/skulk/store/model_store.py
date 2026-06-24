@@ -165,10 +165,16 @@ def has_gguf_projector(paths: Iterable[str]) -> bool:
     Matches the same convention as the card resolver (``gguf_repo_has_projector``)
     and the runner (``find_mmproj_file``): a case-sensitive ``.gguf`` extension
     (HF GGUF files are always lowercase-extension) with a case-insensitive
-    ``mmproj`` name. Keeping all three aligned avoids a file being detected or
-    selected here but then not found by the loader.
+    ``mmproj`` in the **basename**. The runner identifies the projector by
+    basename, so matching on the basename here (not anywhere in the path) keeps
+    all three aligned and avoids misclassifying a non-projector GGUF that merely
+    sits under a directory whose name contains ``mmproj``.
     """
-    return any(p.endswith(".gguf") and "mmproj" in p.lower() for p in paths)
+    for path in paths:
+        name = path.rsplit("/", 1)[-1]
+        if name.endswith(".gguf") and "mmproj" in name.lower():
+            return True
+    return False
 
 
 @final
