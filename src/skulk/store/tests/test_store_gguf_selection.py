@@ -81,7 +81,10 @@ def test_has_gguf_projector_detects_mmproj() -> None:
     # and (b) verify the projector actually landed before registering (#346).
     assert has_gguf_projector(["model-Q4_K_M.gguf", "mmproj-F16.gguf"]) is True
     assert has_gguf_projector(["nested/mmproj-model-f16.gguf"]) is True
-    assert has_gguf_projector(["MMPROJ-F32.GGUF"]) is True  # case-insensitive
+    # Name is case-insensitive; the .gguf extension follows the HF convention
+    # (and the resolver/runner): lowercase extension required.
+    assert has_gguf_projector(["MMPROJ-F16.gguf"]) is True
+    assert has_gguf_projector(["mmproj-F32.GGUF"]) is False  # uppercase ext
 
 
 def test_has_gguf_projector_false_without_projector() -> None:
@@ -92,17 +95,18 @@ def test_has_gguf_projector_false_without_projector() -> None:
     assert has_gguf_projector([]) is False
 
 
-def test_uppercase_projector_is_kept_matching_case_insensitive_detection() -> None:
-    # has_gguf_projector is case-insensitive, so the selection must keep an
-    # uppercase projector too -- otherwise it would be detected-as-vision but
-    # never selected, and the registration guard would fail every retry.
+def test_mixed_case_projector_name_is_kept() -> None:
+    # The projector NAME is matched case-insensitively (matching the card
+    # resolver and the runner's find_mmproj_file), so an uppercase-named
+    # projector with the conventional lowercase .gguf extension is still kept and
+    # selected -- detection and selection stay aligned.
     files = [
         _entry("config.json"),
         _entry("model-Q4_K_M.gguf", 800),
-        _entry("MMPROJ-F32.GGUF", 600),
+        _entry("MMPROJ-F16.gguf", 600),
     ]
     kept = {e.path for e in select_store_gguf_download_files(files)}
-    assert kept == {"config.json", "model-Q4_K_M.gguf", "MMPROJ-F32.GGUF"}
+    assert kept == {"config.json", "model-Q4_K_M.gguf", "MMPROJ-F16.gguf"}
 
 
 def test_non_gguf_repo_unchanged() -> None:

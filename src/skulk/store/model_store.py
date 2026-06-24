@@ -161,10 +161,14 @@ def has_gguf_projector(paths: Iterable[str]) -> bool:
     LM weights; the store uses this both to detect that a repo is a vision GGUF
     (from its full file list) and to verify the projector actually landed before
     registering the model (#346).
+
+    Matches the same convention as the card resolver (``gguf_repo_has_projector``)
+    and the runner (``find_mmproj_file``): a case-sensitive ``.gguf`` extension
+    (HF GGUF files are always lowercase-extension) with a case-insensitive
+    ``mmproj`` name. Keeping all three aligned avoids a file being detected or
+    selected here but then not found by the loader.
     """
-    return any(
-        p.lower().endswith(".gguf") and "mmproj" in p.lower() for p in paths
-    )
+    return any(p.endswith(".gguf") and "mmproj" in p.lower() for p in paths)
 
 
 @final
@@ -194,6 +198,12 @@ class StoreModelEntry(BaseModel):
     files: list[str]
     downloaded_at: str
     total_bytes: int
+    # Whether the upstream repo ships a multimodal projector, recorded at
+    # registration so the availability hot path can decide a vision GGUF's
+    # completeness without an HF repo-list probe (#346). ``None`` on entries
+    # written before this field existed (legacy): those fall back to a one-time
+    # HF probe until they are re-registered.
+    repo_has_projector: bool | None = None
 
 
 @dataclass
@@ -322,6 +332,7 @@ class ModelStore:
         model_path: Path,
         files: list[str],
         total_bytes: int,
+        repo_has_projector: bool | None = None,
     ) -> None:
         """Add or update *model_id* in the registry.
 
@@ -342,6 +353,7 @@ class ModelStore:
             files=files,
             downloaded_at=datetime.now(tz=timezone.utc).isoformat(),
             total_bytes=total_bytes,
+            repo_has_projector=repo_has_projector,
         )
         self._write_registry_entry(entry)
         logger.info(
@@ -415,16 +427,20 @@ class ModelStore:
         repo listing cannot be fetched (offline): we only force the redownload on
         positive evidence of an incomplete vision entry.
         """
-        files = self.list_files_for_model(model_id)
-        if files is None or has_gguf_projector(files):
+        entry = self._read_registry().get(model_id)
+        if entry is None or has_gguf_projector(entry.files):
             return False
-        # Only a GGUF repo carries a separate ``mmproj`` projector; an MLX /
-        # safetensors vision model bundles its vision weights and is complete
-        # without one. This runs on the store-availability hot path, so restrict
-        # the (cached, but occasionally networked) HF repo-list probe to
-        # registered GGUF entries; never probe HF for a non-GGUF model just to
-        # decide it isn't missing a projector it never has.
-        if not any(name.lower().endswith(".gguf") for name in files):
+        # Steady state: the registration guard records whether the upstream repo
+        # ships a projector, so the answer is local: no HF probe on this hot
+        # path (it backs the worker's store-availability check). A vision GGUF
+        # missing its projector is stale; a text model (no projector upstream) is
+        # complete.
+        if entry.repo_has_projector is not None:
+            return entry.repo_has_projector
+        # Legacy entry (written before the flag existed): fall back to a one-time
+        # (cached) HF probe, restricted to GGUF entries so an MLX/safetensors
+        # model is never probed. After it re-registers, the flag above takes over.
+        if not any(name.endswith(".gguf") for name in entry.files):
             return False
         from skulk.download.download_utils import fetch_file_list_with_cache
         from skulk.shared.models.model_cards import ModelId
@@ -600,7 +616,9 @@ class ModelStore:
                     "re-fetch the projector."
                 )
             total = sum(p.stat().st_size for p in target_dir.rglob("*") if p.is_file())
-            self.register_model(model_id, target_dir, files, total)
+            self.register_model(
+                model_id, target_dir, files, total, repo_has_projector=repo_ships_projector
+            )
 
             status.status = "complete"
             status.progress = 1.0
