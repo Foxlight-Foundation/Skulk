@@ -199,6 +199,17 @@ async def chat_request_to_text_generation(
         capability_profile,
     )
 
+    # Resolve the logprobs request at the boundary so every engine sees one
+    # consistent flag (#385). An explicit `logprobs` (true or false) is honored
+    # as-is; only when it is unset is it inferred from `top_logprobs` (which
+    # OpenAI treats as a logprobs request). When logprobs ends up off, drop
+    # `top_logprobs` too so a downstream completeness check cannot re-infer it.
+    logprobs_on = (
+        request.logprobs
+        if request.logprobs is not None
+        else request.top_logprobs is not None
+    )
+
     return TextGenerationTaskParams(
         model=request.model,
         input=input_messages
@@ -218,8 +229,8 @@ async def chat_request_to_text_generation(
         chat_template_messages=chat_template_messages
         if chat_template_messages
         else None,
-        logprobs=request.logprobs or False,
-        top_logprobs=request.top_logprobs,
+        logprobs=logprobs_on,
+        top_logprobs=request.top_logprobs if logprobs_on else None,
         min_p=request.min_p,
         repetition_penalty=request.repetition_penalty,
         repetition_context_size=request.repetition_context_size,

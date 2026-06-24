@@ -9,6 +9,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **A logprobs request to a llama.cpp node without `logits_all` now fails with a
+  clear error instead of silently returning none (#385).** Per-token logprobs on
+  the llama.cpp engine require loading the model with `logits_all=True`, which is
+  off by default because it pre-allocates a large logits buffer; a request asking
+  for `logprobs`/`top_logprobs` against a node that did not enable it used to
+  "succeed" with empty logprobs. The runner now refuses such a request with an
+  actionable message naming `SKULK_LLAMA_CPP_LOGITS_ALL=1` (delivered to the
+  client as an error chunk), so the limitation is legible rather than silent.
+  Enabling logprobs remains opt-in per node (`SKULK_LLAMA_CPP_LOGITS_ALL=1`,
+  buffer bounded by `SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX`).
+
 - **The model store no longer registers a vision GGUF without its projector.**
   A vision GGUF (LLaVA/Qwen-VL/Gemma-VLM style) ships its multimodal projector
   as a separate `mmproj` file; without it the llama.cpp runner cannot load the

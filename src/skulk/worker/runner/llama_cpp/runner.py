@@ -265,7 +265,10 @@ def _generation_kwargs(task_params: TextGenerationTaskParams) -> dict[str, Any]:
         kwargs["stop"] = task_params.stop
     if task_params.seed is not None:
         kwargs["seed"] = task_params.seed
-    if task_params.logprobs:
+    # `top_logprobs` set alone implies a logprobs request (OpenAI semantics), so
+    # enable logprobs for either signal, otherwise a top_logprobs-only request
+    # would return none even on a logits_all-enabled node.
+    if wants_logprobs(task_params.logprobs, task_params.top_logprobs):
         kwargs["logprobs"] = True
         if task_params.top_logprobs is not None:
             kwargs["top_logprobs"] = task_params.top_logprobs
@@ -344,6 +347,39 @@ def _logits_all_enabled() -> bool:
         "yes",
         "on",
     )
+
+
+def wants_logprobs(logprobs: bool, top_logprobs: int | None) -> bool:
+    """Whether a request is asking for per-token logprobs.
+
+    A client may signal it either with ``logprobs=true`` or by setting
+    ``top_logprobs`` alone (OpenAI treats the latter as a logprobs request), so
+    either implies logprobs are wanted.
+    """
+    return logprobs or top_logprobs is not None
+
+
+def logprobs_unavailable_error(
+    logprobs: bool, top_logprobs: int | None, logits_all_on: bool
+) -> str | None:
+    """Clear error message when logprobs are requested but cannot be produced.
+
+    Returns the message to fail the request with when a client asked for
+    per-token logprobs (via ``logprobs`` or ``top_logprobs``) but the runner
+    loaded the model without ``logits_all`` (the default), or ``None`` when the
+    request can proceed. Surfacing this as a clear error (#385) avoids silently
+    returning a stream with empty logprobs.
+    """
+    if wants_logprobs(logprobs, top_logprobs) and not logits_all_on:
+        return (
+            "Per-token logprobs are unavailable on this llama.cpp node: they "
+            "require loading the model with logits_all=True (a large "
+            "pre-allocated logits buffer), which is off by default. Set "
+            "SKULK_LLAMA_CPP_LOGITS_ALL=1 on the serving node to enable them "
+            "(and optionally bound the buffer with "
+            "SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX)."
+        )
+    return None
 
 
 def _logits_all_n_ctx() -> int:
@@ -618,7 +654,26 @@ class Runner:
         messages = messages_for_llama(task.task_params)
         kwargs = _generation_kwargs(task.task_params)
 
+        want_logprobs = wants_logprobs(
+            task.task_params.logprobs, task.task_params.top_logprobs
+        )
+
         try:
+            # Fail loud when logprobs are requested but the model was not loaded
+            # with logits_all (#385): llama-cpp-python gates ALL logprobs behind
+            # logits_all=True at construction, which the runner leaves off by
+            # default because the pre-allocated logits buffer is huge. Without
+            # this guard the request would "succeed" with silently-empty
+            # logprobs; instead surface a clear, actionable error (it propagates
+            # to the client as an ErrorChunk via the handler below).
+            logprobs_error = logprobs_unavailable_error(
+                task.task_params.logprobs,
+                task.task_params.top_logprobs,
+                _logits_all_enabled(),
+            )
+            if logprobs_error is not None:
+                raise RuntimeError(logprobs_error)
+
             # Tool calling can't be streamed token-by-token usefully (the caller
             # wants the assembled call), and accumulating OpenAI tool-call deltas
             # is fragile; run it non-streamed and emit one ToolCallChunk.
@@ -627,7 +682,6 @@ class Runner:
                 self.current_status = RunnerReady()
                 return
 
-            want_logprobs = task.task_params.logprobs
             stream = self.model.create_chat_completion(
                 messages=messages, stream=True, **kwargs
             )

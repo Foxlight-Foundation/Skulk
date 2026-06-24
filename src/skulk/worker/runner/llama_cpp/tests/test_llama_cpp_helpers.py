@@ -21,9 +21,46 @@ from skulk.worker.runner.llama_cpp.runner import (
     _splice_images_into_messages,
     _tool_calls_from_message,
     find_mmproj_file,
+    logprobs_unavailable_error,
     messages_for_llama,
     select_gguf_file,
 )
+
+
+def test_logprobs_request_without_logits_all_returns_clear_error() -> None:
+    msg = logprobs_unavailable_error(
+        logprobs=True, top_logprobs=None, logits_all_on=False
+    )
+    assert msg is not None
+    assert "SKULK_LLAMA_CPP_LOGITS_ALL=1" in msg
+
+
+def test_top_logprobs_alone_is_treated_as_a_logprobs_request() -> None:
+    # OpenAI treats top_logprobs (with logprobs unset) as a logprobs request, so
+    # it must also trip the guard rather than silently returning none.
+    msg = logprobs_unavailable_error(
+        logprobs=False, top_logprobs=5, logits_all_on=False
+    )
+    assert msg is not None
+    assert "SKULK_LLAMA_CPP_LOGITS_ALL=1" in msg
+
+
+def test_logprobs_request_with_logits_all_proceeds() -> None:
+    assert (
+        logprobs_unavailable_error(logprobs=True, top_logprobs=5, logits_all_on=True)
+        is None
+    )
+
+
+def test_no_logprobs_request_never_errors() -> None:
+    assert (
+        logprobs_unavailable_error(logprobs=False, top_logprobs=None, logits_all_on=False)
+        is None
+    )
+    assert (
+        logprobs_unavailable_error(logprobs=False, top_logprobs=None, logits_all_on=True)
+        is None
+    )
 
 
 def test_select_gguf_picks_first_shard_skips_mmproj(tmp_path: Path) -> None:
@@ -90,6 +127,10 @@ def test_generation_kwargs_passes_logprobs() -> None:
     # logprobs requested without a top-N: flag on, no top_logprobs key
     kw2 = _generation_kwargs(_params(logprobs=True))
     assert kw2["logprobs"] is True and "top_logprobs" not in kw2
+    # top_logprobs set alone implies logprobs (OpenAI semantics): flag on too,
+    # so the model actually returns logprobs instead of silently none.
+    kw3 = _generation_kwargs(_params(top_logprobs=5))
+    assert kw3["logprobs"] is True and kw3["top_logprobs"] == 5
 
 
 def test_logits_all_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
