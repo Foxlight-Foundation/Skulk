@@ -265,7 +265,10 @@ def _generation_kwargs(task_params: TextGenerationTaskParams) -> dict[str, Any]:
         kwargs["stop"] = task_params.stop
     if task_params.seed is not None:
         kwargs["seed"] = task_params.seed
-    if task_params.logprobs:
+    # `top_logprobs` set alone implies a logprobs request (OpenAI semantics), so
+    # enable logprobs for either signal, otherwise a top_logprobs-only request
+    # would return none even on a logits_all-enabled node.
+    if wants_logprobs(task_params.logprobs, task_params.top_logprobs):
         kwargs["logprobs"] = True
         if task_params.top_logprobs is not None:
             kwargs["top_logprobs"] = task_params.top_logprobs

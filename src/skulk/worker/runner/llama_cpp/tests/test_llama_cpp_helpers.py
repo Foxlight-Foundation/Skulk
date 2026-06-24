@@ -127,6 +127,10 @@ def test_generation_kwargs_passes_logprobs() -> None:
     # logprobs requested without a top-N: flag on, no top_logprobs key
     kw2 = _generation_kwargs(_params(logprobs=True))
     assert kw2["logprobs"] is True and "top_logprobs" not in kw2
+    # top_logprobs set alone implies logprobs (OpenAI semantics): flag on too,
+    # so the model actually returns logprobs instead of silently none.
+    kw3 = _generation_kwargs(_params(top_logprobs=5))
+    assert kw3["logprobs"] is True and kw3["top_logprobs"] == 5
 
 
 def test_logits_all_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
