@@ -17,9 +17,12 @@ This project records release notes here and mirrors public-facing notes in
   so staging it to a worker produced an unloadable model that failed only as a
   runner crash at load time on a remote node. The store host now verifies the
   projector actually landed before registering a vision GGUF and refuses with a
-  clear error otherwise (re-running the download re-fetches it), so the failure
-  is a loud, fixable download error on the store host instead of a confusing
-  crash elsewhere.
+  clear error otherwise, so an incomplete vision model can never be registered.
+  An existing stale entry self-heals: a download request for an in-store vision
+  GGUF whose entry lacks the projector re-downloads (reusing the already-present
+  weights and fetching only the missing projector) instead of being
+  short-circuited as "complete", so the failure becomes a loud, fixable download
+  error on the store host instead of a confusing crash elsewhere.
 
 - **A borderline multi-node placement is no longer refused on sub-GB memory
   jitter (#383).** The master admits a placement on each node's *gossiped* usable

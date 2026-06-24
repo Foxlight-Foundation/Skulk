@@ -394,17 +394,55 @@ class ModelStore:
     # Store-side HuggingFace downloads
     # ------------------------------------------------------------------
 
+    async def _store_entry_missing_projector(self, model_id: str) -> bool:
+        """True when an in-store GGUF entry is a vision model missing its projector.
+
+        Recovers stale entries registered before the projector was retained
+        (#346): such an entry lists only the LM quant, so staging it produces an
+        unloadable vision model. We detect that here so a re-download request is
+        not short-circuited as "already complete": the re-download skips the
+        already-present weights (size-matched) and fetches only the missing
+        projector, then re-registers a complete entry. Returns ``False`` when the
+        model is absent, already has a projector, is not a vision GGUF, or the
+        repo listing cannot be fetched (offline): we only force the redownload on
+        positive evidence of an incomplete vision entry.
+        """
+        files = self.list_files_for_model(model_id)
+        if files is None or has_gguf_projector(files):
+            return False
+        from skulk.download.download_utils import fetch_file_list_with_cache
+        from skulk.shared.models.model_cards import ModelId
+
+        try:
+            repo_files = await fetch_file_list_with_cache(
+                ModelId(model_id), "main", recursive=True
+            )
+        except Exception as exc:
+            logger.debug(
+                f"ModelStore: could not check projector completeness for "
+                f"{model_id} ({exc}); leaving the existing entry as-is"
+            )
+            return False
+        return has_gguf_projector(f.path for f in repo_files)
+
     async def request_download(
         self, model_id: str, pinned_gguf: str | None = None
     ) -> StoreDownloadStatus:
         """Request that the store download a model from HuggingFace.
 
         Deduplicates: if the model is already downloading, returns the
-        existing status.  If already in the store, returns "complete".
+        existing status.  If already in the store, returns "complete", unless it
+        is a vision GGUF whose stored entry is missing its ``mmproj`` projector
+        (a stale pre-#346 entry), in which case it re-downloads to recover the
+        projector instead of staging an unloadable model.
 
         ``pinned_gguf`` is the requester's card-pinned GGUF file, forwarded so a
         GGUF repo fetches that quant's shard group rather than the default (#344).
         """
+        # Checked outside the lock: it may do a (cached) repo file-list fetch, and
+        # holding the download lock across network I/O would serialize unrelated
+        # requests.
+        missing_projector = await self._store_entry_missing_projector(model_id)
         async with self._download_lock:
             existing = self._active_downloads.get(model_id)
             if existing is not None:
@@ -412,9 +450,15 @@ class ModelStore:
                     del self._active_downloads[model_id]
                 else:
                     return existing
-            if self.is_in_store(model_id):
+            if self.is_in_store(model_id) and not missing_projector:
                 return StoreDownloadStatus(
                     model_id=model_id, status="complete", progress=1.0
+                )
+            if missing_projector:
+                logger.warning(
+                    f"ModelStore: {model_id} is in the store but its entry is "
+                    "missing the mmproj projector for a vision GGUF; "
+                    "re-downloading to recover it (existing weights are reused)."
                 )
             status = StoreDownloadStatus(model_id=model_id, status="pending")
             self._active_downloads[model_id] = status
