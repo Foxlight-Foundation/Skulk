@@ -15,8 +15,10 @@ isolation by unit tests; the API supplies the live wall clock and telemetry.
 """
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Literal, final
+
+from pydantic import ConfigDict
 
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.memory import Memory
@@ -58,6 +60,8 @@ class NodeHealthReason(CamelCaseModel):
     fix it) together, so a node problem is actionable rather than a raw error.
     """
 
+    model_config = ConfigDict(frozen=True)
+
     code: HealthCode
     """Stable machine code for the condition (for styling / filtering)."""
 
@@ -71,6 +75,8 @@ class NodeHealthReason(CamelCaseModel):
 @final
 class NodeHealth(CamelCaseModel):
     """Aggregate health for a single node: a level plus its concrete reasons."""
+
+    model_config = ConfigDict(frozen=True)
 
     level: HealthLevel
     """Worst severity across ``reasons`` (``ok`` when there are none)."""
@@ -148,6 +154,11 @@ def _unreachable_reason(
     last_seen: datetime, now: datetime, warn_after: timedelta
 ) -> NodeHealthReason | None:
     """A reason when a node's heartbeat is stale enough to be at risk of pruning."""
+    # last_seen is stamped tz-aware UTC by the master, but guard a tz-naive value
+    # (an odd snapshot) defensively: a naive-vs-aware subtraction would raise and
+    # 500 the whole /state endpoint, which is the dashboard's primary data source.
+    if last_seen.tzinfo is None:
+        last_seen = last_seen.replace(tzinfo=timezone.utc)
     if now - last_seen > warn_after:
         return NodeHealthReason(
             code="unreachable",

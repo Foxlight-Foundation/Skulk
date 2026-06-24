@@ -172,6 +172,20 @@ def test_error_dominates_warn_when_multiple_reasons() -> None:
     assert codes == {"download_failed", "disk_full", "unreachable"}
 
 
+def test_tz_naive_last_seen_does_not_raise() -> None:
+    # A tz-naive last_seen must not raise on the aware-vs-naive subtraction; it is
+    # treated as UTC so the /state derivation never 500s on an odd timestamp.
+    naive_stale = (_NOW - (UNREACHABLE_WARN_AFTER + timedelta(seconds=1))).replace(
+        tzinfo=None
+    )
+    health = compute_node_health(
+        live_nodes={_NODE: naive_stale}, downloads={}, node_disk={}, now=_NOW
+    )
+    node = health["node-a"]
+    assert node.level == "warn"
+    assert node.reasons[0].code == "unreachable"
+
+
 def test_only_live_nodes_get_entries() -> None:
     other = NodeId("node-b")
     health = compute_node_health(
