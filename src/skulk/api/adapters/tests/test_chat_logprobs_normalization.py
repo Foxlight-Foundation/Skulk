@@ -31,6 +31,16 @@ async def test_explicit_logprobs_preserved() -> None:
     assert params.logprobs is True and params.top_logprobs == 3
 
 
+async def test_explicit_logprobs_false_is_honored_over_top_logprobs() -> None:
+    # An explicit opt-out wins over top_logprobs; top_logprobs is dropped so a
+    # downstream completeness check cannot re-infer a logprobs request.
+    params = await chat_request_to_text_generation(
+        _request(logprobs=False, top_logprobs=5)
+    )
+    assert params.logprobs is False
+    assert params.top_logprobs is None
+
+
 async def test_no_logprobs_request_stays_off() -> None:
     params = await chat_request_to_text_generation(_request())
     assert params.logprobs is False
