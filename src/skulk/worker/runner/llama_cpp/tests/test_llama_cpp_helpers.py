@@ -28,18 +28,39 @@ from skulk.worker.runner.llama_cpp.runner import (
 
 
 def test_logprobs_request_without_logits_all_returns_clear_error() -> None:
-    msg = logprobs_unavailable_error(want_logprobs=True, logits_all_on=False)
+    msg = logprobs_unavailable_error(
+        logprobs=True, top_logprobs=None, logits_all_on=False
+    )
+    assert msg is not None
+    assert "SKULK_LLAMA_CPP_LOGITS_ALL=1" in msg
+
+
+def test_top_logprobs_alone_is_treated_as_a_logprobs_request() -> None:
+    # OpenAI treats top_logprobs (with logprobs unset) as a logprobs request, so
+    # it must also trip the guard rather than silently returning none.
+    msg = logprobs_unavailable_error(
+        logprobs=False, top_logprobs=5, logits_all_on=False
+    )
     assert msg is not None
     assert "SKULK_LLAMA_CPP_LOGITS_ALL=1" in msg
 
 
 def test_logprobs_request_with_logits_all_proceeds() -> None:
-    assert logprobs_unavailable_error(want_logprobs=True, logits_all_on=True) is None
+    assert (
+        logprobs_unavailable_error(logprobs=True, top_logprobs=5, logits_all_on=True)
+        is None
+    )
 
 
 def test_no_logprobs_request_never_errors() -> None:
-    assert logprobs_unavailable_error(want_logprobs=False, logits_all_on=False) is None
-    assert logprobs_unavailable_error(want_logprobs=False, logits_all_on=True) is None
+    assert (
+        logprobs_unavailable_error(logprobs=False, top_logprobs=None, logits_all_on=False)
+        is None
+    )
+    assert (
+        logprobs_unavailable_error(logprobs=False, top_logprobs=None, logits_all_on=True)
+        is None
+    )
 
 
 def test_select_gguf_picks_first_shard_skips_mmproj(tmp_path: Path) -> None:

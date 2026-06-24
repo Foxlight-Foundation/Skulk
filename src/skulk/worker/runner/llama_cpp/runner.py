@@ -346,17 +346,28 @@ def _logits_all_enabled() -> bool:
     )
 
 
+def wants_logprobs(logprobs: bool, top_logprobs: int | None) -> bool:
+    """Whether a request is asking for per-token logprobs.
+
+    A client may signal it either with ``logprobs=true`` or by setting
+    ``top_logprobs`` alone (OpenAI treats the latter as a logprobs request), so
+    either implies logprobs are wanted.
+    """
+    return logprobs or top_logprobs is not None
+
+
 def logprobs_unavailable_error(
-    want_logprobs: bool, logits_all_on: bool
+    logprobs: bool, top_logprobs: int | None, logits_all_on: bool
 ) -> str | None:
     """Clear error message when logprobs are requested but cannot be produced.
 
     Returns the message to fail the request with when a client asked for
-    per-token logprobs but the runner loaded the model without ``logits_all``
-    (the default), or ``None`` when the request can proceed. Surfacing this as a
-    clear error (#385) avoids silently returning a stream with empty logprobs.
+    per-token logprobs (via ``logprobs`` or ``top_logprobs``) but the runner
+    loaded the model without ``logits_all`` (the default), or ``None`` when the
+    request can proceed. Surfacing this as a clear error (#385) avoids silently
+    returning a stream with empty logprobs.
     """
-    if want_logprobs and not logits_all_on:
+    if wants_logprobs(logprobs, top_logprobs) and not logits_all_on:
         return (
             "Per-token logprobs are unavailable on this llama.cpp node: they "
             "require loading the model with logits_all=True (a large "
@@ -640,6 +651,10 @@ class Runner:
         messages = messages_for_llama(task.task_params)
         kwargs = _generation_kwargs(task.task_params)
 
+        want_logprobs = wants_logprobs(
+            task.task_params.logprobs, task.task_params.top_logprobs
+        )
+
         try:
             # Fail loud when logprobs are requested but the model was not loaded
             # with logits_all (#385): llama-cpp-python gates ALL logprobs behind
@@ -649,7 +664,9 @@ class Runner:
             # logprobs; instead surface a clear, actionable error (it propagates
             # to the client as an ErrorChunk via the handler below).
             logprobs_error = logprobs_unavailable_error(
-                task.task_params.logprobs, _logits_all_enabled()
+                task.task_params.logprobs,
+                task.task_params.top_logprobs,
+                _logits_all_enabled(),
             )
             if logprobs_error is not None:
                 raise RuntimeError(logprobs_error)
@@ -662,7 +679,6 @@ class Runner:
                 self.current_status = RunnerReady()
                 return
 
-            want_logprobs = task.task_params.logprobs
             stream = self.model.create_chat_completion(
                 messages=messages, stream=True, **kwargs
             )
