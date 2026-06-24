@@ -63,6 +63,7 @@ from skulk.api.adapters.responses import (
     responses_request_to_text_generation,
 )
 from skulk.api.keepalive import with_sse_keepalive
+from skulk.api.node_health import compute_node_health
 from skulk.api.types import (
     AddCustomModelParams,
     AdvancedImageParams,
@@ -2126,6 +2127,19 @@ class API:
             str(node_id): status.model_dump(mode="json", by_alias=True)
             for node_id, status in self._telemetry_view.node_rdma_ctl.items()
             if node_id in live
+        }
+        # Derived per-node health (#388): explain a node's problems (and the fix)
+        # in the topology so the master's silent recovery of a wedged/failed node
+        # is legible. Read-only derivation from the same state/telemetry above; no
+        # new gossip type. last_seen is tz-aware UTC, so use the same clock here.
+        payload["nodeHealth"] = {
+            node_id: summary.model_dump(mode="json", by_alias=True)
+            for node_id, summary in compute_node_health(
+                live_nodes=live,
+                downloads=self.state.downloads,
+                node_disk=self._telemetry_view.node_disk,
+                now=datetime.now(tz=timezone.utc),
+            ).items()
         }
         return payload
 

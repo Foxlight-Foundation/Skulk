@@ -24,6 +24,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **The cluster topology now shows per-node health with the fix (#388).** When
+  the master recovers a node that could not pull its shard or whose download
+  failed, the reason used to be invisible: the node looked normal while
+  placements quietly routed around it. `GET /state` now carries a derived
+  `nodeHealth` map (per node: a `level` of `ok`/`warn`/`error` plus `reasons`,
+  each with a `message` and a `remediation`), computed read-only from state
+  already in the response (terminal download failures, low or full models-volume
+  disk, and late heartbeats) so it adds no new polling or gossip. The dashboard
+  renders an amber/red badge on the affected node whose hover names the problem
+  and how to fix it.
 - **macOS Local Network permission is now diagnosable and the denial warning is
   actionable (#267).** macOS attributes Local Network access to the responsible
   app in the launch chain (a terminal when run interactively, "Python" over SSH

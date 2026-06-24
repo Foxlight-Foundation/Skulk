@@ -30,6 +30,22 @@ export interface NetworkInterfaceInfo {
   addresses?: string[];
 }
 
+/** Severity of a node's derived health (#388). */
+export type NodeHealthLevel = 'ok' | 'warn' | 'error';
+
+/** One concrete node problem and the operator's path to fix it (#388). */
+export interface NodeHealthReason {
+  code: string;
+  message: string;
+  remediation: string;
+}
+
+/** Aggregate derived health for a node, rendered as a topology indicator. */
+export interface NodeHealth {
+  level: NodeHealthLevel;
+  reasons: NodeHealthReason[];
+}
+
 /** Normalized node record used by the topology graph and cards. */
 export interface NodeInfo {
   system_info?: SystemInfo;
@@ -46,6 +62,8 @@ export interface NodeInfo {
   rdma_enabled?: boolean;
   rdma_interfaces_present?: boolean;
   syncing?: boolean;
+  /** Derived health summary for this node (#388); absent when unknown. */
+  node_health?: NodeHealth;
 }
 
 /** Directed edge between two nodes in the cluster topology graph. */

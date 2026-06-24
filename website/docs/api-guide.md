@@ -818,6 +818,15 @@ If a local restart is already scheduled, returns HTTP 409 with `{"status": "rest
 
 Returns the cluster state as Skulk currently sees it.
 
+The response also carries a derived `nodeHealth` map (keyed by node id) so a
+problem on a node is visible rather than silent. Each entry is a `level`
+(`ok`, `warn`, or `error`) plus a list of `reasons`, where each reason has a
+`code`, a `message` describing what is wrong, and a `remediation` describing how
+to fix it. It is computed read-only from state already in the response (terminal
+download failures, low or full models-volume disk, and late heartbeats), so it
+adds no new polling. A node with no problems reports `level: "ok"` with an empty
+`reasons` list.
+
 Operational note:
 
 - a follower may briefly report a local view that is behind the elected master
