@@ -9,6 +9,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **A placement right after a teardown is no longer spuriously refused on
+  gossip-lagged memory (#314).** Node memory rides the telemetry plane
+  (last-write-wins), so for a few gossip rounds after a runner teardown the
+  freed memory is not yet reflected in `ramAvailable` (or the GPU-wireable
+  figure). A back-to-back placement (test harness, rapid model swap) reads the
+  stale, deflated availability and is refused with "no candidate cycle fits"
+  until a ~20-30s settle. The master now credits a just-deleted instance's
+  per-node footprint (estimated with the same accounting placement admits
+  against) back to the fit-check inputs for a short grace window
+  (`RECENTLY_FREED_MEMORY_GRACE_SECONDS`), so the placement admits immediately;
+  the credit expires so a genuine shortfall reasserts, and the worker's live
+  pre-load fit guard (#383) remains the OOM backstop.
+
 - **A logprobs request to a llama.cpp node without `logits_all` now fails with a
   clear error instead of silently returning none (#385).** Per-token logprobs on
   the llama.cpp engine require loading the model with `logits_all=True`, which is

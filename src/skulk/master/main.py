@@ -1,5 +1,6 @@
 import copy
 import time
+from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from datetime import datetime, timedelta, timezone
 from typing import cast
@@ -22,6 +23,10 @@ from skulk.master.placement import (
 from skulk.master.placement_utils import usable_vram_by_node
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_EVENT_LOG_DIR, SKULK_TRACING_ENABLED
+from skulk.shared.models.memory_estimate import (
+    estimate_shard_footprint,
+    shard_fraction_of_model,
+)
 from skulk.shared.types.commands import (
     AddCustomModelCard,
     CreateInstance,
@@ -64,6 +69,8 @@ from skulk.shared.types.events import (
     TracesMerged,
     TracingStateChanged,
 )
+from skulk.shared.types.memory import Memory
+from skulk.shared.types.profiling import MemoryUsage
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSnapshot, StateSyncMessage
 from skulk.shared.types.tasks import (
@@ -84,7 +91,7 @@ from skulk.shared.types.tasks import (
 )
 from skulk.shared.types.telemetry import TelemetryView
 from skulk.shared.types.worker.downloads import DownloadFailed
-from skulk.shared.types.worker.instances import InstanceId
+from skulk.shared.types.worker.instances import Instance, InstanceId
 from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
 from skulk.store.config import resolve_config_path
 from skulk.utils.channels import Receiver, Sender
@@ -110,6 +117,20 @@ Pruning during that window would delete the very placements the seed
 preserved. 60s comfortably covers several probe cycles; the dead master's
 instances are still pruned — just one minute later, once absence reflects
 real liveness rather than an unsettled view."""
+
+RECENTLY_FREED_MEMORY_GRACE_SECONDS = 30.0
+"""How long the planner credits a just-deleted instance's memory back to its
+nodes during placement admission (#314).
+
+Node memory is gossiped last-write-wins, so after a teardown the freed memory
+takes a few gossip rounds to be reflected in `ramAvailable` (and the GPU-wireable
+figure). A back-to-back placement (test harness, rapid model swap) therefore
+reads stale, deflated availability and is spuriously refused. The master knows
+deterministically what it just freed, so it credits that node's footprint back
+to the fit-check inputs for this window: long enough to bridge the gossip lag,
+short enough that a genuine shortfall reasserts once the credit expires. The
+worker's live pre-load fit guard (#383) remains the OOM backstop, so an
+over-credit at most causes a refuse-and-re-place, never an OOM."""
 JsonObject = dict[str, object]
 
 # API-facing task types: the ones whose loss strands an open HTTP request.
@@ -312,6 +333,98 @@ class Master:
         # id makes recovery fire once per wedged instance. Grows only by wedged
         # ids (rare); never reused since InstanceIds are unique.
         self._download_failure_recovered: set[InstanceId] = set()
+        # Per-node memory (bytes) freed by a just-deleted instance, credited back
+        # to placement admission until gossiped node memory reflects it (#314).
+        # Each entry is (freed_bytes, monotonic_deadline); expired entries are
+        # pruned on read. See RECENTLY_FREED_MEMORY_GRACE_SECONDS.
+        self._recently_freed_bytes: dict[NodeId, list[tuple[int, float]]] = {}
+
+    def _record_freed_instance(self, instance: Instance) -> None:
+        """Credit a deleted instance's per-node footprint for the grace window.
+
+        Estimates each hosting node's shard footprint with the same accounting
+        the planner admits against, so a back-to-back placement is not refused on
+        the not-yet-refreshed (gossip-lagged) node memory (#314).
+        """
+        assignments = instance.shard_assignments
+        deadline = time.monotonic() + RECENTLY_FREED_MEMORY_GRACE_SECONDS
+        for node_id, runner_id in assignments.node_to_runner.items():
+            shard = assignments.runner_to_shard.get(runner_id)
+            if shard is None:
+                continue
+            fraction = shard_fraction_of_model(shard)
+            if fraction is None or fraction <= 0.0:
+                continue
+            footprint = estimate_shard_footprint(shard.model_card, fraction)
+            self._recently_freed_bytes.setdefault(node_id, []).append(
+                (footprint.in_bytes, deadline)
+            )
+
+    def _freed_credit_by_node(self) -> dict[NodeId, int]:
+        """Current non-expired freed-memory credit (bytes) per node, pruning the
+        expired entries as a side effect (#314)."""
+        now = time.monotonic()
+        credit: dict[NodeId, int] = {}
+        for node_id in list(self._recently_freed_bytes):
+            live = [(b, d) for (b, d) in self._recently_freed_bytes[node_id] if d > now]
+            if live:
+                self._recently_freed_bytes[node_id] = live
+                credit[node_id] = sum(b for (b, _) in live)
+            else:
+                del self._recently_freed_bytes[node_id]
+        return credit
+
+    def _placement_memory_inputs(
+        self,
+    ) -> tuple[Mapping[NodeId, MemoryUsage], Mapping[NodeId, Memory]]:
+        """Build the (node_memory, node_vram) inputs for placement admission with
+        the recently-freed credit applied (#314).
+
+        Both the gossiped ``ram_available`` and the derived GPU-wireable VRAM lag
+        a teardown (telemetry is last-write-wins), so credit both. ``ram_total``
+        is left untouched, so context-ceiling math (which reads it) is unchanged.
+        The worker's live pre-load guard (#383) still backstops genuine OOM.
+        """
+        credit = self._freed_credit_by_node()
+        base_memory = self._telemetry_view.node_memory
+        if not credit:
+            base_vram = usable_vram_by_node(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=base_memory,
+            )
+            return base_memory, base_vram
+        # Credit the freed bytes onto each node's ram_available, clamped to
+        # ram_total so credited availability never exceeds capacity (telemetry
+        # may already have partly caught up, or the footprint estimate may be
+        # conservative).
+        memory = {
+            node_id: (
+                usage.model_copy(
+                    update={
+                        "ram_available": Memory.from_bytes(
+                            min(
+                                usage.ram_total.in_bytes,
+                                usage.ram_available.in_bytes + credit[node_id],
+                            )
+                        )
+                    }
+                )
+                if node_id in credit
+                else usage
+            )
+            for node_id, usage in base_memory.items()
+        }
+        # Derive VRAM from the credited memory rather than crediting the VRAM
+        # figure directly: usable_vram_by_node applies its own working-set /
+        # GTT ceiling, so the credited VRAM is naturally capped and can never
+        # exceed the ceiling or total VRAM.
+        vram = usable_vram_by_node(
+            self._telemetry_view.node_system,
+            self._telemetry_view.node_resources,
+            node_memory=memory,
+        )
+        return memory, vram
 
     def _configure_expected_trace_ranks(
         self, task_id: TaskId, instance_id: InstanceId, *, trace_enabled: bool
@@ -610,6 +723,14 @@ class Master:
                                 TracingStateChanged(enabled=command.enabled)
                             )
                         case DeleteInstance():
+                            # Credit the freed memory back to placement admission
+                            # for a short grace window so a back-to-back placement
+                            # is not refused on gossip-lagged node memory (#314).
+                            deleted_instance = self.state.instances.get(
+                                command.instance_id
+                            )
+                            if deleted_instance is not None:
+                                self._record_freed_instance(deleted_instance)
                             placement = delete_instance(command, self.state.instances)
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
@@ -718,42 +839,44 @@ class Master:
                                     )
                                 generated_events.extend(transition_events)
                         case PlaceInstance():
+                            # node_memory/node_vram come from the telemetry plane
+                            # (#279 slice 2) with a just-freed-memory credit so a
+                            # placement right after a teardown is not refused on
+                            # gossip-lagged availability (#314). Discrete-GPU VRAM
+                            # (AMD/NVIDIA) so big models admit against VRAM, not
+                            # 0.75 x system RAM.
+                            credited_memory, credited_vram = (
+                                self._placement_memory_inputs()
+                            )
                             placement = place_instance(
                                 command,
                                 self.state.topology,
                                 self.state.instances,
-                                # node_memory now lives on the telemetry plane
-                                # (#279 slice 2), not in event-sourced State.
-                                self._telemetry_view.node_memory,
+                                credited_memory,
                                 self.state.node_network,
                                 download_status=self.state.downloads,
                                 excluded_nodes=set(command.excluded_nodes),
                                 node_resources=self._telemetry_view.node_resources,
-                                # Discrete-GPU VRAM (AMD/NVIDIA) so big models
-                                # admit against VRAM, not 0.75 x system RAM.
-                                node_vram=usable_vram_by_node(
-                                    self._telemetry_view.node_system,
-                                    self._telemetry_view.node_resources,
-                                    node_memory=self._telemetry_view.node_memory,
-                                ),
+                                node_vram=credited_vram,
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
                             )
                             generated_events.extend(transition_events)
                         case CreateInstance():
+                            # telemetry plane (#279 slice 2), with the just-freed
+                            # memory credit (#314) so an exact placement right
+                            # after a teardown stamps its ceiling against the
+                            # real (about-to-be-freed) availability.
+                            credited_memory, credited_vram = (
+                                self._placement_memory_inputs()
+                            )
                             placement = add_instance_to_placements(
                                 command,
                                 self.state.topology,
                                 self.state.instances,
-                                # telemetry plane (#279 slice 2) — stamp the
-                                # memory-derived ceiling on exact placements too
-                                self._telemetry_view.node_memory,
-                                node_vram=usable_vram_by_node(
-                                    self._telemetry_view.node_system,
-                                    self._telemetry_view.node_resources,
-                                    node_memory=self._telemetry_view.node_memory,
-                                ),
+                                credited_memory,
+                                node_vram=credited_vram,
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
