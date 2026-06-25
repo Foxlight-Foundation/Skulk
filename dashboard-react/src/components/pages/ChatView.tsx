@@ -80,6 +80,17 @@ const THINK_TAG_START = '<think>';
 const THINK_TAG_END = '</think>';
 const GEMMA_THINK_START = '<|channel>thought\n';
 const GEMMA_THINK_END = '<channel|>';
+// gpt-oss "harmony" channel markers (distinct from Gemma's `<|channel>thought`).
+const HARMONY_CHANNEL_MARK = '<|channel|>';
+const HARMONY_CONTROL_TOKENS = [
+  '<|start|>',
+  '<|end|>',
+  '<|return|>',
+  '<|message|>',
+  '<|channel|>',
+  '<|call|>',
+  '<|constrain|>',
+];
 const MAX_TOOL_ROUNDS = 4;
 const GPT_OSS_BROWSER_TOOLS = {
   web_search: {
@@ -191,7 +202,61 @@ interface ExtractPageToolResponse {
   provider: string;
 }
 
+// Split a gpt-oss harmony stream/string into final content vs analysis thinking,
+// stripping every control marker. Mirrors the server-side parser so already-stored
+// conversations (captured before output channel-parsing) render cleanly, and the
+// raw scaffolding never leaks into a message bubble.
+function splitHarmonyChannels(raw: string): { content: string; thinking: string } {
+  let content = '';
+  let thinking = '';
+  let inBody = true; // start in content passthrough (text before any channel marker)
+  let channel: string | null = null;
+  let header = '';
+  let i = 0;
+
+  while (i < raw.length) {
+    let matched: string | null = null;
+    for (const token of HARMONY_CONTROL_TOKENS) {
+      if (raw.startsWith(token, i)) {
+        matched = token;
+        break;
+      }
+    }
+    if (matched) {
+      if (matched === '<|channel|>') {
+        inBody = false;
+        header = '';
+      } else if (matched === '<|message|>') {
+        const name = header.trim().split(/\s+/)[0];
+        channel = name && name.length > 0 ? name : null;
+        header = '';
+        inBody = true;
+      } else if (matched !== '<|constrain|>') {
+        // <|end|> / <|start|> / <|return|> / <|call|>: end of body.
+        inBody = false;
+        channel = null;
+        header = '';
+      }
+      i += matched.length;
+      continue;
+    }
+    const char = raw[i];
+    if (inBody) {
+      if (channel === 'analysis') thinking += char;
+      else content += char;
+    } else {
+      header += char;
+    }
+    i += 1;
+  }
+
+  return { content, thinking };
+}
+
 function splitReasoningDecoratedContent(raw: string): { content: string; thinking: string } {
+  if (raw.includes(HARMONY_CHANNEL_MARK)) {
+    return splitHarmonyChannels(raw);
+  }
   let content = '';
   let thinking = '';
   let i = 0;
