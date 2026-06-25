@@ -7,6 +7,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- **`<think>` reasoning no longer leaks into the answer for reasoning models on
+  the llama.cpp engine.** A token-delimited reasoning model (e.g. Qwen3.5-MoE /
+  Ornith) emits its chain-of-thought inside `<think>...</think>`; llama.cpp hands
+  back already-detokenized text, so the whole reasoning block flooded the visible
+  `content` (the answer buried after it) and nothing reached `reasoning_content`.
+  The llama.cpp runner now reparses the marker stream from strings, mirroring what
+  the MLX engine does at the token level: text inside the markers becomes
+  `reasoning_content`, the answer becomes clean `content`, and the markers are
+  stripped. This generalizes the gpt-oss harmony fix to plain `<think>` reasoning;
+  the parser is dependency-free (no MLX) so it runs on non-Mac GPU nodes.
+
 ### Changed
 
 - **The llama.cpp engine now loads models with Flash Attention by default.** It

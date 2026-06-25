@@ -26,7 +26,7 @@ from anyio import WouldBlock
 from skulk.api.types import ToolCallItem, TopLogprobItem
 from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.memory_estimate import KV_CONTEXT_BUDGET_TOKENS
-from skulk.shared.models.model_cards import OutputParserType
+from skulk.shared.models.model_cards import OutputParserType, ReasoningFormat
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
@@ -59,6 +59,7 @@ from skulk.shared.types.worker.runners import (
 from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.bootstrap import logger
 from skulk.worker.runner.llm_inference.harmony_text_parser import HarmonyTextParser
+from skulk.worker.runner.llm_inference.think_text_parser import ThinkTextParser
 
 
 def select_gguf_file(model_dir: Path) -> Path:
@@ -833,28 +834,27 @@ class Runner:
                 self.current_status = RunnerReady()
                 return
 
-            # gpt-oss emits the OpenAI "harmony" format: llama.cpp detokenizes the
-            # channel markers into literal text in the content delta, so without
-            # parsing them the raw `<|channel|>analysis...final...|>` scaffolding
-            # leaks into the answer and reasoning is never split out. Reparse the
-            # marker stream from strings (the MLX engine does the token-level
-            # equivalent) so reasoning lands in reasoning_content and content is
-            # clean.
-            harmony_parser = (
-                HarmonyTextParser() if self._is_harmony_model() else None
-            )
+            # A reasoning model's markers arrive as literal text in the content
+            # delta (llama.cpp detokenizes them), so without parsing, the raw
+            # gpt-oss `<|channel|>analysis...final...|>` scaffolding or a `<think>`
+            # block leaks into the answer and reasoning is never split out.
+            # Reparse the marker stream from strings (the MLX engine does the
+            # token-level equivalent) so reasoning lands in reasoning_content and
+            # content is clean.
+            reasoning_parser = self._reasoning_text_parser()
 
-            # Harmony parsing re-chunks the stream into channel-split pieces that
-            # no longer align 1:1 with the source tokens, so per-token logprobs
-            # can't be carried faithfully. Rather than silently return empty
-            # logprobs (the exact no-silent-empty contract #385 enforces), fail
-            # loud when both are requested.
-            if harmony_parser is not None and want_logprobs:
+            # Reasoning parsing re-chunks the stream into pieces that no longer
+            # align 1:1 with the source tokens, so per-token logprobs can't be
+            # carried faithfully. Rather than silently return empty logprobs (the
+            # exact no-silent-empty contract #385 enforces), fail loud when both
+            # are requested.
+            if reasoning_parser is not None and want_logprobs:
                 raise RuntimeError(
-                    "Per-token logprobs are not supported for gpt-oss (harmony) "
-                    "models on the llama.cpp engine: harmony channel parsing "
-                    "re-chunks the stream, so logprobs cannot be aligned to "
-                    "tokens. Retry without logprobs/top_logprobs."
+                    "Per-token logprobs are not supported for reasoning models "
+                    "(gpt-oss harmony or <think>-delimited) on the llama.cpp "
+                    "engine: reasoning parsing re-chunks the stream, so logprobs "
+                    "cannot be aligned to tokens. Retry without "
+                    "logprobs/top_logprobs."
                 )
 
             stream = self.model.create_chat_completion(
@@ -872,13 +872,13 @@ class Runner:
                     _logprob_fields(choice) if want_logprobs else (None, None)
                 )
 
-                if harmony_parser is not None:
-                    for clean_text, is_thinking in harmony_parser.feed(text):
+                if reasoning_parser is not None:
+                    for clean_text, is_thinking in reasoning_parser.feed(text):
                         self._send_token_chunk(
                             command_id, model_id, clean_text, is_thinking=is_thinking
                         )
                     if finish is not None:
-                        for clean_text, is_thinking in harmony_parser.flush():
+                        for clean_text, is_thinking in reasoning_parser.flush():
                             self._send_token_chunk(
                                 command_id,
                                 model_id,
@@ -914,8 +914,8 @@ class Runner:
                 # Flush any tail the harmony parser was holding back (a partial
                 # marker, or final-channel text not yet released) before closing,
                 # so a stream that ends without a finish_reason doesn't truncate.
-                if harmony_parser is not None:
-                    for clean_text, is_thinking in harmony_parser.flush():
+                if reasoning_parser is not None:
+                    for clean_text, is_thinking in reasoning_parser.flush():
                         self._send_token_chunk(
                             command_id, model_id, clean_text, is_thinking=is_thinking
                         )
@@ -966,6 +966,36 @@ class Runner:
             )
             return False
         return profile.output_parser == OutputParserType.GptOss
+
+    def _reasoning_text_parser(self) -> HarmonyTextParser | ThinkTextParser | None:
+        """Pick the string reasoning parser for this model's output format.
+
+        llama.cpp hands back already-detokenized strings, so the reasoning/content
+        split the MLX engine does at the token level must be redone here from
+        text. gpt-oss (harmony channel markers) uses :class:`HarmonyTextParser`; a
+        token-delimited ``<think>``/``</think>`` reasoning model (e.g. Qwen3.5)
+        uses :class:`ThinkTextParser`; anything else returns ``None`` so the text
+        passes through untouched. A card we cannot resolve is treated as
+        unparsed (logged, never raised) so generation stays best-effort.
+        """
+        card = self.shard_metadata.model_card
+        try:
+            profile = resolve_model_capability_profile(card.model_id, model_card=card)
+        except Exception as exc:  # noqa: BLE001 - unresolved card just means no parser
+            logger.opt(exception=exc).warning(
+                f"capability resolution failed for {card.model_id}; "
+                "streaming output without reasoning parsing"
+            )
+            return None
+        if profile.output_parser == OutputParserType.GptOss:
+            return HarmonyTextParser()
+        if profile.thinking_format == ReasoningFormat.TokenDelimited:
+            # The reasoning chat template pre-fills the opening <think> in the
+            # prompt (not the output), so the stream begins mid-reasoning and only
+            # </think> appears. The runner does not toggle thinking, so this is
+            # always the shape for these models on llama.cpp.
+            return ThinkTextParser(starts_in_thinking=True)
+        return None
 
     def _send_token_chunk(
         self,
