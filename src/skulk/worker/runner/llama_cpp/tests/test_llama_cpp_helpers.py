@@ -195,6 +195,19 @@ def test_sanitize_harmony_no_final_channel_drops_to_empty() -> None:
     assert "functions" not in out2[0]["content"]
 
 
+def test_sanitize_harmony_stray_marker_without_body_keeps_text() -> None:
+    # A stray/partial control marker with NO <|message|> body (e.g. generation
+    # truncated right at a <|channel|> header) is plain prose that happens to
+    # include a marker: strip the control tokens and keep the surviving text
+    # rather than erasing genuine assistant history. No marker may survive.
+    stray = "Here is the answer: 4 <|channel|>"
+    out = _sanitize_harmony_assistant_messages(
+        [{"role": "assistant", "content": stray}]
+    )
+    assert out[0]["content"] == "Here is the answer: 4"
+    assert "<|channel|>" not in out[0]["content"]
+
+
 def test_generation_kwargs_passes_logprobs() -> None:
     assert "logprobs" not in _generation_kwargs(_params())
     kw = _generation_kwargs(_params(logprobs=True, top_logprobs=3))

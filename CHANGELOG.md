@@ -7,6 +7,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Changed
+
+- **The llama.cpp engine now loads models with Flash Attention by default.** It
+  is the modern llama.cpp default and matters most for models whose per-layer V
+  embeddings differ (gemma's interleaved sliding-window attention): without it
+  llama.cpp pads the V cache and falls back to a full-size sliding-window cache,
+  wasting VRAM and slowing attention. Set `SKULK_LLAMA_CPP_FLASH_ATTN=0` to
+  disable on a backend whose compiled build lacks Flash Attention kernels.
+
 ### Fixed
 
 - **The model store now advertises a routable IP, so downloads no longer fail
@@ -20,17 +29,6 @@ This project records release notes here and mirrors public-facing notes in
   preferred over a Tailscale/CGNAT address; loopback and link-local are skipped),
   and an operator-supplied routable IP in `store_http_host` is still honored
   verbatim.
-
-### Changed
-
-- **The llama.cpp engine now loads models with Flash Attention by default.** It
-  is the modern llama.cpp default and matters most for models whose per-layer V
-  embeddings differ (gemma's interleaved sliding-window attention): without it
-  llama.cpp pads the V cache and falls back to a full-size sliding-window cache,
-  wasting VRAM and slowing attention. Set `SKULK_LLAMA_CPP_FLASH_ATTN=0` to
-  disable on a backend whose compiled build lacks Flash Attention kernels.
-
-### Fixed
 
 - **gpt-oss conversations no longer wedge on follow-up turns when the history
   carries raw harmony markers.** A gpt-oss assistant turn captured before the

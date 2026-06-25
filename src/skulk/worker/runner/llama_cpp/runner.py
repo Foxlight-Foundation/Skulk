@@ -313,13 +313,27 @@ def _harmony_history_text(content: str) -> str:
 
     Only the ``final`` channel carries the user-facing answer, so analysis
     (reasoning) and commentary (tool-call plumbing) channels are dropped rather
-    than replayed as assistant prose. A turn with no ``final`` channel
-    (commentary/tool-call-only, or truncated before one) reduces to an empty
-    string instead of echoing tool-call JSON back into the next prompt. Either
-    way no ``<|channel|>`` marker survives, which the gpt-oss template rejects.
+    than replayed as assistant prose. A turn with a ``<|message|>`` body but no
+    ``final`` channel is analysis-only or commentary/tool-call, so it reduces to
+    an empty string instead of echoing reasoning or tool-call JSON into the next
+    prompt. A turn with a stray/partial control marker and NO ``<|message|>`` at
+    all carries no channel body (e.g. generation truncated right at a
+    ``<|channel|>`` header): that is plain prose that happens to include a
+    marker, so the control tokens are stripped and the surviving text kept rather
+    than erasing genuine history. Either way no ``<|channel|>`` marker survives,
+    which the gpt-oss template rejects.
     """
     final_text = _harmony_final_channel_text(content)
-    return final_text if final_text is not None else ""
+    if final_text is not None:
+        return final_text
+    if "<|message|>" in content:
+        # A real (analysis/commentary/tool-call) channel body with no final:
+        # drop it so reasoning/JSON is never replayed as assistant prose.
+        return ""
+    stripped = content
+    for token in _HARMONY_CONTROL_TOKENS:
+        stripped = stripped.replace(token, "")
+    return stripped.strip()
 
 
 def _sanitize_harmony_assistant_messages(
