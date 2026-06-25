@@ -25,6 +25,7 @@ from skulk.shared.types.profiling import (
     MachMemoryCategories,
     MemoryUsage,
     NetworkInterfaceInfo,
+    NodeResources,
     ThunderboltBridgeStatus,
     parse_vm_stat_output,
 )
@@ -38,6 +39,11 @@ from skulk.utils.channels import Sender
 from skulk.utils.pydantic_ext import TaggedModel
 from skulk.utils.task_group import TaskGroup
 
+from .linux_gpu import (
+    LinuxGpuMetrics,
+    find_amd_gpu_device,
+    read_system_profile,
+)
 from .mactop import MacmonMetrics, MactopMetrics
 from .system_info import (
     get_friendly_name,
@@ -48,6 +54,7 @@ from .system_info import (
 )
 
 IS_DARWIN = sys.platform == "darwin"
+IS_LINUX = sys.platform.startswith("linux")
 
 
 _vm_stat_failure_logged = False
@@ -449,6 +456,7 @@ GatheredInfo = (
     # Decode-only: lets a newly-upgraded node still apply telemetry from macOS
     # workers on a pre-mactop build during a rolling upgrade (see MacmonMetrics).
     | MacmonMetrics
+    | LinuxGpuMetrics
     | MemoryUsage
     | NodeNetworkInterfaces
     | MacThunderboltIdentifiers
@@ -458,6 +466,7 @@ GatheredInfo = (
     | NodeConfig
     | MiscData
     | StaticNodeInformation
+    | NodeResources
     | NodeDiskUsage
 )
 
@@ -472,8 +481,10 @@ class InfoGatherer:
     mactop_interval: float | None = 1 if IS_DARWIN else None
     thunderbolt_bridge_poll_interval: float | None = 10 if IS_DARWIN else None
     static_info_poll_interval: float | None = 60
+    node_resources_poll_interval: float | None = 60
     rdma_ctl_poll_interval: float | None = 10 if IS_DARWIN else None
     disk_poll_interval: float | None = 30
+    gpu_linux_poll_interval: float | None = 2 if IS_LINUX else None
     _tg: TaskGroup = field(init=False, default_factory=TaskGroup)
 
     async def run(self):
@@ -494,10 +505,13 @@ class InfoGatherer:
                     tg.start_soon(self._monitor_system_profiler_thunderbolt_data)
                     tg.start_soon(self._monitor_thunderbolt_bridge_status)
                     tg.start_soon(self._monitor_rdma_ctl_status)
+                if IS_LINUX:
+                    tg.start_soon(self._monitor_gpu_linux)
                 tg.start_soon(self._watch_system_info)
                 tg.start_soon(self._monitor_memory_usage)
                 tg.start_soon(self._monitor_misc)
                 tg.start_soon(self._monitor_static_info)
+                tg.start_soon(self._monitor_node_resources)
                 tg.start_soon(self._monitor_disk_usage)
 
                 nc = await NodeConfig.gather()
@@ -549,6 +563,22 @@ class InfoGatherer:
             except Exception as e:
                 logger.warning(f"Error gathering static node info: {e}")
             await anyio.sleep(self.static_info_poll_interval)
+
+    async def _monitor_node_resources(self):
+        if self.node_resources_poll_interval is None:
+            return
+        while True:
+            try:
+                with fail_after(30):
+                    await self.info_sender.send(await NodeResources.gather())
+            except (ClosedResourceError, BrokenResourceError):
+                # Consumer gone: stop signal, not a fault. Escape the
+                # per-iteration catch-all so the loop cannot spin on a dead
+                # channel (#266); run() converts it into a clean stop.
+                raise
+            except Exception as e:
+                logger.warning(f"Error gathering node resources: {e}")
+            await anyio.sleep(self.node_resources_poll_interval)
 
     async def _monitor_misc(self):
         if self.misc_poll_interval is None:
@@ -712,6 +742,40 @@ class InfoGatherer:
                 logger.warning(f"Error gathering disk usage: {e}")
             await anyio.sleep(self.disk_poll_interval)
 
+    async def _monitor_gpu_linux(self):
+        """Publish normalized AMD/Linux GPU telemetry from passive sysfs reads.
+
+        Resolves the amdgpu device once; if none is present (no GPU, or a driver
+        that does not expose ``gpu_busy_percent``) the node simply reports no
+        accelerator, which the dashboard renders as "not reported". Reads are
+        passive sysfs, never a GPU-colliding poll (see ``linux_gpu.py`` and the
+        macmon crash mechanism it avoids).
+        """
+        if self.gpu_linux_poll_interval is None:
+            return
+        device = find_amd_gpu_device()
+        if device is None:
+            logger.info(
+                "no AMD GPU sysfs device (gpu_busy_percent) found; skipping GPU "
+                "telemetry on this node"
+            )
+            return
+        logger.info(f"reporting GPU telemetry from {device}")
+        while True:
+            try:
+                with fail_after(5):
+                    await self.info_sender.send(
+                        LinuxGpuMetrics(system_profile=read_system_profile(device))
+                    )
+            except (ClosedResourceError, BrokenResourceError):
+                # Consumer gone (worker shutdown/replacement): a stop signal,
+                # not a gathering fault; must escape this per-iteration
+                # catch-all or the loop spins on a dead channel (#266).
+                raise
+            except Exception as e:
+                logger.warning(f"Error gathering Linux GPU telemetry: {e}")
+            await anyio.sleep(self.gpu_linux_poll_interval)
+
     async def _monitor_mactop(self, mactop_path: str):
         if self.mactop_interval is None:
             return
@@ -769,9 +833,7 @@ class InfoGatherer:
                         # the raw mactop figure rather than dropping the sample.
                         mach_categories = await _read_mach_memory_categories()
                         try:
-                            metrics = MactopMetrics.from_raw_json(
-                                text, mach_categories
-                            )
+                            metrics = MactopMetrics.from_raw_json(text, mach_categories)
                         except ValidationError as e:
                             logger.warning(f"Skipping unparseable mactop line: {e}")
                             continue

@@ -7,6 +7,655 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Changed
+
+- **The llama.cpp engine now loads models with Flash Attention by default.** It
+  is the modern llama.cpp default and matters most for models whose per-layer V
+  embeddings differ (gemma's interleaved sliding-window attention): without it
+  llama.cpp pads the V cache and falls back to a full-size sliding-window cache,
+  wasting VRAM and slowing attention. Set `SKULK_LLAMA_CPP_FLASH_ATTN=0` to
+  disable on a backend whose compiled build lacks Flash Attention kernels.
+
+### Fixed
+
+- **The model store now advertises a routable IP, so downloads no longer fail
+  on Thunderbolt-meshed fleets.** The store host broadcast its `store_http_host`
+  as a bare hostname (e.g. `kite3.local`); on a fleet where nodes are also linked
+  over Thunderbolt, mDNS could resolve that name to the host's link-local TB
+  address (`169.254.x`), which a peer lacking a direct TB link to it cannot route
+  to. That peer's model downloads then failed (`Cannot connect to host
+  kite3.local:58080`) even though it could reach the store fine over the LAN. The
+  store host now broadcasts its own best routable IPv4 (a private LAN address is
+  preferred over a Tailscale/CGNAT address; loopback and link-local are skipped),
+  and an operator-supplied routable IP in `store_http_host` is still honored
+  verbatim.
+
+- **gpt-oss conversations no longer wedge on follow-up turns when the history
+  carries raw harmony markers.** A gpt-oss assistant turn captured before the
+  output was channel-parsed (or echoed back by any client) keeps `<|channel|>`
+  markers in its `content`, and llama.cpp's gpt-oss chat template rejects that
+  with a hard error, so every later turn of the conversation returned no
+  response. The llama.cpp runner now strips harmony markers from assistant
+  history (reducing it to the final-channel text) before handing it to the
+  template, so a client can never wedge inference by replaying the model's own
+  output format and existing conversations resume cleanly.
+
+- **Dashboard: gpt-oss chats render cleanly and stop leaking harmony markers.**
+  The chat reasoning/content splitter now also understands gpt-oss "harmony"
+  channel markers (`<|channel|>analysis...final...`), so the analysis channel
+  shows as collapsible reasoning and the answer renders without raw `<|...|>`
+  scaffolding. This also heals conversations that stored marker-laden assistant
+  turns before the server-side parsing landed, so they display correctly.
+- **Dashboard: no more `404 /i18n/skulk/en.json`.** English ships bundled in the
+  app, so the Tolgee CDN fetch is now only enabled when an additional language is
+  configured; the default English-only build no longer requests (and 404s on) the
+  runtime translations endpoint.
+
+- **gpt-oss models on the llama.cpp engine no longer leak raw "harmony" markers
+  into the answer, and their reasoning is now separated from content.** llama.cpp
+  hands back already-detokenized text whose content still contains the literal
+  harmony channel scaffolding (`<|channel|>analysis<|message|>...<|end|>`
+  `<|start|>assistant<|channel|>final<|message|>...`); the runner forwarded it
+  verbatim, so users saw the control tokens and the analysis (reasoning) channel
+  mixed into the response. The llama.cpp runner now reparses the marker stream
+  from strings, mirroring what the MLX engine does at the token level: the
+  `analysis` channel is emitted as `reasoning_content`, the `final` channel as
+  clean `content`, and every control marker is stripped. The parser is
+  dependency-free (no MLX / openai_harmony) so it runs on non-Mac GPU nodes.
+
+- **Cluster formation no longer livelocks under connection churn (#400).**
+  Master election restarted its whole campaign on every libp2p connection
+  update, and because peers are multi-homed (link-local, LAN, and overlay
+  addresses) and libp2p pings/re-dials every few seconds, those updates can
+  arrive faster than the election timeout. A campaign was then cancelled and
+  restarted before it could ever finish, so no master was elected and the
+  cluster never formed (most visible when several nodes start at once, e.g. a
+  fresh three-machine setup). Election now ignores connection updates that do
+  not change the set of connected peers, and lets an in-flight campaign finish
+  before starting the next one, so steady churn can no longer starve
+  convergence. Reducing the churn at its source (skipping unreachable
+  link-local dials, ping tuning) is tracked separately (#401).
+
+- **A placement right after a teardown is no longer spuriously refused on
+  gossip-lagged memory (#314).** Node memory rides the telemetry plane
+  (last-write-wins), so for a few gossip rounds after a runner teardown the
+  freed memory is not yet reflected in `ramAvailable` (or the GPU-wireable
+  figure). A back-to-back placement (test harness, rapid model swap) reads the
+  stale, deflated availability and is refused with "no candidate cycle fits"
+  until a ~20-30s settle. The master now credits a just-deleted instance's
+  per-node footprint (estimated with the same accounting placement admits
+  against) back to the fit-check inputs for a short grace window
+  (`RECENTLY_FREED_MEMORY_GRACE_SECONDS`), so the placement admits immediately;
+  the credit expires so a genuine shortfall reasserts, and the worker's live
+  pre-load fit guard (#383) remains the OOM backstop.
+
+- **A logprobs request to a llama.cpp node without `logits_all` now fails with a
+  clear error instead of silently returning none (#385).** Per-token logprobs on
+  the llama.cpp engine require loading the model with `logits_all=True`, which is
+  off by default because it pre-allocates a large logits buffer; a request asking
+  for `logprobs`/`top_logprobs` against a node that did not enable it used to
+  "succeed" with empty logprobs. The runner now refuses such a request with an
+  actionable message naming `SKULK_LLAMA_CPP_LOGITS_ALL=1` (delivered to the
+  client as an error chunk), so the limitation is legible rather than silent.
+  Enabling logprobs remains opt-in per node (`SKULK_LLAMA_CPP_LOGITS_ALL=1`,
+  buffer bounded by `SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX`).
+
+- **The model store no longer registers a vision GGUF without its projector.**
+  A vision GGUF (LLaVA/Qwen-VL/Gemma-VLM style) ships its multimodal projector
+  as a separate `mmproj` file; without it the llama.cpp runner cannot load the
+  model. The selective store download already keeps the projector glob, but a
+  store entry registered before that logic landed could list only the LM quant,
+  so staging it to a worker produced an unloadable model that failed only as a
+  runner crash at load time on a remote node. The store host now verifies the
+  projector actually landed before registering a vision GGUF and refuses with a
+  clear error otherwise, so an incomplete vision model can never be registered.
+  An existing stale entry self-heals: a download request for an in-store vision
+  GGUF whose entry lacks the projector re-downloads (reusing the already-present
+  weights and fetching only the missing projector) instead of being
+  short-circuited as "complete", so the failure becomes a loud, fixable download
+  error on the store host instead of a confusing crash elsewhere.
+
+- **A borderline multi-node placement is no longer refused on sub-GB memory
+  jitter (#383).** The master admits a placement on each node's *gossiped* usable
+  memory, but the worker's pre-load guard re-measures *live* at load; on a tight
+  multi-node split the live reading can sit a few hundred MB below the admitted
+  estimate, so the worker refused a placement the master had just admitted, the
+  master could not re-place wider (no spare node), and the model never loaded. A
+  24B model split across a 3-node ring was observed refusing at the load re-check
+  by 0.2GB (2%). The footprint already includes a 1.30x overhead factor, a full
+  KV reservation, and a flat floor, so a marginal miss is within that pad; the
+  guard now applies a 10% fit tolerance and refuses only on a shortfall beyond
+  it (the signature of a node that genuinely lost memory since admission),
+  preserving the leak-on-OOM guard while letting borderline placements load.
+
+### Added
+
+- **The cluster topology now shows per-node health with the fix (#388).** When
+  the master recovers a node that could not pull its shard or whose download
+  failed, the reason used to be invisible: the node looked normal while
+  placements quietly routed around it. `GET /state` now carries a derived
+  `nodeHealth` map (per node: a `level` of `ok`/`warn`/`error` plus `reasons`,
+  each with a `message` and a `remediation`), computed read-only from state
+  already in the response (terminal download failures, low or full models-volume
+  disk, and late heartbeats) so it adds no new polling or gossip. The dashboard
+  renders an amber/red badge on the affected node whose hover names the problem
+  and how to fix it.
+- **macOS Local Network permission is now diagnosable and the denial warning is
+  actionable (#267).** macOS attributes Local Network access to the responsible
+  app in the launch chain (a terminal when run interactively, "Python" over SSH
+  / launchd / headless), so generic "grant the app you launched from" advice is
+  the part users get wrong. A new read-only probe, `uv run
+  skulk-macos-local-network-probe` (text or `--json`), walks the process tree,
+  resolves each process's nearest `.app` bundle identity, runs the existing
+  reachability check, and reports exactly which identity macOS will attribute the
+  grant to. A companion `skulk-build-macos-local-network-probe-app` builds a
+  throwaway ad-hoc-signed probe `.app` (with `NSLocalNetworkUsageDescription`) to
+  compare terminal vs Skulk-named attribution during development. The startup
+  DENIED warning now names the detected app to enable (e.g. "enable 'iTerm2'" or
+  "enable 'Python'") instead of generic advice, and points at the probe command.
+
+- **Auto-imported Qwen3 reasoning models no longer return empty content (#384).**
+  A Qwen3-family model with no built-in card (a fresh quant imported on demand,
+  e.g. `Qwen3.6-35B-A3B-nvfp4`) arrived with empty capabilities, so its resolved
+  profile reported no thinking and no thinking toggle. Thinking is on by default
+  for Qwen3, so the model reasoned unconditionally and a normal chat request
+  spent its whole token budget on the reasoning channel, returning empty
+  `content`. Capability resolution now recognizes the Qwen3 / Qwen3.5 / Qwen3.6
+  family (token-delimited `<think>` toggle), so an auto-imported variant is
+  treated as toggle-capable and the dashboard/API off-by-default path can
+  suppress thinking. Built-in cards keep their explicit declarations, an explicit
+  `reasoning` section still overrides the family default, and Coder variants
+  (instruct-only, no thinking) are excluded.
+
+- **Context-length and other runner errors now surface as structured errors on
+  the Claude, Responses, and Ollama wire formats (#276).** Those adapters
+  previously raised on a runner error (a 500 on the non-streaming path) or broke
+  out of the stream and then emitted an empty successful completion (a bogus
+  success for what is actually a clean request rejection). Since the API streams
+  every response (the HTTP status is committed to 200 before generation), each
+  adapter now emits a structured error envelope in the body and stops, reusing
+  the same `error_chunk_response` mapping the OpenAI chat-completions surface
+  uses: a `context_length_exceeded` rejection becomes an `invalid_request_error`
+  (400), everything else an internal error (500). No more empty-success-on-error
+  for clients feeling out context limits.
+
+- **A runner that never reports after spawn no longer stalls an instance forever
+  (#272).** A runner frozen between spawn and its first status report (a
+  SIGSTOP, a hang in early import or device init) left the instance stuck in
+  pre-init coordination indefinitely: `ConnectToGroup` is only planned once
+  every rank has reported, and the crash breaker never tripped because the
+  process was alive. The worker now applies a first-status-report deadline
+  (`_RUNNER_FIRST_REPORT_DEADLINE_SECONDS`, 120s); a runner silent past it gives
+  the instance up through the same circuit breaker, so the placement fails and
+  recovers instead of hanging. The deadline is generous enough for slow imports
+  and weight mmaps.
+
+- **A rank's failed download no longer wedges a multi-node instance forever
+  (#381).** If one rank's model download failed terminally (disk full, a
+  transient Hugging Face or network error), the ring still formed and every rank
+  waited for all ranks to become load-ready; the failed rank never would, and
+  nothing failed or recovered the instance, so it sat "loading" at
+  `RunnerConnected` indefinitely until a manual restart. The master's plan loop
+  now detects this from replicated state (a not-yet-ready instance whose any rank
+  node carries a terminal `DownloadFailed` for the model), fails any in-flight
+  request bound to it with the download error surfaced, tears the instance down,
+  and re-places the model at the same width excluding the failed node(s). A
+  transient or single-node failure self-heals onto healthy nodes; a cluster-wide
+  shortfall fails cleanly with the reason (`PlacementError` is terminal, bounding
+  recovery to the available nodes) instead of hanging.
+
+- **Node logs are now bounded and cannot fill the disk (#382).** Two paths grew
+  without limit: the durable `~/.skulk/logs/skulk.log` rotated only once at
+  startup, so a long-lived node grew it forever; and the service-manager capture
+  files (`skulk.stderr.log` / `skulk.stdout.log`) accumulated across restarts,
+  reaching tens of GB on the fleet. Now `skulk.log` rotates at 100 MB with the
+  last few runs kept as compressed archives; the capture files are truncated on
+  each restart (keeping a 5 MB tail of the previous run as `*.log.1`, tunable via
+  `SKULK_CAPTURE_KEEP_BYTES`); the console sink drops ANSI color when stderr is
+  not a terminal so captured logs are plain and greppable; and the service now
+  launches at info verbosity by default instead of `-v` debug (the libp2p
+  transport firehose was the bulk of the volume). Set `SKULK_VERBOSITY=-v` to opt
+  back into verbose logging while debugging.
+
+- **The centralized store now honors a card's pinned GGUF quant on download
+  (#344).** A store-routed download re-derived the quant from the model id alone
+  (the default preference), so a custom card pinning a non-default quant (e.g.
+  `Q8_0`, `Q3_K_M`) silently got the default instead. The store download request
+  now carries the card's `gguf_file`: the worker's store client sends it in the
+  `POST /models/{id}/download` body, the store fetches that quant's shard group,
+  and a pin absent from the repo falls back to the default. Auto-built cards
+  (whose pin matches the default) are unaffected.
+
+- **A llama.cpp request between the KV budget and the model's context ceiling is
+  now cleanly rejected instead of failing at the runner (#362).** The llama.cpp
+  runner allocates its KV cache up front and caps the loaded context to
+  `KV_CONTEXT_BUDGET_TOKENS` (8192; `_serving_n_ctx`), but the API's admission
+  ceiling (`instance_context_token_limit`) was the memory/card value, often tens
+  of thousands of tokens. A request above the budget was therefore admitted and
+  then failed or truncated at generation. The admission ceiling for a
+  GGUF/llama.cpp instance is now capped to the same budget, so the API returns a
+  clear `context_length_exceeded` up front and admission matches what the runner
+  serves. (Enabling logprobs lowers the runner window further; this was the
+  originally reported case, now subsumed. A node that overrides
+  `SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX` *below* the budget remains a narrow per-node
+  residual, since the master cannot see node-local env at placement.)
+
+### Added
+
+- **Vision GGUF VLMs now run on the llama.cpp engine (#128).** A vision GGUF
+  (LLaVA / Qwen-VL style, with a separate `mmproj` projector) can be served on a
+  llama.cpp node: the runner loads the projector through llama-cpp-python's
+  multimodal chat handler (the general `MTMDChatHandler` by default, or a
+  family-specific handler selected from the card's vision `model_type`), and an
+  image request's content is passed inline so the handler splices the image
+  features itself. A GGUF repo is marked vision-capable from its `config.json`
+  vision section when present, or, for the many GGUF VLM repos that ship no
+  `config.json`, from the mere presence of an `mmproj` projector. Validated live
+  on an AMD Strix Halo (Vulkan) node serving `Qwen2-VL-2B-Instruct-GGUF`
+  (reads text in images and describes structured scenes). `image_token_id` on
+  the vision card config is now optional: it is required only by the MLX vision
+  path; the llama.cpp handler inserts image features without it.
+
+### Fixed
+
+- **Vision GGUF models now download their multimodal projector (#346).** The
+  selective GGUF allow-list (`gguf_allow_patterns`, used by both the direct-
+  HuggingFace download and the centralized store) only matched the selected LM
+  quant's shard group, so a LLaVA-style vision GGUF fetched its weights but not
+  its separate `mmproj-*.gguf` projector, and llama.cpp could not do image
+  inference. The allow-list now always includes a `*mmproj*.gguf` glob: it
+  matches nothing on a text-only repo (no cost) and pulls the projector on a
+  vision repo. Foundation for vision GGUF VLMs on llama.cpp (#128).
+
+### Changed
+
+- **The placement single-node constraint is now a named engine capability
+  (#328 groundwork).** The hard-coded "llama.cpp is single-node only" check in
+  the planner became `engine_supports_multi_node` (MLX yes; llama.cpp not until
+  its RPC backend is wired into the runner). Behavior is unchanged today: a
+  model whose only compatible engine is single-node is still pinned to a
+  one-node cycle, and a card that also allows a multi-node engine (MLX) still
+  places across nodes. This is the single hinge to flip when multi-node
+  llama.cpp (RPC) lands.
+
+- **Placement now records the resolved backend on each shard (#330).** The master
+  resolves which backend a node will use (the card's `compatible_backends`
+  intersected with that node's advertised backends, ordered by
+  `backend_preference`) at placement time and stamps the winning tag onto the
+  node's shard as `resolved_backend`. The worker reads it at runner-spawn instead
+  of re-probing its own backends, so engine dispatch is deterministic from
+  replicated state and cannot disagree with the placement decision; it also lets
+  a card resolve to different engines per node on a heterogeneous cycle. The
+  worker falls back to its local probe when the field is absent (a node whose
+  resources had not yet gossiped at placement). Foundation for pluggable engines
+  (#284) and multi-node llama.cpp (#328).
+
+### Removed
+
+- **The `EXO_*` environment-variable deprecation runway is gone (#324).** Legacy
+  `EXO_*` env vars from the pre-rename (exo to skulk) deployments are no longer
+  honored: the package-import alias shim (`skulk/__init__.py`), every `EXO_*`
+  fallback in `constants.py` and across the worker/API/store, and the
+  `~/.exo` path fallbacks (home dir, model staging, download staging) were
+  removed. Only the `SKULK_*` names and `~/.skulk/` paths are read now. The
+  whole fleet must run the same Skulk version, so re-set any `EXO_*` vars to
+  their `SKULK_*` names before upgrading. (The libp2p private-network pre-shared
+  key still derives from the `exo_discovery_network` seed in `swarm.rs`; changing
+  that is a wire-compatibility break handled separately as a coordinated
+  fleet-wide upgrade.)
+
+### Changed
+
+- **The libp2p private-network key seed is now `skulk_discovery_network` (#324).**
+  `swarm.rs` derived the PNET pre-shared key from the literal
+  `exo_discovery_network` (an exo-rename residue). The seed is now
+  `skulk_discovery_network`. **This is a wire-compatibility break**: a node built
+  with the new seed cannot form a libp2p cluster with a node built on the old
+  seed, so it must roll out as a single coordinated whole-fleet rebuild and
+  restart (do not roll nodes one at a time). The Zenoh data-plane namespace is
+  unaffected (it derives from `NETWORK_VERSION` / `SKULK_LIBP2P_NAMESPACE`, not
+  this seed).
+
+- **Zenoh data plane is now soft default-on (#315).** The `DATA` topic (per-token
+  generation output) uses the Eclipse Zenoh transport by default when a node is
+  configured for it. `SKULK_ZENOH_DATA_PLANE` is now tri-state
+  (`_resolve_zenoh_enabled`): `1`/`true`/`yes`/`on` forces Zenoh on (still requires
+  an explicit `SKULK_ZENOH_LISTEN`, #308), `0`/`false`/`no`/`off` forces gossipsub,
+  any other non-empty value is rejected, and
+  **unset** is the soft default (Zenoh when `SKULK_ZENOH_LISTEN` is set, else
+  gossipsub). A bare node with no Zenoh config (e.g. a fresh `uv run skulk`) stays
+  on gossipsub rather than failing the listen requirement, so the listen endpoint
+  is the opt-in signal under the default. Control, telemetry, and election planes
+  stay on libp2p. Validated by a full e2e suite over Zenoh (coherence across
+  dense/MoE single- and multi-node, churn/soak/refusal, master-failover
+  continuity).
+
+### Added
+
+- **AMD / Linux GPU nodes can join a cluster and serve GGUF models through
+  llama.cpp (#325, #331).** A non-Mac box (validated on an AMD Ryzen AI Max+ 395
+  "Strix Halo", `gfx1151`, via the Vulkan backend) joins as a worker that serves
+  GGUF models on its GPU alongside Apple Silicon nodes serving MLX. Backends are
+  self-describing `<engine>-<compute>` tags (`mlx-metal`, `llama_cpp-vulkan`,
+  ...); a model card declares `compatible_backends` (a hard placement filter) and
+  `backend_preference` (a soft, graceful-fallback ranking), so a GGUF model lands
+  only on a llama.cpp node and an MLX model only on the Macs, automatically. The
+  llama.cpp runner is single-node and streams tokens onto the existing data
+  plane. See `website/docs/amd-strix-halo-nodes.md`.
+
+- **The llama.cpp engine matches MLX on logprobs and tool calling (#356).** GGUF
+  models served on an AMD node support per-token `logprobs` / `top_logprobs`
+  (opt-in via `SKULK_LLAMA_CPP_LOGITS_ALL=1`, which loads the model retaining
+  per-token logits and caps the served context so the logits buffer stays
+  bounded; off by default) and tool calling (a request's `tools` are forwarded;
+  a structured tool call is emitted when the model returns one, else its prose).
+  Multi-token prediction / speculative decoding remains MLX-only: GGUF models
+  advertise no MTP capability, so an AMD node serves plain autoregressive without
+  promising a speedup it cannot deliver.
+
+- **Collector-agnostic accelerator telemetry (#353, #354).** Node telemetry now
+  carries a vendor-neutral `accelerator` block (vendor / utilization / VRAM /
+  power / temperature / clock) filled at the collector boundary: mactop on Apple,
+  and a passive-sysfs collector for AMD/Linux GPUs, so a non-Mac GPU node is not a
+  telemetry blind spot. The dashboard renders it in a vendor-aware accelerator
+  panel.
+
+- **Heterogeneous-node identity in the topology (#355).** A Linux node reports a
+  real model / chip / OS (DMI + `/proc/cpuinfo` + `os-release`) instead of
+  "Unknown", and the dashboard labels non-Mac nodes correctly rather than
+  prefixing "macOS".
+
+- **The model store downloads only the selected GGUF quant (#339).** When the
+  store host downloads a multi-quant GGUF repo from HuggingFace on a worker's
+  behalf, it now fetches exactly what the direct-HuggingFace path fetches: the
+  preferred quant's shard group plus `config.json`, and nothing else (not the
+  other quantizations, not `original/*` full-precision weights, not `metal/*`
+  artifacts). This matches the selective allow-patterns
+  (`resolve_allow_patterns`) the direct path already applies, so a store-routed
+  download is no larger than a direct one. Non-GGUF repos are unaffected.
+
+- **GGUF cards can be built from the binary header when no `config.json` is
+  present (#327).** A GGUF repo that ships only the `.gguf` weights (no
+  `config.json`) now has its structural fields (layer count, hidden size,
+  KV-head count, context length) read directly from the selected file's GGUF
+  metadata header via a ranged read of the file start, instead of failing the
+  card build. Repos that ship `config.json` (most community GGUF repos) still
+  use it; the header read is the fallback. Completes the selective-quant GGUF
+  download/load path so more llama.cpp repos work without a hand-written card.
+
+- **Zenoh data-plane hardening toward default-on (#308 + #309).** Security
+  (#308): the Zenoh session now sets a **namespace** (a collision-resistant
+  SHA-256 hash of the exact token libp2p isolates on: `SKULK_LIBP2P_NAMESPACE`
+  when set, else the `NETWORK_VERSION` default `v0.0.1`, mirroring `swarm.rs`) so
+  foreign peers on a different namespace cannot subscribe to this fleet's `data`,
+  restoring parity with the libp2p private namespace; and `SKULK_ZENOH_LISTEN` is
+  now **required explicitly** when the plane is enabled rather than silently
+  defaulting to `0.0.0.0` (an explicit `0.0.0.0` still works but warns). TLS/ACL
+  stay operator-configurable for untrusted networks (documented; not built in).
+  Robustness (#309): the DATA plane egresses on its **own outbound loop**, so its
+  `CongestionControl::Block` backpressure can no longer stall the shared
+  control-plane publish loop (commands/events); and `ZenohSession` publish/
+  subscribe no longer hold the publishers/subscribers mutex across the
+  `declare`/`put` await, so per-command concurrent publishes don't serialize.
+
+- **Data-plane reorder buffer is now transport-conditional (#279 Phase 3).** The
+  per-command `sequence` reorder buffer (the #301 fix for gossipsub reordering
+  multi-node output) is now skipped when the DATA plane rides Zenoh, which
+  delivers each command's chunks per-publisher FIFO, so output dispatches in
+  arrival order, eliminating the per-token buffering/reordering hop. The buffer
+  stays ON for the gossipsub default (which reorders). The API selects this from
+  the transport (`data_plane_zenoh`, from `SKULK_ZENOH_DATA_PLANE`);
+  `SKULK_DATA_REORDER_BUFFER` (`1`/`0`) overrides explicitly. Validated 20/20 on
+  a 3-node sampled-MTP coherence matrix with the buffer off. The full removal of
+  the `sequence` field and reorder machinery is deferred until Zenoh is the
+  default DATA transport.
+
+- **Optional Eclipse Zenoh transport for the data plane (experimental, default
+  off).** When `SKULK_ZENOH_DATA_PLANE` is set, the `DATA` topic (per-token
+  generation output) rides a Zenoh `peer` session instead of gossipsub; control,
+  telemetry, and election planes stay on libp2p. Endpoints are per-node and
+  explicit via `SKULK_ZENOH_LISTEN` / `SKULK_ZENOH_CONNECT` (multicast scouting
+  off, gossip on, the macOS Local Network Privacy-safe posture). The swap is
+  transparent above the transport: `DataChunk`, the per-command `sequence`, and
+  the reorder buffer are unchanged, so the two transports are interchangeable
+  behind the flag. Publishers use `Reliable` + `Block` on a single priority for
+  per-key FIFO. With the flag unset, behavior is identical to before. Foundation
+  for #279's data-plane evolution (later phase: removing the app-layer reorder
+  buffer once Zenoh's per-publisher ordering is relied on).
+- **Zenoh data plane is key-addressed per owner (#279 Phase 2), killing the
+  cluster-wide fan-out.** The owning API node stamps its node id on the serving
+  command (`owner_node`); the master carries it onto the worker task, and the
+  rank-0 supervisor stamps it onto each `DataChunk`. On Zenoh the `DATA` topic
+  now publishes to the key `data/<owner_node>` and each node subscribes only to
+  `data/<own_node_id>`, so generation output reaches just the owning API node
+  instead of every node in the cluster. On gossipsub (flag off) `owner_node` is
+  ignored and the topic broadcasts as before, so the transports stay
+  interchangeable behind the flag.
+
+### Fixed
+
+- **Placement now counts a unified-memory GPU node's GTT-mapped system RAM, not
+  just its BIOS VRAM carve-out, and uses a lighter overhead factor for GGUF.** On
+  an AMD APU (Strix Halo / Ryzen AI Max) the GPU addresses the BIOS VRAM
+  carve-out plus system RAM through GTT, so a model larger than the carve-out
+  runs there. `usable_vram_by_node` now detects a unified-memory node (its GTT
+  aperture spans the whole system: `gtt_total_bytes > vram_total_bytes` AND
+  `gtt_total_bytes ≥ ram_total`, which a discrete card whose GTT default merely
+  equals VRAM does not satisfy) and counts working-set-capped VRAM plus
+  GTT-mappable system RAM (minus a 16 GB OS headroom) toward the usable pool. The
+  weight-overhead factor is now engine-aware: GGUF/llama.cpp models use
+  1.10 (lighter C++ runtime) instead of MLX's 1.30. Together these let large GGUF
+  MoEs place on a 128 GB Strix Halo node (e.g. a 58.5 GiB gpt-oss-120B on a node
+  with a 64 GiB VRAM carve-out). The worker's local pre-spawn guard mirrors the
+  same unified-memory math so it never refuses a placement the master admitted.
+
+- **Placement now admits GPU-offload nodes against their discrete VRAM, not
+  system RAM.** The memory fit check capped every node at
+  `GPU_WORKING_SET_FRACTION` (0.75) of *system* RAM, a Metal/Apple-unified-memory
+  assumption. On a discrete-VRAM node (a Strix Halo box whose BIOS carves 128 GB
+  into ~64 GB system + 64 GB GPU VRAM) that refused models that fit fine in the
+  64 GB VRAM the llama.cpp/Vulkan engine actually allocates from (e.g.
+  `Llama-3.3-70B` at ~40 GB: "needs 54.2 GB but can use 46.1 GB"). Placement now
+  detects discrete VRAM from the node's accelerator telemetry
+  (`usable_vram_by_node`: AMD/NVIDIA `vram_total_bytes`) and admits against
+  `min(vram_total − vram_used, GPU_VRAM_WORKING_SET_FRACTION (0.90) × vram_total)`.
+  Apple unified-memory nodes are unchanged (they report no discrete VRAM). This
+  is engine-agnostic, so it carries forward to vLLM/CUDA nodes.
+
+- **A large-context GGUF no longer OOM-kills the node on load.** The llama.cpp
+  runner loaded models with `n_ctx=0`, which sizes the KV cache for the model's
+  full trained context (e.g. gemma-4's 128k) instead of the per-instance context
+  budget placement actually reserved memory for. On a memory-tight node (observed
+  loading gemma-4-31B on a Strix Halo Vulkan node) the kernel OOM-killed the whole
+  worker process, so the instance vanished instead of failing cleanly. The runner
+  now bounds `n_ctx` to the KV budget placement actually reserved memory for
+  (`KV_CONTEXT_BUDGET_TOKENS`, 8192 tokens), clamped down by the instance's
+  admission ceiling (#145) on a smaller node, so the up-front KV cache never
+  exceeds what the cluster sized for the placement. (Serving llama.cpp beyond that
+  budget needs placement to reserve the larger KV footprint, tracked separately
+  with VRAM-aware admission.)
+
+- **llama.cpp logprobs no longer OOM a node on load.** Defaulting the runner to
+  `logits_all=True` for logprobs parity made llama.cpp pre-allocate an
+  `n_ctx * vocab * 4` logits buffer at the model's full trained context, e.g.
+  `131072 * 152064 * 4` = 74 GiB for a Qwen2.5-7B GGUF, failing the load with an
+  allocation error. logprobs is now opt-in (`SKULK_LLAMA_CPP_LOGITS_ALL=1`) and,
+  when enabled, caps the served context (`SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX`,
+  default 8192) so the buffer stays bounded; with it off the served context is
+  the instance's admission ceiling, not the model's full trained context.
+
+- **The source-built GPU llama.cpp wheel survives `uv sync` (#358).** On a node
+  that declares a GPU llama.cpp backend, the service entrypoint now runs
+  `uv sync --inexact`, so a routine sync no longer prunes the out-of-resolution
+  source-built wheel (which previously dropped the node to CPU-only until a manual
+  rebuild). As a safety net, the node cross-checks a declared GPU backend against
+  the actual build (`llama_cpp.llama_supports_gpu_offload()`): if the wheel has no
+  GPU offload compiled in, it advertises only `llama_cpp-cpu` so GPU work is never
+  routed to a degraded build. `SKULK_AUTO_UPDATE=0` is no longer required as a
+  workaround on GPU nodes.
+
+- **The llama.cpp tool path honors cancellation (#357).** A tool-enabled request
+  runs one blocking, uninterruptible `create_chat_completion`; it now checks
+  cancellation at the boundaries around that call (skip if already cancelled,
+  suppress the result if a cancel landed while it ran), so a cancelled tool
+  request neither delivers output nor is marked complete, matching the streaming
+  path's cancellation semantics.
+
+- **Headless/non-Mac nodes boot without the built dashboard (#333).** A worker
+  node with no `dashboard-react/dist` (for example a Linux node with no node/npm
+  to build the UI) previously failed to start: `constants.py` resolved
+  `DASHBOARD_DIR` at import and raised `FileNotFoundError`, and the API's
+  `StaticFiles` mount raised when the directory was absent. `DASHBOARD_DIR` is
+  now `None` when the assets are absent and no `SKULK_DASHBOARD_DIR` override is
+  set, and the API skips serving the dashboard (logging a notice) while serving
+  the full API. Nodes that have the assets, or set `SKULK_DASHBOARD_DIR`, serve
+  the UI unchanged.
+
+- **Embedding tasks reach a clean terminal state (#326).** The embedding runner
+  held `RunnerReady` across the `TextEmbedding` forward pass, but the supervisor
+  asserts the runner is in an active state when it forwards a task's terminal
+  status, so a completing embedding task tripped the assertion and aborted the
+  event forwarder. The runner now holds `RunnerRunning` across the forward pass
+  and returns to `RunnerReady` only after the terminal status is emitted,
+  matching the MLX and llama.cpp text runners.
+
+- **The failover-seed event round-trips through the disk event log again.** A
+  `StateSnapshotHydrated` (the failover seed, indexed as event 0) is read back
+  through the `Event` TypeAdapter, whose `TaggedModel` wrap validator unwraps the
+  `{ClassName: inner}` envelope by re-validating the inner payload as a *python*
+  object. Under `State`'s `strict=True` that path skips JSON-mode coercion, so
+  the ISO datetime strings JSON produced for `last_seen` were rejected
+  (`datetime_type`) and `DiskEventLog.read_range` halted at the seed. The
+  phantom-node fix (#291) had started re-stamping `last_seen` on the seed, so
+  every carried seed now hit this. `State` now coerces `last_seen` strings back to
+  `datetime` in a field-scoped `before` validator (it does not force the whole
+  model into python-mode validation, unlike a model-level validator). This
+  unblocks event-log replay across a failover and is a prerequisite for #279
+  Phase 3 snapshot/truncate (snapshots persist a full `State`, `last_seen`
+  included).
+
+- **Multi-node generation output is no longer silently reordered (#279 Phase 2b
+  sequencing).** #279 Phase 2a moved per-token output (`ChunkGenerated`) off the
+  master-indexed control plane (where the monotonic event `idx` gave every chunk
+  a total order) onto the best-effort `DATA` gossip topic, which has no ordering
+  key. When the producing rank-0 worker and the owning API node are different
+  nodes, the gossip mesh can deliver a command's chunks out of order, and the API
+  consumed them in arrival order, silently transposing tokens/sub-words in the
+  response (`"Question"` -> `"Qesution"`). It was specific to multi-node *sampled*
+  speculative decoding (single-node is local/in-order; greedy emits steadily) and
+  hit ~90% of responses at temperature 0.2; the model battery never caught it
+  because it only checked `finish_reason` and token count, never output
+  coherence. `DataChunk` now carries a per-command monotonic `sequence` stamped
+  by the producing supervisor, and the API reorders by it in a small per-command
+  buffer before dispatch (releasing strictly in order, dropping duplicates). A
+  genuinely dropped sequence on the best-effort topic is bounded two ways so it
+  can never stall a stream: a size cap skips the gap if chunks pile up behind it,
+  and a periodic sweep releases a gap left unfilled for `_REORDER_GAP_FLUSH_SECONDS`
+  even when no later chunk arrives to trigger the cap (the dropped-seq-0 case,
+  where the stream's own idle backstop never arms because nothing was yielded
+  yet). The buffer is created only while a command has a live stream and cleared
+  with it, so late chunks after finalize don't leak; the producer drops its
+  per-command sequence counter on the terminal chunk for the same reason.
+
+- **Deleting an instance no longer leaks its runner records (unbounded
+  `State.runners` growth).** Runner status records were only removed by a
+  terminal `RunnerStatusUpdated(RunnerShutdown)`, but that final status is
+  unreliably delivered: the worker's Shutdown handler cancels the supervisor's
+  event forwarder (`runner.shutdown()`) as soon as the Shutdown task
+  completes/times out, usually before the runner process's `RunnerShutdown` is
+  forwarded, and on a master-failover teardown the forwarder is torn down
+  outright. Every instance delete therefore leaked one `RunnerShuttingDown`
+  record per rank (one per node for a multi-node instance), so `State.runners`
+  grew without bound over the cluster's lifetime, bloating state-sync snapshots.
+  Two changes close it: `apply_instance_deleted` now prunes the deleted
+  instance's runner records directly (mirroring `apply_node_timed_out`), and
+  `apply_runner_status_updated` ignores updates for a runner that belongs to no
+  instance, so the late `RunnerShuttingDown` that races behind `InstanceDeleted`
+  can no longer resurrect the record. Deletion is now atomic and independent of
+  the shutdown handshake. The actual runner-process teardown is driven
+  separately by the Shutdown task, so dropping the status record early is safe.
+
+- **Master failover no longer silently kills a healthy serving instance on a
+  memory-tight node.** On a master-election transition the winning node tears
+  its worker down (`worker.shutdown()`) and rebuilds it; that cancels each
+  `RunnerSupervisor.run()`, whose teardown `finally` reaps the runner process so
+  Metal reclaims its wired GPU memory on exit. The teardown was not shielded
+  from cancellation, so the first `await` in it (the process join) re-raised
+  immediately and the runner process was never reaped, so it lingered holding
+  its GPU memory. The replacement worker then planned `CreateRunner` for the same
+  carried shard, the pre-load memory guard saw the not-yet-reclaimed memory,
+  falsely refused, and the #290 re-place-wider path deleted the carried instance
+  (every subsequent request 404'd until a manual re-place). The teardown is now
+  wrapped in a shielded `CancelScope`, so the runner process is fully joined
+  (memory reclaimed) before `worker.shutdown()` returns and the replacement
+  worker admits against true post-reclaim availability. Only bites when the
+  election winner also hosts a rank of a carried instance and is memory-tight
+  (common on small clusters); restores the documented "survives master failover"
+  guarantee. The terminate/kill joins are now also off-thread (`to_thread`)
+  instead of blocking the event loop.
+
+- **Data-plane streams can't hang on a dropped final chunk (#279 Phase 2b).**
+  Output chunks ride the best-effort `DATA` topic (no replay), so a dropped
+  final chunk would leave a streaming response blocked on `receive()` forever.
+  `_token_chunk_stream` now applies a per-receive idle timeout
+  (`_STREAM_IDLE_TIMEOUT_SECONDS`, 120s): once the first real output token has
+  arrived, a gap longer than the timeout closes the stream with a terminal error
+  instead of hanging. The timeout wraps only the receive (not the yield), so it
+  measures producer silence, never a slow client. Time-to-first-token is left
+  unbounded, so a request queued behind a long decode or in a slow prefill never
+  trips it (prefill-progress chunks are not treated as output and do not arm the
+  timer). A stall whose task has already reached a terminal status is a dropped
+  *final* chunk, so it cleans up via the normal `TaskFinished` path; a stall on a
+  still-active task sends `TaskCancelled` to tear the stuck runner down (avoiding
+  both an orphaned runner and a leaked master task/command mapping).
+
+### Changed
+
+- **Plane separation #279 Phase 2a: generation output chunks move to a data
+  plane, off the master.** Per-token output (`ChunkGenerated`) used to flow
+  worker → master (index + disk write + cluster-wide rebroadcast) → owning API,
+  for data that never mutates `State` and is only ever read by that one API
+  node. It now travels a new `DATA` topic as `DataChunk` (`{command_id, chunk}`)
+  directly from the serving rank-0 worker to the owning API node, which demuxes
+  by `command_id` into the per-command stream queues. The master no longer
+  indexes, persists, or rebroadcasts output chunks; the API event log no longer
+  records the per-token firehose (it had grown ~54MB in 9 idle hours). This
+  removes the per-token master hop + disk write that dominated event-log volume
+  and was the #278 storm vector. Inbound vision chunks (`InputChunkReceived`)
+  stay on the control plane for now. Producer split lives in
+  `RunnerSupervisor._emit`; the API consumes in `API._apply_data`.
+
+- **Plane separation #279 slice 3: observational node readings move to the
+  telemetry plane.** `node_identities`, `node_disk`, and `node_rdma_ctl` now ride
+  the last-write-wins `TELEMETRY` topic into the node-owned `TelemetryView`
+  instead of being event-sourced into `State` (joining `node_resources` from
+  slice 1 and `node_memory`/`node_system` from slice 2). They are no longer
+  persisted in the event log or carried in the failover seed; `GET /state`
+  merges them back in so the dashboard wire shape is unchanged. The
+  **connectivity** readings (`node_network`, `node_thunderbolt`,
+  `node_thunderbolt_bridge`, and the derived `thunderbolt_bridge_cycles`)
+  deliberately stay on the control plane — they define the topology graph
+  (`apply()` builds RDMA edges and TB-bridge cycles from them, and the planner
+  reads `node_network` for host selection), so they remain ordered rather than
+  unordered telemetry.
+
+### Fixed
+
+- **Tight multi-node placements no longer silently vanish (#290).** The
+  master admits placements on the gossiped (telemetry-plane, last-write-wins)
+  available memory, while each worker's pre-spawn OOM guard reads a fresh live
+  GPU-wireable figure at load time. On a borderline split the live reading can
+  sit just below what the master admitted, so the master placed a cycle the
+  worker then refused, and the instance was torn down ("instance vanished")
+  with no recovery. The worker now sends a new `RefuseInstancePlacement`
+  command for the memory-refusal case (distinct from a crash or GPU wedge,
+  which still `DeleteInstance`), and the master re-places the same model one
+  node wider (`min_nodes` = refused width + 1) so each node holds a smaller
+  share. The loop is bounded: once even a full-width split raises
+  `PlacementError` the master stops at the deletion. Refusals for
+  already-removed instances are no-ops, so redelivery and operator deletes are
+  safe.
+
 ## [1.2.0] - 2026-06-11
 
 ### Fixed

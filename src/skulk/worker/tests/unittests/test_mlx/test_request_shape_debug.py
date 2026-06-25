@@ -11,22 +11,20 @@ def _request_shape_debug_enabled() -> bool:
     return cast(Callable[[], bool], module_dict["_request_shape_debug_enabled"])()
 
 
-@pytest.mark.parametrize("env_name", ["SKULK_TRACE_REQUEST_SHAPES", "EXO_TRACE_REQUEST_SHAPES"])
 def test_request_shape_debug_blank_env_is_disabled(
     monkeypatch: pytest.MonkeyPatch,
-    env_name: str,
 ) -> None:
-    monkeypatch.delenv("SKULK_TRACE_REQUEST_SHAPES", raising=False)
-    monkeypatch.delenv("EXO_TRACE_REQUEST_SHAPES", raising=False)
-    monkeypatch.setenv(env_name, "")
+    monkeypatch.setenv("SKULK_TRACE_REQUEST_SHAPES", "")
 
     assert _request_shape_debug_enabled() is False
 
 
-def test_request_shape_debug_blank_skulk_env_does_not_fallback_to_legacy_true_value(
+def test_legacy_exo_request_shapes_env_is_ignored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("SKULK_TRACE_REQUEST_SHAPES", "")
+    # The EXO_ deprecation runway is gone (#324): a legacy EXO_ env must not be
+    # honored even when the SKULK_ name is unset.
+    monkeypatch.delenv("SKULK_TRACE_REQUEST_SHAPES", raising=False)
     monkeypatch.setenv("EXO_TRACE_REQUEST_SHAPES", "1")
 
     assert _request_shape_debug_enabled() is False

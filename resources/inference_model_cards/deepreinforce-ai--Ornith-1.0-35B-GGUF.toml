@@ -1,0 +1,38 @@
+# Ornith 1.0-35B (deepreinforce-ai): agentic-coding Qwen3.5-MoE model, the
+# official GGUF release for the llama.cpp engine (AMD/Vulkan and other GPU
+# nodes). The quant is pinned to Q4_K_M (~21 GB); the repo ships no mmproj
+# projector, so this GGUF is TEXT-ONLY (vision rides the MLX card / the
+# vision-GGUF follow-up). `supports_tensor = false`: the llama.cpp runner is
+# single-node. Reasoning (`<think>...</think>`) and OpenAI-style tool calls are
+# declared so the capability profile treats it as a thinking, tool-using model.
+# The base ships an MTP head; speculative decoding is deferred (measure later).
+model_id = "deepreinforce-ai/Ornith-1.0-35B-GGUF"
+n_layers = 40
+hidden_size = 2048
+num_key_value_heads = 2
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "qwen"
+quantization = "Q4_K_M"
+base_model = "Ornith 1.0-35B"
+capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 262144
+gguf_file = "ornith-1.0-35b-Q4_K_M.gguf"
+trust_remote_code = false
+
+[reasoning]
+supports_toggle = true
+format = "token_delimited"
+default_effort = "medium"
+disabled_effort = "none"
+
+[tooling]
+supports_tool_calling = true
+tool_call_format = "generic"
+
+[placement]
+compatible_backends = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu"]
+backend_preference = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu"]
+
+[storage_size]
+in_bytes = 21166757760

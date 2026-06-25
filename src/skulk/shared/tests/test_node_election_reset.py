@@ -16,6 +16,7 @@ from skulk.shared.election import Election, ElectionResult
 from skulk.shared.types.common import NodeId, SessionId
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSnapshot, StateSyncMessage
+from skulk.shared.types.telemetry import NodeTelemetry, TelemetryView
 from skulk.utils.channels import channel
 from skulk.worker.main import Worker
 
@@ -143,9 +144,11 @@ async def test_election_restarts_event_router_after_receivers_are_rewired(
         api=cast(API, cast(object, _FakeApi(order_events))),
         node_id=NodeId("self"),
         offline=False,
-        exo_config=None,
+        skulk_config=None,
         store_client=None,
         store_server=None,
+        telemetry_view=TelemetryView(),
+        telemetry_receiver=channel[NodeTelemetry]()[1],
     )
     node._tg = _FakeTaskGroup(order_events)  # pyright: ignore[reportAttributeAccessIssue]
 
@@ -235,9 +238,11 @@ async def test_new_master_does_not_wait_on_unavailable_state_sync_config(
         api=cast(API, cast(object, _FakeApi(order_events))),
         node_id=NodeId("self"),
         offline=False,
-        exo_config=None,
+        skulk_config=None,
         store_client=None,
         store_server=None,
+        telemetry_view=TelemetryView(),
+        telemetry_receiver=channel[NodeTelemetry]()[1],
     )
     node._tg = _FakeTaskGroup(order_events)  # pyright: ignore[reportAttributeAccessIssue]
 
@@ -284,9 +289,11 @@ async def test_request_cluster_config_ignores_non_master_origin() -> None:
         api=None,
         node_id=NodeId("self"),
         offline=False,
-        exo_config=None,
+        skulk_config=None,
         store_client=None,
         store_server=None,
+        telemetry_view=TelemetryView(),
+        telemetry_receiver=channel[NodeTelemetry]()[1],
     )
 
     session_id = SessionId(master_node_id=NodeId("master"), election_clock=9)

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import styled from 'styled-components';
 import { Field, type FieldSize } from './Field';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 export interface SearchBarProps {
   value: string;
@@ -41,12 +42,13 @@ const ClearButton = styled.button`
 export function SearchBar({
   value,
   onChange,
-  placeholder = 'Search…',
+  placeholder,
   size = 'md',
   debounceMs,
   autoFocus,
   className,
 }: SearchBarProps) {
+  const { t } = useSkulkTranslation();
   const [local, setLocal] = useState(value);
   const timerRef = useRef<ReturnType<typeof setTimeout>>();
 
@@ -82,13 +84,13 @@ export function SearchBar({
     <Field
       value={local}
       onChange={handleChange}
-      placeholder={placeholder}
+      placeholder={placeholder ?? t('common.searchPlaceholder', 'Search...')}
       size={size}
       autoFocus={autoFocus}
       icon={<SearchIcon />}
       rightElement={
         local ? (
-          <ClearButton onClick={handleClear} aria-label="Clear search">
+          <ClearButton onClick={handleClear} aria-label={t('common.clearSearch', 'Clear search')}>
             ✕
           </ClearButton>
         ) : undefined

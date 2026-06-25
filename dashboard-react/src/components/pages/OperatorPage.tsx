@@ -5,6 +5,7 @@ import { useGetRawStateQuery, useGetLocalNodeIdQuery, useRestartNodeMutation } f
 import { addToast } from '../../hooks/useToast';
 import { useRemoteAccess } from '../../hooks/useRemoteAccess';
 import { copyToClipboard } from '../../utils/clipboard';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 /* ── Types ─────────────────────────────────────────────────── */
 
@@ -259,6 +260,7 @@ function fmtBytes(bytes: number): string {
 /* ── RemoteAccessCard component ───────────────────────────── */
 
 function RemoteAccessCard() {
+  const { t } = useSkulkTranslation();
   const access = useRemoteAccess();
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -285,9 +287,9 @@ function RemoteAccessCard() {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     }).catch(() => {
-      addToast({ type: 'error', message: 'Failed to copy URL' });
+      addToast({ type: 'error', message: t('operator.toasts.copyUrlFailed', 'Failed to copy URL') });
     });
-  }, [operatorUrl]);
+  }, [operatorUrl, t]);
 
   if (access.status === 'loading') return null;
   if (access.status === 'error') return null;
@@ -297,7 +299,7 @@ function RemoteAccessCard() {
       <AccessCardBody>
         {tailscaleUrl && (
           <AccessRow>
-            <AccessLabel>Tailscale</AccessLabel>
+            <AccessLabel>{t('operator.tailscale', 'Tailscale')}</AccessLabel>
             <AccessUrl href={tailscaleUrl} target="_blank" rel="noopener noreferrer">
               {tailscaleUrl}
             </AccessUrl>
@@ -305,7 +307,7 @@ function RemoteAccessCard() {
         )}
         {localUrl && (
           <AccessRow>
-            <AccessLabel>Local</AccessLabel>
+            <AccessLabel>{t('operator.local', 'Local')}</AccessLabel>
             <AccessUrl href={localUrl} target="_blank" rel="noopener noreferrer">
               {localUrl}
             </AccessUrl>
@@ -313,16 +315,16 @@ function RemoteAccessCard() {
         )}
         {!tailscaleRunning && (
           <AccessRow>
-            <AccessLabel>Tailscale</AccessLabel>
-            <MetricValue>not running</MetricValue>
+            <AccessLabel>{t('operator.tailscale', 'Tailscale')}</AccessLabel>
+            <MetricValue>{t('operator.notRunning', 'not running')}</MetricValue>
           </AccessRow>
         )}
         {operatorUrl && qrDataUrl && (
           <QRWrap>
-            <img src={qrDataUrl} alt="Operator panel QR code" width={180} height={180} />
-            <QRLabel>Scan to open operator panel</QRLabel>
+            <img src={qrDataUrl} alt={t('operator.qrAlt', 'Operator panel QR code')} width={180} height={180} />
+            <QRLabel>{t('operator.scanToOpen', 'Scan to open operator panel')}</QRLabel>
             <CopyButton onClick={handleCopy}>
-              {copied ? 'Copied!' : 'Copy URL'}
+              {copied ? t('operator.copied', 'Copied!') : t('operator.copyUrl', 'Copy URL')}
             </CopyButton>
           </QRWrap>
         )}
@@ -339,6 +341,7 @@ interface NodeCardProps {
 }
 
 function NodeRestartCard({ node, localNodeId }: NodeCardProps) {
+  const { t } = useSkulkTranslation();
   const [confirming, setConfirming] = useState(false);
   const [restartNode, { isLoading }] = useRestartNodeMutation();
 
@@ -353,11 +356,11 @@ function NodeRestartCard({ node, localNodeId }: NodeCardProps) {
     setConfirming(false);
     try {
       await restartNode({ nodeId: node.nodeId }).unwrap();
-      addToast({ type: 'success', message: `Restart sent to ${node.name}` });
+      addToast({ type: 'success', message: t('operator.toasts.restartSent', 'Restart sent to {nodeName}', { nodeName: node.name }) });
     } catch {
-      addToast({ type: 'error', message: `Failed to restart ${node.name}` });
+      addToast({ type: 'error', message: t('operator.toasts.restartFailed', 'Failed to restart {nodeName}', { nodeName: node.name }) });
     }
-  }, [confirming, isLoading, node.nodeId, node.name, restartNode]);
+  }, [confirming, isLoading, node.nodeId, node.name, restartNode, t]);
 
   const memPct = node.memTotalBytes > 0
     ? Math.round((node.memUsedBytes / node.memTotalBytes) * 100)
@@ -368,23 +371,27 @@ function NodeRestartCard({ node, localNodeId }: NodeCardProps) {
   return (
     <NodeCard>
       <NodeCardHeader>
-        <NodeName title={node.nodeId}>{node.name}{isLocal ? ' (this node)' : ''}</NodeName>
+        <NodeName title={node.nodeId}>
+          {node.name}{isLocal ? t('operator.thisNodeSuffix', ' (this node)') : ''}
+        </NodeName>
         <RestartButton
           $confirming={confirming}
           $disabled={isLoading}
           disabled={isLoading}
           onClick={handlePress}
-          aria-label={confirming ? 'Tap again to confirm restart' : `Restart ${node.name}`}
-          title={confirming ? 'Tap again to confirm' : 'Restart node'}
+          aria-label={confirming
+            ? t('operator.confirmRestartAria', 'Tap again to confirm restart')
+            : t('operator.restartNodeName', 'Restart {nodeName}', { nodeName: node.name })}
+          title={confirming ? t('operator.tapAgainToConfirm', 'Tap again to confirm') : t('operator.restartNode', 'Restart node')}
         >
-          {isLoading ? '…' : confirming ? 'Confirm?' : 'Restart'}
+          {isLoading ? '…' : confirming ? t('operator.confirm', 'Confirm?') : t('operator.restart', 'Restart')}
         </RestartButton>
       </NodeCardHeader>
       <NodeCardBody>
         {node.memTotalBytes > 0 && (
           <>
             <MetricRow>
-              <MetricLabel>Memory</MetricLabel>
+              <MetricLabel>{t('operator.memory', 'Memory')}</MetricLabel>
               <MetricValue>
                 {fmtBytes(node.memUsedBytes)} / {fmtBytes(node.memTotalBytes)} ({memPct}%)
               </MetricValue>
@@ -396,14 +403,16 @@ function NodeRestartCard({ node, localNodeId }: NodeCardProps) {
         )}
         {node.gpuUsage !== null && (
           <MetricRow>
-            <MetricLabel>GPU</MetricLabel>
+            <MetricLabel>{t('operator.gpu', 'GPU')}</MetricLabel>
             <MetricValue>{node.gpuUsage.toFixed(0)}%</MetricValue>
           </MetricRow>
         )}
         {node.temp !== null && (
           <MetricRow>
-            <MetricLabel>Temp</MetricLabel>
-            <MetricValue>{node.temp.toFixed(0)} °C</MetricValue>
+            <MetricLabel>{t('operator.temp', 'Temp')}</MetricLabel>
+            <MetricValue>
+              {t('operator.temperatureCelsius', '{temperature} °C', { temperature: node.temp.toFixed(0) })}
+            </MetricValue>
           </MetricRow>
         )}
       </NodeCardBody>
@@ -418,6 +427,7 @@ function NodeRestartCard({ node, localNodeId }: NodeCardProps) {
  * per-node restart buttons for headless / remote operation over Tailscale.
  */
 export function OperatorPage() {
+  const { t } = useSkulkTranslation();
   const { data, isLoading } = useGetRawStateQuery(undefined, {
     pollingInterval: 5000,
   });
@@ -456,36 +466,36 @@ export function OperatorPage() {
   if (isLoading && nodes.length === 0) {
     return (
       <Page>
-        <EmptyState>Loading cluster state…</EmptyState>
+        <EmptyState>{t('app.empty.loadingClusterState', 'Loading cluster state...')}</EmptyState>
       </Page>
     );
   }
 
   return (
     <Page>
-      <SectionTitle>Cluster</SectionTitle>
+      <SectionTitle>{t('header.nav.cluster', 'Cluster')}</SectionTitle>
       <SummaryRow>
         <Stat>
-          <StatLabel>Nodes</StatLabel>
+          <StatLabel>{t('operator.nodes', 'Nodes')}</StatLabel>
           <StatValue $ok={nodeCount > 0}>{nodeCount}</StatValue>
         </Stat>
         <Stat>
-          <StatLabel>Instances</StatLabel>
+          <StatLabel>{t('operator.instances', 'Instances')}</StatLabel>
           <StatValue $ok={instanceCount > 0}>{instanceCount}</StatValue>
         </Stat>
         <Stat>
-          <StatLabel>Runners</StatLabel>
+          <StatLabel>{t('operator.runners', 'Runners')}</StatLabel>
           <StatValue>{runnerCount}</StatValue>
         </Stat>
       </SummaryRow>
 
-      <SectionTitle>Remote Access</SectionTitle>
+      <SectionTitle>{t('operator.remoteAccess', 'Remote Access')}</SectionTitle>
       <RemoteAccessCard />
 
-      <SectionTitle>Nodes</SectionTitle>
+      <SectionTitle>{t('operator.nodes', 'Nodes')}</SectionTitle>
 
       {nodes.length === 0 ? (
-        <EmptyState>No nodes visible</EmptyState>
+        <EmptyState>{t('operator.noNodesVisible', 'No nodes visible')}</EmptyState>
       ) : (
         nodes.map((node) => (
           <NodeRestartCard

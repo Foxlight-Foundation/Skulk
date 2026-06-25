@@ -13,35 +13,10 @@ That API has two jobs:
 - compatibility endpoints for tools that already speak OpenAI, Claude, or Ollama-style APIs
 - Skulk-specific control endpoints for placement, downloads, config, tracing, and model-store workflows
 
-## The Most Important Rule
-
-For text generation, Skulk is not just a stateless HTTP server.
-
-**A model has to be placed and running before chat-style requests will work.**
-
-The dashboard enforces this too: it will not let you chat until a model is placed and ready.
-
-If you call `/v1/chat/completions` too early, Skulk will usually return something like:
-
-```json
-{
-  "error": {
-    "message": "No instance found for model mlx-community/...",
-    "type": "Not Found",
-    "code": 404
-  }
-}
-```
-
-## Start Here
-
-If you want your first successful API call, use this flow:
-
-1. Start Skulk with `uv run skulk`.
-2. Preview valid placements for a model.
-3. Launch a placement.
-4. Wait for the model to be ready.
-5. Send a chat request.
+A model must be placed and running before chat requests for it succeed; calling
+`/v1/chat/completions` for an unplaced model returns a 404 `No instance found`.
+The [First Success Flow](#first-success-flow) below walks from placement to first
+token.
 
 ## Quick Navigation
 
@@ -742,6 +717,11 @@ Use this to inspect in-progress shared-store download activity.
 
 Use this when you want the store host to fetch and register a model.
 
+Optional JSON body `{"gguf_file": "<repo-relative path>"}` pins which GGUF quant
+the store fetches for a multi-quant GGUF repo (it downloads that file's shard
+group plus `config.json`). Omit the body to use the default quant preference.
+A pin naming a file not present in the repo falls back to the default.
+
 ### Store download status
 
 **GET** `/store/models/{model_id}/download/status`
@@ -837,6 +817,15 @@ If a local restart is already scheduled, returns HTTP 409 with `{"status": "rest
 **GET** `/state`
 
 Returns the cluster state as Skulk currently sees it.
+
+The response also carries a derived `nodeHealth` map (keyed by node id) so a
+problem on a node is visible rather than silent. Each entry is a `level`
+(`ok`, `warn`, or `error`) plus a list of `reasons`, where each reason has a
+`code`, a `message` describing what is wrong, and a `remediation` describing how
+to fix it. It is computed read-only from state already in the response (terminal
+download failures, low or full models-volume disk, and late heartbeats), so it
+adds no new polling. A node with no problems reports `level: "ok"` with an empty
+`reasons` list.
 
 Operational note:
 

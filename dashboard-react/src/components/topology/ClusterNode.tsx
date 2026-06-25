@@ -4,7 +4,9 @@ import { detectDeviceModel } from '../../types/topology';
 import { DeviceIcon } from './DeviceIcon';
 import { GpuStatsBar } from './GpuStatsBar';
 import { NodeLabel } from './NodeLabel';
+import { NodeHealthBadge } from './NodeHealthBadge';
 import type { Theme } from '../../theme';
+import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 
 export interface ClusterNodeProps {
@@ -32,27 +34,40 @@ function buildDebugContent(
   edges: TopologyEdge[],
   allNodes: Record<string, NodeInfo>,
   theme: Theme,
+  t: SkulkTranslate,
 ): React.ReactNode {
   if (nodeInfo.syncing) {
     return (
       <div style={{ lineHeight: 1.6 }}>
         <div style={{ color: theme.colors.gold, fontWeight: 600, marginBottom: 4 }}>
-          Joining cluster
+          {t('topology.clusterNode.joiningCluster', 'Joining cluster')}
         </div>
         <div style={{ color: theme.colors.textSecondary }}>
-          This dashboard is still replaying the cluster event log for the current master session.
+          {t(
+            'topology.clusterNode.replayingEventLog',
+            'This dashboard is still replaying the cluster event log for the current master session.',
+          )}
         </div>
         <div style={{ color: theme.colors.textSecondary }}>
-          The node will switch to live telemetry once its join events have been applied locally.
+          {t(
+            'topology.clusterNode.liveTelemetryAfterReplay',
+            'The node will switch to live telemetry once its join events have been applied locally.',
+          )}
         </div>
       </div>
     );
   }
 
   const chip = nodeInfo.system_info?.chip ?? '';
-  const modelId = nodeInfo.system_info?.model_id ?? 'Unknown';
+  const modelId = nodeInfo.system_info?.model_id ?? t('common.unknown', 'Unknown');
+  // macOS reports a bare version ("15.3"), so prefix "macOS"; Linux reports a
+  // self-naming string ("Ubuntu 26.04 LTS"), so show it as-is rather than
+  // mislabeling a non-Mac node "macOS".
+  const osBuild = nodeInfo.os_build_version ? ` (${nodeInfo.os_build_version})` : '';
   const os = nodeInfo.os_version
-    ? `macOS ${nodeInfo.os_version}${nodeInfo.os_build_version ? ` (${nodeInfo.os_build_version})` : ''}`
+    ? /^\d/.test(nodeInfo.os_version)
+      ? `macOS ${nodeInfo.os_version}${osBuild}`
+      : `${nodeInfo.os_version}${osBuild}`
     : '';
   // Group outbound connections by target node
   const byTarget = new Map<string, string[]>();
@@ -82,8 +97,10 @@ function buildDebugContent(
   }
 
   const rdmaStatus = nodeInfo.rdma_enabled
-    ? (nodeInfo.rdma_interfaces_present === false ? 'Enabled (no HW support)' : 'Enabled')
-    : 'Disabled';
+    ? (nodeInfo.rdma_interfaces_present === false
+        ? t('topology.clusterNode.rdmaEnabledNoHardware', 'Enabled (no HW support)')
+        : t('topology.clusterNode.enabled', 'Enabled'))
+    : t('topology.clusterNode.disabled', 'Disabled');
   const rdmaColor = nodeInfo.rdma_enabled
     ? (nodeInfo.rdma_interfaces_present === false ? theme.colors.warning : theme.colors.healthy)
     : theme.colors.textMuted;
@@ -98,11 +115,13 @@ function buildDebugContent(
       </div>
       {os && <div style={{ color: theme.colors.textSecondary }}>{os}</div>}
       {version && <div style={{ color: theme.colors.textSecondary }}>{version}</div>}
-      <div style={{ color: rdmaColor, marginBottom: 6 }}>RDMA: {rdmaStatus}</div>
+      <div style={{ color: rdmaColor, marginBottom: 6 }}>
+        {t('topology.clusterNode.rdmaStatus', 'RDMA: {status}', { status: rdmaStatus })}
+      </div>
       {byTarget.size > 0 && (
         <>
           <div style={{ color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>
-            Connections
+            {t('topology.clusterNode.connections', 'Connections')}
           </div>
           {Array.from(byTarget.entries()).map(([target, conns]) => (
             <div key={target} style={{ marginBottom: 4 }}>
@@ -131,6 +150,7 @@ export function ClusterNode({
   onRestart,
   onInspect,
 }: ClusterNodeProps) {
+  const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
   const model = detectDeviceModel(nodeInfo.system_info?.model_id);
 
@@ -158,7 +178,7 @@ export function ClusterNode({
 
   // Display name
   const name = nodeInfo.friendly_name ?? nodeId.slice(-8);
-  const statusText = nodeInfo.syncing ? 'Syncing cluster state' : undefined;
+  const statusText = nodeInfo.syncing ? t('topology.clusterNode.syncingClusterState', 'Syncing cluster state') : undefined;
 
   // Label sizing
   const labelFontSize = 15;
@@ -169,7 +189,7 @@ export function ClusterNode({
   const iconLeft = -iconW / 2;
   const iconTop = -iconH / 2;
 
-  const debugContent = buildDebugContent(nodeId, nodeInfo, edges, allNodes, theme);
+  const debugContent = buildDebugContent(nodeId, nodeInfo, edges, allNodes, theme, t);
 
   return (
     <g transform={`translate(${x}, ${y}) scale(${scale})`}>
@@ -209,6 +229,10 @@ export function ClusterNode({
           height={barH}
         />
       </g>
+
+      {/* Health badge (#388): top-left of the device icon, only when a node
+          has a problem; explains the issue and its fix on hover. */}
+      <NodeHealthBadge health={nodeInfo.node_health} x={iconLeft - 4} y={iconTop} />
 
     </g>
   );

@@ -6,7 +6,7 @@ from skulk.api.types import (
     ImageEditsTaskParams,
     ImageGenerationTaskParams,
 )
-from skulk.shared.types.common import CommandId, Id
+from skulk.shared.types.common import CommandId, Id, NodeId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
 from skulk.shared.types.text_generation import TextGenerationTaskParams
 from skulk.shared.types.worker.instances import BoundInstance, InstanceId
@@ -59,6 +59,10 @@ class StartWarmup(BaseTask):  # emitted by Worker
 
 class TextGeneration(BaseTask):  # emitted by Master
     command_id: CommandId
+    # The API node that owns this command; the rank-0 supervisor stamps it onto
+    # each DataChunk so the Zenoh data plane can address output per-owner (#279
+    # Phase 2). Optional so the gossipsub path is unaffected.
+    owner_node: NodeId | None = None
     task_params: TextGenerationTaskParams
     trace_enabled: bool = False
 
@@ -73,6 +77,7 @@ class CancelTask(BaseTask):
 
 class ImageGeneration(BaseTask):  # emitted by Master
     command_id: CommandId
+    owner_node: NodeId | None = None  # owning API node (#279 Phase 2; see TextGeneration)
     task_params: ImageGenerationTaskParams
     trace_enabled: bool = False
 
@@ -82,6 +87,7 @@ class ImageGeneration(BaseTask):  # emitted by Master
 
 class ImageEdits(BaseTask):  # emitted by Master
     command_id: CommandId
+    owner_node: NodeId | None = None  # owning API node (#279 Phase 2; see TextGeneration)
     task_params: ImageEditsTaskParams
     trace_enabled: bool = False
 
@@ -91,6 +97,7 @@ class ImageEdits(BaseTask):  # emitted by Master
 
 class TextEmbedding(BaseTask):  # emitted by Master
     command_id: CommandId
+    owner_node: NodeId | None = None  # owning API node (#279 Phase 2; see TextGeneration)
     task_params: TextEmbeddingTaskParams
     trace_enabled: bool = False
 

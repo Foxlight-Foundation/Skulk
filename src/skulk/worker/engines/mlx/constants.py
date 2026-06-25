@@ -17,7 +17,7 @@ DEFAULT_MAX_OUTPUT_TOKENS: int = 4096
 _max_tokens_value = preferred_env_value(
     "SKULK_MAX_OUTPUT_TOKENS",
     "SKULK_MAX_TOKENS",
-    str(DEFAULT_MAX_OUTPUT_TOKENS),
+    default=str(DEFAULT_MAX_OUTPUT_TOKENS),
 )
 MAX_TOKENS: int = int(_max_tokens_value) if _max_tokens_value else DEFAULT_MAX_OUTPUT_TOKENS
 if MAX_TOKENS < 1:
@@ -46,8 +46,7 @@ VALID_KV_CACHE_BACKENDS: tuple[KVCacheBackend, ...] = (
 )
 _kv_cache_backend_value = preferred_env_value(
     "SKULK_KV_CACHE_BACKEND",
-    "EXO_KV_CACHE_BACKEND",
-    DEFAULT_KV_CACHE_BACKEND,
+    default=DEFAULT_KV_CACHE_BACKEND,
 )
 KV_CACHE_BACKEND: KVCacheBackend = cast(
     KVCacheBackend,

@@ -10,6 +10,7 @@ import shutil
 import socket
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
@@ -21,7 +22,13 @@ import httpx
 import hypercorn.asyncio as hypercorn_asyncio
 import psutil
 import yaml
-from anyio import BrokenResourceError, ClosedResourceError, WouldBlock, to_thread
+from anyio import (
+    BrokenResourceError,
+    ClosedResourceError,
+    EndOfStream,
+    WouldBlock,
+    to_thread,
+)
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -56,6 +63,7 @@ from skulk.api.adapters.responses import (
     responses_request_to_text_generation,
 )
 from skulk.api.keepalive import with_sse_keepalive
+from skulk.api.node_health import compute_node_health
 from skulk.api.types import (
     AddCustomModelParams,
     AdvancedImageParams,
@@ -152,6 +160,7 @@ from skulk.connectivity.tailscale import TailscaleStatus, query_tailscale_status
 from skulk.master.image_store import ImageStore
 from skulk.master.placement import PlacementInfoPendingError
 from skulk.master.placement import place_instance as get_instance_placements
+from skulk.master.placement_utils import usable_vram_by_node
 from skulk.shared.apply import apply
 from skulk.shared.constants import (
     DASHBOARD_DIR,
@@ -167,7 +176,6 @@ from skulk.shared.constants import (
 from skulk.shared.election import ElectionMessage
 from skulk.shared.logging import InterceptLogger
 from skulk.shared.models.capabilities import resolve_model_capability_profile
-from skulk.shared.models.memory_estimate import instance_context_token_limit
 from skulk.shared.models.model_cards import (
     ModelCard,
     ModelId,
@@ -181,8 +189,10 @@ from skulk.shared.tracing import (
     load_trace_file,
 )
 from skulk.shared.types.chunks import (
+    DataChunk,
     EmbeddingChunk,
     ErrorChunk,
+    GenerationChunk,
     ImageChunk,
     InputImageChunk,
     PrefillProgressChunk,
@@ -235,7 +245,6 @@ from skulk.shared.types.diagnostics import (
     RunnerTaskDiagnostics,
 )
 from skulk.shared.types.events import (
-    ChunkGenerated,
     Event,
     IndexedEvent,
     StateSnapshotHydrated,
@@ -246,6 +255,10 @@ from skulk.shared.types.events import (
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.profiling import MemoryUsage, read_wired_memory_bytes
 from skulk.shared.types.state import State
+from skulk.shared.types.telemetry import (
+    TelemetryView,
+    record_membership_from_event,
+)
 from skulk.shared.types.text_generation import TextGenerationTaskParams
 from skulk.shared.types.worker.downloads import DownloadCompleted
 from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
@@ -292,14 +305,73 @@ serve = cast(_HypercornServe, hypercorn_asyncio.serve)
 _API_EVENT_LOG_DIR = SKULK_EVENT_LOG_DIR / "api"
 
 # Ring retention for the API event log. Unlike the master's log (compacted
-# after every snapshot), the API log had NO compaction and records per-token
-# ChunkGenerated events — it grew without bound for the whole session (54 MB
-# in 9 idle hours on every node; GBs/day under load; the file a node died
-# writing in the 2026-06-06 launch smoke). It only backs GET /events
-# diagnostics, so dropping the old tail is safe.
+# after every snapshot), the API log has NO compaction. Historically it
+# recorded per-token ChunkGenerated events and grew without bound for the whole
+# session (54 MB in 9 idle hours on every node; GBs/day under load; the file a
+# node died writing in the 2026-06-06 launch smoke). As of #279 Phase 2 those
+# output chunks ride the data plane, NOT the event log, so this log no longer
+# carries the per-token firehose — but it still backs GET /events diagnostics
+# and is uncompacted, so the ring retention stays as a backstop.
 _API_EVENT_LOG_MAX_ACTIVE_BYTES = 256 * 1024 * 1024
 _API_EVENT_LOG_COMPACT_KEEP_EVENTS = 20_000
 _API_EVENT_LOG_CHECK_INTERVAL_APPENDS = 4096
+
+# Data-plane stream idle backstop (#279 Phase 2b). Output chunks ride the
+# best-effort DATA topic (no replay), so a dropped *final* chunk would leave a
+# streaming response waiting forever. The timer is armed ONLY after the first
+# real output token (it wraps the receive, not the yield, and measures the gap
+# between tokens). Time-to-first-token is deliberately unbounded: a request can
+# sit behind a long decode or a slow prefill (prefill emits progress chunks that
+# are explicitly NOT treated as output and do not arm the timer). So this only
+# fires on a genuine mid-stream stall, e.g. a dropped data-plane chunk.
+_STREAM_IDLE_TIMEOUT_SECONDS = 120.0
+
+# Largest per-command data-plane reorder window (#279 Phase 2b). The DATA topic
+# is best-effort: a genuinely dropped chunk would otherwise stall the reorder
+# buffer forever waiting for a sequence that never arrives. Once this many
+# out-of-order chunks are held for one command, we give up on the missing
+# sequence(s), skip ahead to the lowest buffered one, and drain — bounding memory
+# and converting an undeliverable gap into (rare) minor loss rather than a hang.
+# Normal mesh reordering spans only a few chunks, far below this.
+_MAX_CHUNK_REORDER_BUFFER = 512
+
+# How long the reorder buffer waits for a missing sequence before giving up on
+# it and releasing the chunks behind the gap (#279 Phase 2b). A genuine mesh
+# reorder resolves in milliseconds; a sequence still missing after this was
+# dropped on the best-effort topic. Without a time bound, a dropped sequence
+# that the size cap never reaches (e.g. seq 0 lost on a short response, or a
+# trailing gap with no later chunk to re-trigger the size check) would hold all
+# the chunks behind it forever — and the stream's own idle backstop never arms
+# because nothing has been yielded yet. A periodic sweep flushes such gaps.
+_REORDER_GAP_FLUSH_SECONDS = 5.0
+
+
+@dataclass
+class _ChunkReorderState:
+    """Per-command reorder cursor for the data plane (#279 Phase 2b)."""
+
+    next_seq: int = 0
+    pending: dict[int, GenerationChunk] = field(default_factory=dict)
+    # Monotonic time the current head-of-line gap was first observed (chunks
+    # buffered above next_seq that couldn't drain). None when there is no gap.
+    # `gap_at` is the next_seq the timer started waiting on, so later chunks
+    # arriving behind the *same* gap don't refresh the timer (a moving stream
+    # resets it; a stuck one ages to the flush window).
+    gap_since: float | None = None
+    gap_at: int | None = None
+
+
+# Task statuses for which the runner has stopped producing — a mid-stream idle
+# stall on such a command is a dropped FINAL chunk, not a stuck runner, so it
+# must clean up via the normal TaskFinished path, not TaskCancelled (#298 review).
+_TERMINAL_TASK_STATUSES: frozenset[task_types.TaskStatus] = frozenset(
+    {
+        task_types.TaskStatus.Complete,
+        task_types.TaskStatus.Failed,
+        task_types.TaskStatus.TimedOut,
+        task_types.TaskStatus.Cancelled,
+    }
+)
 
 # How long POST /place_instance waits for node memory info to finish
 # gossiping before giving up with 503. Covers the window between cluster
@@ -387,8 +459,7 @@ def prune_old_trace_files(directory: Path, retention_days: int, now: float) -> i
 def _text_image_hash_cache_enabled() -> bool:
     value = preferred_env_value(
         "SKULK_TEXT_IMAGE_HASH_CACHE",
-        "EXO_TEXT_IMAGE_HASH_CACHE",
-        "false",
+        default="false",
     )
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -429,15 +500,10 @@ def validate_renderable_text_generation(
                 "(messages / input must contain a non-empty message)"
             ),
         )
-    if (
-        task_params.max_output_tokens is not None
-        and task_params.max_output_tokens <= 0
-    ):
+    if task_params.max_output_tokens is not None and task_params.max_output_tokens <= 0:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "max_tokens (max_output_tokens) must be a positive integer"
-            ),
+            detail=("max_tokens (max_output_tokens) must be a positive integer"),
         )
 
 
@@ -554,7 +620,11 @@ def _coerce_candidate_bits(value: object) -> list[int]:
     if not isinstance(value, list):
         return list(_DEFAULT_OPTIMIZER_CANDIDATE_BITS)
     raw_items = cast(list[object], value)
-    normalized = [item for item in raw_items if isinstance(item, int) and not isinstance(item, bool)]
+    normalized = [
+        item
+        for item in raw_items
+        if isinstance(item, int) and not isinstance(item, bool)
+    ]
     return normalized or list(_DEFAULT_OPTIMIZER_CANDIDATE_BITS)
 
 
@@ -600,12 +670,25 @@ class API:
         download_command_sender: Sender[ForwarderDownloadCommand],
         # This lets us pause the API if an election is running
         election_receiver: Receiver[ElectionMessage],
-        exo_config: "SkulkConfig | None" = None,
+        skulk_config: "SkulkConfig | None" = None,
         store_client: "ModelStoreClient | None" = None,
         enable_event_log: bool = True,
         mount_dashboard: bool = True,
+        telemetry_view: "TelemetryView | None" = None,
+        data_receiver: "Receiver[DataChunk] | None" = None,
+        data_plane_zenoh: bool = False,
     ) -> None:
         self.state = State()
+        # Data plane (#279 Phase 2): per-token output chunks arrive here direct
+        # from the serving worker (DATA topic), not as ChunkGenerated events off
+        # the master. Demuxed by command_id into the per-command stream queues.
+        # None means no DATA topic wired (tests); streaming then has no source.
+        self._data_receiver = data_receiver
+        # Node telemetry off the event log (#279): placement previews read
+        # node_resources from the live view, matching what the master enforces.
+        self._telemetry_view = (
+            telemetry_view if telemetry_view is not None else TelemetryView()
+        )
         self._event_log = DiskEventLog(_API_EVENT_LOG_DIR) if enable_event_log else None
         self._event_log_appends_since_retention_check = 0
         self._system_id = SystemId()
@@ -617,23 +700,24 @@ class API:
         self._master_node_id: NodeId = node_id
         self.last_completed_election: int = 0
         self.port = port
-        self._exo_config = exo_config
+        self._skulk_config = skulk_config
         self._store_client = store_client
         self._config_path = resolve_config_path()
         self._model_optimizer: "ModelOptimizer | None" = None
-        self._runner_diagnostics_provider: Callable[
-            [], Sequence[RunnerSupervisorDiagnostics]
-        ] | None = None
-        self._runner_cancel_provider: Callable[
-            [RunnerId, task_types.TaskId], Awaitable[RunnerTaskCancelResponse]
-        ] | None = None
+        self._runner_diagnostics_provider: (
+            Callable[[], Sequence[RunnerSupervisorDiagnostics]] | None
+        ) = None
+        self._runner_cancel_provider: (
+            Callable[[RunnerId, task_types.TaskId], Awaitable[RunnerTaskCancelResponse]]
+            | None
+        ) = None
         self._sent_image_hashes: set[str] = set()
         # Initialize optimizer if store path is available
-        if exo_config and exo_config.model_store and exo_config.model_store.enabled:
+        if skulk_config and skulk_config.model_store and skulk_config.model_store.enabled:
             from skulk.store.model_optimizer import ModelOptimizer
 
             self._model_optimizer = ModelOptimizer(
-                store_path=Path(exo_config.model_store.store_path)
+                store_path=Path(skulk_config.model_store.store_path)
             )
 
         self.paused: bool = False
@@ -653,7 +737,13 @@ class API:
         self._setup_cors()
         self._setup_routes()
 
-        if mount_dashboard:
+        # A headless/worker node may have no built dashboard assets
+        # (DASHBOARD_DIR is None); serving the UI is then skipped so the node
+        # still boots and serves the API (#333). The control/data planes and
+        # all API routes are unaffected.
+        if mount_dashboard and DASHBOARD_DIR is not None:
+            dashboard_dir = DASHBOARD_DIR
+
             # The dashboard is a SPA that restores its active view from the
             # URL path (App.tsx reads location.pathname), so deep links and
             # browser refreshes hit these paths directly. StaticFiles only
@@ -663,7 +753,7 @@ class API:
             # dashboard-react/src/components/layout/HeaderNav.tsx.
             async def _spa_index() -> FileResponse:
                 """Serve the dashboard SPA shell for client-routed paths."""
-                return FileResponse(os.path.join(DASHBOARD_DIR, "index.html"))
+                return FileResponse(os.path.join(dashboard_dir, "index.html"))
 
             # Both slash forms: the StaticFiles mount at "/" swallows
             # unmatched paths before FastAPI's redirect-slashes logic can
@@ -675,10 +765,16 @@ class API:
             self.app.mount(
                 "/",
                 StaticFiles(
-                    directory=DASHBOARD_DIR,
+                    directory=dashboard_dir,
                     html=True,
                 ),
                 name="dashboard",
+            )
+        elif mount_dashboard:
+            logger.info(
+                "Dashboard assets not found (DASHBOARD_DIR is unset); serving the "
+                "API without the dashboard UI. Build it with `cd dashboard-react "
+                "&& npm run build` or set SKULK_DASHBOARD_DIR to serve the UI."
             )
 
         self._text_generation_queues: dict[
@@ -692,6 +788,45 @@ class API:
             CommandId, Sender[EmbeddingChunk | ErrorChunk]
         ] = {}
         self._cancelled_command_ids: set[CommandId] = set()
+        # Per-command data-plane reorder buffers (#279 Phase 2b). The DATA gossip
+        # topic has no total order (unlike the master event idx it replaced), so
+        # a multi-node producer's chunks can arrive out of order; we reorder by
+        # the per-command sequence stamped on each DataChunk before dispatch.
+        self._chunk_reorder: dict[CommandId, _ChunkReorderState] = {}
+        # Per-command dedupe cursor for the buffer-off path (#279 Phase 3 / #311
+        # review). Even with reordering disabled the data plane must drop
+        # duplicate sequences: when the serving rank-0 worker and the owning API
+        # are the same node, a chunk is delivered twice on Zenoh - once via the
+        # DATA TopicRouter's local publish, once via the node's own
+        # data/<node_id> Zenoh subscription (self-loopback). The reorder buffer
+        # dropped these as below-cursor duplicates; without it, this cursor does
+        # the same O(1) drop (sequence < cursor) while still dispatching in
+        # arrival order. The transport delivers each command in order, so the
+        # only out-of-cursor chunks are these duplicates.
+        self._data_dedup_cursor: dict[CommandId, int] = {}
+        # Data-plane ordering (#279 Phase 3): the reorder buffer is needed only
+        # when the DATA transport can deliver a command's chunks out of order.
+        # Gossipsub (the flag-off default) reorders, so the buffer stays on there
+        # (the #301 fix). Zenoh delivers a command's chunks per-publisher FIFO, so
+        # arrival order is generation order, so the buffer is skipped and chunks
+        # dispatch as they arrive (validated: 20/20 buffer-off coherence on a 3-node
+        # sampled-MTP matrix). SKULK_DATA_REORDER_BUFFER overrides the transport
+        # default explicitly (`1`/`0`) for testing or belt-and-suspenders.
+        _reorder_override = os.environ.get("SKULK_DATA_REORDER_BUFFER", "").strip().lower()
+        if _reorder_override in ("1", "true", "yes", "on"):
+            self._reorder_buffer_enabled: bool = True
+        elif _reorder_override in ("0", "false", "no", "off"):
+            self._reorder_buffer_enabled = False
+        else:
+            if _reorder_override:
+                logger.warning(
+                    f"Ignoring unrecognized SKULK_DATA_REORDER_BUFFER="
+                    f"{_reorder_override!r} (expected 1/0/true/false/yes/no/on/"
+                    f"off); following the transport default."
+                )
+            # Default by transport: gossipsub reorders (buffer on), Zenoh is
+            # per-publisher FIFO (buffer off).
+            self._reorder_buffer_enabled = not data_plane_zenoh
         self._image_store = ImageStore(SKULK_IMAGE_CACHE_DIR)
         self._tg: TaskGroup = TaskGroup()
 
@@ -1068,8 +1203,8 @@ class API:
             "/state",
             tags=["State & Tracing"],
             summary="Get cluster state",
-            description="Return the current cluster state as seen by this API node, including topology, instances, and node capabilities.",
-        )(lambda: self.state)
+            description="Return the current cluster state as seen by this API node, including topology, instances, node capabilities, and live telemetry (per-node memory and system profile).",
+        )(self.get_cluster_state)
         self.app.get(
             "/events",
             tags=["State & Tracing"],
@@ -1414,10 +1549,16 @@ class API:
                     copy.deepcopy(command),
                     topology=self.state.topology,
                     current_instances=self.state.instances,
-                    node_memory=self.state.node_memory,
+                    node_memory=self._telemetry_view.node_memory,
                     node_network=self.state.node_network,
                     download_status=self.state.downloads,
                     excluded_nodes=set(command.excluded_nodes),
+                    node_resources=self._telemetry_view.node_resources,
+                    node_vram=usable_vram_by_node(
+                        self._telemetry_view.node_system,
+                        self._telemetry_view.node_resources,
+                        node_memory=self._telemetry_view.node_memory,
+                    ),
                 )
                 break
             except PlacementInfoPendingError as exc:
@@ -1480,11 +1621,17 @@ class API:
                     instance_meta=instance_meta,
                     min_nodes=min_nodes,
                 ),
-                node_memory=self.state.node_memory,
+                node_memory=self._telemetry_view.node_memory,
                 node_network=self.state.node_network,
                 topology=self.state.topology,
                 current_instances=self.state.instances,
                 download_status=self.state.downloads,
+                node_resources=self._telemetry_view.node_resources,
+                node_vram=usable_vram_by_node(
+                    self._telemetry_view.node_system,
+                    self._telemetry_view.node_resources,
+                    node_memory=self._telemetry_view.node_memory,
+                ),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1544,13 +1691,19 @@ class API:
                         instance_meta=instance_meta,
                         min_nodes=min_nodes,
                     ),
-                    node_memory=self.state.node_memory,
+                    node_memory=self._telemetry_view.node_memory,
                     node_network=self.state.node_network,
                     topology=self.state.topology,
                     current_instances=self.state.instances,
                     required_nodes=required_nodes,
                     download_status=self.state.downloads,
                     excluded_nodes=excluded_nodes,
+                    node_resources=self._telemetry_view.node_resources,
+                    node_vram=usable_vram_by_node(
+                        self._telemetry_view.node_system,
+                        self._telemetry_view.node_resources,
+                        node_memory=self._telemetry_view.node_memory,
+                    ),
                 )
             except ValueError as exc:
                 if (model_card.model_id, sharding, instance_meta, 0) not in seen:
@@ -1671,6 +1824,24 @@ class API:
             command_id=command_id,
         )
 
+    def _command_task_is_terminal(self, command_id: CommandId) -> bool:
+        """Return True if the master already considers this command's task done.
+
+        Used to disambiguate a mid-stream idle stall (#298 review): if the task
+        has already reached a terminal status (Complete/Failed/TimedOut/Cancelled)
+        the stall is just a dropped FINAL data-plane chunk — the runner finished.
+        Sending TaskCancelled there is a no-op on a completed runner and leaves the
+        master's task/command mapping leaked forever; we must let the normal
+        TaskFinished path run instead. A non-terminal task means a genuinely stuck
+        runner, which TaskCancelled correctly tears down.
+        """
+
+        target = str(command_id)
+        for task in self.state.tasks.values():
+            if self._task_command_id(task) == target:
+                return task.task_status in _TERMINAL_TASK_STATUSES
+        return False
+
     async def _finalize_command_stream(
         self,
         command_id: CommandId,
@@ -1688,6 +1859,11 @@ class API:
         if should_send_finished:
             await self._send(TaskFinished(finished_command_id=command_id))
         queue_map.pop(command_id, None)
+        # Drop the data-plane reorder buffer / dedupe cursor alongside the queue
+        # so a late chunk arriving after finalize is dropped (no queue) instead
+        # of leaking state.
+        self._chunk_reorder.pop(command_id, None)
+        self._data_dedup_cursor.pop(command_id, None)
 
     async def _token_chunk_stream(
         self, command_id: CommandId
@@ -1704,10 +1880,86 @@ class API:
             ]()
 
             with recv as token_chunks:
-                async for chunk in token_chunks:
+                # Idle backstop (#279 Phase 2b): the DATA plane is best-effort, so
+                # a dropped chunk could hang this receive forever. The idle timer
+                # applies ONLY once streaming has started (after the first chunk)
+                # and measures the gap BETWEEN chunks — wrapping just the receive,
+                # not the yield. It deliberately does NOT bound time-to-first
+                # chunk: a request can sit in the runner queue behind a long
+                # decode, or in a slow prefill, for an unbounded time, and the
+                # control plane (TaskFailed -> _terminate_command_stream) already
+                # covers instance death. So this only fires on a mid-stream stall.
+                started = False
+                while True:
+                    chunk: (
+                        TokenChunk
+                        | ErrorChunk
+                        | ToolCallChunk
+                        | PrefillProgressChunk
+                        | None
+                    ) = None
+                    delay = _STREAM_IDLE_TIMEOUT_SECONDS if started else None
+                    with anyio.move_on_after(delay) as scope:
+                        try:
+                            chunk = await token_chunks.receive()
+                        except (EndOfStream, ClosedResourceError):
+                            return  # producer closed normally
+                    if scope.cancelled_caught:
+                        # Mid-stream stall: the receive went idle for longer than
+                        # the inter-token bound. Two distinct causes, disambiguated
+                        # by the master's task status (#298 review):
+                        #   - task already terminal -> the runner finished and only
+                        #     the FINAL data-plane chunk was dropped. Sending
+                        #     TaskCancelled here is a no-op on a completed runner and
+                        #     leaks the master's task/command mapping forever, so let
+                        #     the normal TaskFinished path (via _finalize) clean up.
+                        #   - task not terminal -> a genuinely stuck runner; send
+                        #     TaskCancelled so the master tears it down (otherwise we
+                        #     orphan an in-flight runner task).
+                        task_done = self._command_task_is_terminal(command_id)
+                        logger.warning(
+                            f"Token stream for command {command_id} idle for "
+                            f">{_STREAM_IDLE_TIMEOUT_SECONDS:g}s mid-stream; "
+                            + (
+                                "task already terminal — finishing (a final "
+                                "data-plane chunk was likely dropped)."
+                                if task_done
+                                else "task still active — cancelling (a data-plane "
+                                "chunk may have been dropped)."
+                            )
+                        )
+                        if not task_done:
+                            self._cancelled_command_ids.add(command_id)
+                            with anyio.CancelScope(shield=True):
+                                await self.command_sender.send(
+                                    ForwarderCommand(
+                                        origin=self._system_id,
+                                        command=TaskCancelled(
+                                            cancelled_command_id=command_id
+                                        ),
+                                    )
+                                )
+                        yield ErrorChunk(
+                            model=ModelId("unknown"),
+                            error_message=(
+                                "Stream stalled: no output for "
+                                f"{_STREAM_IDLE_TIMEOUT_SECONDS:g}s; the response "
+                                "may be incomplete."
+                            ),
+                        )
+                        return
+                    assert chunk is not None  # not timed out and not EndOfStream
                     yield chunk
                     if isinstance(chunk, PrefillProgressChunk):
+                        # Prefill progress is NOT real output: keep the idle timer
+                        # disarmed (delay stays None). Prefill of a huge prompt on
+                        # a slow node can run far longer than the inter-token idle
+                        # bound between progress updates, so arming here would
+                        # falsely time out a still-prefilling request (#298 review).
                         continue
+                    # First real output token: from here, gaps are inter-token and
+                    # the idle timeout applies.
+                    started = True
                     if chunk.finish_reason is not None:
                         break
 
@@ -1731,7 +1983,13 @@ class API:
     async def _collect_text_generation_with_stats(
         self, command_id: CommandId
     ) -> BenchChatCompletionResponse:
-        sampler = PowerSampler(get_node_system=lambda: self.state.node_system)
+        sampler = PowerSampler(
+            get_node_system=lambda: {
+                node_id: profile
+                for node_id, profile in self._telemetry_view.node_system.items()
+                if node_id in self.state.last_seen
+            }
+        )
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         model: ModelId | None = None
@@ -1813,22 +2071,77 @@ class API:
         maximum avoids falsely rejecting a request the largest instance could
         still serve.
         """
-        node_ram_totals = {
-            node_id: usage.ram_total
-            for node_id, usage in self.state.node_memory.items()
-        }
         limits = [
-            limit
+            instance.context_token_limit
             for instance in self.state.instances.values()
             if instance.shard_assignments.model_id == model_id
-            and (
-                limit := instance_context_token_limit(
-                    instance.shard_assignments, node_ram_totals
-                )
-            )
-            is not None
+            and instance.context_token_limit is not None
         ]
         return max(limits) if limits else None
+
+    async def get_cluster_state(self) -> dict[str, object]:
+        """Cluster state for ``GET /state``: event-sourced ``State`` plus live
+        telemetry (per-node memory + system profile) merged back in.
+
+        ``node_memory`` and ``node_system`` moved off event-sourced ``State`` to
+        the telemetry plane (#279 slice 2), but ``/state`` is the dashboard's
+        single data source and still renders per-node memory/system. Merge the
+        ``TelemetryView`` maps in under their camelCase keys so the wire shape is
+        unchanged for the dashboard and any external consumer. The merge is
+        filtered to ``last_seen``-live nodes as defense-in-depth on top of the
+        worker's ``NodeTimedOut`` prune, so a dead node never shows as a ghost.
+
+        Declared ``async`` so FastAPI serves it ON the event loop rather than a
+        worker thread: the telemetry subscriber and the ``NodeTimedOut`` prune
+        mutate these dicts on the loop, and a threadpool read could iterate one
+        mid-mutation and 500 with ``dictionary changed size during iteration``.
+        There is no ``await`` here, so the comprehensions run atomically wrt
+        those same-loop mutators.
+        """
+        live = self.state.last_seen
+        payload = self.state.model_dump(mode="json", by_alias=True)
+        payload["nodeMemory"] = {
+            str(node_id): usage.model_dump(mode="json", by_alias=True)
+            for node_id, usage in self._telemetry_view.node_memory.items()
+            if node_id in live
+        }
+        payload["nodeSystem"] = {
+            str(node_id): profile.model_dump(mode="json", by_alias=True)
+            for node_id, profile in self._telemetry_view.node_system.items()
+            if node_id in live
+        }
+        # Observational readings moved to telemetry in #279 slice 3; merge them
+        # back under their original camelCase keys so the dashboard wire shape is
+        # unchanged.
+        payload["nodeIdentities"] = {
+            str(node_id): identity.model_dump(mode="json", by_alias=True)
+            for node_id, identity in self._telemetry_view.node_identities.items()
+            if node_id in live
+        }
+        payload["nodeDisk"] = {
+            str(node_id): disk.model_dump(mode="json", by_alias=True)
+            for node_id, disk in self._telemetry_view.node_disk.items()
+            if node_id in live
+        }
+        payload["nodeRdmaCtl"] = {
+            str(node_id): status.model_dump(mode="json", by_alias=True)
+            for node_id, status in self._telemetry_view.node_rdma_ctl.items()
+            if node_id in live
+        }
+        # Derived per-node health (#388): explain a node's problems (and the fix)
+        # in the topology so the master's silent recovery of a wedged/failed node
+        # is legible. Read-only derivation from the same state/telemetry above; no
+        # new gossip type. last_seen is tz-aware UTC, so use the same clock here.
+        payload["nodeHealth"] = {
+            node_id: summary.model_dump(mode="json", by_alias=True)
+            for node_id, summary in compute_node_health(
+                live_nodes=live,
+                downloads=self.state.downloads,
+                node_disk=self._telemetry_view.node_disk,
+                now=datetime.now(tz=timezone.utc),
+            ).items()
+        }
+        return payload
 
     async def _send_text_generation_with_images(
         self, task_params: TextGenerationTaskParams
@@ -1862,7 +2175,7 @@ class API:
             )
         images = task_params.images
         if not images:
-            command = TextGeneration(task_params=task_params)
+            command = TextGeneration(task_params=task_params, owner_node=self.node_id)
             await self._send(command)
             return command
 
@@ -1896,15 +2209,14 @@ class API:
             )
         for idx, h in cached_hashes.items():
             _log_image_transport(
-                f"TextGeneration cached image {idx}: "
-                f"b64_sha256={h[:12]}..."
+                f"TextGeneration cached image {idx}: b64_sha256={h[:12]}..."
             )
 
         if not new_images:
             task_params = task_params.model_copy(
                 update={"images": [], "image_hashes": cached_hashes}
             )
-            command = TextGeneration(task_params=task_params)
+            command = TextGeneration(task_params=task_params, owner_node=self.node_id)
             await self._send(command)
             return command
 
@@ -1921,7 +2233,7 @@ class API:
                 "image_count": len(new_images),
             }
         )
-        command = TextGeneration(task_params=task_params)
+        command = TextGeneration(task_params=task_params, owner_node=self.node_id)
 
         for global_idx, (img_idx, chunk_data) in enumerate(all_chunks):
             await self._send(
@@ -2022,7 +2334,9 @@ class API:
                 )
                 if isinstance(runner_to_shard, dict):
                     for shard in cast(dict[object, object], runner_to_shard).values():
-                        shard_model_card = cast(object, getattr(shard, "model_card", None))
+                        shard_model_card = cast(
+                            object, getattr(shard, "model_card", None)
+                        )
                         if isinstance(shard_model_card, ModelCard):
                             return shard_model_card
                 fallback_card = cast(
@@ -2137,6 +2451,7 @@ class API:
         )
 
         command = ImageGeneration(
+            owner_node=self.node_id,
             task_params=payload,
         )
         await self._send(command)
@@ -2391,7 +2706,13 @@ class API:
         num_images: int,
         response_format: str,
     ) -> BenchImageGenerationResponse:
-        sampler = PowerSampler(get_node_system=lambda: self.state.node_system)
+        sampler = PowerSampler(
+            get_node_system=lambda: {
+                node_id: profile
+                for node_id, profile in self._telemetry_view.node_system.items()
+                if node_id in self.state.last_seen
+            }
+        )
         images: list[ImageData] = []
         stats: ImageGenerationStats | None = None
         async with anyio.create_task_group() as tg:
@@ -2417,6 +2738,7 @@ class API:
         )
 
         command = ImageGeneration(
+            owner_node=self.node_id,
             task_params=payload,
         )
         await self._send(command)
@@ -2460,6 +2782,7 @@ class API:
         total_chunks = len(data_chunks)
 
         command = ImageEdits(
+            owner_node=self.node_id,
             task_params=ImageEditsTaskParams(
                 image_data="",
                 total_input_chunks=total_chunks,
@@ -2894,12 +3217,18 @@ class API:
         return {"version": get_skulk_version_label()}
 
     def _calculate_total_available_memory(self) -> Memory:
-        """Calculate total available memory across all nodes in bytes."""
+        """Total available RAM across nodes still live in ``last_seen``.
+
+        Feeds the ``POST /instance`` admission pre-check, so it must exclude
+        timed-out nodes: counting a dead node's last RAM sample could admit a
+        placement the live cluster cannot support. Filtered to ``last_seen``-live
+        nodes as defense-in-depth on top of the worker's ``NodeTimedOut`` prune
+        of the view, matching ``get_cluster_state`` and the power sampler.
+        """
         total_available = Memory()
-
-        for memory in self.state.node_memory.values():
-            total_available += memory.ram_available
-
+        for node_id, memory in self._telemetry_view.node_memory.items():
+            if node_id in self.state.last_seen:
+                total_available += memory.ram_available
         return total_available
 
     @staticmethod
@@ -2973,9 +3302,7 @@ class API:
                         downloaded_model_ids.add(dl.shard_metadata.model_card.model_id)
             cards = [c for c in cards if c.model_id in downloaded_model_ids]
 
-        return ModelList(
-            data=[self._model_list_entry(card) for card in cards]
-        )
+        return ModelList(data=[self._model_list_entry(card) for card in cards])
 
     async def add_custom_model(self, payload: AddCustomModelParams) -> ModelListModel:
         """Fetch a model from HuggingFace and save as a custom model card, then sync across the cluster."""
@@ -3047,6 +3374,17 @@ class API:
             async with self._tg as tg:
                 logger.info("Starting API")
                 tg.start_soon(self._apply_state)
+                # Data plane (#279 Phase 2): per-command output chunks, off the
+                # event log. Started once for the API's lifetime — the DATA
+                # subscription is session-independent, so (unlike _apply_state)
+                # it is NOT re-spawned by reset().
+                tg.start_soon(self._apply_data)
+                # Releases reorder gaps stuck on a chunk dropped by the
+                # best-effort DATA topic (#279 Phase 2b); lifetime-scoped like
+                # _apply_data. Only meaningful while the reorder buffer is on;
+                # with it disabled (#279 Phase 3) no gaps are ever buffered.
+                if self._reorder_buffer_enabled:
+                    tg.start_soon(self._sweep_reorder_buffers)
                 tg.start_soon(self._pause_on_new_election)
                 tg.start_soon(self._cleanup_expired_images)
                 tg.start_soon(self._prune_old_traces)
@@ -3108,37 +3446,19 @@ class API:
         with self.event_receiver as events:
             async for i_event in events:
                 event = i_event.event
-                if (
-                    self._event_log is not None
-                    and not isinstance(event, StateSnapshotHydrated)
+                if self._event_log is not None and not isinstance(
+                    event, StateSnapshotHydrated
                 ):
                     self._event_log.append(event)
                     self._maybe_compact_event_log()
                 self.state = apply(self.state, i_event)
 
-                if isinstance(event, ChunkGenerated):
-                    if queue := self._image_generation_queues.get(
-                        event.command_id, None
-                    ):
-                        assert isinstance(event.chunk, ImageChunk)
-                        try:
-                            await queue.send(event.chunk)
-                        except BrokenResourceError:
-                            self._image_generation_queues.pop(event.command_id, None)
-                    if queue := self._text_generation_queues.get(
-                        event.command_id, None
-                    ):
-                        assert not isinstance(event.chunk, (ImageChunk, EmbeddingChunk))
-                        try:
-                            await queue.send(event.chunk)
-                        except BrokenResourceError:
-                            self._text_generation_queues.pop(event.command_id, None)
-                    if queue := self._embedding_queues.get(event.command_id, None):
-                        assert isinstance(event.chunk, (EmbeddingChunk, ErrorChunk))
-                        try:
-                            await queue.send(event.chunk)
-                        except BrokenResourceError:
-                            self._embedding_queues.pop(event.command_id, None)
+                # Prune telemetry for timed-out nodes from the API applier too,
+                # so a --no-worker node still tracks live membership (#279).
+                record_membership_from_event(self._telemetry_view, event)
+
+                # Output chunks no longer travel the event log — they arrive on
+                # the data plane (#279 Phase 2), demuxed by _apply_data.
                 if isinstance(event, TaskFailed):
                     await self._terminate_command_stream(
                         event.task_id,
@@ -3156,11 +3476,184 @@ class API:
                     # this is a no-op for them.
                     await self._terminate_command_stream(
                         event.task_id,
-                        "The request was cancelled because its instance "
-                        "was deleted",
+                        "The request was cancelled because its instance was deleted",
                     )
                 if isinstance(event, TracesMerged):
                     self._save_merged_trace(event)
+
+    async def _apply_data(self) -> None:
+        """Consume the data plane (#279 Phase 2): per-command output chunks.
+
+        Output chunks stream here directly from the serving worker (DATA topic)
+        rather than as ``ChunkGenerated`` events off the master, so they never
+        touch the ordered event log or the master hop. Demux by ``command_id``
+        into the per-command stream queues exactly as the event path did. No-op
+        on a node with no DATA topic wired (tests).
+        """
+        if self._data_receiver is None:
+            return
+        if not self._reorder_buffer_enabled:
+            logger.info(
+                "Data-plane reorder buffer DISABLED; dispatching output chunks in "
+                "arrival order (with O(1) sequence dedupe). Only safe on an "
+                "ordered transport - Zenoh delivers per-publisher FIFO; gossipsub "
+                "reorders, so forcing this off there (SKULK_DATA_REORDER_BUFFER=0) "
+                "can garble multi-node output. #279 Phase 3."
+            )
+        with self._data_receiver as data_chunks:
+            async for data in data_chunks:
+                if self._reorder_buffer_enabled:
+                    await self._reorder_and_dispatch(
+                        data.command_id, data.sequence, data.chunk
+                    )
+                elif self._command_has_queue(data.command_id):
+                    # Buffer off: dispatch in arrival order (the transport orders
+                    # per command), but still dedupe by sequence so a same-node
+                    # Zenoh self-loopback duplicate is dropped (#311 review).
+                    # Late chunks for a finalized stream are already excluded by
+                    # _command_has_queue above.
+                    cursor = self._data_dedup_cursor.get(data.command_id, 0)
+                    if data.sequence < cursor:
+                        continue  # duplicate (local publish + Zenoh loopback)
+                    self._data_dedup_cursor[data.command_id] = data.sequence + 1
+                    await self._dispatch_generation_chunk(data.command_id, data.chunk)
+
+    def _command_has_queue(self, command_id: CommandId) -> bool:
+        return (
+            command_id in self._text_generation_queues
+            or command_id in self._image_generation_queues
+            or command_id in self._embedding_queues
+        )
+
+    async def _reorder_and_dispatch(
+        self, command_id: CommandId, sequence: int, chunk: GenerationChunk
+    ) -> None:
+        """Reorder a command's data-plane chunks by sequence, then dispatch.
+
+        The DATA gossip topic has no total order (it replaced the master event
+        ``idx`` that did), so a multi-node producer's per-token chunks can arrive
+        out of order at the owning API node, which silently transposed generation
+        output. We hold each command's chunks in a small per-command buffer and
+        release them strictly in ``sequence`` order. Late duplicates (below the
+        cursor) are dropped; if the buffer exceeds ``_MAX_CHUNK_REORDER_BUFFER``
+        (a genuinely dropped sequence on the best-effort topic) we skip past the
+        gap rather than stall. State is only created while the command has a live
+        stream queue, so a chunk arriving after the stream finalized is dropped
+        without leaking a buffer (the queue and buffer are cleared together).
+        """
+        if not self._command_has_queue(command_id):
+            return  # client gone / stream finalized: drop late chunk, no buffer
+        state = self._chunk_reorder.setdefault(command_id, _ChunkReorderState())
+        if sequence < state.next_seq:
+            return  # already delivered (duplicate / late re-send)
+        state.pending[sequence] = chunk
+        await self._drain_in_order(command_id, state)
+        # Emergency size cap: if the buffer runs away (a dropped sequence the
+        # later chunks keep piling up behind), skip the gap and keep draining.
+        # Looped so several gaps in one burst are all cleared in this call.
+        while len(state.pending) > _MAX_CHUNK_REORDER_BUFFER:
+            skipped_to = min(state.pending)
+            logger.warning(
+                f"Data-plane reorder buffer for command {command_id} exceeded "
+                f"{_MAX_CHUNK_REORDER_BUFFER}; a chunk was likely dropped on the "
+                f"best-effort DATA topic. Skipping seq {state.next_seq}..{skipped_to - 1}."
+            )
+            state.next_seq = skipped_to
+            await self._drain_in_order(command_id, state)
+        self._mark_reorder_gap(state)
+
+    @staticmethod
+    def _mark_reorder_gap(state: "_ChunkReorderState") -> None:
+        """Stamp the head-of-line gap's age, preserving it across new chunks.
+
+        The timer must measure how long *this* gap (the one at ``next_seq``) has
+        been stuck, not refresh on every chunk that arrives behind it — otherwise
+        a long stream with a dropped sequence never ages to the flush window. So
+        only (re)start the clock when there is no timer yet or the gap moved to a
+        new ``next_seq`` (the stream made progress).
+        """
+        if state.pending:
+            if state.gap_since is None or state.gap_at != state.next_seq:
+                state.gap_since = time.monotonic()
+                state.gap_at = state.next_seq
+        else:
+            state.gap_since = None
+            state.gap_at = None
+
+    async def _drain_in_order(
+        self, command_id: CommandId, state: "_ChunkReorderState"
+    ) -> None:
+        """Dispatch contiguous buffered chunks starting at ``next_seq``."""
+        while state.next_seq in state.pending:
+            ready = state.pending.pop(state.next_seq)
+            state.next_seq += 1
+            await self._dispatch_generation_chunk(command_id, ready)
+
+    async def _sweep_reorder_buffers(self) -> None:
+        """Release reorder gaps stuck waiting for a sequence dropped on the topic.
+
+        A genuine mesh reorder resolves in milliseconds; a gap older than
+        ``_REORDER_GAP_FLUSH_SECONDS`` means the missing sequence was dropped on
+        the best-effort DATA topic. Skipping ahead to the lowest buffered
+        sequence releases the held chunks (so the stream yields and its idle
+        backstop can arm) instead of hanging forever — the case the size cap
+        misses when no later chunk arrives to trigger it (#279 Phase 2b review).
+        """
+        while True:
+            await anyio.sleep(1.0)
+            await self._flush_stale_reorder_gaps(time.monotonic())
+
+    async def _flush_stale_reorder_gaps(self, now: float) -> None:
+        """One sweep pass: release reorder gaps older than the flush window."""
+        for command_id, state in list(self._chunk_reorder.items()):
+            if (
+                state.pending
+                and state.gap_since is not None
+                and now - state.gap_since > _REORDER_GAP_FLUSH_SECONDS
+            ):
+                skipped_to = min(state.pending)
+                logger.warning(
+                    f"Data-plane reorder gap for command {command_id} unfilled "
+                    f"for >{_REORDER_GAP_FLUSH_SECONDS:g}s (seq "
+                    f"{state.next_seq}..{skipped_to - 1} dropped on the "
+                    "best-effort DATA topic); releasing buffered chunks."
+                )
+                state.next_seq = skipped_to
+                await self._drain_in_order(command_id, state)
+                self._mark_reorder_gap(state)
+
+    async def _dispatch_generation_chunk(
+        self, command_id: CommandId, chunk: GenerationChunk
+    ) -> None:
+        """Route one output chunk to its per-command stream queue by type.
+
+        Shared by the data plane (#279 Phase 2). ``await send`` preserves the
+        backpressure the event path had (a slow client throttles its producer);
+        a closed receiver (client gone) drops the queue so a late chunk can't
+        wedge the dispatcher.
+        """
+        if queue := self._image_generation_queues.get(command_id, None):
+            # ErrorChunk too: a runner failure on an ImageGeneration/ImageEdits
+            # command emits ErrorChunk (RunnerSupervisor._check_runner), which
+            # must reach the image client instead of crashing the data loop on a
+            # too-narrow assert. The queue is typed ImageChunk | ErrorChunk.
+            assert isinstance(chunk, (ImageChunk, ErrorChunk))
+            try:
+                await queue.send(chunk)
+            except (BrokenResourceError, ClosedResourceError):
+                self._image_generation_queues.pop(command_id, None)
+        if queue := self._text_generation_queues.get(command_id, None):
+            assert not isinstance(chunk, (ImageChunk, EmbeddingChunk))
+            try:
+                await queue.send(chunk)
+            except (BrokenResourceError, ClosedResourceError):
+                self._text_generation_queues.pop(command_id, None)
+        if queue := self._embedding_queues.get(command_id, None):
+            assert isinstance(chunk, (EmbeddingChunk, ErrorChunk))
+            try:
+                await queue.send(chunk)
+            except (BrokenResourceError, ClosedResourceError):
+                self._embedding_queues.pop(command_id, None)
 
     async def _terminate_command_stream(
         self, task_id: task_types.TaskId, error_message: str
@@ -3257,8 +3750,9 @@ class API:
         while True:
             try:
                 retention_days = (
-                    self._exo_config.tracing.retention_days
-                    if self._exo_config is not None and self._exo_config.tracing is not None
+                    self._skulk_config.tracing.retention_days
+                    if self._skulk_config is not None
+                    and self._skulk_config.tracing is not None
                     else 3
                 )
                 removed = prune_old_trace_files(
@@ -3352,12 +3846,12 @@ class API:
         """
         staging_root: Path | None = None
         if (
-            self._exo_config is not None
-            and self._exo_config.model_store is not None
-            and self._exo_config.model_store.enabled
+            self._skulk_config is not None
+            and self._skulk_config.model_store is not None
+            and self._skulk_config.model_store.enabled
         ):
             staging = resolve_node_staging(
-                self._exo_config.model_store, str(self.node_id)
+                self._skulk_config.model_store, str(self.node_id)
             )
             if staging.enabled:
                 staging_root = Path(staging.node_cache_path).expanduser()
@@ -3410,7 +3904,7 @@ class API:
         return trace_path
 
     def _friendly_name_for_trace_node(self, node_id: str) -> str | None:
-        for known_node_id, identity in self.state.node_identities.items():
+        for known_node_id, identity in self._telemetry_view.node_identities.items():
             if str(known_node_id) != node_id:
                 continue
             if identity.friendly_name and identity.friendly_name != "Unknown":
@@ -3424,7 +3918,9 @@ class API:
             friendly_name=self._friendly_name_for_trace_node(node_id),
         )
 
-    def _trace_source_nodes(self, trace_events: list[TraceEvent]) -> list[TraceSourceNode]:
+    def _trace_source_nodes(
+        self, trace_events: list[TraceEvent]
+    ) -> list[TraceSourceNode]:
         node_ids = [event.node_id for event in trace_events if event.node_id]
         if not node_ids:
             node_ids = [str(self.node_id)]
@@ -3500,12 +3996,16 @@ class API:
         created_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
         trace_events = load_trace_file(trace_path)
 
-        model_id = next((event.model_id for event in trace_events if event.model_id), None)
+        model_id = next(
+            (event.model_id for event in trace_events if event.model_id), None
+        )
         task_kind = cast(
             TraceTaskKind | None,
             next((event.task_kind for event in trace_events if event.task_kind), None),
         )
-        categories = sorted({event.category for event in trace_events if event.category})
+        categories = sorted(
+            {event.category for event in trace_events if event.category}
+        )
         tags = sorted({tag for event in trace_events for tag in event.tags})
         has_tool_activity = any("tool_call" in event.tags for event in trace_events)
 
@@ -3522,9 +4022,12 @@ class API:
         )
 
     @staticmethod
-    def _merge_trace_list_item(existing: TraceListItem, incoming: TraceListItem) -> TraceListItem:
+    def _merge_trace_list_item(
+        existing: TraceListItem, incoming: TraceListItem
+    ) -> TraceListItem:
         source_nodes_by_id = {
-            source.node_id: source for source in [*existing.source_nodes, *incoming.source_nodes]
+            source.node_id: source
+            for source in [*existing.source_nodes, *incoming.source_nodes]
         }
         return existing.model_copy(
             update={
@@ -3534,7 +4037,8 @@ class API:
                 "task_kind": existing.task_kind or incoming.task_kind,
                 "categories": sorted({*existing.categories, *incoming.categories}),
                 "tags": sorted({*existing.tags, *incoming.tags}),
-                "has_tool_activity": existing.has_tool_activity or incoming.has_tool_activity,
+                "has_tool_activity": existing.has_tool_activity
+                or incoming.has_tool_activity,
                 "source_nodes": list(source_nodes_by_id.values()),
             }
         )
@@ -3571,7 +4075,7 @@ class API:
     def _friendly_name_for_node(self, node_id: NodeId) -> str | None:
         """Return a known friendly node name for diagnostics."""
 
-        identity = self.state.node_identities.get(node_id)
+        identity = self._telemetry_view.node_identities.get(node_id)
         if identity is None:
             return None
         if identity.friendly_name and identity.friendly_name != "Unknown":
@@ -3601,7 +4105,9 @@ class API:
         return None
 
     @staticmethod
-    def _task_model_id(task: task_types.Task, default_model_id: str | None) -> str | None:
+    def _task_model_id(
+        task: task_types.Task, default_model_id: str | None
+    ) -> str | None:
         """Return the model associated with a task when available."""
 
         if isinstance(
@@ -3649,8 +4155,12 @@ class API:
             shard_assignments = instance.shard_assignments
             placement_node_ids = list(shard_assignments.node_to_runner.keys())
             placement_node_id_strings = [str(node_id) for node_id in placement_node_ids]
-            master_is_placement_node = master_node_id in shard_assignments.node_to_runner
-            local_node_is_placement_node = self.node_id in shard_assignments.node_to_runner
+            master_is_placement_node = (
+                master_node_id in shard_assignments.node_to_runner
+            )
+            local_node_is_placement_node = (
+                self.node_id in shard_assignments.node_to_runner
+            )
             warnings: list[str] = []
 
             if not master_is_placement_node:
@@ -3739,7 +4249,9 @@ class API:
             instance_task_ids: set[str] = set()
             if placement is not None:
                 instance_task_ids = {
-                    task.task_id for placement_runner in placement.runners for task in placement_runner.tasks
+                    task.task_id
+                    for placement_runner in placement.runners
+                    for task in placement_runner.tasks
                 }
                 for placement_runner in placement.runners:
                     if placement_runner.runner_id == runner.runner_id:
@@ -3748,7 +4260,11 @@ class API:
                         }
                         break
 
-            if runner.process_alive and runner.in_progress_tasks and not instance_task_ids:
+            if (
+                runner.process_alive
+                and runner.in_progress_tasks
+                and not instance_task_ids
+            ):
                 message = (
                     "Runner "
                     f"{self._short_diagnostics_id(runner.runner_id)} is still alive with "
@@ -3757,9 +4273,9 @@ class API:
                     f"{self._short_diagnostics_id(runner.instance_id)}."
                 )
                 top_level_warnings.add(message)
-                placement_warnings_by_instance.setdefault(runner.instance_id, set()).add(
-                    message
-                )
+                placement_warnings_by_instance.setdefault(
+                    runner.instance_id, set()
+                ).add(message)
 
             for task in runner.in_progress_tasks:
                 matching_state_task = task_by_id.get(task.task_id)
@@ -3770,7 +4286,10 @@ class API:
                         f"{task.task_kind}:{self._short_diagnostics_id(task.task_id)} in progress, "
                         "but cluster state no longer tracks that task."
                     )
-                elif matching_state_task.task_status.value not in {"Pending", "Running"}:
+                elif matching_state_task.task_status.value not in {
+                    "Pending",
+                    "Running",
+                }:
                     message = (
                         "Runner "
                         f"{self._short_diagnostics_id(runner.runner_id)} still reports "
@@ -3788,12 +4307,14 @@ class API:
                     continue
 
                 top_level_warnings.add(message)
-                placement_warnings_by_instance.setdefault(runner.instance_id, set()).add(
-                    message
-                )
+                placement_warnings_by_instance.setdefault(
+                    runner.instance_id, set()
+                ).add(message)
 
         for placement in placements:
-            extra_warnings = placement_warnings_by_instance.get(placement.instance_id, set())
+            extra_warnings = placement_warnings_by_instance.get(
+                placement.instance_id, set()
+            )
             if extra_warnings:
                 placement.warnings = sorted(set(placement.warnings) | extra_warnings)
 
@@ -3920,9 +4441,7 @@ class API:
             children = []
 
         runner_pids = {
-            runner.pid
-            for runner in supervisor_runners
-            if runner.pid is not None
+            runner.pid for runner in supervisor_runners if runner.pid is not None
         }
         child_pids = {current.pid, *(child.pid for child in children)}
         process_by_pid: dict[int, psutil.Process] = {
@@ -3952,8 +4471,10 @@ class API:
     def _runtime_diagnostics(self) -> NodeRuntimeDiagnostics:
         """Build local runtime diagnostics from API process and state."""
 
-        identity = self.state.node_identities.get(self.node_id)
-        logging_config = self._exo_config.logging if self._exo_config is not None else None
+        identity = self._telemetry_view.node_identities.get(self.node_id)
+        logging_config = (
+            self._skulk_config.logging if self._skulk_config is not None else None
+        )
         master_node_id = self._master_node_id
         return NodeRuntimeDiagnostics(
             node_id=str(self.node_id),
@@ -3968,9 +4489,9 @@ class API:
             skulk_commit=identity.skulk_commit if identity is not None else "Unknown",
             libp2p_namespace=preferred_env_value(
                 "SKULK_LIBP2P_NAMESPACE",
-                "EXO_LIBP2P_NAMESPACE",
             ),
-            python_unbuffered=os.environ.get("PYTHONUNBUFFERED") in {"1", "true", "True"},
+            python_unbuffered=os.environ.get("PYTHONUNBUFFERED")
+            in {"1", "true", "True"},
             tracing_enabled=self.state.tracing_enabled,
             structured_logging_configured=bool(
                 logging_config is not None
@@ -3996,11 +4517,11 @@ class API:
             )
 
         return NodeResourceDiagnostics(
-            gathered_memory=self.state.node_memory.get(self.node_id),
+            gathered_memory=self._telemetry_view.node_memory.get(self.node_id),
             current_memory=current_memory,
             current_wired=current_wired,
-            disk=self.state.node_disk.get(self.node_id),
-            system=self.state.node_system.get(self.node_id),
+            disk=self._telemetry_view.node_disk.get(self.node_id),
+            system=self._telemetry_view.node_system.get(self.node_id),
             network=self.state.node_network.get(self.node_id),
         )
 
@@ -4022,7 +4543,7 @@ class API:
         return NodeDiagnostics(
             generated_at=datetime.now(tz=timezone.utc).isoformat(),
             runtime=self._runtime_diagnostics(),
-            identity=self.state.node_identities.get(self.node_id),
+            identity=self._telemetry_view.node_identities.get(self.node_id),
             resources=resources,
             processes=self._collect_process_diagnostics(supervisor_runners),
             supervisor_runners=supervisor_runners,
@@ -4250,7 +4771,9 @@ class API:
 
         diagnostics = await self.get_node_diagnostics()
         runner = self._match_capture_runner(diagnostics, request)
-        if (request.runner_id is not None or request.task_id is not None) and runner is None:
+        if (
+            request.runner_id is not None or request.task_id is not None
+        ) and runner is None:
             raise HTTPException(
                 status_code=404,
                 detail="No local runner matched the requested runnerId/taskId.",
@@ -4396,8 +4919,7 @@ class API:
                     ClusterTimelineUnreachable(
                         node_id=node.node_id,
                         url=node.url,
-                        error=node.error
-                        or "Node diagnostics returned no payload.",
+                        error=node.error or "Node diagnostics returned no payload.",
                     )
                 )
                 continue
@@ -4625,9 +5147,7 @@ class API:
         async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
             for base_url in peer_urls:
                 try:
-                    response = await client.get(
-                        f"{base_url}/v1/traces/{task_id}/stats"
-                    )
+                    response = await client.get(f"{base_url}/v1/traces/{task_id}/stats")
                 except httpx.HTTPError as exc:
                     logger.opt(exception=exc).debug(
                         f"Failed to proxy trace stats {task_id} from {base_url}"
@@ -4640,7 +5160,9 @@ class API:
 
         raise HTTPException(status_code=404, detail=f"Trace not found: {task_id}")
 
-    async def get_cluster_trace_raw(self, task_id: str) -> FileResponse | StreamingResponse:
+    async def get_cluster_trace_raw(
+        self, task_id: str
+    ) -> FileResponse | StreamingResponse:
         try:
             return await self.get_trace_raw(task_id)
         except HTTPException as exc:
@@ -4652,9 +5174,7 @@ class API:
         async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
             for base_url in peer_urls:
                 try:
-                    response = await client.get(
-                        f"{base_url}/v1/traces/{task_id}/raw"
-                    )
+                    response = await client.get(f"{base_url}/v1/traces/{task_id}/raw")
                 except httpx.HTTPError as exc:
                     logger.opt(exception=exc).debug(
                         f"Failed to proxy raw trace {task_id} from {base_url}"
@@ -4707,11 +5227,10 @@ class API:
     # ------------------------------------------------------------------
 
     def _effective_kv_cache_backend(self) -> str:
-        """Return the effective KV backend after SKULK/EXO env precedence is applied."""
+        """Return the effective KV backend from the env (or empty when unset)."""
         configured_backend = preferred_env_value(
             "SKULK_KV_CACHE_BACKEND",
-            "EXO_KV_CACHE_BACKEND",
-            "",
+            default="",
         )
         if not configured_backend:
             return DEFAULT_KV_CACHE_BACKEND
@@ -4799,15 +5318,10 @@ class API:
         # Apply inference config to env var immediately so next model launch uses it.
         # Don't overwrite if user provided the env var at launch.
         inference = _coerce_json_object(config_data.get("inference"))
-        if (
-            "kv_cache_backend" in inference
-            and not os.environ.get("_SKULK_KV_BACKEND_USER_SET")
-            and not os.environ.get("_EXO_KV_BACKEND_USER_SET")
+        if "kv_cache_backend" in inference and not os.environ.get(
+            "_SKULK_KV_BACKEND_USER_SET"
         ):
             os.environ["SKULK_KV_CACHE_BACKEND"] = str(inference["kv_cache_backend"])
-            os.environ["SKULK_KV_CACHE_BACKEND"] = str(
-                inference["kv_cache_backend"]
-            )  # legacy compat
         # Apply HF token immediately
         hf_token = config_data.get("hf_token")
         if hf_token and "HF_TOKEN" not in os.environ:
@@ -4831,8 +5345,7 @@ class API:
             # already-running Vector subprocess shipping to the prior URL.
             ingest_url_str = str(logging_cfg_update.get("ingest_url", ""))
             log_on = external_log_pipe_enabled() or (
-                bool(logging_cfg_update.get("enabled", False))
-                and bool(ingest_url_str)
+                bool(logging_cfg_update.get("enabled", False)) and bool(ingest_url_str)
             )
             set_structured_stdout(log_on, ingest_url=ingest_url_str)
         # model_store changes still require restart; inference-only changes don't
@@ -5076,6 +5589,7 @@ class API:
 
         model_id = await self._validate_embedding_model(ModelId(request.model))
         command = TextEmbedding(
+            owner_node=self.node_id,
             task_params=TextEmbeddingTaskParams(
                 model=model_id,
                 input_texts=texts,

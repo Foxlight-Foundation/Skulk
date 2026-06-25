@@ -73,7 +73,7 @@ from pathlib import Path
 from typing import Literal, final
 
 import yaml
-from pydantic import Field, model_validator
+from pydantic import Field
 
 from skulk.utils.pydantic_ext import FrozenModel
 
@@ -144,11 +144,8 @@ class StagingNodeConfig(FrozenModel):
         node_cache_path: Absolute or ``~``-prefixed path to the directory
             where staged model files are written.  Each model occupies a
             subdirectory named ``<org>--<model>`` (e.g.
-            ``mlx-community--Qwen3-30B-A3B-4bit``).  When left at the
-            default, a populated legacy ``~/.exo/staging`` directory from a
-            pre-rename deployment is used instead of an empty
-            ``~/.skulk/staging`` so existing staged copies are not re-paid
-            (see the model validator below).
+            ``mlx-community--Qwen3-30B-A3B-4bit``).  Defaults to
+            ``~/.skulk/staging``.
         cleanup_on_deactivate: When ``True`` (the default), staged copies
             become eviction candidates when their model instance is shut
             down, and the staging directory is held to the
@@ -170,23 +167,6 @@ class StagingNodeConfig(FrozenModel):
     node_cache_path: str = "~/.skulk/staging"
     cleanup_on_deactivate: bool = True
     staging_keep_recent_gb: float = Field(default=40.0, ge=0)
-
-    @model_validator(mode="after")
-    def _prefer_populated_legacy_staging(self) -> "StagingNodeConfig":  # pyright: ignore[reportUnusedFunction]
-        """Keep using a populated pre-rename staging dir when unconfigured.
-
-        Only fires for the DEFAULT path: an explicit ``node_cache_path``
-        is always respected verbatim. Without this, the 2026-06 exo->skulk
-        rename would silently orphan every staged copy (eviction never
-        looks outside the active staging root) and re-stage everything.
-        """
-        if self.node_cache_path != "~/.skulk/staging":
-            return self
-        legacy = Path("~/.exo/staging").expanduser()
-        current = Path(self.node_cache_path).expanduser()
-        if legacy.is_dir() and any(legacy.iterdir()) and not current.is_dir():
-            object.__setattr__(self, "node_cache_path", "~/.exo/staging")
-        return self
 
 
 @final
@@ -240,7 +220,12 @@ class ModelStoreConfig(FrozenModel):
             when ``None``.  Set this when ``store_host`` is a libp2p peer
             ID (which is not a valid DNS name) so that workers can still
             resolve the HTTP address (e.g. ``mac-studio-1`` or
-            ``192.168.1.10``).
+            ``192.168.1.10``).  At startup the store host replaces a
+            hostname (or a loopback/link-local literal) here with its own
+            best routable IPv4 before broadcasting it to the cluster, so a
+            bare ``.local`` name cannot resolve to an unreachable Thunderbolt
+            link-local address on peers; a routable IP literal is broadcast
+            verbatim (see ``_routable_store_advertise_host`` in ``main.py``).
         store_port: HTTP port for ``ModelStoreServer`` on the store host.
             Must be reachable from all worker nodes.
         store_path: Absolute path to the model store root on the store host.
@@ -387,21 +372,14 @@ class InferenceConfig(FrozenModel):
 
 
 def resolve_config_path() -> Path:
-    """Find the config file, preferring ``skulk.yaml`` over legacy ``skulk.yaml``."""
-    skulk = Path("skulk.yaml")
-    legacy = Path("exo.yaml")
-    if skulk.exists():
-        return skulk
-    if legacy.exists():
-        return legacy
-    # Neither exists — return the preferred name so callers get a clear path
-    return skulk
+    """Return the cluster config path (``skulk.yaml`` in the working directory)."""
+    return Path("skulk.yaml")
 
 
 def load_skulk_config(
     path: Path | None = None,
 ) -> SkulkConfig | None:
-    """Load cluster config from ``skulk.yaml`` (preferred) or ``skulk.yaml`` (legacy fallback).
+    """Load cluster config from ``skulk.yaml``.
 
     Returns ``None`` if no config file exists, preserving zero-config
     compatibility: all downstream code must check for ``None`` before using
@@ -409,8 +387,7 @@ def load_skulk_config(
 
     Args:
         path: Explicit path override.  When ``None`` (the default), the
-              function checks for ``skulk.yaml`` first, then ``skulk.yaml``
-              in the current working directory.
+              function reads ``skulk.yaml`` in the current working directory.
 
     Returns:
         Parsed :class:`SkulkConfig` instance, or ``None`` if the file is absent.
@@ -419,10 +396,26 @@ def load_skulk_config(
         :class:`pydantic.ValidationError`: If the file exists but contains
             invalid configuration.
         :class:`yaml.YAMLError`: If the file exists but is not valid YAML.
+        :class:`FileNotFoundError`: If ``skulk.yaml`` is absent but a legacy
+            ``exo.yaml`` sits beside it. The legacy file is no longer read, and
+            booting zero-config would silently drop the operator's
+            ``model_store``/``logging``/``hf_token``/tracing/Tailscale settings,
+            so we fail loudly with the rename instead.
     """
     if path is None:
         path = resolve_config_path()
     if not path.exists():
+        # Don't silently degrade to zero-config when a pre-rename node still
+        # only has exo.yaml: that would drop every store/logging/auth setting
+        # without warning. exo.yaml is no longer parsed (#324), so point the
+        # operator at the one-step rename rather than booting misconfigured.
+        legacy = path.with_name("exo.yaml")
+        if legacy.exists():
+            raise FileNotFoundError(
+                f"Found legacy {legacy} but no {path}. exo.yaml is no longer "
+                f"read as of the EXO_ deprecation runway removal (#324). Rename "
+                f"it: `mv {legacy} {path}`."
+            )
         return None
     with path.open() as f:
         raw = yaml.safe_load(f)

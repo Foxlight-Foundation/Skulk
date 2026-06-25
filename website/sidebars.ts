@@ -23,6 +23,7 @@ const sidebars: SidebarsConfig = {
         "api-guide",
         "build-and-runtime",
         "thunderbolt-clustering",
+        "amd-strix-halo-nodes",
         "run-skulk-as-a-service",
         "external-logging",
         {
@@ -52,6 +53,7 @@ const sidebars: SidebarsConfig = {
           label: "Release Notes",
           items: ["release-notes/1.2.0", "release-notes/1.1.0", "release-notes/1.0.3", "release-notes/1.0.2"],
         },
+        "cluster-communication",
         "architecture",
         "architecture-reference",
       ],

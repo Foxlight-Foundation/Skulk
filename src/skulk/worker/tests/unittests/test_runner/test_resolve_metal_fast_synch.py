@@ -22,7 +22,6 @@ def test_returns_cluster_default_when_no_override_or_card(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("SKULK_FAST_SYNCH", raising=False)
-    monkeypatch.delenv("EXO_FAST_SYNCH", raising=False)
     assert resolve_metal_fast_synch(None) is FAST_SYNCH_CLUSTER_DEFAULT
 
 
@@ -30,7 +29,6 @@ def test_card_preference_overrides_cluster_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("SKULK_FAST_SYNCH", raising=False)
-    monkeypatch.delenv("EXO_FAST_SYNCH", raising=False)
     runtime_off = RuntimeCapabilityCardConfig(metal_fast_synch=False)
     runtime_on = RuntimeCapabilityCardConfig(metal_fast_synch=True)
     assert resolve_metal_fast_synch(runtime_off) is False
@@ -41,7 +39,6 @@ def test_card_none_falls_through_to_cluster_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("SKULK_FAST_SYNCH", raising=False)
-    monkeypatch.delenv("EXO_FAST_SYNCH", raising=False)
     runtime_silent = RuntimeCapabilityCardConfig(metal_fast_synch=None)
     assert resolve_metal_fast_synch(runtime_silent) is FAST_SYNCH_CLUSTER_DEFAULT
 
@@ -51,7 +48,6 @@ def test_skulk_env_on_forces_true(
     monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
     monkeypatch.setenv("SKULK_FAST_SYNCH", value)
-    monkeypatch.delenv("EXO_FAST_SYNCH", raising=False)
     runtime_off = RuntimeCapabilityCardConfig(metal_fast_synch=False)
     # Operator override beats card preference, even when the card says off.
     assert resolve_metal_fast_synch(runtime_off) is True
@@ -62,24 +58,18 @@ def test_skulk_env_off_forces_false(
     monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
     monkeypatch.setenv("SKULK_FAST_SYNCH", value)
-    monkeypatch.delenv("EXO_FAST_SYNCH", raising=False)
     runtime_on = RuntimeCapabilityCardConfig(metal_fast_synch=True)
     # Operator override beats card preference, even when the card says on.
     assert resolve_metal_fast_synch(runtime_on) is False
 
 
-def test_legacy_exo_env_still_respected(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_legacy_exo_env_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The EXO_ deprecation runway is gone (#324): a legacy EXO_FAST_SYNCH must
+    # NOT influence the result. With SKULK_FAST_SYNCH unset, an EXO_ value of
+    # "on" is ignored and the cluster default applies.
     monkeypatch.delenv("SKULK_FAST_SYNCH", raising=False)
-    monkeypatch.setenv("EXO_FAST_SYNCH", "off")
-    assert resolve_metal_fast_synch(None) is False
-
-
-def test_skulk_env_wins_over_legacy_exo_env(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("SKULK_FAST_SYNCH", "on")
-    monkeypatch.setenv("EXO_FAST_SYNCH", "off")
-    assert resolve_metal_fast_synch(None) is True
+    monkeypatch.setenv("EXO_FAST_SYNCH", "on")
+    assert resolve_metal_fast_synch(None) is FAST_SYNCH_CLUSTER_DEFAULT
 
 
 def test_unknown_env_value_falls_through_to_card(
@@ -92,7 +82,6 @@ def test_unknown_env_value_falls_through_to_card(
     explicit ``on`` / ``off``; anything else flows to the card layer.
     """
     monkeypatch.setenv("SKULK_FAST_SYNCH", "auto")
-    monkeypatch.delenv("EXO_FAST_SYNCH", raising=False)
     runtime_off = RuntimeCapabilityCardConfig(metal_fast_synch=False)
     assert resolve_metal_fast_synch(runtime_off) is False
 
@@ -101,7 +90,6 @@ def test_unknown_env_value_with_no_card_falls_to_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SKULK_FAST_SYNCH", "yes")
-    monkeypatch.delenv("EXO_FAST_SYNCH", raising=False)
     assert resolve_metal_fast_synch(None) is FAST_SYNCH_CLUSTER_DEFAULT
 
 
@@ -135,7 +123,6 @@ def test_speculative_card_defaults_fast_synch_off(
     monkeypatch: pytest.MonkeyPatch, runtime: RuntimeCapabilityCardConfig
 ) -> None:
     monkeypatch.delenv("SKULK_FAST_SYNCH", raising=False)
-    monkeypatch.delenv("EXO_FAST_SYNCH", raising=False)
     assert resolve_metal_fast_synch(runtime) is False
 
 
@@ -149,7 +136,6 @@ def test_explicit_card_pin_beats_speculative_default(
     no opinion.
     """
     monkeypatch.delenv("SKULK_FAST_SYNCH", raising=False)
-    monkeypatch.delenv("EXO_FAST_SYNCH", raising=False)
     runtime = RuntimeCapabilityCardConfig(
         metal_fast_synch=True,
         mtp_heads=True,
@@ -162,7 +148,6 @@ def test_operator_on_beats_speculative_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SKULK_FAST_SYNCH", "on")
-    monkeypatch.delenv("EXO_FAST_SYNCH", raising=False)
     runtime = RuntimeCapabilityCardConfig(
         mtp_sidecar_repo="FoxlightAI/qwen3-5-9b-base-mtp"
     )
@@ -175,6 +160,5 @@ def test_non_speculative_card_keeps_cluster_default(
     """Plain decode is unaffected by FAST_SYNCH (20.8 vs 20.7 tok/s measured);
     non-speculative cards must keep inheriting the cluster default."""
     monkeypatch.delenv("SKULK_FAST_SYNCH", raising=False)
-    monkeypatch.delenv("EXO_FAST_SYNCH", raising=False)
     runtime = RuntimeCapabilityCardConfig(prompt_renderer=None)
     assert resolve_metal_fast_synch(runtime) is FAST_SYNCH_CLUSTER_DEFAULT

@@ -51,7 +51,7 @@ def _safe_env_without(*prefixes: str) -> dict[str, str]:
 
 def test_xdg_paths_on_linux():
     """Test that XDG paths are used on Linux when XDG env vars are set."""
-    env = _safe_env_without("SKULK_", "SKULK_", "XDG_")
+    env = _safe_env_without("SKULK_", "XDG_")
     env.update(
         {
             "XDG_CONFIG_HOME": "/tmp/test-config",
@@ -64,13 +64,11 @@ def test_xdg_paths_on_linux():
     assert Path("/tmp/test-config/skulk") == c.SKULK_CONFIG_HOME
     assert Path("/tmp/test-data/skulk") == c.SKULK_DATA_HOME
     assert Path("/tmp/test-cache/skulk") == c.SKULK_CACHE_HOME
-    # Deprecated aliases still work
-    assert c.SKULK_CONFIG_HOME == c.SKULK_CONFIG_HOME
 
 
 def test_xdg_default_paths_on_linux():
     """Test that XDG default paths are used on Linux when env vars are not set."""
-    env = _safe_env_without("XDG_", "SKULK_", "SKULK_")
+    env = _safe_env_without("XDG_", "SKULK_")
     c = _reload_constants_clean(env, "linux")
 
     home = Path.home()
@@ -81,7 +79,7 @@ def test_xdg_default_paths_on_linux():
 
 def test_skulk_home_takes_precedence():
     """Test that SKULK_HOME environment variable takes precedence."""
-    env = _safe_env_without("SKULK_", "SKULK_")
+    env = _safe_env_without("SKULK_")
     env["SKULK_HOME"] = ".custom-skulk"
     env["XDG_CONFIG_HOME"] = "/tmp/test-config"
     c = _reload_constants_clean(env)
@@ -91,31 +89,20 @@ def test_skulk_home_takes_precedence():
     assert home / ".custom-skulk" == c.SKULK_DATA_HOME
 
 
-def test_legacy_exo_home_fallback():
-    """Test that SKULK_HOME still works as a fallback when SKULK_HOME is not set."""
-    env = _safe_env_without("SKULK_", "SKULK_")
-    env["SKULK_HOME"] = ".custom-exo"
-    c = _reload_constants_clean(env)
-
-    home = Path.home()
-    assert home / ".custom-exo" == c.SKULK_CONFIG_HOME
-
-
 def test_macos_uses_skulk_directory():
     """Test that macOS uses ~/.skulk directory by default."""
-    env = _safe_env_without("SKULK_", "SKULK_")
+    env = _safe_env_without("SKULK_")
     c = _reload_constants_clean(env, "darwin")
 
     home = Path.home()
-    # On a fresh install, .skulk is used. If .exo exists and .skulk
-    # doesn't, the fallback logic picks .exo — but we can't easily
-    # test filesystem state here, so just check it's one of the two.
-    assert c.SKULK_CONFIG_HOME in (home / ".skulk", home / ".exo")
+    # macOS always uses ~/.skulk by default; the legacy ~/.exo fallback was
+    # removed with the EXO_ deprecation runway (#324).
+    assert home / ".skulk" == c.SKULK_CONFIG_HOME
 
 
 def test_node_id_in_config_dir():
     """Test that node ID keypair is in the config directory."""
-    env = _safe_env_without("SKULK_", "SKULK_")
+    env = _safe_env_without("SKULK_")
     c = _reload_constants_clean(env)
 
     assert c.SKULK_NODE_ID_KEYPAIR.parent == c.SKULK_CONFIG_HOME
@@ -123,7 +110,7 @@ def test_node_id_in_config_dir():
 
 def test_models_in_data_dir():
     """Test that models directory is in the data directory."""
-    env = _safe_env_without("SKULK_MODELS", "SKULK_MODELS", "SKULK_HOME", "SKULK_HOME")
+    env = _safe_env_without("SKULK_MODELS", "SKULK_HOME")
     c = _reload_constants_clean(env)
 
     assert c.SKULK_MODELS_DIR.parent == c.SKULK_DATA_HOME

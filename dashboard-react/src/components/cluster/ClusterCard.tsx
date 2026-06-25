@@ -4,6 +4,7 @@ import { FiExternalLink } from 'react-icons/fi';
 import { MdPlayArrow } from 'react-icons/md';
 import { DeviceIcon } from '../topology/DeviceIcon';
 import type { Theme } from '../../theme';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -131,6 +132,7 @@ export function ClusterCard({
   onLaunch,
   className,
 }: ClusterCardProps) {
+  const { t } = useSkulkTranslation();
   const link = hfUrl(modelId);
   const displayName = modelName ?? modelId.split('/').pop() ?? modelId;
   const showDownloads = !isReady && downloads && downloads.length > 0;
@@ -143,7 +145,7 @@ export function ClusterCard({
         <ModelRow>
           <ModelName>{displayName}</ModelName>
           {link && (
-            <LinkBtn href={link} target="_blank" rel="noopener noreferrer" title="Open on HuggingFace">
+            <LinkBtn href={link} target="_blank" rel="noopener noreferrer" title={t('common.openOnHuggingFace', 'Open on HuggingFace')}>
               <FiExternalLink size={13} />
             </LinkBtn>
           )}
@@ -154,15 +156,15 @@ export function ClusterCard({
 
       {/* Sharding / Instance type badges */}
       <BadgeRow>
-        <TypeBadge>{sharding}</TypeBadge>
-        <TypeBadge>{instanceType === 'MlxRing' ? 'MLX Ring' : 'MLX Jaccl'}</TypeBadge>
-        {isReady && <ReadyBadge><PulseDot /> Ready</ReadyBadge>}
+        <TypeBadge>{sharding === 'Pipeline' ? t('common.pipeline', 'Pipeline') : t('common.tensor', 'Tensor')}</TypeBadge>
+        <TypeBadge>{instanceType === 'MlxRing' ? t('placement.mlxRing', 'MLX Ring') : t('placement.mlxJaccl', 'MLX Jaccl')}</TypeBadge>
+        {isReady && <ReadyBadge><PulseDot /> {t('common.ready', 'Ready')}</ReadyBadge>}
       </BadgeRow>
 
       {/* Download progress */}
       {showDownloads && (
         <DownloadSection>
-          <SectionLabel>Download Progress</SectionLabel>
+          <SectionLabel>{t('clusterCard.downloadProgress', 'Download Progress')}</SectionLabel>
           {downloads.map((dl) => (
             <DownloadRow key={dl.nodeId}>
               <DownloadNode>{dl.nodeName}</DownloadNode>
@@ -183,7 +185,7 @@ export function ClusterCard({
       {/* Launch button */}
       {showLaunch && (
         <LaunchBtn onClick={onLaunch}>
-          <MdPlayArrow size={18} /> Launch
+          <MdPlayArrow size={18} /> {t('clusterCard.launch', 'Launch')}
         </LaunchBtn>
       )}
     </Card>

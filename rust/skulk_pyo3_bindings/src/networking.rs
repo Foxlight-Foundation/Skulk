@@ -12,6 +12,7 @@ use crate::pyclass;
 use futures_lite::{Stream, StreamExt as _};
 use libp2p::gossipsub::PublishError;
 use networking::swarm::{FromSwarm, ToSwarm, create_swarm};
+use networking::zenoh_session::{ZenohConfig, ZenohSession};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::{PyModule, PyModuleMethods as _};
 use pyo3::types::PyBytes;
@@ -200,8 +201,8 @@ impl PyNetworkingHandle {
             bootstrap_peers.unwrap_or_default(),
             listen_port,
         )
-            .pyerr()?
-            .into_stream();
+        .pyerr()?
+        .into_stream();
 
         Ok(Self {
             swarm: Arc::new(Mutex::new(swarm)),
@@ -302,11 +303,107 @@ impl PyNetworkingHandle {
     }
 }
 
+/// One inbound Zenoh sample handed to Python: the key (topic) it arrived on and
+/// its raw payload. Mirrors the `Message` arm of [`PyFromSwarm`]; the data-plane
+/// consumer demuxes by the `command_id` carried inside `data`.
+#[gen_stub_pyclass]
+#[pyclass(name = "ZenohMessage")]
+struct PyZenohMessage {
+    #[pyo3(get)]
+    topic: String,
+    #[pyo3(get)]
+    data: Py<PyBytes>,
+}
+
+/// Handle to the Zenoh peer session backing the data plane (Phase 1).
+///
+/// Separate from [`PyNetworkingHandle`] (libp2p): only the DATA topic is routed
+/// here when the `zenoh_data_plane` flag is on. Methods mirror the gossipsub
+/// surface (subscribe / publish / recv) so the Python `Router` can treat it as
+/// an alternate transport backend.
+#[gen_stub_pyclass]
+#[pyclass(name = "ZenohHandle")]
+struct PyZenohHandle {
+    session: Arc<ZenohSession>,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyZenohHandle {
+    #[new]
+    #[pyo3(signature = (listen_endpoints=None, connect_endpoints=None, namespace=None))]
+    fn py_new(
+        listen_endpoints: Option<Vec<String>>,
+        connect_endpoints: Option<Vec<String>>,
+        namespace: Option<String>,
+    ) -> PyResult<Self> {
+        let config = ZenohConfig {
+            listen_endpoints: listen_endpoints.unwrap_or_default(),
+            connect_endpoints: connect_endpoints.unwrap_or_default(),
+            // #308 namespace isolation; the Python caller passes an
+            // already-validated key-expr segment (or None for the legacy
+            // unprefixed behavior).
+            namespace,
+        };
+        // Opening the session is async; block on it inside the shared tokio
+        // runtime (the same runtime the swarm uses), matching `py_new` above.
+        let runtime = pyo3_async_runtimes::tokio::get_runtime();
+        let session = runtime.block_on(ZenohSession::open(config)).pyerr()?;
+        Ok(Self {
+            session: Arc::new(session),
+        })
+    }
+
+    /// Subscribe to a Zenoh key (topic). Idempotent.
+    async fn zenoh_subscribe(&self, topic: String) -> PyResult<()> {
+        self.session
+            .subscribe(&topic)
+            .allow_threads_py()
+            .await
+            .pyerr()
+    }
+
+    /// Publish `data` on a Zenoh key (Reliable + Block + single priority).
+    async fn zenoh_publish(&self, topic: String, data: Py<PyBytes>) -> PyResult<()> {
+        let data = Python::attach(|py| Vec::from(data.as_bytes(py)));
+        self.session
+            .publish(&topic, data)
+            .allow_threads_py()
+            .await
+            .pyerr()
+    }
+
+    /// Await the next inbound `(topic, data)` sample.
+    #[gen_stub(skip)]
+    fn recv<'py>(&'py self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let session = Arc::clone(&self.session);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let (topic, data) = session
+                .recv()
+                .await
+                .ok_or(PyErr::receiver_channel_closed())?;
+            Ok(PyZenohMessage {
+                topic,
+                data: data.pybytes(),
+            })
+        })
+    }
+}
+
 pyo3_stub_gen::inventory::submit! {
     gen_methods_from_python! {
         r#"
             class PyNetworkingHandle:
                 async def recv() -> PyFromSwarm: ...
+        "#
+    }
+}
+
+pyo3_stub_gen::inventory::submit! {
+    gen_methods_from_python! {
+        r#"
+            class PyZenohHandle:
+                async def recv() -> ZenohMessage: ...
         "#
     }
 }
@@ -318,6 +415,8 @@ pub fn networking_submodule(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<PyNetworkingHandle>()?;
     m.add_class::<PyFromSwarm>()?;
+    m.add_class::<PyZenohHandle>()?;
+    m.add_class::<PyZenohMessage>()?;
 
     Ok(())
 }

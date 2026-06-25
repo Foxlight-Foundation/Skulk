@@ -110,7 +110,7 @@ _patch_arrays_cache_make_mask_signature()
 
 
 def _mlx_hang_debug_enabled() -> bool:
-    value = preferred_env_value("SKULK_MLX_HANG_DEBUG", "EXO_MLX_HANG_DEBUG")
+    value = preferred_env_value("SKULK_MLX_HANG_DEBUG")
     if value is None:
         return False
     return value.strip().lower() not in {"", "0", "false", "no", "off"}
@@ -119,7 +119,6 @@ def _mlx_hang_debug_enabled() -> bool:
 def _mlx_hang_debug_interval_seconds() -> float:
     raw = preferred_env_value(
         "SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS",
-        "EXO_MLX_HANG_DEBUG_INTERVAL_SECONDS",
     )
     if raw is None:
         return 30.0
@@ -243,7 +242,6 @@ def pipeline_eval_timeout_seconds() -> float:
     """
     raw = preferred_env_value(
         "SKULK_PIPELINE_EVAL_TIMEOUT_SECONDS",
-        "EXO_PIPELINE_EVAL_TIMEOUT_SECONDS",
     )
     if raw is None:
         return 60.0

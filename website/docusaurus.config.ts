@@ -4,13 +4,25 @@ import type { Config } from "@docusaurus/types";
 import type * as Preset from "@docusaurus/preset-classic";
 import type { PluginOptions as OpenApiPluginOptions } from "docusaurus-plugin-openapi-docs";
 
+// baseUrl is env-overridable so one config can build two live sites from one
+// deploy job: the stable site (from `main`) at /Skulk/ and the "next" site
+// (from `dev`) at /Skulk/next/. Each is a normal full build of that branch's
+// current docs, so there are no version snapshots to maintain or miss. Anything
+// pointing at the site root (e.g. the TypeDoc static dir) is derived from this
+// so it stays correct on whichever channel is being built.
+// Normalize to exactly one leading and trailing slash (Docusaurus requires both)
+// so a fat-fingered DOCS_BASE_URL (e.g. "Skulk/next") still builds.
+const rawBaseUrl = process.env.DOCS_BASE_URL ?? "/Skulk/";
+const strippedBaseUrl = rawBaseUrl.replace(/^\/+|\/+$/g, "");
+const baseUrl = strippedBaseUrl ? `/${strippedBaseUrl}/` : "/";
+
 const config: Config = {
   title: "Skulk Developer Docs",
   tagline: "Distributed AI inference, edge-to-edge",
   favicon: "img/skulk-logo.svg",
 
   url: "https://foxlight-foundation.github.io",
-  baseUrl: "/Skulk/",
+  baseUrl,
 
   organizationName: "foxlight-foundation",
   projectName: "Skulk",
@@ -105,6 +117,23 @@ const config: Config = {
   themes: ["docusaurus-theme-openapi-docs"],
 
   themeConfig: {
+    // Cross-link the two live sites. On the "next" (dev) build this points back
+    // to the stable docs; on the stable build it points to the dev docs. Driven
+    // by DOCS_CHANNEL so the same config produces the right banner for each build.
+    announcementBar:
+      process.env.DOCS_CHANNEL === "next"
+        ? {
+            id: "channel-next",
+            content:
+              'You are viewing the <b>development (next)</b> docs. For the latest release, see the <a href="/Skulk/">stable docs</a>.',
+            isCloseable: false,
+          }
+        : {
+            id: "channel-stable",
+            content:
+              'You are viewing the <b>stable</b> docs. For unreleased changes, see the <a href="/Skulk/next/">development docs</a>.',
+            isCloseable: true,
+          },
     navbar: {
       title: "Skulk",
       logo: {
@@ -125,13 +154,39 @@ const config: Config = {
           label: "API Reference",
         },
         {
-          // TypeDoc HTML is served from website/static/typedoc/ at /typedoc/.
-          // Uses the full URL so Docusaurus doesn't treat it as an internal
-          // link and fail the broken-link check (static files are invisible
-          // to the link checker).
-          href: "https://foxlight-foundation.github.io/Skulk/typedoc/",
+          // TypeDoc HTML is served from website/static/typedoc/ under the
+          // site baseUrl. Built as a full URL (channel-aware via baseUrl) so
+          // Docusaurus doesn't treat it as an internal link and fail the
+          // broken-link check (static files are invisible to the link checker).
+          href: `https://foxlight-foundation.github.io${baseUrl}typedoc/`,
           label: "TypeScript API",
           position: "left",
+        },
+        {
+          // Always-visible switch between the two live sites. The label shows
+          // the channel you're currently on (driven by DOCS_CHANNEL, the same
+          // env that drives the cross-link banner), and both destinations are
+          // listed so you can jump either way from anywhere in the docs.
+          type: "dropdown",
+          label: process.env.DOCS_CHANNEL === "next" ? "Next (dev)" : "Stable",
+          position: "right",
+          // Full URLs (not root-relative) for the same reason as the TypeDoc
+          // link above: a navbar `href` that looks internal is run through the
+          // broken-link checker, and a cross-channel path like /Skulk/next/ is
+          // not a routable page on the stable build (and vice versa), so it
+          // would fail the build. Full URLs are treated as external and skipped.
+          // (The announcementBar can use root-relative paths because its raw
+          // HTML string is not parsed by the link checker.)
+          items: [
+            {
+              label: "Stable",
+              href: "https://foxlight-foundation.github.io/Skulk/",
+            },
+            {
+              label: "Next (dev)",
+              href: "https://foxlight-foundation.github.io/Skulk/next/",
+            },
+          ],
         },
         {
           href: "https://github.com/Foxlight-Foundation/Skulk",
@@ -158,7 +213,7 @@ const config: Config = {
             { label: "API Reference", to: "/api/skulk-api" },
             {
               label: "TypeScript API",
-              href: "https://foxlight-foundation.github.io/Skulk/typedoc/",
+              href: `https://foxlight-foundation.github.io${baseUrl}typedoc/`,
             },
           ],
         },

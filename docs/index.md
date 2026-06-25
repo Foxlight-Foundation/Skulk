@@ -2,7 +2,7 @@
 
 This site combines practical guides with generated reference material for Skulk.
 
-Skulk is a distributed inference platform, so these docs try to serve both of the audiences that show up most often:
+Skulk is an interconnect fabric for multi-node AI compute (distributed inference is its headline use), so these docs try to serve both of the audiences that show up most often:
 
 - people who are new and want a clear path to a first working setup
 - developers who want exact API, type, and integration reference material

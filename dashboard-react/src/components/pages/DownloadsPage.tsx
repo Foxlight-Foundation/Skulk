@@ -9,6 +9,7 @@ import { FiTrash2, FiSearch } from 'react-icons/fi';
 import { Button } from '../common/Button';
 import { addToast } from '../../hooks/useToast';
 import { PlacementManager } from '../cluster/PlacementManager';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 interface ModelStorePageProps {
   topology: TopologyData | null;
@@ -142,6 +143,7 @@ const SearchIcon = () => <FiSearch size={14} />;
 /* ── Component ────────────────────────────────────────── */
 
 export function ModelStorePage({ topology, downloads, nodeDisk, instances, runners, onChat }: ModelStorePageProps) {
+  const { t } = useSkulkTranslation();
   const [storeEntries, setStoreEntries] = useState<StoreRegistryEntry[]>([]);
   const [storeDownloads, setStoreDownloads] = useState<StoreDownloadProgress[]>([]);
   const [storeLoading, setStoreLoading] = useState(false);
@@ -302,17 +304,17 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
         body: JSON.stringify({ modelId: null }),
       });
       if (res.ok) {
-        addToast({ type: 'success', message: 'Purge command sent to all nodes' });
+        addToast({ type: 'success', message: t('downloads.toasts.purgeSent', 'Purge command sent to all nodes') });
       } else {
-        addToast({ type: 'error', message: 'Failed to send purge command' });
+        addToast({ type: 'error', message: t('downloads.toasts.purgeFailed', 'Failed to send purge command') });
       }
     } catch {
-      addToast({ type: 'error', message: 'Failed to send purge command' });
+      addToast({ type: 'error', message: t('downloads.toasts.purgeFailed', 'Failed to send purge command') });
     } finally {
       setPurging(false);
       setPurgeConfirm(false);
     }
-  }, []);
+  }, [t]);
 
   const [searchOpen, setSearchOpen] = useState(false);
 
@@ -420,15 +422,22 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
         }),
       });
       if (res.ok) {
-        addToast({ type: 'success', message: `Launching ${params.modelId}` });
+        addToast({
+          type: 'success',
+          message: t('downloads.toasts.launchingModel', 'Launching {modelId}', { modelId: params.modelId }),
+        });
       } else {
         const err = await res.json().catch(() => ({}));
-        addToast({ type: 'error', message: (err as Record<string, string>).detail ?? `Failed to launch ${params.modelId}` });
+        addToast({
+          type: 'error',
+          message: (err as Record<string, string>).detail
+            ?? t('downloads.toasts.launchFailedForModel', 'Failed to launch {modelId}', { modelId: params.modelId }),
+        });
       }
     } catch {
-      addToast({ type: 'error', message: `Failed to launch model` });
+      addToast({ type: 'error', message: t('downloads.toasts.launchFailed', 'Failed to launch model') });
     }
-  }, []);
+  }, [t]);
 
   const handleLaunch = useCallback((modelId: string) => {
     handleLaunchWithParams({ modelId, sharding: 'Pipeline', instanceMeta: 'MlxRing', minNodes: 1, excludedNodes: [] });
@@ -437,38 +446,47 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
   const handleStop = useCallback(async (modelId: string) => {
     const instanceId = modelToInstanceId[modelId];
     if (!instanceId) {
-      addToast({ type: 'error', message: `No active instance found for ${modelId}` });
+      addToast({
+        type: 'error',
+        message: t('downloads.toasts.noActiveInstance', 'No active instance found for {modelId}', { modelId }),
+      });
       return;
     }
     try {
       const res = await fetch(`/instance/${encodeURIComponent(instanceId)}`, { method: 'DELETE' });
       if (res.ok) {
-        addToast({ type: 'success', message: `Stopping ${modelId}` });
+        addToast({ type: 'success', message: t('downloads.toasts.stoppingModel', 'Stopping {modelId}', { modelId }) });
       } else {
-        addToast({ type: 'error', message: `Failed to stop ${modelId}` });
+        addToast({ type: 'error', message: t('downloads.toasts.stopFailedForModel', 'Failed to stop {modelId}', { modelId }) });
       }
     } catch {
-      addToast({ type: 'error', message: `Failed to stop model` });
+      addToast({ type: 'error', message: t('downloads.toasts.stopFailed', 'Failed to stop model') });
     }
-  }, [modelToInstanceId]);
+  }, [modelToInstanceId, t]);
 
   const handleDelete = useCallback(async (entry: { model_id: string }, isActive: boolean) => {
     if (isActive) {
-      addToast({ type: 'error', message: 'Stop the model before deleting' });
+      addToast({ type: 'error', message: t('downloads.toasts.stopBeforeDelete', 'Stop the model before deleting') });
       return;
     }
     try {
       const res = await fetch(`/store/models/${encodeURIComponent(entry.model_id)}`, { method: 'DELETE' });
       if (res.ok) {
-        addToast({ type: 'success', message: `Deleted ${entry.model_id}` });
+        addToast({
+          type: 'success',
+          message: t('downloads.toasts.deletedModel', 'Deleted {modelId}', { modelId: entry.model_id }),
+        });
         loadRegistry();
       } else {
-        addToast({ type: 'error', message: `Failed to delete ${entry.model_id}` });
+        addToast({
+          type: 'error',
+          message: t('downloads.toasts.deleteFailedForModel', 'Failed to delete {modelId}', { modelId: entry.model_id }),
+        });
       }
     } catch {
-      addToast({ type: 'error', message: 'Failed to delete model' });
+      addToast({ type: 'error', message: t('downloads.toasts.deleteFailed', 'Failed to delete model') });
     }
-  }, [loadRegistry]);
+  }, [loadRegistry, t]);
 
   const handleOptimize = useCallback(async (modelId: string) => {
     try {
@@ -478,7 +496,10 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
         body: JSON.stringify({ target_bpw: 4.5, candidate_bits: [4, 8] }),
       });
       if (res.ok) {
-        addToast({ type: 'success', message: `OptiQ optimization started for ${modelId}` });
+        addToast({
+          type: 'success',
+          message: t('downloads.toasts.optiqStarted', 'OptiQ optimization started for {modelId}', { modelId }),
+        });
         // Poll for completion/failure (tracked for cleanup on unmount)
         if (optimizePollRef.current) clearInterval(optimizePollRef.current);
         const pollInterval = setInterval(async () => {
@@ -488,23 +509,37 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
             const status = await statusRes.json();
             if (status.status === 'complete') {
               clearInterval(pollInterval);
-              addToast({ type: 'success', message: `OptiQ optimization complete: ${status.achievedBpw?.toFixed(2) ?? '?'} BPW` });
+              addToast({
+                type: 'success',
+                message: t(
+                  'downloads.toasts.optiqComplete',
+                  'OptiQ optimization complete: {achievedBpw} BPW',
+                  { achievedBpw: status.achievedBpw?.toFixed(2) ?? '?' },
+                ),
+              });
               loadRegistry();
             } else if (status.status === 'failed') {
               clearInterval(pollInterval);
-              addToast({ type: 'error', message: status.error ?? 'Optimization failed' });
+              addToast({
+                type: 'error',
+                message: status.error ?? t('downloads.toasts.optimizationFailed', 'Optimization failed'),
+              });
             }
           } catch { clearInterval(pollInterval); optimizePollRef.current = undefined; }
         }, 5000);
         optimizePollRef.current = pollInterval;
       } else {
         const err = await res.json().catch(() => ({}));
-        addToast({ type: 'error', message: (err as Record<string, string>).detail ?? 'Failed to start optimization' });
+        addToast({
+          type: 'error',
+          message: (err as Record<string, string>).detail
+            ?? t('downloads.toasts.optimizationStartFailed', 'Failed to start optimization'),
+        });
       }
     } catch {
-      addToast({ type: 'error', message: 'Failed to start optimization' });
+      addToast({ type: 'error', message: t('downloads.toasts.optimizationStartFailed', 'Failed to start optimization') });
     }
-  }, [loadRegistry]);
+  }, [loadRegistry, t]);
 
   return (
     <Container>
@@ -512,21 +547,22 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
         <PurgeModal>
           <ModalBackdrop onClick={() => setPurgeConfirm(false)} />
           <ModalBox>
-            <ModalTitle>Purge all node caches</ModalTitle>
+            <ModalTitle>{t('downloads.purge.title', 'Purge all node caches')}</ModalTitle>
             <ModalText>
-              This will remove all staged model files and partial downloads from
-              every node in the cluster. Models will need to be re-downloaded
-              before they can run again.
+              {t(
+                'downloads.purge.description',
+                'This will remove all staged model files and partial downloads from every node in the cluster. Models will need to be re-downloaded before they can run again.',
+              )}
             </ModalText>
             <ModalNote>
-              Nodes that are currently offline will not receive this command.
+              {t('downloads.purge.offlineNote', 'Nodes that are currently offline will not receive this command.')}
             </ModalNote>
             <ModalActions>
               <Button variant="outline" size="md" onClick={() => setPurgeConfirm(false)}>
-                Cancel
+                {t('common.cancel', 'Cancel')}
               </Button>
               <Button variant="danger" size="md" loading={purging} onClick={handlePurge}>
-                {purging ? 'Purging...' : 'Purge All'}
+                {purging ? t('downloads.purge.purging', 'Purging...') : t('downloads.purge.confirm', 'Purge All')}
               </Button>
             </ModalActions>
           </ModalBox>
@@ -542,10 +578,10 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
           actions={
             <>
               <Button variant="danger" size="sm" onClick={() => setPurgeConfirm(true)}>
-                <TrashIcon /> Purge Node Caches
+                <TrashIcon /> {t('downloads.actions.purgeNodeCaches', 'Purge Node Caches')}
               </Button>
               <Button variant="primary" size="sm" onClick={() => setSearchOpen(true)}>
-                <SearchIcon /> Find Models
+                <SearchIcon /> {t('downloads.actions.findModels', 'Find Models')}
               </Button>
             </>
           }

@@ -3,8 +3,10 @@ import pytest
 from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
+    add_instance_to_placements,
     get_transition_events,
     place_instance,
+    replacement_command_for_refused_instance,
 )
 from skulk.master.tests.conftest import (
     create_node_memory,
@@ -14,7 +16,7 @@ from skulk.master.tests.conftest import (
 )
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.topology import Topology
-from skulk.shared.types.commands import PlaceInstance
+from skulk.shared.types.commands import CreateInstance, PlaceInstance
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import (
     InstanceCreated,
@@ -23,7 +25,12 @@ from skulk.shared.types.events import (
 )
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.multiaddr import Multiaddr
-from skulk.shared.types.profiling import NetworkInterfaceInfo, NodeNetworkInfo
+from skulk.shared.types.profiling import (
+    MemoryUsage,
+    NetworkInterfaceInfo,
+    NodeNetworkInfo,
+    NodeResources,
+)
 from skulk.shared.types.tasks import TaskId, TaskStatus, TextGeneration
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from skulk.shared.types.topology import Connection, SocketConnection
@@ -40,7 +47,7 @@ from skulk.shared.types.worker.instances import (
     MlxJacclInstance,
     MlxRingInstance,
 )
-from skulk.shared.types.worker.runners import ShardAssignments
+from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import PipelineShardMetadata, Sharding
 
 
@@ -226,6 +233,91 @@ def test_get_instance_placements_one_node_fits_with_extra_memory() -> None:
     assert len(instance.shard_assignments.node_to_runner) == 1
     assert len(instance.shard_assignments.runner_to_shard) == 1
     assert len(instance.shard_assignments.runner_to_shard) == 1
+
+
+def test_placement_stamps_context_token_limit() -> None:
+    # #279 slice 2: the master computes the context-admission ceiling once at
+    # placement time and stamps it onto the instance, so every rank reads the
+    # identical value instead of recomputing from (now telemetry-plane) memory.
+    topology = Topology()
+    node_id = NodeId()
+    topology.add_node(node_id)
+    node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
+    node_network = {node_id: create_node_network()}
+    cic = place_instance_command(
+        ModelCard(
+            model_id=ModelId("test-model"),
+            storage_size=Memory.from_gb(5),
+            n_layers=10,
+            hidden_size=1000,
+            supports_tensor=True,
+            tasks=[ModelTask.TextGeneration],
+            context_length=4096,
+        ),
+    )
+    placements = place_instance(cic, topology, {}, node_memory, node_network)
+    instance = next(iter(placements.values()))
+    # A card-advertised context_length makes the ceiling enforceable; the stamp
+    # is present and never exceeds the advertised limit.
+    assert instance.context_token_limit is not None
+    assert instance.context_token_limit <= 4096
+
+
+def test_placement_stamps_resolved_backend() -> None:
+    # #330: the master resolves each node's backend at placement time and stamps
+    # it on the shard, so the worker dispatches from replicated state instead of
+    # re-probing. A node advertising {"mlx"} for an mlx card -> resolved "mlx".
+    topology = Topology()
+    node_id = NodeId()
+    topology.add_node(node_id)
+    node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
+    node_network = {node_id: create_node_network()}
+    node_resources = {
+        node_id: NodeResources(
+            backends=frozenset({"mlx", "mlx-metal"}), participation="full"
+        )
+    }
+    cic = place_instance_command(
+        ModelCard(
+            model_id=ModelId("test-model"),
+            storage_size=Memory.from_gb(5),
+            n_layers=10,
+            hidden_size=1000,
+            supports_tensor=True,
+            tasks=[ModelTask.TextGeneration],
+        ),
+    )
+    placements = place_instance(
+        cic, topology, {}, node_memory, node_network, node_resources=node_resources
+    )
+    instance = next(iter(placements.values()))
+    shard = next(iter(instance.shard_assignments.runner_to_shard.values()))
+    assert shard.resolved_backend == "mlx"
+
+
+def test_placement_leaves_resolved_backend_none_without_node_resources() -> None:
+    # When the master has no resources entry for the node (gossip warming up), it
+    # cannot resolve a backend; resolved_backend stays None and the worker falls
+    # back to its local probe.
+    topology = Topology()
+    node_id = NodeId()
+    topology.add_node(node_id)
+    node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
+    node_network = {node_id: create_node_network()}
+    cic = place_instance_command(
+        ModelCard(
+            model_id=ModelId("test-model"),
+            storage_size=Memory.from_gb(5),
+            n_layers=10,
+            hidden_size=1000,
+            supports_tensor=True,
+            tasks=[ModelTask.TextGeneration],
+        ),
+    )
+    placements = place_instance(cic, topology, {}, node_memory, node_network)
+    instance = next(iter(placements.values()))
+    shard = next(iter(instance.shard_assignments.runner_to_shard.values()))
+    assert shard.resolved_backend is None
 
 
 def test_get_instance_placements_one_node_not_fit() -> None:
@@ -756,6 +848,69 @@ def _make_shard_metadata(model_card: ModelCard) -> PipelineShardMetadata:
     )
 
 
+def test_legacy_instance_backfills_context_token_limit_from_card() -> None:
+    # An instance hydrated without a stamped ceiling (pre-#279 slice 2 snapshot
+    # / event / older CreateInstance) must fall back to the card's context
+    # length so the #145 admission guard still applies (review catch on #292).
+    node_id = NodeId()
+    runner_id = RunnerId()
+    card = ModelCard(
+        model_id=ModelId("legacy-model"),
+        storage_size=Memory.from_gb(1),
+        n_layers=10,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        context_length=8192,
+    )
+    instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=ModelId("legacy-model"),
+            runner_to_shard={runner_id: _make_shard_metadata(card)},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+        # context_token_limit deliberately omitted (the legacy/None case)
+    )
+    assert instance.context_token_limit == 8192
+
+
+def test_create_instance_restamps_context_token_limit() -> None:
+    # The exact-control POST /instance path must stamp the master's
+    # memory-derived ceiling too (#292 review) — runners trust the stamped
+    # field now, so a client-supplied placement can't smuggle in an inflated
+    # ceiling and reach MLX past the safe limit.
+    node_id = NodeId()
+    runner_id = RunnerId()
+    card = ModelCard(
+        model_id=ModelId("exact-model"),
+        storage_size=Memory.from_gb(1),
+        n_layers=10,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        context_length=4096,
+    )
+    client_instance = MlxRingInstance(
+        instance_id=InstanceId(),
+        shard_assignments=ShardAssignments(
+            model_id=ModelId("exact-model"),
+            runner_to_shard={runner_id: _make_shard_metadata(card)},
+            node_to_runner={node_id: runner_id},
+        ),
+        hosts_by_node={},
+        ephemeral_port=50000,
+        context_token_limit=999_999,  # client-inflated; must be overridden
+    )
+    command = CreateInstance(command_id=CommandId(), instance=client_instance)
+    node_memory = {node_id: create_node_memory(Memory.from_gb(8).in_bytes)}
+    result = add_instance_to_placements(command, Topology(), {}, node_memory)
+    stamped = next(iter(result.values())).context_token_limit
+    assert stamped is not None and stamped <= 4096
+
+
 def test_placement_prefers_cycle_with_downloaded_model(
     model_card: ModelCard,
 ) -> None:
@@ -923,3 +1078,323 @@ def test_placement_does_not_prefer_cycle_with_failed_download(
     assigned_nodes = set(instance.shard_assignments.node_to_runner.keys())
     # node_a should win on RAM tiebreaker since failed download scores 0.0
     assert assigned_nodes == {node_a}
+
+
+def test_management_node_is_excluded_from_placement() -> None:
+    """A node declaring participation="management" must never receive an
+    inference shard, even though it is topologically present and has memory.
+    The planner routes to the full-participation node instead (#149)."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_resources={
+            node_a: NodeResources(participation="management"),
+            node_b: NodeResources(participation="full"),
+        },
+    )
+
+    assert len(placements) == 1
+    instance = next(iter(placements.values()))
+    assert set(instance.shard_assignments.node_to_runner.keys()) == {node_b}
+
+
+def test_all_management_nodes_fail_to_place() -> None:
+    """If every candidate node is management-only, placement raises rather
+    than assigning a shard to a non-participating node."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    with pytest.raises(ValueError, match="ineligible for this model"):
+        place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources={
+                node_a: NodeResources(participation="management"),
+                node_b: NodeResources(participation="management"),
+            },
+        )
+
+
+def test_backend_incompatible_node_is_excluded() -> None:
+    """A node whose advertised backends do not intersect the card's
+    compatible_backends (default {"mlx"}) is filtered out (#149)."""
+    topology, node_a, node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_resources={
+            node_a: NodeResources(backends=frozenset({"llama_cpp"})),
+            node_b: NodeResources(backends=frozenset({"mlx"})),
+        },
+    )
+
+    assert len(placements) == 1
+    instance = next(iter(placements.values()))
+    assert set(instance.shard_assignments.node_to_runner.keys()) == {node_b}
+
+
+def test_missing_node_resources_is_treated_as_eligible() -> None:
+    """Nodes with no resources entry yet (gossip still warming up) must remain
+    placeable, matching the pre-#149 full/mlx default — no regression."""
+    topology, _node_a, _node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_small_model_card())
+
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_resources={},  # nothing gossiped yet
+    )
+
+    assert len(placements) == 1
+
+
+def _fully_connected_three_nodes(
+    available_memory: tuple[float, float, float],
+) -> tuple[
+    Topology,
+    dict[NodeId, MemoryUsage],
+    dict[NodeId, NodeNetworkInfo],
+    list[NodeId],
+]:
+    """Build a fully-connected 3-node topology with the given available RAM.
+
+    Returns ``(topology, node_memory, node_network, node_ids)``. Used by the
+    refused-placement re-placement tests (#290).
+    """
+    topology = Topology()
+    node_ids = [NodeId(), NodeId(), NodeId()]
+    for node_id in node_ids:
+        topology.add_node(node_id)
+    # directed full mesh
+    port = 1
+    for source in node_ids:
+        for sink in node_ids:
+            if source != sink:
+                topology.add_connection(
+                    Connection(
+                        source=source,
+                        sink=sink,
+                        edge=create_socket_connection(port),
+                    )
+                )
+                port += 1
+    node_memory = {
+        node_ids[i]: create_node_memory(Memory.from_gb(available_memory[i]).in_bytes)
+        for i in range(3)
+    }
+    node_network = {node_id: create_node_network() for node_id in node_ids}
+    return topology, node_memory, node_network, node_ids
+
+
+def test_replacement_command_widens_refused_instance_by_one_node() -> None:
+    """A refused instance re-places one node wider, preserving model + backend (#290)."""
+    topology, node_memory, node_network, _ = _fully_connected_three_nodes(
+        (10.0, 10.0, 10.0)
+    )
+    card = ModelCard(
+        model_id=ModelId("widen-model"),
+        storage_size=Memory.from_gb(6),
+        n_layers=12,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+    )
+    two_node = PlaceInstance(
+        model_card=card,
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=2,
+    )
+    placed = place_instance(two_node, topology, {}, node_memory, node_network)
+    instance = next(iter(placed.values()))
+    assert len(instance.shard_assignments.node_to_runner) == 2
+
+    replacement = replacement_command_for_refused_instance(instance)
+    assert replacement.min_nodes == 3
+    assert replacement.model_card.model_id == card.model_id
+    assert replacement.sharding == Sharding.Pipeline
+    assert replacement.instance_meta == InstanceMeta.MlxRing
+
+
+def test_refused_instance_replaces_onto_a_wider_split() -> None:
+    """A refused 2-node placement re-places across all three nodes (#290).
+
+    The master picks the smallest fitting cycle, so on a memory view where the
+    2-node split looks fine it keeps choosing 2 nodes — exactly the view that
+    over-admits the split a worker then refuses on its tighter live reading.
+    Bumping ``min_nodes`` to 3 forces the wider floor, so the re-placement lands
+    a 3-node split (smaller per-node share) instead of the doomed 2-node one.
+    """
+    topology, node_memory, node_network, _ = _fully_connected_three_nodes(
+        (10.0, 10.0, 10.0)
+    )
+    card = ModelCard(
+        model_id=ModelId("widen-fit-model"),
+        storage_size=Memory.from_gb(6),
+        n_layers=12,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+    )
+    two_node = PlaceInstance(
+        model_card=card,
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=2,
+    )
+    placed = place_instance(two_node, topology, {}, node_memory, node_network)
+    refused_instance = next(iter(placed.values()))
+    # The same memory view keeps selecting the 2-node split.
+    assert len(refused_instance.shard_assignments.node_to_runner) == 2
+
+    replacement = replacement_command_for_refused_instance(refused_instance)
+    assert replacement.min_nodes == 3
+    widened = place_instance(replacement, topology, {}, node_memory, node_network)
+    widened_instance = next(iter(widened.values()))
+    assert len(widened_instance.shard_assignments.node_to_runner) == 3
+
+
+def test_replacement_at_full_cluster_width_is_terminal() -> None:
+    """Re-placing a full-width instance raises PlacementError (loop bound) (#290).
+
+    A 3-node instance on a 3-node cluster widens to min_nodes=4, which cannot be
+    satisfied — place_instance raises, and the master treats that as the terminal
+    "cannot fit anywhere" outcome that stops the refuse→re-place loop.
+    """
+    topology, node_memory, node_network, _ = _fully_connected_three_nodes(
+        (10.0, 10.0, 10.0)
+    )
+    card = ModelCard(
+        model_id=ModelId("full-width-model"),
+        storage_size=Memory.from_gb(9),
+        n_layers=12,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+    )
+    three_node = PlaceInstance(
+        model_card=card,
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=3,
+    )
+    placed = place_instance(three_node, topology, {}, node_memory, node_network)
+    instance = next(iter(placed.values()))
+    assert len(instance.shard_assignments.node_to_runner) == 3
+
+    replacement = replacement_command_for_refused_instance(instance)
+    assert replacement.min_nodes == 4
+    with pytest.raises(PlacementError):
+        place_instance(replacement, topology, {}, node_memory, node_network)
+
+
+def _llama_cpp_card() -> ModelCard:
+    """A GGUF-style card whose compatible backends are all llama_cpp tags."""
+    from skulk.shared.models.model_cards import PlacementCardConfig
+
+    return ModelCard(
+        model_id=ModelId("test-gguf"),
+        storage_size=Memory.from_mb(500),
+        n_layers=10,
+        hidden_size=1000,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        placement=PlacementCardConfig(
+            compatible_backends=frozenset({"llama_cpp-vulkan", "llama_cpp-cpu"})
+        ),
+    )
+
+
+def test_llama_cpp_multi_node_placement_is_rejected() -> None:
+    """llama.cpp is single-node only; a forced multi-node placement of a
+    llama.cpp-only card is rejected up front rather than crashing at runner
+    startup (world_size != 1)."""
+    topology = Topology()
+    node_a = NodeId()
+    node_b = NodeId()
+    topology.add_node(node_a)
+    topology.add_node(node_b)
+    topology.add_connection(
+        Connection(source=node_a, sink=node_b, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=node_b, sink=node_a, edge=create_socket_connection(2))
+    )
+    node_memory = {
+        node_a: create_node_memory(Memory.from_gb(8).in_bytes),
+        node_b: create_node_memory(Memory.from_gb(8).in_bytes),
+    }
+    node_network = {node_a: create_node_network(), node_b: create_node_network()}
+    command = place_instance_command(_llama_cpp_card()).model_copy(
+        update={"min_nodes": 2}
+    )
+    with pytest.raises(ValueError, match="single-node only"):
+        place_instance(command, topology, {}, node_memory, node_network)
+
+
+def test_llama_cpp_single_node_placement_succeeds() -> None:
+    """The single-node guard must not block a legitimate single-node placement."""
+    topology, _node_a, _node_b, node_memory, node_network = _two_node_topology()
+    command = place_instance_command(_llama_cpp_card())
+    placements = place_instance(command, topology, {}, node_memory, node_network)
+    assert len(placements) == 1
+    instance = next(iter(placements.values()))
+    assert len(instance.shard_assignments.node_to_runner) == 1
+
+
+def test_hybrid_card_with_multi_node_engine_places_multi_node() -> None:
+    """The single-node guard keys on engine capability, not on llama.cpp by name:
+    a card that also allows a multi-node engine (MLX) still places across nodes,
+    serving via that engine. Guards #328's generalization of the old
+    llama.cpp-only special-case."""
+    from skulk.shared.models.model_cards import PlacementCardConfig
+
+    topology = Topology()
+    node_a = NodeId()
+    node_b = NodeId()
+    topology.add_node(node_a)
+    topology.add_node(node_b)
+    topology.add_connection(
+        Connection(source=node_a, sink=node_b, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=node_b, sink=node_a, edge=create_socket_connection(2))
+    )
+    node_memory = {
+        node_a: create_node_memory(Memory.from_gb(8).in_bytes),
+        node_b: create_node_memory(Memory.from_gb(8).in_bytes),
+    }
+    node_network = {node_a: create_node_network(), node_b: create_node_network()}
+    hybrid_card = ModelCard(
+        model_id=ModelId("test-hybrid"),
+        storage_size=Memory.from_mb(500),
+        n_layers=10,
+        hidden_size=1000,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        placement=PlacementCardConfig(
+            compatible_backends=frozenset({"mlx", "llama_cpp-vulkan"})
+        ),
+    )
+    command = place_instance_command(hybrid_card).model_copy(update={"min_nodes": 2})
+    # Must NOT raise the single-node guard: MLX is multi-node capable.
+    placements = place_instance(command, topology, {}, node_memory, node_network)
+    instance = next(iter(placements.values()))
+    assert len(instance.shard_assignments.node_to_runner) == 2

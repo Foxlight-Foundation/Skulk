@@ -305,6 +305,15 @@ Header conventions:
   submitting a pull request you license your contribution under the same
   terms.
 
+## Branching Model
+
+Day-to-day work branches from `dev` and merges back to `dev` via pull
+request. `main` is the release branch: it only advances when `dev` is
+promoted as part of a release cut, so `main` always reflects a tested,
+releasable state. Open pull requests against `dev` (the repository
+default); release promotion PRs from `dev` to `main` are opened by the
+maintainers.
+
 ## Submitting Changes
 
 1. Fork the repository

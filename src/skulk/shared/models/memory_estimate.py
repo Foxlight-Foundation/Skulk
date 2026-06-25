@@ -50,6 +50,32 @@ placement check and the worker's local guard derive the ceiling from
 worker on the same heuristic makes the two checks agree); the worker's advantage
 is using *current local* ``ram_available`` rather than the gossiped value."""
 
+GPU_VRAM_WORKING_SET_FRACTION: float = 0.90
+"""Fraction of a node's *discrete GPU VRAM* usable for weights + KV on a
+GPU-offload node (AMD/NVIDIA running llama.cpp/vLLM/CUDA), as opposed to
+``GPU_WORKING_SET_FRACTION`` for Apple unified memory. Discrete VRAM is a
+dedicated pool the engine allocates from, not shared with the OS and app
+working set, so only driver/runtime/fragmentation overhead is unavailable
+(hence a higher fraction than Apple's 0.75). 0.90 matches the de-facto GPU
+default (e.g. vLLM ``gpu_memory_utilization``). Used only when a node reports
+discrete VRAM telemetry; Apple unified-memory nodes keep the 0.75 path."""
+
+UMA_GPU_OS_HEADROOM: Memory = Memory.from_gb(16)
+"""System RAM to leave for the OS on a unified-memory GPU node (AMD APU, e.g.
+Strix Halo) when counting host memory the GPU can map via GTT toward the usable
+pool. On such a node the GPU addresses the BIOS VRAM carve-out *plus* system RAM
+through GTT, so a model larger than the carve-out runs there; this reserve keeps
+the OS + worker + download staging from being squeezed out of the shared pool.
+16 GB is generous for a headless inference node; the worker's local pre-spawn
+guard backstops it with current free memory."""
+
+LLAMA_CPP_MEMORY_OVERHEAD_FACTOR: float = 1.10
+"""``MEMORY_OVERHEAD_FACTOR`` for the llama.cpp (GGUF) engine. The 1.30 default
+covers MLX's buffer cache + Python/MLX runtime, which the C++ llama.cpp runtime
+does not carry; its resident footprint is ~weights + KV + a modest compute
+buffer, so 1.10 is the right margin. Over-applying 1.30 to a GGUF wrongly refuses
+models that fit (e.g. a 58.5 GB gpt-oss-120B looked like 76 GB)."""
+
 KV_CONTEXT_BUDGET_TOKENS: int = 8192
 """Per-sequence context length reserved for KV cache during the fit check.
 Reserving a model's advertised max (e.g. GLM-4.7-Flash: 131072) would over-
@@ -63,6 +89,22 @@ persist ``head_dim``). 128 dominates current MLX families (Llama/Qwen/GLM)."""
 KV_DTYPE_BYTES: int = 2
 """Bytes per KV-cache element. MLX keeps the KV cache in fp16 even for 4-bit
 weights unless quantized-KV is explicitly enabled, which Skulk does not."""
+
+
+def memory_overhead_factor(model_card: ModelCard) -> float:
+    """Engine-appropriate weight-overhead multiplier for a model.
+
+    Returns ``LLAMA_CPP_MEMORY_OVERHEAD_FACTOR`` for a GGUF model (the card
+    carries a ``gguf_file``, so it runs on the llama.cpp/C++ engine) and the
+    MLX-tuned ``MEMORY_OVERHEAD_FACTOR`` otherwise. GGUF is lighter because the
+    C++ runtime carries no MLX buffer cache and no Python/MLX interpreter
+    overhead; its resident footprint is essentially weights + KV + a modest
+    compute buffer. Applying the 1.30 MLX factor to a GGUF over-refuses models
+    that fit (a 58.5 GB gpt-oss-120B looked like ~76 GB).
+    """
+    if model_card.gguf_file:
+        return LLAMA_CPP_MEMORY_OVERHEAD_FACTOR
+    return MEMORY_OVERHEAD_FACTOR
 
 
 def estimate_kv_cache_bytes(
@@ -112,7 +154,11 @@ def estimate_shard_footprint(
     weights_share = model_card.storage_size * shard_fraction
     full_kv = estimate_kv_cache_bytes(model_card, model_card.n_layers, context_budget)
     kv_share = full_kv * shard_fraction
-    return weights_share * MEMORY_OVERHEAD_FACTOR + kv_share + MEMORY_OVERHEAD_FLOOR
+    return (
+        weights_share * memory_overhead_factor(model_card)
+        + kv_share
+        + MEMORY_OVERHEAD_FLOOR
+    )
 
 
 def gpu_working_set_ceiling(ram_total: Memory) -> Memory:
@@ -156,6 +202,7 @@ def shard_fraction_of_model(shard: ShardMetadata) -> float | None:
 def instance_context_token_limit(
     shard_assignments: ShardAssignments,
     node_ram_totals: Mapping[NodeId, Memory],
+    node_vram: Mapping[NodeId, Memory] | None = None,
 ) -> int | None:
     """Deterministic context-token ceiling for one placed instance.
 
@@ -167,14 +214,21 @@ def instance_context_token_limit(
 
     Determinism is load-bearing: on multi-rank instances every rank admits or
     rejects a request independently, and divergent verdicts deadlock the
-    collectives. All inputs here are static — ``ram_total`` never changes for
-    a node, and placement only happens after the master has indexed memory
-    for every hosting node, so every worker computes the identical value.
-    Time-varying ``ram_available`` must NOT be used here.
+    collectives. All inputs here are static (``ram_total`` and a node's discrete
+    VRAM total never change for a node), and placement only happens after the
+    master has indexed memory for every hosting node, so every worker computes
+    the identical value. Time-varying ``ram_available`` must NOT be used here.
+
+    ``node_vram`` (a node's usable discrete-GPU VRAM, see ``usable_vram_by_node``)
+    is the working-set ceiling for a GPU-offload node, mirroring the memory-fit
+    admission: without it a model whose weights exceed ``0.75 * ram_total`` but
+    fit in VRAM would get a negative KV budget and a 0-token ceiling (every
+    request rejected), even though placement admitted it against VRAM.
 
     Returns ``None`` when no ceiling is enforceable (unknown KV cost or
     missing node memory, falling back to the card limit when that exists).
     """
+    node_vram = node_vram or {}
     model_card: ModelCard | None = None
     memory_limit: int | None = None
     for shard in shard_assignments.runner_to_shard.values():
@@ -193,9 +247,10 @@ def instance_context_token_limit(
             if fraction is None or fraction <= 0.0 or ram_total is None:
                 memory_limit = None
                 break
+            working_set = node_vram.get(node_id) or gpu_working_set_ceiling(ram_total)
             kv_budget = (
-                gpu_working_set_ceiling(ram_total)
-                - model_card.storage_size * fraction * MEMORY_OVERHEAD_FACTOR
+                working_set
+                - model_card.storage_size * fraction * memory_overhead_factor(model_card)
                 - MEMORY_OVERHEAD_FLOOR
             )
             node_tokens = max(
@@ -207,7 +262,28 @@ def instance_context_token_limit(
 
     card_limit = model_card.context_length if model_card.context_length > 0 else None
     if memory_limit is None:
-        return card_limit
-    if card_limit is None:
-        return memory_limit
-    return min(memory_limit, card_limit)
+        limit = card_limit
+    elif card_limit is None:
+        limit = memory_limit
+    else:
+        limit = min(memory_limit, card_limit)
+
+    # The llama.cpp runner allocates its KV cache up front and caps the loaded
+    # context to KV_CONTEXT_BUDGET_TOKENS (the same budget placement reserves; see
+    # the runner's _serving_n_ctx). The memory/card ceiling above can be far
+    # larger (tens of thousands of tokens), so without this a request between the
+    # budget and that ceiling is ADMITTED by the API but exceeds the runner's
+    # loaded window and fails/truncates at generation instead of being cleanly
+    # rejected (#362; logprobs lowers the runner window further, the original
+    # report). Cap a GGUF/llama.cpp instance's admission ceiling to the budget so
+    # admission matches what the runner actually serves. (Serving beyond the
+    # budget needs placement to reserve the larger KV footprint first, tracked
+    # with VRAM-aware admission; when that lands both this cap and _serving_n_ctx
+    # move together off the shared constant.)
+    if model_card.gguf_file:
+        limit = (
+            KV_CONTEXT_BUDGET_TOKENS
+            if limit is None
+            else min(limit, KV_CONTEXT_BUDGET_TOKENS)
+        )
+    return limit

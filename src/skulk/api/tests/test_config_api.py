@@ -78,7 +78,6 @@ def test_get_config_treats_blank_skulk_kv_backend_as_default(
     config_path = tmp_path / "skulk.yaml"
     config_path.write_text("inference:\n  kv_cache_backend: default\n", encoding="utf-8")
     monkeypatch.setenv("SKULK_KV_CACHE_BACKEND", "")
-    monkeypatch.setenv("EXO_KV_CACHE_BACKEND", "optiq")
 
     api = _build_api()
     object.__setattr__(api, "_config_path", config_path)

@@ -31,8 +31,19 @@ def _find_resources_in_bundle() -> Path | None:
     return None
 
 
+def find_dashboard_optional() -> Path | None:
+    """Locate the built dashboard assets, or ``None`` if they are absent.
+
+    A headless/worker node (e.g. a Linux node with no node/npm to build the
+    dashboard) is a first-class deployment, so a missing ``dashboard-react/dist``
+    must not be fatal. Callers that can run without the UI use this and skip
+    serving it; callers that require the UI use :func:`find_dashboard`.
+    """
+    return _find_react_dashboard_in_repo() or _find_dashboard_in_bundle()
+
+
 def find_dashboard() -> Path:
-    dashboard = _find_react_dashboard_in_repo() or _find_dashboard_in_bundle()
+    dashboard = find_dashboard_optional()
     if not dashboard:
         raise FileNotFoundError(
             "Unable to locate dashboard assets — run: cd dashboard-react && npm install && npm run build && cd .."

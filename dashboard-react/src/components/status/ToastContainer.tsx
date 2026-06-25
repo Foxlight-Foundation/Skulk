@@ -2,6 +2,7 @@ import styled, { keyframes, useTheme } from 'styled-components';
 import { useToast, type Toast } from '../../hooks/useToast';
 import { Button } from '../common/Button';
 import type { Theme } from '../../theme';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 /* ---- type config ---- */
 
@@ -118,6 +119,7 @@ const ProgressBar = styled.div<{ $color: string; $duration: number }>`
 /* ---- component ---- */
 
 export function ToastContainer() {
+  const { t } = useSkulkTranslation();
   const { toasts, dismissToast } = useToast();
   const theme = useTheme() as Theme;
   const TYPE_STYLES = buildTypeStyles(theme);
@@ -125,7 +127,7 @@ export function ToastContainer() {
   if (toasts.length === 0) return null;
 
   return (
-    <Container role="log" aria-live="polite" aria-label="Notifications">
+    <Container role="log" aria-live="polite" aria-label={t('toast.notifications', 'Notifications')}>
       {toasts.map((toast) => {
         const style = TYPE_STYLES[toast.type];
         return (
@@ -140,7 +142,13 @@ export function ToastContainer() {
                 <path d={style.iconPath} />
               </svg>
               <Message>{toast.message}</Message>
-              <DismissBtn variant="ghost" size="sm" icon onClick={() => dismissToast(toast.id)} aria-label="Dismiss notification">
+              <DismissBtn
+                variant="ghost"
+                size="sm"
+                icon
+                onClick={() => dismissToast(toast.id)}
+                aria-label={t('toast.dismissNotification', 'Dismiss notification')}
+              >
                 <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
                   <path d="M6 18L18 6M6 6l12 12" />
                 </svg>

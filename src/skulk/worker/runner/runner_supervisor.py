@@ -15,7 +15,8 @@ from anyio import (
 )
 from loguru import logger
 
-from skulk.shared.types.chunks import ErrorChunk
+from skulk.shared.types.chunks import DataChunk, EmbeddingChunk, ErrorChunk
+from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.diagnostics import (
     MlxMemorySnapshot,
     RunnerDiagnosticContext,
@@ -110,6 +111,11 @@ class RunnerSupervisor:
     _task_sender: MpSender[Task]
     _event_sender: Sender[Event]
     _cancel_sender: MpSender[TaskId]
+    # Data plane (#279 Phase 2): generation output chunks (ChunkGenerated) are
+    # diverted here and streamed direct to the owning API node instead of the
+    # event log. None falls back to the event path (tests / a node with no DATA
+    # topic wired), preserving the pre-Phase-2 behavior.
+    _data_sender: "Sender[DataChunk] | None" = None
     _tg: TaskGroup = field(default_factory=TaskGroup, init=False)
     status: RunnerStatus = field(default_factory=RunnerIdle, init=False)
     pending: dict[TaskId, anyio.Event] = field(default_factory=dict, init=False)
@@ -120,11 +126,36 @@ class RunnerSupervisor:
     # duplicates from the runner are suppressed (#278). Bounded by the tasks
     # this runner ever saw (runner lifetime is instance-scoped).
     _terminal_forwarded: set[TaskId] = field(default_factory=set, init=False)
+    # Per-command monotonic counter stamped onto each DataChunk so the owning
+    # API node can reorder output that the DATA gossip topic may deliver out of
+    # order (#279 Phase 2b: multi-node producers reach the API across the mesh).
+    # _forward_events reads the runner's events in generation order, so the
+    # counter assigned here is the true order.
+    _chunk_sequence: dict[CommandId, int] = field(default_factory=dict, init=False)
+    # The owning API node for each in-flight serving command (#279 Phase 2).
+    # Populated when a serving task is submitted (the master carries the owning
+    # API node onto the task), read in _emit to stamp each DataChunk so the Zenoh
+    # data plane can address it to that node. Same lifecycle as _chunk_sequence:
+    # dropped on the terminal chunk or terminal task status. The API stamps
+    # owner_node on every serving command (gossipsub and Zenoh alike), so this is
+    # normally populated on both paths; on gossipsub the stamped owner is simply
+    # ignored (the bare topic broadcasts). Entries are absent only for tasks that
+    # carry no owner_node at all.
+    _command_owner: dict[CommandId, NodeId] = field(default_factory=dict, init=False)
     _cancel_watch_runner: anyio.CancelScope = field(
         default_factory=anyio.CancelScope, init=False
     )
     _status_since: str = field(default_factory=_now_utc_iso, init=False)
     _status_since_monotonic: float = field(default_factory=time.monotonic, init=False)
+    # Wall-clock baseline for the first-status-report deadline (#272). `status`
+    # defaults to RunnerIdle before the runner process ever reports, so it cannot
+    # distinguish "reported idle" from "never reported"; this flag does, and the
+    # created timestamp bounds how long the worker waits for that first report
+    # before giving the instance up (a runner frozen between spawn and its first
+    # report would otherwise stall ConnectToGroup forever, with no breaker since
+    # the process is alive).
+    _created_monotonic: float = field(default_factory=time.monotonic, init=False)
+    _first_status_reported: bool = field(default=False, init=False)
     _last_task_sent_at: str | None = field(default=None, init=False)
     _last_event_received_at: str | None = field(default=None, init=False)
     _last_event_type: str | None = field(default=None, init=False)
@@ -148,6 +179,19 @@ class RunnerSupervisor:
 
         self._record_milestone("supervisor_created", self.status.__class__.__name__)
 
+    @property
+    def has_reported_status(self) -> bool:
+        """Whether the runner process has reported at least one status (#272).
+
+        ``status`` defaults to ``RunnerIdle`` before the process ever reports, so
+        it is not a reliable "has it come alive" signal on its own; this flag is.
+        """
+        return self._first_status_reported
+
+    def seconds_since_created(self, now_monotonic: float) -> float:
+        """Seconds since this supervisor (and its runner process) was created."""
+        return now_monotonic - self._created_monotonic
+
     @classmethod
     def create(
         cls,
@@ -156,6 +200,7 @@ class RunnerSupervisor:
         event_sender: Sender[Event],
         initialize_timeout: float = 400,
         context_token_limit: int | None = None,
+        data_sender: "Sender[DataChunk] | None" = None,
     ) -> Self:
         """Spawn the runner subprocess for one shard of a placed instance.
 
@@ -194,9 +239,44 @@ class RunnerSupervisor:
             _task_sender=task_sender,
             _cancel_sender=cancel_sender,
             _event_sender=event_sender,
+            _data_sender=data_sender,
         )
 
         return self
+
+    async def _emit(self, event: Event) -> None:
+        """Forward one runner event to the right plane (#279 Phase 2).
+
+        Generation output chunks (``ChunkGenerated``) are diverted to the data
+        plane (``DATA`` topic, direct to the owning API node) so they never hit
+        the master's event log; every other event (task status, acks, runner
+        status) stays on the ordered control-plane event sender. Falls back to
+        the event sender when no data sender is wired (tests / no DATA topic).
+        """
+        if isinstance(event, ChunkGenerated) and self._data_sender is not None:
+            seq = self._chunk_sequence.get(event.command_id, 0)
+            await self._data_sender.send(
+                DataChunk(
+                    command_id=event.command_id,
+                    chunk=event.chunk,
+                    sequence=seq,
+                    owner_node=self._command_owner.get(event.command_id),
+                )
+            )
+            # Drop the per-command counter on the terminal chunk so a long-lived
+            # runner doesn't accumulate one entry per command served (#301 review).
+            # EmbeddingChunk is single-shot (no finish_reason) but also terminal.
+            chunk_finished = (
+                getattr(event.chunk, "finish_reason", None) is not None
+                or isinstance(event.chunk, EmbeddingChunk)
+            )
+            if chunk_finished:
+                self._chunk_sequence.pop(event.command_id, None)
+                self._command_owner.pop(event.command_id, None)
+            else:
+                self._chunk_sequence[event.command_id] = seq + 1
+        else:
+            await self._event_sender.send(event)
 
     async def run(self):
         self._record_milestone("process_start_requested")
@@ -211,39 +291,66 @@ class RunnerSupervisor:
                 tg.start_soon(self._forward_events)
                 tg.start_soon(self._forward_diagnostics)
         finally:
-            logger.info("Runner supervisor shutting down")
-            if not self._cancel_watch_runner.cancel_called:
-                self._cancel_watch_runner.cancel()
-            with contextlib.suppress(ClosedResourceError):
-                self._ev_recv.close()
-            with contextlib.suppress(ClosedResourceError):
-                self._diag_recv.close()
-            with contextlib.suppress(ClosedResourceError):
-                self._task_sender.close()
-            with contextlib.suppress(ClosedResourceError):
-                self._event_sender.close()
-            with contextlib.suppress(ClosedResourceError):
-                self._cancel_sender.send(CANCEL_ALL_TASKS)
-            with contextlib.suppress(ClosedResourceError):
-                self._cancel_sender.close()
+            # Shield the entire teardown from cancellation. This `finally` runs
+            # under cancellation when the worker is torn down on a master-election
+            # transition (worker.shutdown() cancels the worker task group, which
+            # cancels this run()). Without the shield, the very first `await`
+            # below (the process join) re-raises CancelledError immediately, so
+            # the runner process is never reaped — it lingers holding its wired
+            # GPU memory. The replacement worker then plans CreateRunner for the
+            # same shard and the pre-load memory guard sees the not-yet-reclaimed
+            # memory, falsely refuses, and #290 deletes the carried instance —
+            # i.e. a master failover silently kills a healthy serving instance on
+            # a memory-tight node. Reaping the process here (Metal reclaims wired
+            # memory on process exit) before shutdown() returns guarantees the
+            # replacement worker admits against true post-reclaim availability.
+            with anyio.CancelScope(shield=True):
+                logger.info("Runner supervisor shutting down")
+                if not self._cancel_watch_runner.cancel_called:
+                    self._cancel_watch_runner.cancel()
+                with contextlib.suppress(ClosedResourceError):
+                    self._ev_recv.close()
+                with contextlib.suppress(ClosedResourceError):
+                    self._diag_recv.close()
+                with contextlib.suppress(ClosedResourceError):
+                    self._task_sender.close()
+                with contextlib.suppress(ClosedResourceError):
+                    self._event_sender.close()
+                with contextlib.suppress(ClosedResourceError):
+                    self._cancel_sender.send(CANCEL_ALL_TASKS)
+                with contextlib.suppress(ClosedResourceError):
+                    self._cancel_sender.close()
 
-            await to_thread.run_sync(self.runner_process.join, 5)
+                await to_thread.run_sync(self.runner_process.join, 5)
 
-            if self.runner_process.is_alive():
-                logger.warning(
-                    "Runner process didn't shutdown successfully, terminating"
-                )
-                self.runner_process.terminate()
-                self.runner_process.join(timeout=5)
-                # This is overkill but it's not technically bad, just unnecessary.
                 if self.runner_process.is_alive():
-                    logger.critical("Runner process didn't respond to SIGTERM, killing")
-                    self.runner_process.kill()
-                    self.runner_process.join(timeout=5)
-            else:
-                logger.info("Runner process successfully terminated")
+                    logger.warning(
+                        "Runner process didn't shutdown successfully, terminating"
+                    )
+                    self.runner_process.terminate()
+                    await to_thread.run_sync(self.runner_process.join, 5)
+                    # This is overkill but it's not technically bad, just unnecessary.
+                    if self.runner_process.is_alive():
+                        logger.critical(
+                            "Runner process didn't respond to SIGTERM, killing"
+                        )
+                        self.runner_process.kill()
+                        await to_thread.run_sync(self.runner_process.join, 5)
+                else:
+                    logger.info("Runner process successfully terminated")
 
-            self.runner_process.close()
+                # close() raises ValueError on a still-running process. A process
+                # surviving SIGKILL + join is rare (uninterruptible sleep), but
+                # since the teardown is now shielded and reliably runs, guard the
+                # close so an unexpected straggler can't raise out of the failover
+                # teardown and destabilize worker.shutdown().
+                if self.runner_process.is_alive():
+                    logger.error(
+                        "Runner process still alive after SIGKILL; skipping "
+                        "close() to avoid ValueError (likely uninterruptible)."
+                    )
+                else:
+                    self.runner_process.close()
 
     def shutdown(self):
         self._record_milestone("shutdown_requested")
@@ -264,6 +371,17 @@ class RunnerSupervisor:
         event = anyio.Event()
         self.pending[task.task_id] = event
         self.in_progress[task.task_id] = task
+        # Record the owning API node so _emit can address this command's output
+        # chunks to it over the Zenoh data plane (#279 Phase 2). Set before the
+        # task is dispatched to the runner, which is what may begin emitting.
+        if (
+            isinstance(
+                task,
+                (TextGeneration, ImageGeneration, ImageEdits, TextEmbedding),
+            )
+            and task.owner_node is not None
+        ):
+            self._command_owner[task.command_id] = task.owner_node
         self._last_task_sent_at = _now_utc_iso()
         self._record_milestone(
             "task_sent",
@@ -315,6 +433,7 @@ class RunnerSupervisor:
                     self._record_milestone("event_received", self._last_event_type)
                     if isinstance(event, RunnerStatusUpdated):
                         self.status = event.runner_status
+                        self._first_status_reported = True
                         self._status_since = _now_utc_iso()
                         self._status_since_monotonic = time.monotonic()
                         self._record_milestone(
@@ -354,6 +473,25 @@ class RunnerSupervisor:
                                 RunnerShuttingDown,
                             ),
                         )
+                        # Drop the per-command data-plane sequence counter on any
+                        # terminal task status, covering commands that end without
+                        # a finish_reason chunk: image generation (ImageChunk has
+                        # no finish_reason) and cancellations/failures that arrive
+                        # as terminal TaskStatusUpdated bypassing _emit (#301
+                        # review). Done before popping in_progress, which holds the
+                        # task->command_id mapping.
+                        ending_task = self.in_progress.get(event.task_id)
+                        if isinstance(
+                            ending_task,
+                            (
+                                TextGeneration,
+                                ImageGeneration,
+                                ImageEdits,
+                                TextEmbedding,
+                            ),
+                        ):
+                            self._chunk_sequence.pop(ending_task.command_id, None)
+                            self._command_owner.pop(ending_task.command_id, None)
                         self.in_progress.pop(event.task_id, None)
                         if event.task_status == TaskStatus.Complete:
                             self.completed.add(event.task_id)
@@ -376,7 +514,10 @@ class RunnerSupervisor:
                                 TaskDeleted(task_id=event.task_id)
                             )
                         continue
-                    await self._event_sender.send(event)
+                    # Catch-all: runner-produced events, including the per-token
+                    # ChunkGenerated output, which _emit diverts to the data
+                    # plane (#279 Phase 2).
+                    await self._emit(event)
         except (ClosedResourceError, BrokenResourceError) as e:
             await self._check_runner(e)
         finally:
@@ -436,7 +577,7 @@ class RunnerSupervisor:
         for task in self.in_progress.values():
             if isinstance(task, (TextGeneration, ImageGeneration, ImageEdits)):
                 with anyio.CancelScope(shield=True):
-                    await self._event_sender.send(
+                    await self._emit(
                         ChunkGenerated(
                             command_id=task.command_id,
                             chunk=ErrorChunk(

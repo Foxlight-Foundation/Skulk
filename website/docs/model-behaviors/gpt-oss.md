@@ -6,8 +6,8 @@ sidebar_position: 2
 
 <!-- Copyright 2025 Foxlight Foundation -->
 
-GPT-OSS is one of the first non-Gemma families that Phase 1 treats as a
-first-class capability-system consumer.
+GPT-OSS is one of the first non-Gemma families treated as a first-class
+capability-system consumer.
 
 ## Why GPT-OSS Is Special
 

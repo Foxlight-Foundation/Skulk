@@ -49,7 +49,6 @@ def _thinking_stream_debug_enabled() -> bool:
     """Return whether opt-in thinking stream tracing is enabled."""
     value = preferred_env_value(
         "SKULK_TRACE_THINKING_STREAM",
-        "EXO_TRACE_THINKING_STREAM",
     )
     if value is None:
         return False
@@ -200,6 +199,17 @@ async def chat_request_to_text_generation(
         capability_profile,
     )
 
+    # Resolve the logprobs request at the boundary so every engine sees one
+    # consistent flag (#385). An explicit `logprobs` (true or false) is honored
+    # as-is; only when it is unset is it inferred from `top_logprobs` (which
+    # OpenAI treats as a logprobs request). When logprobs ends up off, drop
+    # `top_logprobs` too so a downstream completeness check cannot re-infer it.
+    logprobs_on = (
+        request.logprobs
+        if request.logprobs is not None
+        else request.top_logprobs is not None
+    )
+
     return TextGenerationTaskParams(
         model=request.model,
         input=input_messages
@@ -219,8 +229,8 @@ async def chat_request_to_text_generation(
         chat_template_messages=chat_template_messages
         if chat_template_messages
         else None,
-        logprobs=request.logprobs or False,
-        top_logprobs=request.top_logprobs,
+        logprobs=logprobs_on,
+        top_logprobs=request.top_logprobs if logprobs_on else None,
         min_p=request.min_p,
         repetition_penalty=request.repetition_penalty,
         repetition_context_size=request.repetition_context_size,
@@ -409,13 +419,13 @@ async def collect_chat_response(
                 finish_reason = chunk.finish_reason
 
     if error_message is not None:
-        if error_message.startswith(CONTEXT_LENGTH_EXCEEDED_PREFIX):
-            # The HTTP status is already committed (the body itself streams),
-            # so a runner-side context rejection surfaces as a structured
-            # OpenAI error envelope in the body rather than a broken stream.
-            yield error_chunk_response(error_message).model_dump_json()
-            return
-        raise ValueError(error_message)
+        # The HTTP status is already committed (the body itself streams), so a
+        # runner-side error surfaces as a structured OpenAI error envelope in the
+        # body rather than a broken stream or a bogus empty success.
+        # error_chunk_response maps the context sentinel to a 400 and everything
+        # else to the historical 500 internal-error shape.
+        yield error_chunk_response(error_message).model_dump_json()
+        return
 
     combined_text = "".join(text_parts)
     combined_thinking = "".join(thinking_parts) if thinking_parts else None

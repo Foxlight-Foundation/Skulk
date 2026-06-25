@@ -41,6 +41,8 @@ dependencies = [
 
 [project.scripts]
 skulk = "skulk.main:main"
+skulk-build-macos-local-network-probe-app = "skulk.connectivity.local_network_probe_app:main"
+skulk-macos-local-network-probe = "skulk.connectivity.local_network_probe:main"
 
 # dependencies only required for development
 [dependency-groups]
@@ -61,6 +63,14 @@ dev = [
 # cuda = [
 #     "mlx[cuda]==0.26.3",
 # ]
+# llama.cpp engine for heterogeneous (non-MLX) GPU nodes, e.g. AMD Strix Halo via
+# Vulkan/ROCm. NOTE: a plain `pip install` of this extra builds the CPU backend;
+# for a GPU node, install from source with the backend selected at build time,
+# e.g. `CMAKE_ARGS="-DGGML_VULKAN=on" pip install llama-cpp-python`, and declare
+# the built backends via SKULK_LLAMA_CPP_BACKENDS so the node advertises them.
+llama-cpp = [
+    "llama-cpp-python>=0.3.3",
+]
 
 ###
 # workspace configuration

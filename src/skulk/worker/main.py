@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import io
+import time
 from collections import defaultdict
 from collections.abc import Container, Mapping
 from datetime import datetime, timezone
@@ -11,14 +12,14 @@ from anyio import BrokenResourceError, ClosedResourceError, fail_after, to_threa
 from loguru import logger
 from PIL import Image
 
-from skulk.api.types import ImageEditsTaskParams
 from skulk.download.download_utils import resolve_model_in_path
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_IMAGE_TRANSPORT_DEBUG
 from skulk.shared.models.memory_estimate import (
+    GPU_VRAM_WORKING_SET_FRACTION,
+    UMA_GPU_OS_HEADROOM,
     estimate_shard_footprint,
     gpu_working_set_ceiling,
-    instance_context_token_limit,
 )
 from skulk.shared.models.model_cards import (
     ModelCard,
@@ -26,11 +27,12 @@ from skulk.shared.models.model_cards import (
     add_to_card_cache,
     delete_custom_card,
 )
-from skulk.shared.types.chunks import InputImageChunk
+from skulk.shared.types.chunks import DataChunk, InputImageChunk
 from skulk.shared.types.commands import (
     DeleteInstance,
     ForwarderCommand,
     ForwarderDownloadCommand,
+    RefuseInstancePlacement,
     StartDownload,
 )
 from skulk.shared.types.common import CommandId, NodeId, SystemId
@@ -51,6 +53,7 @@ from skulk.shared.types.events import (
     TopologyEdgeCreated,
     TopologyEdgeDeleted,
 )
+from skulk.shared.types.memory import Memory
 from skulk.shared.types.multiaddr import Multiaddr
 from skulk.shared.types.profiling import MemoryUsage
 from skulk.shared.types.state import State
@@ -66,6 +69,12 @@ from skulk.shared.types.tasks import (
     TaskId,
     TaskStatus,
     TextGeneration,
+)
+from skulk.shared.types.telemetry import (
+    TELEMETRY_PLANE_INFO,
+    NodeTelemetry,
+    TelemetryView,
+    record_membership_from_event,
 )
 from skulk.shared.types.topology import Connection, SocketConnection
 from skulk.shared.types.worker.downloads import (
@@ -86,7 +95,10 @@ from skulk.store.staging_eviction import (
 )
 from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.crash_window import CrashWindow
-from skulk.utils.info_gatherer.info_gatherer import GatheredInfo, InfoGatherer
+from skulk.utils.info_gatherer.info_gatherer import (
+    GatheredInfo,
+    InfoGatherer,
+)
 from skulk.utils.info_gatherer.net_profile import check_reachable
 from skulk.utils.keyed_backoff import KeyedBackoff
 from skulk.utils.task_group import TaskGroup
@@ -97,7 +109,7 @@ from skulk.worker.runner.runner_supervisor import RunnerSupervisor
 _STALE_RESET_MAX_WAIT_TICKS = 300
 """How many ~100ms planning ticks to hold planning while stale download
 resets round-trip through the master (~30s). The deadline exists so a
-masterless interval cannot freeze the worker forever — past it, planning
+masterless interval cannot freeze the worker forever - past it, planning
 resumes and the download coordinator's missing-directory self-heal covers
 the residual risk."""
 
@@ -110,6 +122,35 @@ _RUNNER_CRASH_WINDOW_SECONDS = 60.0
 """Rolling window for ``_RUNNER_CRASH_THRESHOLD`` (see CrashWindow)."""
 
 
+_LOAD_FIT_TOLERANCE = 0.10
+"""Fraction by which a shard's estimated footprint may exceed live usable memory
+before the pre-load guard refuses (#383).
+
+The footprint from ``estimate_shard_footprint`` already bakes in the engine
+overhead factor (1.30 for MLX), a full ``KV_CONTEXT_BUDGET_TOKENS`` KV
+reservation, and a flat floor, so it overstates the real resident need. The
+master admits on the same padded estimate but against a *gossiped* usable
+figure, while this guard re-measures *live*; on a borderline multi-node split
+the live reading can sit a few hundred MB below the gossiped one (staging churn,
+telemetry lag), so requiring ``usable >= footprint`` exactly flips a placement
+the master already admitted into a refusal on a sub-GB jitter, observed as a
+0.2GB / 2% miss refusing Devstral-24B at the LoadModel re-check across the
+3-kite ring (#383, Phase 0). Allowing the footprint to exceed usable by this
+margin absorbs that jitter (the 30% pad means actual resident still fits) while
+a *gross* shortfall (a node that genuinely loaded another model since admission)
+still refuses, preserving the leak-on-OOM guard (#290/#239)."""
+
+
+_RUNNER_FIRST_REPORT_DEADLINE_SECONDS = 120.0
+"""How long a spawned runner has to report its first status before the worker
+gives up on its instance (#272). A runner frozen between spawn and its first
+report (SIGSTOP, a hang in early import, a stuck device init) otherwise stalls
+pre-init coordination forever: ``_init_distributed_backend`` only plans
+``ConnectToGroup`` once every rank has reported, and the crash breaker never
+trips because the process is alive. Generous enough to cover slow Python imports
+and weight mmaps, far under an indefinite hang."""
+
+
 def _wedged_live_instances(
     runners: Mapping[RunnerId, "RunnerSupervisor"],
     live_instances: Container[InstanceId],
@@ -118,7 +159,7 @@ def _wedged_live_instances(
 
     These never get a planner ``Shutdown`` (``plan._kill_runner`` only fires
     when the instance is gone or a PEER failed), so the worker must give the
-    instance up directly on observation — otherwise a single-node wedge
+    instance up directly on observation - otherwise a single-node wedge
     strands a dead runner behind a live instance forever.
     """
     return [
@@ -130,6 +171,48 @@ def _wedged_live_instances(
         if supervisor.bound_instance.instance.instance_id in live_instances
         and _runner_failed_wedged(supervisor.status)
     ]
+
+
+def runners_never_reported(
+    runners: Mapping[RunnerId, "RunnerSupervisor"],
+    live_instances: Container[InstanceId],
+    now_monotonic: float,
+    deadline_seconds: float,
+) -> list[tuple[InstanceId, ModelId]]:
+    """Live instances whose spawned runner never reported a status in time (#272).
+
+    A runner frozen between spawn and its first status report stalls pre-init
+    coordination forever: the group-init gate only plans ``ConnectToGroup`` once
+    every rank has reported, and the crash breaker never trips because the
+    process is alive. Returns ``(instance_id, model_id)`` for each live-instance
+    supervisor older than ``deadline_seconds`` that has not yet reported. Pure for
+    testability.
+    """
+    stalled: list[tuple[InstanceId, ModelId]] = []
+    for supervisor in runners.values():
+        instance_id = supervisor.bound_instance.instance.instance_id
+        if instance_id not in live_instances:
+            continue
+        if supervisor.has_reported_status:
+            continue
+        if supervisor.seconds_since_created(now_monotonic) >= deadline_seconds:
+            stalled.append(
+                (instance_id, supervisor.shard_metadata.model_card.model_id)
+            )
+    return stalled
+
+
+def footprint_exceeds_usable(
+    footprint: Memory, usable: Memory, tolerance: float
+) -> bool:
+    """Whether a shard footprint exceeds usable memory beyond the fit tolerance.
+
+    Pure for testability (#383). The footprint is already padded (engine overhead
+    factor + KV reservation + floor), so a marginal excess is within that pad and
+    within live-vs-gossip jitter; only a shortfall beyond ``tolerance`` (a
+    fraction of usable) is treated as a real refusal.
+    """
+    return footprint.in_bytes > usable.in_bytes * (1 + tolerance)
 
 
 def _runner_failed_wedged(status: RunnerStatus | None) -> bool:
@@ -145,6 +228,69 @@ def _runner_failed_wedged(status: RunnerStatus | None) -> bool:
         and status.error_message is not None
         and WEDGE_FAILURE_MARKER in status.error_message
     )
+
+
+def _local_usable_vram() -> Memory | None:
+    """Usable discrete-GPU VRAM on THIS node, or ``None`` if it has no discrete GPU.
+
+    The worker counterpart of the master's ``usable_vram_by_node``: a GPU-offload
+    node (AMD/Linux amdgpu) allocates a shard from its VRAM pool, not system RAM,
+    so the local pre-spawn fit guard must size against VRAM or it would falsely
+    refuse a placement the VRAM-aware master correctly admitted. Reads the local
+    amdgpu sysfs (passive, the same source as the telemetry collector). It mirrors
+    the master's two architectures so the two checks agree:
+
+    * Discrete GPU: ``min(vram_total - vram_used, GPU_VRAM_WORKING_SET_FRACTION x
+      vram_total)``.
+    * Unified-memory APU (GTT spans the whole system: ``gtt_total > vram_total``
+      AND ``gtt_total >= ram_total``, e.g. Strix Halo):
+      ``min(vram_avail, GPU_VRAM_WORKING_SET_FRACTION x vram_total) +
+      min(max(0, local_ram_available - UMA_GPU_OS_HEADROOM), gtt_total)`` so the
+      GPU's GTT-mapped system RAM counts toward the pool. The live GPU-wireable
+      snapshot matches the ceiling the master derives from gossiped telemetry.
+
+    Returns ``None`` on Apple unified-memory nodes (no amdgpu device), which keep
+    the system-RAM path. The master is the backend authority that decides a shard
+    belongs on this GPU node in the first place.
+    """
+    from skulk.utils.info_gatherer.linux_gpu import (
+        find_amd_gpu_device,
+        read_accelerator_metrics,
+    )
+
+    device = find_amd_gpu_device()
+    if device is None:
+        return None
+    accelerator = read_accelerator_metrics(device)
+    total = accelerator.vram_total_bytes
+    if not total or total <= 0:
+        return None
+    used = accelerator.vram_used_bytes or 0
+    available = max(0, total - used)
+    ceiling = int(total * GPU_VRAM_WORKING_SET_FRACTION)
+    vram_usable = min(available, ceiling)
+    gtt_total = accelerator.gtt_total_bytes
+    local_memory = MemoryUsage.from_local_gpu_wireable()
+    # UMA signature: GTT spans the whole system (exceeds the VRAM carve-out AND
+    # covers all of system RAM). A discrete AMD card also reports a GTT total
+    # (often ~= VRAM), so requiring it to cover system RAM keeps a discrete GPU
+    # on the VRAM-only path. Matches the master's gate in ``usable_vram_by_node``.
+    if (
+        gtt_total is not None
+        and gtt_total > total
+        and gtt_total >= local_memory.ram_total.in_bytes
+    ):
+        # UMA APU: the GPU maps host RAM via GTT beyond the BIOS VRAM carve-out,
+        # so count current free system RAM (minus OS headroom, capped by GTT).
+        # The VRAM portion keeps its working-set headroom.
+        sys_for_gpu = min(
+            max(
+                0, local_memory.ram_available.in_bytes - UMA_GPU_OS_HEADROOM.in_bytes
+            ),
+            gtt_total,
+        )
+        return Memory.from_bytes(vram_usable + sys_for_gpu)
+    return Memory.from_bytes(vram_usable)
 
 
 def _summarize_worker_task(task: Task) -> str:
@@ -218,6 +364,25 @@ def _summarize_worker_task(task: Task) -> str:
             f"stream={params.stream!r})"
         )
     return task.__class__.__name__
+
+
+def _inject_assembled_image_edit(task: ImageEdits, assembled_image: str) -> ImageEdits:
+    """Return the ImageEdits task with the reassembled image injected.
+
+    Uses ``model_copy`` so every other field is preserved - in particular
+    ``owner_node``, which the Zenoh data plane needs to address generation output
+    back to the owning API node (#279 Phase 2). Rebuilding the task field-by-field
+    here previously dropped ``owner_node`` (and would silently drop any future
+    field), causing the supervisor to stamp ``owner_node=None`` and the Router to
+    publish output to a Zenoh key no node subscribes to (#310 review).
+    """
+    return task.model_copy(
+        update={
+            "task_params": task.task_params.model_copy(
+                update={"image_data": assembled_image}
+            )
+        }
+    )
 
 
 def _log_image_transport(message: str) -> None:
@@ -302,6 +467,9 @@ class Worker:
         # but I think it's the correct way to be thinking about commands
         command_sender: Sender[ForwarderCommand],
         download_command_sender: Sender[ForwarderDownloadCommand],
+        telemetry_sender: Sender[NodeTelemetry] | None = None,
+        telemetry_view: TelemetryView | None = None,
+        data_sender: Sender[DataChunk] | None = None,
         store_client: ModelStoreClient | None = None,
         staging_config: StagingNodeConfig | None = None,
     ):
@@ -310,6 +478,18 @@ class Worker:
         self.event_sender = event_sender
         self.command_sender = command_sender
         self.download_command_sender = download_command_sender
+        self._telemetry_sender = telemetry_sender
+        # Data plane (#279 Phase 2): per-token output chunks stream direct to the
+        # owning API node via this sender (DATA topic), bypassing the master's
+        # event log. Threaded into each RunnerSupervisor. None falls back to the
+        # event path (no DATA topic wired / tests).
+        self._data_sender = data_sender
+        # Shared, Node-owned telemetry view (#279). The worker prunes a node's
+        # telemetry here when it sees NodeTimedOut, because the worker runs on
+        # EVERY node regardless of role - so a --no-api node (or a --no-api
+        # master placing off this view) still drops dead nodes, where an
+        # API-only prune hook would leak unbounded across churn.
+        self._telemetry_view = telemetry_view
         self._store_client = store_client
         self._staging_config = staging_config
 
@@ -320,7 +500,7 @@ class Worker:
         # be replicating in; countered lazily by
         # plan_step once state carries them. Names stay in the pending set
         # until the reset has APPLIED (state stops advertising the stale
-        # entry) — discarding on send would reopen the plan gate while the
+        # entry) - discarding on send would reopen the plan gate while the
         # event is still round-tripping through the master.
         self._stale_downloads_pending_reset: set[str] = set()
         self._stale_resets_sent: set[str] = set()
@@ -364,7 +544,7 @@ class Worker:
         Last-resort guard using *local, current* memory, not the master's
         gossiped view. Availability is the same GPU-wireable figure the master
         admits on (``total − wired − anonymous − compressor`` from a vm_stat
-        snapshot, capped at the Metal GPU working-set ceiling) — psutil's
+        snapshot, capped at the Metal GPU working-set ceiling) - psutil's
         ``available`` counts reclaimable file cache as used, so right after a
         model download it would veto the very placement the master just
         correctly admitted. Falls back to psutil when vm_stat fails. Refusing
@@ -376,16 +556,32 @@ class Worker:
         footprint = estimate_shard_footprint(
             shard.model_card, self._shard_memory_fraction(shard)
         )
-        local = MemoryUsage.from_local_gpu_wireable()
-        usable = min(local.ram_available, gpu_working_set_ceiling(local.ram_total))
-        if footprint > usable:
+        # On a discrete-GPU node the engine allocates from VRAM, not system RAM,
+        # so size the guard against local usable VRAM or it would falsely refuse
+        # the very placement the (VRAM-aware) master just admitted. None on
+        # unified-memory (Apple) nodes, which keep the system-RAM path.
+        vram = _local_usable_vram()
+        if vram is not None:
+            usable = vram
+            pool = f"{vram.in_gb:.1f}GB usable GPU VRAM"
+        else:
+            local = MemoryUsage.from_local_gpu_wireable()
+            usable = min(local.ram_available, gpu_working_set_ceiling(local.ram_total))
+            pool = (
+                f"{local.ram_available.in_gb:.1f}GB GPU-wireable, capped at "
+                "the GPU working-set ceiling"
+            )
+        # Refuse only on a shortfall beyond the tolerance (#383): the footprint
+        # is already padded (overhead factor + KV reservation + floor), so a
+        # marginal miss is within that pad and within live-vs-gossip jitter on a
+        # placement the master already admitted. A gross shortfall still trips.
+        if footprint_exceeds_usable(footprint, usable, _LOAD_FIT_TOLERANCE):
             return (
                 f"Refusing to load a shard of {shard.model_card.model_id} on "
                 f"{self.node_id}: ~{footprint.in_gb:.1f}GB needed but only "
-                f"~{usable.in_gb:.1f}GB usable locally "
-                f"({local.ram_available.in_gb:.1f}GB GPU-wireable, capped at "
-                "the GPU working-set ceiling). Refusing before load to avoid "
-                "an OOM abort that leaks GPU memory."
+                f"~{usable.in_gb:.1f}GB usable locally ({pool}), beyond the "
+                f"{_LOAD_FIT_TOLERANCE:.0%} fit tolerance. Refusing before load "
+                "to avoid an OOM abort that leaks GPU memory."
             )
         return None
 
@@ -393,7 +589,7 @@ class Worker:
         """Tear down a repeatedly-failing instance instead of relaunching it.
 
         Sends ``DeleteInstance`` to the master so the doomed instance stops
-        being reconciled into fresh runners — each relaunch risks another
+        being reconciled into fresh runners - each relaunch risks another
         leak-on-abort. The crash window is deliberately NOT cleared: the trip is
         edge-triggered, so leaving the failure history in place keeps the latch
         set and suppresses re-tripping (and duplicate ``DeleteInstance``) while
@@ -406,6 +602,38 @@ class Worker:
             ForwarderCommand(
                 origin=self._system_id,
                 command=DeleteInstance(instance_id=instance_id),
+            )
+        )
+
+    async def _refuse_instance_placement(
+        self, instance_id: InstanceId, reason: str
+    ) -> None:
+        """Ask the master to re-place this instance on a wider split (#290).
+
+        Used instead of :meth:`_give_up_on_instance` when the give-up is driven
+        by the *memory fit guard* rather than a runner crash or GPU wedge. The
+        master admits placements on the gossiped (telemetry-plane) availability,
+        which can sit just above the live GPU-wireable figure this node measures
+        at load time; on a borderline split that gap makes the master admit a
+        cycle this worker then refuses. Rather than letting the instance vanish,
+        the master re-places the model one node wider (smaller per-node share),
+        and only gives up for good once even a full-width split won't fit. The
+        crash window is left set, exactly as in :meth:`_give_up_on_instance`, so
+        the edge-triggered breaker does not re-send while the deletion that the
+        re-placement performs propagates through replicated state.
+        """
+        logger.error(
+            f"Worker: refusing instance {instance_id} for placement "
+            f"(asking master to re-place wider): {reason}"
+        )
+        await self.command_sender.send(
+            ForwarderCommand(
+                origin=self._system_id,
+                command=RefuseInstancePlacement(
+                    instance_id=instance_id,
+                    node_id=self.node_id,
+                    reason=reason,
+                ),
             )
         )
 
@@ -437,6 +665,18 @@ class Worker:
         with recv as info_stream:
             async for info in info_stream:
                 try:
+                    # Telemetry plane (#279): live readings are gossiped on the
+                    # telemetry topic, off the event log. The remaining node_*
+                    # readings still travel as indexed NodeGatheredInfo events
+                    # until later slices migrate them.
+                    if (
+                        isinstance(info, TELEMETRY_PLANE_INFO)
+                        and self._telemetry_sender is not None
+                    ):
+                        await self._telemetry_sender.send(
+                            NodeTelemetry(node_id=self.node_id, info=info)
+                        )
+                        continue
                     await self.event_sender.send(
                         NodeGatheredInfo(
                             node_id=self.node_id,
@@ -457,6 +697,12 @@ class Worker:
                 # 2. for each event, apply it to the state
                 self.state = apply(self.state, event=event)
                 event = event.event
+
+                # Prune telemetry for timed-out nodes from the worker applier.
+                # The API applier does the same; together they cover --no-api
+                # and --no-worker nodes (#279 slice 2).
+                if self._telemetry_view is not None:
+                    record_membership_from_event(self._telemetry_view, event)
 
                 # Buffer input image chunks for image editing
                 if isinstance(event, InputChunkReceived):
@@ -526,10 +772,31 @@ class Worker:
                     await self._give_up_on_instance(
                         _wedge_iid,
                         f"runner for {_wedge_model} died with a suspected GPU "
-                        f"wedge ({WEDGE_FAILURE_MARKER}); not retrying — each "
+                        f"wedge ({WEDGE_FAILURE_MARKER}); not retrying - each "
                         "wedge attempt leaks wired GPU memory. If this node's "
                         "available memory dropped, a reboot is the only way "
                         "to reclaim it.",
+                    )
+
+            # First-report deadline (#272): a runner frozen between spawn and its
+            # first status report stalls pre-init coordination forever (the
+            # group-init gate waits for every rank, and the breaker never trips
+            # because the process is alive). Give the instance up via the same
+            # edge-latched breaker so it fires once and the master can recover or
+            # surface the failure instead of the instance "loading" forever.
+            for _stall_iid, _stall_model in runners_never_reported(
+                self.runners,
+                self.state.instances,
+                time.monotonic(),
+                _RUNNER_FIRST_REPORT_DEADLINE_SECONDS,
+            ):
+                if self._crash_breaker.record(_stall_iid):
+                    await self._give_up_on_instance(
+                        _stall_iid,
+                        f"runner for {_stall_model} did not report any status "
+                        f"within {_RUNNER_FIRST_REPORT_DEADLINE_SECONDS:.0f}s of "
+                        "spawn (suspected frozen process); giving up so it does "
+                        "not stall pre-init coordination forever.",
                     )
 
             task: Task | None = plan(
@@ -568,8 +835,12 @@ class Worker:
                                 task_id=task.task_id, task_status=TaskStatus.Failed
                             )
                         )
+                        # Memory refusal (not a crash/wedge): ask the master to
+                        # re-place wider instead of silently deleting (#290).
                         if self._crash_breaker.record(task.instance_id):
-                            await self._give_up_on_instance(task.instance_id, fit_error)
+                            await self._refuse_instance_placement(
+                                task.instance_id, fit_error
+                            )
                     else:
                         self._create_supervisor(task)
                         await self.event_sender.send(
@@ -652,7 +923,7 @@ class Worker:
                                 f"runner for "
                                 f"{shard_for_eviction.model_card.model_id} died "
                                 "with a suspected GPU wedge "
-                                f"({WEDGE_FAILURE_MARKER}); not retrying — each "
+                                f"({WEDGE_FAILURE_MARKER}); not retrying - each "
                                 "wedge attempt leaks wired GPU memory. If this "
                                 "node's available memory dropped, a reboot is "
                                 "the only way to reclaim it.",
@@ -670,7 +941,7 @@ class Worker:
                             )
                         else:
                             # Runner crashed but instance still exists and the
-                            # breaker has not tripped — reset download status so
+                            # breaker has not tripped - reset download status so
                             # the planner re-stages the model instead of assuming
                             # it's still on disk, and retry.
                             logger.info(
@@ -707,29 +978,10 @@ class Worker:
                     _log_image_payload_debug(
                         "Worker assembled image edit", 0, assembled
                     )
-                    # Create modified task with assembled image data
-                    modified_task = ImageEdits(
-                        task_id=task.task_id,
-                        command_id=task.command_id,
-                        instance_id=task.instance_id,
-                        task_status=task.task_status,
-                        task_params=ImageEditsTaskParams(
-                            image_data=assembled,
-                            total_input_chunks=task.task_params.total_input_chunks,
-                            prompt=task.task_params.prompt,
-                            model=task.task_params.model,
-                            n=task.task_params.n,
-                            quality=task.task_params.quality,
-                            output_format=task.task_params.output_format,
-                            response_format=task.task_params.response_format,
-                            size=task.task_params.size,
-                            image_strength=task.task_params.image_strength,
-                            bench=task.task_params.bench,
-                            stream=task.task_params.stream,
-                            partial_images=task.task_params.partial_images,
-                            advanced_params=task.task_params.advanced_params,
-                        ),
-                    )
+                    # Inject the assembled image while preserving every other
+                    # field (notably owner_node for Zenoh routing - #279 Phase 2 /
+                    # #310 review).
+                    modified_task = _inject_assembled_image_edit(task, assembled)
                     # Cleanup buffers
                     if cmd_id in self.input_chunk_buffer:
                         del self.input_chunk_buffer[cmd_id]
@@ -820,8 +1072,8 @@ class Worker:
             if isinstance(task, LoadModel) and shard is not None:
                 # Re-check fit at load dispatch. The CreateRunner guard runs
                 # before download and before any concurrently-placed instance
-                # has loaded, so this is the last accurate point — current free
-                # memory now reflects those other loads — to refuse before the
+                # has loaded, so this is the last accurate point - current free
+                # memory now reflects those other loads - to refuse before the
                 # runner allocates and risks an OOM-abort that leaks GPU memory.
                 fit_error = self._local_shard_fit_error(shard)
                 if fit_error is not None:
@@ -831,8 +1083,12 @@ class Worker:
                             task_id=task.task_id, task_status=TaskStatus.Failed
                         )
                     )
+                    # Memory refusal (not a crash/wedge): ask the master to
+                    # re-place wider instead of silently deleting (#290).
                     if self._crash_breaker.record(task.instance_id):
-                        await self._give_up_on_instance(task.instance_id, fit_error)
+                        await self._refuse_instance_placement(
+                            task.instance_id, fit_error
+                        )
                     return
             logger.info(
                 "Dispatching worker task "
@@ -855,18 +1111,13 @@ class Worker:
             f"world_size={shard.world_size}, "
             f"layers={shard.start_layer}:{shard.end_layer})"
         )
-        # Context-admission ceiling (#145): derived exclusively from static
-        # inputs (per-node ram_total, card, shard fractions) so every rank of
-        # a multi-node instance computes the identical limit — placement only
-        # happens after the master indexed memory for all hosting nodes, so
-        # the replicated state already carries every entry we need here.
-        context_token_limit = instance_context_token_limit(
-            task.bound_instance.instance.shard_assignments,
-            {
-                node_id: usage.ram_total
-                for node_id, usage in self.state.node_memory.items()
-            },
-        )
+        # Context-admission ceiling (#145/#279 slice 2): the master computed
+        # this once at placement time and stamped it into the event-sourced
+        # placement decision, so every rank reads the identical value here.
+        # Recomputing from node memory would now be non-deterministic - memory
+        # moved to the last-write-wins telemetry plane and is no longer in the
+        # ordered, replicated event log.
+        context_token_limit = task.bound_instance.instance.context_token_limit
         logger.info(
             "Context admission limit for instance "
             f"{task.instance_id}: {context_token_limit} tokens"
@@ -875,6 +1126,9 @@ class Worker:
             bound_instance=task.bound_instance,
             event_sender=self.event_sender.clone(),
             context_token_limit=context_token_limit,
+            data_sender=self._data_sender.clone()
+            if self._data_sender is not None
+            else None,
         )
         self.runners[task.bound_instance.bound_runner_id] = runner
         self._tg.start_soon(runner.run)
@@ -934,7 +1188,7 @@ class Worker:
 
         Includes companion repos (MTP sidecar, assistant, split vision
         weights) of active models: no instance names them directly, but
-        evicting one corrupts a live runner just the same — MLX loads
+        evicting one corrupts a live runner just the same - MLX loads
         weights lazily.
         """
 
@@ -953,7 +1207,7 @@ class Worker:
         for runner in self.runners.values():
             _add_card(runner.shard_metadata.model_card)
         # A store-backed download in progress has already created its
-        # staging directory but no runner exists yet — a concurrent
+        # staging directory but no runner exists yet - a concurrent
         # teardown's budget pass must not delete a directory that is
         # actively being written.
         for progress in self.state.downloads.get(self.node_id, []):
@@ -976,7 +1230,7 @@ class Worker:
             or not self._staging_config.cleanup_on_deactivate
         ):
             return
-        # The just-deactivated model was in use until this very moment —
+        # The just-deactivated model was in use until this very moment -
         # refresh its last-use marker (and its companions') BEFORE the
         # budget pass, or a long-staged but heavily-used model sorts as
         # old and gets evicted despite being the most recently used thing
@@ -984,7 +1238,7 @@ class Worker:
         # and reuse from an existing DownloadCompleted skips it).
         self._touch_staged_model_and_companions(shard.model_card)
         # The walk + rmtree are synchronous filesystem work on potentially
-        # tens of GB — run off the event loop so teardown doesn't stall
+        # tens of GB - run off the event loop so teardown doesn't stall
         # other worker tasks. The in-use snapshot is taken HERE, on the
         # loop thread: the threaded pass must not iterate self.runners /
         # self.state while the loop mutates them.
@@ -1009,7 +1263,7 @@ class Worker:
         cache_path = Path(self._staging_config.node_cache_path).expanduser()
         # Keyed by forward-sanitized directory name: the report's model ids
         # are best-effort inverses of directory names and can be ambiguous
-        # for ids containing "--" — sanitizing both sides forward makes the
+        # for ids containing "--" - sanitizing both sides forward makes the
         # match exact.
         own_downloads = {
             staging_directory_name(
@@ -1028,7 +1282,7 @@ class Worker:
                 else own_downloads.get(evicted_directory)
             )
             if shard_metadata is None:
-                # Never advertised as downloaded on this node — nothing to
+                # Never advertised as downloaded on this node - nothing to
                 # reset (e.g. a companion repo staged without its own
                 # download entry).
                 continue
@@ -1065,7 +1319,7 @@ class Worker:
         """Run one staging-budget enforcement pass (best-effort).
 
         ``models_in_use`` is snapshotted by the caller on the event-loop
-        thread — this method may run in a worker thread and must not touch
+        thread - this method may run in a worker thread and must not touch
         the loop's mutable structures.
         """
         if self._staging_config is None or not self._staging_config.enabled:
@@ -1074,7 +1328,7 @@ class Worker:
         # A store host configured for direct loading points node_cache_path
         # at the CANONICAL store directory (a common override that was safe
         # under the old no-cleanup default). Eviction there would delete the
-        # cluster's only copy of every model beyond the budget — refuse,
+        # cluster's only copy of every model beyond the budget - refuse,
         # whatever the config says (codex review on #215).
         if self._store_client is not None:
             local_store_path = self._store_client.local_store_path
@@ -1083,7 +1337,7 @@ class Worker:
                 and local_store_path.expanduser().resolve() == staging_root.resolve()
             ):
                 logger.warning(
-                    "Worker: staging eviction skipped — node_cache_path is "
+                    "Worker: staging eviction skipped - node_cache_path is "
                     f"the canonical store directory ({staging_root}); the "
                     "store is never evicted. Set a separate staging path if "
                     "this node should have a managed staging cache."
@@ -1138,7 +1392,7 @@ class Worker:
                 continue
             staged_dir = cache_path / directory_name
             if staged_dir.exists():
-                # Re-staged since eviction — state is truthful again.
+                # Re-staged since eviction - state is truthful again.
                 self._stale_downloads_pending_reset.discard(directory_name)
                 self._stale_resets_sent.discard(directory_name)
                 continue
@@ -1159,7 +1413,7 @@ class Worker:
                 "(staged files were evicted at startup)"
             )
         # Anything we sent a reset for that state no longer advertises has
-        # APPLIED — only then does it stop gating the planner.
+        # APPLIED - only then does it stop gating the planner.
         for directory_name in list(self._stale_resets_sent):
             if directory_name not in still_completed:
                 self._stale_downloads_pending_reset.discard(directory_name)
@@ -1173,7 +1427,7 @@ class Worker:
         A node that dies never runs the deactivate-time eviction, so its
         staged copies survive forever without this. At startup nothing is
         in use yet, so every staged model is a candidate and the grace
-        budget alone decides what survives — which is exactly the crash
+        budget alone decides what survives - which is exactly the crash
         recovery behavior we want: recent models stay warm for the
         restart, the old tail goes.
         """
@@ -1190,7 +1444,7 @@ class Worker:
                 f"({report.evicted_bytes / 2**30:.1f} GiB)"
             )
             # The master may still hold DownloadCompleted entries for the
-            # files we just deleted, but this runs BEFORE state replay —
+            # files we just deleted, but this runs BEFORE state replay -
             # there is no shard metadata to build the reset events from
             # yet. Remember the DIRECTORY names (forward-sanitized; the
             # report's repo-form ids are best-effort inverses and would be

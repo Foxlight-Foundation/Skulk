@@ -27,7 +27,7 @@ How staging works
 2. ``ModelStoreDownloader.ensure_shard()`` asks the store client whether the
    model is available (HTTP ``GET /models/{id}/files``).
 3. **Model in store**: ``stage_shard()`` downloads all model files to the
-   node-local staging directory (``~/.exo/staging/<org>--<model>/`` by
+   node-local staging directory (``~/.skulk/staging/<org>--<model>/`` by
    default).  Files are downloaded with HTTP ``Range`` resume support — if the
    process is interrupted, the next call picks up where it left off.
 4. **Model not in store + HF fallback enabled**: delegates to the inner
@@ -106,7 +106,7 @@ def _sanitize_model_id(model_id: str) -> str:
 
     ``"mlx-community/Qwen3-30B-A3B-4bit"`` → ``"mlx-community--Qwen3-30B-A3B-4bit"``
 
-    This mirrors the sanitization used by EXO's own ``~/.exo/models/`` cache
+    This mirrors the conventional HuggingFace cache-directory sanitization
     so that the staging layout is consistent with what users already expect.
     """
     return str(model_id).replace("/", "--")
@@ -141,6 +141,33 @@ def _staged_directory_looks_complete(directory: Path) -> bool:
     ).is_file():
         return True
     return (directory / "mtp.safetensors").is_file()
+
+
+def _staged_vision_projector_missing(
+    shard: ShardMetadata, directory: Path
+) -> bool:
+    """True when a GGUF vision model's staged dir is missing its ``mmproj``.
+
+    The generic completeness probe (``_staged_directory_looks_complete``)
+    excludes ``mmproj`` files, so a GGUF vision model staged without its
+    projector still "looks complete" yet crashes the runner at load. Treating
+    such a dir as incomplete forces re-staging, which (with a projector-complete
+    store entry) pulls the projector down too (#346).
+
+    Scoped to GGUF vision models (``gguf_file`` set): an MLX / safetensors vision
+    model bundles its vision weights and has no separate projector, so it is
+    complete without one; flagging it here would wrongly disable the staged-cache
+    fast path and force needless store/HF re-resolution. Non-vision and non-GGUF
+    models are never affected.
+    """
+    card = shard.model_card
+    if card.vision is None or not card.gguf_file:
+        return False
+    from skulk.store.model_store import has_gguf_projector
+
+    return not has_gguf_projector(
+        path.name for path in directory.rglob("*") if path.is_file()
+    )
 
 
 @final
@@ -432,6 +459,7 @@ class ModelStoreClient:
         on_progress: Callable[[float], Awaitable[None]] | None = None,
         timeout: float = 7200,
         poll_interval: float = 5.0,
+        pinned_gguf: str | None = None,
     ) -> bool:
         """Request the store host download a model from HuggingFace, then wait.
 
@@ -443,6 +471,10 @@ class ModelStoreClient:
             on_progress: Called with progress (0.0-1.0) on each poll.
             timeout: Maximum wait time in seconds.
             poll_interval: Seconds between status polls.
+            pinned_gguf: The card's pinned GGUF file (``ModelCard.gguf_file``),
+                sent in the POST body so the store fetches that quant's shard
+                group rather than its default (#344). ``None`` for non-GGUF
+                models or when no pin applies.
 
         Returns:
             ``True`` if download completed successfully.
@@ -455,13 +487,17 @@ class ModelStoreClient:
 
         encoded_id = quote(model_id, safe="")
 
-        # Request download
+        # Request download. Send the pinned quant in the body when present; an
+        # older store host ignores the unknown body and uses its default (#344).
         url = _make_store_url(
             self._store_host, self._store_port, f"/models/{encoded_id}/download"
         )
+        post_kwargs: dict[str, object] = (
+            {"json": {"gguf_file": pinned_gguf}} if pinned_gguf else {}
+        )
         async with (
             create_http_session(timeout_profile="short") as session,
-            session.post(url) as resp,
+            session.post(url, **post_kwargs) as resp,  # pyright: ignore[reportArgumentType]
         ):
             if resp.status not in (200, 201):
                 raise RuntimeError(f"Store download request failed: HTTP {resp.status}")
@@ -722,7 +758,7 @@ class ModelStoreDownloader(ShardDownloader):
 
     Wrapping pattern (mirrors how Skulk wraps its own downloaders)::
 
-        base = exo_shard_downloader(offline=args.offline)
+        base = skulk_shard_downloader(offline=args.offline)
         downloader = ModelStoreDownloader(
             inner=base,
             store_client=store_client,
@@ -854,8 +890,10 @@ class ModelStoreDownloader(ShardDownloader):
                 direct_path = self._store_client.local_store_path / _sanitize_model_id(
                     model_id
                 )
-                if direct_path.exists() and _staged_directory_looks_complete(
-                    direct_path
+                if (
+                    direct_path.exists()
+                    and _staged_directory_looks_complete(direct_path)
+                    and not _staged_vision_projector_missing(shard, direct_path)
                 ):
                     logger.info(
                         f"ModelStoreDownloader: staging disabled — loading {model_id} directly from store at {direct_path}"
@@ -872,7 +910,11 @@ class ModelStoreDownloader(ShardDownloader):
         # broken model, so incomplete dirs fall through to re-staging
         # (which resumes partial files via HTTP Range).
         dest_path = _staging_dir(self._staging_config.node_cache_path, model_id)
-        if dest_path.exists() and _staged_directory_looks_complete(dest_path):
+        if (
+            dest_path.exists()
+            and _staged_directory_looks_complete(dest_path)
+            and not _staged_vision_projector_missing(shard, dest_path)
+        ):
             logger.info(
                 f"ModelStoreDownloader: {model_id} already staged at {dest_path} — skipping availability probe"
             )
@@ -921,6 +963,9 @@ class ModelStoreDownloader(ShardDownloader):
                     on_progress=lambda _p: self._emit_progress(
                         shard, status="in_progress"
                     ),
+                    # Forward the card's pinned quant so the store fetches it
+                    # rather than its default preference (#344).
+                    pinned_gguf=shard.model_card.gguf_file,
                 )
             except (RuntimeError, TimeoutError) as exc:
                 raise ModelNotInStoreError(

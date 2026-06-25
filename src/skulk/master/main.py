@@ -1,5 +1,6 @@
 import copy
 import time
+from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from datetime import datetime, timedelta, timezone
 from typing import cast
@@ -9,14 +10,23 @@ import yaml
 from loguru import logger
 
 from skulk.master.placement import (
+    PlacementError,
+    PlacementInfoPendingError,
     add_instance_to_placements,
     cancel_unnecessary_downloads,
     delete_instance,
     get_transition_events,
     place_instance,
+    replacement_command_for_download_failed_instance,
+    replacement_command_for_refused_instance,
 )
+from skulk.master.placement_utils import usable_vram_by_node
 from skulk.shared.apply import apply
 from skulk.shared.constants import SKULK_EVENT_LOG_DIR, SKULK_TRACING_ENABLED
+from skulk.shared.models.memory_estimate import (
+    estimate_shard_footprint,
+    shard_fraction_of_model,
+)
 from skulk.shared.types.commands import (
     AddCustomModelCard,
     CreateInstance,
@@ -27,6 +37,7 @@ from skulk.shared.types.commands import (
     ImageEdits,
     ImageGeneration,
     PlaceInstance,
+    RefuseInstancePlacement,
     RequestEventLog,
     SendInputChunk,
     SetTracingEnabled,
@@ -58,6 +69,8 @@ from skulk.shared.types.events import (
     TracesMerged,
     TracingStateChanged,
 )
+from skulk.shared.types.memory import Memory
+from skulk.shared.types.profiling import MemoryUsage
 from skulk.shared.types.state import State
 from skulk.shared.types.state_sync import StateSnapshot, StateSyncMessage
 from skulk.shared.types.tasks import (
@@ -76,7 +89,10 @@ from skulk.shared.types.tasks import (
 from skulk.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
 )
-from skulk.shared.types.worker.instances import InstanceId
+from skulk.shared.types.telemetry import TelemetryView
+from skulk.shared.types.worker.downloads import DownloadFailed
+from skulk.shared.types.worker.instances import Instance, InstanceId
+from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
 from skulk.store.config import resolve_config_path
 from skulk.utils.channels import Receiver, Sender
 from skulk.utils.disk_event_log import DiskEventLog
@@ -101,6 +117,20 @@ Pruning during that window would delete the very placements the seed
 preserved. 60s comfortably covers several probe cycles; the dead master's
 instances are still pruned — just one minute later, once absence reflects
 real liveness rather than an unsettled view."""
+
+RECENTLY_FREED_MEMORY_GRACE_SECONDS = 30.0
+"""How long the planner credits a just-deleted instance's memory back to its
+nodes during placement admission (#314).
+
+Node memory is gossiped last-write-wins, so after a teardown the freed memory
+takes a few gossip rounds to be reflected in `ramAvailable` (and the GPU-wireable
+figure). A back-to-back placement (test harness, rapid model swap) therefore
+reads stale, deflated availability and is spuriously refused. The master knows
+deterministically what it just freed, so it credits that node's footprint back
+to the fit-check inputs for this window: long enough to bridge the gossip lag,
+short enough that a genuine shortfall reasserts once the credit expires. The
+worker's live pre-load fit guard (#383) remains the OOM backstop, so an
+over-credit at most causes a refuse-and-re-place, never an OOM."""
 JsonObject = dict[str, object]
 
 # API-facing task types: the ones whose loss strands an open HTTP request.
@@ -176,6 +206,52 @@ def orphaned_task_failure_events(
     return events
 
 
+def instances_wedged_by_download_failure(
+    state: State,
+) -> dict[InstanceId, tuple[frozenset[NodeId], str]]:
+    """Not-yet-ready instances that can never load because a rank's download failed.
+
+    A multi-node instance forms its ring and every rank waits for all ranks to
+    become load-ready. If one rank's model download terminally fails (disk full,
+    transient HF or network error) that rank never advances, so the whole
+    instance sits at ``RunnerConnected`` forever with nothing to fail or recover
+    it (#381). This detects exactly that wedge from the master's own state: an
+    instance not all-ready whose any rank node carries a terminal
+    ``DownloadFailed`` for the instance's model. Returns, per wedged instance,
+    the failed node id(s) and a human-readable cause. Pure for testability.
+
+    A fully-ready instance (all runners ``RunnerReady``/``RunnerRunning``) is
+    never reported even if a stale ``DownloadFailed`` lingers in state, so a
+    serving instance is never torn down by this path.
+    """
+    wedged: dict[InstanceId, tuple[frozenset[NodeId], str]] = {}
+    for instance_id, instance in state.instances.items():
+        runner_ids = list(instance.shard_assignments.runner_to_shard.keys())
+        if not runner_ids:
+            continue
+        all_ready = all(
+            isinstance(state.runners.get(runner_id), (RunnerReady, RunnerRunning))
+            for runner_id in runner_ids
+        )
+        if all_ready:
+            continue
+        shards = list(instance.shard_assignments.runner_to_shard.values())
+        model_id = shards[0].model_card.model_id
+        failed_nodes: set[NodeId] = set()
+        cause = ""
+        for node_id in instance.shard_assignments.node_to_runner:
+            for progress in state.downloads.get(node_id, []):
+                if (
+                    isinstance(progress, DownloadFailed)
+                    and progress.shard_metadata.model_card.model_id == model_id
+                ):
+                    failed_nodes.add(node_id)
+                    cause = progress.error_message
+        if failed_nodes:
+            wedged[instance_id] = (frozenset(failed_nodes), cause)
+    return wedged
+
+
 class Master:
     def __init__(
         self,
@@ -191,9 +267,18 @@ class Master:
         download_command_sender: Sender[ForwarderDownloadCommand],
         snapshot_event_cadence: int = SNAPSHOT_EVENT_CADENCE,
         initial_state: State | None = None,
+        telemetry_view: TelemetryView | None = None,
     ):
         self.node_id = node_id
         self.session_id = session_id
+        # Live node telemetry off the event log (#279). Node-owned so it
+        # survives this master's election: a freshly promoted master keeps the
+        # cluster's current node_resources instead of starting blind and
+        # risking a placement on a management node. None only in tests/standalone
+        # construction; the planner falls back to "no telemetry constraints".
+        self._telemetry_view = (
+            telemetry_view if telemetry_view is not None else TelemetryView()
+        )
         # A promoted master seeds its session from the node's prior
         # replicated state (shared/session_carryover.py) so placements
         # survive failover (#273) — previously every new session started
@@ -231,6 +316,115 @@ class Master:
         self._last_snapshot_idx = -1
         self._pending_traces: dict[TaskId, dict[int, list[TraceEventData]]] = {}
         self._expected_ranks: dict[TaskId, set[int]] = {}
+        # Instance ids whose memory-refusal re-placement has already been
+        # initiated (#290). The command processor generates events but does not
+        # apply them — self.state only updates when they round-trip through
+        # _event_processor — so two ranks of the same instance refusing in the
+        # same window would both still see the instance present and each spawn a
+        # wider replacement. Deduping on the refused id makes re-placement
+        # happen at most once per instance regardless of how many ranks refuse
+        # or of redelivery. Grows only by refused ids (rare); never reused since
+        # InstanceIds are unique.
+        self._refusal_replaced: set[InstanceId] = set()
+        # Instance ids whose download-failure recovery has already been initiated
+        # (#381), same dedup rationale as _refusal_replaced: the plan pass emits
+        # events but does not apply them, so the wedged instance stays visible
+        # for several ticks until InstanceDeleted round-trips. Deduping on the
+        # id makes recovery fire once per wedged instance. Grows only by wedged
+        # ids (rare); never reused since InstanceIds are unique.
+        self._download_failure_recovered: set[InstanceId] = set()
+        # Per-node memory (bytes) freed by a just-deleted instance, credited back
+        # to placement admission until gossiped node memory reflects it (#314).
+        # Each entry is (freed_bytes, monotonic_deadline); expired entries are
+        # pruned on read. See RECENTLY_FREED_MEMORY_GRACE_SECONDS.
+        self._recently_freed_bytes: dict[NodeId, list[tuple[int, float]]] = {}
+
+    def _record_freed_instance(self, instance: Instance) -> None:
+        """Credit a deleted instance's per-node footprint for the grace window.
+
+        Estimates each hosting node's shard footprint with the same accounting
+        the planner admits against, so a back-to-back placement is not refused on
+        the not-yet-refreshed (gossip-lagged) node memory (#314).
+        """
+        assignments = instance.shard_assignments
+        deadline = time.monotonic() + RECENTLY_FREED_MEMORY_GRACE_SECONDS
+        for node_id, runner_id in assignments.node_to_runner.items():
+            shard = assignments.runner_to_shard.get(runner_id)
+            if shard is None:
+                continue
+            fraction = shard_fraction_of_model(shard)
+            if fraction is None or fraction <= 0.0:
+                continue
+            footprint = estimate_shard_footprint(shard.model_card, fraction)
+            self._recently_freed_bytes.setdefault(node_id, []).append(
+                (footprint.in_bytes, deadline)
+            )
+
+    def _freed_credit_by_node(self) -> dict[NodeId, int]:
+        """Current non-expired freed-memory credit (bytes) per node, pruning the
+        expired entries as a side effect (#314)."""
+        now = time.monotonic()
+        credit: dict[NodeId, int] = {}
+        for node_id in list(self._recently_freed_bytes):
+            live = [(b, d) for (b, d) in self._recently_freed_bytes[node_id] if d > now]
+            if live:
+                self._recently_freed_bytes[node_id] = live
+                credit[node_id] = sum(b for (b, _) in live)
+            else:
+                del self._recently_freed_bytes[node_id]
+        return credit
+
+    def _placement_memory_inputs(
+        self,
+    ) -> tuple[Mapping[NodeId, MemoryUsage], Mapping[NodeId, Memory]]:
+        """Build the (node_memory, node_vram) inputs for placement admission with
+        the recently-freed credit applied (#314).
+
+        Both the gossiped ``ram_available`` and the derived GPU-wireable VRAM lag
+        a teardown (telemetry is last-write-wins), so credit both. ``ram_total``
+        is left untouched, so context-ceiling math (which reads it) is unchanged.
+        The worker's live pre-load guard (#383) still backstops genuine OOM.
+        """
+        credit = self._freed_credit_by_node()
+        base_memory = self._telemetry_view.node_memory
+        if not credit:
+            base_vram = usable_vram_by_node(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=base_memory,
+            )
+            return base_memory, base_vram
+        # Credit the freed bytes onto each node's ram_available, clamped to
+        # ram_total so credited availability never exceeds capacity (telemetry
+        # may already have partly caught up, or the footprint estimate may be
+        # conservative).
+        memory = {
+            node_id: (
+                usage.model_copy(
+                    update={
+                        "ram_available": Memory.from_bytes(
+                            min(
+                                usage.ram_total.in_bytes,
+                                usage.ram_available.in_bytes + credit[node_id],
+                            )
+                        )
+                    }
+                )
+                if node_id in credit
+                else usage
+            )
+            for node_id, usage in base_memory.items()
+        }
+        # Derive VRAM from the credited memory rather than crediting the VRAM
+        # figure directly: usable_vram_by_node applies its own working-set /
+        # GTT ceiling, so the credited VRAM is naturally capped and can never
+        # exceed the ceiling or total VRAM.
+        vram = usable_vram_by_node(
+            self._telemetry_view.node_system,
+            self._telemetry_view.node_resources,
+            node_memory=memory,
+        )
+        return memory, vram
 
     def _configure_expected_trace_ranks(
         self, task_id: TaskId, instance_id: InstanceId, *, trace_enabled: bool
@@ -352,6 +546,11 @@ class Master:
                                     task=TextGenerationTask(
                                         task_id=task_id,
                                         command_id=command.command_id,
+                                        # Carry the owning API node onto the task
+                                        # so the rank-0 supervisor can address
+                                        # output over the Zenoh data plane (#279
+                                        # Phase 2).
+                                        owner_node=command.owner_node,
                                         instance_id=selected_instance_id,
                                         task_status=TaskStatus.Pending,
                                         task_params=command.task_params,
@@ -402,6 +601,7 @@ class Master:
                                     task=ImageGenerationTask(
                                         task_id=task_id,
                                         command_id=command.command_id,
+                                        owner_node=command.owner_node,  # #279 Phase 2
                                         instance_id=selected_instance_id,
                                         task_status=TaskStatus.Pending,
                                         task_params=command.task_params,
@@ -452,6 +652,7 @@ class Master:
                                     task=ImageEditsTask(
                                         task_id=task_id,
                                         command_id=command.command_id,
+                                        owner_node=command.owner_node,  # #279 Phase 2
                                         instance_id=selected_instance_id,
                                         task_status=TaskStatus.Pending,
                                         task_params=command.task_params,
@@ -502,6 +703,7 @@ class Master:
                                     task=TextEmbeddingTask(
                                         task_id=task_id,
                                         command_id=command.command_id,
+                                        owner_node=command.owner_node,  # #279 Phase 2
                                         instance_id=selected_instance_id,
                                         task_status=TaskStatus.Pending,
                                         task_params=command.task_params,
@@ -521,6 +723,14 @@ class Master:
                                 TracingStateChanged(enabled=command.enabled)
                             )
                         case DeleteInstance():
+                            # Credit the freed memory back to placement admission
+                            # for a short grace window so a back-to-back placement
+                            # is not refused on gossip-lagged node memory (#314).
+                            deleted_instance = self.state.instances.get(
+                                command.instance_id
+                            )
+                            if deleted_instance is not None:
+                                self._record_freed_instance(deleted_instance)
                             placement = delete_instance(command, self.state.instances)
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
@@ -534,25 +744,139 @@ class Master:
                                     )
                                 )
                             generated_events.extend(transition_events)
+                        case RefuseInstancePlacement():
+                            # A worker could not fit its shard at load time
+                            # (#290). Delete the refused instance and re-place
+                            # the model one node wider so each node holds a
+                            # smaller share. If even a full-width split will not
+                            # fit, place_instance raises PlacementError and we
+                            # stop at the deletion — that terminal case bounds
+                            # the refuse→re-place loop to the cluster size.
+                            refused = self.state.instances.get(command.instance_id)
+                            if command.instance_id in self._refusal_replaced:
+                                # Another rank of the same instance already
+                                # triggered re-placement (self.state lags command
+                                # processing, so both ranks can still see the
+                                # instance present) — re-place exactly once.
+                                logger.info(
+                                    "RefuseInstancePlacement for "
+                                    f"{command.instance_id} already handled; ignoring"
+                                )
+                            elif refused is None:
+                                # Already gone (operator delete or redelivery) —
+                                # no-op.
+                                logger.info(
+                                    "RefuseInstancePlacement for unknown instance "
+                                    f"{command.instance_id}; ignoring"
+                                )
+                            else:
+                                self._refusal_replaced.add(command.instance_id)
+                                after_delete = delete_instance(
+                                    DeleteInstance(instance_id=command.instance_id),
+                                    self.state.instances,
+                                )
+                                replace_command = (
+                                    replacement_command_for_refused_instance(refused)
+                                )
+                                try:
+                                    final_placement = place_instance(
+                                        replace_command,
+                                        self.state.topology,
+                                        after_delete,
+                                        self._telemetry_view.node_memory,
+                                        self.state.node_network,
+                                        download_status=self.state.downloads,
+                                        node_resources=self._telemetry_view.node_resources,
+                                        node_vram=usable_vram_by_node(
+                                            self._telemetry_view.node_system,
+                                            self._telemetry_view.node_resources,
+                                            node_memory=self._telemetry_view.node_memory,
+                                        ),
+                                    )
+                                    logger.warning(
+                                        "Re-placing "
+                                        f"{replace_command.model_card.model_id} at "
+                                        f"min_nodes={replace_command.min_nodes} after "
+                                        f"{command.node_id} refused its shard "
+                                        f"({command.reason})"
+                                    )
+                                except PlacementInfoPendingError as err:
+                                    # Telemetry for a needed node has not arrived
+                                    # yet (rare during a load-time refusal, since
+                                    # the cluster is already running). Distinct
+                                    # from a true shortfall: the refused instance
+                                    # still can't stay on the node that rejected
+                                    # it, so it is torn down, but log the
+                                    # transient cause rather than "cannot fit".
+                                    final_placement = after_delete
+                                    logger.error(
+                                        "Cannot re-place "
+                                        f"{replace_command.model_card.model_id} after "
+                                        f"refusal on {command.node_id}: cluster info "
+                                        f"still gossiping ({err}). Torn down."
+                                    )
+                                except PlacementError as err:
+                                    final_placement = after_delete
+                                    logger.error(
+                                        "Cannot re-place "
+                                        f"{replace_command.model_card.model_id} after "
+                                        f"refusal on {command.node_id} (tried "
+                                        f"min_nodes={replace_command.min_nodes}): {err}. "
+                                        "Giving up on this placement."
+                                    )
+                                transition_events = get_transition_events(
+                                    self.state.instances,
+                                    final_placement,
+                                    self.state.tasks,
+                                )
+                                for cmd in cancel_unnecessary_downloads(
+                                    final_placement, self.state.downloads
+                                ):
+                                    await self.download_command_sender.send(
+                                        ForwarderDownloadCommand(
+                                            origin=self._system_id, command=cmd
+                                        )
+                                    )
+                                generated_events.extend(transition_events)
                         case PlaceInstance():
+                            # node_memory/node_vram come from the telemetry plane
+                            # (#279 slice 2) with a just-freed-memory credit so a
+                            # placement right after a teardown is not refused on
+                            # gossip-lagged availability (#314). Discrete-GPU VRAM
+                            # (AMD/NVIDIA) so big models admit against VRAM, not
+                            # 0.75 x system RAM.
+                            credited_memory, credited_vram = (
+                                self._placement_memory_inputs()
+                            )
                             placement = place_instance(
                                 command,
                                 self.state.topology,
                                 self.state.instances,
-                                self.state.node_memory,
+                                credited_memory,
                                 self.state.node_network,
                                 download_status=self.state.downloads,
                                 excluded_nodes=set(command.excluded_nodes),
+                                node_resources=self._telemetry_view.node_resources,
+                                node_vram=credited_vram,
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
                             )
                             generated_events.extend(transition_events)
                         case CreateInstance():
+                            # telemetry plane (#279 slice 2), with the just-freed
+                            # memory credit (#314) so an exact placement right
+                            # after a teardown stamps its ceiling against the
+                            # real (about-to-be-freed) availability.
+                            credited_memory, credited_vram = (
+                                self._placement_memory_inputs()
+                            )
                             placement = add_instance_to_placements(
                                 command,
                                 self.state.topology,
                                 self.state.instances,
+                                credited_memory,
+                                node_vram=credited_vram,
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
@@ -700,7 +1024,94 @@ class Master:
                 logger.info(f"Manually removing node {node_id} due to inactivity")
                 await self.event_sender.send(NodeTimedOut(node_id=node_id))
 
+            # Recover instances wedged because a rank's download failed (#381).
+            # Suppressed during the settle grace for the same reason as the
+            # liveness passes above: a freshly seeded master sees stale download
+            # state until live gossip refreshes it. A terminal DownloadFailed on
+            # a not-yet-ready instance can never clear on its own, so fail the
+            # instance (surfacing the cause to any waiting request) and re-place
+            # it excluding the failed node(s). Deduped so it acts once per wedged
+            # instance, not every tick while the events round-trip.
+            if topology_settled:
+                await self._recover_download_failed_instances()
+
             await anyio.sleep(10)
+
+    async def _recover_download_failed_instances(self) -> None:
+        """Fail and re-place instances stuck because a rank's download failed (#381).
+
+        See :func:`instances_wedged_by_download_failure`. For each newly-detected
+        wedged instance: fail any in-flight API task bound to it (so an open
+        request gets a clean error instead of hanging), tear the instance down,
+        and re-place the model at the same width excluding the failed node(s),
+        reusing the #290 placement machinery. If no healthy node set can host the
+        width, placement raises and we stop at the teardown, which bounds
+        recovery to the available nodes instead of looping.
+        """
+        wedged = instances_wedged_by_download_failure(self.state)
+        for instance_id, (failed_nodes, cause) in wedged.items():
+            if instance_id in self._download_failure_recovered:
+                continue
+            instance = self.state.instances.get(instance_id)
+            if instance is None:
+                continue
+            self._download_failure_recovered.add(instance_id)
+            failed_list = sorted(str(node_id) for node_id in failed_nodes)
+            logger.error(
+                f"Instance {instance_id} wedged: a rank's download failed on "
+                f"{failed_list} ({cause}). Failing it and re-placing without the "
+                "failed node(s)."
+            )
+            # Fail any in-flight API task bound to this instance before the
+            # teardown events index (the TaskFailed-before-removal invariant,
+            # #223): get_transition_events below emits InstanceDeleted, whose
+            # apply drops the instance's tasks.
+            for task_failed in orphaned_task_failure_events(self.state, {instance_id}):
+                await self.event_sender.send(task_failed)
+            after_delete = delete_instance(
+                DeleteInstance(instance_id=instance_id), self.state.instances
+            )
+            final_placement = after_delete
+            try:
+                replace_command = replacement_command_for_download_failed_instance(
+                    instance, failed_nodes
+                )
+                final_placement = place_instance(
+                    replace_command,
+                    self.state.topology,
+                    after_delete,
+                    self._telemetry_view.node_memory,
+                    self.state.node_network,
+                    download_status=self.state.downloads,
+                    excluded_nodes=set(failed_nodes),
+                    node_resources=self._telemetry_view.node_resources,
+                    node_vram=usable_vram_by_node(
+                        self._telemetry_view.node_system,
+                        self._telemetry_view.node_resources,
+                        node_memory=self._telemetry_view.node_memory,
+                    ),
+                )
+                logger.warning(
+                    f"Re-placing {replace_command.model_card.model_id} excluding "
+                    f"{failed_list} after a download failure"
+                )
+            except (PlacementError, PlacementInfoPendingError) as err:
+                final_placement = after_delete
+                logger.error(
+                    f"Cannot re-place {instance_id}'s model after a download "
+                    f"failure on {failed_list}: {err}. Torn down."
+                )
+            transition_events = get_transition_events(
+                self.state.instances, final_placement, self.state.tasks
+            )
+            for cmd in cancel_unnecessary_downloads(
+                final_placement, self.state.downloads
+            ):
+                await self.download_command_sender.send(
+                    ForwarderDownloadCommand(origin=self._system_id, command=cmd)
+                )
+            for event in transition_events:
+                await self.event_sender.send(event)
 
     async def _event_processor(self) -> None:
         with self.local_event_receiver as local_events:
@@ -719,7 +1130,9 @@ class Master:
                         continue
 
                     if isinstance(event, TaskDeleted):
-                        for command_id, task_id in list(self.command_task_mapping.items()):
+                        for command_id, task_id in list(
+                            self.command_task_mapping.items()
+                        ):
                             if task_id == event.task_id:
                                 self.command_task_mapping.pop(command_id, None)
 

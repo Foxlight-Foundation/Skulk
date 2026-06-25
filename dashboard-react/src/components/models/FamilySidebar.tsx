@@ -1,5 +1,6 @@
 import styled, { css } from 'styled-components';
 import { FamilyLogos } from './FamilyLogos';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 export interface FamilySidebarProps {
   families: string[];
@@ -65,13 +66,15 @@ export function FamilySidebar({
   hasRecents,
   onSelect,
 }: FamilySidebarProps) {
+  const { t } = useSkulkTranslation();
+
   return (
     <Sidebar>
       {/* All models */}
       <NavButton
         $active={selectedFamily === null}
         onClick={() => onSelect(null)}
-        title="All models"
+        title={t('familySidebar.allModels', 'All models')}
       >
         <GridIcon />
       </NavButton>
@@ -81,7 +84,7 @@ export function FamilySidebar({
         <NavButton
           $active={selectedFamily === 'favorites'}
           onClick={() => onSelect('favorites')}
-          title="Favorites"
+          title={t('familySidebar.favorites', 'Favorites')}
         >
           <FamilyLogos family="favorites" />
         </NavButton>
@@ -92,7 +95,7 @@ export function FamilySidebar({
         <NavButton
           $active={selectedFamily === 'recents'}
           onClick={() => onSelect('recents')}
-          title="Recent"
+          title={t('familySidebar.recent', 'Recent')}
         >
           <FamilyLogos family="recents" />
         </NavButton>
@@ -102,7 +105,7 @@ export function FamilySidebar({
       <NavButton
         $active={selectedFamily === 'huggingface'}
         onClick={() => onSelect('huggingface')}
-        title="HuggingFace Hub"
+        title={t('familySidebar.huggingFaceHub', 'HuggingFace Hub')}
       >
         <FamilyLogos family="huggingface" />
       </NavButton>

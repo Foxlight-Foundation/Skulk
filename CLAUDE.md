@@ -9,7 +9,8 @@ Skulk is a distributed AI inference system that connects multiple devices into o
 ## Build & Run Commands
 
 ```bash
-# Build the dashboard (required before running skulk)
+# Build the dashboard (needed to serve the web UI; a headless node can run
+# without it, in which case the API serves without the dashboard)
 cd dashboard-react && npm install && npm run build && cd ..
 
 # Run skulk (starts both master and worker with API at http://localhost:52415)
@@ -69,6 +70,8 @@ Docs source lives in `website/docs/`. Generated content:
 - `website/static/typedoc/` — TypeDoc HTML reference (gitignored)
 - `website/build/` — final Docusaurus output (gitignored)
 
+Deploy (`.github/workflows/docs.yml`): a push to `main` OR `dev` publishes TWO live sites in one GitHub Pages deploy: the **stable** docs built from `main` at `/Skulk/` and the **next** docs built from `dev` at `/Skulk/next/`. A build matrix builds each branch's current content (baseUrl set via `DOCS_BASE_URL`, channel banner via `DOCS_CHANNEL`), and the deploy job assembles them (stable at root, next under `/next/`). There are no Docusaurus version snapshots to maintain: each site is rebuilt live from its branch, so a push to either rebuilds and redeploys both. PRs build the PR's own docs as a validation artifact only.
+
 ## Pre-Commit Checks (REQUIRED)
 
 **IMPORTANT: Always run these checks before committing code. CI will fail if these don't pass.**
@@ -110,14 +113,18 @@ Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `LOCAL_EVENTS`: Workers send events to master for indexing
 - `COMMANDS`: Workers/API send commands to master
 - `STATE_SYNC_MESSAGES`: Followers request the current session snapshot before replaying the retained tail
+- `DATA`: Data plane (#279 Phase 2). The serving rank-0 worker streams per-token generation output (`DataChunk` = `{command_id, chunk}`) directly to the owning API node, off the event log entirely. The master never sees these (no index, no disk, no cluster-wide rebroadcast); only API nodes drain them, demuxing by `command_id` into the per-command stream queues. Output chunks never mutate `State`, so removing them from the ordered log is loss-free for correctness while eliminating the per-token master hop + disk write that dominated event-log volume (#278). Produced in `RunnerSupervisor._emit` (diverts `ChunkGenerated` to the data sender); consumed in `API._apply_data`. Inbound vision chunks (`InputChunkReceived`) stay on the control plane for now. The `DATA` topic can ride an **Eclipse Zenoh** peer session instead of gossipsub (soft default-on as of #315 via `_resolve_zenoh_enabled`: Zenoh when `SKULK_ZENOH_LISTEN` is configured, gossipsub for a bare node with no Zenoh config, `SKULK_ZENOH_DATA_PLANE=1/0` forces on/off; control/telemetry/election stay on libp2p): the `Router` routes only `DATA` to a `ZenohHandle` (`rust/networking/src/zenoh_session.rs`) via `Router.uses_zenoh`. On Zenoh the plane is **key-addressed per owner** (#279 Phase 2): the owning API node stamps `owner_node` on the serving command, the master carries it onto the task, and `_emit` stamps it onto each `DataChunk`; the `Router` publishes to the key `data/<owner_node>` (`DATA.routing_key` / `_data_owner_key`, 3-tuple `(topic, routing_key, data)` on the networking channel) and each node subscribes only to `data/<own_node_id>`, so output reaches just the owner instead of fanning out. `_zenoh_recv` strips the suffix back to the bare `data` topic. On gossipsub `owner_node` is ignored (bare-topic broadcast), so the transports stay interchangeable. Phase 3 (#311) made the reorder buffer transport-conditional (kept on gossipsub, skipped under Zenoh's per-publisher FIFO; `sequence` retained until Zenoh is default). Hardening toward default-on (#308/#309): the Zenoh session is **namespace-isolated** (`ZenohConfig.namespace` = a SHA-256 hash of the libp2p namespace token, `_libp2p_namespace_token` mirroring `swarm.rs`: `SKULK_LIBP2P_NAMESPACE` when set, else the `NETWORK_VERSION` default `v0.0.1`; this is isolation between distinct clusters, NOT confidentiality vs an adversary already on the Zenoh network, since the seed is non-secret operator config also surfaced in `/v1/diagnostics/node`, so use Zenoh TLS/firewall on untrusted networks), `SKULK_ZENOH_LISTEN` is **required explicitly** (no `0.0.0.0` default), the DATA plane egresses on its own loop (`Router._zenoh_networking_publish`) whose channel is **bounded** (`_ZENOH_DATA_OUTBOUND_BUFFER`) so `Block` can't stall control and a stalled subscriber backpressures the producer instead of OOMing the node, and `ZenohSession` publish/subscribe don't hold their mutex across the await. See `website/docs/architecture-reference.md` for the env vars and the data-plane evolution plan.
 - `ELECTION_MESSAGES`: Election protocol messages
 - `CONNECTION_MESSAGES`: libp2p connection updates
+- `TELEMETRY`: Workers gossip `NodeTelemetry` (last-write-wins node readings — `NodeResources`: participation role + backends; `node_memory` + `node_system` since slice 2; `node_identities` + `node_disk` + `node_rdma_ctl` since slice 3) into an in-memory `TelemetryView`, NOT the event log. Control/telemetry/data plane separation (#279); read by the planner for placement and merged into `GET /state` for the dashboard. Those maps live here, not in `State`. The context-admission ceiling is stamped onto the instance at placement time (`context_token_limit`) since telemetry is unordered. NOTE: the **connectivity** readings (`node_network`, `node_thunderbolt`, `node_thunderbolt_bridge`, and the derived `thunderbolt_bridge_cycles`) deliberately STAY on the control plane: `apply()` builds the RDMA topology graph and TB-bridge cycles from them and the planner reads `node_network` for host selection, so they must be ordered, not LWW telemetry (#279 slice 3 scoping). `TELEMETRY_PLANE_INFO` in `telemetry.py` is the source of truth for which `GatheredInfo` variants ride telemetry. `node_system` (`SystemPerformanceProfile`) carries a collector-agnostic `accelerator` block (`AcceleratorMetrics`: vendor/name/utilization_ratio/vram/power/temp/clock, `None` when unmeasured) filled at the collector boundary: mactop on Apple, and a new AMD/Linux passive-sysfs collector (`LinuxGpuMetrics`, `utils/info_gatherer/linux_gpu.py`) so non-Mac GPU nodes are not a telemetry blind spot.
 
 ### Event Sourcing
 The system uses event sourcing for state management:
 - `State` (src/skulk/shared/types/state.py): Immutable state object
 - `apply()` (src/skulk/shared/apply.py): Pure function that applies events to state
 - Master indexes events and broadcasts; workers apply indexed events
+
+**Versioning: all nodes in a cluster MUST run the same Skulk version.** Mixed-version clusters are an unsupported anti-pattern — wire types are strict (`extra="forbid"`), so a stale node rejects newer fields, causing state divergence/churn. Upgrade the whole fleet together; do NOT engineer cross-version compatibility (no dual-publish/legacy-event bridges, no snapshot-hydration shims). A node never reloads its own persisted State across restart (identity is ephemeral; State is rebuilt from the event log / state-sync), so a stale snapshot is simply rejected by `extra="forbid"`, which is the intended behavior. (A `State` before-validator that stripped removed keys was removed in #294: it broke state-sync by forcing strict Python-mode validation, which rejected ISO datetime strings like `lastSeen`.) See `website/docs/architecture.md` "Deployment & versioning" and #293.
 
 ### Key Type Hierarchy
 - `src/skulk/shared/types/`: Pydantic models for all shared types
@@ -136,7 +143,15 @@ Rust code in `rust/` provides:
 - `system_custodian`: System-level operations
 
 ### Dashboard
-React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API.
+React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API when present. A node without the built assets (a headless/non-Mac worker, or with no `SKULK_DASHBOARD_DIR`) sets `DASHBOARD_DIR=None`, skips the mount, and serves the API without the UI.
+
+Dashboard localization uses Tolgee in `dashboard-react/src/i18n/tolgee.ts`.
+All dashboard strings must use the `skulk` namespace through Tolgee's `t()`
+function with an English fallback; do not use the `<T>` component. Runtime
+translations are loaded from `VITE_TOLGEE_CDN_PREFIX` (default `/i18n`) with
+the bundled English namespace at `dashboard-react/src/i18n/en/skulk.json` as
+fallback. `VITE_TOLGEE_AVAILABLE_LANGUAGES` is a comma-separated build-time
+language list; English is always included.
 
 ### Model Capability System
 Skulk now treats model capability handling as two layers:

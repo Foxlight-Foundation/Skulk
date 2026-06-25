@@ -18,7 +18,9 @@
 </div>
 
 <br>
-Skulk runs AI models across one or more machines as a single cluster: point it at a few Apple Silicon machines and it pools their memory and GPUs behind one OpenAI-compatible endpoint. Skulk builds on the distributed inference foundations provided by [exo](#about-exo) and adds:
+Skulk is an interconnect fabric for multi-node AI compute. It joins several machines into one cluster and moves work across them as if they were a single device. Its headline use today is distributed inference: point it at a few Apple Silicon machines and it pools their memory and GPUs behind one OpenAI-compatible endpoint, so you can run models far larger than any single machine could hold.
+
+On top of that, Skulk adds:
 
 - Production-grade speculative decoding delivering 1.16–2.2× speedups across nodes and on heterogeneous hardware.
 - A real-time React dashboard with easy access to:
@@ -608,5 +610,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) if you want to contribute code, docs, tes
 
 ## About exo
 
-exo is the upstream distributed inference project Skulk was forked from; we keep this acknowledgment because Skulk still benefits from that foundation.
-Skulk keeps that foundation, then pushes further on model-store workflows, dashboard UX, and newcomer-friendly cluster operation.
+Skulk began as a fork of [exo](https://github.com/exo-explore/exo) and has since
+diverged substantially into its own project, with its own architecture and
+roadmap. We keep this acknowledgment, alongside the attribution in
+[NOTICE](NOTICE), because the early foundations came from exo's distributed
+inference work.

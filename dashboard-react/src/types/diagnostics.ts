@@ -198,6 +198,16 @@ export interface NodeResourceDiagnostics {
     sysPower?: number;
     pcpuUsage?: number;
     ecpuUsage?: number;
+    accelerator?: {
+      vendor?: string;
+      name?: string;
+      utilizationRatio?: number | null;
+      vramTotalBytes?: number | null;
+      vramUsedBytes?: number | null;
+      powerWatts?: number | null;
+      temperatureCelsius?: number | null;
+      clockMhz?: number | null;
+    } | null;
   } | null;
 }
 

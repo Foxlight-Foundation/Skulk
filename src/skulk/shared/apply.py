@@ -32,9 +32,8 @@ from skulk.shared.types.events import (
     TracingStateChanged,
 )
 from skulk.shared.types.profiling import (
-    NodeIdentity,
     NodeNetworkInfo,
-    NodeRdmaCtlStatus,
+    NodeResources,
     NodeThunderboltInfo,
     ThunderboltBridgeStatus,
 )
@@ -45,6 +44,7 @@ from skulk.shared.types.worker.downloads import DownloadProgress
 from skulk.shared.types.worker.instances import Instance, InstanceId
 from skulk.shared.types.worker.runners import RunnerId, RunnerShutdown, RunnerStatus
 from skulk.utils.info_gatherer.info_gatherer import (
+    LinuxGpuMetrics,
     MacmonMetrics,
     MacThunderboltConnections,
     MacThunderboltIdentifiers,
@@ -213,7 +213,30 @@ def apply_instance_deleted(event: InstanceDeleted, state: State) -> State:
     new_instances: Mapping[InstanceId, Instance] = {
         iid: inst for iid, inst in state.instances.items() if iid != event.instance_id
     }
-    return state.model_copy(update={"instances": new_instances})
+    # Drop the deleted instance's runner records too. Runner records are
+    # otherwise only removed by a terminal RunnerStatusUpdated(RunnerShutdown),
+    # but that final status is unreliably delivered: the worker's Shutdown
+    # handler cancels the supervisor's event forwarder (runner.shutdown()) as
+    # soon as the Shutdown task completes/times out, often before the runner
+    # process's RunnerShutdown is forwarded — and on a master-failover teardown
+    # the forwarder is torn down outright. Every instance delete therefore
+    # leaked one RunnerShuttingDown record per rank, growing State.runners
+    # without bound. Cleaning them here makes deletion atomic and independent of
+    # that handshake (mirrors apply_node_timed_out, which already prunes an
+    # affected instance's runners). The actual process teardown is driven
+    # separately by the Shutdown task, so dropping the status record early is
+    # safe.
+    deleted = state.instances.get(event.instance_id)
+    update: dict[str, object] = {"instances": new_instances}
+    if deleted is not None:
+        doomed_runner_ids = set(deleted.shard_assignments.runner_to_shard.keys())
+        if doomed_runner_ids:
+            update["runners"] = {
+                rid: rs
+                for rid, rs in state.runners.items()
+                if rid not in doomed_runner_ids
+            }
+    return state.model_copy(update=update)
 
 
 def apply_runner_status_updated(event: RunnerStatusUpdated, state: State) -> State:
@@ -222,6 +245,21 @@ def apply_runner_status_updated(event: RunnerStatusUpdated, state: State) -> Sta
             rid: rs for rid, rs in state.runners.items() if rid != event.runner_id
         }
         return state.model_copy(update={"runners": new_runners})
+    # Don't resurrect a record for a runner that no longer belongs to any
+    # instance. During teardown the worker emits a RunnerShuttingDown status that
+    # races behind InstanceDeleted; without this guard it re-adds a runner record
+    # that then never receives its terminal RunnerShutdown (that final status is
+    # routinely lost when the supervisor's event forwarder is cancelled on
+    # shutdown), so State.runners grows without bound. A status update for a live
+    # runner always has its instance present (CreateRunner is planned only after
+    # the instance exists, and events apply in order), so this only drops the
+    # post-deletion stragglers.
+    runner_belongs_to_an_instance = any(
+        event.runner_id in instance.shard_assignments.runner_to_shard
+        for instance in state.instances.values()
+    )
+    if not runner_belongs_to_an_instance:
+        return state
     new_runners = {
         **state.runners,
         event.runner_id: event.runner_status,
@@ -260,24 +298,13 @@ def apply_node_timed_out(event: NodeTimedOut, state: State) -> State:
     last_seen = {
         key: value for key, value in state.last_seen.items() if key != event.node_id
     }
-    node_identities = {
-        key: value
-        for key, value in state.node_identities.items()
-        if key != event.node_id
-    }
     downloads = {
         key: value for key, value in state.downloads.items() if key != event.node_id
     }
-    # Clean up all granular node mappings
-    node_memory = {
-        key: value for key, value in state.node_memory.items() if key != event.node_id
-    }
-    node_disk = {
-        key: value for key, value in state.node_disk.items() if key != event.node_id
-    }
-    node_system = {
-        key: value for key, value in state.node_system.items() if key != event.node_id
-    }
+    # Clean up the connectivity mappings still held in State. The telemetry-plane
+    # readings (node_memory/node_system since slice 2; node_identities/node_disk/
+    # node_rdma_ctl since slice 3) are pruned from TelemetryView via
+    # record_membership_from_event, not here.
     node_network = {
         key: value for key, value in state.node_network.items() if key != event.node_id
     }
@@ -290,9 +317,6 @@ def apply_node_timed_out(event: NodeTimedOut, state: State) -> State:
         key: value
         for key, value in state.node_thunderbolt_bridge.items()
         if key != event.node_id
-    }
-    node_rdma_ctl = {
-        key: value for key, value in state.node_rdma_ctl.items() if key != event.node_id
     }
     # Only recompute cycles if the leaving node had TB bridge enabled
     leaving_node_status = state.node_thunderbolt_bridge.get(event.node_id)
@@ -312,14 +336,9 @@ def apply_node_timed_out(event: NodeTimedOut, state: State) -> State:
             "downloads": downloads,
             "topology": topology,
             "last_seen": last_seen,
-            "node_identities": node_identities,
-            "node_memory": node_memory,
-            "node_disk": node_disk,
-            "node_system": node_system,
             "node_network": node_network,
             "node_thunderbolt": node_thunderbolt,
             "node_thunderbolt_bridge": node_thunderbolt_bridge,
-            "node_rdma_ctl": node_rdma_ctl,
             "thunderbolt_bridge_cycles": thunderbolt_bridge_cycles,
         }
     )
@@ -340,45 +359,34 @@ def apply_node_gathered_info(event: NodeGatheredInfo, state: State) -> State:
     }
 
     match info:
-        # MacmonMetrics is a decode-only shim for rolling upgrades; it carries
-        # the same normalized system_profile/memory shape as MactopMetrics.
-        case MactopMetrics() | MacmonMetrics():
-            update["node_system"] = {
-                **state.node_system,
-                event.node_id: info.system_profile,
-            }
-            update["node_memory"] = {**state.node_memory, event.node_id: info.memory}
+        # Memory and the system profile moved to the telemetry plane (#279
+        # slice 2): workers now gossip them on the TELEMETRY topic into the
+        # TelemetryView, off the event log. These cases stay only to keep the
+        # match exhaustive and to no-op a legacy event from an un-upgraded
+        # worker during a rolling upgrade (its readings ride telemetry once it
+        # restarts on the new binary). last_seen is still bumped above.
+        case MactopMetrics() | MacmonMetrics() | LinuxGpuMetrics():
+            # GPU/SoC readings ride the telemetry plane (#279 / accelerator
+            # telemetry), not the event log; applied to TelemetryView, not State.
+            # Kept as explicit no-op cases so the GatheredInfo match stays
+            # exhaustive and a stray log-path delivery is harmless.
+            pass
         case MemoryUsage():
-            update["node_memory"] = {**state.node_memory, event.node_id: info}
+            pass
         case NodeDiskUsage():
-            update["node_disk"] = {**state.node_disk, event.node_id: info.disk_usage}
+            # Telemetry plane since #279 slice 3 — applied to TelemetryView, not
+            # State. A NodeGatheredInfo still bumps last_seen above, but the
+            # reading no longer rides the event log (workers fork it to the
+            # TELEMETRY topic; a legacy event from an un-upgraded worker no-ops).
+            pass
         case NodeConfig():
             pass
         case MiscData():
-            current_identity = state.node_identities.get(event.node_id, NodeIdentity())
-            new_identity = current_identity.model_copy(
-                update={"friendly_name": info.friendly_name}
-            )
-            update["node_identities"] = {
-                **state.node_identities,
-                event.node_id: new_identity,
-            }
+            # Telemetry plane since #279 slice 3 (identity friendly-name).
+            pass
         case StaticNodeInformation():
-            current_identity = state.node_identities.get(event.node_id, NodeIdentity())
-            new_identity = current_identity.model_copy(
-                update={
-                    "model_id": info.model,
-                    "chip_id": info.chip,
-                    "os_version": info.os_version,
-                    "os_build_version": info.os_build_version,
-                    "skulk_version": info.skulk_version,
-                    "skulk_commit": info.skulk_commit,
-                }
-            )
-            update["node_identities"] = {
-                **state.node_identities,
-                event.node_id: new_identity,
-            }
+            # Telemetry plane since #279 slice 3 (identity static info).
+            pass
         case NodeNetworkInterfaces():
             update["node_network"] = {
                 **state.node_network,
@@ -426,13 +434,15 @@ def apply_node_gathered_info(event: NodeGatheredInfo, state: State) -> State:
                     )
                 )
         case RdmaCtlStatus():
-            update["node_rdma_ctl"] = {
-                **state.node_rdma_ctl,
-                event.node_id: NodeRdmaCtlStatus(
-                    enabled=info.enabled,
-                    interfaces_present=info.interfaces_present,
-                ),
-            }
+            # Telemetry plane since #279 slice 3 (rdma-ctl status).
+            pass
+        case NodeResources():
+            # NodeResources travels the telemetry plane (#279), not the event
+            # log — the worker routes it to the TELEMETRY topic and it lands in
+            # TelemetryView, never here. Kept as an explicit no-op so the match
+            # over GatheredInfo stays exhaustive and a stray log-path delivery
+            # is harmless rather than a crash.
+            pass
 
     return state.model_copy(update=update)
 

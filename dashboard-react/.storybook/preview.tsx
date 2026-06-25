@@ -1,6 +1,8 @@
 import type { Preview } from '@storybook/react-vite';
 import { ThemeProvider } from 'styled-components';
+import { TolgeeProvider } from '@tolgee/react';
 import { darkTheme, lightTheme, GlobalStyle } from '../src/theme';
+import { tolgee } from '../src/i18n/tolgee';
 import { useEffect, type ReactNode } from 'react';
 
 type ThemeName = 'light' | 'dark';
@@ -15,7 +17,12 @@ const ThemeWrapper = ({ themeName, children }: { themeName: ThemeName; children:
   return (
     <ThemeProvider theme={activeTheme}>
       <GlobalStyle />
-      {children}
+      {/* Components use Tolgee's t(); provide the instance so i18n-using stories
+          render instead of throwing "no TolgeeProvider". Falls back to the
+          bundled English namespace. */}
+      <TolgeeProvider tolgee={tolgee} fallback={null}>
+        {children}
+      </TolgeeProvider>
     </ThemeProvider>
   );
 };

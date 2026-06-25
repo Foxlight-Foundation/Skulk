@@ -1,4 +1,4 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import {
   useGetConfigQuery,
   useUpdateConfigMutation,
@@ -38,7 +38,7 @@ export interface UseConfigReturn {
  * cached query and the PUT is a mutation that invalidates the cache, so a
  * successful save is followed by an automatic refetch.
  */
-export function useConfig(): UseConfigReturn {
+export function useConfig(fallbackFetchErrorMessage: string): UseConfigReturn {
   const query = useGetConfigQuery();
   const [updateConfig, mutationState] = useUpdateConfigMutation();
 
@@ -49,7 +49,9 @@ export function useConfig(): UseConfigReturn {
   // query in a ref and read through it so `fetchConfig` keeps a single
   // stable identity for the lifetime of the hook subscription.
   const queryRef = useRef(query);
-  queryRef.current = query;
+  useEffect(() => {
+    queryRef.current = query;
+  }, [query]);
   const fetchConfig = useCallback(async () => {
     await queryRef.current.refetch();
   }, []);
@@ -76,7 +78,7 @@ export function useConfig(): UseConfigReturn {
   // so the UI can keep showing the previously-loaded config while the user
   // retries the save.
   const error = query.isError
-    ? (query.error as { error?: string; status?: number })?.error ?? 'Failed to fetch config'
+    ? (query.error as { error?: string; status?: number })?.error ?? fallbackFetchErrorMessage
     : null;
 
   return {

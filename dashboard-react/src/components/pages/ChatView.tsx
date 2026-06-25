@@ -11,6 +11,7 @@ import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import { chatActions } from '../../store/slices/chatSlice';
 import { store } from '../../store';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 /* ── Types ────────────────────────────────────────────── */
 
@@ -79,6 +80,17 @@ const THINK_TAG_START = '<think>';
 const THINK_TAG_END = '</think>';
 const GEMMA_THINK_START = '<|channel>thought\n';
 const GEMMA_THINK_END = '<channel|>';
+// gpt-oss "harmony" channel markers (distinct from Gemma's `<|channel>thought`).
+const HARMONY_CHANNEL_MARK = '<|channel|>';
+const HARMONY_CONTROL_TOKENS = [
+  '<|start|>',
+  '<|end|>',
+  '<|return|>',
+  '<|message|>',
+  '<|channel|>',
+  '<|call|>',
+  '<|constrain|>',
+];
 const MAX_TOOL_ROUNDS = 4;
 const GPT_OSS_BROWSER_TOOLS = {
   web_search: {
@@ -190,7 +202,61 @@ interface ExtractPageToolResponse {
   provider: string;
 }
 
+// Split a gpt-oss harmony stream/string into final content vs analysis thinking,
+// stripping every control marker. Mirrors the server-side parser so already-stored
+// conversations (captured before output channel-parsing) render cleanly, and the
+// raw scaffolding never leaks into a message bubble.
+function splitHarmonyChannels(raw: string): { content: string; thinking: string } {
+  let content = '';
+  let thinking = '';
+  let inBody = true; // start in content passthrough (text before any channel marker)
+  let channel: string | null = null;
+  let header = '';
+  let i = 0;
+
+  while (i < raw.length) {
+    let matched: string | null = null;
+    for (const token of HARMONY_CONTROL_TOKENS) {
+      if (raw.startsWith(token, i)) {
+        matched = token;
+        break;
+      }
+    }
+    if (matched) {
+      if (matched === '<|channel|>') {
+        inBody = false;
+        header = '';
+      } else if (matched === '<|message|>') {
+        const name = header.trim().split(/\s+/)[0];
+        channel = name && name.length > 0 ? name : null;
+        header = '';
+        inBody = true;
+      } else if (matched !== '<|constrain|>') {
+        // <|end|> / <|start|> / <|return|> / <|call|>: end of body.
+        inBody = false;
+        channel = null;
+        header = '';
+      }
+      i += matched.length;
+      continue;
+    }
+    const char = raw[i];
+    if (inBody) {
+      if (channel === 'analysis') thinking += char;
+      else content += char;
+    } else {
+      header += char;
+    }
+    i += 1;
+  }
+
+  return { content, thinking };
+}
+
 function splitReasoningDecoratedContent(raw: string): { content: string; thinking: string } {
+  if (raw.includes(HARMONY_CHANNEL_MARK)) {
+    return splitHarmonyChannels(raw);
+  }
   let content = '';
   let thinking = '';
   let i = 0;
@@ -423,6 +489,7 @@ async function readUploadedImageAsDataUrl(file: ChatUploadedFile): Promise<strin
 /* ── Component ────────────────────────────────────────── */
 
 export function ChatView({ readyInstances, className }: ChatViewProps) {
+  const { t } = useSkulkTranslation();
   // Store state
   const selectedModelId = useAppSelector((s) => s.chat.selectedModelId);
   const activeConversationId = useAppSelector((s) => s.chat.activeConversationId);
@@ -769,7 +836,9 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
           try {
             toolOutput = await executeBuiltinToolCall(toolCall);
           } catch (error) {
-            const message = error instanceof Error ? error.message : 'Tool execution failed.';
+            const message = error instanceof Error
+              ? error.message
+              : t('chat.view.errors.toolExecutionFailed', 'Tool execution failed.');
             toolOutput = JSON.stringify({ error: message });
           }
 
@@ -799,16 +868,27 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
       }
 
       if (!finalRawContent && toolLoopLimitHit) {
-        finalRawContent = 'Error: web search tool loop exceeded the safety limit.';
+        finalRawContent = t(
+          'chat.view.errors.toolLoopLimit',
+          'Error: web search tool loop exceeded the safety limit.',
+        );
       }
     } catch (err) {
       if ((err as Error).name === 'AbortError') {
         // User cancelled
         if (requestTimedOut) {
-          finalRawContent = `Error: generation stalled for more than ${Math.round(lastStallTimeoutMs / 1000)} seconds.`;
+          finalRawContent = t(
+            'chat.view.errors.generationStalled',
+            'Error: generation stalled for more than {seconds} seconds.',
+            { seconds: Math.round(lastStallTimeoutMs / 1000) },
+          );
         }
       } else {
-        finalRawContent = finalRawContent || `Error: ${(err as Error).message}`;
+        finalRawContent = finalRawContent || t(
+          'chat.view.errors.generic',
+          'Error: {message}',
+          { message: (err as Error).message },
+        );
       }
     } finally {
       if (stallTimer !== null) {
@@ -842,7 +922,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     abortRef.current = null;
     activeCommandIdRef.current = null;
 
-  }, [selectedModelId, isLoading, thinkingEnabled, supportsThinking, selectedBuiltinTools, addMessage]);
+  }, [selectedModelId, isLoading, thinkingEnabled, supportsThinking, selectedBuiltinTools, addMessage, t]);
 
   const handleCancel = useCallback(async () => {
     const commandId = activeCommandIdRef.current;
@@ -905,7 +985,10 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   if (readyModels.length === 0) {
     return (
       <NoModels>
-        No models are ready. Launch a model from the Model Store to start chatting.
+        {t(
+          'chat.view.noReadyModels',
+          'No models are ready. Launch a model from the Model Store to start chatting.',
+        )}
       </NoModels>
     );
   }
@@ -949,7 +1032,11 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
           thinkingEnabled={thinkingEnabled}
           onToggleThinking={() => setThinkingEnabled((v) => !v)}
           supportsImageAttachments={supportsImageAttachments}
-          placeholder={selectedModelId ? `Message ${selectedLabel}…` : 'Select a model to chat'}
+          placeholder={selectedModelId
+            ? t('chat.view.messagePlaceholder', 'Message {model}...', {
+                model: selectedLabel ?? t('chat.view.selectedModel', 'selected model'),
+              })
+            : t('chat.view.selectModelPlaceholder', 'Select a model to chat')}
         />
       </InputArea>
     </Container>

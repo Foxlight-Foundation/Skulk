@@ -47,7 +47,7 @@ Directory layout on the store host::
         ...
 
 The ``/`` → ``--`` sanitization in directory names matches the convention
-used by EXO's own ``~/.exo/models/`` cache.
+used for HuggingFace cache directories.
 
 Thread safety
 -------------
@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,6 +70,111 @@ from typing import Literal, final
 import aiofiles.os as aios
 from loguru import logger
 from pydantic import BaseModel, ConfigDict
+
+from skulk.shared.types.worker.downloads import FileListEntry
+
+
+def select_store_gguf_download_files(
+    file_list: list[FileListEntry],
+    pinned_gguf: str | None = None,
+) -> list[FileListEntry]:
+    """Filter a repo's file list to what the store host should download (#339).
+
+    A multi-quant GGUF repo ships every quantization (and sometimes the original
+    full-precision weights under ``original/`` plus ``metal/`` artifacts). The
+    store host should fetch exactly what the direct-HuggingFace path fetches:
+    the preferred quant's shard group plus ``config.json``, and nothing else.
+    This mirrors ``download_utils.resolve_allow_patterns`` for a GGUF card
+    (``[*gguf_allow_patterns(gguf_file), "config.json"]``), so a store-routed
+    download is no larger than a direct one. A non-GGUF repo (no ``.gguf`` LM
+    weights, excluding ``mmproj`` projectors) is returned unchanged.
+
+    Args:
+        file_list: The full recursive repo file list.
+        pinned_gguf: The card's pinned GGUF file (``ModelCard.gguf_file``), when
+            the requester carries one. The store fetches *that* quant's shard
+            group, honoring a custom/non-default pin (#344). When ``None`` (or
+            the pin is absent from the repo) the store falls back to the default
+            quant preference, matching the prior behavior.
+
+    Returns:
+        The subset to download. Identical to the input for non-GGUF repos.
+    """
+    from fnmatch import fnmatch
+
+    from skulk.shared.models.model_cards import (
+        gguf_allow_patterns,
+        select_preferred_gguf,
+    )
+
+    gguf_weights = [
+        entry
+        for entry in file_list
+        if entry.path.endswith(".gguf") and "mmproj" not in entry.path.lower()
+    ]
+    if not gguf_weights:
+        return file_list  # not a GGUF repo (or vision-only projector): unchanged
+
+    # Honor a card's pinned quant when it names a file actually in the repo;
+    # otherwise fall back to the default preference (#344). The pin is matched by
+    # exact repo-relative path so a stale/typo'd pin can't silently select the
+    # wrong file -- it just degrades to the default.
+    pinned_paths = {entry.path for entry in gguf_weights}
+    if pinned_gguf and pinned_gguf in pinned_paths:
+        selected = pinned_gguf
+    else:
+        if pinned_gguf:
+            logger.warning(
+                f"ModelStore: pinned GGUF {pinned_gguf!r} not found in repo; "
+                "falling back to the default quant preference"
+            )
+        selected = select_preferred_gguf(
+            [(entry.path, entry.size or 0) for entry in gguf_weights]
+        )
+    # Match the direct-HF GGUF allow-list exactly: the selected shard group
+    # (``gguf_allow_patterns`` returns either the single file or the
+    # ``<base>-*-of-*.gguf`` glob) plus ``config.json``. Patterns and paths are
+    # both repo-relative, the same basis HuggingFace's ``allow_patterns`` matches
+    # on, so a GGUF in a subdirectory aligns with the direct path. Every other
+    # file (other quants, original/* full-precision weights, metal/*, tokenizer,
+    # README) is dropped, just as the direct path drops them.
+    keep_patterns = [*gguf_allow_patterns(selected), "config.json"]
+
+    def _keep(entry: FileListEntry) -> bool:
+        # Keep the selected quant's shard group + config.json, plus the
+        # multimodal projector matched case-insensitively: ``has_gguf_projector``
+        # (used to detect a vision repo and to verify completeness) is
+        # case-insensitive, so the selection MUST be too, or an uppercase
+        # ``MMPROJ-*.gguf`` would be detected-but-never-selected and the
+        # registration guard would fail every retry.
+        if has_gguf_projector([entry.path]):
+            return True
+        return any(fnmatch(entry.path, pattern) for pattern in keep_patterns)
+
+    return [entry for entry in file_list if _keep(entry)]
+
+
+def has_gguf_projector(paths: Iterable[str]) -> bool:
+    """Whether any path is a multimodal projector GGUF (``*mmproj*.gguf``).
+
+    A vision GGUF ships its projector as a separate ``mmproj`` file alongside the
+    LM weights; the store uses this both to detect that a repo is a vision GGUF
+    (from its full file list) and to verify the projector actually landed before
+    registering the model (#346).
+
+    Matches the same convention as the card resolver (``gguf_repo_has_projector``)
+    and the runner (``find_mmproj_file``): a case-sensitive ``.gguf`` extension
+    (HF GGUF files are always lowercase-extension) with a case-insensitive
+    ``mmproj`` in the **basename**. The runner identifies the projector by
+    basename, so matching on the basename here (not anywhere in the path) keeps
+    all three aligned and avoids misclassifying a non-projector GGUF that merely
+    sits under a directory whose name contains ``mmproj``.
+    """
+    for path in paths:
+        name = path.rsplit("/", 1)[-1]
+        if name.endswith(".gguf") and "mmproj" in name.lower():
+            return True
+    return False
 
 
 @final
@@ -98,6 +204,12 @@ class StoreModelEntry(BaseModel):
     files: list[str]
     downloaded_at: str
     total_bytes: int
+    # Whether the upstream repo ships a multimodal projector, recorded at
+    # registration so the availability hot path can decide a vision GGUF's
+    # completeness without an HF repo-list probe (#346). ``None`` on entries
+    # written before this field existed (legacy): those fall back to a one-time
+    # HF probe until they are re-registered.
+    repo_has_projector: bool | None = None
 
 
 @dataclass
@@ -226,6 +338,7 @@ class ModelStore:
         model_path: Path,
         files: list[str],
         total_bytes: int,
+        repo_has_projector: bool | None = None,
     ) -> None:
         """Add or update *model_id* in the registry.
 
@@ -246,6 +359,7 @@ class ModelStore:
             files=files,
             downloaded_at=datetime.now(tz=timezone.utc).isoformat(),
             total_bytes=total_bytes,
+            repo_has_projector=repo_has_projector,
         )
         self._write_registry_entry(entry)
         logger.info(
@@ -306,12 +420,67 @@ class ModelStore:
     # Store-side HuggingFace downloads
     # ------------------------------------------------------------------
 
-    async def request_download(self, model_id: str) -> StoreDownloadStatus:
+    async def vision_entry_missing_projector(self, model_id: str) -> bool:
+        """True when an in-store GGUF entry is a vision model missing its projector.
+
+        Recovers stale entries registered before the projector was retained
+        (#346): such an entry lists only the LM quant, so staging it produces an
+        unloadable vision model. We detect that here so a re-download request is
+        not short-circuited as "already complete": the re-download skips the
+        already-present weights (size-matched) and fetches only the missing
+        projector, then re-registers a complete entry. Returns ``False`` when the
+        model is absent, already has a projector, is not a vision GGUF, or the
+        repo listing cannot be fetched (offline): we only force the redownload on
+        positive evidence of an incomplete vision entry.
+        """
+        entry = self._read_registry().get(model_id)
+        if entry is None or has_gguf_projector(entry.files):
+            return False
+        # Steady state: the registration guard records whether the upstream repo
+        # ships a projector, so the answer is local: no HF probe on this hot
+        # path (it backs the worker's store-availability check). A vision GGUF
+        # missing its projector is stale; a text model (no projector upstream) is
+        # complete.
+        if entry.repo_has_projector is not None:
+            return entry.repo_has_projector
+        # Legacy entry (written before the flag existed): fall back to a one-time
+        # (cached) HF probe, restricted to GGUF entries so an MLX/safetensors
+        # model is never probed. After it re-registers, the flag above takes over.
+        if not any(name.endswith(".gguf") for name in entry.files):
+            return False
+        from skulk.download.download_utils import fetch_file_list_with_cache
+        from skulk.shared.models.model_cards import ModelId
+
+        try:
+            repo_files = await fetch_file_list_with_cache(
+                ModelId(model_id), "main", recursive=True
+            )
+        except Exception as exc:
+            logger.debug(
+                f"ModelStore: could not check projector completeness for "
+                f"{model_id} ({exc}); leaving the existing entry as-is"
+            )
+            return False
+        return has_gguf_projector(f.path for f in repo_files)
+
+    async def request_download(
+        self, model_id: str, pinned_gguf: str | None = None
+    ) -> StoreDownloadStatus:
         """Request that the store download a model from HuggingFace.
 
         Deduplicates: if the model is already downloading, returns the
-        existing status.  If already in the store, returns "complete".
+        existing status.  If already in the store, returns "complete", unless it
+        is a vision GGUF whose stored entry is missing its ``mmproj`` projector
+        (a stale pre-#346 entry), in which case it re-downloads to recover the
+        projector instead of staging an unloadable model.
+
+        ``pinned_gguf`` is the requester's card-pinned GGUF file, forwarded so a
+        GGUF repo fetches that quant's shard group rather than the default (#344).
         """
+        # Checked outside the lock: it may do a (cached) repo file-list fetch, and
+        # holding the download lock across network I/O would serialize unrelated
+        # requests.
+        missing_projector = await self.vision_entry_missing_projector(model_id)
         async with self._download_lock:
             existing = self._active_downloads.get(model_id)
             if existing is not None:
@@ -319,13 +488,19 @@ class ModelStore:
                     del self._active_downloads[model_id]
                 else:
                     return existing
-            if self.is_in_store(model_id):
+            if self.is_in_store(model_id) and not missing_projector:
                 return StoreDownloadStatus(
                     model_id=model_id, status="complete", progress=1.0
                 )
+            if missing_projector:
+                logger.warning(
+                    f"ModelStore: {model_id} is in the store but its entry is "
+                    "missing the mmproj projector for a vision GGUF; "
+                    "re-downloading to recover it (existing weights are reused)."
+                )
             status = StoreDownloadStatus(model_id=model_id, status="pending")
             self._active_downloads[model_id] = status
-        task = asyncio.create_task(self._do_download(model_id))
+        task = asyncio.create_task(self._do_download(model_id, pinned_gguf))
         self._download_tasks.add(task)
         task.add_done_callback(self._download_tasks.discard)
         return status
@@ -348,8 +523,14 @@ class ModelStore:
             if s.status in ("pending", "downloading")
         ]
 
-    async def _do_download(self, model_id: str) -> None:
-        """Download a model from HuggingFace into the store and register it."""
+    async def _do_download(
+        self, model_id: str, pinned_gguf: str | None = None
+    ) -> None:
+        """Download a model from HuggingFace into the store and register it.
+
+        ``pinned_gguf`` (the requester's ``ModelCard.gguf_file``) selects which
+        GGUF quant's shard group to fetch, honoring a custom pin (#344).
+        """
         from skulk.download.download_utils import (
             download_file_with_retry,
             fetch_file_list_with_cache,
@@ -367,9 +548,34 @@ class ModelStore:
         try:
             await aios.makedirs(str(target_dir), exist_ok=True)
 
-            file_list = await fetch_file_list_with_cache(
+            repo_file_list = await fetch_file_list_with_cache(
                 ModelId(model_id), "main", recursive=True
             )
+            # A vision GGUF (LLaVA/Qwen-VL/Gemma-VLM style) ships its multimodal
+            # projector as a separate ``*mmproj*.gguf`` alongside the LM weights;
+            # the llama.cpp runner cannot load the model without it. Detect that
+            # from the full repo listing so we can verify the projector actually
+            # lands before registering (see the post-download guard below): a
+            # store entry that omits the projector stages an unloadable vision
+            # model, which surfaces only as a runner crash at load time (#346).
+            repo_ships_projector = has_gguf_projector(
+                f.path for f in repo_file_list
+            )
+            # For a GGUF repo, fetch only the preferred quant's shard group plus
+            # config.json (dropping other quants, original/*, metal/*, etc.),
+            # mirroring the direct-HF selective download (#339). The projector
+            # glob is retained by ``gguf_allow_patterns``, so a vision GGUF keeps
+            # its ``*mmproj*.gguf``.
+            selected_files = select_store_gguf_download_files(
+                repo_file_list, pinned_gguf
+            )
+            if len(selected_files) != len(repo_file_list):
+                logger.info(
+                    f"ModelStore: {model_id} is a GGUF repo; downloading "
+                    f"{len(selected_files)}/{len(repo_file_list)} files (selected "
+                    "quant's shard group + config.json only)"
+                )
+            file_list = selected_files
             total_bytes = sum(f.size or 0 for f in file_list)
             downloaded_bytes = 0
 
@@ -401,8 +607,24 @@ class ModelStore:
                 for p in target_dir.rglob("*")
                 if p.is_file()
             ]
+            # Vision-projector completeness guard (#346): a vision GGUF whose repo
+            # ships an ``mmproj`` projector MUST land its projector, or staging it
+            # to a worker produces an unloadable model that only fails as a runner
+            # crash at load time. Refuse to register an incomplete vision model so
+            # the failure is a loud, fixable download error here (re-running the
+            # download re-fetches the projector, which the selective allow-list
+            # already retains) instead of a confusing crash on a remote node.
+            if repo_ships_projector and not has_gguf_projector(files):
+                raise RuntimeError(
+                    f"{model_id} is a vision GGUF whose repo ships an mmproj "
+                    "projector, but none landed in the store download; refusing to "
+                    "register an unusable vision model. Re-run the download to "
+                    "re-fetch the projector."
+                )
             total = sum(p.stat().st_size for p in target_dir.rglob("*") if p.is_file())
-            self.register_model(model_id, target_dir, files, total)
+            self.register_model(
+                model_id, target_dir, files, total, repo_has_projector=repo_ships_projector
+            )
 
             status.status = "complete"
             status.progress = 1.0

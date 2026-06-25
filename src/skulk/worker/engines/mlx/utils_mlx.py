@@ -218,7 +218,6 @@ def _request_shape_debug_enabled() -> bool:
     """Return whether request-shape tracing is enabled for prompt debugging."""
     value = preferred_env_value(
         "SKULK_TRACE_REQUEST_SHAPES",
-        "EXO_TRACE_REQUEST_SHAPES",
     )
     if value is None:
         return False
@@ -946,6 +945,15 @@ def get_eos_token_ids_for_model(model_id: ModelId) -> list[int] | None:
     elif "qwen3.5" in model_id_lower or "qwen-3.5" in model_id_lower:
         # For Qwen3.5: 248046 (<|im_end|>), 248044 (<|endoftext|>)
         return [248046, 248044]
+    elif "moonlight" in model_id_lower:
+        # Moonlight's tokenizer eos_token is [EOS] (163585), but its chat
+        # template ends assistant turns with <|im_end|> (163586). Without the
+        # latter in the eos set, <|im_end|> is generated as an ordinary token,
+        # leaks into the output, and generation runs past the turn boundary
+        # into hallucinated follow-on turns (Skulk #304). Moonlight shares the
+        # Kimi tokenizer family, so 163586 is the same <|im_end|> id used for
+        # kimi-k2 above. Keep [EOS] too so the model's own stop token still works.
+        return [163585, 163586]
     return None
 
 

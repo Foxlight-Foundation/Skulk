@@ -1,3 +1,4 @@
+import anyio
 import pytest
 from anyio import create_task_group, fail_after, move_on_after
 
@@ -402,3 +403,187 @@ async def test_tie_breaker_prefers_node_with_more_commands_seen() -> None:
             em_in_tx.close()
             cm_tx.close()
             co_tx.close()
+
+
+# ===================================================== #
+#   Connection-churn / livelock regression (#400)       #
+# ===================================================== #
+
+
+def _make_election(node_id: str) -> Election:
+    """Build an Election wired to fresh channels for unit-level assertions."""
+    em_out_tx, _em_out_rx = channel[ElectionMessage]()
+    _em_in_tx, em_in_rx = channel[ElectionMessage]()
+    er_tx, _er_rx = channel[ElectionResult]()
+    _cm_tx, cm_rx = channel[ConnectionMessage]()
+    _co_tx, co_rx = channel[ForwarderCommand]()
+    return Election(
+        node_id=NodeId(node_id),
+        election_message_receiver=em_in_rx,
+        election_message_sender=em_out_tx,
+        election_result_sender=er_tx,
+        connection_message_receiver=cm_rx,
+        command_receiver=co_rx,
+        is_candidate=True,
+    )
+
+
+def test_apply_connection_updates_reports_only_real_membership_changes() -> None:
+    """The membership diff drives whether a connection update starts a round.
+
+    Only a peer genuinely joining or leaving counts; duplicate connects,
+    disconnects of untracked peers, and updates about ourselves are no-ops.
+    """
+    election = _make_election("ME")
+
+    # First sighting of a peer (its first connection) is a change.
+    assert election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
+        [ConnectionMessage(node_id=NodeId("A"), connected=True)]
+    )
+    # Its single connection closing (last close) is a change: the peer leaves.
+    assert election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
+        [ConnectionMessage(node_id=NodeId("A"), connected=False)]
+    )
+    # A disconnect for an untracked peer is not a change.
+    assert not election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
+        [ConnectionMessage(node_id=NodeId("A"), connected=False)]
+    )
+    # Updates about ourselves never count.
+    assert not election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
+        [ConnectionMessage(node_id=NodeId("ME"), connected=True)]
+    )
+    # A burst that nets out to a single new peer counts once.
+    assert election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
+        [
+            ConnectionMessage(node_id=NodeId("B"), connected=True),
+            ConnectionMessage(node_id=NodeId("B"), connected=True),
+        ]
+    )
+
+
+def test_apply_connection_updates_refcounts_multihomed_peer() -> None:
+    """A multi-homed peer stays present until its LAST connection closes.
+
+    The transport emits one update per connection, so dropping the peer on the
+    first close (and then ignoring the real last close as an untracked-peer
+    disconnect) could miss a genuine master loss. Ref-counting prevents that.
+    """
+    election = _make_election("ME")
+
+    # Two connections to the same peer: the first is a join, the second is not.
+    assert election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
+        [ConnectionMessage(node_id=NodeId("A"), connected=True)]
+    )
+    assert not election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
+        [ConnectionMessage(node_id=NodeId("A"), connected=True)]
+    )
+    # First of the two connections closes: peer is still present -> no change.
+    assert not election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
+        [ConnectionMessage(node_id=NodeId("A"), connected=False)]
+    )
+    # Last connection closes: the peer genuinely leaves -> change.
+    assert election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
+        [ConnectionMessage(node_id=NodeId("A"), connected=False)]
+    )
+    # And an extra close past zero is a harmless no-op (no negative counts).
+    assert not election._apply_connection_updates(  # pyright: ignore[reportPrivateUsage]
+        [ConnectionMessage(node_id=NodeId("A"), connected=False)]
+    )
+
+
+@pytest.mark.anyio
+async def test_duplicate_connection_update_does_not_restart_round(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A redundant connect to an already-tracked peer must not start a round.
+
+    This is the core of the livelock fix: pre-fix every connection message
+    bumped the clock and restarted the campaign; now only membership changes do.
+    """
+    monkeypatch.setattr("skulk.shared.election.CONNECTION_SETTLE_DELAY", 0.02)
+
+    em_out_tx, _em_out_rx = channel[ElectionMessage]()
+    em_in_tx, em_in_rx = channel[ElectionMessage]()
+    er_tx, _er_rx = channel[ElectionResult]()
+    cm_tx, cm_rx = channel[ConnectionMessage]()
+    co_tx, co_rx = channel[ForwarderCommand]()
+
+    election = Election(
+        node_id=NodeId("ME"),
+        election_message_receiver=em_in_rx,
+        election_message_sender=em_out_tx,
+        election_result_sender=er_tx,
+        connection_message_receiver=cm_rx,
+        command_receiver=co_rx,
+        is_candidate=True,
+    )
+
+    async with create_task_group() as tg:
+        with fail_after(2):
+            tg.start_soon(election.run)
+
+            # First sighting of peer A: a real membership change -> clock 1.
+            await cm_tx.send(ConnectionMessage(node_id=NodeId("A"), connected=True))
+            while election.clock != 1:
+                await anyio.sleep(0.01)
+
+            # A duplicate connect to A must NOT advance the clock / start a round.
+            await cm_tx.send(ConnectionMessage(node_id=NodeId("A"), connected=True))
+            await anyio.sleep(0.2)
+            assert election.clock == 1
+
+        em_in_tx.close()
+        cm_tx.close()
+        co_tx.close()
+        await election.shutdown()
+
+
+@pytest.mark.anyio
+async def test_connection_churn_burst_still_converges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A burst of redundant connection updates must not starve convergence.
+
+    Pre-fix, updates arriving faster than DEFAULT_ELECTION_TIMEOUT cancelled and
+    restarted the campaign forever, so no ElectionResult was ever produced. The
+    membership-diff gate collapses the burst to a single round that completes.
+    """
+    monkeypatch.setattr("skulk.shared.election.CONNECTION_SETTLE_DELAY", 0.02)
+
+    em_out_tx, _em_out_rx = channel[ElectionMessage]()
+    _em_in_tx, em_in_rx = channel[ElectionMessage]()
+    er_tx, er_rx = channel[ElectionResult]()
+    cm_tx, cm_rx = channel[ConnectionMessage]()
+    _co_tx, co_rx = channel[ForwarderCommand]()
+
+    election = Election(
+        node_id=NodeId("ME"),
+        election_message_receiver=em_in_rx,
+        election_message_sender=em_out_tx,
+        election_result_sender=er_tx,
+        connection_message_receiver=cm_rx,
+        command_receiver=co_rx,
+        is_candidate=True,
+    )
+
+    async def churn() -> None:
+        # Hammer the same peer faster than the (fast) election timeout.
+        for _ in range(40):
+            await cm_tx.send(ConnectionMessage(node_id=NodeId("A"), connected=True))
+            await anyio.sleep(0.01)
+
+    async with create_task_group() as tg:
+        with fail_after(3):
+            tg.start_soon(election.run)
+            tg.start_soon(churn)
+
+            # Despite the churn, the election must still produce a result for the
+            # round that admitted peer A (clock >= 1).
+            while True:
+                result = await er_rx.receive()
+                if result.session_id.election_clock >= 1 or result.won_clock >= 1:
+                    break
+
+        # Tear down cleanly while churn may still be sending: cancel rather than
+        # close the channel out from under the running producer task.
+        tg.cancel_scope.cancel()

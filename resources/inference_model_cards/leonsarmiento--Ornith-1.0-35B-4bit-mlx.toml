@@ -1,0 +1,39 @@
+# Ornith 1.0-35B (deepreinforce-ai): an agentic-coding Qwen3.5-MoE model
+# (256 experts / 8 active, ~3B active of 35B total). This is the MLX 4-bit
+# conversion. The base is a vision-language model (`qwen3_5_moe`), so it loads on
+# the mlx-vlm path (mlx-lm cannot target this architecture); mlx-vlm 0.6.1 ships
+# the `qwen3_5_moe` model, so the vision tower loads even when serving text-only.
+# Reasoning is declared explicitly (`<think>...</think>`, token-delimited)
+# because the qwen3 family auto-detection keys off the model id, which here does
+# not contain "qwen3". The base ships an MTP head (`mtp_num_hidden_layers = 1`);
+# speculative decoding is intentionally NOT wired here yet (a later measurement,
+# like the Qwen3.5-A3B card which found fast MoEs MTP-hostile).
+model_id = "leonsarmiento/Ornith-1.0-35B-4bit-mlx"
+n_layers = 40
+hidden_size = 2048
+num_key_value_heads = 2
+supports_tensor = true
+tasks = ["TextGeneration"]
+family = "qwen"
+quantization = "4bit"
+base_model = "Ornith 1.0-35B"
+capabilities = ["text", "thinking", "thinking_toggle", "vision"]
+context_length = 262144
+
+[reasoning]
+supports_toggle = true
+format = "token_delimited"
+default_effort = "medium"
+disabled_effort = "none"
+
+[tooling]
+supports_tool_calling = true
+tool_call_format = "generic"
+
+[vision]
+image_token_id = 248056
+model_type = "qwen3_5_moe"
+weights_repo = "leonsarmiento/Ornith-1.0-35B-4bit-mlx"
+
+[storage_size]
+in_bytes = 21168916714

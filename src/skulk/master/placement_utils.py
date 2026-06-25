@@ -6,13 +6,13 @@ from loguru import logger
 from pydantic import Field
 
 from skulk.shared.models.memory_estimate import (
+    GPU_VRAM_WORKING_SET_FRACTION,
     GPU_WORKING_SET_FRACTION,
+    UMA_GPU_OS_HEADROOM,
+    memory_overhead_factor,
 )
 from skulk.shared.models.memory_estimate import (
     KV_CONTEXT_BUDGET_TOKENS as PLACEMENT_KV_CONTEXT_BUDGET_TOKENS,
-)
-from skulk.shared.models.memory_estimate import (
-    MEMORY_OVERHEAD_FACTOR as PLACEMENT_MEMORY_OVERHEAD_FACTOR,
 )
 from skulk.shared.models.memory_estimate import (
     MEMORY_OVERHEAD_FLOOR as PLACEMENT_MEMORY_OVERHEAD_FLOOR,
@@ -24,7 +24,12 @@ from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.topology import Topology
 from skulk.shared.types.common import Host, NodeId
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.profiling import MemoryUsage, NodeNetworkInfo
+from skulk.shared.types.profiling import (
+    MemoryUsage,
+    NodeNetworkInfo,
+    NodeResources,
+    SystemPerformanceProfile,
+)
 from skulk.shared.types.topology import Cycle, RDMAConnection, SocketConnection
 from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import (
@@ -64,11 +69,106 @@ class CycleMemoryDiagnostics(CamelCaseModel):
     """One human-readable line per cycle rejected on real memory grounds."""
 
 
+def _has_gpu_offload_backend(backends: frozenset[str]) -> bool:
+    """Whether a node advertises a discrete-GPU-offload llama.cpp backend.
+
+    True only for a non-CPU llama.cpp compute tag (``llama_cpp-vulkan/rocm/cuda``).
+    A node that exposes a GPU but advertises only ``llama_cpp-cpu`` (the default
+    when ``SKULK_LLAMA_CPP_BACKENDS`` is unset, or after a GPU wheel is replaced)
+    runs GGUF on the CPU out of system RAM, so it must NOT be admitted against
+    VRAM it will not use.
+    """
+    return any(
+        tag.startswith("llama_cpp-") and not tag.endswith("-cpu") for tag in backends
+    )
+
+
+def usable_vram_by_node(
+    node_system: Mapping[NodeId, SystemPerformanceProfile],
+    node_resources: Mapping[NodeId, NodeResources] | None = None,
+    node_memory: Mapping[NodeId, MemoryUsage] | None = None,
+) -> dict[NodeId, Memory]:
+    """Per-node usable GPU memory for placement, keyed by node.
+
+    A node appears here only when it both (a) reports a VRAM-bearing accelerator
+    (AMD/NVIDIA with a nonzero ``vram_total_bytes`` in ``node_system``) and
+    (b) advertises a GPU-offload llama.cpp backend (``_has_gpu_offload_backend``),
+    so its engine actually allocates weights + KV from the GPU. Apple
+    unified-memory nodes report no discrete VRAM and are absent, keeping the
+    system-RAM path. When ``node_resources`` is omitted the backend gate is
+    skipped (test/simple use).
+
+    The usable figure depends on the node's memory architecture:
+
+    * Discrete GPU: ``min(vram_total - vram_used, vram_total *
+      GPU_VRAM_WORKING_SET_FRACTION)``. VRAM is a dedicated pool reported
+      separately from system RAM, so placement admits against VRAM, not
+      ``0.75 * system_ram``, and never assumes the whole card is free.
+    * Unified-memory APU (e.g. AMD Strix Halo), detected when the GTT aperture
+      spans the whole system (``gtt_total > vram_total`` AND ``gtt_total >=
+      ram_total``): the GPU addresses the BIOS VRAM carve-out PLUS system RAM
+      mapped through GTT, so a model larger than the carve-out runs there. Usable
+      GPU memory is the working-set-capped VRAM plus the system RAM the GPU can
+      map via GTT, leaving ``UMA_GPU_OS_HEADROOM`` for the OS + worker + download
+      staging: ``min(vram_avail, vram_total * GPU_VRAM_WORKING_SET_FRACTION) +
+      min(max(0, ram_available - UMA_GPU_OS_HEADROOM), gtt_total)``. The UMA path
+      needs the node's current memory from ``node_memory``; without that entry it
+      falls back to the discrete path. A discrete GPU also exposes a GTT total
+      (often ~= VRAM), so requiring GTT to cover all of system RAM is what keeps
+      it off this path.
+    """
+    node_memory = node_memory or {}
+    usable: dict[NodeId, Memory] = {}
+    for node_id, profile in node_system.items():
+        accelerator = profile.accelerator
+        if accelerator is None or accelerator.vendor not in ("amd", "nvidia"):
+            continue
+        total = accelerator.vram_total_bytes
+        if not total or total <= 0:
+            continue
+        if node_resources is not None:
+            resources = node_resources.get(node_id)
+            if resources is None or not _has_gpu_offload_backend(resources.backends):
+                continue
+        used = accelerator.vram_used_bytes or 0
+        vram_avail = max(0, total - used)
+        ceiling = int(total * GPU_VRAM_WORKING_SET_FRACTION)
+        vram_usable = min(vram_avail, ceiling)
+        gtt_total = accelerator.gtt_total_bytes
+        memory = node_memory.get(node_id)
+        # UMA signature: the GTT aperture spans the WHOLE system, i.e. it both
+        # exceeds the VRAM carve-out AND covers all of system RAM. A discrete AMD
+        # GPU also exposes ``mem_info_gtt_total`` (its default can equal VRAM), so
+        # ``gtt_total >= vram_total`` alone would misclassify a discrete card as
+        # unified and over-admit; requiring ``gtt_total >= ram_total`` keeps a
+        # discrete GPU (gtt ~= vram < system RAM) on the conservative VRAM-only
+        # path.
+        if (
+            gtt_total is not None
+            and gtt_total > total
+            and memory is not None
+            and gtt_total >= memory.ram_total.in_bytes
+        ):
+            # GTT spans host RAM, so the GPU can map system memory beyond the
+            # BIOS VRAM carve-out; count it (minus OS headroom) toward the pool,
+            # capped by what GTT itself can address. The VRAM portion still keeps
+            # its working-set headroom for driver/fragmentation overhead.
+            sys_for_gpu = min(
+                max(0, memory.ram_available.in_bytes - UMA_GPU_OS_HEADROOM.in_bytes),
+                gtt_total,
+            )
+            usable[node_id] = Memory.from_bytes(vram_usable + sys_for_gpu)
+            continue
+        usable[node_id] = Memory.from_bytes(vram_usable)
+    return usable
+
+
 def _per_node_required_memory(
     cycle: Cycle,
     node_memory: Mapping[NodeId, MemoryUsage],
     required_memory: Memory,
     sharding: Sharding,
+    node_vram: Mapping[NodeId, Memory] | None = None,
 ) -> dict[NodeId, Memory]:
     """Estimate the weight bytes each node in the cycle must hold.
 
@@ -80,7 +180,7 @@ def _per_node_required_memory(
     The continuous fraction is an estimate of the integer layer allocation:
     the two can differ by up to one layer per node (a few percent of the
     weights on realistic layer counts), which sits comfortably inside the
-    ``PLACEMENT_MEMORY_OVERHEAD_FACTOR`` margin applied on top.
+    ``memory_overhead_factor`` margin applied on top.
 
     Both the split here and the per-node admission below weigh by
     ``_node_usable_memory`` (capped at the Metal working-set ceiling), not raw
@@ -90,11 +190,15 @@ def _per_node_required_memory(
     cap and rejecting cycles that would fit if sized by usable memory — exactly
     the heterogeneous clusters this check is meant to support.
     """
+    node_vram = node_vram or {}
     if sharding == Sharding.Tensor:
         even_share = required_memory / len(cycle.node_ids)
         return {node_id: even_share for node_id in cycle.node_ids}
     total_usable = sum(
-        (_node_usable_memory(node_memory[node_id]) for node_id in cycle.node_ids),
+        (
+            _node_usable_memory(node_memory[node_id], node_vram.get(node_id))
+            for node_id in cycle.node_ids
+        ),
         start=Memory(),
     )
     if total_usable.in_bytes == 0:
@@ -103,19 +207,29 @@ def _per_node_required_memory(
         return {node_id: required_memory for node_id in cycle.node_ids}
     return {
         node_id: required_memory
-        * (_node_usable_memory(node_memory[node_id]) / total_usable)
+        * (
+            _node_usable_memory(node_memory[node_id], node_vram.get(node_id))
+            / total_usable
+        )
         for node_id in cycle.node_ids
     }
 
 
-def _node_usable_memory(memory: MemoryUsage) -> Memory:
+def _node_usable_memory(
+    memory: MemoryUsage, vram_usable: Memory | None = None
+) -> Memory:
     """Memory a node can actually dedicate to a shard.
 
-    Capped at the Metal GPU working-set ceiling (``GPU_WORKING_SET_FRACTION`` of
-    total RAM): gossiped ``ram_available`` can exceed what the GPU is allowed to
-    wire, so a shard that fits "available" RAM can still abort on the GPU
-    working-set wall.
+    On a discrete-VRAM GPU node (``vram_usable`` provided, see
+    ``usable_vram_by_node``), this is the usable VRAM pool the GPU-offload engine
+    allocates from, which is distinct from system RAM. Otherwise (Apple unified
+    memory) it is capped at the Metal GPU working-set ceiling
+    (``GPU_WORKING_SET_FRACTION`` of total RAM): gossiped ``ram_available`` can
+    exceed what the GPU is allowed to wire, so a shard that fits "available" RAM
+    can still abort on the GPU working-set wall.
     """
+    if vram_usable is not None:
+        return vram_usable
     ceiling = memory.ram_total * GPU_WORKING_SET_FRACTION
     return min(memory.ram_available, ceiling)
 
@@ -126,6 +240,7 @@ def filter_cycles_by_memory(
     model_card: ModelCard,
     sharding: Sharding = Sharding.Pipeline,
     context_budget: int = PLACEMENT_KV_CONTEXT_BUDGET_TOKENS,
+    node_vram: Mapping[NodeId, Memory] | None = None,
 ) -> tuple[list[Cycle], CycleMemoryDiagnostics]:
     """Keep cycles whose every node can hold its shard with runtime headroom.
 
@@ -134,9 +249,14 @@ def filter_cycles_by_memory(
     whose even split overloads the 16 GB node, and a sum check would happily
     admit it. Each node must satisfy::
 
-        weights_share * PLACEMENT_MEMORY_OVERHEAD_FACTOR
+        weights_share * memory_overhead_factor(model_card)
             + kv_share + PLACEMENT_MEMORY_OVERHEAD_FLOOR
-            <= min(ram_available, GPU_WORKING_SET_FRACTION * ram_total)
+            <= node usable memory
+
+    where usable memory is the node's discrete VRAM pool when it has one
+    (``node_vram``, see ``usable_vram_by_node``) or
+    ``min(ram_available, GPU_WORKING_SET_FRACTION * ram_total)`` on Apple unified
+    memory.
 
     ``kv_share`` reserves KV cache for ``context_budget`` tokens. It scales with
     a node's shard exactly as the weights do (per-layer for pipeline, per-rank
@@ -150,6 +270,7 @@ def filter_cycles_by_memory(
 
     Returns the surviving cycles plus diagnostics describing every rejection.
     """
+    node_vram = node_vram or {}
     diagnostics = CycleMemoryDiagnostics()
     filtered_cycles: list[Cycle] = []
     required_memory = model_card.storage_size
@@ -168,24 +289,30 @@ def filter_cycles_by_memory(
             continue
 
         node_shares = _per_node_required_memory(
-            cycle, node_memory, required_memory, sharding
+            cycle, node_memory, required_memory, sharding, node_vram
         )
+        # GGUF runs on the lighter llama.cpp C++ runtime, so its weight overhead
+        # is smaller than MLX's; use the engine-aware factor for the fit decision.
+        overhead_factor = memory_overhead_factor(model_card)
         overloaded: list[str] = []
         for node_id, share in node_shares.items():
             kv_share = share * kv_ratio
             required_with_overhead = (
-                share * PLACEMENT_MEMORY_OVERHEAD_FACTOR
-                + kv_share
-                + PLACEMENT_MEMORY_OVERHEAD_FLOOR
+                share * overhead_factor + kv_share + PLACEMENT_MEMORY_OVERHEAD_FLOOR
             )
-            available = _node_usable_memory(node_memory[node_id])
+            node_vram_usable = node_vram.get(node_id)
+            available = _node_usable_memory(node_memory[node_id], node_vram_usable)
             if required_with_overhead > available:
+                pool = (
+                    "usable GPU VRAM"
+                    if node_vram_usable is not None
+                    else f"min of available and {GPU_WORKING_SET_FRACTION:.0%} of RAM"
+                )
                 overloaded.append(
                     f"node {node_id} needs ~{required_with_overhead.in_gb:.1f}GB "
                     f"({share.in_gb:.1f}GB weights + {kv_share.in_gb:.1f}GB "
                     f"KV@{context_budget}tok + runtime headroom) but can use "
-                    f"{available.in_gb:.1f}GB (min of available and "
-                    f"{GPU_WORKING_SET_FRACTION:.0%} of RAM)"
+                    f"{available.in_gb:.1f}GB ({pool})"
                 )
         if overloaded:
             diagnostics.rejection_reasons.append(
@@ -243,13 +370,18 @@ def _validate_cycle(cycle: Cycle) -> None:
 def _compute_total_memory(
     node_ids: list[NodeId],
     node_memory: Mapping[NodeId, MemoryUsage],
+    node_vram: Mapping[NodeId, Memory] | None = None,
 ) -> Memory:
     # Weigh by usable (working-set-capped) memory, matching the admission check
     # in filter_cycles_by_memory: splitting by raw ram_available while admitting
     # against the cap over-weights nodes whose free RAM exceeds their GPU
     # ceiling and produces shards that don't fit.
+    node_vram = node_vram or {}
     total_memory = sum(
-        (_node_usable_memory(node_memory[node_id]) for node_id in node_ids),
+        (
+            _node_usable_memory(node_memory[node_id], node_vram.get(node_id))
+            for node_id in node_ids
+        ),
         start=Memory(),
     )
     if total_memory.in_bytes == 0:
@@ -262,11 +394,14 @@ def _allocate_and_validate_layers(
     node_memory: Mapping[NodeId, MemoryUsage],
     total_memory: Memory,
     model_card: ModelCard,
+    node_vram: Mapping[NodeId, Memory] | None = None,
 ) -> list[int]:
+    node_vram = node_vram or {}
     layer_allocations = allocate_layers_proportionally(
         total_layers=model_card.n_layers,
         memory_fractions=[
-            _node_usable_memory(node_memory[node_id]) / total_memory
+            _node_usable_memory(node_memory[node_id], node_vram.get(node_id))
+            / total_memory
             for node_id in node_ids
         ],
     )
@@ -276,13 +411,17 @@ def _allocate_and_validate_layers(
     for i, node_id in enumerate(node_ids):
         node_layers = layer_allocations[i]
         required_memory = (total_storage * node_layers) // total_layers
-        usable_memory = _node_usable_memory(node_memory[node_id])
+        usable_memory = _node_usable_memory(node_memory[node_id], node_vram.get(node_id))
         if required_memory > usable_memory:
+            pool = (
+                "GPU VRAM"
+                if node_vram.get(node_id) is not None
+                else f"{GPU_WORKING_SET_FRACTION:.0%} of RAM cap"
+            )
             raise ValueError(
                 f"Node {i} ({node_id}) has insufficient memory: "
                 f"requires {required_memory.in_gb:.2f} GB for {node_layers} layers, "
-                f"but can only use {usable_memory.in_gb:.2f} GB "
-                f"({GPU_WORKING_SET_FRACTION:.0%} of RAM cap)"
+                f"but can only use {usable_memory.in_gb:.2f} GB ({pool})"
             )
 
     return layer_allocations
@@ -292,21 +431,27 @@ def get_shard_assignments_for_pipeline_parallel(
     model_card: ModelCard,
     cycle: Cycle,
     node_memory: Mapping[NodeId, MemoryUsage],
+    node_vram: Mapping[NodeId, Memory] | None = None,
 ) -> ShardAssignments:
     """Create shard assignments for pipeline parallel execution."""
     world_size = len(cycle)
     use_cfg_parallel = model_card.uses_cfg and world_size >= 2 and world_size % 2 == 0
 
     if use_cfg_parallel:
-        return _get_shard_assignments_for_cfg_parallel(model_card, cycle, node_memory)
+        return _get_shard_assignments_for_cfg_parallel(
+            model_card, cycle, node_memory, node_vram
+        )
     else:
-        return _get_shard_assignments_for_pure_pipeline(model_card, cycle, node_memory)
+        return _get_shard_assignments_for_pure_pipeline(
+            model_card, cycle, node_memory, node_vram
+        )
 
 
 def _get_shard_assignments_for_cfg_parallel(
     model_card: ModelCard,
     cycle: Cycle,
     node_memory: Mapping[NodeId, MemoryUsage],
+    node_vram: Mapping[NodeId, Memory] | None = None,
 ) -> ShardAssignments:
     """Create shard assignments for CFG parallel execution.
 
@@ -323,9 +468,9 @@ def _get_shard_assignments_for_cfg_parallel(
 
     # Allocate layers for one pipeline group (both groups run the same layers)
     pipeline_node_ids = cycle.node_ids[:pipeline_world_size]
-    pipeline_memory = _compute_total_memory(pipeline_node_ids, node_memory)
+    pipeline_memory = _compute_total_memory(pipeline_node_ids, node_memory, node_vram)
     layer_allocations = _allocate_and_validate_layers(
-        pipeline_node_ids, node_memory, pipeline_memory, model_card
+        pipeline_node_ids, node_memory, pipeline_memory, model_card, node_vram
     )
 
     # Ring topology: group 0 ascending [0,1,2,...], group 1 descending [...,2,1,0]
@@ -370,13 +515,14 @@ def _get_shard_assignments_for_pure_pipeline(
     model_card: ModelCard,
     cycle: Cycle,
     node_memory: Mapping[NodeId, MemoryUsage],
+    node_vram: Mapping[NodeId, Memory] | None = None,
 ) -> ShardAssignments:
     """Create shard assignments for pure pipeline execution."""
     _validate_cycle(cycle)
-    total_memory = _compute_total_memory(cycle.node_ids, node_memory)
+    total_memory = _compute_total_memory(cycle.node_ids, node_memory, node_vram)
 
     layer_allocations = _allocate_and_validate_layers(
-        cycle.node_ids, node_memory, total_memory, model_card
+        cycle.node_ids, node_memory, total_memory, model_card, node_vram
     )
 
     runner_to_shard: dict[RunnerId, ShardMetadata] = {}
@@ -444,6 +590,7 @@ def get_shard_assignments(
     cycle: Cycle,
     sharding: Sharding,
     node_memory: Mapping[NodeId, MemoryUsage],
+    node_vram: Mapping[NodeId, Memory] | None = None,
 ) -> ShardAssignments:
     match sharding:
         case Sharding.Pipeline:
@@ -451,6 +598,7 @@ def get_shard_assignments(
                 model_card=model_card,
                 cycle=cycle,
                 node_memory=node_memory,
+                node_vram=node_vram,
             )
         case Sharding.Tensor:
             return get_shard_assignments_for_tensor_parallel(

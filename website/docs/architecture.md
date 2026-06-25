@@ -10,12 +10,12 @@ This is the long-form mental model for how Skulk is put together end to end. Rea
 
 ## What Skulk is
 
-Skulk is a distributed inference system that connects multiple Apple Silicon (and increasingly Linux/CUDA) nodes into one logical inference cluster. Models are sharded across nodes; any node's API can serve cluster-wide requests; the cluster keeps running through node arrivals, departures, and master failures. One Python binary (`uv run skulk`) is everything you need on each node — the same process is router, worker, master-eligible coordinator, election participant, API server, and dashboard host.
+Skulk is an interconnect fabric for multi-node AI compute: it connects multiple Apple Silicon (and increasingly Linux/CUDA) nodes into one cluster and moves work across them. Its headline use is distributed inference, where models are sharded across nodes, any node's API can serve cluster-wide requests, and the cluster keeps running through node arrivals, departures, and master failures. One Python binary (`uv run skulk`) is everything you need on each node: the same process is router, worker, master-eligible coordinator, election participant, API server, and, when its built assets are present, dashboard host. A headless node (for example a Linux worker with no built dashboard) runs as a full node and serves the API without the UI.
 
 The design choices that shape almost everything else:
 
 - **Event-sourced state.** All cluster-visible facts (instances, runners, downloads, tracing toggles) flow through an ordered event log. State is the result of `apply()`-ing events to a Pydantic model that is treated as immutable by convention (replaced wholesale by `apply()` rather than mutated in place).
-- **One master at a time.** A bully election picks the master; only the master indexes events. Failover is automatic, and the promoted node seeds the new session from its replicated state, so placed instances survive a master restart — workers rebuild their runners and serving resumes after a model-reload-sized gap (#273). Instances with a rank on the dead master are cleaned up once live topology confirms the node is gone.
+- **One master at a time.** A bully election picks the master; only the master indexes events. Failover is automatic, and the promoted node seeds the new session from its replicated state, so placed instances survive a master restart: workers rebuild their runners and serving resumes after a model-reload-sized gap. Instances with a rank on the dead master are cleaned up once live topology confirms the node is gone.
 - **libp2p pub/sub for transport.** Topics carry commands, events, election messages, and connection updates between nodes.
 - **MLX as the inference backend.** Pipeline-parallel and tensor-parallel sharding strategies sit on top of `mlx.distributed`'s ring or jaccl/RDMA backends.
 - **Subprocess isolation for runners.** Each model instance runs in its own `mp.Process` with its own MLX/Metal context, so a crash or hang in one runner can't bring down the rest of the node.
@@ -51,12 +51,14 @@ flowchart TB
 
 Each subsystem has its own concern:
 
-- **Router** wraps libp2p (via PyO3 Rust bindings) and exposes typed pub/sub topics: `GLOBAL_EVENTS`, `LOCAL_EVENTS`, `COMMANDS`, `DOWNLOAD_COMMANDS`, `STATE_SYNC_MESSAGES`, `ELECTION_MESSAGES`, `CONNECTION_MESSAGES`. Components subscribe by topic; payloads are validated Pydantic types.
+- **Router** wraps libp2p (via PyO3 Rust bindings) and exposes typed pub/sub topics: `GLOBAL_EVENTS`, `LOCAL_EVENTS`, `COMMANDS`, `DOWNLOAD_COMMANDS`, `STATE_SYNC_MESSAGES`, `ELECTION_MESSAGES`, `CONNECTION_MESSAGES`, `TELEMETRY`, `DATA`. Components subscribe by topic; payloads are validated Pydantic types.
+- **Telemetry plane** (`TELEMETRY` topic) carries last-write-wins node readings that are *not* decisions: each node's `participation` role and `backends` (slice 1), its memory and system profile (slice 2, the highest-volume readings), and the observational readings node identity, disk, and rdma-ctl status (slice 3). They are gossiped into an in-memory `TelemetryView` (read by the planner for placement and by the dashboard via `GET /state`) instead of being event-sourced into `State`, so routine readings don't bloat the event log. The system profile includes a collector-agnostic accelerator block (GPU utilization, VRAM used and total, power, temperature, clock) that every node fills the same way regardless of platform: macOS fills it from mactop, and an AMD/Linux node fills it from passive amdgpu sysfs reads, so the dashboard renders a heterogeneous fleet uniformly and reports "not measured" rather than a fake zero for anything a given node cannot read. Because the context-admission ceiling must be identical across ranks but telemetry is unordered, the master computes it once at placement time and stamps it onto the instance (`context_token_limit`). **Connectivity readings stay on the control plane**, though: `node_network`, the thunderbolt maps, and the derived `thunderbolt_bridge_cycles` define the topology graph (`apply()` builds RDMA edges and TB-bridge cycles from them, and the planner reads `node_network` for host selection), so they remain ordered event-sourced state rather than last-write-wins telemetry. This is the telemetry slice of separating the control plane (decisions, event-sourced) from telemetry and data planes.
+- **Data plane** (`DATA` topic) carries per-token generation output. The serving rank-0 worker streams `DataChunk` (`{command_id, chunk}`) directly to the owning API node, which demuxes by `command_id` into the per-command stream queue feeding the HTTP response. The master never sees these (no indexing, no disk write, no cluster-wide rebroadcast), so taking output off the ordered log is loss-free for correctness while removing the per-token master hop that dominated event-log volume. Ordering holds because a single rank-0 producer publishes each command's chunks in order. Inbound vision chunks (`InputChunkReceived`, low-volume) stay on the control plane for now. The plane can ride either libp2p gossipsub or an Eclipse Zenoh session, with key-addressed delivery and a namespace-isolated session on Zenoh. See [how the cluster communicates](cluster-communication) for the transports, ordering, trust model, and how speculative decoding rides the planes.
 - **Election** runs the bully algorithm and broadcasts `ELECTION_MESSAGES`. The winner takes the master role.
 - **Master** indexes incoming events into the event log (writing them to disk via `DiskEventLog`), publishes indexed events on `GLOBAL_EVENTS` for followers, and decides instance placements when a model is launched.
-- **Worker** receives indexed events, applies them to its local view of `State`, downloads model weights to disk when assigned a placement, and spawns / supervises runner subprocesses. Before spawning, it refuses a shard that won't fit local memory — a last-resort guard below the master's admission check, using the same shared estimator — and a crash circuit breaker gives up on a runner that keeps failing rather than relaunching it into another GPU-memory leak.
+- **Worker** receives indexed events, applies them to its local view of `State`, downloads model weights to disk when assigned a placement, and spawns / supervises runner subprocesses. Before spawning, it refuses a shard that won't fit local memory (a last-resort guard below the master's admission check, using the same shared estimator), and a crash circuit breaker gives up on a runner that keeps failing rather than relaunching it into another GPU-memory leak. When the give-up is driven by that *memory* guard (not a crash) the worker asks the master to re-place the model one node wider via `RefuseInstancePlacement` instead of letting the placement silently disappear (see "Placement memory admission" below).
 - **Runner** is *not* in the same process — it's a `mp.Process` daemon spawned by the worker. It owns one model and serves inference tasks for it. Multiple runners (one per pipeline rank) coordinate via `mlx.distributed` collectives.
-- **API** is a FastAPI app that exposes inference endpoints in four wire formats (OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, Ollama) and Skulk-native control endpoints (placements, diagnostics, traces, config). It also serves the dashboard build at `/`.
+- **API** is a FastAPI app that exposes inference endpoints in four wire formats (OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, Ollama) and Skulk-native control endpoints (placements, diagnostics, traces, config). It also serves the dashboard build at `/` when those assets are present; a headless node built without the UI skips that mount and serves the API alone.
 - **Storage** is a collection of on-disk responsibilities: the event log (msgpack + zstd), the model cache directory, custom model cards (per-user TOML files), and the optional shared model store.
 
 ## The shape of a cluster
@@ -81,6 +83,10 @@ Clusters form via libp2p mDNS or via explicit `--bootstrap-peers` multiaddrs. Ne
 
 Any node's API can serve any request — the API forwards work to the placed runners through the master/worker plumbing. Operators usually pick one node as the public entry point (commonly the most stable / best-connected one) but the cluster doesn't require a specific entry point.
 
+### Deployment & versioning
+
+**All nodes in a cluster must run the same Skulk version. Mixed-version clusters are unsupported: this is an anti-pattern, not a deployment mode.** Skulk's wire types are strict (`extra="forbid"`), so an older node will reject events, commands, or snapshots that carry a newer node's fields; running mixed versions produces silent state divergence, dropped placements, and election churn. Upgrade the whole fleet together (e.g. `git checkout <ref>` + restart the service on every node) rather than rolling nodes one at a time. There is no cross-version snapshot-hydration concession: a node never reloads its own State across restart (node identity is ephemeral and State is rebuilt from the event log / state-sync, not persisted-and-rehydrated), so a snapshot carrying a previous version's removed fields is simply rejected by `extra="forbid"`, which is the intended behavior for the unsupported mixed-version case. (An earlier before-validator that stripped removed keys was removed: it forced the whole model into strict Python-mode validation, where ISO datetime strings such as `lastSeen` were rejected, silently breaking state-sync.) Cross-version *interoperation* (a protocol-version handshake) is deliberately out of scope and rejected as a supported mode.
+
 ## Lifecycle of a request
 
 This is the path a chat completion takes from HTTP through to SSE response:
@@ -93,7 +99,7 @@ sequenceDiagram
     participant W as Worker (rank 0)
     participant R as Runner (rank 0)
     participant Rn as Runners (ranks 1..N)
-    participant Cb as ChunkGenerated subscribers
+    participant Cb as Owning API node
 
     C->>API: POST /v1/chat/completions
     API->>API: normalize → internal Task
@@ -107,11 +113,11 @@ sequenceDiagram
     R->>Rn: pipeline_parallel_prefill collectives
     Rn-->>R: returns through pipeline
     Note over R: decode loop<br/>(per-token sampling)
-    R->>Cb: ChunkGenerated event<br/>(token / finish_reason)
+    R->>Cb: DataChunk on DATA topic<br/>(token / finish_reason)
     Cb-->>API: chunk arrives in queue
     API-->>C: SSE: data: {...}\n\n
     Note over R,API: ...repeat per token...
-    R->>Cb: ChunkGenerated(finish_reason="stop")
+    R->>Cb: DataChunk(finish_reason="stop")
     Cb-->>API: terminal chunk
     API-->>C: data: [DONE]\n\n
 ```
@@ -120,15 +126,15 @@ The eleven steps in detail:
 
 1. **HTTP arrival.** Request hits FastAPI on any node's port (default 52415). The adapter for the wire format (OpenAI / Ollama / Claude / Responses) lives in `src/skulk/api/adapters/`.
 2. **Normalization.** The adapter transforms the wire-format payload into an internal `Task` (`src/skulk/shared/types/tasks.py`).
-3. **Capability resolution.** The API resolves the request against the bound `ModelCard` and computes a `ResolvedCapabilityProfile` (`src/skulk/shared/models/capabilities.py`). This decides prompt rendering, output parsing, tool-call format, reasoning format, vision handling, and a few MLX runtime knobs.
+3. **Capability resolution.** The API resolves the request against the bound `ModelCard` and computes a `ResolvedCapabilityProfile` (`src/skulk/shared/models/capabilities.py`). This decides prompt rendering, output parsing, tool-call format, reasoning format, vision handling, and a few MLX runtime knobs. Output parsing for channel-delimited reasoning formats (notably gpt-oss "harmony") is applied in the runner per engine: the MLX runner parses harmony at the token level (`parse_gpt_oss`), and the llama.cpp runner reparses it from llama.cpp's detokenized text (`HarmonyTextParser`), both splitting the `analysis` channel into reasoning and the `final` channel into content so control markers never reach the client.
 4. **Runner discovery.** The API resolves the request against running instances via `_resolve_and_validate_text_model`. If no instance is currently placed for the model, the API returns HTTP 404 — placement is **not** automatic on chat requests; operators must call `/instance` or `/place_instance` first to spin up the model. Once an instance exists, the API issues a command on the `COMMANDS` topic that the master indexes.
 5. **Worker dispatch and runner acknowledgement.** Each rank's worker forwards the `Task` over an `mp.Queue` to its runner subprocess. The runner emits `TaskAcknowledged` on its outgoing event channel (see `src/skulk/worker/runner/llm_inference/runner.py:223`); the worker forwards that to `LOCAL_EVENTS`, the master indexes it, and it is republished on `GLOBAL_EVENTS` so every node observes the same acknowledged-state transition.
 6. **Prompt rendering.** The runner renders the chat history into tokens. Family-specific renderers (e.g., Gemma 4's `<|turn>` template, DeepSeek's DSML) handle the format. Vision preprocessing happens here for multimodal requests.
 7. **Distributed prefill.** Pipeline-parallel models split the layer stack across ranks. Each rank computes its slice's prefill, sends activations to the next rank via `mx.distributed.send`, and barriers synchronize phase transitions. Tensor-parallel models do per-layer collectives within a rank.
 8. **Decode loop.** Per token, the runner runs forward through its layer slice, exchanges activations with peers, samples (or accepts an injected token from speculative decoding), and emits the resulting chunk. Speculative decoding runs on single-node, tensor-parallel, and pipeline placements via one loop; on multi-node *pipeline* placements exactly one rank — the decider, the last rank — drafts and makes every accept/reject decision, broadcasting draft tokens and the per-round accept outcome through fixed-shape collectives so the committed stream is identical on every rank by construction rather than by numerical luck (heterogeneous chips produce divergent per-rank logits; relying on every rank recomputing the same decision is exactly what desynced and crashed mixed M5/M4 clusters). Multi-node *tensor* placements instead load the drafter on every rank and draft rank-symmetrically — a lone TP decider cannot draft "locally" because draft logits go through the TP-sharded lm_head, an all-rank collective idle receivers would never join (#263); rank-symmetric drafting relies on bit-identical per-rank logits, which TP placements already require in practice. Assistant-style drafters that cross-attend the target's KV occupy the same decider seat — the last pipeline rank is the only rank holding the KV layers they attend; such drafters declare `reads_target_cache` so the loop keeps the target cache fully committed before every draft. It is mechanism-agnostic: the loop owns verification, accept/reject, and cache reconciliation, and talks to a `Drafter` protocol (`src/skulk/worker/engines/mlx/drafters/`) behind which family-specific draft mechanisms live — Qwen3.5 sidecar MTP heads (fc projection + the sidecar's transformer block with a private KV cache, quantized on load to match the target), DeepSeek projection-only heads, and the Gemma 4 assistant model (a chain-trained companion that cross-attends the target's KV cache). Family facts (sidecar norm conventions, fc concat orders, hidden-state convention) are declarative data resolved from layout-keyed defaults plus model-card overrides, never constants in drafter code. The loop guarantees drafters a gapless, exactly-once stream of committed `(hidden, next-token)` pairs so stateful drafters keep positional history aligned with the target sequence. Rounds are *bonus-driven*: the loop carries an emitted-but-unforwarded bonus token, drafts up to the card's `mtp_max_depth` candidates from the bonus position, verifies `[bonus, drafts]` in a single K+1-token forward — the round's only target forward — commits the longest matching prefix, and samples the next bonus from the first non-matching row (the correction on a partial reject, the free next token on a full accept); the next round drafts from that position, so post-correction drafts — statistically the easiest — are never skipped. Cache reconciliation on a reject prefers the model's native `rollback_speculative_cache` (gemma4), else restores an SSM snapshot and *defers* the committed prefix to ride at the front of the next verify forward (extra verify width is effectively free on memory-bound decode), else plainly trims pure-KV caches. Depth is a per-model tuning knob set by measurement on the carded artifact. At temperature > 0, acceptance switches to Leviathan-Chen probability-ratio rejection sampling over the effective sampler distributions (with residual resampling on reject), preserving the output distribution exactly while keeping the speedup; depth is forced to 1 under sampling.
-9. **Chunk fan-out.** The runner emits `ChunkGenerated` events; the master indexes them; subscribers (the API queue for the originating request) receive them.
+9. **Output streaming.** The rank-0 runner publishes each generated chunk on the `DATA` topic, and the API node that owns the request drains it into that request's queue (on Zenoh the chunk is addressed to that node; on gossipsub it rides the shared topic and only the owner consumes it). The master does not index or relay per-token output (see [how the cluster communicates](cluster-communication) and the Data plane note above).
 10. **SSE serialization.** The API's adapter for the wire format converts each chunk to its on-the-wire shape (`data: {...}\n\n`) and yields it on the SSE stream.
-11. **Termination.** A chunk with `finish_reason != None` sends `data: [DONE]\n\n` and closes the stream. (As of writing, the stream-termination correctness work in #42 is hardening this against cancel races and silent worker failures — see the issue for current state.)
+11. **Termination.** A chunk with `finish_reason != None` sends `data: [DONE]\n\n` and closes the stream. (Stream termination is hardened against cancel races and silent worker failures.)
 
 For non-streaming responses the same flow happens but the API accumulates chunks before responding once. For embeddings and image generation the runner type and Task type differ but the master/worker/runner shape stays the same.
 
@@ -154,7 +160,13 @@ Operationally, the rule of thumb:
 
 `PlaceInstance` carries an optional `excluded_nodes` list. The master's placement planner treats those nodes as absent when scoring candidate cycles for that single placement only — it's a per-launch hint, not a cluster-wide flag. Already-running instances on the listed nodes are unaffected. Operators set the list from the dashboard's placement modal before pressing Launch.
 
-The planner's memory admission is per node, not summed across the candidate cycle: Tensor sharding splits the weights evenly across ranks while Pipeline allocates layers proportionally to each node's available memory, and every node must fit its weight share times a runtime-overhead factor (KV cache, activations, MLX buffers, the runner process) plus a flat floor — an exact weights-equal-free-memory fit is rejected because it thrashes rather than runs. "Available memory" here is the GPU-wireable figure, `total − wired − anonymous − compressor` from a `vm_stat` snapshot taken alongside each telemetry sample — not the naive free-plus-inactive figure, which counts reclaimable file cache as used (after downloading a model, the weights sitting in file cache would deflate availability by the model's full size and refuse a placement that runs comfortably; macOS evicts that cache the moment Metal wires pages). It deliberately does not credit compression of idle anonymous memory. Placement failures are typed: a topology gap, an exclusion that removed every candidate, a per-node memory shortfall (with the arithmetic), and the not-an-error startup cases where cluster info simply has not finished gossiping (`PlacementInfoPendingError` — covers both phases: connection edges lagging node identities, and memory info lagging the edges) are all distinct, and `POST /place_instance` dry-runs the placement against replicated state so callers get the real reason as a 400/503 instead of an acknowledged command that silently fails on the master.
+The planner's memory admission is per node, not summed across the candidate cycle: Tensor sharding splits the weights evenly across ranks while Pipeline allocates layers proportionally to each node's available memory, and every node must fit its weight share times a runtime-overhead factor (KV cache, activations, MLX buffers, the runner process) plus a flat floor — an exact weights-equal-free-memory fit is rejected because it thrashes rather than runs. "Available memory" here is the GPU-wireable figure, `total − wired − anonymous − compressor` from a `vm_stat` snapshot taken alongside each telemetry sample — not the naive free-plus-inactive figure, which counts reclaimable file cache as used (after downloading a model, the weights sitting in file cache would deflate availability by the model's full size and refuse a placement that runs comfortably; macOS evicts that cache the moment Metal wires pages). It deliberately does not credit compression of idle anonymous memory. Because that availability rides the telemetry plane (last-write-wins gossip), it lags a teardown by a few rounds: right after an instance is deleted the freed memory is not yet reflected, so a placement issued immediately afterward (a test harness or a rapid model swap) would read deflated availability and be refused until the gossip settles. To avoid that, the master credits a just-deleted instance's per-node footprint back to the admission inputs for a short grace window, then lets the credit expire so a genuine shortfall reasserts; the worker's own pre-load fit guard remains the last-resort check against an over-credit. Placement failures are typed: a topology gap, an exclusion that removed every candidate, a per-node memory shortfall (with the arithmetic), and the not-an-error startup cases where cluster info simply has not finished gossiping (`PlacementInfoPendingError` — covers both phases: connection edges lagging node identities, and memory info lagging the edges) are all distinct, and `POST /place_instance` dry-runs the placement against replicated state so callers get the real reason as a 400/503 instead of an acknowledged command that silently fails on the master.
+
+The master admits on the gossiped (telemetry-plane, last-write-wins) `ram_available`, while the worker's pre-spawn guard reads a fresh live `vm_stat` figure at load time. On a borderline multi-node split the live reading can sit just below the admitted estimate, so the master admits a cycle the worker then refuses. The worker guard therefore allows a small fit tolerance (10% of usable): a shard's footprint already bakes in the engine overhead factor, a full KV reservation, and a flat floor, so a sub-GB miss is within that pad and within live-versus-gossip jitter, and refusing on it would flip a placement the master admitted into a needless failure (a 0.2GB / 2% miss was observed refusing a 24B model at the load re-check across a 3-node ring). Only a shortfall beyond the tolerance, the signature of a node that genuinely lost memory since admission, trips the guard. When it does, rather than letting that instance vanish, the worker emits `RefuseInstancePlacement` and the master re-places the same model one node wider (`min_nodes` = refused width + 1) so each node holds a smaller share; the loop terminates when even a full-width split raises `PlacementError`. This self-corrects tight splits instead of requiring an operator to notice and re-launch.
+
+A separate failure mode is a rank whose model **download** fails terminally (disk full, a transient Hugging Face or network error). The ring still forms and every rank waits for all ranks to become load-ready, but the failed rank never will, so the instance would otherwise sit "loading" forever with nothing to recover it. The master's plan loop detects this from replicated state (a not-yet-ready instance whose any rank node carries a terminal download failure for the model), fails any in-flight request bound to it with the download error surfaced, tears the instance down, and re-places the model at the same width while excluding the failed node(s). If no healthy node set can host the width (for example the failure was cluster-wide), the re-placement raises `PlacementError` and the master stops at the teardown, which bounds recovery to the available nodes rather than looping. A transient or single-node failure therefore self-heals onto healthy nodes; a genuine shortfall fails cleanly with the reason instead of hanging.
+
+This recovery is made visible so it is not mysterious. `GET /state` attaches a derived per-node health summary (a level of ok, warn, or error plus reasons, each with a message and a remediation), computed read-only from state already in the response: a terminal download failure on a node, a low or full models-volume disk (a pre-emptive warning before a download fails), and a node whose heartbeats are late enough to be at risk of pruning. The dashboard renders an amber or red badge on the affected topology node whose hover names the problem and how to fix it, so an operator sees why a node is being routed around rather than watching placements quietly avoid a normal-looking node.
 
 Task failure is part of the same event flow. The master's plan loop — the
 same reconciliation pass that deletes instances on dead nodes — emits
@@ -175,6 +187,63 @@ client's own timeout.
 
 A snapshot-bootstrap rollout has one operational rule: once a master starts compacting old replay history after writing snapshots, older nodes that only know how to "replay from event 0" should be considered temporary guests during the rollout window. Upgrade all nodes before relying on bounded retention as the steady state.
 
+### Heterogeneous nodes and capability-aware placement
+
+A cluster can mix node types: Apple Silicon nodes serving MLX models and
+non-Mac (for example AMD/Linux) nodes serving GGUF models through llama.cpp.
+Placement is capability-aware so each model runs only where it can.
+
+Every node advertises the compute **backends** it can serve as
+`<engine>-<compute>` tags. The tag folds two axes into one self-describing
+string: the engine selects the worker runner class (`mlx` or `llama_cpp`), and
+the compute names the accelerator (`metal`, `vulkan`, `rocm`, `cuda`, `cpu`). A
+macOS node advertises `{mlx, mlx-metal}`; a Linux node with an importable
+`llama_cpp` built for its GPU adds `{llama_cpp, llama_cpp-vulkan}` (the compute
+backends come from `SKULK_LLAMA_CPP_BACKENDS`, defaulting to `cpu` when that env
+var is unset so a node never over-claims a GPU). Backends are probed per node and
+gossiped on the telemetry plane as part of `NodeResources`.
+
+The llama.cpp runner loads GGUF models with Flash Attention on by default (the
+modern llama.cpp default; it fixes the slow padded-V-cache and full-size
+sliding-window-cache path that gemma-style interleaved attention otherwise hits).
+Set `SKULK_LLAMA_CPP_FLASH_ATTN=0` to disable it on a node whose compiled build
+lacks Flash Attention kernels.
+
+A model card declares two placement axes that are deliberately separate from the
+memory/topology axes above:
+
+- `compatible_backends` is a **hard filter**: the planner excludes any node whose
+  advertised backends do not intersect it. A GGUF card lists the llama.cpp
+  backends, so it can only land on a llama.cpp node; an MLX card lists MLX, so it
+  stays on the Macs. This is what keeps an MLX model off an AMD node and a GGUF
+  model off a Mac without an MLX llama.cpp shim.
+- `backend_preference` is a **soft score**: when several compatible nodes
+  qualify, the planner prefers the node whose backend ranks earliest in the
+  card's preference list (for example preferring a GPU backend over CPU).
+
+The engine axis (which runtime) is orthogonal to the node axis (which machine):
+the same card mechanism that routes a GGUF model to a Vulkan llama.cpp node would
+route a future engine to whichever nodes advertise it. The worker resolves the
+concrete engine for its node at runner-spawn time by intersecting the card's
+`compatible_backends` with the node's advertised backends, ordered by
+`backend_preference`. See the
+[AMD Strix Halo nodes](./amd-strix-halo-nodes.md) guide for bringing up a
+non-Mac node.
+
+The llama.cpp runner serves GGUF models single-node and matches the MLX runner
+on the capabilities llama.cpp supports natively: per-token logprobs (with the
+top alternatives) and tool calling. A tool-enabled request runs unstreamed so
+the caller receives an assembled tool call rather than fragile token-by-token
+deltas; if the model answers in prose instead, that prose streams back normally.
+Logprobs requires the model to be loaded so it retains per-token logits, which
+pre-allocates a buffer proportional to context length times vocabulary. At a
+model's full trained context that buffer is large enough to exhaust a node's
+memory on load, so logprobs is off by default and opt-in per node; enabling it
+also caps the served context so the buffer stays bounded. The default path
+serves at full context without it. Whether a given GGUF emits a structured tool
+call (versus describing one in prose) depends on the model and its embedded chat
+template, which the runner uses as-is.
+
 ## The inference engine
 
 Inference happens entirely inside the runner subprocess. Skulk wraps MLX (and the upstream mlx-lm model implementations) in a layer that handles distributed coordination, family-specific behavior, and operator-controlled knobs.
@@ -183,7 +252,7 @@ Inference happens entirely inside the runner subprocess. Skulk wraps MLX (and th
 
 For models too large for a single device, Skulk splits the layer stack across ranks. Each rank holds a contiguous range of layers (`start_layer` to `end_layer`). Layers communicate via `mlx.distributed.send` / `recv_like` over the `ring` backend (sockets) or `jaccl` (RDMA, when available).
 
-The ring's per-rank addresses are chosen at placement time from the libp2p connections the cluster has *observed* between each neighbor pair, ranked by transport: Thunderbolt first, then ethernet/Wi-Fi, with VPN/overlay addresses (Tailscale's CGNAT range, detected by address) strictly last — the overlay exists for reaching nodes from outside the local network and may be relayed through a distant server, so it is only used when a pair genuinely has no local path (#265). Group formation itself runs under a hard deadline (`SKULK_GROUP_CONNECT_DEADLINE_SECONDS`, default 120s): ring init blocks forever if a neighbor socket fails its post-TCP rank handshake, so on expiry the runner exits via the wedge path, the worker gives the instance up on the first failure, and a fresh placement — with a fresh ring port — is the recovery, instead of an instance that sits broken behind request timeouts indefinitely.
+The ring's per-rank addresses are chosen at placement time from the libp2p connections the cluster has *observed* between each neighbor pair, ranked by transport: Thunderbolt first, then ethernet/Wi-Fi, with VPN/overlay addresses (Tailscale's CGNAT range, detected by address) strictly last; the overlay exists for reaching nodes from outside the local network and may be relayed through a distant server, so it is only used when a pair genuinely has no local path. Group formation itself runs under a hard deadline (`SKULK_GROUP_CONNECT_DEADLINE_SECONDS`, default 120s): ring init blocks forever if a neighbor socket fails its post-TCP rank handshake, so on expiry the runner exits via the wedge path, the worker gives the instance up on the first failure, and a fresh placement (with a fresh ring port) is the recovery, instead of an instance that sits broken behind request timeouts indefinitely. An even earlier gap is covered by a first-status-report deadline (120s): a runner frozen between spawn and its very first status report (a stuck process the crash breaker cannot see, since it is still alive) would otherwise stall group formation forever because the gate waits for every rank to report. The worker gives the instance up when a runner stays silent past that deadline.
 
 The pipeline forward pass per rank:
 
@@ -196,11 +265,11 @@ The `mx.eval` + `mx.distributed.send` discipline is load-bearing — it's where 
 
 ### Tensor parallelism
 
-Within a rank, individual operations (attention, MLP) can be sharded across devices/contexts via per-family `*ShardingStrategy` classes (Llama, DeepSeek, Qwen, GLM, MiniMax, GPT-OSS, Step3.5, NemotronH; see `src/skulk/worker/engines/mlx/auto_parallel.py`). The strategy picks shard dimensions for `q_proj`, `k_proj`, `v_proj`, `o_proj`, MLP gates, and so on. Today the strategies are dispatched via an `isinstance` chain; the ongoing modular-engine work (#130) is moving these to per-family adapters.
+Within a rank, individual operations (attention, MLP) can be sharded across devices/contexts via per-family `*ShardingStrategy` classes (Llama, DeepSeek, Qwen, GLM, MiniMax, GPT-OSS, Step3.5, NemotronH; see `src/skulk/worker/engines/mlx/auto_parallel.py`). The strategy picks shard dimensions for `q_proj`, `k_proj`, `v_proj`, `o_proj`, MLP gates, and so on. Today the strategies are dispatched via an `isinstance` chain; ongoing modular-engine work is moving these to per-family adapters.
 
 ### Family-specific behavior
 
-About 37% of the inference engine's code is family-specific (prompt rendering, output parsing, vision preprocessing, sharding strategy, occasional patches like Gemma 4's vision-tower wrapping). The current mechanism is a mix of capability-profile enum dispatch (`profile.prompt_renderer == Gemma4`) and direct `isinstance` checks. The umbrella issue at #130 tracks consolidation into a `FamilyAdapter` per family.
+About 37% of the inference engine's code is family-specific (prompt rendering, output parsing, vision preprocessing, sharding strategy, occasional patches like Gemma 4's vision-tower wrapping). The current mechanism is a mix of capability-profile enum dispatch (`profile.prompt_renderer == Gemma4`) and direct `isinstance` checks. Consolidation into a `FamilyAdapter` per family is ongoing.
 
 For the practical effect today: the model card declares a family (or family hints via `vision`, `tooling`, `runtime` sections), the resolver computes a profile, and the engine dispatches against the profile.
 
@@ -213,7 +282,7 @@ Skulk supports multiple KV cache backends, selectable per-cluster via config:
 - `turboquant` / `turboquant_adaptive` — random-orthogonal-rotation + scalar quant
 - `optiq` — rotated-space attention trick, decode-time perf benefit
 
-(RotorQuant is a research backend tracked under PR #103 and is not yet in the merged backend set; check `src/skulk/worker/engines/mlx/constants.py` for the current valid values.)
+(RotorQuant is a research backend not yet in the merged backend set; check `src/skulk/worker/engines/mlx/constants.py` for the current valid values.)
 
 The choice affects memory footprint and decode throughput. See [KV Cache Backends](kv-cache-backends) for the operator-facing trade-offs.
 
@@ -264,7 +333,7 @@ When a model appears stalled during warmup, prefill, or distributed generation, 
 - Set `SKULK_PIPELINE_EVAL_TIMEOUT_SECONDS=120` to raise the per-eval timeout if you're seeing false positives on cold-start
 - The repro harness at `bench/repro_gemma4_hang.py` exercises the deterministic pipeline-parallel hang pattern; see the file for the operator workflow
 
-The wider observability story (cluster timeline, hang-rate SLO, per-node panel) is being consolidated under #123. The user-facing operator workflow is documented in [Tracing and debugging](tracing) and the [API guide](api-guide).
+The wider observability story (cluster timeline, hang-rate SLO, per-node panel) is being consolidated. The user-facing operator workflow is documented in [Tracing and debugging](tracing) and the [API guide](api-guide).
 
 ## Storage
 
@@ -310,13 +379,14 @@ The adapters live in `src/skulk/api/adapters/`. Each one handles request normali
 
 ## The dashboard
 
-The dashboard is the operator-facing UI for the same Skulk runtime. It's a React + TypeScript + styled-components SPA, built with Vite, served by the API at `/` (the API's static-files mount).
+The dashboard is the operator-facing UI for the same Skulk runtime. It's a React + TypeScript + styled-components SPA, built with Vite, served by the API at `/` (the API's static-files mount) on nodes where the built assets are present. A node without them (a headless or non-Mac worker built without the UI) still runs the full API; operators reach the dashboard from any node that has it.
 
 Architecture decisions:
 
-- **Zustand** for state (`dashboard-react/src/stores/uiStore.ts`, `dashboard-react/src/stores/chatStore.ts`). No Redux, no Context for global state.
-- **Activity-style routing.** No react-router. Routes are managed via an `activeRoute` enum in the UI store. Each top-level page renders based on the current value.
+- **Redux Toolkit + RTK Query** for dashboard state (`dashboard-react/src/store/`). UI state lives in slices such as `uiSlice` and `chatSlice`; API reads/writes go through RTK Query endpoint modules.
+- **Activity-style routing.** No react-router. Routes are managed via an `activeRoute` enum in `uiSlice`. Each top-level page renders based on the current value.
 - **Hooks over services.** The cluster state subscription lives in `useClusterState`; topology rendering subscribes via the hook. No service singletons.
+- **Tolgee localization.** `dashboard-react/src/i18n/tolgee.ts` initializes Tolgee with the `skulk` namespace and wraps the app through `TolgeeProvider`. Dashboard code uses Tolgee's `t()` function with an English fallback for each key rather than `<T>`. Runtime translations are fetched from a CDN/static prefix (`VITE_TOLGEE_CDN_PREFIX`, default `/i18n`), with English bundled in `src/i18n/en/skulk.json` as the offline fallback. `VITE_TOLGEE_AVAILABLE_LANGUAGES` is a comma-separated list of language tags to preload/allow; English is always present.
 - **Theme-token-driven styling.** `dashboard-react/src/theme/theme.ts` exports `darkTheme` and `lightTheme`; styled-components reference tokens via `${({ theme }) => theme.colors.X}`.
 - **localStorage for cross-session preferences** (theme, observability panel width); sessionStorage for in-session UI state (which page, panel open/closed, scroll positions).
 
@@ -325,7 +395,7 @@ The dashboard's main surfaces:
 - **Topology** — spatial cluster view, node-by-node status
 - **Model Store** — search Hugging Face, place models, monitor downloads
 - **Chat** — simple chat client against the placed models
-- **Observability panel** — right-side resizable dock for live cluster health, per-node diagnostics, trace browsing (work in progress under #123)
+- **Observability panel**: right-side resizable dock for live cluster health, per-node diagnostics, trace browsing (work in progress)
 - **Settings** — cluster config (model store, KV cache backend, logging, tracing)
 
 ## Trade-offs and constraints

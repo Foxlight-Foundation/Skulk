@@ -2,6 +2,7 @@ import styled from 'styled-components';
 import type { ChatUploadedFile } from '../../types/chat';
 import { getFileIcon, formatFileSize, truncateFileName } from '../../types/chat';
 import { Button } from '../common/Button';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 export interface ChatAttachmentsProps {
   files: ChatUploadedFile[];
@@ -75,6 +76,8 @@ const RemoveBtn = styled(Button)`
 `;
 
 export function ChatAttachments({ files, readonly = false, onRemove }: ChatAttachmentsProps) {
+  const { t } = useSkulkTranslation();
+
   if (files.length === 0) return null;
 
   return (
@@ -88,10 +91,16 @@ export function ChatAttachments({ files, readonly = false, onRemove }: ChatAttac
           )}
           <FileInfo>
             <FileName title={file.name}>{truncateFileName(file.name)}</FileName>
-            <FileSize>{formatFileSize(file.size)}</FileSize>
+            <FileSize>{formatFileSize(file.size, t)}</FileSize>
           </FileInfo>
           {!readonly && onRemove && (
-            <RemoveBtn variant="ghost" size="sm" icon onClick={() => onRemove(file.id)} aria-label={`Remove ${file.name}`}>
+            <RemoveBtn
+              variant="ghost"
+              size="sm"
+              icon
+              onClick={() => onRemove(file.id)}
+              aria-label={t('chat.attachments.remove', 'Remove {fileName}', { fileName: file.name })}
+            >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M6 18L18 6M6 6l12 12" />
               </svg>

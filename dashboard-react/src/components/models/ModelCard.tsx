@@ -4,6 +4,7 @@ import type { DownloadProgress, PlacementPreview } from '../../types/models';
 import { formatBytes } from '../../utils/format';
 import { Button } from '../common/Button';
 import type { Theme } from '../../theme';
+import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 /* ================================================================
    Types
@@ -66,9 +67,9 @@ function estimateMemoryGB(modelId: string, modelName?: string): number {
   return 16;
 }
 
-function formatSpeed(bps: number): string {
-  if (!bps || bps <= 0) return '0 B/s';
-  return formatBytes(bps) + '/s';
+function formatSpeed(bps: number, t: SkulkTranslate): string {
+  if (!bps || bps <= 0) return t('modelCard.zeroBytesPerSecond', '0 B/s');
+  return t('modelCard.bytesPerSecond', '{bytes}/s', { bytes: formatBytes(bps) });
 }
 
 function clamp(v: number, min = 0, max = 100): number {
@@ -346,6 +347,7 @@ export function ModelCard({
   hideActions = false,
   excludedNodeIds,
 }: ModelCardProps) {
+  const { t } = useSkulkTranslation();
   const estimatedMemory = model.storage_size_megabytes
     ? Math.round(model.storage_size_megabytes / 1024)
     : estimateMemoryGB(model.id, model.name);
@@ -360,7 +362,11 @@ export function ModelCard({
   const hfId = modelIdOverride ?? model.id;
   const filterId = model.id.replace(/[^a-zA-Z0-9]/g, '');
 
-  const runtimeLabel = runtime === 'MlxRing' ? 'MLX Ring' : runtime === 'MlxJaccl' ? 'MLX RDMA' : runtime;
+  const runtimeLabel = runtime === 'MlxRing'
+    ? t('modelCard.runtime.mlxRing', 'MLX Ring')
+    : runtime === 'MlxJaccl'
+      ? t('modelCard.runtime.mlxRdma', 'MLX RDMA')
+      : runtime;
 
   return (
     <Card $canFit={canFit}>
@@ -376,7 +382,7 @@ export function ModelCard({
                 href={`https://huggingface.co/${hfId}`}
                 target="_blank"
                 rel="noreferrer noopener"
-                aria-label="View on HuggingFace"
+                aria-label={t('modelCard.viewOnHuggingFace', 'View on HuggingFace')}
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M14 3h7v7" /><path d="M10 14l11-11" /><path d="M21 14v6a1 1 0 0 1-1 1h-16a1 1 0 0 1-1-1v-16a1 1 0 0 1 1-1h6" />
@@ -393,19 +399,19 @@ export function ModelCard({
             <ModelId title={model.id}>{model.id}</ModelId>
           )}
         </div>
-        <MemorySize $canFit={canFit}>{estimatedMemory}GB</MemorySize>
+        <MemorySize $canFit={canFit}>{t('common.sizeGbCompact', '{size}GB', { size: estimatedMemory })}</MemorySize>
       </Header>
 
       {/* Sharding + runtime badges */}
       <BadgeRow>
         <Badge title={sharding === 'Pipeline'
-          ? 'Pipeline: splits model into sequential stages across devices.'
-          : 'Tensor: splits each layer across devices. Best with high-bandwidth connections.'}>
-          {sharding}
+          ? t('modelCard.sharding.pipelineTooltip', 'Pipeline: splits model into sequential stages across devices.')
+          : t('modelCard.sharding.tensorTooltip', 'Tensor: splits each layer across devices. Best with high-bandwidth connections.')}>
+          {sharding === 'Pipeline' ? t('common.pipeline', 'Pipeline') : t('common.tensor', 'Tensor')}
         </Badge>
         <Badge title={runtime === 'MlxRing'
-          ? 'Ring: standard networking. Works over any connection.'
-          : 'RDMA: direct memory access over Thunderbolt.'}>
+          ? t('modelCard.runtime.ringTooltip', 'Ring: standard networking. Works over any connection.')
+          : t('modelCard.runtime.rdmaTooltip', 'RDMA: direct memory access over Thunderbolt.')}>
           {runtimeLabel}
         </Badge>
       </BadgeRow>
@@ -413,7 +419,7 @@ export function ModelCard({
       {/* Per-node download progress */}
       {perNode.length > 0 && (
         <div style={{ marginBottom: 8 }}>
-          <SectionTitle>Download progress</SectionTitle>
+          <SectionTitle>{t('modelCard.downloadProgress', 'Download progress')}</SectionTitle>
           {perNode.map((nd) => (
             <DownloadRow key={nd.nodeId}>
               <span style={{ color: theme.colors.textMuted, width: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={nd.nodeId}>
@@ -427,7 +433,7 @@ export function ModelCard({
                 color: nd.status === 'completed' ? theme.colors.goldDim : nd.status === 'downloading' ? theme.colors.info : theme.colors.textMuted,
               }}>
                 {nd.status === 'downloading' && nd.progress
-                  ? `${Math.round(nd.percentage)}% ${formatSpeed(nd.progress.speed)}`
+                  ? `${Math.round(nd.percentage)}% ${formatSpeed(nd.progress.speed, t)}`
                   : `${nd.percentage > 0 ? Math.round(nd.percentage) : 0}%`}
               </span>
             </DownloadRow>
@@ -505,11 +511,11 @@ export function ModelCard({
           onClick={onLaunch}
         >
           {isLaunching ? (
-            <><LaunchSpinner /> LAUNCHING...</>
+            <><LaunchSpinner /> {t('modelCard.launching', 'LAUNCHING...')}</>
           ) : !canFit ? (
-            'INSUFFICIENT MEMORY'
+            t('modelCard.insufficientMemory', 'INSUFFICIENT MEMORY')
           ) : (
-            '▸ LAUNCH'
+            t('modelCard.launch', '▸ LAUNCH')
           )}
         </LaunchBtn>
       )}

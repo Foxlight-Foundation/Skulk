@@ -23,7 +23,7 @@ from skulk.shared.types.worker.shards import (
 )
 
 
-def exo_shard_downloader(
+def skulk_shard_downloader(
     max_parallel_downloads: int = 8, offline: bool = False
 ) -> ShardDownloader:
     return SingletonShardDownloader(

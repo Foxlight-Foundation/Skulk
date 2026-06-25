@@ -2,19 +2,19 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any, cast
 
-from pydantic import ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+)
 from pydantic.alias_generators import to_camel
 
 from skulk.shared.topology import Topology, TopologySnapshot
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.profiling import (
-    DiskUsage,
-    MemoryUsage,
-    NodeIdentity,
     NodeNetworkInfo,
-    NodeRdmaCtlStatus,
     NodeThunderboltInfo,
-    SystemPerformanceProfile,
     ThunderboltBridgeStatus,
 )
 from skulk.shared.types.tasks import Task, TaskId
@@ -49,15 +49,25 @@ class State(CamelCaseModel):
     tracing_enabled: bool = False
     last_event_applied_idx: int = Field(default=-1, ge=-1)
 
-    # Granular node state mappings (update independently at different frequencies)
-    node_identities: Mapping[NodeId, NodeIdentity] = {}
-    node_memory: Mapping[NodeId, MemoryUsage] = {}
-    node_disk: Mapping[NodeId, DiskUsage] = {}
-    node_system: Mapping[NodeId, SystemPerformanceProfile] = {}
+    # Connectivity mappings stay on the control plane: apply() builds the
+    # topology graph (RDMA edges, thunderbolt-bridge cycles) from them and the
+    # placement planner reads node_network, so they must be ordered, not
+    # last-write-wins telemetry (#279 slice 3 scoping).
     node_network: Mapping[NodeId, NodeNetworkInfo] = {}
     node_thunderbolt: Mapping[NodeId, NodeThunderboltInfo] = {}
     node_thunderbolt_bridge: Mapping[NodeId, ThunderboltBridgeStatus] = {}
-    node_rdma_ctl: Mapping[NodeId, NodeRdmaCtlStatus] = {}
+    # node_resources (#279 slice 1), node_memory + node_system (#279 slice 2),
+    # and node_identities + node_disk + node_rdma_ctl (#279 slice 3, the
+    # observational readings) moved to the telemetry plane — gossiped
+    # last-write-wins off the event log, held in TelemetryView, not here.
+    # NB: do NOT add a model_validator(mode=
+    # "before") to strip legacy keys for cross-version snapshots — that forces
+    # the whole model into strict PYTHON-mode validation, where ISO datetime
+    # strings (last_seen, serialized over the wire) are rejected, which silently
+    # broke state-sync entirely (followers livelock requesting the event log
+    # from 0). Mixed-version clusters are unsupported anyway (see #293 / the
+    # versioning policy in CLAUDE.md), so extra="forbid" simply rejecting an
+    # old snapshot's removed keys is the correct, intended behavior.
 
     # Detected cycles where all nodes have Thunderbolt bridge enabled (>2 nodes)
     thunderbolt_bridge_cycles: Sequence[Sequence[NodeId]] = []
@@ -83,3 +93,30 @@ class State(CamelCaseModel):
             return Topology.from_snapshot(snapshot)
 
         raise TypeError("Invalid representation for Topology field in State")
+
+    @field_validator("last_seen", mode="before")
+    @classmethod
+    def _coerce_last_seen(cls, value: object) -> object:
+        """Coerce ISO datetime strings in ``last_seen`` back to ``datetime``.
+
+        A ``StateSnapshotHydrated`` event persisted to the disk event log is
+        read back through the ``Event`` TypeAdapter, whose ``TaggedModel`` wrap
+        validator unwraps the ``{ClassName: inner}`` envelope by re-validating
+        the inner payload as a *python* object. Under ``strict=True`` that path
+        does not apply JSON-mode coercion to the nested ``State``, so the ISO
+        datetime strings that JSON serialization produced for ``last_seen`` are
+        rejected (``datetime_type``), halting event-log replay (#279 Phase 3 /
+        the failover-seed read). Coerce them here — scoped to this one field, so
+        unlike a model-level ``before`` validator it does not force the whole
+        model into python-mode validation (which previously broke state-sync,
+        see the note on ``last_seen`` above). Over-the-wire state-sync seeds
+        ``last_seen`` empty, so this only matters for the disk path.
+        """
+        if isinstance(value, Mapping):
+            return {
+                key: (
+                    datetime.fromisoformat(item) if isinstance(item, str) else item
+                )
+                for key, item in cast("Mapping[object, object]", value).items()
+            }
+        return value

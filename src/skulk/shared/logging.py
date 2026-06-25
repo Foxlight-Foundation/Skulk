@@ -10,11 +10,11 @@ import socket
 import subprocess
 import sys
 import traceback
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC
 from io import TextIOWrapper
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TextIO
 
 import zstandard
 from hypercorn import Config
@@ -25,6 +25,11 @@ if TYPE_CHECKING:
     from loguru import Message
 
 _MAX_LOG_ARCHIVES = 5
+# Hard size cap per skulk.log generation. With _MAX_LOG_ARCHIVES that bounds the
+# durable log at ~5 * 100 MB uncompressed (far less on disk: archives are
+# zstd-compressed). The previous policy rotated only once on startup, so a node
+# that ran for days without restarting grew its log file without bound (#382).
+_MAX_LOG_BYTES = 100 * 1024 * 1024
 _json_sink_id: int | None = None
 _vector_process: subprocess.Popen[bytes] | None = None
 _vector_pipe: TextIOWrapper | None = None
@@ -45,6 +50,26 @@ def _once_then_never() -> Iterator[bool]:
     yield True
     while True:
         yield False
+
+
+def _make_rotation_policy() -> Callable[[Message, TextIO], bool]:
+    """Build a loguru rotation policy: fresh log per run, then bounded by size.
+
+    Returns a callable loguru invokes before each write. It rotates once on the
+    first message (so every process start begins a clean ``skulk.log`` and the
+    previous run is retained as a compressed archive) and thereafter whenever the
+    next write would push the file past :data:`_MAX_LOG_BYTES`. The size bound is
+    what the prior once-on-startup-only policy lacked: a long-lived node now caps
+    its durable log instead of growing it without limit (#382).
+    """
+    rotate_once = _once_then_never()
+
+    def _should_rotate(message: Message, file: TextIO) -> bool:
+        if next(rotate_once):
+            return True
+        return file.tell() + len(message) > _MAX_LOG_BYTES
+
+    return _should_rotate
 
 
 class InterceptLogger(HypercornLogger):
@@ -173,9 +198,7 @@ def _start_vector(ingest_url: str) -> bool:
     env = {
         **dict(os.environ),
         "SKULK_LOGGING_INGEST_URL": ingest_url,
-        "EXO_LOGGING_INGEST_URL": ingest_url,  # legacy compat for vector.yaml
         "SKULK_VECTOR_DATA_DIR": str(Path.home() / ".skulk" / "vector"),
-        "EXO_VECTOR_DATA_DIR": str(Path.home() / ".skulk" / "vector"),  # legacy compat
     }
 
     # Ensure the data dir exists
@@ -244,12 +267,19 @@ def logger_setup(
     # replace all stdlib loggers with _InterceptHandlers that log to loguru
     logging.basicConfig(handlers=[_InterceptHandler()], level=0)
 
+    # Colorize only when stderr is an interactive terminal. Under launchd /
+    # systemd the console stream is captured to a file, where ANSI escape codes
+    # are noise that also inflate the captured size (#382) and make the log
+    # ungreppable. A non-TTY (or detached) stderr gets plain text.
+    _stderr = sys.__stderr__
+    console_is_tty = bool(_stderr is not None and _stderr.isatty())
+
     if verbosity == 0:
         logger.add(
             sys.__stderr__,  # type: ignore
             format="[ {time:hh:mm:ss.SSSSA} | <level>{level: <8}</level>] <level>{message}</level>",
             level="INFO",
-            colorize=True,
+            colorize=console_is_tty,
             enqueue=True,
         )
     else:
@@ -257,18 +287,17 @@ def logger_setup(
             sys.__stderr__,  # type: ignore
             format="[ {time:HH:mm:ss.SSS} | <level>{level: <8}</level> | {name}:{function}:{line} ] <level>{message}</level>",
             level="DEBUG",
-            colorize=True,
+            colorize=console_is_tty,
             enqueue=True,
         )
     if log_file:
-        rotate_once = _once_then_never()
         logger.add(
             log_file,
             format="[ {time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} ] {message}",
             level="INFO",
             colorize=False,
             enqueue=True,
-            rotation=lambda _, __: next(rotate_once),
+            rotation=_make_rotation_policy(),
             retention=_MAX_LOG_ARCHIVES,
             compression=_zstd_compress,
         )

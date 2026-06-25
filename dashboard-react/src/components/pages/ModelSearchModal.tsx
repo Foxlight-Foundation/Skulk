@@ -4,6 +4,7 @@ import { FiX } from 'react-icons/fi';
 import { ModelBrowser } from '../models/ModelBrowser';
 import type { ModelInfo, HuggingFaceModel, DownloadAvailability } from '../../types/models';
 import { addToast } from '../../hooks/useToast';
+import { useSkulkTranslation } from '../../i18n/tolgee';
 
 const FAVORITES_KEY = 'skulk-favorite-models';
 const RECENTS_KEY = 'skulk-recent-models';
@@ -85,6 +86,7 @@ export function ModelSearchModal({
   existingModelIds,
   onDownloadStarted,
 }: ModelSearchModalProps) {
+  const { t } = useSkulkTranslation();
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [favorites, setFavorites] = useState<Set<string>>(() => loadFavorites());
   const [recentIds, setRecentIds] = useState<string[]>(() => loadRecentIds());
@@ -167,16 +169,22 @@ export function ModelSearchModal({
         method: 'POST',
       });
       if (res.ok) {
-        addToast({ type: 'success', message: `Downloading ${modelId} to store` });
+        addToast({
+          type: 'success',
+          message: t('modelSearch.toasts.downloadingToStore', 'Downloading {modelId} to store', { modelId }),
+        });
         setRecentIds((prev) => [modelId, ...prev.filter((id) => id !== modelId)].slice(0, MAX_RECENT_MODELS));
         onDownloadStarted();
       } else {
-        addToast({ type: 'error', message: `Failed to start download for ${modelId}` });
+        addToast({
+          type: 'error',
+          message: t('modelSearch.toasts.downloadStartFailedForModel', 'Failed to start download for {modelId}', { modelId }),
+        });
       }
     } catch {
-      addToast({ type: 'error', message: `Failed to start download` });
+      addToast({ type: 'error', message: t('modelSearch.toasts.downloadStartFailed', 'Failed to start download') });
     }
-  }, [onDownloadStarted]);
+  }, [onDownloadStarted, t]);
 
   const handleAddModel = useCallback(async (modelId: string) => {
     try {
@@ -186,7 +194,7 @@ export function ModelSearchModal({
         body: JSON.stringify({ model_id: modelId }),
       });
       if (res.ok) {
-        addToast({ type: 'success', message: `Added ${modelId}` });
+        addToast({ type: 'success', message: t('modelSearch.toasts.addedModel', 'Added {modelId}', { modelId }) });
         // Refresh model list
         const listRes = await fetch('/models');
         if (listRes.ok) {
@@ -195,7 +203,7 @@ export function ModelSearchModal({
         }
       }
     } catch { /* ignore */ }
-  }, []);
+  }, [t]);
 
   const handleToggleMlxOnly = useCallback(() => {
     setMlxOnly(prev => !prev);
@@ -227,8 +235,8 @@ export function ModelSearchModal({
       <Backdrop onClick={onClose} />
       <ModalContainer>
         <ModalHeader>
-          <ModalTitle>Find Models</ModalTitle>
-          <CloseButton onClick={onClose} aria-label="Close">
+          <ModalTitle>{t('modelSearch.title', 'Find Models')}</ModalTitle>
+          <CloseButton onClick={onClose} aria-label={t('common.close', 'Close')}>
             <FiX size={20} />
           </CloseButton>
         </ModalHeader>

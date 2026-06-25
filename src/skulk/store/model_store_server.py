@@ -64,7 +64,7 @@ Example requests::
 from __future__ import annotations
 
 import shutil
-from typing import final
+from typing import cast, final
 
 import aiofiles
 import aiofiles.os as aios
@@ -190,6 +190,18 @@ class ModelStoreServer:
         model_path = self._store.get_store_path(model_id)
         if model_path is None:
             raise web.HTTPNotFound(reason=f"Model not in store: {model_id}")
+        # A stale vision-GGUF entry missing its mmproj projector is reported as
+        # NOT available so the worker's ensure_shard path (which stages directly
+        # on a 200 here) falls through to a download request, which re-fetches the
+        # projector and re-registers a complete entry (#346). Without this, the
+        # worker stages the incomplete entry and the runner crashes on load.
+        if await self._store.vision_entry_missing_projector(model_id):
+            raise web.HTTPNotFound(
+                reason=(
+                    f"Model in store but missing its vision projector "
+                    f"(will re-download): {model_id}"
+                )
+            )
         files = [
             str(p.relative_to(model_path)) for p in model_path.rglob("*") if p.is_file()
         ]
@@ -290,9 +302,25 @@ class ModelStoreServer:
         return web.json_response({"modelId": model_id, "deleted": True})
 
     async def _handle_download_request(self, request: web.Request) -> web.Response:
-        """``POST /models/{model_id}/download`` — request store-side HF download."""
+        """``POST /models/{model_id}/download``: request store-side HF download.
+
+        Optional JSON body ``{"gguf_file": "<path>"}`` pins which GGUF quant's
+        shard group the store fetches, honoring a card's custom pin (#344). The
+        body is optional: a request without it (or a non-JSON body) falls back to
+        the default quant preference, preserving the prior contract.
+        """
         model_id = _sanitize_model_id(request.match_info["model_id"])
-        status = await self._store.request_download(model_id)
+        pinned_gguf: str | None = None
+        if request.can_read_body:
+            try:
+                body: object = cast("object", await request.json())
+            except Exception:  # noqa: BLE001 - tolerate empty / non-JSON body
+                body = None
+            if isinstance(body, dict):
+                raw = cast("dict[str, object]", body).get("gguf_file")
+                if isinstance(raw, str) and raw:
+                    pinned_gguf = raw
+        status = await self._store.request_download(model_id, pinned_gguf)
         return web.json_response(
             {
                 "modelId": status.model_id,

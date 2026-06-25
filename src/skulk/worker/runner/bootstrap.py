@@ -98,7 +98,7 @@ def resolve_metal_fast_synch(card_runtime: RuntimeCapabilityCardConfig | None) -
 
     Returns ``True`` when ``MLX_METAL_FAST_SYNCH`` should be ``"1"``.
     """
-    override = preferred_env_value("SKULK_FAST_SYNCH", "EXO_FAST_SYNCH")
+    override = preferred_env_value("SKULK_FAST_SYNCH")
     if override is not None:
         normalized = override.strip().lower()
         if normalized == "on":
@@ -170,7 +170,7 @@ Override with SKULK_GROUP_CONNECT_DEADLINE_SECONDS.
 def resolve_group_connect_deadline_seconds() -> float:
     """Resolve the group-connect deadline, honoring the operator override."""
     raw = preferred_env_value(
-        "SKULK_GROUP_CONNECT_DEADLINE_SECONDS", "EXO_GROUP_CONNECT_DEADLINE_SECONDS"
+        "SKULK_GROUP_CONNECT_DEADLINE_SECONDS"
     )
     if raw is not None:
         try:
@@ -201,7 +201,7 @@ wedge, so the watchdog's default Metal guidance would mislead operators."""
 def resolve_warmup_deadline_seconds() -> float:
     """Resolve the warmup deadline, honoring the operator env override."""
     raw = preferred_env_value(
-        "SKULK_WARMUP_DEADLINE_SECONDS", "EXO_WARMUP_DEADLINE_SECONDS"
+        "SKULK_WARMUP_DEADLINE_SECONDS"
     )
     if raw is not None:
         try:
@@ -212,7 +212,7 @@ def resolve_warmup_deadline_seconds() -> float:
             pass
         logger.warning(
             "Ignoring invalid warmup-deadline override "
-            f"(SKULK_WARMUP_DEADLINE_SECONDS / SKULK_WARMUP_DEADLINE_SECONDS) "
+            f"(SKULK_WARMUP_DEADLINE_SECONDS) "
             f"value {raw!r}; using default "
             f"{WARMUP_DEADLINE_SECONDS_DEFAULT:.0f}s"
         )
@@ -318,7 +318,9 @@ def _release_metal_resources() -> None:
     gc.collect()
 
 
-def _install_parent_death_watchdog(initial_ppid: int, poll_seconds: float = 1.0) -> None:
+def _install_parent_death_watchdog(
+    initial_ppid: int, poll_seconds: float = 1.0
+) -> None:
     """Self-terminate the runner when the agent supervisor dies.
 
     The runner is a ``mp.Process(daemon=True)`` child of the agent. ``daemon=True``
@@ -380,6 +382,36 @@ def _metal_cleanup_signal_handler(signum: int, _frame: object) -> None:
     # Raise instead of sys.exit() so the normal exception path in
     # entrypoint() can report RunnerFailed to the supervisor.
     raise InterruptedError(f"Runner interrupted by signal {signum}")
+
+
+def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
+    """Resolve which engine serves this (non-image, non-embedding) text model here.
+
+    Prefers the backend the master already resolved for this node and persisted
+    on the shard (``resolved_backend``, #330): dispatch is then deterministic
+    from replicated state and cannot disagree with the placement decision. Only
+    when that is absent (a master that did not record one, or a manual launch off
+    the normal placement path) does it fall back to a node-local probe of the
+    card's ``compatible_backends`` intersected with this node's advertised
+    backends, ordered by ``backend_preference``. Returns the engine, or ``None``
+    to fall through to the default MLX runner.
+    """
+    from skulk.shared.backends import (
+        engine_of,
+        probe_node_backends,
+        resolve_node_engine,
+    )
+
+    shard = bound_instance.bound_shard
+    if shard.resolved_backend is not None:
+        return engine_of(shard.resolved_backend)
+
+    placement = shard.model_card.placement
+    return resolve_node_engine(
+        placement.compatible_backends,
+        placement.backend_preference,
+        probe_node_backends(),
+    )
 
 
 def entrypoint(
@@ -446,6 +478,21 @@ def entrypoint(
 
             runner = EmbeddingRunner(
                 bound_instance, event_sender, task_receiver, cancel_receiver
+            )
+            runner.main()
+        elif _resolve_text_engine(bound_instance) == "llama_cpp":
+            # Heterogeneous (non-MLX) text generation via in-process llama.cpp.
+            # Selected when the model card's compatible backends resolve to the
+            # llama_cpp engine on this node (e.g. a GGUF model on a GPU node that
+            # advertises llama_cpp-vulkan / llama_cpp-rocm). Single-node only.
+            from skulk.worker.runner.llama_cpp.runner import Runner as LlamaCppRunner
+
+            runner = LlamaCppRunner(
+                bound_instance,
+                event_sender,
+                task_receiver,
+                cancel_receiver,
+                context_token_limit=context_token_limit,
             )
             runner.main()
         else:

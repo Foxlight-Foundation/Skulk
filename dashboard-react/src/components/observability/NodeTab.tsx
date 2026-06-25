@@ -3,6 +3,7 @@ import { copyToClipboard } from '../../utils/clipboard';
 import { useTailscaleStatus } from '../../hooks/useTailscaleStatus';
 import styled from 'styled-components';
 import { Button } from '../common/Button';
+import { AcceleratorPanel } from './AcceleratorPanel';
 import { CenteredSpinner, Spinner } from '../common/Spinner';
 import { formatBytes } from '../../utils/format';
 import { useClusterState } from '../../hooks/useClusterState';
@@ -21,6 +22,7 @@ import type {
   RunnerFlightRecorderEntry,
   RunnerSupervisorDiagnostics,
 } from '../../types/diagnostics';
+import { useSkulkTranslation, type SkulkTranslate } from '../../i18n/tolgee';
 
 /**
  * "Node" tab body for the observability panel — read-only diagnostics for one cluster
@@ -277,27 +279,27 @@ const JsonPreview = styled.pre`
   font-size: ${({ theme }) => theme.fontSizes.xs};
 `;
 
-function memoryUsage(bytes?: number | null): string {
-  if (bytes == null) return 'unknown';
+function memoryUsage(bytes: number | null | undefined, t: SkulkTranslate): string {
+  if (bytes == null) return t('common.unknownLower', 'unknown');
   return formatBytes(bytes);
 }
 
-function processMemory(process: DiagnosticsProcess): string {
-  return process.rss ? memoryUsage(process.rss.inBytes) : 'unknown';
+function processMemory(process: DiagnosticsProcess, t: SkulkTranslate): string {
+  return process.rss ? memoryUsage(process.rss.inBytes, t) : t('common.unknownLower', 'unknown');
 }
 
 function shortId(id: string): string {
   return id.length > 12 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
 }
 
-function mlxMemorySummary(snapshot?: MlxMemorySnapshot | null): string {
-  if (!snapshot) return 'none reported';
-  return [
-    `active ${memoryUsage(snapshot.active?.inBytes)}`,
-    `cache ${memoryUsage(snapshot.cache?.inBytes)}`,
-    `peak ${memoryUsage(snapshot.peak?.inBytes)}`,
-    `wired ${memoryUsage(snapshot.wiredLimit?.inBytes)}`,
-  ].join(' · ');
+function mlxMemorySummary(snapshot: MlxMemorySnapshot | null | undefined, t: SkulkTranslate): string {
+  if (!snapshot) return t('observability.node.noneReported', 'none reported');
+  return t('observability.node.mlxMemorySummary', 'active {active} · cache {cache} · peak {peak} · wired {wired}', {
+    active: memoryUsage(snapshot.active?.inBytes, t),
+    cache: memoryUsage(snapshot.cache?.inBytes, t),
+    peak: memoryUsage(snapshot.peak?.inBytes, t),
+    wired: memoryUsage(snapshot.wiredLimit?.inBytes, t),
+  });
 }
 
 function phaseTone(runner: RunnerSupervisorDiagnostics): 'good' | 'warn' | 'neutral' {
@@ -324,6 +326,7 @@ function recorderLine(entry: RunnerFlightRecorderEntry): string {
 }
 
 export function NodeTab({ nodeId }: NodeTabProps) {
+  const { t } = useSkulkTranslation();
   const cluster = useClusterState();
   const tailscaleResult = useTailscaleStatus();
   const dispatch = useAppDispatch();
@@ -398,9 +401,8 @@ export function NodeTab({ nodeId }: NodeTabProps) {
     skip: !effectiveNodeId,
   });
   const diagnostics = diagnosticsQuery.currentData ?? null;
-  const loading = diagnosticsQuery.isFetching;
   const error = diagnosticsQuery.isError
-    ? (diagnosticsQuery.error as { error?: string })?.error ?? 'Failed to load diagnostics'
+    ? (diagnosticsQuery.error as { error?: string })?.error ?? t('observability.node.errors.loadDiagnosticsFailed', 'Failed to load diagnostics')
     : null;
 
   const [cancelRunnerTask, cancelMutation] = useCancelRunnerTaskMutation();
@@ -413,23 +415,23 @@ export function NodeTab({ nodeId }: NodeTabProps) {
   const cancelError = cancelMutation.isError
     ? (cancelMutation.error as { data?: { detail?: string }; error?: string })?.data?.detail
       ?? (cancelMutation.error as { error?: string })?.error
-      ?? 'Cancellation request failed'
+      ?? t('observability.node.errors.cancellationFailed', 'Cancellation request failed')
     : null;
   const captureError = captureMutation.isError
     ? (captureMutation.error as { data?: { detail?: string }; error?: string })?.data?.detail
       ?? (captureMutation.error as { error?: string })?.error
-      ?? 'Capture request failed'
+      ?? t('observability.node.errors.captureFailed', 'Capture request failed')
     : null;
 
   const selector = (
     <SelectorRow>
-      <SelectorLabel htmlFor="observability-node-select">Node</SelectorLabel>
+      <SelectorLabel htmlFor="observability-node-select">{t('observability.node.selectorLabel', 'Node')}</SelectorLabel>
       <NodeSelect
         id="observability-node-select"
         value={effectiveNodeId ?? ''}
         onChange={(event) => setSelectedNodeId(event.target.value || null)}
       >
-        <option value="">Select node…</option>
+        <option value="">{t('observability.node.selectNode', 'Select node...')}</option>
         {nodeOptions.map((option) => (
           <option key={option.id} value={option.id}>
             {option.label}
@@ -445,7 +447,10 @@ export function NodeTab({ nodeId }: NodeTabProps) {
         {selector}
         {nodeOptions.length === 0 ? (
           <EmptyHint>
-            No nodes reported by the cluster yet. Once a node connects, pick it here to inspect its diagnostics.
+            {t(
+              'observability.node.noNodes',
+              'No nodes reported by the cluster yet. Once a node connects, pick it here to inspect its diagnostics.',
+            )}
           </EmptyHint>
         ) : (
           // The auto-select effect above will resolve to master once the
@@ -475,7 +480,7 @@ export function NodeTab({ nodeId }: NodeTabProps) {
         runnerId,
         taskId,
       }).unwrap();
-      setCancelMessage(payload.message ?? 'Cancellation requested.');
+      setCancelMessage(payload.message ?? t('observability.node.cancellationRequested', 'Cancellation requested.'));
       // The mutation invalidates the NodeDiagnostics tag, so the query
       // refetches automatically — no manual reload token needed.
     } catch {
@@ -545,7 +550,7 @@ export function NodeTab({ nodeId }: NodeTabProps) {
           <>
             {diagnostics.warnings.length > 0 && (
               <Section>
-                <SectionTitle>Warnings</SectionTitle>
+                <SectionTitle>{t('observability.node.warnings', 'Warnings')}</SectionTitle>
                 {diagnostics.warnings.map((warning) => (
                   <Warning key={warning}>{warning}</Warning>
                 ))}
@@ -553,57 +558,94 @@ export function NodeTab({ nodeId }: NodeTabProps) {
             )}
 
             <Section>
-              <SectionTitle>Runtime</SectionTitle>
-              <Row><Key>Role</Key><Value>{runtime.isMaster ? <Pill $tone="good">master</Pill> : <Pill>worker/follower</Pill>}</Value></Row>
-              <Row><Key>Master</Key><Value>{runtime.masterNodeId ? shortId(runtime.masterNodeId) : 'unknown'}</Value></Row>
-              <Row><Key>Commit</Key><Value>{runtime.skulkCommit}</Value></Row>
-              <Row><Key>Version</Key><Value>{runtime.skulkVersion}</Value></Row>
-              <Row><Key>Namespace</Key><Value>{runtime.libp2pNamespace ?? 'default'}</Value></Row>
-              <Row><Key>CWD</Key><Value>{runtime.cwd}</Value></Row>
-              <Row><Key>Config</Key><Value $warn={!runtime.configFileExists}>{runtime.configPath} {runtime.configFileExists ? '' : '(missing)'}</Value></Row>
-              <Row><Key>Logging</Key><Value>{runtime.structuredLoggingConfigured ? 'centralized enabled' : 'not configured'}</Value></Row>
+              <SectionTitle>{t('observability.node.runtime', 'Runtime')}</SectionTitle>
               <Row>
-                <Key>Tailscale</Key>
+                <Key>{t('observability.node.role', 'Role')}</Key>
+                <Value>
+                  {runtime.isMaster
+                    ? <Pill $tone="good">{t('observability.node.masterRole', 'master')}</Pill>
+                    : <Pill>{t('observability.node.workerFollowerRole', 'worker/follower')}</Pill>}
+                </Value>
+              </Row>
+              <Row><Key>{t('observability.node.master', 'Master')}</Key><Value>{runtime.masterNodeId ? shortId(runtime.masterNodeId) : t('common.unknownLower', 'unknown')}</Value></Row>
+              <Row><Key>{t('observability.node.commit', 'Commit')}</Key><Value>{runtime.skulkCommit}</Value></Row>
+              <Row><Key>{t('observability.node.version', 'Version')}</Key><Value>{runtime.skulkVersion}</Value></Row>
+              <Row><Key>{t('observability.node.namespace', 'Namespace')}</Key><Value>{runtime.libp2pNamespace ?? t('observability.node.defaultNamespace', 'default')}</Value></Row>
+              <Row><Key>{t('observability.node.cwd', 'CWD')}</Key><Value>{runtime.cwd}</Value></Row>
+              <Row>
+                <Key>{t('observability.node.config', 'Config')}</Key>
+                <Value $warn={!runtime.configFileExists}>
+                  {runtime.configPath} {runtime.configFileExists ? '' : t('observability.node.missingMarker', '(missing)')}
+                </Value>
+              </Row>
+              <Row>
+                <Key>{t('observability.node.logging', 'Logging')}</Key>
+                <Value>
+                  {runtime.structuredLoggingConfigured
+                    ? t('observability.node.loggingCentralizedEnabled', 'centralized enabled')
+                    : t('observability.node.loggingNotConfigured', 'not configured')}
+                </Value>
+              </Row>
+              <Row>
+                <Key>{t('observability.node.tailscale', 'Tailscale')}</Key>
                 <Value $warn={tailscaleResult.status === 'ok' && !tailscaleResult.data.running}>
                   {tailscaleResult.status === 'loading'
                     ? '…'
                     : tailscaleResult.status === 'error'
-                      ? 'unavailable'
+                      ? t('observability.node.unavailable', 'unavailable')
                       : tailscaleResult.data.running
                         ? `${tailscaleResult.data.selfIp ?? '?'} · ${tailscaleResult.data.dnsName ?? tailscaleResult.data.hostname ?? '?'}`
-                        : 'not running'}
+                        : t('observability.node.notRunning', 'not running')}
                 </Value>
               </Row>
             </Section>
 
             <Section>
-              <SectionTitle>Resources</SectionTitle>
-              <Row><Key>RAM available</Key><Value>{memoryUsage(currentMemory?.ramAvailable?.inBytes)} / {memoryUsage(currentMemory?.ramTotal?.inBytes)}</Value></Row>
-              <Row><Key>Swap available</Key><Value>{memoryUsage(currentMemory?.swapAvailable?.inBytes)} / {memoryUsage(currentMemory?.swapTotal?.inBytes)}</Value></Row>
-              <Row><Key>GPU</Key><Value>{system?.gpuUsage != null ? `${Math.round(system.gpuUsage)}%` : 'unknown'}</Value></Row>
-              <Row><Key>Temp</Key><Value>{system?.temp != null ? `${Math.round(system.temp)}°C` : 'unknown'}</Value></Row>
-              <Row><Key>Power</Key><Value>{system?.sysPower != null ? `${Math.round(system.sysPower)}W` : 'unknown'}</Value></Row>
+              <SectionTitle>{t('observability.node.resources', 'Resources')}</SectionTitle>
+              <Row>
+                <Key>{t('observability.node.ramAvailable', 'RAM available')}</Key>
+                <Value>{memoryUsage(currentMemory?.ramAvailable?.inBytes, t)} / {memoryUsage(currentMemory?.ramTotal?.inBytes, t)}</Value>
+              </Row>
+              <Row>
+                <Key>{t('observability.node.swapAvailable', 'Swap available')}</Key>
+                <Value>{memoryUsage(currentMemory?.swapAvailable?.inBytes, t)} / {memoryUsage(currentMemory?.swapTotal?.inBytes, t)}</Value>
+              </Row>
+              <Row><Key>{t('observability.node.gpu', 'GPU')}</Key><Value>{system?.gpuUsage != null ? `${Math.round(system.gpuUsage)}%` : t('common.unknownLower', 'unknown')}</Value></Row>
+              <Row><Key>{t('observability.node.temp', 'Temp')}</Key><Value>{system?.temp != null ? `${Math.round(system.temp)}°C` : t('common.unknownLower', 'unknown')}</Value></Row>
+              <Row><Key>{t('observability.node.power', 'Power')}</Key><Value>{system?.sysPower != null ? `${Math.round(system.sysPower)}W` : t('common.unknownLower', 'unknown')}</Value></Row>
             </Section>
 
+            {system?.accelerator && (
+              <Section>
+                <SectionTitle>{t('observability.node.accelerator', 'Accelerator')}</SectionTitle>
+                <AcceleratorPanel accelerator={system.accelerator} />
+              </Section>
+            )}
+
             <Section>
-              <SectionTitle>Placements</SectionTitle>
+              <SectionTitle>{t('observability.node.placements', 'Placements')}</SectionTitle>
               {diagnostics.placements.length === 0 ? (
-                <Value>No active placements.</Value>
+                <Value>{t('observability.node.noActivePlacements', 'No active placements.')}</Value>
               ) : diagnostics.placements.map((placement) => (
                 <div key={placement.instanceId}>
-                  <Row><Key>Model</Key><Value>{placement.modelId}</Value></Row>
-                  <Row><Key>Instance</Key><Value>{shortId(placement.instanceId)}</Value></Row>
+                  <Row><Key>{t('observability.node.model', 'Model')}</Key><Value>{placement.modelId}</Value></Row>
+                  <Row><Key>{t('observability.node.instance', 'Instance')}</Key><Value>{shortId(placement.instanceId)}</Value></Row>
                   <Row>
-                    <Key>Master placed</Key>
+                    <Key>{t('observability.node.masterPlaced', 'Master placed')}</Key>
                     <Value $warn={!placement.masterIsPlacementNode}>
-                      {placement.masterIsPlacementNode ? <Pill $tone="good">yes</Pill> : <Pill $tone="warn">no</Pill>}
+                      {placement.masterIsPlacementNode
+                        ? <Pill $tone="good">{t('common.yesLower', 'yes')}</Pill>
+                        : <Pill $tone="warn">{t('common.noLower', 'no')}</Pill>}
                     </Value>
                   </Row>
                   {placement.runners.map((runner) => (
                     <Row key={runner.runnerId}>
-                      <Key>Rank {runner.deviceRank}</Key>
+                      <Key>{t('observability.node.rankLabel', 'Rank {rank}', { rank: runner.deviceRank })}</Key>
                       <Value>
-                        {runner.friendlyName ?? shortId(runner.nodeId)} · {runner.statusKind ?? 'unknown'} · layers {runner.startLayer}:{runner.endLayer}
+                        {runner.friendlyName ?? shortId(runner.nodeId)} · {runner.statusKind ?? t('common.unknownLower', 'unknown')} · {t('observability.node.layerRange', 'layers {startLayer}:{endLayer}', {
+                          startLayer: runner.startLayer,
+                          endLayer: runner.endLayer,
+                        })}
                       </Value>
                     </Row>
                   ))}
@@ -615,63 +657,105 @@ export function NodeTab({ nodeId }: NodeTabProps) {
             </Section>
 
               <Section>
-                <SectionTitle>Live Runners</SectionTitle>
+                <SectionTitle>{t('observability.node.liveRunners', 'Live Runners')}</SectionTitle>
               <Warning>
-                Cancel task sends a cooperative runner-local cancellation request. A runner wedged in native MLX work may ignore it and still require stronger intervention.
+                {t(
+                  'observability.node.cancelTaskWarning',
+                  'Cancel task sends a cooperative runner-local cancellation request. A runner wedged in native MLX work may ignore it and still require stronger intervention.',
+                )}
               </Warning>
               {cancelMessage && <Warning>{cancelMessage}</Warning>}
               {cancelError && <Warning>{cancelError}</Warning>}
               {captureError && <Warning>{captureError}</Warning>}
               {captureBundle && (
                 <CapturePanel>
-                  <Row><Key>Captured</Key><Value>{captureBundle.generatedAt}</Value></Row>
-                  <Row><Key>Runner</Key><Value>{captureBundle.runner ? shortId(captureBundle.runner.runnerId) : 'none'}</Value></Row>
-                  <Row><Key>MLX memory</Key><Value>{mlxMemorySummary(captureBundle.mlxMemory)}</Value></Row>
-                  <Row><Key>Samples</Key><Value>{captureBundle.processSamples.map((sample) => `${sample.name}:${sample.ok ? 'ok' : sample.error ?? 'failed'}`).join(', ') || 'none'}</Value></Row>
+                  <Row><Key>{t('observability.node.captured', 'Captured')}</Key><Value>{captureBundle.generatedAt}</Value></Row>
+                  <Row><Key>{t('observability.node.runner', 'Runner')}</Key><Value>{captureBundle.runner ? shortId(captureBundle.runner.runnerId) : t('common.none', 'none')}</Value></Row>
+                  <Row><Key>{t('observability.node.mlxMemory', 'MLX memory')}</Key><Value>{mlxMemorySummary(captureBundle.mlxMemory, t)}</Value></Row>
+                  <Row>
+                    <Key>{t('observability.node.samples', 'Samples')}</Key>
+                    <Value>
+                      {captureBundle.processSamples
+                        .map((sample) => `${sample.name}:${sample.ok ? t('common.ok', 'ok') : sample.error ?? t('common.failed', 'failed')}`)
+                        .join(', ') || t('common.none', 'none')}
+                    </Value>
+                  </Row>
                   {captureBundle.warnings.map((warning) => <Warning key={warning}>{warning}</Warning>)}
                   <CaptureActions>
-                    <Button variant="outline" size="sm" onClick={() => void copyCaptureBundle()}>Copy JSON</Button>
-                    <Button variant="outline" size="sm" onClick={downloadCaptureBundle}>Download JSON</Button>
+                    <Button variant="outline" size="sm" onClick={() => void copyCaptureBundle()}>{t('common.copyJson', 'Copy JSON')}</Button>
+                    <Button variant="outline" size="sm" onClick={downloadCaptureBundle}>{t('common.downloadJson', 'Download JSON')}</Button>
                   </CaptureActions>
                   <JsonPreview>{JSON.stringify(captureBundle, null, 2)}</JsonPreview>
                 </CapturePanel>
               )}
               {diagnostics.supervisorRunners.length === 0 ? (
-                <Value>No local runner supervisors reported by this node.</Value>
+                <Value>{t('observability.node.noLocalRunnerSupervisors', 'No local runner supervisors reported by this node.')}</Value>
               ) : diagnostics.supervisorRunners.map((runner) => (
                 <RunnerCard key={runner.runnerId}>
-                  <Row><Key>Runner</Key><Value>{shortId(runner.runnerId)} · pid {runner.pid ?? 'unknown'}</Value></Row>
                   <Row>
-                    <Key>Status</Key>
+                    <Key>{t('observability.node.runner', 'Runner')}</Key>
                     <Value>
-                      {runner.statusKind} for {Math.round(runner.secondsInStatus)}s{' '}
-                      {runner.processAlive ? <Pill $tone="good">alive</Pill> : <Pill $tone="warn">exited</Pill>}
-                      {!runner.processAlive && runner.exitCode != null ? ` exit ${runner.exitCode}` : ''}
+                      {shortId(runner.runnerId)} · {t('observability.node.pidValue', 'pid {pid}', {
+                        pid: runner.pid ?? t('common.unknownLower', 'unknown'),
+                      })}
                     </Value>
                   </Row>
-                  <Row><Key>Shard</Key><Value>rank {runner.deviceRank}/{runner.worldSize} · layers {runner.startLayer}:{runner.endLayer}</Value></Row>
-                  <Row><Key>Instance</Key><Value>{shortId(runner.instanceId)} · {runner.modelId}</Value></Row>
                   <Row>
-                    <Key>Phase</Key>
+                    <Key>{t('observability.node.status', 'Status')}</Key>
+                    <Value>
+                      {t('observability.node.statusForSeconds', '{status} for {seconds}s', {
+                        status: runner.statusKind,
+                        seconds: Math.round(runner.secondsInStatus),
+                      })}{' '}
+                      {runner.processAlive
+                        ? <Pill $tone="good">{t('observability.node.alive', 'alive')}</Pill>
+                        : <Pill $tone="warn">{t('observability.node.exited', 'exited')}</Pill>}
+                      {!runner.processAlive && runner.exitCode != null
+                        ? t('observability.node.exitCode', ' exit {exitCode}', { exitCode: runner.exitCode })
+                        : ''}
+                    </Value>
+                  </Row>
+                  <Row>
+                    <Key>{t('observability.node.shard', 'Shard')}</Key>
+                    <Value>
+                      {t('observability.node.rankValue', 'rank {rank}/{worldSize}', {
+                        rank: runner.deviceRank,
+                        worldSize: runner.worldSize,
+                      })} · {t('observability.node.layerRange', 'layers {startLayer}:{endLayer}', {
+                        startLayer: runner.startLayer,
+                        endLayer: runner.endLayer,
+                      })}
+                    </Value>
+                  </Row>
+                  <Row><Key>{t('observability.node.instance', 'Instance')}</Key><Value>{shortId(runner.instanceId)} · {runner.modelId}</Value></Row>
+                  <Row>
+                    <Key>{t('observability.node.phase', 'Phase')}</Key>
                     <Value $warn={phaseTone(runner) === 'warn'}>
                       <Pill $tone={phaseTone(runner)}>{runner.phase}</Pill>{' '}
-                      {Math.round(runner.secondsInPhase)}s
+                      {t('common.secondsShort', '{count}s', { count: Math.round(runner.secondsInPhase) })}
                       {runner.phaseDetail ? ` · ${runner.phaseDetail}` : ''}
                     </Value>
                   </Row>
-                  <Row><Key>Last progress</Key><Value>{runner.lastProgressAt ?? 'none'}</Value></Row>
-                  <Row><Key>Active task</Key><Value>{runner.activeTaskId ? shortId(runner.activeTaskId) : 'none'}</Value></Row>
-                  <Row><Key>MLX memory</Key><Value>{mlxMemorySummary(runner.lastMlxMemory)}</Value></Row>
-                  <Row><Key>Last task sent</Key><Value>{runner.lastTaskSentAt ?? 'none'}</Value></Row>
-                  <Row><Key>Last event</Key><Value>{runner.lastEventType ?? 'none'} {runner.lastEventReceivedAt ? `at ${runner.lastEventReceivedAt}` : ''}</Value></Row>
+                  <Row><Key>{t('observability.node.lastProgress', 'Last progress')}</Key><Value>{runner.lastProgressAt ?? t('common.none', 'none')}</Value></Row>
+                  <Row><Key>{t('observability.node.activeTask', 'Active task')}</Key><Value>{runner.activeTaskId ? shortId(runner.activeTaskId) : t('common.none', 'none')}</Value></Row>
+                  <Row><Key>{t('observability.node.mlxMemory', 'MLX memory')}</Key><Value>{mlxMemorySummary(runner.lastMlxMemory, t)}</Value></Row>
+                  <Row><Key>{t('observability.node.lastTaskSent', 'Last task sent')}</Key><Value>{runner.lastTaskSentAt ?? t('common.none', 'none')}</Value></Row>
                   <Row>
-                    <Key>Pending</Key>
-                    <Value>{runner.pendingTaskIds.map((taskId) => shortId(taskId)).join(', ') || 'none'}</Value>
+                    <Key>{t('observability.node.lastEvent', 'Last event')}</Key>
+                    <Value>
+                      {runner.lastEventType ?? t('common.none', 'none')} {runner.lastEventReceivedAt
+                        ? t('observability.node.atTime', 'at {time}', { time: runner.lastEventReceivedAt })
+                        : ''}
+                    </Value>
                   </Row>
                   <Row>
-                    <Key>In progress</Key>
+                    <Key>{t('observability.node.pending', 'Pending')}</Key>
+                    <Value>{runner.pendingTaskIds.map((taskId) => shortId(taskId)).join(', ') || t('common.none', 'none')}</Value>
+                  </Row>
+                  <Row>
+                    <Key>{t('observability.node.inProgress', 'In progress')}</Key>
                     <Value>
-                      {runner.inProgressTasks.map((task) => `${task.taskKind}:${shortId(task.taskId)} (${task.taskStatus})`).join(', ') || 'none'}
+                      {runner.inProgressTasks.map((task) => `${task.taskKind}:${shortId(task.taskId)} (${task.taskStatus})`).join(', ') || t('common.none', 'none')}
                     </Value>
                   </Row>
                   {runner.inProgressTasks.length > 0 && (
@@ -691,7 +775,7 @@ export function NodeTab({ nodeId }: NodeTabProps) {
                                 loading={captureActionKey === actionKey}
                                 onClick={() => { void requestCaptureBundle(runner.runnerId, task.taskId); }}
                               >
-                                Capture bundle
+                                {t('observability.node.captureBundle', 'Capture bundle')}
                               </Button>
                               <Button
                                 size="sm"
@@ -699,7 +783,7 @@ export function NodeTab({ nodeId }: NodeTabProps) {
                                 loading={cancelActionKey === actionKey}
                                 onClick={() => { void requestRunnerCancel(runner.runnerId, task.taskId); }}
                               >
-                                Cancel task
+                                {t('observability.node.cancelTask', 'Cancel task')}
                               </Button>
                             </TaskActionButtons>
                           </TaskActionItem>
@@ -715,16 +799,23 @@ export function NodeTab({ nodeId }: NodeTabProps) {
                         loading={captureActionKey === `${runner.runnerId}:runner`}
                         onClick={() => { void requestCaptureBundle(runner.runnerId); }}
                       >
-                        Capture runner bundle
+                        {t('observability.node.captureRunnerBundle', 'Capture runner bundle')}
                       </Button>
                     </CaptureActions>
                   )}
                   <Row>
-                    <Key>Cancelled</Key>
-                    <Value>{runner.cancelledTaskIds.map((taskId) => shortId(taskId)).join(', ') || 'none'}</Value>
+                    <Key>{t('observability.node.cancelled', 'Cancelled')}</Key>
+                    <Value>{runner.cancelledTaskIds.map((taskId) => shortId(taskId)).join(', ') || t('common.none', 'none')}</Value>
                   </Row>
-                  <Row><Key>Completed</Key><Value>{runner.completedTaskCount}</Value></Row>
-                  <Row><Key>Milestones</Key><Value>{runner.milestones.length === 0 ? 'none' : `${runner.milestones.length} recorded`}</Value></Row>
+                  <Row><Key>{t('observability.node.completed', 'Completed')}</Key><Value>{runner.completedTaskCount}</Value></Row>
+                  <Row>
+                    <Key>{t('observability.node.milestones', 'Milestones')}</Key>
+                    <Value>
+                      {runner.milestones.length === 0
+                        ? t('common.none', 'none')
+                        : t('observability.node.recordedCount', '{count} recorded', { count: runner.milestones.length })}
+                    </Value>
+                  </Row>
                   {runner.milestones.length > 0 && (
                     <MilestoneList>
                       {runner.milestones.slice().reverse().map((milestone, index) => (
@@ -737,7 +828,10 @@ export function NodeTab({ nodeId }: NodeTabProps) {
                   )}
                   {runner.flightRecorder.length > 0 && (
                     <>
-                      <Row><Key>Flight recorder</Key><Value>{runner.flightRecorder.length} entries</Value></Row>
+                      <Row>
+                        <Key>{t('observability.node.flightRecorder', 'Flight recorder')}</Key>
+                        <Value>{t('observability.node.entryCount', '{count} entries', { count: runner.flightRecorder.length })}</Value>
+                      </Row>
                       <MilestoneList>
                         {runner.flightRecorder.slice(-8).reverse().map((entry, index) => (
                           <MilestoneItem key={`${entry.at}-${entry.event}-${index}`}>
@@ -752,15 +846,15 @@ export function NodeTab({ nodeId }: NodeTabProps) {
             </Section>
 
             <Section>
-              <SectionTitle>Processes</SectionTitle>
+              <SectionTitle>{t('observability.node.processes', 'Processes')}</SectionTitle>
               {diagnostics.processes
                 .filter((process) => process.role !== 'other')
                 .map((process) => (
                   <ProcessLine key={process.pid}>
                     <span>{process.pid}</span>
                     <span>{process.role}</span>
-                    <span>{processMemory(process)}</span>
-                    <Monospace title={process.command}>{process.command || process.status || 'unknown'}</Monospace>
+                    <span>{processMemory(process, t)}</span>
+                    <Monospace title={process.command}>{process.command || process.status || t('common.unknownLower', 'unknown')}</Monospace>
                   </ProcessLine>
                 ))}
             </Section>

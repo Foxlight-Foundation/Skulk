@@ -26,7 +26,7 @@ The **store** is the authoritative copy served over the LAN from the store
 host. **Staging** is the node-local copy a worker writes before MLX loads it
 — MLX always loads from a local filesystem path, never from the store
 directly. Staged copies live under `node_cache_path` (default
-`~/.exo/staging`), one `<org>--<name>` subdirectory per model.
+`~/.skulk/staging`), one `<org>--<name>` subdirectory per model.
 
 Staged copies are cheap to recreate from the LAN store but local disk on
 small-disk nodes is the scarce resource, so staging has a lifecycle.
