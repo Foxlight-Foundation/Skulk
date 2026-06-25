@@ -220,7 +220,12 @@ class ModelStoreConfig(FrozenModel):
             when ``None``.  Set this when ``store_host`` is a libp2p peer
             ID (which is not a valid DNS name) so that workers can still
             resolve the HTTP address (e.g. ``mac-studio-1`` or
-            ``192.168.1.10``).
+            ``192.168.1.10``).  At startup the store host replaces a
+            hostname (or a loopback/link-local literal) here with its own
+            best routable IPv4 before broadcasting it to the cluster, so a
+            bare ``.local`` name cannot resolve to an unreachable Thunderbolt
+            link-local address on peers; a routable IP literal is broadcast
+            verbatim (see ``_routable_store_advertise_host`` in ``main.py``).
         store_port: HTTP port for ``ModelStoreServer`` on the store host.
             Must be reachable from all worker nodes.
         store_path: Absolute path to the model store root on the store host.

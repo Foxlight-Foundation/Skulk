@@ -7,6 +7,20 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- **The model store now advertises a routable IP, so downloads no longer fail
+  on Thunderbolt-meshed fleets.** The store host broadcast its `store_http_host`
+  as a bare hostname (e.g. `kite3.local`); on a fleet where nodes are also linked
+  over Thunderbolt, mDNS could resolve that name to the host's link-local TB
+  address (`169.254.x`), which a peer lacking a direct TB link to it cannot route
+  to. That peer's model downloads then failed (`Cannot connect to host
+  kite3.local:58080`) even though it could reach the store fine over the LAN. The
+  store host now broadcasts its own best routable IPv4 (a private LAN address is
+  preferred over a Tailscale/CGNAT address; loopback and link-local are skipped),
+  and an operator-supplied routable IP in `store_http_host` is still honored
+  verbatim.
+
 ### Changed
 
 - **The llama.cpp engine now loads models with Flash Attention by default.** It
@@ -27,6 +41,17 @@ This project records release notes here and mirrors public-facing notes in
   history (reducing it to the final-channel text) before handing it to the
   template, so a client can never wedge inference by replaying the model's own
   output format and existing conversations resume cleanly.
+
+- **Dashboard: gpt-oss chats render cleanly and stop leaking harmony markers.**
+  The chat reasoning/content splitter now also understands gpt-oss "harmony"
+  channel markers (`<|channel|>analysis...final...`), so the analysis channel
+  shows as collapsible reasoning and the answer renders without raw `<|...|>`
+  scaffolding. This also heals conversations that stored marker-laden assistant
+  turns before the server-side parsing landed, so they display correctly.
+- **Dashboard: no more `404 /i18n/skulk/en.json`.** English ships bundled in the
+  app, so the Tolgee CDN fetch is now only enabled when an additional language is
+  configured; the default English-only build no longer requests (and 404s on) the
+  runtime translations endpoint.
 
 - **gpt-oss models on the llama.cpp engine no longer leak raw "harmony" markers
   into the answer, and their reasoning is now separated from content.** llama.cpp
