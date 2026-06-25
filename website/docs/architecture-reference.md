@@ -406,7 +406,7 @@ Inventory snapshot — see #130 for consolidation plan.
 | GLM-4 (Lite + MoE) | ~280 | Two strategies in `auto_parallel.py` |
 | MiniMax | ~225 | `MiniMaxShardingStrategy` + custom attention wrapper in `auto_parallel.py:1148-1226` |
 | NemotronH | ~210 | `NemotronHShardingStrategy` + Mamba2 hybrid cache |
-| GPT-OSS | ~180 | `parse_gpt_oss` (Harmony parser) + `GptOssShardingStrategy` |
+| GPT-OSS | ~180 | MLX: `parse_gpt_oss` (token-level Harmony parser via `openai_harmony`) + `GptOssShardingStrategy`. llama.cpp: `HarmonyTextParser` in `harmony_text_parser.py` reparses the harmony channel markers from llama.cpp's detokenized *string* deltas (the engine exposes no token ids), splitting `analysis`→reasoning / `final`→content and stripping markers; wired in `llama_cpp/runner._generate`, gated on `OutputParserType.GptOss`, and dependency-free (no MLX/openai_harmony) so it runs on non-Mac GPU nodes. |
 | Step 3.5 | ~95 | Sliding-window cache tracking in `auto_parallel.py:639-650` |
 | Llama / Ministral | ~70 | `LlamaShardingStrategy` (default) |
 
