@@ -1,5 +1,6 @@
 import argparse
 import hashlib
+import ipaddress
 import multiprocessing as mp
 import os
 import resource
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Self
 
 import anyio
+import psutil
 from loguru import logger
 from pydantic import PositiveInt
 
@@ -188,6 +190,67 @@ def _add_model_search_path(path: Path) -> None:
     from skulk.shared.constants import add_model_search_path
 
     add_model_search_path(expanded)
+
+
+def _routable_store_advertise_host(configured: str | None, hostname_fallback: str) -> str:
+    """Pick an address other nodes can actually reach the model store host at.
+
+    The store host broadcasts this as ``store_http_host`` so workers build the
+    download URL ``http://<host>:<port>``. A bare hostname (``kite3.local``) is
+    fragile on a Thunderbolt-meshed fleet: mDNS can resolve it to the host's
+    link-local TB address (``169.254.x``), which a peer lacking a direct TB link
+    cannot route to, so its downloads fail while the LAN path works fine.
+
+    An operator-supplied **routable IP literal** is honored as-is. Anything else
+    (a hostname, or a loopback/link-local literal) is replaced with this host's
+    own best routable IPv4: a private LAN address (RFC1918) is preferred over any
+    other routable address, and loopback / link-local / unspecified addresses are
+    skipped. Falls back to the hostname only when no routable IPv4 is found.
+    """
+    if configured:
+        try:
+            literal = ipaddress.ip_address(configured)
+        except ValueError:
+            literal = None  # a hostname, not an IP -> recompute below
+        if literal is not None and not (
+            literal.is_loopback or literal.is_link_local or literal.is_unspecified
+        ):
+            return configured
+
+    routable: list[str] = []
+    for addresses in psutil.net_if_addrs().values():
+        for address in addresses:
+            if address.family != socket.AF_INET:
+                continue
+            try:
+                ip = ipaddress.ip_address(address.address)
+            except ValueError:
+                continue
+            if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
+                continue
+            routable.append(address.address)
+
+    # Prefer an RFC1918 LAN address (fast, reachable across the local switch)
+    # over a Tailscale/CGNAT (100.64.0.0/10) address over anything else; all beat
+    # the hostname fallback. CGNAT is also "private", so rank the ranges
+    # explicitly rather than relying on ``is_private``.
+    lan_nets = (
+        ipaddress.ip_network("10.0.0.0/8"),
+        ipaddress.ip_network("172.16.0.0/12"),
+        ipaddress.ip_network("192.168.0.0/16"),
+    )
+    cgnat_net = ipaddress.ip_network("100.64.0.0/10")
+
+    def _rank(address: str) -> int:
+        ip = ipaddress.ip_address(address)
+        if any(ip in net for net in lan_nets):
+            return 0
+        if ip in cgnat_net:
+            return 1
+        return 2
+
+    routable.sort(key=_rank)
+    return routable[0] if routable else hostname_fallback
 
 
 def _configure_model_store_runtime(
@@ -634,14 +697,14 @@ class Node:
         if not is_store_host:
             return
 
-        # Fix up store_http_host to be reachable by other nodes
-        reachable_host = local_hostname
-        if ms.store_http_host and ms.store_http_host not in (
-            "127.0.0.1",
-            "localhost",
-            "::1",
-        ):
-            reachable_host = ms.store_http_host
+        # Advertise a routable IP, not a hostname. A bare hostname (e.g.
+        # ``kite3.local``) can mDNS-resolve on a Thunderbolt-meshed fleet to the
+        # store host's link-local TB address (169.254.x), which peers without a
+        # direct TB link cannot route to, so their store downloads fail even
+        # though they can reach the host fine over the LAN.
+        reachable_host = _routable_store_advertise_host(
+            ms.store_http_host, local_hostname
+        )
 
         config_dict = self.skulk_config.model_dump()
         config_dict["model_store"]["store_http_host"] = reachable_host
