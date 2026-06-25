@@ -1,5 +1,6 @@
 import argparse
 import hashlib
+import ipaddress
 import multiprocessing as mp
 import os
 import resource
@@ -8,9 +9,10 @@ import socket
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Self
+from typing import Final, Self
 
 import anyio
+import psutil
 from loguru import logger
 from pydantic import PositiveInt
 
@@ -188,6 +190,105 @@ def _add_model_search_path(path: Path) -> None:
     from skulk.shared.constants import add_model_search_path
 
     add_model_search_path(expanded)
+
+
+_VIRTUAL_IFACE_PREFIXES: Final = (
+    "docker",
+    "br-",
+    "virbr",
+    "vmnet",
+    "vboxnet",
+    "veth",
+    "cni",
+    "flannel",
+    "kube",
+)
+
+
+def _is_virtual_iface(name: str) -> bool:
+    """Whether an interface name looks like a Docker/VM/container bridge.
+
+    These carry RFC1918 addresses (e.g. Docker's ``172.17.0.1``) that are not
+    reachable from peers on the real LAN, so they must not be advertised as the
+    store host. VPN tunnels (Tailscale ``utun``/``tailscale0``) are deliberately
+    NOT excluded: they are a valid fallback path and are already ranked below the
+    LAN address.
+    """
+    lowered = name.lower()
+    return lowered.startswith(_VIRTUAL_IFACE_PREFIXES)
+
+
+def _routable_store_advertise_host(configured: str | None, hostname_fallback: str) -> str:
+    """Pick an address other nodes can actually reach the model store host at.
+
+    The store host broadcasts this as ``store_http_host`` so workers build the
+    download URL ``http://<host>:<port>``. A bare hostname (``kite3.local``) is
+    fragile on a Thunderbolt-meshed fleet: mDNS can resolve it to the host's
+    link-local TB address (``169.254.x``), which a peer lacking a direct TB link
+    cannot route to, so its downloads fail while the LAN path works fine.
+
+    An operator-supplied **routable IP literal** is honored as-is. Anything else
+    (a hostname, or a loopback/link-local literal) is replaced with this host's
+    own best routable IPv4: a private LAN address (RFC1918) is preferred over any
+    other routable address, and loopback / link-local / unspecified addresses are
+    skipped. Falls back to the hostname only when no routable IPv4 is found.
+    """
+    if configured:
+        try:
+            literal = ipaddress.ip_address(configured)
+        except ValueError:
+            literal = None  # a hostname, not an IP -> recompute below
+        # Honor only a routable IPv4 literal: the store URL is built as
+        # http://{host}:{port} with no IPv6-bracket handling, so an IPv6 literal
+        # would produce an invalid URL -> treat it like a hostname and recompute.
+        if (
+            literal is not None
+            and literal.version == 4
+            and not (
+                literal.is_loopback or literal.is_link_local or literal.is_unspecified
+            )
+        ):
+            return configured
+
+    routable: list[str] = []
+    for iface_name, addresses in psutil.net_if_addrs().items():
+        # Skip virtual bridge / container interfaces (docker0, br-*, virbr*,
+        # vmnet*, vboxnet*, veth*, k8s): they carry RFC1918 IPs that peers on the
+        # real LAN cannot route to and could otherwise outrank the LAN address.
+        if _is_virtual_iface(iface_name):
+            continue
+        for address in addresses:
+            if address.family != socket.AF_INET:
+                continue
+            try:
+                ip = ipaddress.ip_address(address.address)
+            except ValueError:
+                continue
+            if ip.is_loopback or ip.is_link_local or ip.is_unspecified:
+                continue
+            routable.append(address.address)
+
+    # Prefer an RFC1918 LAN address (fast, reachable across the local switch)
+    # over a Tailscale/CGNAT (100.64.0.0/10) address over anything else; all beat
+    # the hostname fallback. CGNAT is also "private", so rank the ranges
+    # explicitly rather than relying on ``is_private``.
+    lan_nets = (
+        ipaddress.ip_network("10.0.0.0/8"),
+        ipaddress.ip_network("172.16.0.0/12"),
+        ipaddress.ip_network("192.168.0.0/16"),
+    )
+    cgnat_net = ipaddress.ip_network("100.64.0.0/10")
+
+    def _rank(address: str) -> int:
+        ip = ipaddress.ip_address(address)
+        if any(ip in net for net in lan_nets):
+            return 0
+        if ip in cgnat_net:
+            return 1
+        return 2
+
+    routable.sort(key=_rank)
+    return routable[0] if routable else hostname_fallback
 
 
 def _configure_model_store_runtime(
@@ -617,8 +718,18 @@ class Node:
     async def _broadcast_config_if_store_host(self) -> None:
         """If this node is the store host, broadcast a valid config to all nodes.
 
-        Fixes up ``store_http_host`` so that worker nodes receive a reachable
-        address (the store host's hostname) rather than ``127.0.0.1`` or None.
+        Resolves ``store_http_host`` to a routable IPv4 (see
+        ``_routable_store_advertise_host``) so worker nodes receive an address
+        they can actually reach over HTTP, rather than a hostname that may
+        mDNS-resolve to an unreachable link-local address, ``127.0.0.1``, or
+        None. An operator-supplied routable IPv4 literal is honored as-is;
+        otherwise this host's best routable LAN address is used.
+
+        The resolved address is broadcast over the cluster config-sync path,
+        which every node (including this store host, via local delivery) applies
+        and persists. We therefore do not separately write the local config file
+        here: a second write would only be clobbered by the host applying its
+        own broadcast.
         """
         if self.skulk_config is None or self.skulk_config.model_store is None:
             return
@@ -634,34 +745,25 @@ class Node:
         if not is_store_host:
             return
 
-        # Fix up store_http_host to be reachable by other nodes
-        reachable_host = local_hostname
-        if ms.store_http_host and ms.store_http_host not in (
-            "127.0.0.1",
-            "localhost",
-            "::1",
-        ):
-            reachable_host = ms.store_http_host
+        # Advertise a routable IP, not a hostname. A bare hostname (e.g.
+        # ``kite3.local``) can mDNS-resolve on a Thunderbolt-meshed fleet to the
+        # store host's link-local TB address (169.254.x), which peers without a
+        # direct TB link cannot route to, so their store downloads fail even
+        # though they can reach the host fine over the LAN.
+        reachable_host = _routable_store_advertise_host(
+            ms.store_http_host, local_hostname
+        )
 
-        config_dict = self.skulk_config.model_dump()
-        config_dict["model_store"]["store_http_host"] = reachable_host
+        import copy
 
         import yaml
 
-        config_yaml = yaml.safe_dump(
-            config_dict, default_flow_style=False, sort_keys=False
-        )
-
-        # Also update local config file with the fixed host
-        try:
-            resolve_config_path().write_text(config_yaml)
-        except Exception as exc:
-            logger.warning(f"Failed to update local config: {exc}")
-
-        # Strip secrets before broadcasting over gossipsub
-        import copy
-
-        broadcast_dict = copy.deepcopy(config_dict)
+        # Broadcast the resolved reachable host to the cluster (secrets stripped).
+        # The store host applies its own broadcast via local delivery and persists
+        # it through the normal config-sync path, so there is no separate local
+        # write here (it would only be clobbered by that same broadcast).
+        broadcast_dict = copy.deepcopy(self.skulk_config.model_dump())
+        broadcast_dict["model_store"]["store_http_host"] = reachable_host
         broadcast_dict.pop("hf_token", None)
         broadcast_yaml = yaml.safe_dump(
             broadcast_dict, default_flow_style=False, sort_keys=False

@@ -7,6 +7,20 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- **The model store now advertises a routable IP, so downloads no longer fail
+  on Thunderbolt-meshed fleets.** The store host broadcast its `store_http_host`
+  as a bare hostname (e.g. `kite3.local`); on a fleet where nodes are also linked
+  over Thunderbolt, mDNS could resolve that name to the host's link-local TB
+  address (`169.254.x`), which a peer lacking a direct TB link to it cannot route
+  to. That peer's model downloads then failed (`Cannot connect to host
+  kite3.local:58080`) even though it could reach the store fine over the LAN. The
+  store host now broadcasts its own best routable IPv4 (a private LAN address is
+  preferred over a Tailscale/CGNAT address; loopback and link-local are skipped),
+  and an operator-supplied routable IP in `store_http_host` is still honored
+  verbatim.
+
 ### Changed
 
 - **The llama.cpp engine now loads models with Flash Attention by default.** It
