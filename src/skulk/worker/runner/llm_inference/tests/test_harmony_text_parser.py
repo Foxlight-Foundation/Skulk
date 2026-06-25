@@ -94,7 +94,14 @@ def test_commentary_header_with_recipient_and_constrain_is_stripped() -> None:
 
 
 def test_trailing_partial_marker_is_flushed_as_literal() -> None:
-    # If a stream genuinely ends on a lone '<' that never completes a marker,
-    # flush must still surface it rather than swallow it.
-    out = _run(HarmonyTextParser(), ["answer 1 < 2"])
-    assert _content(out) == "answer 1 < 2"
+    # A stream that ends on a lone '<' (a marker prefix) holds it back mid-stream;
+    # flush must still surface it rather than swallow it. Use feed() directly so
+    # the held-back '<' is observable before flush.
+    parser = HarmonyTextParser()
+    fed = parser.feed("answer <")
+    # The trailing '<' is held back as a potential marker prefix, not yet emitted.
+    assert "".join(t for t, _ in fed) == "answer "
+    flushed = parser.flush()
+    assert "".join(t for t, _ in flushed) == "<"
+    # And a literal '<' that is clearly not at the end passes straight through.
+    assert _content(_run(HarmonyTextParser(), ["a < b"])) == "a < b"

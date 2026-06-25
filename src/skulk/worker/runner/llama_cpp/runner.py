@@ -691,11 +691,23 @@ class Runner:
             # leaks into the answer and reasoning is never split out. Reparse the
             # marker stream from strings (the MLX engine does the token-level
             # equivalent) so reasoning lands in reasoning_content and content is
-            # clean. Per-token logprobs can't survive this re-chunking, so they
-            # are dropped on the harmony path (logprobs are off by default here).
+            # clean.
             harmony_parser = (
                 HarmonyTextParser() if self._is_harmony_model() else None
             )
+
+            # Harmony parsing re-chunks the stream into channel-split pieces that
+            # no longer align 1:1 with the source tokens, so per-token logprobs
+            # can't be carried faithfully. Rather than silently return empty
+            # logprobs (the exact no-silent-empty contract #385 enforces), fail
+            # loud when both are requested.
+            if harmony_parser is not None and want_logprobs:
+                raise RuntimeError(
+                    "Per-token logprobs are not supported for gpt-oss (harmony) "
+                    "models on the llama.cpp engine: harmony channel parsing "
+                    "re-chunks the stream, so logprobs cannot be aligned to "
+                    "tokens. Retry without logprobs/top_logprobs."
+                )
 
             stream = self.model.create_chat_completion(
                 messages=messages, stream=True, **kwargs
@@ -751,6 +763,14 @@ class Runner:
             # Guarantee a terminal chunk on normal completion so the consumer's
             # stream closes even if llama.cpp ended without an explicit finish.
             if not emitted_finish and not self._is_cancelled(task.task_id):
+                # Flush any tail the harmony parser was holding back (a partial
+                # marker, or final-channel text not yet released) before closing,
+                # so a stream that ends without a finish_reason doesn't truncate.
+                if harmony_parser is not None:
+                    for clean_text, is_thinking in harmony_parser.flush():
+                        self._send_token_chunk(
+                            command_id, model_id, clean_text, is_thinking=is_thinking
+                        )
                 self.event_sender.send(
                     ChunkGenerated(
                         command_id=command_id,
