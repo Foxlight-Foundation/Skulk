@@ -18,6 +18,7 @@ from skulk.worker.runner.llama_cpp.runner import (
     _logits_all_n_ctx,
     _logprob_fields,
     _map_finish_reason,
+    _sanitize_harmony_assistant_messages,
     _serving_n_ctx,
     _splice_images_into_messages,
     _tool_calls_from_message,
@@ -119,6 +120,92 @@ def test_messages_fallback_from_input_and_instructions() -> None:
     result = messages_for_llama(params)
     assert result[0] == {"role": "system", "content": "be brief"}
     assert result[1]["role"] == "user"
+
+
+def test_sanitize_harmony_assistant_messages() -> None:
+    raw_assistant = (
+        "<|channel|>analysis<|message|>thinking out loud"
+        "<|end|><|start|>assistant<|channel|>final<|message|>The answer is 4."
+    )
+    messages = [
+        {"role": "user", "content": "what is 2+2?"},
+        {"role": "assistant", "content": raw_assistant},
+        {"role": "user", "content": "and 3+3?"},
+    ]
+    out = _sanitize_harmony_assistant_messages(messages)
+    # Assistant content reduced to the final channel; no markers, no analysis.
+    assert out[1]["content"] == "The answer is 4."
+    assert "<|channel|>" not in out[1]["content"]
+    # User turns are untouched.
+    assert out[0]["content"] == "what is 2+2?"
+    assert out[2]["content"] == "and 3+3?"
+
+
+def test_sanitize_harmony_leaves_clean_and_nonstring_content() -> None:
+    messages = [
+        {"role": "assistant", "content": "already clean"},
+        {"role": "user", "content": "<|channel|>not sanitized for user role"},
+        {"role": "assistant", "content": [{"type": "image"}]},
+    ]
+    out = _sanitize_harmony_assistant_messages(messages)
+    assert out == messages  # no markers in assistant str / non-str -> untouched
+
+
+def test_messages_for_llama_does_not_sanitize() -> None:
+    # Sanitization is applied by the runner only for harmony (gpt-oss) models, so
+    # messages_for_llama itself leaves the raw history untouched.
+    raw = "<|channel|>analysis<|message|>hmm<|end|><|start|>assistant<|channel|>final<|message|>Hi!"
+    msgs = [{"role": "assistant", "content": raw}]
+    assert messages_for_llama(_params(chat_template_messages=msgs)) == msgs
+
+
+def test_sanitize_harmony_keeps_only_final_channel() -> None:
+    # A commentary/tool-call channel must NOT be replayed: only the final answer.
+    raw = (
+        '<|channel|>commentary to=functions.get_weather <|constrain|>json'
+        '<|message|>{"city": "SF"}<|call|>'
+        "<|channel|>final<|message|>It is sunny."
+    )
+    out = _sanitize_harmony_assistant_messages(
+        [{"role": "assistant", "content": raw}]
+    )
+    assert out[0]["content"] == "It is sunny."
+    assert "functions" not in out[0]["content"]
+
+
+def test_sanitize_harmony_no_final_channel_drops_to_empty() -> None:
+    # No final channel (analysis-only, or a commentary/tool-call-only turn): the
+    # turn carried no user-facing answer, so it reduces to an empty string rather
+    # than replaying reasoning or tool-call JSON as assistant prose. Either way no
+    # <|channel|> marker survives (the gpt-oss template rejects them).
+    analysis_only = "<|channel|>analysis<|message|>just thinking, no answer"
+    out = _sanitize_harmony_assistant_messages(
+        [{"role": "assistant", "content": analysis_only}]
+    )
+    assert out[0]["content"] == ""
+    # A pure tool-call/commentary turn must not leak its JSON body into history.
+    commentary_only = (
+        '<|channel|>commentary to=functions.get_weather <|constrain|>json'
+        '<|message|>{"city": "SF"}<|call|>'
+    )
+    out2 = _sanitize_harmony_assistant_messages(
+        [{"role": "assistant", "content": commentary_only}]
+    )
+    assert out2[0]["content"] == ""
+    assert "functions" not in out2[0]["content"]
+
+
+def test_sanitize_harmony_stray_marker_without_body_keeps_text() -> None:
+    # A stray/partial control marker with NO <|message|> body (e.g. generation
+    # truncated right at a <|channel|> header) is plain prose that happens to
+    # include a marker: strip the control tokens and keep the surviving text
+    # rather than erasing genuine assistant history. No marker may survive.
+    stray = "Here is the answer: 4 <|channel|>"
+    out = _sanitize_harmony_assistant_messages(
+        [{"role": "assistant", "content": stray}]
+    )
+    assert out[0]["content"] == "Here is the answer: 4"
+    assert "<|channel|>" not in out[0]["content"]
 
 
 def test_generation_kwargs_passes_logprobs() -> None:

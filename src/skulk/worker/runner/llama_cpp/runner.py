@@ -249,6 +249,123 @@ def messages_for_llama(task_params: TextGenerationTaskParams) -> list[dict[str, 
     return messages
 
 
+_HARMONY_CONTROL_TOKENS: Final = (
+    "<|start|>",
+    "<|end|>",
+    "<|return|>",
+    "<|message|>",
+    "<|channel|>",
+    "<|call|>",
+    "<|constrain|>",
+)
+
+
+def _harmony_final_channel_text(content: str) -> str | None:
+    """Return the concatenated text of the harmony ``final`` channel(s), or None.
+
+    Walks the harmony control markers and collects only the body of the ``final``
+    channel, so analysis (reasoning) and commentary/tool-call channels are
+    dropped. Returns ``None`` when no ``final`` channel body is present (e.g. a
+    truncated or commentary-only turn), letting the caller fall back rather than
+    invent an answer.
+    """
+    final_parts: list[str] = []
+    found_final = False
+    in_body = False
+    channel: str | None = None
+    header_parts: list[str] = []
+    index = 0
+    length = len(content)
+    while index < length:
+        marker: str | None = None
+        for token in _HARMONY_CONTROL_TOKENS:
+            if content.startswith(token, index):
+                marker = token
+                break
+        if marker is not None:
+            if marker == "<|channel|>":
+                in_body = False
+                header_parts = []
+            elif marker == "<|message|>":
+                stripped = "".join(header_parts).strip()
+                channel = stripped.split()[0] if stripped else None
+                header_parts = []
+                in_body = True
+                if channel == "final":
+                    found_final = True
+            elif marker != "<|constrain|>":
+                in_body = False
+                channel = None
+                header_parts = []
+            index += len(marker)
+            continue
+        if in_body:
+            if channel == "final":
+                final_parts.append(content[index])
+        else:
+            header_parts.append(content[index])
+        index += 1
+    return "".join(final_parts) if found_final else None
+
+
+def _harmony_history_text(content: str) -> str:
+    """Reduce a raw harmony assistant turn to its replayable final-channel text.
+
+    Only the ``final`` channel carries the user-facing answer, so analysis
+    (reasoning) and commentary (tool-call plumbing) channels are dropped rather
+    than replayed as assistant prose. A turn with a ``<|message|>`` body but no
+    ``final`` channel is analysis-only or commentary/tool-call, so it reduces to
+    an empty string instead of echoing reasoning or tool-call JSON into the next
+    prompt. A turn with a stray/partial control marker and NO ``<|message|>`` at
+    all carries no channel body (e.g. generation truncated right at a
+    ``<|channel|>`` header): that is plain prose that happens to include a
+    marker, so the control tokens are stripped and the surviving text kept rather
+    than erasing genuine history. Either way no ``<|channel|>`` marker survives,
+    which the gpt-oss template rejects.
+    """
+    final_text = _harmony_final_channel_text(content)
+    if final_text is not None:
+        return final_text
+    if "<|message|>" in content:
+        # A real (analysis/commentary/tool-call) channel body with no final:
+        # drop it so reasoning/JSON is never replayed as assistant prose.
+        return ""
+    stripped = content
+    for token in _HARMONY_CONTROL_TOKENS:
+        stripped = stripped.replace(token, "")
+    return stripped.strip()
+
+
+def _sanitize_harmony_assistant_messages(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Strip gpt-oss harmony channel markers from assistant history content.
+
+    Apply ONLY when serving a gpt-oss (harmony) model: its llama.cpp chat
+    template raises when an assistant message's ``content`` contains
+    ``<|channel|>`` markers (it expects the analysis channel in a separate
+    ``thinking`` field), which wedges every follow-up turn of a conversation that
+    stored a raw, pre-parse assistant response. A client must never be able to
+    break inference by echoing the model's own output format, so any marker-laden
+    assistant content is reduced to safe, marker-free replay text (the final
+    channel, see ``_harmony_history_text``). Content without markers (and
+    non-string content, e.g. vision parts) is passed through untouched. Gating to
+    harmony models keeps a normal llama.cpp model's literal ``<|channel|>`` text
+    intact.
+    """
+    sanitized: list[dict[str, Any]] = []
+    for message in messages:
+        content = message.get("content")
+        if (
+            message.get("role") == "assistant"
+            and isinstance(content, str)
+            and "<|channel|>" in content
+        ):
+            message = {**message, "content": _harmony_history_text(content)}
+        sanitized.append(message)
+    return sanitized
+
+
 def _generation_kwargs(task_params: TextGenerationTaskParams) -> dict[str, Any]:
     """Translate Skulk task params into llama.cpp ``create_chat_completion`` kwargs."""
     kwargs: dict[str, Any] = {}
@@ -678,6 +795,14 @@ class Runner:
         model_id = self.shard_metadata.model_card.model_id
         command_id = task.command_id
         messages = messages_for_llama(task.task_params)
+        # gpt-oss only: a harmony assistant turn whose content still carries raw
+        # <|channel|> markers (captured before output parsing, or echoed by a
+        # client) makes llama.cpp's gpt-oss template reject the whole request, so
+        # reduce such history to safe marker-free text. Gated to harmony models so
+        # a normal model's literal <|channel|> text is left intact. Covers the
+        # tools path too: _generate_with_tools is handed these same messages.
+        if self._is_harmony_model():
+            messages = _sanitize_harmony_assistant_messages(messages)
         kwargs = _generation_kwargs(task.task_params)
 
         want_logprobs = wants_logprobs(
@@ -826,7 +951,20 @@ class Runner:
         gpt-oss variant rather than matching model-id substrings here.
         """
         card = self.shard_metadata.model_card
-        profile = resolve_model_capability_profile(card.model_id, model_card=card)
+        try:
+            profile = resolve_model_capability_profile(card.model_id, model_card=card)
+        except Exception as exc:  # noqa: BLE001 - an unresolvable card is just not gpt-oss
+            # Never crash generation on capability resolution: now that the
+            # harmony history sanitize runs before the tool branch in _generate,
+            # the tool path resolves the profile too. A card we cannot resolve is
+            # treated as non-harmony (harmony-specific handling skipped) rather
+            # than raising. Log it so a real resolution regression (which would
+            # silently disable gpt-oss parsing) is still visible.
+            logger.opt(exception=exc).warning(
+                f"capability resolution failed for {card.model_id}; "
+                "treating as non-harmony"
+            )
+            return False
         return profile.output_parser == OutputParserType.GptOss
 
     def _send_token_chunk(

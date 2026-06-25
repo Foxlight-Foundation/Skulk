@@ -7,6 +7,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Changed
+
+- **The llama.cpp engine now loads models with Flash Attention by default.** It
+  is the modern llama.cpp default and matters most for models whose per-layer V
+  embeddings differ (gemma's interleaved sliding-window attention): without it
+  llama.cpp pads the V cache and falls back to a full-size sliding-window cache,
+  wasting VRAM and slowing attention. Set `SKULK_LLAMA_CPP_FLASH_ATTN=0` to
+  disable on a backend whose compiled build lacks Flash Attention kernels.
+
 ### Fixed
 
 - **The model store now advertises a routable IP, so downloads no longer fail
@@ -21,16 +30,15 @@ This project records release notes here and mirrors public-facing notes in
   and an operator-supplied routable IP in `store_http_host` is still honored
   verbatim.
 
-### Changed
-
-- **The llama.cpp engine now loads models with Flash Attention by default.** It
-  is the modern llama.cpp default and matters most for models whose per-layer V
-  embeddings differ (gemma's interleaved sliding-window attention): without it
-  llama.cpp pads the V cache and falls back to a full-size sliding-window cache,
-  wasting VRAM and slowing attention. Set `SKULK_LLAMA_CPP_FLASH_ATTN=0` to
-  disable on a backend whose compiled build lacks Flash Attention kernels.
-
-### Fixed
+- **gpt-oss conversations no longer wedge on follow-up turns when the history
+  carries raw harmony markers.** A gpt-oss assistant turn captured before the
+  output was channel-parsed (or echoed back by any client) keeps `<|channel|>`
+  markers in its `content`, and llama.cpp's gpt-oss chat template rejects that
+  with a hard error, so every later turn of the conversation returned no
+  response. The llama.cpp runner now strips harmony markers from assistant
+  history (reducing it to the final-channel text) before handing it to the
+  template, so a client can never wedge inference by replaying the model's own
+  output format and existing conversations resume cleanly.
 
 - **Dashboard: gpt-oss chats render cleanly and stop leaking harmony markers.**
   The chat reasoning/content splitter now also understands gpt-oss "harmony"
