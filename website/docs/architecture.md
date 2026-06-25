@@ -203,6 +203,12 @@ backends come from `SKULK_LLAMA_CPP_BACKENDS`, defaulting to `cpu` when that env
 var is unset so a node never over-claims a GPU). Backends are probed per node and
 gossiped on the telemetry plane as part of `NodeResources`.
 
+The llama.cpp runner loads GGUF models with Flash Attention on by default (the
+modern llama.cpp default; it fixes the slow padded-V-cache and full-size
+sliding-window-cache path that gemma-style interleaved attention otherwise hits).
+Set `SKULK_LLAMA_CPP_FLASH_ATTN=0` to disable it on a node whose compiled build
+lacks Flash Attention kernels.
+
 A model card declares two placement axes that are deliberately separate from the
 memory/topology axes above:
 
