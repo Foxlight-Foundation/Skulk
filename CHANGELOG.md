@@ -7,6 +7,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Changed
+
+- **The llama.cpp engine now loads models with Flash Attention by default.** It
+  is the modern llama.cpp default and matters most for models whose per-layer V
+  embeddings differ (gemma's interleaved sliding-window attention): without it
+  llama.cpp pads the V cache and falls back to a full-size sliding-window cache,
+  wasting VRAM and slowing attention. Set `SKULK_LLAMA_CPP_FLASH_ATTN=0` to
+  disable on a backend whose compiled build lacks Flash Attention kernels.
+
 ### Fixed
 
 - **gpt-oss conversations no longer wedge on follow-up turns when the history
@@ -18,17 +27,6 @@ This project records release notes here and mirrors public-facing notes in
   history (reducing it to the final-channel text) before handing it to the
   template, so a client can never wedge inference by replaying the model's own
   output format and existing conversations resume cleanly.
-
-### Changed
-
-- **The llama.cpp engine now loads models with Flash Attention by default.** It
-  is the modern llama.cpp default and matters most for models whose per-layer V
-  embeddings differ (gemma's interleaved sliding-window attention): without it
-  llama.cpp pads the V cache and falls back to a full-size sliding-window cache,
-  wasting VRAM and slowing attention. Set `SKULK_LLAMA_CPP_FLASH_ATTN=0` to
-  disable on a backend whose compiled build lacks Flash Attention kernels.
-
-### Fixed
 
 - **gpt-oss models on the llama.cpp engine no longer leak raw "harmony" markers
   into the answer, and their reasoning is now separated from content.** llama.cpp

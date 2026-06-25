@@ -173,21 +173,26 @@ def test_sanitize_harmony_keeps_only_final_channel() -> None:
     assert "functions" not in out[0]["content"]
 
 
-def test_sanitize_harmony_fallback_strips_markers_without_truncating() -> None:
-    # No final channel (analysis-only / incomplete): never leave <|channel|>
-    # markers (the template rejects them) and never drop genuine leading text.
+def test_sanitize_harmony_no_final_channel_drops_to_empty() -> None:
+    # No final channel (analysis-only, or a commentary/tool-call-only turn): the
+    # turn carried no user-facing answer, so it reduces to an empty string rather
+    # than replaying reasoning or tool-call JSON as assistant prose. Either way no
+    # <|channel|> marker survives (the gpt-oss template rejects them).
     analysis_only = "<|channel|>analysis<|message|>just thinking, no answer"
     out = _sanitize_harmony_assistant_messages(
         [{"role": "assistant", "content": analysis_only}]
     )
-    assert "<|channel|>" not in out[0]["content"]
-    # Leading text before a stray marker is preserved by the fallback.
-    stray = "Here is the answer: 4 <|channel|>"
-    out2 = _sanitize_harmony_assistant_messages(
-        [{"role": "assistant", "content": stray}]
+    assert out[0]["content"] == ""
+    # A pure tool-call/commentary turn must not leak its JSON body into history.
+    commentary_only = (
+        '<|channel|>commentary to=functions.get_weather <|constrain|>json'
+        '<|message|>{"city": "SF"}<|call|>'
     )
-    assert "<|channel|>" not in out2[0]["content"]
-    assert "Here is the answer: 4" in out2[0]["content"]
+    out2 = _sanitize_harmony_assistant_messages(
+        [{"role": "assistant", "content": commentary_only}]
+    )
+    assert out2[0]["content"] == ""
+    assert "functions" not in out2[0]["content"]
 
 
 def test_generation_kwargs_passes_logprobs() -> None:

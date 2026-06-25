@@ -273,7 +273,7 @@ def _harmony_final_channel_text(content: str) -> str | None:
     found_final = False
     in_body = False
     channel: str | None = None
-    header = ""
+    header_parts: list[str] = []
     index = 0
     length = len(content)
     while index < length:
@@ -285,43 +285,41 @@ def _harmony_final_channel_text(content: str) -> str | None:
         if marker is not None:
             if marker == "<|channel|>":
                 in_body = False
-                header = ""
+                header_parts = []
             elif marker == "<|message|>":
-                stripped = header.strip()
+                stripped = "".join(header_parts).strip()
                 channel = stripped.split()[0] if stripped else None
-                header = ""
+                header_parts = []
                 in_body = True
                 if channel == "final":
                     found_final = True
             elif marker != "<|constrain|>":
                 in_body = False
                 channel = None
-                header = ""
+                header_parts = []
             index += len(marker)
             continue
         if in_body:
             if channel == "final":
                 final_parts.append(content[index])
         else:
-            header += content[index]
+            header_parts.append(content[index])
         index += 1
     return "".join(final_parts) if found_final else None
 
 
 def _harmony_history_text(content: str) -> str:
-    """Reduce a raw harmony assistant turn to safe, marker-free replay text.
+    """Reduce a raw harmony assistant turn to its replayable final-channel text.
 
-    Prefers the ``final`` channel answer; if none is present, strips all control
-    markers and keeps the non-analysis text. Either way no ``<|channel|>`` marker
-    survives (the gpt-oss template rejects them) and the text is never truncated
-    to nothing by a partial/odd marker sequence.
+    Only the ``final`` channel carries the user-facing answer, so analysis
+    (reasoning) and commentary (tool-call plumbing) channels are dropped rather
+    than replayed as assistant prose. A turn with no ``final`` channel
+    (commentary/tool-call-only, or truncated before one) reduces to an empty
+    string instead of echoing tool-call JSON back into the next prompt. Either
+    way no ``<|channel|>`` marker survives, which the gpt-oss template rejects.
     """
     final_text = _harmony_final_channel_text(content)
-    if final_text is not None and final_text.strip():
-        return final_text
-    parser = HarmonyTextParser()
-    emissions = parser.feed(content) + parser.flush()
-    return "".join(text for text, is_thinking in emissions if not is_thinking)
+    return final_text if final_text is not None else ""
 
 
 def _sanitize_harmony_assistant_messages(
@@ -941,12 +939,17 @@ class Runner:
         card = self.shard_metadata.model_card
         try:
             profile = resolve_model_capability_profile(card.model_id, model_card=card)
-        except Exception:  # noqa: BLE001 - an unresolvable card is just not gpt-oss
+        except Exception as exc:  # noqa: BLE001 - an unresolvable card is just not gpt-oss
             # Never crash generation on capability resolution: now that the
             # harmony history sanitize runs before the tool branch in _generate,
             # the tool path resolves the profile too. A card we cannot resolve is
             # treated as non-harmony (harmony-specific handling skipped) rather
-            # than raising.
+            # than raising. Log it so a real resolution regression (which would
+            # silently disable gpt-oss parsing) is still visible.
+            logger.opt(exception=exc).warning(
+                f"capability resolution failed for {card.model_id}; "
+                "treating as non-harmony"
+            )
             return False
         return profile.output_parser == OutputParserType.GptOss
 
