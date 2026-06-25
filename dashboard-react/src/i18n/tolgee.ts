@@ -39,12 +39,23 @@ const availableLanguages = parseConfiguredLanguages(
 
 const tolgeeBuilder = Tolgee()
   .use(LanguageStorage())
-  .use(LanguageDetector())
-  .use(BackendFetch({
+  .use(LanguageDetector());
+
+// Only fetch runtime translations from the CDN when a non-English language is
+// actually configured. English ships bundled in `staticData`, so on a default
+// (English-only) deployment a BackendFetch just 404s on `/i18n/skulk/en.json`
+// before falling back to the bundle — harmless but noisy. Skipping it entirely
+// avoids the 404; deployments with extra languages keep the CDN backend.
+const hasRuntimeLanguages = availableLanguages.some(
+  (language) => language !== DEFAULT_LANGUAGE,
+);
+if (hasRuntimeLanguages) {
+  tolgeeBuilder.use(BackendFetch({
     prefix: import.meta.env.VITE_TOLGEE_CDN_PREFIX ?? DEFAULT_CDN_PREFIX,
     fallbackOnFail: true,
     timeout: CDN_TIMEOUT_MS,
   }));
+}
 
 if (import.meta.env.DEV) {
   tolgeeBuilder.use(DevTools());

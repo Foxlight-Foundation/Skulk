@@ -7,6 +7,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dashboard: gpt-oss chats render cleanly and stop leaking harmony markers.**
+  The chat reasoning/content splitter now also understands gpt-oss "harmony"
+  channel markers (`<|channel|>analysis…final…`), so the analysis channel shows
+  as collapsible reasoning and the answer renders without raw `<|...|>`
+  scaffolding. This also heals conversations that stored marker-laden assistant
+  turns before the server-side parsing landed, so they display correctly.
+- **Dashboard: no more `404 /i18n/skulk/en.json`.** English ships bundled in the
+  app, so the Tolgee CDN fetch is now only enabled when an additional language is
+  configured; the default English-only build no longer requests (and 404s on) the
+  runtime translations endpoint.
+
 ### Changed
 
 - **The llama.cpp engine now loads models with Flash Attention by default.** It
