@@ -9,7 +9,7 @@ import socket
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Self
+from typing import Final, Self
 
 import anyio
 import psutil
@@ -192,6 +192,32 @@ def _add_model_search_path(path: Path) -> None:
     add_model_search_path(expanded)
 
 
+_VIRTUAL_IFACE_PREFIXES: Final = (
+    "docker",
+    "br-",
+    "virbr",
+    "vmnet",
+    "vboxnet",
+    "veth",
+    "cni",
+    "flannel",
+    "kube",
+)
+
+
+def _is_virtual_iface(name: str) -> bool:
+    """Whether an interface name looks like a Docker/VM/container bridge.
+
+    These carry RFC1918 addresses (e.g. Docker's ``172.17.0.1``) that are not
+    reachable from peers on the real LAN, so they must not be advertised as the
+    store host. VPN tunnels (Tailscale ``utun``/``tailscale0``) are deliberately
+    NOT excluded: they are a valid fallback path and are already ranked below the
+    LAN address.
+    """
+    lowered = name.lower()
+    return lowered.startswith(_VIRTUAL_IFACE_PREFIXES)
+
+
 def _routable_store_advertise_host(configured: str | None, hostname_fallback: str) -> str:
     """Pick an address other nodes can actually reach the model store host at.
 
@@ -212,13 +238,25 @@ def _routable_store_advertise_host(configured: str | None, hostname_fallback: st
             literal = ipaddress.ip_address(configured)
         except ValueError:
             literal = None  # a hostname, not an IP -> recompute below
-        if literal is not None and not (
-            literal.is_loopback or literal.is_link_local or literal.is_unspecified
+        # Honor only a routable IPv4 literal: the store URL is built as
+        # http://{host}:{port} with no IPv6-bracket handling, so an IPv6 literal
+        # would produce an invalid URL -> treat it like a hostname and recompute.
+        if (
+            literal is not None
+            and literal.version == 4
+            and not (
+                literal.is_loopback or literal.is_link_local or literal.is_unspecified
+            )
         ):
             return configured
 
     routable: list[str] = []
-    for addresses in psutil.net_if_addrs().values():
+    for iface_name, addresses in psutil.net_if_addrs().items():
+        # Skip virtual bridge / container interfaces (docker0, br-*, virbr*,
+        # vmnet*, vboxnet*, veth*, k8s): they carry RFC1918 IPs that peers on the
+        # real LAN cannot route to and could otherwise outrank the LAN address.
+        if _is_virtual_iface(iface_name):
+            continue
         for address in addresses:
             if address.family != socket.AF_INET:
                 continue
@@ -680,8 +718,14 @@ class Node:
     async def _broadcast_config_if_store_host(self) -> None:
         """If this node is the store host, broadcast a valid config to all nodes.
 
-        Fixes up ``store_http_host`` so that worker nodes receive a reachable
-        address (the store host's hostname) rather than ``127.0.0.1`` or None.
+        Resolves ``store_http_host`` to a routable IPv4 (see
+        ``_routable_store_advertise_host``) so worker nodes receive an address
+        they can actually reach over HTTP, rather than a hostname that may
+        mDNS-resolve to an unreachable link-local address, ``127.0.0.1``, or
+        None. The resolved IP is broadcast to the cluster, but the **local**
+        config keeps the operator's original ``store_http_host`` so the host
+        re-resolves a fresh IP on every restart (a persisted IP would freeze a
+        stale address after a DHCP/interface change).
         """
         if self.skulk_config is None or self.skulk_config.model_store is None:
             return
@@ -706,25 +750,27 @@ class Node:
             ms.store_http_host, local_hostname
         )
 
-        config_dict = self.skulk_config.model_dump()
-        config_dict["model_store"]["store_http_host"] = reachable_host
+        import copy
 
         import yaml
 
+        config_dict = self.skulk_config.model_dump()
+
+        # Persist the local config with the operator's ORIGINAL store_http_host
+        # (a hostname / None), not the resolved IP, so the host re-resolves a
+        # fresh routable IP on the next restart instead of honoring a frozen,
+        # possibly stale address.
         config_yaml = yaml.safe_dump(
             config_dict, default_flow_style=False, sort_keys=False
         )
-
-        # Also update local config file with the fixed host
         try:
             resolve_config_path().write_text(config_yaml)
         except Exception as exc:
             logger.warning(f"Failed to update local config: {exc}")
 
-        # Strip secrets before broadcasting over gossipsub
-        import copy
-
+        # Broadcast the resolved reachable host to the cluster (secrets stripped).
         broadcast_dict = copy.deepcopy(config_dict)
+        broadcast_dict["model_store"]["store_http_host"] = reachable_host
         broadcast_dict.pop("hf_token", None)
         broadcast_yaml = yaml.safe_dump(
             broadcast_dict, default_flow_style=False, sort_keys=False
