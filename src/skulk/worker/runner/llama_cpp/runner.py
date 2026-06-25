@@ -231,8 +231,10 @@ def messages_for_llama(task_params: TextGenerationTaskParams) -> list[dict[str, 
     no rendered messages are present.
     """
     if task_params.chat_template_messages:
-        return _splice_images_into_messages(
-            task_params.chat_template_messages, task_params.images
+        return _sanitize_harmony_assistant_messages(
+            _splice_images_into_messages(
+                task_params.chat_template_messages, task_params.images
+            )
         )
     messages: list[dict[str, Any]] = []
     if task_params.instructions:
@@ -246,7 +248,40 @@ def messages_for_llama(task_params: TextGenerationTaskParams) -> list[dict[str, 
                 "content": content if isinstance(content, str) else str(content),
             }
         )
-    return messages
+    return _sanitize_harmony_assistant_messages(messages)
+
+
+def _sanitize_harmony_assistant_messages(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Strip gpt-oss harmony channel markers from assistant history content.
+
+    gpt-oss's llama.cpp chat template raises when an assistant message's
+    ``content`` contains ``<|channel|>`` markers (it expects the analysis channel
+    in a separate ``thinking`` field), which wedges every follow-up turn of a
+    conversation that stored a raw, pre-parse assistant response. A client must
+    never be able to break inference by echoing the model's own output format, so
+    any marker-laden assistant content is reduced to just its final-channel text
+    (dropping the analysis channel and all control markers) before reaching the
+    template. Content without markers (and non-string content, e.g. vision parts)
+    is passed through untouched.
+    """
+    sanitized: list[dict[str, Any]] = []
+    for message in messages:
+        content = message.get("content")
+        if (
+            message.get("role") == "assistant"
+            and isinstance(content, str)
+            and "<|channel|>" in content
+        ):
+            parser = HarmonyTextParser()
+            emissions = parser.feed(content) + parser.flush()
+            final_text = "".join(
+                text for text, is_thinking in emissions if not is_thinking
+            )
+            message = {**message, "content": final_text}
+        sanitized.append(message)
+    return sanitized
 
 
 def _generation_kwargs(task_params: TextGenerationTaskParams) -> dict[str, Any]:

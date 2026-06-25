@@ -7,6 +7,18 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- **gpt-oss conversations no longer wedge on follow-up turns when the history
+  carries raw harmony markers.** A gpt-oss assistant turn captured before the
+  output was channel-parsed (or echoed back by any client) keeps `<|channel|>`
+  markers in its `content`, and llama.cpp's gpt-oss chat template rejects that
+  with a hard error, so every later turn of the conversation returned no
+  response. The llama.cpp runner now strips harmony markers from assistant
+  history (reducing it to the final-channel text) before handing it to the
+  template, so a client can never wedge inference by replaying the model's own
+  output format and existing conversations resume cleanly.
+
 ### Changed
 
 - **The llama.cpp engine now loads models with Flash Attention by default.** It

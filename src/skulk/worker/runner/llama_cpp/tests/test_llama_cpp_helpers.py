@@ -18,6 +18,7 @@ from skulk.worker.runner.llama_cpp.runner import (
     _logits_all_n_ctx,
     _logprob_fields,
     _map_finish_reason,
+    _sanitize_harmony_assistant_messages,
     _serving_n_ctx,
     _splice_images_into_messages,
     _tool_calls_from_message,
@@ -119,6 +120,46 @@ def test_messages_fallback_from_input_and_instructions() -> None:
     result = messages_for_llama(params)
     assert result[0] == {"role": "system", "content": "be brief"}
     assert result[1]["role"] == "user"
+
+
+def test_sanitize_harmony_assistant_messages() -> None:
+    raw_assistant = (
+        "<|channel|>analysis<|message|>thinking out loud"
+        "<|end|><|start|>assistant<|channel|>final<|message|>The answer is 4."
+    )
+    messages = [
+        {"role": "user", "content": "what is 2+2?"},
+        {"role": "assistant", "content": raw_assistant},
+        {"role": "user", "content": "and 3+3?"},
+    ]
+    out = _sanitize_harmony_assistant_messages(messages)
+    # Assistant content reduced to the final channel; no markers, no analysis.
+    assert out[1]["content"] == "The answer is 4."
+    assert "<|channel|>" not in out[1]["content"]
+    # User turns are untouched.
+    assert out[0]["content"] == "what is 2+2?"
+    assert out[2]["content"] == "and 3+3?"
+
+
+def test_sanitize_harmony_leaves_clean_and_nonstring_content() -> None:
+    messages = [
+        {"role": "assistant", "content": "already clean"},
+        {"role": "user", "content": "<|channel|>not sanitized for user role"},
+        {"role": "assistant", "content": [{"type": "image"}]},
+    ]
+    out = _sanitize_harmony_assistant_messages(messages)
+    assert out == messages  # no markers in assistant str / non-str -> untouched
+
+
+def test_messages_for_llama_sanitizes_assistant_history() -> None:
+    raw = "<|channel|>analysis<|message|>hmm<|end|><|start|>assistant<|channel|>final<|message|>Hi!"
+    msgs = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": raw},
+        {"role": "user", "content": "again"},
+    ]
+    out = messages_for_llama(_params(chat_template_messages=msgs))
+    assert out[1]["content"] == "Hi!"
 
 
 def test_generation_kwargs_passes_logprobs() -> None:
