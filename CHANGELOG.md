@@ -9,6 +9,18 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **gpt-oss models on the llama.cpp engine no longer leak raw "harmony" markers
+  into the answer, and their reasoning is now separated from content.** llama.cpp
+  hands back already-detokenized text whose content still contains the literal
+  harmony channel scaffolding (`<|channel|>analysis<|message|>...<|end|>`
+  `<|start|>assistant<|channel|>final<|message|>...`); the runner forwarded it
+  verbatim, so users saw the control tokens and the analysis (reasoning) channel
+  mixed into the response. The llama.cpp runner now reparses the marker stream
+  from strings, mirroring what the MLX engine does at the token level: the
+  `analysis` channel is emitted as `reasoning_content`, the `final` channel as
+  clean `content`, and every control marker is stripped. The parser is
+  dependency-free (no MLX / openai_harmony) so it runs on non-Mac GPU nodes.
+
 - **Cluster formation no longer livelocks under connection churn (#400).**
   Master election restarted its whole campaign on every libp2p connection
   update, and because peers are multi-homed (link-local, LAN, and overlay

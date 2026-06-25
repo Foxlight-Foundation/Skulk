@@ -24,7 +24,9 @@ from typing import Any, Final, Literal
 from anyio import WouldBlock
 
 from skulk.api.types import ToolCallItem, TopLogprobItem
+from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.memory_estimate import KV_CONTEXT_BUDGET_TOKENS
+from skulk.shared.models.model_cards import OutputParserType
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
@@ -56,6 +58,7 @@ from skulk.shared.types.worker.runners import (
 )
 from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.bootstrap import logger
+from skulk.worker.runner.llm_inference.harmony_text_parser import HarmonyTextParser
 
 
 def select_gguf_file(model_dir: Path) -> Path:
@@ -682,6 +685,30 @@ class Runner:
                 self.current_status = RunnerReady()
                 return
 
+            # gpt-oss emits the OpenAI "harmony" format: llama.cpp detokenizes the
+            # channel markers into literal text in the content delta, so without
+            # parsing them the raw `<|channel|>analysis...final...|>` scaffolding
+            # leaks into the answer and reasoning is never split out. Reparse the
+            # marker stream from strings (the MLX engine does the token-level
+            # equivalent) so reasoning lands in reasoning_content and content is
+            # clean.
+            harmony_parser = (
+                HarmonyTextParser() if self._is_harmony_model() else None
+            )
+
+            # Harmony parsing re-chunks the stream into channel-split pieces that
+            # no longer align 1:1 with the source tokens, so per-token logprobs
+            # can't be carried faithfully. Rather than silently return empty
+            # logprobs (the exact no-silent-empty contract #385 enforces), fail
+            # loud when both are requested.
+            if harmony_parser is not None and want_logprobs:
+                raise RuntimeError(
+                    "Per-token logprobs are not supported for gpt-oss (harmony) "
+                    "models on the llama.cpp engine: harmony channel parsing "
+                    "re-chunks the stream, so logprobs cannot be aligned to "
+                    "tokens. Retry without logprobs/top_logprobs."
+                )
+
             stream = self.model.create_chat_completion(
                 messages=messages, stream=True, **kwargs
             )
@@ -696,6 +723,26 @@ class Runner:
                 logprob, top_logprobs = (
                     _logprob_fields(choice) if want_logprobs else (None, None)
                 )
+
+                if harmony_parser is not None:
+                    for clean_text, is_thinking in harmony_parser.feed(text):
+                        self._send_token_chunk(
+                            command_id, model_id, clean_text, is_thinking=is_thinking
+                        )
+                    if finish is not None:
+                        for clean_text, is_thinking in harmony_parser.flush():
+                            self._send_token_chunk(
+                                command_id,
+                                model_id,
+                                clean_text,
+                                is_thinking=is_thinking,
+                            )
+                        emitted_finish = True
+                        self._send_token_chunk(
+                            command_id, model_id, "", finish_reason=finish
+                        )
+                    continue
+
                 if not text and finish is None and logprob is None:
                     continue
                 emitted_finish = emitted_finish or finish is not None
@@ -716,6 +763,14 @@ class Runner:
             # Guarantee a terminal chunk on normal completion so the consumer's
             # stream closes even if llama.cpp ended without an explicit finish.
             if not emitted_finish and not self._is_cancelled(task.task_id):
+                # Flush any tail the harmony parser was holding back (a partial
+                # marker, or final-channel text not yet released) before closing,
+                # so a stream that ends without a finish_reason doesn't truncate.
+                if harmony_parser is not None:
+                    for clean_text, is_thinking in harmony_parser.flush():
+                        self._send_token_chunk(
+                            command_id, model_id, clean_text, is_thinking=is_thinking
+                        )
                 self.event_sender.send(
                     ChunkGenerated(
                         command_id=command_id,
@@ -738,6 +793,44 @@ class Runner:
             )
 
         self.current_status = RunnerReady()
+
+    def _is_harmony_model(self) -> bool:
+        """Whether this runner serves a gpt-oss (harmony-format) model.
+
+        gpt-oss output carries OpenAI harmony channel markers that must be parsed
+        out of the streamed text (see ``_generate``). Detection mirrors the MLX
+        path via the resolved capability profile, so a single check covers every
+        gpt-oss variant rather than matching model-id substrings here.
+        """
+        card = self.shard_metadata.model_card
+        profile = resolve_model_capability_profile(card.model_id, model_card=card)
+        return profile.output_parser == OutputParserType.GptOss
+
+    def _send_token_chunk(
+        self,
+        command_id: CommandId,
+        model_id: ModelId,
+        text: str,
+        *,
+        is_thinking: bool = False,
+        finish_reason: Literal["stop", "length", "content_filter"] | None = None,
+    ) -> None:
+        """Emit one harmony-parsed token chunk; skip empty non-terminal chunks."""
+        if not text and finish_reason is None:
+            return
+        self.event_sender.send(
+            ChunkGenerated(
+                command_id=command_id,
+                chunk=TokenChunk(
+                    model=model_id,
+                    text=text,
+                    token_id=-1,  # llama.cpp chat stream does not expose ids
+                    usage=None,
+                    finish_reason=finish_reason,
+                    is_thinking=is_thinking,
+                ),
+            )
+        )
 
     def _generate_with_tools(
         self,
