@@ -352,6 +352,26 @@ def _logits_all_enabled() -> bool:
     )
 
 
+def _flash_attn_enabled() -> bool:
+    """Whether to load the model with Flash Attention (defaults **on**).
+
+    Flash Attention is the modern llama.cpp default and matters most for models
+    whose per-layer V embeddings differ (gemma's interleaved sliding-window
+    attention): without it llama.cpp pads the V cache and falls back to a
+    full-size SWA cache, wasting VRAM and slowing attention. With it the SWA
+    cache sizes correctly and the padding goes away. It is a load-time
+    construction flag (cannot be toggled per request), so it is a node-local
+    knob: default on, set ``SKULK_LLAMA_CPP_FLASH_ATTN=0`` to disable on a
+    backend whose build lacks Flash Attention kernels.
+    """
+    return os.getenv("SKULK_LLAMA_CPP_FLASH_ATTN", "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def wants_logprobs(logprobs: bool, top_logprobs: int | None) -> bool:
     """Whether a request is asking for per-token logprobs.
 
@@ -623,15 +643,18 @@ class Runner:
                     f"handler for model_type={vision.model_type!r}, but the "
                     "installed llama-cpp-python build exposes none"
                 )
+        flash_attn = _flash_attn_enabled()
         logger.info(
             f"loading GGUF {gguf_path.name} for {model_id} "
-            f"(n_ctx={n_ctx}, logits_all={logits_all}, vision={vision is not None})"
+            f"(n_ctx={n_ctx}, logits_all={logits_all}, flash_attn={flash_attn}, "
+            f"vision={vision is not None})"
         )
         self.model = Llama(
             model_path=str(gguf_path),
             n_gpu_layers=-1,
             n_ctx=n_ctx,
             logits_all=logits_all,
+            flash_attn=flash_attn,
             verbose=False,
             chat_handler=chat_handler,
         )

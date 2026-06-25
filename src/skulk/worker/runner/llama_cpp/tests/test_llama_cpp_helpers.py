@@ -11,6 +11,7 @@ from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskP
 from skulk.worker.runner.llama_cpp.runner import (
     _DEFAULT_VISION_HANDLER,
     _VISION_HANDLER_BY_MODEL_TYPE,
+    _flash_attn_enabled,
     _generation_kwargs,
     _image_data_uri,
     _logits_all_enabled,
@@ -148,6 +149,22 @@ def test_logits_all_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
         assert _logits_all_enabled() is True
     monkeypatch.setenv("SKULK_LLAMA_CPP_LOGITS_ALL", "off")
     assert _logits_all_enabled() is False
+
+
+def test_flash_attn_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Default ON: Flash Attention is the modern llama.cpp default and fixes the
+    # gemma full-size-SWA-cache + V-cache-padding slow path.
+    monkeypatch.delenv("SKULK_LLAMA_CPP_FLASH_ATTN", raising=False)
+    assert _flash_attn_enabled() is True  # default on
+    # Explicit opt-out for backends whose build lacks Flash Attention kernels.
+    monkeypatch.setenv("SKULK_LLAMA_CPP_FLASH_ATTN", "0")
+    assert _flash_attn_enabled() is False
+    for falsy in ("0", "false", "FALSE", "no", " off "):
+        monkeypatch.setenv("SKULK_LLAMA_CPP_FLASH_ATTN", falsy)
+        assert _flash_attn_enabled() is False
+    for truthy in ("1", "true", "Yes", " on "):
+        monkeypatch.setenv("SKULK_LLAMA_CPP_FLASH_ATTN", truthy)
+        assert _flash_attn_enabled() is True
 
 
 def test_logits_all_n_ctx(monkeypatch: pytest.MonkeyPatch) -> None:
