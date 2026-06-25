@@ -722,10 +722,14 @@ class Node:
         ``_routable_store_advertise_host``) so worker nodes receive an address
         they can actually reach over HTTP, rather than a hostname that may
         mDNS-resolve to an unreachable link-local address, ``127.0.0.1``, or
-        None. The resolved IP is broadcast to the cluster, but the **local**
-        config keeps the operator's original ``store_http_host`` so the host
-        re-resolves a fresh IP on every restart (a persisted IP would freeze a
-        stale address after a DHCP/interface change).
+        None. An operator-supplied routable IPv4 literal is honored as-is;
+        otherwise this host's best routable LAN address is used.
+
+        The resolved address is broadcast over the cluster config-sync path,
+        which every node (including this store host, via local delivery) applies
+        and persists. We therefore do not separately write the local config file
+        here: a second write would only be clobbered by the host applying its
+        own broadcast.
         """
         if self.skulk_config is None or self.skulk_config.model_store is None:
             return
@@ -754,22 +758,11 @@ class Node:
 
         import yaml
 
-        config_dict = self.skulk_config.model_dump()
-
-        # Persist the local config with the operator's ORIGINAL store_http_host
-        # (a hostname / None), not the resolved IP, so the host re-resolves a
-        # fresh routable IP on the next restart instead of honoring a frozen,
-        # possibly stale address.
-        config_yaml = yaml.safe_dump(
-            config_dict, default_flow_style=False, sort_keys=False
-        )
-        try:
-            resolve_config_path().write_text(config_yaml)
-        except Exception as exc:
-            logger.warning(f"Failed to update local config: {exc}")
-
         # Broadcast the resolved reachable host to the cluster (secrets stripped).
-        broadcast_dict = copy.deepcopy(config_dict)
+        # The store host applies its own broadcast via local delivery and persists
+        # it through the normal config-sync path, so there is no separate local
+        # write here (it would only be clobbered by that same broadcast).
+        broadcast_dict = copy.deepcopy(self.skulk_config.model_dump())
         broadcast_dict["model_store"]["store_http_host"] = reachable_host
         broadcast_dict.pop("hf_token", None)
         broadcast_yaml = yaml.safe_dump(
