@@ -826,7 +826,13 @@ class Runner:
         gpt-oss variant rather than matching model-id substrings here.
         """
         card = self.shard_metadata.model_card
-        profile = resolve_model_capability_profile(card.model_id, model_card=card)
+        try:
+            profile = resolve_model_capability_profile(card.model_id, model_card=card)
+        except Exception:  # noqa: BLE001 - an unresolvable card is just not gpt-oss
+            # Never crash generation on capability resolution: a card we cannot
+            # resolve is treated as non-harmony (harmony-specific parsing/history
+            # handling is skipped) rather than raising.
+            return False
         return profile.output_parser == OutputParserType.GptOss
 
     def _send_token_chunk(
