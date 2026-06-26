@@ -89,3 +89,29 @@ def test_harmony_takes_precedence_when_both_markers_present() -> None:
     raw = "<|channel|>commentary to=functions.ping <|message|>{}"
     calls = parse_tool_calls_from_text(raw)
     assert calls is not None and calls[0].name == "ping"
+
+
+def test_braces_inside_string_values_do_not_break_scan() -> None:
+    # The bracket-scan fallback (triggered by trailing text after the JSON) must
+    # not miscount a brace inside a quoted string value.
+    raw = (
+        '<|channel|>commentary to=functions.search <|message|>'
+        '{"pattern": "a{2}b", "note": "}"} trailing junk after the call'
+    )
+    calls = parse_tool_calls_from_text(raw)
+    assert calls is not None and calls[0].name == "search"
+    assert json.loads(calls[0].arguments) == {"pattern": "a{2}b", "note": "}"}
+
+
+def test_harmony_no_arg_call_keeps_empty_object() -> None:
+    # An empty body is a genuine no-argument call -> {} is correct.
+    calls = parse_tool_calls_from_text("commentary to=functions.now <|message|>")
+    assert calls is not None and calls[0].name == "now"
+    assert json.loads(calls[0].arguments) == {}
+
+
+def test_harmony_unparseable_body_is_skipped_not_fabricated() -> None:
+    # A non-empty body that does not parse is a truncated/garbled call; skip it
+    # rather than emit a call with fabricated empty arguments.
+    raw = 'commentary to=functions.search <|message|>{"city": "Tok'  # truncated
+    assert parse_tool_calls_from_text(raw) is None

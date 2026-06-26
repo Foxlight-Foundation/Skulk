@@ -142,6 +142,17 @@ def _coerce_tool_arg_with_schema(value: Any, schema: dict[str, Any]) -> Any:  # 
 def coerce_tool_calls_to_schema(
     tool_calls: list[ToolCallItem], tools: list[dict[str, Any]]
 ) -> list[ToolCallItem]:
+    """Coerce each tool call's argument values to the requested tool's schema.
+
+    A model may emit arguments with loose types (e.g. a number as a string, or a
+    string value where the schema wants an integer). For each call whose name
+    matches a tool in ``tools``, this re-types the JSON arguments against that
+    tool's ``parameters`` schema and returns the call with the re-serialized
+    arguments. ``ToolCallItem.arguments`` must be a JSON object string; a call
+    whose name is unknown, whose arguments do not parse, or which is not a JSON
+    object is passed through unchanged. Used by both the MLX token-level tool
+    parsers and the llama.cpp string parser (``tool_text_parser``).
+    """
     schema_by_name: dict[str, dict[str, Any]] = {}
     for tool in tools:
         function = tool.get("function")

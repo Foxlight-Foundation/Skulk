@@ -58,10 +58,25 @@ def _first_json_object(text: str) -> dict[str, Any] | None:
     start = stripped.find("{")
     if start == -1:
         return None
+    # Brace scan to find the end of the first object. Track string state so a
+    # brace inside a string value (e.g. {"pattern": "{a}"}) does not throw off
+    # the depth count.
     depth = 0
+    in_string = False
+    escaped = False
     for index in range(start, len(stripped)):
         char = stripped[index]
-        if char == "{":
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
             depth += 1
         elif char == "}":
             depth -= 1
@@ -78,10 +93,15 @@ def _harmony_tool_calls(text: str) -> list[ToolCallItem]:
     calls: list[ToolCallItem] = []
     for match in _HARMONY_CALL_RE.finditer(text):
         name = match.group(1)
-        obj = _first_json_object(match.group(2))
-        calls.append(
-            ToolCallItem(name=name, arguments=json.dumps(obj) if obj is not None else "{}")
-        )
+        body = match.group(2)
+        obj = _first_json_object(body)
+        if obj is not None:
+            calls.append(ToolCallItem(name=name, arguments=json.dumps(obj)))
+        elif not body.strip():
+            # A genuine no-argument call (empty body) is valid; only then is {}
+            # correct. A non-empty body that did not parse is a truncated/garbled
+            # call, so skip it rather than fabricate empty arguments.
+            calls.append(ToolCallItem(name=name, arguments="{}"))
     return calls
 
 
