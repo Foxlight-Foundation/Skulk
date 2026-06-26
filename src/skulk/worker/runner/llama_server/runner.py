@@ -327,12 +327,19 @@ class Runner:
                 "point it at a llama-server binary built >= b9196 (for draft-mtp)"
             )
         port = self._pick_port()
+        # Honor the resolved backend's compute: a node that resolved to
+        # ``llama_server-cpu`` was admitted against system RAM (placement does not
+        # count it as GPU-offload), so request 0 GPU layers rather than forcing
+        # ``-ngl 99`` onto a GPU that was not budgeted (or may not exist). Any
+        # GPU compute tag (vulkan/rocm/cuda), or no resolved tag, offloads fully.
+        resolved = self.shard_metadata.resolved_backend
+        n_gpu_layers = "0" if (resolved and resolved.endswith("-cpu")) else "99"
         cmd: list[str] = [
             binary,
             "-m",
             str(gguf_path),
             "-ngl",
-            "99",
+            n_gpu_layers,
             "-c",
             str(n_ctx),
             "--host",
