@@ -109,7 +109,20 @@ def _toolcall_block_calls(text: str) -> list[ToolCallItem]:
     calls: list[ToolCallItem] = []
     for block in _TOOLCALL_BLOCK_RE.finditer(text):
         inner = block.group(1).strip()
-        # JSON form: {"name": ..., "arguments": {...}}.
+        # Disambiguate by the unambiguous Qwen3 XML marker FIRST. A JSON-scan
+        # first would misread an object-valued XML parameter that happens to
+        # contain a "name" field (e.g. <parameter=person>{"name":"Alice"}) as the
+        # Hermes JSON form and take "Alice" as the function name.
+        if "<function=" in inner:
+            for function in _FUNCTION_RE.finditer(inner):
+                name = function.group(1)
+                params = {
+                    key: value.strip()
+                    for key, value in _PARAMETER_RE.findall(function.group(2))
+                }
+                calls.append(ToolCallItem(name=name, arguments=json.dumps(params)))
+            continue
+        # Hermes / older Qwen JSON form: {"name": ..., "arguments": {...}}.
         obj = _first_json_object(inner)
         if isinstance(obj, dict) and isinstance(obj.get("name"), str):
             args = obj.get("arguments", obj.get("parameters", {}))
@@ -117,15 +130,6 @@ def _toolcall_block_calls(text: str) -> list[ToolCallItem]:
                 json.dumps(args) if isinstance(args, (dict, list)) else str(args)
             )
             calls.append(ToolCallItem(name=obj["name"], arguments=args_str))
-            continue
-        # Qwen3 XML form: <function=NAME><parameter=KEY>VALUE</parameter>...
-        for function in _FUNCTION_RE.finditer(inner):
-            name = function.group(1)
-            params = {
-                key: value.strip()
-                for key, value in _PARAMETER_RE.findall(function.group(2))
-            }
-            calls.append(ToolCallItem(name=name, arguments=json.dumps(params)))
     return calls
 
 

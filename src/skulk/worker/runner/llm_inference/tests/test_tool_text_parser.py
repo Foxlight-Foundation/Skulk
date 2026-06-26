@@ -115,3 +115,16 @@ def test_harmony_unparseable_body_is_skipped_not_fabricated() -> None:
     # rather than emit a call with fabricated empty arguments.
     raw = 'commentary to=functions.search <|message|>{"city": "Tok'  # truncated
     assert parse_tool_calls_from_text(raw) is None
+
+
+def test_qwen3_xml_object_param_with_name_field_keeps_function_name() -> None:
+    # A Qwen3 XML param value that is a JSON object containing a "name" field must
+    # not be misread as the Hermes JSON form; the function name comes from
+    # <function=...>, not the nested object.
+    raw = (
+        "<tool_call>\n<function=add_person>\n<parameter=person>\n"
+        '{"name": "Alice"}\n</parameter>\n</function>\n</tool_call>'
+    )
+    name, args = _one(raw)
+    assert name == "add_person"
+    assert json.loads(args["person"]) == {"name": "Alice"}
