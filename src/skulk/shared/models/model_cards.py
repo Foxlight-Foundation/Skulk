@@ -460,12 +460,14 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     ) = None
     """Speculative-decoding mode for the ``llama_server`` (served-backend) engine.
 
-    Maps to ``llama-server --spec-type`` (underscores become hyphens):
-    ``draft_mtp`` uses the model's own built-in MTP heads (no draft model
-    needed; Qwen3.6/DeepSeek/GLM/Kimi/Nemotron), ``draft_eagle3`` an EAGLE-3 head,
-    ``ngram`` prompt-lookup, ``none``/``None`` plain decoding. Only the served
-    engine reads this; the in-process ``mlx`` and ``llama_cpp`` engines ignore it
-    (MLX speculation is the ``mtp_*`` / ``assistant_model_repo`` fields above)."""
+    Maps to a ``llama-server --spec-type`` token in the runner
+    (``_SPEC_TYPE_FLAG``): ``draft_mtp`` -> ``draft-mtp`` (the model's own built-in
+    MTP heads, no draft model needed; Qwen3.6/DeepSeek/GLM/Kimi/Nemotron),
+    ``draft_eagle3`` -> ``draft-eagle3`` (an EAGLE-3 head), ``draft_simple`` ->
+    ``draft-simple`` (a separate draft model), ``ngram`` -> ``ngram-cache``
+    (prompt-lookup), ``none``/``None`` plain decoding. Only the served engine reads
+    this; the in-process ``mlx`` and ``llama_cpp`` engines ignore it (MLX
+    speculation is the ``mtp_*`` / ``assistant_model_repo`` fields above)."""
     served_spec_n_max: int | None = None
     """Max draft tokens per step for the served engine (``--spec-draft-n-max``).
 

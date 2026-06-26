@@ -71,3 +71,5 @@ def test_spec_type_flag_maps_to_llama_server_flags() -> None:
     assert _SPEC_TYPE_FLAG["draft_mtp"] == "draft-mtp"
     assert _SPEC_TYPE_FLAG["draft_eagle3"] == "draft-eagle3"
     assert _SPEC_TYPE_FLAG["draft_simple"] == "draft-simple"
+    # ngram is the special case: it maps to ngram-cache, not "ngram".
+    assert _SPEC_TYPE_FLAG["ngram"] == "ngram-cache"
