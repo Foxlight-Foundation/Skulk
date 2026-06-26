@@ -31,15 +31,30 @@ from typing import Any
 from skulk.api.types import ToolCallItem
 from skulk.worker.runner.llm_inference.tool_parsers import coerce_tool_calls_to_schema
 
-# gpt-oss harmony tool call: a `commentary` channel whose header carries
-# `to=functions.NAME`, then the `<|message|>` body holds the JSON arguments, up to
-# the next control marker (or end of text). Anchoring on `<|channel|>commentary`
-# (with no intervening marker, hence `[^<]*?`) means a `to=functions.` written as
-# prose in the analysis (reasoning) channel is NOT treated as a tool call.
-_HARMONY_CALL_RE = re.compile(
-    r"<\|channel\|>commentary[^<]*?to=functions\.([A-Za-z0-9_.\-]+).*?<\|message\|>"
-    r"(.*?)(?=<\|call\|>|<\|end\|>|<\|return\|>|<\|start\|>|<\|channel\|>|$)",
-    re.DOTALL,
+# gpt-oss harmony tool call: the recipient `to=functions.NAME` and a `commentary`
+# channel together, then a `<|message|>` body holding the JSON arguments (up to
+# the next control marker or end of text). gpt-oss emits the recipient in EITHER
+# order relative to the channel marker, both documented by the repo's
+# FORMAT_A/FORMAT_B fixtures, so match both:
+#   B (channel first):   <|channel|>commentary ... to=functions.NAME ... <|message|>
+#   A (recipient first): to=functions.NAME<|channel|>commentary ... <|message|>
+# Both tie the recipient to the commentary channel header (before `<|message|>`),
+# so a bare `to=functions.` written as prose in the analysis (reasoning) channel
+# body is NOT matched. `_HARMONY_MESSAGE_TAIL` is the shared args + terminator.
+_HARMONY_MESSAGE_TAIL = (
+    r"(.*?)(?=<\|call\|>|<\|end\|>|<\|return\|>|<\|start\|>|<\|channel\|>|$)"
+)
+_HARMONY_CALL_RES = (
+    re.compile(
+        r"<\|channel\|>commentary[^<]*?to=functions\.([A-Za-z0-9_.\-]+)"
+        r".*?<\|message\|>" + _HARMONY_MESSAGE_TAIL,
+        re.DOTALL,
+    ),
+    re.compile(
+        r"to=functions\.([A-Za-z0-9_.\-]+)\s*<\|channel\|>commentary"
+        r".*?<\|message\|>" + _HARMONY_MESSAGE_TAIL,
+        re.DOTALL,
+    ),
 )
 # A `<tool_call>...</tool_call>` block (JSON or Qwen3 XML inside), embedded in
 # prose/reasoning. There may be several.
@@ -94,17 +109,25 @@ def _first_json_object(text: str) -> dict[str, Any] | None:
 
 def _harmony_tool_calls(text: str) -> list[ToolCallItem]:
     calls: list[ToolCallItem] = []
-    for match in _HARMONY_CALL_RE.finditer(text):
-        name = match.group(1)
-        body = match.group(2)
-        obj = _first_json_object(body)
-        if obj is not None:
-            calls.append(ToolCallItem(name=name, arguments=json.dumps(obj)))
-        elif not body.strip():
-            # A genuine no-argument call (empty body) is valid; only then is {}
-            # correct. A non-empty body that did not parse is a truncated/garbled
-            # call, so skip it rather than fabricate empty arguments.
-            calls.append(ToolCallItem(name=name, arguments="{}"))
+    seen: set[tuple[int, str]] = set()
+    for pattern in _HARMONY_CALL_RES:
+        for match in pattern.finditer(text):
+            # A given call matches only one ordering, but guard against a region
+            # being claimed twice by keying on its start offset + name.
+            key = (match.start(), match.group(1))
+            if key in seen:
+                continue
+            seen.add(key)
+            name = match.group(1)
+            body = match.group(2)
+            obj = _first_json_object(body)
+            if obj is not None:
+                calls.append(ToolCallItem(name=name, arguments=json.dumps(obj)))
+            elif not body.strip():
+                # A genuine no-argument call (empty body) is valid; only then is
+                # {} correct. A non-empty body that did not parse is a
+                # truncated/garbled call, so skip it rather than fabricate args.
+                calls.append(ToolCallItem(name=name, arguments="{}"))
     return calls
 
 

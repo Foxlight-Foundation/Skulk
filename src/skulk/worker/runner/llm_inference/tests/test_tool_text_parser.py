@@ -42,6 +42,16 @@ def test_gpt_oss_harmony_commentary_tool_call() -> None:
     assert name == "get_weather" and args == {"city": "Paris"}
 
 
+def test_gpt_oss_harmony_recipient_before_channel() -> None:
+    # FORMAT_A: gpt-oss can emit the recipient before the channel marker.
+    raw = (
+        " to=functions.get_weather<|channel|>commentary json"
+        '<|message|>{"city": "Tokyo"}<|call|>'
+    )
+    name, args = _one(raw, _TOOLS)
+    assert name == "get_weather" and args == {"city": "Tokyo"}
+
+
 def test_qwen3_xml_tool_call() -> None:
     # The exact shape captured live from Ornith-1.0-35B GGUF (Qwen3 XML form),
     # with the reasoning block ahead of it.

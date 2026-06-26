@@ -1034,12 +1034,16 @@ class Runner:
         model_id: ModelId,
         command_id: CommandId,
     ) -> None:
-        """Serve a tool-enabled request (non-streamed) and emit one terminal chunk.
+        """Serve a tool-enabled request (non-streamed) and emit a terminal chunk.
 
-        Passes the request's ``tools`` to llama.cpp. If the model returns tool
-        calls, emits a ``ToolCallChunk``; otherwise it chose to answer in prose,
-        so emits that content as a normal ``TokenChunk``. Either way a single
-        terminal chunk closes the consumer's stream.
+        Passes the request's ``tools`` to llama.cpp. If a tool call is present
+        (either parsed natively by llama.cpp or recovered from a reasoning
+        model's text, #416), emits a single ``ToolCallChunk``. Otherwise the
+        model answered in prose: for a reasoning model the answer is streamed
+        through the reasoning parser (reasoning -> reasoning_content, answer ->
+        clean content) as a short sequence of ``TokenChunk``s ending in a
+        terminal chunk; for a plain model it is one terminal ``TokenChunk``.
+        Either way a terminal chunk closes the consumer's stream.
 
         Cancellation: unlike the streaming path (which checks per token), the
         tool call runs through one blocking ``create_chat_completion`` that
