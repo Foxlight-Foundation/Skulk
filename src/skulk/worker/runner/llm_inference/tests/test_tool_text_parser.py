@@ -192,6 +192,17 @@ def test_non_object_arguments_fall_back_to_empty_object() -> None:
     assert name == "go" and args == {}
 
 
+def test_openai_shape_string_arguments_preserved() -> None:
+    # The OpenAI canonical shape puts `arguments` as a JSON-encoded string; it
+    # must be preserved (not dropped to {}).
+    raw = (
+        '<tool_call>{"name": "get_weather", '
+        '"arguments": "{\\"city\\": \\"Paris\\"}"}</tool_call>'
+    )
+    name, args = _one(raw)
+    assert name == "get_weather" and args == {"city": "Paris"}
+
+
 def test_qwen3_xml_object_param_with_name_field_keeps_function_name() -> None:
     # A Qwen3 XML param value that is a JSON object containing a "name" field must
     # not be misread as the Hermes JSON form; the function name comes from

@@ -132,10 +132,18 @@ def _toolcall_block_calls(text: str) -> list[ToolCallItem]:
         obj = _first_json_object(inner)
         if isinstance(obj, dict) and isinstance(obj.get("name"), str):
             args = obj.get("arguments", obj.get("parameters", {}))
-            # OpenAI tool arguments must decode to a JSON object; downstream
-            # (schema coercion, the Claude adapter's dict input) assumes that.
-            # A non-object (list/scalar) is malformed, so fall back to {}.
-            args_str = json.dumps(args) if isinstance(args, dict) else "{}"
+            # ToolCallItem.arguments must decode to a JSON object downstream
+            # (schema coercion, the Claude adapter's dict input). A dict is
+            # re-serialized; the OpenAI shape where `arguments` is already a
+            # JSON-encoded string (e.g. "{\"city\":\"Paris\"}") is kept as-is
+            # when it decodes to an object; any other shape (list/scalar, or a
+            # string that is not a JSON object) is malformed and falls back to {}.
+            if isinstance(args, dict):
+                args_str = json.dumps(args)
+            elif isinstance(args, str) and _first_json_object(args) is not None:
+                args_str = args
+            else:
+                args_str = "{}"
             calls.append(ToolCallItem(name=obj["name"], arguments=args_str))
     return calls
 
