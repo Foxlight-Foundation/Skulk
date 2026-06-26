@@ -35,6 +35,25 @@ With the model store:
 - other nodes stage needed files from that host
 - Skulk keeps the same cluster and inference architecture, but changes where model artifacts come from
 
+### GGUF repositories download only the pinned quantization
+
+A GGUF repository often ships several quantizations of the same model (for
+example `Q4_K_M`, `Q5_K_M`, `Q8_0`, `bf16`). The store downloads only the
+quantization a model card pins (its `gguf_file`), plus the multimodal projector
+for a vision model, rather than every quant in the repository. This keeps a
+single-quant download to roughly the size of that one file instead of the whole
+repo.
+
+### The store host advertises a routable address
+
+The store host broadcasts the address other nodes use to reach it. Even when you
+configure `store_host` as a hostname, the store host resolves and advertises its
+own best routable IPv4 (a private LAN address is preferred). This avoids a
+failure mode on a Thunderbolt-meshed fleet, where a bare hostname could resolve
+through mDNS to a link-local Thunderbolt address (`169.254.x`) that a peer
+without a direct Thunderbolt link cannot reach, even though the LAN path works.
+An operator-supplied routable IP in `store_http_host` is still honored as-is.
+
 ## What Does Not Change
 
 - the libp2p mesh, election, master, and worker model stay the same

@@ -53,6 +53,16 @@ case. It shows that model-card-backed runtime behavior can cleanly cover a
 second specialized family with different parser, reasoning, and tool semantics
 without changing generic-model behavior.
 
+## On both engines
+
+GPT-OSS harmony parsing works on the MLX engine (token level) and on the
+llama.cpp engine (string level). llama.cpp hands back already-detokenized text,
+so the runner reparses the harmony channel markers from strings into a separate
+reasoning channel, with a dependency-free parser that runs on non-Mac GPU nodes.
+The same approach covers plain `<think>`-delimited reasoning models, so a
+reasoning model's chain-of-thought lands in `reasoning_content` and the answer
+stays clean regardless of which engine serves it.
+
 ## Related
 
 - [Model Cards](../model-cards)

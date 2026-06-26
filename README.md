@@ -10,7 +10,7 @@
 
 [![Documentation](https://img.shields.io/badge/docs-documentation-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/)
 [![Build & Runtime Paths](https://img.shields.io/badge/docs-build_%26_runtime-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/build-and-runtime/)
-[![Release Notes](https://img.shields.io/badge/release_notes-v1.2.0-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/release-notes/1.2.0/)
+[![Release Notes](https://img.shields.io/badge/release_notes-v1.3.0-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/release-notes/1.3.0/)
 [![Architecture](https://img.shields.io/badge/docs-architecture-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/architecture/)
 
   <br>
@@ -18,10 +18,11 @@
 </div>
 
 <br>
-Skulk is an interconnect fabric for multi-node AI compute. It joins several machines into one cluster and moves work across them as if they were a single device. Its headline use today is distributed inference: point it at a few Apple Silicon machines and it pools their memory and GPUs behind one OpenAI-compatible endpoint, so you can run models far larger than any single machine could hold.
+Skulk is an interconnect fabric for multi-node AI compute. It joins several machines into one cluster and moves work across them as if they were a single device. Its headline use today is distributed inference: point it at a few machines (Apple Silicon, and now AMD or other Linux GPU nodes too) and it pools their memory and GPUs behind one OpenAI-compatible endpoint, so you can run models far larger than any single machine could hold.
 
 On top of that, Skulk adds:
 
+- Heterogeneous clusters: Apple Silicon nodes serving MLX models and AMD or other Linux GPU nodes serving GGUF models (through a llama.cpp engine on Vulkan or ROCm) in one cluster, with each model routed to a node that can run it.
 - Production-grade speculative decoding delivering 1.16–2.2× speedups across nodes and on heterogeneous hardware.
 - A real-time React dashboard with easy access to:
   - A central model store
@@ -194,20 +195,22 @@ Build/runtime note:
 
 | Platform | Current state |
 |----------|---------------|
-| macOS on Apple Silicon | Primary target. Best experience today. |
+| macOS on Apple Silicon | Primary target. Best experience today. Serves MLX models. |
 | Multi-Mac clusters | Supported. Best results on matched macOS versions and fast networking. |
 | RDMA over Thunderbolt 5 | Supported on eligible macOS 26.2+ hardware after OS-level setup. |
-| Linux | Supported, but currently CPU-oriented in this fork. |
+| AMD / Linux GPU (for example Strix Halo) | Supported. Joins a cluster and serves GGUF models on a llama.cpp engine (Vulkan or ROCm), alongside Apple Silicon nodes. See the [AMD / Strix Halo node guide](https://foxlight-foundation.github.io/Skulk/amd-strix-halo-nodes). |
+| Linux (CPU only) | Supported as a control/API node; GGUF serving on CPU is possible but slow. |
 
 ## Core Features
 
 - **Distributed inference**: split work across devices instead of treating each machine as an island.
+- **Heterogeneous engines**: Apple Silicon nodes serve MLX models and AMD or other Linux GPU nodes serve GGUF models on a llama.cpp engine (Vulkan or ROCm), in one cluster, with each model routed to a node that can run it.
 - **Speculative decoding**: measured 1.16–2.2× decode speedups via multi-token prediction, on by default for supported model cards, including multi-node placements on mixed hardware.
 - **Skulk Dashboard**: React dashboard for topology, model store, chat, settings, and placement workflows.
-- **Model Store**: centralize model files on one node and stage them to the rest of the cluster over the LAN.
+- **Model Store**: centralize model files on one node and stage them to the rest of the cluster over the LAN; for GGUF repos it downloads only the quantization a model card pins, and the store host advertises a routable address so downloads work on a Thunderbolt-meshed fleet.
 - **Cluster-wide config sync**: update config from the dashboard and sync it across nodes.
 - **Placement previews**: inspect valid placements before launching a model.
-- **Thinking-aware chat UI**: chat with compatible models and surface reasoning content.
+- **Thinking-aware chat UI**: chat with compatible models and surface reasoning content, separated from the answer on both the MLX and llama.cpp engines.
 - **Alternative API compatibility**: OpenAI Chat Completions, OpenAI Responses, Claude Messages, and Ollama.
 - **Experimental inference tuning**: OptiQ and other KV cache backends for long-context and memory experiments.
 
@@ -597,11 +600,18 @@ Draft depth is a measured property, not a guess: deeper chains trade acceptance 
 
 ## More Documentation
 
-- [Speculative Decoding guide](https://foxlight-foundation.github.io/Skulk/speculative-decoding/)
-- [docs/api.md](docs/api.md)
-- [docs/model-store.md](docs/model-store.md)
-- [docs/architecture.md](docs/architecture.md)
-- [docs/kv-cache-backends.md](docs/kv-cache-backends.md)
+The full documentation site is published at
+[foxlight-foundation.github.io/Skulk](https://foxlight-foundation.github.io/Skulk/).
+Highlights:
+
+- [AMD / Strix Halo node guide](https://foxlight-foundation.github.io/Skulk/amd-strix-halo-nodes) (heterogeneous clusters, the llama.cpp engine)
+- [Cluster communication](https://foxlight-foundation.github.io/Skulk/cluster-communication) (the control, telemetry, and data planes; the Zenoh transport)
+- [Model store](https://foxlight-foundation.github.io/Skulk/model-store)
+- [Model cards](https://foxlight-foundation.github.io/Skulk/model-cards) and [model capabilities](https://foxlight-foundation.github.io/Skulk/model-capabilities)
+- [Thunderbolt clustering](https://foxlight-foundation.github.io/Skulk/thunderbolt-clustering) and [RDMA on macOS](https://foxlight-foundation.github.io/Skulk/build-and-runtime)
+- [Speculative decoding](https://foxlight-foundation.github.io/Skulk/speculative-decoding)
+- [API guide](https://foxlight-foundation.github.io/Skulk/api-guide) and [architecture](https://foxlight-foundation.github.io/Skulk/architecture)
+- [Release notes](https://foxlight-foundation.github.io/Skulk/release-notes/1.3.0/)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Contributing
