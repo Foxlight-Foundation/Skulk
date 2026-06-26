@@ -523,7 +523,8 @@ class Runner:
         if self._is_cancelled(task.task_id):
             logger.info(f"llama-server tool generation cancelled: {task.task_id}")
             return
-        message = (result.get("choices") or [{}])[0].get("message") or {}
+        choice = (result.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
         tool_calls = tool_calls_from_message(message)
         if tool_calls:
             self.event_sender.send(
@@ -536,13 +537,17 @@ class Runner:
             )
             return
         # The model answered in prose: emit its reasoning + content, then close.
+        # Preserve the server's finish_reason (e.g. "length" when the answer hit
+        # max_tokens) rather than hard-coding "stop", so a truncated prose answer
+        # still signals truncation to the client.
         reasoning = message.get("reasoning_content") or ""
         content = message.get("content") or ""
         if reasoning:
             self._send_token(command_id, model_id, reasoning, is_thinking=True)
         if content:
             self._send_token(command_id, model_id, content)
-        self._send_token(command_id, model_id, "", finish_reason="stop")
+        finish = map_finish_reason(choice.get("finish_reason")) or "stop"
+        self._send_token(command_id, model_id, "", finish_reason=finish)
 
     def _send_token(
         self,
