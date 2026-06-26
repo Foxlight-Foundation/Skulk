@@ -16,9 +16,11 @@ become additional served backends without new runner architecture.
 Single-node only (no ring / ConnectToGroup / warmup), mirroring the in-process
 llama.cpp and embeddings runners. Linux-oriented: the subprocess is reaped on
 parent death via ``PR_SET_PDEATHSIG`` so a runner crash never orphans a server
-holding GPU memory. The server emits structured ``reasoning_content`` and
-``tool_calls`` itself, so the in-process text parsers (harmony / think / tool)
-are not used here.
+holding GPU memory. Per-request cancellation aborts the proxied HTTP connection
+(which stops server-side generation); ``SIGTERM`` is for instance teardown of the
+whole server, not a single request. The server emits structured
+``reasoning_content`` and ``tool_calls`` itself, so the in-process text parsers
+(harmony / think / tool) are not used here.
 """
 
 import contextlib
@@ -75,6 +77,7 @@ from skulk.worker.runner.llama_cpp.runner import (
     select_gguf_file,
     serving_n_ctx,
     tool_calls_from_message,
+    wants_logprobs,
 )
 
 # Card ``served_spec_type`` value -> the ``llama-server --spec-type`` token.
@@ -405,13 +408,23 @@ class Runner:
         model_id = self.shard_metadata.model_card.model_id
         command_id = task.command_id
         body: dict[str, Any] = generation_kwargs(task.task_params)
-        # Per-token logprobs over the proxy are not wired yet; drop them rather
-        # than return silently-empty logprobs (the #385 no-silent-empty contract).
-        body.pop("logprobs", None)
-        body.pop("top_logprobs", None)
         body["messages"] = messages_for_llama(task.task_params)
 
         try:
+            # Per-token logprobs are not wired over the SSE proxy yet. Fail loud
+            # rather than return a successful response with logprobs silently
+            # missing, matching the in-process runner's #385 no-silent-empty
+            # contract (the raise surfaces as an ErrorChunk below).
+            if wants_logprobs(
+                task.task_params.logprobs, task.task_params.top_logprobs
+            ):
+                body.pop("logprobs", None)
+                body.pop("top_logprobs", None)
+                raise RuntimeError(
+                    "Per-token logprobs are not supported on the served "
+                    "(llama_server) engine: the OpenAI SSE proxy does not surface "
+                    "them. Retry without logprobs/top_logprobs."
+                )
             if task.task_params.tools:
                 self._generate_with_tools(task, body, model_id, command_id)
                 self.current_status = RunnerReady()
@@ -496,11 +509,20 @@ class Runner:
         if tool_choice is not None:
             body["tool_choice"] = tool_choice
         assert self.base_url is not None
+        if self._is_cancelled(task.task_id):
+            return
         timeout = httpx.Timeout(connect=15.0, read=None, write=30.0, pool=None)
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(f"{self.base_url}/v1/chat/completions", json=body)
             resp.raise_for_status()
             result = resp.json()
+        # A cancel that arrived while the (non-streamed) request was in flight:
+        # drain it (the streaming path checks every chunk; this blocking path has
+        # no mid-flight checkpoint) and skip emission so main() marks the task
+        # Cancelled, not Complete, and no tool call is surfaced for it.
+        if self._is_cancelled(task.task_id):
+            logger.info(f"llama-server tool generation cancelled: {task.task_id}")
+            return
         message = (result.get("choices") or [{}])[0].get("message") or {}
         tool_calls = tool_calls_from_message(message)
         if tool_calls:
