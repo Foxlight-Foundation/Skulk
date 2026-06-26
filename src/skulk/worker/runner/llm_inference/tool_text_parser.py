@@ -31,11 +31,14 @@ from typing import Any
 from skulk.api.types import ToolCallItem
 from skulk.worker.runner.llm_inference.tool_parsers import coerce_tool_calls_to_schema
 
-# gpt-oss harmony: `to=functions.NAME` in a channel header, then the `<|message|>`
-# body holds the JSON arguments, up to the next control marker (or end of text).
+# gpt-oss harmony tool call: a `commentary` channel whose header carries
+# `to=functions.NAME`, then the `<|message|>` body holds the JSON arguments, up to
+# the next control marker (or end of text). Anchoring on `<|channel|>commentary`
+# (with no intervening marker, hence `[^<]*?`) means a `to=functions.` written as
+# prose in the analysis (reasoning) channel is NOT treated as a tool call.
 _HARMONY_CALL_RE = re.compile(
-    r"to=functions\.([A-Za-z0-9_.\-]+).*?<\|message\|>(.*?)"
-    r"(?=<\|call\|>|<\|end\|>|<\|return\|>|<\|start\|>|<\|channel\|>|$)",
+    r"<\|channel\|>commentary[^<]*?to=functions\.([A-Za-z0-9_.\-]+).*?<\|message\|>"
+    r"(.*?)(?=<\|call\|>|<\|end\|>|<\|return\|>|<\|start\|>|<\|channel\|>|$)",
     re.DOTALL,
 )
 # A `<tool_call>...</tool_call>` block (JSON or Qwen3 XML inside), embedded in

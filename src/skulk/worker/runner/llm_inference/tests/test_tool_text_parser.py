@@ -1,13 +1,15 @@
+# pyright: reportAny=false
 """Tests for recovering reasoning-model tool calls from llama.cpp text (#416)."""
 
 import json
+from typing import Any
 
 from skulk.worker.runner.llm_inference.think_text_parser import ThinkTextParser
 from skulk.worker.runner.llm_inference.tool_text_parser import (
     parse_tool_calls_from_text,
 )
 
-_TOOLS = [
+_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
@@ -21,7 +23,9 @@ _TOOLS = [
 ]
 
 
-def _one(text, tools=None):
+def _one(
+    text: str, tools: list[dict[str, Any]] | None = None
+) -> tuple[str, dict[str, Any]]:
     calls = parse_tool_calls_from_text(text, tools)
     assert calls is not None and len(calls) == 1
     return calls[0].name, json.loads(calls[0].arguments)
@@ -106,15 +110,39 @@ def test_braces_inside_string_values_do_not_break_scan() -> None:
 
 def test_harmony_no_arg_call_keeps_empty_object() -> None:
     # An empty body is a genuine no-argument call -> {} is correct.
-    calls = parse_tool_calls_from_text("commentary to=functions.now <|message|>")
+    calls = parse_tool_calls_from_text(
+        "<|channel|>commentary to=functions.now <|message|>"
+    )
     assert calls is not None and calls[0].name == "now"
     assert json.loads(calls[0].arguments) == {}
+
+
+def test_harmony_to_functions_in_analysis_channel_is_not_a_call() -> None:
+    # `to=functions.` appearing as prose in the analysis (reasoning) channel must
+    # NOT be extracted; only a real commentary-channel call counts.
+    raw = (
+        "<|channel|>analysis<|message|>I might use to=functions.delete here but "
+        "will not.<|end|><|start|>assistant<|channel|>final<|message|>Done."
+    )
+    assert parse_tool_calls_from_text(raw) is None
+
+
+def test_harmony_analysis_mention_does_not_shadow_real_commentary_call() -> None:
+    raw = (
+        "<|channel|>analysis<|message|>to=functions.delete is dangerous.<|end|>"
+        "<|start|>assistant<|channel|>commentary to=functions.get_weather "
+        '<|message|>{"city": "Paris"}'
+    )
+    calls = parse_tool_calls_from_text(raw)
+    assert calls is not None and len(calls) == 1 and calls[0].name == "get_weather"
 
 
 def test_harmony_unparseable_body_is_skipped_not_fabricated() -> None:
     # A non-empty body that does not parse is a truncated/garbled call; skip it
     # rather than emit a call with fabricated empty arguments.
-    raw = 'commentary to=functions.search <|message|>{"city": "Tok'  # truncated
+    raw = (
+        '<|channel|>commentary to=functions.search <|message|>{"city": "Tok'
+    )  # truncated body
     assert parse_tool_calls_from_text(raw) is None
 
 
