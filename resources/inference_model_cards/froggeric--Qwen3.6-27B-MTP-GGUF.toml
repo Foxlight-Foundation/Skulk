@@ -1,0 +1,49 @@
+# Qwen3.6-27B (dense) GGUF with built-in multi-token-prediction heads, served via
+# the llama_server (served-backend) engine so it can use llama.cpp's native MTP
+# speculative decoding (`--spec-type draft-mtp`). This is the only path to native
+# MTP on llama.cpp: the MTP orchestration lives in llama-server, not the in-process
+# binding. `compatible_backends` is the `llama_server` engine (not `llama_cpp`), so
+# placement routes it to a node running llama-server (e.g. kite4 on Vulkan). The
+# repo ships no mmproj projector, so this GGUF is TEXT-ONLY. `supports_tensor =
+# false`: served single-node. Architecture values read from the GGUF metadata
+# (arch `qwen35`: 65 layers, hidden 5120, 4 KV heads, 262144 ctx).
+#
+# Phase-0 measured on kite4 Radeon (Vulkan, llama.cpp b9820): draft-mtp n-max 3 =
+# 27.9 tok/s vs 12.7 baseline (2.19x, 72% acceptance). Tune `served_spec_n_max`
+# from measured acceptance; per-position acceptance decays past ~3.
+model_id = "froggeric/Qwen3.6-27B-MTP-GGUF"
+n_layers = 65
+hidden_size = 5120
+num_key_value_heads = 4
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "qwen"
+quantization = "Q4_K_M"
+base_model = "Qwen3.6 27B"
+capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 262144
+gguf_file = "Qwen3.6-27B-Q4_K_M-mtp.gguf"
+trust_remote_code = false
+
+[reasoning]
+supports_toggle = true
+format = "token_delimited"
+default_effort = "medium"
+disabled_effort = "none"
+
+[tooling]
+supports_tool_calling = true
+tool_call_format = "generic"
+
+[runtime]
+# Native MTP via llama-server. No draft model needed: the prediction heads ship
+# in the GGUF. Only the llama_server engine reads these fields.
+served_spec_type = "draft_mtp"
+served_spec_n_max = 3
+
+[placement]
+compatible_backends = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_server-cpu"]
+backend_preference = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_server-cpu"]
+
+[storage_size]
+in_bytes = 16810716064

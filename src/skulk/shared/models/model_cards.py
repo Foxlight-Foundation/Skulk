@@ -455,6 +455,23 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     the runner — declaring it here only pre-downloads it. See the Gemma 4 MTP
     initiative in the foxlight-docs hub (Phase C).
     """
+    served_spec_type: (
+        Literal["none", "draft_mtp", "draft_eagle3", "draft_simple", "ngram"] | None
+    ) = None
+    """Speculative-decoding mode for the ``llama_server`` (served-backend) engine.
+
+    Maps to ``llama-server --spec-type`` (underscores become hyphens):
+    ``draft_mtp`` uses the model's own built-in MTP heads (no draft model
+    needed; Qwen3.6/DeepSeek/GLM/Kimi/Nemotron), ``draft_eagle3`` an EAGLE-3 head,
+    ``ngram`` prompt-lookup, ``none``/``None`` plain decoding. Only the served
+    engine reads this; the in-process ``mlx`` and ``llama_cpp`` engines ignore it
+    (MLX speculation is the ``mtp_*`` / ``assistant_model_repo`` fields above)."""
+    served_spec_n_max: int | None = None
+    """Max draft tokens per step for the served engine (``--spec-draft-n-max``).
+
+    ``None`` uses the llama-server default (3). Acceptance falls off with depth
+    (per-position acceptance drops), so 2-3 is the usual sweet spot; tune per
+    card from measured acceptance."""
 
     @field_validator("prompt_renderer", mode="before")
     @classmethod

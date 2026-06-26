@@ -370,7 +370,7 @@ def _sanitize_harmony_assistant_messages(
     return sanitized
 
 
-def _generation_kwargs(task_params: TextGenerationTaskParams) -> dict[str, Any]:
+def generation_kwargs(task_params: TextGenerationTaskParams) -> dict[str, Any]:
     """Translate Skulk task params into llama.cpp ``create_chat_completion`` kwargs."""
     kwargs: dict[str, Any] = {}
     if task_params.max_output_tokens is not None:
@@ -399,7 +399,7 @@ def _generation_kwargs(task_params: TextGenerationTaskParams) -> dict[str, Any]:
     return kwargs
 
 
-def _tool_calls_from_message(message: dict[str, Any]) -> list[ToolCallItem]:
+def tool_calls_from_message(message: dict[str, Any]) -> list[ToolCallItem]:
     """Extract Skulk ToolCallItems from a llama.cpp chat-completion message.
 
     llama.cpp returns OpenAI-shaped tool calls:
@@ -462,7 +462,7 @@ def _logits_all_enabled() -> bool:
     when on the context is further capped (see ``_logits_all_n_ctx``) so the
     buffer stays bounded. With it off a logprobs request degrades to a clear
     error. Either way the serving context window is bounded by the instance's
-    admission ceiling (see ``_serving_n_ctx``), never the model's full trained
+    admission ceiling (see ``serving_n_ctx``), never the model's full trained
     context.
     """
     return os.getenv("SKULK_LLAMA_CPP_LOGITS_ALL", "0").strip().lower() in (
@@ -542,7 +542,7 @@ def _logits_all_n_ctx() -> int:
     return value if value > 0 else 8192
 
 
-def _serving_n_ctx(context_token_limit: int | None, logits_all: bool) -> int:
+def serving_n_ctx(context_token_limit: int | None, logits_all: bool) -> int:
     """Context window (tokens) to allocate for the llama.cpp KV cache on load.
 
     llama.cpp allocates the whole KV cache up front from ``n_ctx`` (unlike MLX,
@@ -575,7 +575,7 @@ def _serving_n_ctx(context_token_limit: int | None, logits_all: bool) -> int:
     return ceiling
 
 
-def _map_finish_reason(
+def map_finish_reason(
     reason: str | None,
 ) -> Literal["stop", "length", "content_filter"] | None:
     """Map a llama.cpp finish reason onto Skulk's TokenChunk finish reasons."""
@@ -611,7 +611,7 @@ class Runner:
         # computed by the worker from gossiped node memory before spawn. Only a
         # lower-bound clamp on the load-time KV window here: the window is the
         # placement KV budget, not this (larger) ceiling, so the up-front KV cache
-        # never exceeds the memory placement reserved (see _serving_n_ctx).
+        # never exceeds the memory placement reserved (see serving_n_ctx).
         self.context_token_limit = context_token_limit
         self.instance, self.runner_id, self.shard_metadata = (
             bound_instance.instance,
@@ -739,11 +739,11 @@ class Runner:
         # built with (Vulkan/ROCm/CUDA). n_ctx is bounded by the KV budget
         # placement reserved (never 0/full-context nor the larger admission
         # ceiling, either of which OOM-kills the node on a large-context model --
-        # see _serving_n_ctx). logits_all (logprobs, opt-in) further bounds it
+        # see serving_n_ctx). logits_all (logprobs, opt-in) further bounds it
         # because it pre-allocates an n_ctx*vocab*4 logits buffer. See
         # _logits_all_enabled / _logits_all_n_ctx.
         logits_all = _logits_all_enabled()
-        n_ctx = _serving_n_ctx(self.context_token_limit, logits_all)
+        n_ctx = serving_n_ctx(self.context_token_limit, logits_all)
         # Vision GGUF (#128): when the card declares a vision config, load the
         # multimodal projector via the family's chat handler so image inputs are
         # spliced server-side by llama.cpp. Text-only cards take the plain path.
@@ -807,7 +807,7 @@ class Runner:
         # tools path too: _generate_with_tools is handed these same messages.
         if self._is_harmony_model():
             messages = _sanitize_harmony_assistant_messages(messages)
-        kwargs = _generation_kwargs(task.task_params)
+        kwargs = generation_kwargs(task.task_params)
 
         want_logprobs = wants_logprobs(
             task.task_params.logprobs, task.task_params.top_logprobs
@@ -870,7 +870,7 @@ class Runner:
                     break
                 choice = chunk["choices"][0]
                 text = choice.get("delta", {}).get("content") or ""
-                finish = _map_finish_reason(choice.get("finish_reason"))
+                finish = map_finish_reason(choice.get("finish_reason"))
                 logprob, top_logprobs = (
                     _logprob_fields(choice) if want_logprobs else (None, None)
                 )
@@ -1068,7 +1068,7 @@ class Runner:
         choice = result["choices"][0]
         message = choice.get("message", {})
         content = message.get("content") or ""
-        finish = _map_finish_reason(choice.get("finish_reason")) or "stop"
+        finish = map_finish_reason(choice.get("finish_reason")) or "stop"
 
         # Split reasoning from visible output once (llama.cpp returns detokenized
         # text; the MLX engine does this at the token level). A reasoning model
@@ -1082,7 +1082,7 @@ class Runner:
         )
         visible_text = "".join(text for text, is_thinking in emissions if not is_thinking)
 
-        tool_calls = _tool_calls_from_message(message)
+        tool_calls = tool_calls_from_message(message)
         if not tool_calls:
             # llama.cpp only fills structured tool_calls for formats its bundled
             # chat handlers recognize. A reasoning model emits the call as text,
