@@ -109,12 +109,15 @@ def _toolcall_block_calls(text: str) -> list[ToolCallItem]:
     calls: list[ToolCallItem] = []
     for block in _TOOLCALL_BLOCK_RE.finditer(text):
         inner = block.group(1).strip()
-        # Disambiguate by the unambiguous Qwen3 XML marker FIRST. A JSON-scan
-        # first would misread an object-valued XML parameter that happens to
-        # contain a "name" field (e.g. <parameter=person>{"name":"Alice"}) as the
-        # Hermes JSON form and take "Alice" as the function name.
-        if "<function=" in inner:
-            for function in _FUNCTION_RE.finditer(inner):
+        # Disambiguate by a real Qwen3 XML function tag FIRST. Matching the full
+        # <function=NAME>...</function> (not just the substring "<function=")
+        # avoids two failure modes: a JSON-scan first would misread an
+        # object-valued XML parameter containing a "name" field as the Hermes
+        # form, and a substring check would misclassify a Hermes JSON call whose
+        # argument value merely contains the literal "<function=" as XML.
+        xml_functions = list(_FUNCTION_RE.finditer(inner))
+        if xml_functions:
+            for function in xml_functions:
                 name = function.group(1)
                 params = {
                     key: value.strip()
@@ -126,9 +129,10 @@ def _toolcall_block_calls(text: str) -> list[ToolCallItem]:
         obj = _first_json_object(inner)
         if isinstance(obj, dict) and isinstance(obj.get("name"), str):
             args = obj.get("arguments", obj.get("parameters", {}))
-            args_str = (
-                json.dumps(args) if isinstance(args, (dict, list)) else str(args)
-            )
+            # OpenAI tool arguments must decode to a JSON object; downstream
+            # (schema coercion, the Claude adapter's dict input) assumes that.
+            # A non-object (list/scalar) is malformed, so fall back to {}.
+            args_str = json.dumps(args) if isinstance(args, dict) else "{}"
             calls.append(ToolCallItem(name=obj["name"], arguments=args_str))
     return calls
 

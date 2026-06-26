@@ -117,6 +117,25 @@ def test_harmony_unparseable_body_is_skipped_not_fabricated() -> None:
     assert parse_tool_calls_from_text(raw) is None
 
 
+def test_hermes_json_with_function_literal_in_arg_value() -> None:
+    # A Hermes JSON call whose argument value merely contains the literal
+    # "<function=" must NOT be misclassified as Qwen3 XML (no real tag present).
+    raw = (
+        '<tool_call>{"name": "search", "arguments": '
+        '{"q": "how to use <function=foo>"}}</tool_call>'
+    )
+    name, args = _one(raw)
+    assert name == "search" and args == {"q": "how to use <function=foo>"}
+
+
+def test_non_object_arguments_fall_back_to_empty_object() -> None:
+    # Malformed non-object arguments (a list) must not surface downstream where a
+    # JSON object is required; fall back to {}.
+    raw = '<tool_call>{"name": "go", "arguments": [1, 2, 3]}</tool_call>'
+    name, args = _one(raw)
+    assert name == "go" and args == {}
+
+
 def test_qwen3_xml_object_param_with_name_field_keeps_function_name() -> None:
     # A Qwen3 XML param value that is a JSON object containing a "name" field must
     # not be misread as the Hermes JSON form; the function name comes from
