@@ -34,7 +34,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal, NamedTuple
 
 import httpx
 from anyio import WouldBlock
@@ -92,6 +92,47 @@ _SPEC_TYPE_FLAG: Final[dict[str, str]] = {
 # How long to wait for the server to finish loading the model and report healthy.
 # A large GGUF on a GPU node can take a while to map + warm up.
 _HEALTH_DEADLINE_S: Final = 600.0
+
+
+class _StreamDelta(NamedTuple):
+    """One parsed SSE delta from the proxied ``/v1/chat/completions`` stream."""
+
+    reasoning: str
+    content: str
+    finish: Literal["stop", "length", "content_filter"] | None
+    done: bool  # the terminal ``data: [DONE]`` sentinel
+
+
+def _parse_sse_line(line: str) -> _StreamDelta | None:
+    """Parse one SSE line into a ``_StreamDelta``, or ``None`` to skip it.
+
+    Handles the OpenAI streaming shape llama-server emits: ``data: {json}`` lines
+    whose first choice carries a ``delta`` (``content`` and/or ``reasoning_content``)
+    and an optional ``finish_reason``, plus the terminal ``data: [DONE]``. Returns
+    ``None`` for non-``data:`` lines, ``[DONE]`` is reported via ``done=True``, and
+    malformed JSON or a choice-less payload is skipped (``None``) so a stray line
+    never breaks the stream. Pure (no I/O) so the parse is unit-testable.
+    """
+    if not line.startswith("data:"):
+        return None
+    data = line[len("data:") :].strip()
+    if data == "[DONE]":
+        return _StreamDelta("", "", None, done=True)
+    try:
+        chunk = json.loads(data)
+    except json.JSONDecodeError:
+        return None
+    choices = chunk.get("choices") or []
+    if not choices:
+        return None
+    choice = choices[0]
+    delta = choice.get("delta") or {}
+    return _StreamDelta(
+        reasoning=delta.get("reasoning_content") or "",
+        content=delta.get("content") or "",
+        finish=map_finish_reason(choice.get("finish_reason")),
+        done=False,
+    )
 
 
 def _set_pdeathsig() -> None:
@@ -268,7 +309,7 @@ class Runner:
         self.current_status = RunnerReady()
         logger.info(
             f"llama-server runner ready in {time.time() - self.setup_start_time:.1f}s "
-            f"(port={self.base_url})"
+            f"(url={self.base_url})"
         )
 
     def _spawn_server(self, gguf_path: Path, n_ctx: int, runtime: Any) -> None:
@@ -276,6 +317,14 @@ class Runner:
         if not binary:
             raise RuntimeError(
                 f"{LLAMA_SERVER_BIN_ENV} is not set; cannot launch llama-server"
+            )
+        # Validate the binary up front (same check the probe uses) so a
+        # misconfigured path fails with a clear, actionable error rather than a
+        # bare FileNotFoundError/PermissionError from Popen later.
+        if not os.path.isfile(binary) or not os.access(binary, os.X_OK):
+            raise RuntimeError(
+                f"{LLAMA_SERVER_BIN_ENV}={binary!r} is not an executable file; "
+                "point it at a llama-server binary built >= b9196 (for draft-mtp)"
             )
         port = self._pick_port()
         cmd: list[str] = [
@@ -464,29 +513,21 @@ class Runner:
                 if self._is_cancelled(task.task_id):
                     logger.info(f"llama-server generation cancelled: {task.task_id}")
                     break
-                if not line.startswith("data:"):
+                delta = _parse_sse_line(line)
+                if delta is None:
                     continue
-                data = line[len("data:") :].strip()
-                if data == "[DONE]":
+                if delta.done:
                     break
-                try:
-                    chunk = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                choices = chunk.get("choices") or []
-                if not choices:
-                    continue
-                choice = choices[0]
-                delta = choice.get("delta") or {}
-                reasoning = delta.get("reasoning_content") or ""
-                content = delta.get("content") or ""
-                finish = map_finish_reason(choice.get("finish_reason"))
-                if reasoning:
-                    self._send_token(command_id, model_id, reasoning, is_thinking=True)
-                if content:
-                    self._send_token(command_id, model_id, content)
-                if finish is not None:
-                    self._send_token(command_id, model_id, "", finish_reason=finish)
+                if delta.reasoning:
+                    self._send_token(
+                        command_id, model_id, delta.reasoning, is_thinking=True
+                    )
+                if delta.content:
+                    self._send_token(command_id, model_id, delta.content)
+                if delta.finish is not None:
+                    self._send_token(
+                        command_id, model_id, "", finish_reason=delta.finish
+                    )
                     emitted_finish = True
         # Guarantee a terminal chunk so the consumer's stream closes even if the
         # server ended without an explicit finish_reason.
