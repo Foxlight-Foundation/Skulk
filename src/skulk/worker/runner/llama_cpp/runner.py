@@ -1064,14 +1064,40 @@ class Runner:
         choice = result["choices"][0]
         message = choice.get("message", {})
         content = message.get("content") or ""
+        finish = _map_finish_reason(choice.get("finish_reason")) or "stop"
+
+        # Split reasoning from visible output once (llama.cpp returns detokenized
+        # text; the MLX engine does this at the token level). A reasoning model
+        # wraps its answer -- and may merely *contemplate* a tool call -- inside
+        # <think>/harmony scaffolding.
+        reasoning_parser = self._reasoning_text_parser()
+        emissions = (
+            reasoning_parser.feed(content) + reasoning_parser.flush()
+            if reasoning_parser is not None
+            else [(content, False)]
+        )
+        visible_text = "".join(text for text, is_thinking in emissions if not is_thinking)
+
         tool_calls = _tool_calls_from_message(message)
         if not tool_calls:
             # llama.cpp only fills structured tool_calls for formats its bundled
-            # chat handlers recognize. A reasoning model (gpt-oss harmony, Qwen3
-            # XML / Hermes <tool_call>) emits the call as text in `content`
-            # instead, so recover it from the string (#416). The MLX engine does
-            # the token-level equivalent.
-            tool_calls = parse_tool_calls_from_text(content, task.task_params.tools)
+            # chat handlers recognize. A reasoning model emits the call as text,
+            # so recover it from the string (#416). Source selection matters:
+            # gpt-oss keeps the call in its commentary-channel header
+            # (to=functions.NAME), which HarmonyTextParser strips from the visible
+            # text -- but its analysis (reasoning) channel never carries that
+            # marker, so parse harmony from the raw content. For <think>/Qwen
+            # models a <tool_call> the model only reasoned about lives inside
+            # <think>, so parse only the visible (post-think) text to avoid
+            # executing a contemplated call (#417 review).
+            tool_source = (
+                content
+                if isinstance(reasoning_parser, HarmonyTextParser)
+                else visible_text
+            )
+            tool_calls = parse_tool_calls_from_text(
+                tool_source, task.task_params.tools
+            )
         if tool_calls:
             self.event_sender.send(
                 ChunkGenerated(
@@ -1082,16 +1108,11 @@ class Runner:
                 )
             )
             return
-        # No tool call: the model answered in prose. Reasoning models still wrap
-        # that answer in <think>/harmony scaffolding, so run it through the same
-        # string reasoning parser as the streaming path (#412/#413) to split
-        # reasoning from the visible answer instead of leaking the markers.
-        finish = _map_finish_reason(choice.get("finish_reason")) or "stop"
-        reasoning_parser = self._reasoning_text_parser()
+        # No tool call: the model answered in prose. Emit the reasoning-split
+        # stream (reasoning -> reasoning_content, answer -> clean content) so the
+        # <think>/harmony scaffolding does not leak (#412/#413).
         if reasoning_parser is not None:
-            for clean_text, is_thinking in (
-                reasoning_parser.feed(content) + reasoning_parser.flush()
-            ):
+            for clean_text, is_thinking in emissions:
                 self._send_token_chunk(
                     command_id, model_id, clean_text, is_thinking=is_thinking
                 )

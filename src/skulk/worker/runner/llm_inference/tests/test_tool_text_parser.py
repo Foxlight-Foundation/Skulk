@@ -2,6 +2,7 @@
 
 import json
 
+from skulk.worker.runner.llm_inference.think_text_parser import ThinkTextParser
 from skulk.worker.runner.llm_inference.tool_text_parser import (
     parse_tool_calls_from_text,
 )
@@ -126,6 +127,33 @@ def test_hermes_json_with_function_literal_in_arg_value() -> None:
     )
     name, args = _one(raw)
     assert name == "search" and args == {"q": "how to use <function=foo>"}
+
+
+def _visible(text: str) -> str:
+    """Mirror the runner: strip <think> reasoning, keep the visible output."""
+    parser = ThinkTextParser(starts_in_thinking=False)
+    emissions = parser.feed(text) + parser.flush()
+    return "".join(t for t, is_thinking in emissions if not is_thinking)
+
+
+def test_tool_call_only_inside_think_is_not_extracted() -> None:
+    # A <tool_call> the model merely contemplated inside <think> must not be
+    # executed: parsing the visible (post-think) text yields no call.
+    raw = (
+        "<think>I could call <tool_call>{\"name\":\"delete\",\"arguments\":{}}"
+        "</tool_call> but I won't.</think>The answer is 4."
+    )
+    assert parse_tool_calls_from_text(_visible(raw)) is None
+
+
+def test_real_tool_call_after_think_is_extracted() -> None:
+    # A committed <tool_call> after </think> survives the visible-text filter.
+    raw = (
+        "<think>Let me look it up.</think>\n<tool_call>\n"
+        '{"name": "get_weather", "arguments": {"city": "Rome"}}\n</tool_call>'
+    )
+    calls = parse_tool_calls_from_text(_visible(raw))
+    assert calls is not None and calls[0].name == "get_weather"
 
 
 def test_non_object_arguments_fall_back_to_empty_object() -> None:
