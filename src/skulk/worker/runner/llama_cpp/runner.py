@@ -60,6 +60,9 @@ from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.bootstrap import logger
 from skulk.worker.runner.llm_inference.harmony_text_parser import HarmonyTextParser
 from skulk.worker.runner.llm_inference.think_text_parser import ThinkTextParser
+from skulk.worker.runner.llm_inference.tool_text_parser import (
+    parse_tool_calls_from_text,
+)
 
 
 def select_gguf_file(model_dir: Path) -> Path:
@@ -1060,7 +1063,15 @@ class Runner:
             return
         choice = result["choices"][0]
         message = choice.get("message", {})
+        content = message.get("content") or ""
         tool_calls = _tool_calls_from_message(message)
+        if not tool_calls:
+            # llama.cpp only fills structured tool_calls for formats its bundled
+            # chat handlers recognize. A reasoning model (gpt-oss harmony, Qwen3
+            # XML / Hermes <tool_call>) emits the call as text in `content`
+            # instead, so recover it from the string (#416). The MLX engine does
+            # the token-level equivalent.
+            tool_calls = parse_tool_calls_from_text(content, task.task_params.tools)
         if tool_calls:
             self.event_sender.send(
                 ChunkGenerated(
@@ -1071,17 +1082,30 @@ class Runner:
                 )
             )
             return
-        # No tool call: the model answered in prose. Emit it as a final token.
+        # No tool call: the model answered in prose. Reasoning models still wrap
+        # that answer in <think>/harmony scaffolding, so run it through the same
+        # string reasoning parser as the streaming path (#412/#413) to split
+        # reasoning from the visible answer instead of leaking the markers.
+        finish = _map_finish_reason(choice.get("finish_reason")) or "stop"
+        reasoning_parser = self._reasoning_text_parser()
+        if reasoning_parser is not None:
+            for clean_text, is_thinking in (
+                reasoning_parser.feed(content) + reasoning_parser.flush()
+            ):
+                self._send_token_chunk(
+                    command_id, model_id, clean_text, is_thinking=is_thinking
+                )
+            self._send_token_chunk(command_id, model_id, "", finish_reason=finish)
+            return
         self.event_sender.send(
             ChunkGenerated(
                 command_id=command_id,
                 chunk=TokenChunk(
                     model=model_id,
-                    text=message.get("content") or "",
+                    text=content,
                     token_id=-1,
                     usage=None,
-                    finish_reason=_map_finish_reason(choice.get("finish_reason"))
-                    or "stop",
+                    finish_reason=finish,
                 ),
             )
         )

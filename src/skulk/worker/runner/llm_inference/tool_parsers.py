@@ -19,7 +19,7 @@ class ToolParser:
         if parsed is None:
             return None
         if tools is not None:
-            parsed = _coerce_tool_calls_to_schema(parsed, tools)
+            parsed = coerce_tool_calls_to_schema(parsed, tools)
         return parsed
 
 
@@ -139,7 +139,7 @@ def _coerce_tool_arg_with_schema(value: Any, schema: dict[str, Any]) -> Any:  # 
     return value  # pyright: ignore[reportAny]
 
 
-def _coerce_tool_calls_to_schema(
+def coerce_tool_calls_to_schema(
     tool_calls: list[ToolCallItem], tools: list[dict[str, Any]]
 ) -> list[ToolCallItem]:
     schema_by_name: dict[str, dict[str, Any]] = {}
