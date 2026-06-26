@@ -309,11 +309,19 @@ class Runner:
             Path(tempfile.gettempdir()) / f"skulk-llama-server-{self.runner_id}.log"
         )
         self.server_log = open(self.server_log_path, "wb")  # noqa: SIM115
+        # Modern llama.cpp links libllama.so / libggml*.so from the binary's own
+        # directory (rpath $ORIGIN). Add that dir to LD_LIBRARY_PATH too so the
+        # shared libs resolve regardless of the runner's working directory.
+        env = os.environ.copy()
+        bin_dir = str(Path(binary).resolve().parent)
+        existing = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = f"{bin_dir}:{existing}" if existing else bin_dir
         logger.info("launching llama-server: " + " ".join(cmd))
         self.server_proc = subprocess.Popen(  # noqa: S603 - args are built here, not user input
             cmd,
             stdout=self.server_log,
             stderr=subprocess.STDOUT,
+            env=env,
             preexec_fn=_set_pdeathsig,  # noqa: PLW1509 - Linux reap-on-parent-death
         )
         self.base_url = f"http://127.0.0.1:{port}"
