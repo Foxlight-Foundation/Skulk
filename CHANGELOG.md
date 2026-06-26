@@ -7,6 +7,17 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-06-25
+
+This release makes Skulk a **heterogeneous** inference fabric: alongside Apple
+Silicon (MLX), an AMD or other Linux GPU node can now join the same cluster and
+serve GGUF models through a new llama.cpp engine (Vulkan / ROCm). It also lands
+the control / telemetry / data plane separation (with an optional Eclipse Zenoh
+data-plane transport), a centralized model store, vision GGUF support, and
+cross-engine reasoning (gpt-oss harmony and `<think>` parsed into a separate
+reasoning channel), plus a large amount of placement, failover, and stability
+hardening. See `website/docs/release-notes/1.3.0.md` for the user-facing summary.
+
 ### Fixed
 
 - **`<think>` reasoning no longer leaks into the answer for reasoning models on
