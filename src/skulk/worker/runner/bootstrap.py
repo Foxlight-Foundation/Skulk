@@ -495,6 +495,24 @@ def entrypoint(
                 context_token_limit=context_token_limit,
             )
             runner.main()
+        elif _resolve_text_engine(bound_instance) == "llama_server":
+            # Served-backend text generation: the worker launches an external
+            # llama-server subprocess and proxies its OpenAI API. Selected when the
+            # card's compatible backends resolve to the llama_server engine on this
+            # node (SKULK_LLAMA_SERVER_BIN set). The only path to native MTP
+            # (--spec-type draft-mtp). Single-node only.
+            from skulk.worker.runner.llama_server.runner import (
+                Runner as LlamaServerRunner,
+            )
+
+            runner = LlamaServerRunner(
+                bound_instance,
+                event_sender,
+                task_receiver,
+                cancel_receiver,
+                context_token_limit=context_token_limit,
+            )
+            runner.main()
         else:
             from skulk.worker.engines.mlx.patches import apply_mlx_patches
             from skulk.worker.runner.llm_inference.runner import Runner

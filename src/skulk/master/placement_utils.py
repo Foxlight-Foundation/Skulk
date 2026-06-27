@@ -1,6 +1,6 @@
 import ipaddress
 from collections.abc import Generator, Mapping
-from typing import final
+from typing import Final, final
 
 from loguru import logger
 from pydantic import Field
@@ -69,17 +69,27 @@ class CycleMemoryDiagnostics(CamelCaseModel):
     """One human-readable line per cycle rejected on real memory grounds."""
 
 
-def _has_gpu_offload_backend(backends: frozenset[str]) -> bool:
-    """Whether a node advertises a discrete-GPU-offload llama.cpp backend.
+# Engines that offload weights + KV onto the GPU (so placement admits them
+# against VRAM, not system RAM). Both the in-process llama.cpp runner and the
+# served llama-server engine launch with ``-ngl`` full-GPU offload; vLLM would
+# join here too. The bare CPU compute tag is excluded by the ``-cpu`` check.
+_GPU_OFFLOAD_ENGINE_PREFIXES: Final = ("llama_cpp-", "llama_server-")
 
-    True only for a non-CPU llama.cpp compute tag (``llama_cpp-vulkan/rocm/cuda``).
-    A node that exposes a GPU but advertises only ``llama_cpp-cpu`` (the default
-    when ``SKULK_LLAMA_CPP_BACKENDS`` is unset, or after a GPU wheel is replaced)
-    runs GGUF on the CPU out of system RAM, so it must NOT be admitted against
-    VRAM it will not use.
+
+def _has_gpu_offload_backend(backends: frozenset[str]) -> bool:
+    """Whether a node advertises a discrete-GPU-offload backend.
+
+    True for a non-CPU GPU-offload compute tag (``llama_cpp-vulkan/rocm/cuda`` or
+    ``llama_server-vulkan/rocm/cuda``). A node that exposes a GPU but advertises
+    only a ``-cpu`` tag (the default when ``SKULK_LLAMA_CPP_BACKENDS`` is unset, or
+    after a GPU wheel is replaced) runs out of system RAM, so it must NOT be
+    admitted against VRAM it will not use. The served ``llama_server`` engine is
+    included because it launches ``llama-server -ngl 99``, allocating weights + KV
+    from the GPU exactly like the in-process llama.cpp runner.
     """
     return any(
-        tag.startswith("llama_cpp-") and not tag.endswith("-cpu") for tag in backends
+        tag.startswith(_GPU_OFFLOAD_ENGINE_PREFIXES) and not tag.endswith("-cpu")
+        for tag in backends
     )
 
 

@@ -33,15 +33,24 @@ from typing import Final, Literal
 
 from loguru import logger
 
-EngineType = Literal["mlx", "llama_cpp"]
-"""Inference runtime that loads and runs a model; selects the worker runner."""
+EngineType = Literal["mlx", "llama_cpp", "llama_server"]
+"""Inference runtime that loads and runs a model; selects the worker runner.
+
+``llama_server`` is a *served-backend* engine: instead of loading the model
+in-process (like ``mlx`` and ``llama_cpp``), the worker launches an external
+``llama-server`` subprocess and proxies its OpenAI HTTP API. It is the only way
+to reach llama.cpp's native multi-token-prediction speculative decoding
+(``--spec-type draft-mtp``), whose orchestration lives in the server application
+rather than ``libllama`` / the Python binding. It coexists with the in-process
+``llama_cpp`` engine and is selected per model by the card's ``compatible_backends``.
+"""
 
 ComputeBackend = Literal["metal", "vulkan", "rocm", "cuda", "cpu"]
 """Compute backend a runtime drives on a node."""
 
 # Explicit typed tuples (rather than typing.get_args, which erases to Any) so the
 # values stay narrowed to their Literal types where they are consumed.
-_ENGINES: Final[tuple[EngineType, ...]] = ("mlx", "llama_cpp")
+_ENGINES: Final[tuple[EngineType, ...]] = ("mlx", "llama_cpp", "llama_server")
 _COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = (
     "metal",
     "vulkan",
@@ -58,6 +67,20 @@ _TAG_SEPARATOR: Final = "-"
 # actually use, and the Python binding does not cleanly expose that, so we treat
 # this as authoritative operator policy (mirroring SKULK_NODE_PARTICIPATION).
 LLAMA_CPP_BACKENDS_ENV: Final = "SKULK_LLAMA_CPP_BACKENDS"
+
+# Path to the external ``llama-server`` binary the served-backend engine launches.
+# Set this on a node that should serve models via the ``llama_server`` engine
+# (e.g. for native MTP). Absent => the node does not advertise ``llama_server``,
+# so it is never a placement candidate for served-engine cards. The binary must
+# be a build recent enough to expose ``--spec-type`` (>= b9196 for ``draft-mtp``).
+LLAMA_SERVER_BIN_ENV: Final = "SKULK_LLAMA_SERVER_BIN"
+
+# Compute backends the ``llama-server`` build was compiled with (comma-separated,
+# e.g. "vulkan" or "vulkan,rocm"), same vocabulary as ``SKULK_LLAMA_CPP_BACKENDS``.
+# When unset, the served engine falls back to the node's llama.cpp backend
+# declaration (the GPU is the same regardless of which engine drives it), then to
+# ``cpu``.
+LLAMA_SERVER_BACKENDS_ENV: Final = "SKULK_LLAMA_SERVER_BACKENDS"
 
 
 def make_backend_tag(engine: EngineType, compute: ComputeBackend) -> str:
@@ -220,17 +243,50 @@ def _probe_llama_cpp_backends() -> frozenset[str]:
     return frozenset(tags)
 
 
+def _probe_served_backends() -> frozenset[str]:
+    """Probe whether this node can serve models via the ``llama_server`` engine.
+
+    Returns the bare ``llama_server`` tag plus one compound tag per advertised
+    compute backend when ``SKULK_LLAMA_SERVER_BIN`` points at an existing
+    executable; otherwise an empty set (the node does not advertise the served
+    engine and is never a candidate for served-engine cards). Compute backends
+    come from ``SKULK_LLAMA_SERVER_BACKENDS``, falling back to the node's
+    ``SKULK_LLAMA_CPP_BACKENDS`` declaration (the GPU is the same whichever engine
+    drives it), then to ``cpu``. ``metal`` is MLX-only and never valid here.
+    """
+    binary = os.environ.get(LLAMA_SERVER_BIN_ENV, "").strip()
+    if not binary or not os.path.isfile(binary) or not os.access(binary, os.X_OK):
+        return frozenset()
+
+    declared = os.environ.get(LLAMA_SERVER_BACKENDS_ENV, "").strip() or os.environ.get(
+        LLAMA_CPP_BACKENDS_ENV, ""
+    )
+    declared_tokens = {token for raw in declared.split(",") if (token := raw.strip())}
+    computes: list[ComputeBackend] = [
+        cb for cb in _COMPUTE_BACKENDS if cb != "metal" and cb in declared_tokens
+    ]
+    if not computes:
+        computes = ["cpu"]
+
+    tags: set[str] = {"llama_server"}
+    for compute in computes:
+        tags.add(make_backend_tag("llama_server", compute))
+    return frozenset(tags)
+
+
 def probe_node_backends() -> frozenset[str]:
     """Probe the backend tags this node can actually serve.
 
     macOS nodes (``sys.platform == "darwin"``) advertise ``{"mlx", "mlx-metal"}`` (the bare engine tag
     is kept for backward compatibility with cards written against the original
     ``{"mlx"}`` vocabulary). Any node with an importable ``llama_cpp`` adds its
-    llama.cpp tags. A bare Linux node with neither advertises an empty set and
+    llama.cpp tags; a node with ``SKULK_LLAMA_SERVER_BIN`` set adds its
+    ``llama_server`` tags. A bare Linux node with none advertises an empty set and
     is therefore not a placement candidate, which is the pre-existing behavior.
     """
     tags: set[str] = set()
     if sys.platform == "darwin":
         tags |= {"mlx", make_backend_tag("mlx", "metal")}
     tags |= _probe_llama_cpp_backends()
+    tags |= _probe_served_backends()
     return frozenset(tags)

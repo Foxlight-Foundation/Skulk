@@ -235,7 +235,7 @@ def test_instance_limit_none_when_nothing_enforceable():
 
 def test_instance_limit_gguf_capped_to_kv_budget():
     # #362: a GGUF/llama.cpp instance whose memory + card ceiling exceed the
-    # runner's loaded window (KV_CONTEXT_BUDGET_TOKENS, _serving_n_ctx) must admit
+    # runner's loaded window (KV_CONTEXT_BUDGET_TOKENS, serving_n_ctx) must admit
     # only up to that window, else a request beyond it is admitted then fails at
     # the runner. Card advertises a large context, lots of memory -> would be huge.
     card = _card(1, kv_heads=8, n_layers=32, gguf_file="m-Q4_K_M.gguf").model_copy(

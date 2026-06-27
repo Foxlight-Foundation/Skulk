@@ -394,3 +394,18 @@ async def test_gguf_card_pins_selected_quant(monkeypatch: pytest.MonkeyPatch) ->
     card = await ModelCard.fetch_from_hf(ModelId("some/gguf-repo"))
     assert card.gguf_file == "model-Q4_K_M.gguf"
     assert card.quantization == "Q4_K_M"
+
+
+def test_served_spec_n_max_must_be_positive() -> None:
+    """A non-positive served_spec_n_max fails at card validation (it would produce
+    an undefined --spec-draft-n-max at the server), while a positive value and
+    None (server default) are accepted."""
+    from pydantic import ValidationError
+
+    from skulk.shared.models.model_cards import RuntimeCapabilityCardConfig
+
+    assert RuntimeCapabilityCardConfig(served_spec_n_max=3).served_spec_n_max == 3
+    assert RuntimeCapabilityCardConfig(served_spec_n_max=None).served_spec_n_max is None
+    for bad in (0, -1):
+        with pytest.raises(ValidationError):
+            RuntimeCapabilityCardConfig(served_spec_n_max=bad)

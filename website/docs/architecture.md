@@ -209,6 +209,23 @@ sliding-window-cache path that gemma-style interleaved attention otherwise hits)
 Set `SKULK_LLAMA_CPP_FLASH_ATTN=0` to disable it on a node whose compiled build
 lacks Flash Attention kernels.
 
+Alongside the two in-process engines (MLX and llama.cpp) there is a third,
+**served-backend** engine (`llama_server`). Instead of loading the model in the
+worker process, it launches an external `llama-server` subprocess and proxies its
+OpenAI HTTP API. This is what unlocks llama.cpp's **native multi-token-prediction
+speculative decoding** for models that ship MTP heads (Qwen3.6, DeepSeek, GLM,
+Kimi, Nemotron): that machinery lives in the llama-server application, not in the
+library the in-process runner links, so the only way to use it is to run and proxy
+the server. A node offers this engine when `SKULK_LLAMA_SERVER_BIN` points at a
+`llama-server` binary (built recent enough to expose `--spec-type`), and a model
+opts in through its card's `compatible_backends` (`llama_server-…`) plus the
+`served_spec_type` / `served_spec_n_max` runtime fields (for example
+`served_spec_type = "draft_mtp"`). The engine is single-node and coexists with the
+in-process llama.cpp runner; the same managed-server-plus-proxy shape is the
+intended on-ramp for vLLM later. See the setup notes for a non-Mac node in
+[AMD / Strix Halo nodes](amd-strix-halo-nodes) and the env vars
+`SKULK_LLAMA_SERVER_BIN` / `SKULK_LLAMA_SERVER_BACKENDS`.
+
 A model card declares two placement axes that are deliberately separate from the
 memory/topology axes above:
 

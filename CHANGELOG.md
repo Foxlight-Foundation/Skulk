@@ -7,6 +7,19 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- **Served-backend engine (`llama_server`) with native MTP speculative decoding.**
+  A new inference-engine class that launches an external `llama-server` subprocess
+  and proxies its OpenAI HTTP API, coexisting with the in-process `mlx` and
+  `llama_cpp` runners. This unlocks llama.cpp's native multi-token-prediction
+  (`--spec-type draft-mtp`) for models that ship MTP heads (Qwen3.6, DeepSeek,
+  GLM, Kimi, Nemotron), which is not reachable from the in-process Python binding.
+  Routed per model via a card's `compatible_backends` and configured with the
+  `served_spec_type` / `served_spec_n_max` runtime fields; enabled on a node by
+  pointing `SKULK_LLAMA_SERVER_BIN` at a `llama-server` binary. Measured 2.19x on a
+  dense Qwen3.6-27B on a Strix Halo (Radeon/Vulkan).
+
 ## [1.3.0] - 2026-06-25
 
 This release makes Skulk a **heterogeneous** inference fabric: alongside Apple

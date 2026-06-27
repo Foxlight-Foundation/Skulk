@@ -12,20 +12,20 @@ from skulk.worker.runner.llama_cpp.runner import (
     _DEFAULT_VISION_HANDLER,
     _VISION_HANDLER_BY_MODEL_TYPE,
     _flash_attn_enabled,
-    _generation_kwargs,
     _image_data_uri,
     _logits_all_enabled,
     _logits_all_n_ctx,
     _logprob_fields,
-    _map_finish_reason,
     _sanitize_harmony_assistant_messages,
-    _serving_n_ctx,
     _splice_images_into_messages,
-    _tool_calls_from_message,
     find_mmproj_file,
+    generation_kwargs,
     logprobs_unavailable_error,
+    map_finish_reason,
     messages_for_llama,
     select_gguf_file,
+    serving_n_ctx,
+    tool_calls_from_message,
 )
 
 
@@ -78,10 +78,10 @@ def test_select_gguf_raises_when_absent(tmp_path: Path) -> None:
 
 
 def test_map_finish_reason() -> None:
-    assert _map_finish_reason(None) is None
-    assert _map_finish_reason("length") == "length"
-    assert _map_finish_reason("stop") == "stop"
-    assert _map_finish_reason("eos_token") == "stop"  # anything non-length -> stop
+    assert map_finish_reason(None) is None
+    assert map_finish_reason("length") == "length"
+    assert map_finish_reason("stop") == "stop"
+    assert map_finish_reason("eos_token") == "stop"  # anything non-length -> stop
 
 
 def _params(**kw: object) -> TextGenerationTaskParams:
@@ -91,8 +91,8 @@ def _params(**kw: object) -> TextGenerationTaskParams:
 
 
 def test_generation_kwargs_only_includes_set_fields() -> None:
-    assert _generation_kwargs(_params()) == {}
-    kwargs = _generation_kwargs(
+    assert generation_kwargs(_params()) == {}
+    kwargs = generation_kwargs(
         _params(max_output_tokens=128, temperature=0.7, top_p=0.9, stop=["X"])
     )
     assert kwargs == {
@@ -104,7 +104,7 @@ def test_generation_kwargs_only_includes_set_fields() -> None:
 
 
 def test_generation_kwargs_maps_repetition_penalty() -> None:
-    assert _generation_kwargs(_params(repetition_penalty=1.1))["repeat_penalty"] == 1.1
+    assert generation_kwargs(_params(repetition_penalty=1.1))["repeat_penalty"] == 1.1
 
 
 def test_messages_prefers_chat_template_messages() -> None:
@@ -209,15 +209,15 @@ def test_sanitize_harmony_stray_marker_without_body_keeps_text() -> None:
 
 
 def test_generation_kwargs_passes_logprobs() -> None:
-    assert "logprobs" not in _generation_kwargs(_params())
-    kw = _generation_kwargs(_params(logprobs=True, top_logprobs=3))
+    assert "logprobs" not in generation_kwargs(_params())
+    kw = generation_kwargs(_params(logprobs=True, top_logprobs=3))
     assert kw["logprobs"] is True and kw["top_logprobs"] == 3
     # logprobs requested without a top-N: flag on, no top_logprobs key
-    kw2 = _generation_kwargs(_params(logprobs=True))
+    kw2 = generation_kwargs(_params(logprobs=True))
     assert kw2["logprobs"] is True and "top_logprobs" not in kw2
     # top_logprobs set alone implies logprobs (OpenAI semantics): flag on too,
     # so the model actually returns logprobs instead of silently none.
-    kw3 = _generation_kwargs(_params(top_logprobs=5))
+    kw3 = generation_kwargs(_params(top_logprobs=5))
     assert kw3["logprobs"] is True and kw3["top_logprobs"] == 5
 
 
@@ -274,18 +274,18 @@ def test_serving_n_ctx_capped_to_placement_budget(
     # placement reserved (KV_CONTEXT_BUDGET_TOKENS), NEVER the full trained context
     # (n_ctx=0) and NEVER the larger request-admission ceiling -- either would
     # exceed reserved memory and OOM-kill the node (the bug this fixes).
-    assert _serving_n_ctx(32768, logits_all=False) == KV_CONTEXT_BUDGET_TOKENS
-    assert _serving_n_ctx(None, logits_all=False) == KV_CONTEXT_BUDGET_TOKENS
-    assert _serving_n_ctx(0, logits_all=False) == KV_CONTEXT_BUDGET_TOKENS
+    assert serving_n_ctx(32768, logits_all=False) == KV_CONTEXT_BUDGET_TOKENS
+    assert serving_n_ctx(None, logits_all=False) == KV_CONTEXT_BUDGET_TOKENS
+    assert serving_n_ctx(0, logits_all=False) == KV_CONTEXT_BUDGET_TOKENS
     # On a degenerate tiny node whose admission ceiling is even smaller than the
     # budget, clamp down to it (never allocate more than admitted).
-    assert _serving_n_ctx(4096, logits_all=False) == 4096
+    assert serving_n_ctx(4096, logits_all=False) == 4096
     # With logits_all on, the logits-buffer window further bounds it (a smaller
     # window wins), never raising it above the budget.
     monkeypatch.setenv("SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX", "2048")
-    assert _serving_n_ctx(32768, logits_all=True) == 2048
+    assert serving_n_ctx(32768, logits_all=True) == 2048
     monkeypatch.setenv("SKULK_LLAMA_CPP_LOGITS_ALL_N_CTX", "16384")
-    assert _serving_n_ctx(32768, logits_all=True) == KV_CONTEXT_BUDGET_TOKENS
+    assert serving_n_ctx(32768, logits_all=True) == KV_CONTEXT_BUDGET_TOKENS
 
 
 def test_tool_calls_from_message() -> None:
@@ -297,14 +297,14 @@ def test_tool_calls_from_message() -> None:
             {"function": {"arguments": "{}"}},  # no name -> skipped
         ]
     }
-    items = _tool_calls_from_message(msg)
+    items = tool_calls_from_message(msg)
     assert [i.name for i in items] == ["get_weather", "noid"]
     assert items[0].id == "call_1"
     assert items[0].arguments == '{"city":"SF"}'
 
 
 def test_tool_calls_from_message_none() -> None:
-    assert _tool_calls_from_message({"content": "hi"}) == []
+    assert tool_calls_from_message({"content": "hi"}) == []
 
 
 def test_logprob_fields_parses_openai_shape() -> None:
