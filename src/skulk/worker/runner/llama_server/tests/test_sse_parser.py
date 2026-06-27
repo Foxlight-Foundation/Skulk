@@ -5,8 +5,11 @@ The runner's HTTP/subprocess plumbing is exercised live on a GPU node; this
 covers the pure parsing surface (the subtle part) without a server.
 """
 
+import pytest
+
 from skulk.worker.runner.llama_server.runner import (
     _SPEC_TYPE_FLAG,
+    _gpu_layers_for_backend,
     _parse_sse_line,
 )
 
@@ -73,3 +76,20 @@ def test_spec_type_flag_maps_to_llama_server_flags() -> None:
     assert _SPEC_TYPE_FLAG["draft_simple"] == "draft-simple"
     # ngram is the special case: it maps to ngram-cache, not "ngram".
     assert _SPEC_TYPE_FLAG["ngram"] == "ngram-cache"
+
+
+@pytest.mark.parametrize(
+    ("resolved", "expected"),
+    [
+        ("llama_server-vulkan", "99"),  # GPU compute tag -> full offload
+        ("llama_server-rocm", "99"),
+        ("llama_server-cuda", "99"),
+        ("llama_server-cpu", "0"),  # CPU tag was RAM-admitted -> no GPU offload
+        ("llama_server", "0"),  # bare tag is NOT GPU-offload (RAM-admitted)
+        (None, "99"),  # no resolution (manual/fallback) -> default GPU offload
+    ],
+)
+def test_gpu_layers_match_vram_admission(resolved: str | None, expected: str) -> None:
+    # The runner's -ngl decision must mirror placement_utils._has_gpu_offload_backend
+    # so a RAM-admitted placement never grabs an unbudgeted GPU.
+    assert _gpu_layers_for_backend(resolved) == expected

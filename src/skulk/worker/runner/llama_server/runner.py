@@ -103,6 +103,26 @@ class _StreamDelta(NamedTuple):
     done: bool  # the terminal ``data: [DONE]`` sentinel
 
 
+def _gpu_layers_for_backend(resolved_backend: str | None) -> str:
+    """The ``-ngl`` (n-gpu-layers) value to pass llama-server for a backend tag.
+
+    Mirrors the master's VRAM admission exactly (placement_utils
+    ``_has_gpu_offload_backend``): offload every layer (``"99"``) only for a
+    recognized GPU compute tag (``llama_server-<gpu>``). A ``-cpu`` tag OR a bare
+    ``llama_server`` tag was admitted against system RAM, not VRAM, so use
+    ``"0"`` rather than grabbing a GPU that was not budgeted (or may not exist). A
+    missing resolution (a manual / fallback launch off the placement path)
+    defaults to full GPU offload, the common served case.
+    """
+    if resolved_backend is None:
+        return "99"
+    if resolved_backend.startswith("llama_server-") and not resolved_backend.endswith(
+        "-cpu"
+    ):
+        return "99"
+    return "0"
+
+
 def _parse_sse_line(line: str) -> _StreamDelta | None:
     """Parse one SSE line into a ``_StreamDelta``, or ``None`` to skip it.
 
@@ -327,13 +347,7 @@ class Runner:
                 "point it at a llama-server binary built >= b9196 (for draft-mtp)"
             )
         port = self._pick_port()
-        # Honor the resolved backend's compute: a node that resolved to
-        # ``llama_server-cpu`` was admitted against system RAM (placement does not
-        # count it as GPU-offload), so request 0 GPU layers rather than forcing
-        # ``-ngl 99`` onto a GPU that was not budgeted (or may not exist). Any
-        # GPU compute tag (vulkan/rocm/cuda), or no resolved tag, offloads fully.
-        resolved = self.shard_metadata.resolved_backend
-        n_gpu_layers = "0" if (resolved and resolved.endswith("-cpu")) else "99"
+        n_gpu_layers = _gpu_layers_for_backend(self.shard_metadata.resolved_backend)
         cmd: list[str] = [
             binary,
             "-m",

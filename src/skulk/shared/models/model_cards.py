@@ -468,9 +468,11 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     (prompt-lookup), ``none``/``None`` plain decoding. Only the served engine reads
     this; the in-process ``mlx`` and ``llama_cpp`` engines ignore it (MLX
     speculation is the ``mtp_*`` / ``assistant_model_repo`` fields above)."""
-    served_spec_n_max: int | None = None
+    served_spec_n_max: int | None = Field(default=None, gt=0)
     """Max draft tokens per step for the served engine (``--spec-draft-n-max``).
 
+    Must be a positive integer (validated at card load so a bad value fails fast
+    rather than producing an undefined ``--spec-draft-n-max`` at the server).
     ``None`` uses the llama-server default (3). Acceptance falls off with depth
     (per-position acceptance drops), so 2-3 is the usual sweet spot; tune per
     card from measured acceptance."""
