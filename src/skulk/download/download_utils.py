@@ -247,6 +247,20 @@ def companion_download_specs(
                 False,
             )
         )
+    # Served-engine draft GGUF (`--model-draft`): a separate small draft model
+    # (draft_simple / draft_eagle3) or a Gemma-4 assistant-as-MTP draft. Fetch only
+    # the pinned draft GGUF file (its shard group); it may live in the same repo as
+    # the base (then it lands in the base's dir) or a separate repo.
+    if runtime and runtime.served_spec_draft_repo and runtime.served_spec_draft_file:
+        # Just the pinned draft file -- a draft GGUF is single-file and is not a
+        # vision model, so do not pull mmproj projectors or sibling quants.
+        specs.append(
+            (
+                _bare_shard(runtime.served_spec_draft_repo),
+                [runtime.served_spec_draft_file],
+                False,
+            )
+        )
     return specs
 
 
@@ -302,10 +316,20 @@ def model_companions_present_on_disk(
         is None
     ):
         return False
-    return not (
-        runtime.assistant_model_repo
-        and build_companion_model_path(ModelId(runtime.assistant_model_repo)) is None
-    )
+    if runtime.assistant_model_repo and (
+        build_companion_model_path(ModelId(runtime.assistant_model_repo)) is None
+    ):
+        return False
+    # Served draft GGUF: the specific file must be on disk (it may share the
+    # base's directory or live in its own repo dir).
+    if runtime.served_spec_draft_repo and runtime.served_spec_draft_file:
+        try:
+            draft_dir = build_model_path(ModelId(runtime.served_spec_draft_repo))
+        except FileNotFoundError:
+            return False
+        if not (draft_dir / runtime.served_spec_draft_file).is_file():
+            return False
+    return True
 
 
 def build_model_path(model_id: ModelId) -> Path:

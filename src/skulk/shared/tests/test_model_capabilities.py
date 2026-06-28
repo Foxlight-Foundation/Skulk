@@ -584,7 +584,9 @@ def test_is_gemma4_family_resource_cards_other_families_dont_match() -> None:
     non_gemma4_paths = [
         path
         for path in cards_dir.glob("*.toml")
-        if "gemma-4" not in path.name and "gemma_4" not in path.name
+        if "gemma-4" not in path.name
+        and "gemma_4" not in path.name
+        and "gemma4" not in path.name
     ]
     if not non_gemma4_paths:
         return  # No control set; skip silently rather than fail

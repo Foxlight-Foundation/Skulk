@@ -206,3 +206,32 @@ def test_vision_repo_found_in_models_dir(
         ),
     )
     assert model_companions_present_on_disk(card)
+
+
+def test_served_draft_missing_on_disk(models_dir: Path) -> None:
+    # A card declaring a served draft GGUF whose file is absent must NOT report
+    # companions present, so a staged base does not short-circuit the download
+    # path and leave --model-draft unresolvable at llama-server launch.
+    card = _card(
+        RuntimeCapabilityCardConfig(
+            served_spec_type="draft_mtp",
+            served_spec_draft_repo="test-org/test-base",
+            served_spec_draft_file="draft.gguf",
+        )
+    )
+    assert not model_companions_present_on_disk(card)
+
+
+def test_served_draft_present_on_disk(models_dir: Path) -> None:
+    # Same-repo draft: the draft GGUF shares the base repo's directory.
+    base_dir = models_dir / "test-org--test-base"
+    base_dir.mkdir(parents=True)
+    (base_dir / "draft.gguf").write_bytes(b"fake")
+    card = _card(
+        RuntimeCapabilityCardConfig(
+            served_spec_type="draft_mtp",
+            served_spec_draft_repo="test-org/test-base",
+            served_spec_draft_file="draft.gguf",
+        )
+    )
+    assert model_companions_present_on_disk(card)

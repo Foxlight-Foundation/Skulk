@@ -220,7 +220,11 @@ the server. A node offers this engine when `SKULK_LLAMA_SERVER_BIN` points at a
 `llama-server` binary (built recent enough to expose `--spec-type`), and a model
 opts in through its card's `compatible_backends` (`llama_server-…`) plus the
 `served_spec_type` / `served_spec_n_max` runtime fields (for example
-`served_spec_type = "draft_mtp"`). The engine is single-node and coexists with the
+`served_spec_type = "draft_mtp"`). Most MTP families ship the heads inside the base
+GGUF, but some speculative modes need a separate small draft model: a card names it
+with `served_spec_draft_repo` / `served_spec_draft_file` and the worker downloads it
+as a companion and passes it to the server as `--model-draft` (this is how Gemma 4
+runs MTP, via its assistant as the draft model). The engine is single-node and coexists with the
 in-process llama.cpp runner; the same managed-server-plus-proxy shape is the
 intended on-ramp for vLLM later. See the setup notes for a non-Mac node in
 [AMD / Strix Halo nodes](amd-strix-halo-nodes) and the env vars
