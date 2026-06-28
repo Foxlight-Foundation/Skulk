@@ -532,7 +532,17 @@ class ModelStore:
         async with self._download_lock:
             existing = self._active_downloads.get(model_id)
             if existing is not None:
-                if existing.status == "failed":
+                # A failed entry retries. A cached-complete entry that is missing
+                # a newly-requested companion (or projector) is stale -- a prior
+                # base-only download in this process left a "complete" status, so
+                # returning it here would skip the recovery re-download below
+                # (the registry-based missing checks would never run). Drop it and
+                # fall through. An in-progress (downloading/pending) entry is
+                # returned as-is to dedup concurrent requests.
+                stale_complete = existing.status == "complete" and (
+                    missing_projector or missing_companion
+                )
+                if existing.status == "failed" or stale_complete:
                     del self._active_downloads[model_id]
                 else:
                     return existing

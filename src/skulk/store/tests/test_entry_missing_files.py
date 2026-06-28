@@ -41,3 +41,41 @@ def test_absent_model_is_not_flagged(tmp_path: Path) -> None:
     # Not in store: the normal download path handles it, not the recovery guard.
     store = ModelStore(tmp_path)
     assert store.entry_missing_files("org/missing", ["draft.gguf"]) is False
+
+
+async def test_cached_complete_entry_redownloads_when_companion_missing(
+    tmp_path: Path,
+) -> None:
+    # A prior base-only download leaves a "complete" status in _active_downloads.
+    # A later request naming a same-repo companion must NOT return that cached
+    # status (which would skip recovery): it drops the stale entry and re-runs
+    # the download so entry_missing_files recovery can fetch the companion.
+    from skulk.store.model_store import StoreDownloadStatus
+
+    store = ModelStore(tmp_path)
+    _register(store, "org/bundle", ["base-IQ4_XS.gguf", "config.json"])
+    store._active_downloads["org/bundle"] = StoreDownloadStatus(  # pyright: ignore[reportPrivateUsage]
+        model_id="org/bundle", status="complete", progress=1.0
+    )
+    status = await store.request_download(
+        "org/bundle", "base-IQ4_XS.gguf", ["draft.gguf"]
+    )
+    # Recovery kicked off: a fresh pending/downloading status, not the cached
+    # complete one (the draft is genuinely missing from the registry).
+    assert status.status in ("pending", "downloading")
+
+
+async def test_cached_complete_entry_returned_when_nothing_missing(
+    tmp_path: Path,
+) -> None:
+    from skulk.store.model_store import StoreDownloadStatus
+
+    store = ModelStore(tmp_path)
+    _register(store, "org/bundle", ["base-IQ4_XS.gguf", "config.json", "draft.gguf"])
+    cached = StoreDownloadStatus(model_id="org/bundle", status="complete", progress=1.0)
+    store._active_downloads["org/bundle"] = cached  # pyright: ignore[reportPrivateUsage]
+    status = await store.request_download(
+        "org/bundle", "base-IQ4_XS.gguf", ["draft.gguf"]
+    )
+    # Nothing missing: the cached complete status is returned (dedup preserved).
+    assert status.status == "complete"
