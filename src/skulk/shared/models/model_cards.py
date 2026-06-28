@@ -476,6 +476,22 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     ``None`` uses the llama-server default (3). Acceptance falls off with depth
     (per-position acceptance drops), so 2-3 is the usual sweet spot; tune per
     card from measured acceptance."""
+    served_spec_draft_repo: str | None = None
+    """Hugging Face repo of a separate **draft** GGUF for the served engine.
+
+    Some served speculative modes need a second model passed to llama-server via
+    ``--model-draft``, NOT built-in heads: ``draft_simple`` (a vocab-matched small
+    draft model) and ``draft_eagle3`` (an EAGLE-3 head) always require one, and
+    Gemma 4 ``draft_mtp`` uses its *assistant* as a separate draft GGUF (llama.cpp
+    PR #23398) rather than baking heads into the base. Qwen3.6/DeepSeek/GLM
+    ``draft_mtp`` leave this unset (heads are in the base GGUF). When set, the
+    draft GGUF is downloaded as a companion alongside the base and passed as
+    ``--model-draft``. Pairs with ``served_spec_draft_file``."""
+    served_spec_draft_file: str | None = None
+    """Repo-relative GGUF filename of the served draft model (in
+    ``served_spec_draft_repo``), e.g. ``"mtp-gemma-4-31B-it.gguf"``. Required when
+    ``served_spec_draft_repo`` is set; selects the exact draft quant the runner
+    passes to ``--model-draft``."""
 
     @field_validator("prompt_renderer", mode="before")
     @classmethod

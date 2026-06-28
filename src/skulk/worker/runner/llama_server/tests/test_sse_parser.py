@@ -5,13 +5,67 @@ The runner's HTTP/subprocess plumbing is exercised live on a GPU node; this
 covers the pure parsing surface (the subtle part) without a server.
 """
 
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
 from skulk.worker.runner.llama_server.runner import (
     _SPEC_TYPE_FLAG,
+    _draft_model_args,
     _gpu_layers_for_backend,
     _parse_sse_line,
 )
+
+
+def _runtime(repo: str | None = None, file: str | None = None) -> SimpleNamespace:
+    return SimpleNamespace(served_spec_draft_repo=repo, served_spec_draft_file=file)
+
+
+def test_draft_args_none_when_no_draft_and_not_required() -> None:
+    # draft_mtp without a draft = baked-in heads (Qwen); ngram needs no model.
+    assert _draft_model_args(_runtime(), "draft_mtp") == []
+    assert _draft_model_args(_runtime(), "ngram") == []
+    assert _draft_model_args(None, "draft_mtp") == []
+
+
+def test_draft_args_required_modes_raise_without_draft() -> None:
+    for mode in ("draft_simple", "draft_eagle3"):
+        with pytest.raises(RuntimeError, match="requires a draft model"):
+            _draft_model_args(_runtime(), mode)
+
+
+def test_draft_args_repo_without_file_raises() -> None:
+    with pytest.raises(RuntimeError, match="served_spec_draft_file is"):
+        _draft_model_args(_runtime(repo="org/draft-GGUF"), "draft_mtp")
+
+
+def test_draft_args_resolves_model_draft_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # With a draft repo+file present on disk, returns --model-draft <path>.
+    (tmp_path / "draft.gguf").write_bytes(b"GGUF")
+    import skulk.download.download_utils as du
+
+    def _fake_build_model_path(_model_id: object) -> Path:
+        return tmp_path
+
+    monkeypatch.setattr(du, "build_model_path", _fake_build_model_path)
+    args = _draft_model_args(_runtime(repo="org/draft-GGUF", file="draft.gguf"), "draft_mtp")
+    assert args == ["--model-draft", str(tmp_path / "draft.gguf")]
+
+
+def test_draft_args_missing_file_on_disk_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import skulk.download.download_utils as du
+
+    def _fake_build_model_path(_model_id: object) -> Path:
+        return tmp_path
+
+    monkeypatch.setattr(du, "build_model_path", _fake_build_model_path)
+    with pytest.raises(RuntimeError, match="not found under"):
+        _draft_model_args(_runtime(repo="org/draft-GGUF", file="missing.gguf"), "draft_simple")
 
 
 def test_parse_content_delta() -> None:

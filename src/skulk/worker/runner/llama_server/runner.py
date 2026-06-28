@@ -89,6 +89,51 @@ _SPEC_TYPE_FLAG: Final[dict[str, str]] = {
     "ngram": "ngram-cache",
 }
 
+# Served spec modes that REQUIRE a separate `--model-draft` GGUF. ``draft_mtp`` is
+# optional (Qwen/DeepSeek/GLM bake the heads into the base GGUF; Gemma 4 instead
+# supplies its assistant as a draft), and ``ngram`` needs no model at all.
+_DRAFT_MODEL_REQUIRED: Final[frozenset[str]] = frozenset(
+    {"draft_simple", "draft_eagle3"}
+)
+
+
+def _draft_model_args(runtime: Any, spec_type: str) -> list[str]:
+    """Resolve the ``--model-draft`` args for a served spec mode.
+
+    When the card declares a draft GGUF (``served_spec_draft_repo`` +
+    ``served_spec_draft_file``), resolve its on-disk path and return
+    ``["--model-draft", path]`` (Gemma 4 draft_mtp, draft_simple, draft_eagle3).
+    Modes in ``_DRAFT_MODEL_REQUIRED`` raise loudly when no draft is configured;
+    ``draft_mtp`` without a draft is fine (built-in heads), and ``ngram`` needs
+    none. Returns ``[]`` when no draft applies. Pure except for the on-disk path
+    resolution, so the validation branches are unit-testable.
+    """
+    draft_repo = getattr(runtime, "served_spec_draft_repo", None) if runtime else None
+    draft_file = getattr(runtime, "served_spec_draft_file", None) if runtime else None
+    if draft_repo:
+        if not draft_file:
+            raise RuntimeError(
+                "served_spec_draft_repo is set but served_spec_draft_file is "
+                "missing; both are required to pass --model-draft"
+            )
+        from skulk.download.download_utils import build_model_path
+
+        draft_dir = build_model_path(ModelId(draft_repo))
+        draft_path = (draft_dir / draft_file).resolve()
+        if not draft_path.is_file() or not draft_path.is_relative_to(
+            draft_dir.resolve()
+        ):
+            raise RuntimeError(
+                f"served draft GGUF {draft_file!r} not found under {draft_dir}"
+            )
+        return ["--model-draft", str(draft_path)]
+    if spec_type in _DRAFT_MODEL_REQUIRED:
+        raise RuntimeError(
+            f"served_spec_type={spec_type!r} requires a draft model; set "
+            "served_spec_draft_repo + served_spec_draft_file on the card"
+        )
+    return []
+
 # How long to wait for the server to finish loading the model and report healthy.
 # A large GGUF on a GPU node can take a while to map + warm up.
 _HEALTH_DEADLINE_S: Final = 600.0
@@ -377,6 +422,7 @@ class Runner:
                 n_max = getattr(runtime, "served_spec_n_max", None)
                 if n_max is not None:
                     cmd += ["--spec-draft-n-max", str(n_max)]
+                cmd += _draft_model_args(runtime, spec_type)
 
         self.server_log_path = (
             Path(tempfile.gettempdir()) / f"skulk-llama-server-{self.runner_id}.log"
