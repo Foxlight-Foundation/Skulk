@@ -1,0 +1,43 @@
+# GLM-4.7-Flash (MoE) GGUF with built-in multi-token-prediction heads, served via
+# the llama_server (served-backend) engine for llama.cpp native MTP speculative
+# decoding (`--spec-type draft-mtp`). The non-Qwen family in the MTP benchmark set
+# (a second architecture). GLM-4.x loads under llama.cpp's `deepseek2` graph (MLA
+# attention, num_key_value_heads = 1). compatible_backends is the llama_server
+# engine, so placement routes it to a node running llama-server (e.g. kite4 on
+# Vulkan). Text-only (no mmproj). supports_tensor = false: served single-node.
+# Architecture from the GGUF metadata (arch deepseek2: 48 layers, hidden 2048,
+# 1 KV head, 64 experts, 202752 ctx).
+model_id = "jamesdumay/GLM-4.7-Flash-MTP-GGUF"
+n_layers = 48
+hidden_size = 2048
+num_key_value_heads = 1
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "glm"
+quantization = "Q4_K_M"
+base_model = "GLM-4.7-Flash"
+capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 202752
+gguf_file = "GLM-4.7-Flash-MTP-Q4_K_M.gguf"
+trust_remote_code = false
+
+[reasoning]
+supports_toggle = true
+format = "token_delimited"
+default_effort = "medium"
+disabled_effort = "none"
+
+[tooling]
+supports_tool_calling = true
+tool_call_format = "generic"
+
+[runtime]
+served_spec_type = "draft_mtp"
+served_spec_n_max = 3
+
+[placement]
+compatible_backends = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_server-cpu"]
+backend_preference = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_server-cpu"]
+
+[storage_size]
+in_bytes = 18905099712

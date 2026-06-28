@@ -1,0 +1,41 @@
+# Qwen3.5-9B (dense) GGUF with built-in multi-token-prediction heads, served via
+# the llama_server (served-backend) engine for llama.cpp native MTP speculative
+# decoding (`--spec-type draft-mtp`). The small/fast member of the MTP benchmark
+# set. compatible_backends is the llama_server engine, so placement routes it to a
+# node running llama-server (e.g. kite4 on Vulkan). Text-only (no mmproj).
+# supports_tensor = false: served single-node. Architecture from the GGUF metadata
+# (arch qwen35: 33 layers, hidden 4096, 4 KV heads, 262144 ctx).
+model_id = "unsloth/Qwen3.5-9B-MTP-GGUF"
+n_layers = 33
+hidden_size = 4096
+num_key_value_heads = 4
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "qwen"
+quantization = "Q4_K_M"
+base_model = "Qwen3.5 9B"
+capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 262144
+gguf_file = "Qwen3.5-9B-Q4_K_M.gguf"
+trust_remote_code = false
+
+[reasoning]
+supports_toggle = true
+format = "token_delimited"
+default_effort = "medium"
+disabled_effort = "none"
+
+[tooling]
+supports_tool_calling = true
+tool_call_format = "generic"
+
+[runtime]
+served_spec_type = "draft_mtp"
+served_spec_n_max = 3
+
+[placement]
+compatible_backends = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_server-cpu"]
+backend_preference = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_server-cpu"]
+
+[storage_size]
+in_bytes = 5868826976
