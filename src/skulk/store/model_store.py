@@ -77,6 +77,7 @@ from skulk.shared.types.worker.downloads import FileListEntry
 def select_store_gguf_download_files(
     file_list: list[FileListEntry],
     pinned_gguf: str | None = None,
+    extra_pinned_gguf: list[str] | None = None,
 ) -> list[FileListEntry]:
     """Filter a repo's file list to what the store host should download (#339).
 
@@ -96,6 +97,12 @@ def select_store_gguf_download_files(
             group, honoring a custom/non-default pin (#344). When ``None`` (or
             the pin is absent from the repo) the store falls back to the default
             quant preference, matching the prior behavior.
+        extra_pinned_gguf: Additional repo-relative GGUF files in the SAME repo
+            that must be co-fetched with the base quant, e.g. a served-engine
+            draft GGUF bundled alongside the base (``served_spec_draft_repo`` ==
+            the base repo). Each is kept as its own shard group on top of the
+            base selection so a single store download lands both. Names absent
+            from the repo are skipped with a warning.
 
     Returns:
         The subset to download. Identical to the input for non-GGUF repos.
@@ -139,6 +146,20 @@ def select_store_gguf_download_files(
     # file (other quants, original/* full-precision weights, metal/*, tokenizer,
     # README) is dropped, just as the direct path drops them.
     keep_patterns = [*gguf_allow_patterns(selected), "config.json"]
+    # Co-fetch any same-repo companion GGUF the requester pinned (e.g. a
+    # served-engine draft bundled with the base): keep each one's own shard
+    # group so a single store download lands the base AND the companion. A pin
+    # that doesn't name a file in this repo is dropped with a warning, matching
+    # how a stale base pin degrades above (the served runner surfaces a genuinely
+    # absent draft loudly at launch via _draft_model_args).
+    for extra in extra_pinned_gguf or []:
+        if extra in pinned_paths:
+            keep_patterns.extend(gguf_allow_patterns(extra))
+        elif extra:
+            logger.warning(
+                f"ModelStore: extra pinned GGUF {extra!r} not found in repo; "
+                "skipping (it will not be co-fetched)"
+            )
 
     def _keep(entry: FileListEntry) -> bool:
         # Keep the selected quant's shard group + config.json, plus the
@@ -463,24 +484,51 @@ class ModelStore:
             return False
         return has_gguf_projector(f.path for f in repo_files)
 
+    def entry_missing_files(self, model_id: str, required_files: list[str]) -> bool:
+        """True when an in-store entry omits any of ``required_files``.
+
+        Recovers a stale base-only store entry that predates a card declaring a
+        same-repo companion (e.g. a served-engine draft GGUF bundled with the
+        base): the entry lists only the base quant, so staging it omits the
+        companion and the served runner's ``--model-draft`` resolution fails.
+        Forcing a re-download fetches just the missing file (size-matched skips
+        reuse present weights) and re-registers a complete entry. Returns
+        ``False`` when the model is absent (the normal download path handles it)
+        or no files are required.
+        """
+        if not required_files:
+            return False
+        entry = self._read_registry().get(model_id)
+        if entry is None:
+            return False
+        registered = set(entry.files)
+        return any(name not in registered for name in required_files)
+
     async def request_download(
-        self, model_id: str, pinned_gguf: str | None = None
+        self,
+        model_id: str,
+        pinned_gguf: str | None = None,
+        extra_pinned_gguf: list[str] | None = None,
     ) -> StoreDownloadStatus:
         """Request that the store download a model from HuggingFace.
 
         Deduplicates: if the model is already downloading, returns the
         existing status.  If already in the store, returns "complete", unless it
         is a vision GGUF whose stored entry is missing its ``mmproj`` projector
-        (a stale pre-#346 entry), in which case it re-downloads to recover the
-        projector instead of staging an unloadable model.
+        (a stale pre-#346 entry) or its entry omits a requested same-repo
+        companion GGUF, in which case it re-downloads to recover the missing
+        files instead of staging an incomplete model.
 
         ``pinned_gguf`` is the requester's card-pinned GGUF file, forwarded so a
         GGUF repo fetches that quant's shard group rather than the default (#344).
+        ``extra_pinned_gguf`` names same-repo companion GGUFs (a served-engine
+        draft bundled with the base) to co-fetch with the base quant.
         """
         # Checked outside the lock: it may do a (cached) repo file-list fetch, and
         # holding the download lock across network I/O would serialize unrelated
         # requests.
         missing_projector = await self.vision_entry_missing_projector(model_id)
+        missing_companion = self.entry_missing_files(model_id, extra_pinned_gguf or [])
         async with self._download_lock:
             existing = self._active_downloads.get(model_id)
             if existing is not None:
@@ -488,7 +536,11 @@ class ModelStore:
                     del self._active_downloads[model_id]
                 else:
                     return existing
-            if self.is_in_store(model_id) and not missing_projector:
+            if (
+                self.is_in_store(model_id)
+                and not missing_projector
+                and not missing_companion
+            ):
                 return StoreDownloadStatus(
                     model_id=model_id, status="complete", progress=1.0
                 )
@@ -498,9 +550,17 @@ class ModelStore:
                     "missing the mmproj projector for a vision GGUF; "
                     "re-downloading to recover it (existing weights are reused)."
                 )
+            if missing_companion:
+                logger.warning(
+                    f"ModelStore: {model_id} is in the store but its entry is "
+                    f"missing a requested companion GGUF ({extra_pinned_gguf}); "
+                    "re-downloading to recover it (existing weights are reused)."
+                )
             status = StoreDownloadStatus(model_id=model_id, status="pending")
             self._active_downloads[model_id] = status
-        task = asyncio.create_task(self._do_download(model_id, pinned_gguf))
+        task = asyncio.create_task(
+            self._do_download(model_id, pinned_gguf, extra_pinned_gguf)
+        )
         self._download_tasks.add(task)
         task.add_done_callback(self._download_tasks.discard)
         return status
@@ -524,12 +584,17 @@ class ModelStore:
         ]
 
     async def _do_download(
-        self, model_id: str, pinned_gguf: str | None = None
+        self,
+        model_id: str,
+        pinned_gguf: str | None = None,
+        extra_pinned_gguf: list[str] | None = None,
     ) -> None:
         """Download a model from HuggingFace into the store and register it.
 
         ``pinned_gguf`` (the requester's ``ModelCard.gguf_file``) selects which
         GGUF quant's shard group to fetch, honoring a custom pin (#344).
+        ``extra_pinned_gguf`` names same-repo companion GGUFs (a served-engine
+        draft bundled with the base) co-fetched in the same store download.
         """
         from skulk.download.download_utils import (
             download_file_with_retry,
@@ -567,7 +632,7 @@ class ModelStore:
             # glob is retained by ``gguf_allow_patterns``, so a vision GGUF keeps
             # its ``*mmproj*.gguf``.
             selected_files = select_store_gguf_download_files(
-                repo_file_list, pinned_gguf
+                repo_file_list, pinned_gguf, extra_pinned_gguf
             )
             if len(selected_files) != len(repo_file_list):
                 logger.info(
@@ -620,6 +685,26 @@ class ModelStore:
                     "projector, but none landed in the store download; refusing to "
                     "register an unusable vision model. Re-run the download to "
                     "re-fetch the projector."
+                )
+            # Same-repo companion completeness guard: a requested companion GGUF
+            # (served-engine draft) that the repo actually ships MUST land, or
+            # staging produces a model the served runner can't launch (its
+            # --model-draft path 404s). Refuse to register an incomplete entry so
+            # the failure is a loud, fixable download error here rather than a
+            # runner spawn failure on a remote node. A companion absent from the
+            # repo is a card-config error surfaced at launch, not a download bug,
+            # so it is not guarded here.
+            repo_paths = {f.path for f in repo_file_list}
+            missing_companions = [
+                name
+                for name in (extra_pinned_gguf or [])
+                if name in repo_paths and name not in files
+            ]
+            if missing_companions:
+                raise RuntimeError(
+                    f"{model_id}: requested companion GGUF(s) {missing_companions} "
+                    "are in the repo but did not land in the store download; "
+                    "refusing to register an incomplete entry. Re-run the download."
                 )
             total = sum(p.stat().st_size for p in target_dir.rglob("*") if p.is_file())
             self.register_model(

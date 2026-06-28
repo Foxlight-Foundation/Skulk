@@ -71,7 +71,7 @@ import shutil
 from collections.abc import Awaitable
 from datetime import timedelta
 from pathlib import Path
-from typing import AsyncIterator, Callable, final
+from typing import TYPE_CHECKING, AsyncIterator, Callable, final
 from urllib.parse import quote
 
 import aiofiles
@@ -86,6 +86,9 @@ from skulk.shared.types.worker.downloads import RepoDownloadProgress
 from skulk.shared.types.worker.shards import ShardMetadata
 from skulk.store.config import StagingNodeConfig
 from skulk.store.staging_eviction import touch_last_used
+
+if TYPE_CHECKING:
+    from skulk.shared.models.model_cards import ModelCard
 
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB per read/write chunk
 _CONNECT_TIMEOUT = 10.0  # seconds — abort if store host unreachable
@@ -167,6 +170,42 @@ def _staged_vision_projector_missing(
 
     return not has_gguf_projector(
         path.name for path in directory.rglob("*") if path.is_file()
+    )
+
+
+def _same_repo_draft_files(card: "ModelCard") -> list[str]:
+    """Repo-relative GGUFs that ride the base repo's store entry but aren't the base.
+
+    Currently the served-engine draft GGUF when ``served_spec_draft_repo`` names
+    the base repo itself (a bundle shipping base + MTP draft, e.g. Gemma 4): the
+    draft shares the base's store entry and staging directory, so it must be
+    co-fetched with the base rather than resolved as a distinct companion repo. A
+    separate-repo draft has its own ``model_id`` / staging dir and is handled by
+    the normal companion path, so it is not returned here.
+    """
+    runtime = card.runtime
+    if (
+        runtime is not None
+        and runtime.served_spec_draft_repo == str(card.model_id)
+        and runtime.served_spec_draft_file
+    ):
+        return [runtime.served_spec_draft_file]
+    return []
+
+
+def _staged_same_repo_draft_missing(shard: ShardMetadata, directory: Path) -> bool:
+    """True when a card's same-repo served draft GGUF is absent from a staged dir.
+
+    The generic completeness probe (``_staged_directory_looks_complete``) only
+    checks the base shard group, so a dir staged before the draft was co-fetched
+    (or from a stale base-only store entry) still "looks complete" yet the served
+    runner's ``--model-draft`` resolution fails. Treating such a dir as incomplete
+    forces re-staging, which (with a draft-complete store entry) pulls the draft
+    down too. Scoped to the same-repo case; a separate-repo draft has its own dir.
+    """
+    return any(
+        not (directory / draft_file).is_file()
+        for draft_file in _same_repo_draft_files(shard.model_card)
     )
 
 
@@ -460,6 +499,7 @@ class ModelStoreClient:
         timeout: float = 7200,
         poll_interval: float = 5.0,
         pinned_gguf: str | None = None,
+        extra_pinned_gguf: list[str] | None = None,
     ) -> bool:
         """Request the store host download a model from HuggingFace, then wait.
 
@@ -475,6 +515,10 @@ class ModelStoreClient:
                 sent in the POST body so the store fetches that quant's shard
                 group rather than its default (#344). ``None`` for non-GGUF
                 models or when no pin applies.
+            extra_pinned_gguf: Same-repo companion GGUFs (a served-engine draft
+                bundled with the base) to co-fetch with the base quant, sent in
+                the POST body. ``None`` when the card declares no same-repo
+                companion. An older store host ignores the unknown field.
 
         Returns:
             ``True`` if download completed successfully.
@@ -487,14 +531,18 @@ class ModelStoreClient:
 
         encoded_id = quote(model_id, safe="")
 
-        # Request download. Send the pinned quant in the body when present; an
-        # older store host ignores the unknown body and uses its default (#344).
+        # Request download. Send the pinned quant + same-repo companions in the
+        # body when present; an older store host ignores unknown body fields and
+        # uses its default (#344).
         url = _make_store_url(
             self._store_host, self._store_port, f"/models/{encoded_id}/download"
         )
-        post_kwargs: dict[str, object] = (
-            {"json": {"gguf_file": pinned_gguf}} if pinned_gguf else {}
-        )
+        download_body: dict[str, object] = {}
+        if pinned_gguf:
+            download_body["gguf_file"] = pinned_gguf
+        if extra_pinned_gguf:
+            download_body["extra_gguf_files"] = extra_pinned_gguf
+        post_kwargs: dict[str, object] = {"json": download_body} if download_body else {}
         async with (
             create_http_session(timeout_profile="short") as session,
             session.post(url, **post_kwargs) as resp,  # pyright: ignore[reportArgumentType]
@@ -894,6 +942,7 @@ class ModelStoreDownloader(ShardDownloader):
                     direct_path.exists()
                     and _staged_directory_looks_complete(direct_path)
                     and not _staged_vision_projector_missing(shard, direct_path)
+                    and not _staged_same_repo_draft_missing(shard, direct_path)
                 ):
                     logger.info(
                         f"ModelStoreDownloader: staging disabled — loading {model_id} directly from store at {direct_path}"
@@ -914,6 +963,7 @@ class ModelStoreDownloader(ShardDownloader):
             dest_path.exists()
             and _staged_directory_looks_complete(dest_path)
             and not _staged_vision_projector_missing(shard, dest_path)
+            and not _staged_same_repo_draft_missing(shard, dest_path)
         ):
             logger.info(
                 f"ModelStoreDownloader: {model_id} already staged at {dest_path} — skipping availability probe"
@@ -922,8 +972,21 @@ class ModelStoreDownloader(ShardDownloader):
             return dest_path
 
         available = await self._store_client.is_model_available(model_id)
+        same_repo_drafts = _same_repo_draft_files(shard.model_card)
 
         if available:
+            if same_repo_drafts:
+                # A stale base-only store entry (registered before this card
+                # declared a same-repo draft) would stage without the draft and
+                # the served runner's --model-draft path would 404. Ensure the
+                # canonical entry carries the draft before staging; idempotent
+                # (a draft-complete entry returns immediately). The store host
+                # performs any needed HF fetch (workers never download directly).
+                await self._store_client.request_and_wait_for_download(
+                    model_id,
+                    pinned_gguf=shard.model_card.gguf_file,
+                    extra_pinned_gguf=same_repo_drafts,
+                )
             logger.info(
                 f"ModelStoreDownloader: staging {model_id} from store → {dest_path}"
             )
@@ -964,8 +1027,10 @@ class ModelStoreDownloader(ShardDownloader):
                         shard, status="in_progress"
                     ),
                     # Forward the card's pinned quant so the store fetches it
-                    # rather than its default preference (#344).
+                    # rather than its default preference (#344), plus any same-repo
+                    # draft GGUF bundled with the base so it is co-fetched.
                     pinned_gguf=shard.model_card.gguf_file,
+                    extra_pinned_gguf=same_repo_drafts,
                 )
             except (RuntimeError, TimeoutError) as exc:
                 raise ModelNotInStoreError(

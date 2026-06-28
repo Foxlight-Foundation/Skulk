@@ -205,3 +205,77 @@ def test_pinned_none_matches_prior_default_behavior() -> None:
         == {e.path for e in select_store_gguf_download_files(files)}
         == {"config.json", "model-Q4_K_M.gguf"}
     )
+
+
+def test_extra_pinned_same_repo_draft_is_cofetched() -> None:
+    # A served-engine draft GGUF bundled in the base repo (served_spec_draft_repo
+    # == base repo) must be co-fetched with the base quant in one store download,
+    # or the served runner's --model-draft path 404s on the staged dir.
+    files = [
+        _entry("config.json"),
+        _entry("gemma-4-31B-it-IQ4_XS.gguf", 16000),
+        _entry("mtp-gemma-4-31B-it.gguf", 500),
+        _entry("gemma-4-31B-it-Q8_0.gguf", 30000),  # other quant: dropped
+    ]
+    kept = {
+        e.path
+        for e in select_store_gguf_download_files(
+            files,
+            "gemma-4-31B-it-IQ4_XS.gguf",
+            ["mtp-gemma-4-31B-it.gguf"],
+        )
+    }
+    assert kept == {
+        "config.json",
+        "gemma-4-31B-it-IQ4_XS.gguf",
+        "mtp-gemma-4-31B-it.gguf",
+    }
+
+
+def test_extra_pinned_sharded_draft_keeps_whole_group() -> None:
+    files = [
+        _entry("config.json"),
+        _entry("base-Q4_K_M.gguf", 800),
+        _entry("draft-00001-of-00002.gguf", 200),
+        _entry("draft-00002-of-00002.gguf", 200),
+    ]
+    kept = {
+        e.path
+        for e in select_store_gguf_download_files(
+            files, "base-Q4_K_M.gguf", ["draft-00001-of-00002.gguf"]
+        )
+    }
+    assert kept == {
+        "config.json",
+        "base-Q4_K_M.gguf",
+        "draft-00001-of-00002.gguf",
+        "draft-00002-of-00002.gguf",
+    }
+
+
+def test_extra_pin_absent_from_repo_is_skipped() -> None:
+    # An extra pin that names no file in the repo is dropped (warned), not an
+    # error: a genuinely absent draft surfaces loudly later at runner launch.
+    files = [
+        _entry("config.json"),
+        _entry("base-Q4_K_M.gguf", 800),
+    ]
+    kept = {
+        e.path
+        for e in select_store_gguf_download_files(
+            files, "base-Q4_K_M.gguf", ["nonexistent-draft.gguf"]
+        )
+    }
+    assert kept == {"config.json", "base-Q4_K_M.gguf"}
+
+
+def test_extra_pinned_none_matches_prior_behavior() -> None:
+    files = [
+        _entry("config.json"),
+        _entry("base-Q4_K_M.gguf", 800),
+    ]
+    assert (
+        {e.path for e in select_store_gguf_download_files(files, "base-Q4_K_M.gguf", None)}
+        == {e.path for e in select_store_gguf_download_files(files, "base-Q4_K_M.gguf")}
+        == {"config.json", "base-Q4_K_M.gguf"}
+    )
