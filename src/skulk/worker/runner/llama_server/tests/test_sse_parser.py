@@ -14,6 +14,7 @@ from skulk.worker.runner.llama_server.runner import (
     _SPEC_TYPE_FLAG,
     _draft_model_args,
     _gpu_layers_for_backend,
+    _model_declares_reasoning,
     _parse_sse_line,
 )
 
@@ -66,6 +67,25 @@ def test_draft_args_missing_file_on_disk_raises(
     monkeypatch.setattr(du, "build_model_path", _fake_build_model_path)
     with pytest.raises(RuntimeError, match="not found under"):
         _draft_model_args(_runtime(repo="org/draft-GGUF", file="missing.gguf"), "draft_simple")
+
+
+def _card(reasoning: object = None, capabilities: list[str] | None = None) -> SimpleNamespace:
+    return SimpleNamespace(reasoning=reasoning, capabilities=capabilities or [])
+
+
+def test_reasoning_card_section_declares_reasoning() -> None:
+    assert _model_declares_reasoning(_card(reasoning=SimpleNamespace())) is True
+
+
+def test_thinking_capability_declares_reasoning() -> None:
+    assert _model_declares_reasoning(_card(capabilities=["text", "thinking"])) is True
+
+
+def test_plain_text_card_declares_no_reasoning() -> None:
+    # Gemma 4 served card: reasoning=None, capabilities=["text"] -> served with
+    # --reasoning-format none so output stays in message.content.
+    assert _model_declares_reasoning(_card(capabilities=["text"])) is False
+    assert _model_declares_reasoning(_card()) is False
 
 
 def test_parse_content_delta() -> None:

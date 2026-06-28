@@ -134,6 +134,23 @@ def _draft_model_args(runtime: Any, spec_type: str) -> list[str]:
         )
     return []
 
+
+def _model_declares_reasoning(card: Any) -> bool:
+    """Whether the card advertises a reasoning/thinking capability.
+
+    Drives ``--reasoning-format``: a reasoning model keeps llama-server's default
+    (``auto``) so thoughts land in ``message.reasoning_content`` (which the runner
+    flags as ``is_thinking``); a non-reasoning model is served with
+    ``--reasoning-format none`` so all output stays in ``message.content``.
+    Without that, llama-server's ``auto`` can extract a plain model's prose into
+    ``reasoning_content`` (observed with Gemma 4 served via ``--jinja``), leaving
+    ``message.content`` empty for the client. Detection mirrors the capability
+    spine: an explicit ``reasoning`` card section or a ``thinking`` capability.
+    """
+    if getattr(card, "reasoning", None) is not None:
+        return True
+    return "thinking" in (getattr(card, "capabilities", None) or [])
+
 # How long to wait for the server to finish loading the model and report healthy.
 # A large GGUF on a GPU node can take a while to map + warm up.
 _HEALTH_DEADLINE_S: Final = 600.0
@@ -366,7 +383,9 @@ class Runner:
 
         n_ctx = serving_n_ctx(self.context_token_limit, logits_all=False)
         try:
-            self._spawn_server(gguf_path, n_ctx, card.runtime)
+            self._spawn_server(
+                gguf_path, n_ctx, card.runtime, _model_declares_reasoning(card)
+            )
             self._await_health()
         except Exception:
             self._teardown_server()
@@ -377,7 +396,13 @@ class Runner:
             f"(url={self.base_url})"
         )
 
-    def _spawn_server(self, gguf_path: Path, n_ctx: int, runtime: Any) -> None:
+    def _spawn_server(
+        self,
+        gguf_path: Path,
+        n_ctx: int,
+        runtime: Any,
+        model_has_reasoning: bool,
+    ) -> None:
         binary = os.environ.get(LLAMA_SERVER_BIN_ENV, "").strip()
         if not binary:
             raise RuntimeError(
@@ -409,6 +434,14 @@ class Runner:
             # tool calling and reasoning-content extraction work server-side.
             "--jinja",
         ]
+        # A non-reasoning model is served with --reasoning-format none so all
+        # output stays in message.content. llama-server's default (auto) can
+        # extract a plain model's prose into reasoning_content (seen with Gemma 4
+        # under --jinja), which the runner flags as is_thinking, leaving the
+        # client's message.content empty. A reasoning model keeps the default so
+        # its thoughts land in reasoning_content (mapped to is_thinking here).
+        if not model_has_reasoning:
+            cmd += ["--reasoning-format", "none"]
         spec_type = getattr(runtime, "served_spec_type", None) if runtime else None
         if spec_type and spec_type != "none":
             flag = _SPEC_TYPE_FLAG.get(spec_type)
