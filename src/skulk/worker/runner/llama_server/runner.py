@@ -40,6 +40,7 @@ import httpx
 from anyio import WouldBlock
 
 from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
+from skulk.shared.models.model_cards import OutputParserType
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk, ToolCallChunk
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
@@ -78,6 +79,9 @@ from skulk.worker.runner.llama_cpp.runner import (
     serving_n_ctx,
     tool_calls_from_message,
     wants_logprobs,
+)
+from skulk.worker.runner.llama_server.channel_text_parser import (
+    GemmaChannelTextParser,
 )
 
 # Card ``served_spec_type`` value -> the ``llama-server --spec-type`` token.
@@ -272,6 +276,10 @@ class Runner:
         self.server_log: Any = None
         self.server_log_path: Path | None = None
         self.base_url: str | None = None
+        # Set at load: the card declares a channel output parser (Gemma 4), so the
+        # served runner reparses ``<|channel>`` markers out of the content stream
+        # itself (llama-server can't), splitting reasoning from the answer.
+        self._uses_channel_parser: bool = False
         self.current_status: RunnerStatus = RunnerIdle()
         logger.info("llama-server runner created")
         self.update_status(RunnerIdle())
@@ -381,11 +389,20 @@ class Runner:
         if gguf_path is None:
             gguf_path = select_gguf_file(model_dir)
 
+        # When the card declares a channel output parser we strip reasoning
+        # markers ourselves, so llama-server must hand back raw text
+        # (--reasoning-format none) regardless of whether the model "reasons":
+        # its own reasoning parsers don't understand Gemma 4's <|channel> tokens.
+        self._uses_channel_parser = (
+            card.runtime is not None
+            and card.runtime.output_parser == OutputParserType.Gemma4
+        )
+        reasoning_format_none = self._uses_channel_parser or not (
+            _model_declares_reasoning(card)
+        )
         n_ctx = serving_n_ctx(self.context_token_limit, logits_all=False)
         try:
-            self._spawn_server(
-                gguf_path, n_ctx, card.runtime, _model_declares_reasoning(card)
-            )
+            self._spawn_server(gguf_path, n_ctx, card.runtime, reasoning_format_none)
             self._await_health()
         except Exception:
             self._teardown_server()
@@ -401,7 +418,7 @@ class Runner:
         gguf_path: Path,
         n_ctx: int,
         runtime: Any,
-        model_has_reasoning: bool,
+        reasoning_format_none: bool,
     ) -> None:
         binary = os.environ.get(LLAMA_SERVER_BIN_ENV, "").strip()
         if not binary:
@@ -434,13 +451,13 @@ class Runner:
             # tool calling and reasoning-content extraction work server-side.
             "--jinja",
         ]
-        # A non-reasoning model is served with --reasoning-format none so all
-        # output stays in message.content. llama-server's default (auto) can
-        # extract a plain model's prose into reasoning_content (seen with Gemma 4
-        # under --jinja), which the runner flags as is_thinking, leaving the
-        # client's message.content empty. A reasoning model keeps the default so
-        # its thoughts land in reasoning_content (mapped to is_thinking here).
-        if not model_has_reasoning:
+        # --reasoning-format none hands back raw text in message.content. We use
+        # it for (a) plain non-reasoning models (otherwise llama-server's default
+        # `auto` extracts their prose into reasoning_content, leaving content
+        # empty) and (b) models we parse ourselves (Gemma 4's <|channel> markers,
+        # which llama-server's parsers mishandle). A reasoning model llama-server
+        # *can* parse keeps the default so its thoughts land in reasoning_content.
+        if reasoning_format_none:
             cmd += ["--reasoning-format", "none"]
         spec_type = getattr(runtime, "served_spec_type", None) if runtime else None
         if spec_type and spec_type != "none":
@@ -599,6 +616,9 @@ class Runner:
         body["stream"] = True
         assert self.base_url is not None
         emitted_finish = False
+        # Gemma 4 emits its reasoning as literal <|channel> markers in content;
+        # reparse them here (llama-server can't) into reasoning/content chunks.
+        parser = GemmaChannelTextParser() if self._uses_channel_parser else None
         # No read timeout: generation can pause between tokens on a busy GPU. The
         # connection is closed (aborting server generation) when we break out.
         timeout = httpx.Timeout(connect=15.0, read=None, write=30.0, pool=None)
@@ -623,15 +643,31 @@ class Runner:
                         command_id, model_id, delta.reasoning, is_thinking=True
                     )
                 if delta.content:
-                    self._send_token(command_id, model_id, delta.content)
+                    if parser is not None:
+                        for text, is_thinking in parser.feed(delta.content):
+                            self._send_token(
+                                command_id, model_id, text, is_thinking=is_thinking
+                            )
+                    else:
+                        self._send_token(command_id, model_id, delta.content)
                 if delta.finish is not None:
+                    if parser is not None:
+                        for text, is_thinking in parser.flush():
+                            self._send_token(
+                                command_id, model_id, text, is_thinking=is_thinking
+                            )
                     self._send_token(
                         command_id, model_id, "", finish_reason=delta.finish
                     )
                     emitted_finish = True
         # Guarantee a terminal chunk so the consumer's stream closes even if the
-        # server ended without an explicit finish_reason.
+        # server ended without an explicit finish_reason; drain any held tail.
         if not emitted_finish and not self._is_cancelled(task.task_id):
+            if parser is not None:
+                for text, is_thinking in parser.flush():
+                    self._send_token(
+                        command_id, model_id, text, is_thinking=is_thinking
+                    )
             self._send_token(command_id, model_id, "", finish_reason="stop")
 
     def _generate_with_tools(
@@ -686,7 +722,15 @@ class Runner:
         if reasoning:
             self._send_token(command_id, model_id, reasoning, is_thinking=True)
         if content:
-            self._send_token(command_id, model_id, content)
+            if self._uses_channel_parser:
+                # Reparse Gemma 4's <|channel> markers out of the prose answer.
+                parser = GemmaChannelTextParser()
+                for text, is_thinking in parser.feed(content) + parser.flush():
+                    self._send_token(
+                        command_id, model_id, text, is_thinking=is_thinking
+                    )
+            else:
+                self._send_token(command_id, model_id, content)
         finish = map_finish_reason(choice.get("finish_reason")) or "stop"
         self._send_token(command_id, model_id, "", finish_reason=finish)
 
