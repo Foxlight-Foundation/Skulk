@@ -123,6 +123,17 @@ class CustomModelCardDeleted(BaseEvent):
     model_id: ModelId
 
 
+class StagedModelEvicted(BaseEvent):
+    """A store-deleted model whose staged copies every node should drop (#427).
+
+    apply() clears the model's download entries from State (so the planner
+    re-stages on a future placement instead of loading deleted files); each
+    worker reacts by removing the model's staged directory from disk.
+    """
+
+    model_id: ModelId
+
+
 class StateSnapshotHydrated(BaseEvent):
     """Local-only bootstrap event that replaces follower state from a snapshot."""
 
@@ -187,6 +198,7 @@ Event = (
     | TracingStateChanged
     | CustomModelCardAdded
     | CustomModelCardDeleted
+    | StagedModelEvicted
     | StateSnapshotHydrated
 )
 

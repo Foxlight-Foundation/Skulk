@@ -48,6 +48,7 @@ from skulk.shared.types.events import (
     InputChunkReceived,
     NodeDownloadProgress,
     NodeGatheredInfo,
+    StagedModelEvicted,
     TaskCreated,
     TaskStatusUpdated,
     TopologyEdgeCreated,
@@ -732,6 +733,13 @@ class Worker:
                             f"Failed to delete custom model card (model_id={event.model_id})"
                         )
 
+                if isinstance(event, StagedModelEvicted):
+                    # A store-delete removed the canonical copy; drop our local
+                    # staged copy too (#427). evict_shard never touches the
+                    # store's canonical files and is a no-op when nothing is
+                    # staged here, so this is safe to broadcast to every node.
+                    await self._evict_staged_model(event.model_id)
+
     async def plan_step(self):
         while True:
             await anyio.sleep(0.1)
@@ -1214,6 +1222,25 @@ class Worker:
             if isinstance(progress, DownloadOngoing):
                 _add_card(progress.shard_metadata.model_card)
         return frozenset(in_use)
+
+    async def _evict_staged_model(self, model_id: ModelId) -> None:
+        """Remove this node's staged copy of a store-deleted model (#427).
+
+        Unlike ``_maybe_evict_shard`` (LRU budget pass on teardown), this is a
+        direct, unconditional eviction triggered by a ``StagedModelEvicted``
+        broadcast. ``evict_shard`` is a no-op when nothing is staged here and
+        never touches the store's canonical files; the apply() side already drops
+        the model's download entries from State, so this only frees disk.
+        """
+        if self._store_client is None or self._staging_config is None:
+            return
+        cache_path = Path(self._staging_config.node_cache_path).expanduser()
+        try:
+            await self._store_client.evict_shard(model_id, cache_path)
+        except Exception:
+            logger.exception(
+                f"Failed to evict staged model on store-delete (model_id={model_id})"
+            )
 
     async def _maybe_evict_shard(self, shard: ShardMetadata | None) -> None:
         """Hold the staging cache to its recent-use budget after teardown.

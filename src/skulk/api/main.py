@@ -207,6 +207,7 @@ from skulk.shared.types.commands import (
     DeleteDownload,
     DeleteInstance,
     DownloadCommand,
+    EvictStagedModel,
     ForwarderCommand,
     ForwarderDownloadCommand,
     ImageEdits,
@@ -5519,6 +5520,27 @@ class API:
         if not deleted:
             raise HTTPException(
                 status_code=404, detail=f"Model {model_id} not in store"
+            )
+        # The store-delete above only removed the store host's canonical copy.
+        # Workers cache their own staged shards independently, so broadcast a
+        # fleet-wide eviction to free that disk too (#427). The canonical delete
+        # has already succeeded, so a failure to dispatch the (best-effort)
+        # eviction must not turn this into a 500: that would report the delete as
+        # failed while it actually happened, and a retry would 404 and never
+        # broadcast the eviction at all. Log and still report success; the
+        # staging budget pass and POST /store/purge-staging are the backstops.
+        try:
+            await self.command_sender.send(
+                ForwarderCommand(
+                    origin=self._system_id,
+                    command=EvictStagedModel(model_id=ModelId(model_id)),
+                )
+            )
+        except Exception:
+            logger.exception(
+                "Store-delete succeeded but the staged-eviction broadcast failed "
+                f"(model_id={model_id}); staged copies will be reclaimed by the "
+                "staging budget pass or a manual purge"
             )
         return JSONResponse({"modelId": model_id, "deleted": True})
 

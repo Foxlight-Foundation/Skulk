@@ -9,6 +9,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **Store-delete now evicts worker-staged copies cluster-wide (#427).** Deleting a
+  model from the store (`DELETE /store/models/{model_id}`) previously removed only
+  the store host's canonical copy; workers cache their own staged shards
+  independently, so the deleted model lingered on worker disk until LRU pressure.
+  The API now broadcasts a fleet-wide `EvictStagedModel` command after a successful
+  store-delete: every node drops its local staged copy and the model's download
+  entries are cleared from cluster `State`, so the planner re-stages on a future
+  placement instead of loading deleted files.
+
 - **Served-backend engine (`llama_server`) with native MTP speculative decoding.**
   A new inference-engine class that launches an external `llama-server` subprocess
   and proxies its OpenAI HTTP API, coexisting with the in-process `mlx` and

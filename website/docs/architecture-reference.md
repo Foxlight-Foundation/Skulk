@@ -167,6 +167,7 @@ Discriminated union at `src/skulk/shared/types/events.py`. Selected events:
 | `TracesCollected` | Runner emits trace events for one rank | Master (merges across ranks) |
 | `TracesMerged` | Master merges + persists a complete trace | API (writes to disk) |
 | `TracingStateChanged` | Cluster tracing toggle changes | All nodes |
+| `StagedModelEvicted` | A store-deleted model's locally-staged copies should be dropped fleet-wide (#427) | All nodes: `apply` removes the model's download entries from State (so the planner re-stages on a future placement instead of loading deleted files); each worker reacts by `rmtree`-ing the model's staged directory (`_evict_staged_model` → `ModelStoreClient.evict_shard`, which never touches the store's canonical copy) |
 
 Apply function: `src/skulk/shared/apply.py::apply` — pure `(State, IndexedEvent) -> State`.
 
@@ -188,6 +189,7 @@ Discriminated union at `src/skulk/shared/types/commands.py`. Carried as `Forward
 | `SetTracingEnabled` | Cluster-wide tracing toggle | Emit `TracingStateChanged` |
 | `AddCustomModelCard` | User-added model card | Emit `CustomModelCardAdded`; nodes persist locally |
 | `DeleteCustomModelCard` | Remove user card | Emit `CustomModelCardDeleted` |
+| `EvictStagedModel` | Drop a store-deleted model's locally-staged copies fleet-wide. Sent by the API right after `DELETE /store/models/{id}` removes the store host's canonical copy, because workers cache their own staged shards independently of the store (#427). | Emit `StagedModelEvicted` |
 
 **Download-failure recovery (#381, plan loop, not a command):** a multi-node instance whose ring forms but where one rank's model **download** fails terminally (disk full, transient HF/network error) sits at `RunnerConnected` forever: the failed rank never becomes load-ready and nothing fails or recovers it. The master's `_plan` reconcile (`_recover_download_failed_instances`, gated on the same `TOPOLOGY_SETTLE_GRACE_SECONDS` as the liveness passes) detects it via `instances_wedged_by_download_failure` (a not-all-ready instance whose any rank node carries a terminal `DownloadFailed` for the model), fails in-flight API tasks bound to it (cause surfaced), tears it down, and re-places at the **same width excluding the failed node(s)** (`replacement_command_for_download_failed_instance` + `place_instance(excluded_nodes=...)`). `PlacementError` (no healthy node set hosts the width, e.g. a cluster-wide failure) is terminal: stop at the teardown. Deduped via `_download_failure_recovered` (same rationale as `_refusal_replaced`: events are emitted by the plan pass but not applied until they round-trip). A ready/serving instance is never torn down by this path even if a stale `DownloadFailed` lingers.
 
@@ -435,7 +437,7 @@ Selection logic: `src/skulk/worker/engines/mlx/cache.py::make_kv_cache`. Some ba
 | Section | Field | What |
 |---|---|---|
 | `model_store` | `enabled`, `host`, `port`, `path` | Shared model store config |
-| `model_store.staging` | `enabled`, `node_cache_path`, `cleanup_on_deactivate` | Staging behavior |
+| `model_store.staging` | `enabled`, `node_cache_path`, `cleanup_on_deactivate` (default true; gates the recency pass, off = no auto-eviction), `staging_keep_recent_gb` (default 40, recency floor for idle copies; 0 = strict evict-on-deactivate) | Staging behavior. Recency pass is lifecycle-triggered (deactivate + startup), NOT disk-pressure-triggered. Store-delete (`EvictStagedModel`) and `POST /store/purge-staging` are separate unconditional paths that ignore both the toggle and the budget |
 | `inference` | `kv_cache_backend` | KV cache selection |
 | `logging` | `enabled`, `ingest_url` | Centralized logging opt-in |
 | `tracing` | `retention_days` | Saved-trace retention for the API janitor (default 3 days; 0 disables pruning) |
