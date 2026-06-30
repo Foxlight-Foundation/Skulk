@@ -119,13 +119,18 @@ model_store:
   staging:
     enabled: true
     node_cache_path: ~/.skulk/staging
-    cleanup_on_deactivate: false
+    # Keep the newest ~40 GiB of idle staged copies warm and evict older ones
+    # on deactivation/startup. Warm and bounded. Set false to keep everything
+    # (unbounded) and reclaim disk only via POST /store/purge-staging.
+    cleanup_on_deactivate: true
+    staging_keep_recent_gb: 40
 
   node_overrides:
     mac-studio-1:
+      # The store host loads directly from the store path, so it makes no
+      # second copy and the recency budget is skipped here regardless.
       staging:
         node_cache_path: /Volumes/ModelStore/models
-        cleanup_on_deactivate: false
 ```
 
 ## How to Think About It
@@ -138,6 +143,71 @@ There are two important paths:
 For worker nodes, `node_cache_path` is usually a fast local path such as `~/.skulk/staging`.
 
 For the store host, you often point `node_cache_path` at the same directory as `store_path` so the store host can load directly from the shared volume without making another copy.
+
+## Staging Cache and Disk Management
+
+When a worker needs a model it does not host, it copies that model's files from
+the store host into its local staging directory (`node_cache_path`, default
+`~/.skulk/staging`) and loads from there. Staged copies are independent per
+node: the store host keeps the canonical copy, and each worker keeps its own
+staged copy of whatever it has run. Left unmanaged, staging grows without bound,
+so Skulk keeps it in check with a single recency policy plus an explicit delete
+path.
+
+### What counts as "in use"
+
+A staged copy is **in use** whenever a live runner depends on it, including
+companion repositories that no instance names directly (a speculative-decoding
+draft model, an assistant model, or separate vision weights). In-use copies are
+never evicted automatically.
+
+### The recency budget
+
+Idle (not-in-use) staged copies are kept newest-first up to
+`staging_keep_recent_gb` (default 40 GiB); anything beyond that budget is
+deleted. The budget is a floor for recently used data, not a disk-pressure
+threshold. Nothing watches free space and triggers eviction when the disk fills:
+the check runs at two specific moments, and only when `cleanup_on_deactivate` is
+`true`:
+
+- when a model instance is shut down, and
+- at node startup, which reconciles copies orphaned by a crash or kill.
+
+`cleanup_on_deactivate` is the on/off switch for that check:
+
+| Setting | Behavior |
+|---------|----------|
+| `true` (default, recommended) | Keep the newest ~40 GiB of idle copies warm; delete older idle copies when an instance shuts down and at node startup. The in-use set is always kept and does not count against the budget. Warm and bounded. |
+| `false` | Never evict automatically. Every staged copy is kept until you reclaim space manually. Warm, but unbounded: a busy node can fill its disk. |
+
+Set `staging_keep_recent_gb` to `0` for strict evict-on-deactivate (keep only
+what is in use). Raise it on nodes with large disks to keep more models warm.
+
+The in-use set rides on top of the budget rather than inside it: a node always
+keeps everything its live runners need, plus up to 40 GiB of the most recently
+used idle copies.
+
+> The store host is a special case. When a node points `node_cache_path` at the
+> same directory as `store_path` (so it loads directly from the store without a
+> second copy), the recency budget is skipped on that node whatever the toggle
+> says. The store's canonical copies are never auto-evicted.
+
+### Deleting a model from the store
+
+`DELETE /store/models/{model_id}` removes the canonical copy from the store host
+**and** evicts that model's staged copy from every node in the cluster at once.
+This path is unconditional: it ignores both `cleanup_on_deactivate` and the
+recency budget, because once the canonical copy is gone the staged copies are
+orphans. Use it to remove a model everywhere and reclaim its disk fleet-wide in
+one call.
+
+### Reclaiming disk manually
+
+`POST /store/purge-staging` clears staged copies on every node without touching
+the store's canonical copies. With no body it purges the whole staging cache;
+scoped to a `model_id` it purges just that model. Use it when
+`cleanup_on_deactivate` is `false`, or when you want space back immediately
+rather than waiting for the next deactivation.
 
 ## Important Fields
 
@@ -178,11 +248,19 @@ Where a node stages files before loading them.
 
 ### `model_store.staging.cleanup_on_deactivate`
 
-If `true`, staged files are cleaned up when instances are shut down. The
-recommended default is `false`, which keeps the local staging cache warm so
-large models do not need to be copied from the store again on every placement.
-Use `POST /store/purge-staging` when you intentionally want to reclaim disk
-space.
+Controls automatic eviction of idle staged copies. Default `true` (recommended):
+when a model is shut down, or at node startup, idle staged copies beyond the
+`staging_keep_recent_gb` budget are deleted, keeping the cache warm but bounded.
+Set to `false` to keep every staged copy and reclaim disk only via
+`POST /store/purge-staging`. See
+[Staging Cache and Disk Management](#staging-cache-and-disk-management).
+
+### `model_store.staging.staging_keep_recent_gb`
+
+Recency budget in GiB for idle staged copies (default `40`). Eviction keeps the
+newest idle copies up to this size and deletes the rest; `0` evicts everything
+not in use, and larger values keep more models warm on big-disk nodes. Applies
+only when `cleanup_on_deactivate` is `true`.
 
 ## Typical Flow
 
@@ -280,17 +358,22 @@ multimodal request through the chat APIs.
 
 ### Placements are slow even though the model is already in the store
 
-Check whether `cleanup_on_deactivate` is enabled. If it is `true`, each model
-deactivation removes the local staged copy, so the next placement must copy the
-model from the store host again before MLX can load it. Set it to `false` for
-normal clusters and purge staging caches explicitly when disk pressure requires
-it.
+A staged copy that falls outside the recency budget had to be re-copied from the
+store host before loading. With `cleanup_on_deactivate: true` (the default), the
+newest ~40 GiB of idle copies stay warm, but a model larger than the budget, or
+one pushed out by other recently used models, is evicted and re-staged on its
+next placement. Raise `staging_keep_recent_gb` to keep more models warm, or set
+it large enough to hold the models you cycle between. Setting
+`cleanup_on_deactivate: false` keeps every copy warm but lets staging grow
+without bound (reclaim disk with `POST /store/purge-staging`).
 
 ### Staged files are not being cleaned up
 
-This is usually expected. Skulk keeps staged files by default so repeated
-placements are warm. If you need disk space back, either enable
-`cleanup_on_deactivate` for that node or use the model-store purge action.
+With `cleanup_on_deactivate: false`, nothing is evicted automatically, so
+staging keeps growing. Either leave it at the `true` default (which keeps the
+newest ~40 GiB warm and evicts the rest on deactivation/startup) or reclaim
+space on demand with `POST /store/purge-staging`. Note that the store host never
+auto-evicts its own canonical copies when `node_cache_path` equals `store_path`.
 
 ## Good Defaults for Most Clusters
 

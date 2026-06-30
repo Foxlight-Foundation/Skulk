@@ -437,7 +437,7 @@ Selection logic: `src/skulk/worker/engines/mlx/cache.py::make_kv_cache`. Some ba
 | Section | Field | What |
 |---|---|---|
 | `model_store` | `enabled`, `host`, `port`, `path` | Shared model store config |
-| `model_store.staging` | `enabled`, `node_cache_path`, `cleanup_on_deactivate` | Staging behavior |
+| `model_store.staging` | `enabled`, `node_cache_path`, `cleanup_on_deactivate` (default true; gates the recency pass, off = no auto-eviction), `staging_keep_recent_gb` (default 40, recency floor for idle copies; 0 = strict evict-on-deactivate) | Staging behavior. Recency pass is lifecycle-triggered (deactivate + startup), NOT disk-pressure-triggered. Store-delete (`EvictStagedModel`) and `POST /store/purge-staging` are separate unconditional paths that ignore both the toggle and the budget |
 | `inference` | `kv_cache_backend` | KV cache selection |
 | `logging` | `enabled`, `ingest_url` | Centralized logging opt-in |
 | `tracing` | `retention_days` | Saved-trace retention for the API janitor (default 3 days; 0 disables pruning) |

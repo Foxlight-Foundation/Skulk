@@ -27,7 +27,7 @@ const defaultStoreConfig = (): StoreConfig => ({
   staging: {
     enabled: true,
     node_cache_path: '~/.skulk/staging',
-    cleanup_on_deactivate: false,
+    cleanup_on_deactivate: true,
   },
 });
 
@@ -483,7 +483,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                         filled
                         content={t(
                           'settings.staging.cleanupOnDeactivateTooltip',
-                          'When enabled, staged models are removed when instances stop. Leave this off for faster re-placement from the local staging cache; use the model-store purge action when you need disk space back.',
+                          'When on (default), idle staged copies beyond the keep-recent budget (about 40 GiB) are removed when instances stop and at node startup, keeping the cache warm but bounded. In-use models are always kept. Turn off to keep every staged copy (unbounded) and reclaim disk only with the purge action.',
                         )}
                       />
                     </FieldLabel>
