@@ -157,11 +157,12 @@ def apply_node_download_progress(event: NodeDownloadProgress, state: State) -> S
 def apply_staged_model_evicted(event: StagedModelEvicted, state: State) -> State:
     """Drop a store-deleted model's download entries from every node (#427).
 
-    The model's staged copies are being removed from worker disk; clearing the
-    DownloadCompleted/Ongoing entries keeps State honest so the planner re-stages
-    on a future placement instead of dispatching a load at deleted files. Nodes
-    that had no copy are untouched; a node left with no downloads drops its key,
-    matching how an empty download set is otherwise represented.
+    The model's staged copies are being removed from worker disk; dropping every
+    download entry for the model (any ``DownloadProgress`` variant, keyed by
+    model id) keeps State honest so the planner re-stages on a future placement
+    instead of dispatching a load at deleted files. Nodes that had no copy are
+    untouched; a node left with no downloads drops its key, matching how an empty
+    download set is otherwise represented.
     """
     removed = False
     new_downloads: dict[NodeId, Sequence[DownloadProgress]] = {}
