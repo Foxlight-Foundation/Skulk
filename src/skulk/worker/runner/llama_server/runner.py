@@ -155,6 +155,35 @@ def _model_declares_reasoning(card: Any) -> bool:
         return True
     return "thinking" in (getattr(card, "capabilities", None) or [])
 
+
+def reasoning_request_overrides(task_params: Any) -> dict[str, Any]:
+    """Map Skulk's thinking controls onto llama-server request fields.
+
+    ``generation_kwargs`` carries sampling params but NOT thinking control, so
+    without this the served runner never tells llama-server to suppress reasoning.
+    A reasoning model then thinks on every request regardless of
+    ``enable_thinking=False``, and on a bounded ``max_tokens`` it can spend the
+    whole budget thinking and return EMPTY content (#428/#420).
+
+    llama-server exposes two levers, forwarded here:
+
+    - ``chat_template_kwargs`` -> the model's jinja chat template. ``enable_thinking``
+      is the canonical Qwen3 / Gemma toggle; a template that doesn't understand it
+      simply ignores it, so forwarding is safe across families.
+    - ``reasoning_effort`` -> OpenAI-style effort for harmony models (gpt-oss).
+      ``"none"`` is not a valid server value; disabling is expressed via
+      ``enable_thinking=False`` instead, so it is dropped here.
+    """
+    overrides: dict[str, Any] = {}
+    enable_thinking = getattr(task_params, "enable_thinking", None)
+    if enable_thinking is not None:
+        overrides["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
+    effort = getattr(task_params, "reasoning_effort", None)
+    if effort is not None and effort != "none":
+        overrides["reasoning_effort"] = effort
+    return overrides
+
+
 # How long to wait for the server to finish loading the model and report healthy.
 # A large GGUF on a GPU node can take a while to map + warm up.
 _HEALTH_DEADLINE_S: Final = 600.0
@@ -575,15 +604,17 @@ class Runner:
         command_id = task.command_id
         body: dict[str, Any] = generation_kwargs(task.task_params)
         body["messages"] = messages_for_llama(task.task_params)
+        # Forward thinking-control (enable_thinking / reasoning_effort) to
+        # llama-server. Without this a reasoning model thinks on every request and
+        # can return empty content under a bounded budget (#428/#420).
+        body.update(reasoning_request_overrides(task.task_params))
 
         try:
             # Per-token logprobs are not wired over the SSE proxy yet. Fail loud
             # rather than return a successful response with logprobs silently
             # missing, matching the in-process runner's #385 no-silent-empty
             # contract (the raise surfaces as an ErrorChunk below).
-            if wants_logprobs(
-                task.task_params.logprobs, task.task_params.top_logprobs
-            ):
+            if wants_logprobs(task.task_params.logprobs, task.task_params.top_logprobs):
                 body.pop("logprobs", None)
                 body.pop("top_logprobs", None)
                 raise RuntimeError(
