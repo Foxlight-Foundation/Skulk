@@ -207,6 +207,7 @@ from skulk.shared.types.commands import (
     DeleteDownload,
     DeleteInstance,
     DownloadCommand,
+    EvictStagedModel,
     ForwarderCommand,
     ForwarderDownloadCommand,
     ImageEdits,
@@ -5520,6 +5521,15 @@ class API:
             raise HTTPException(
                 status_code=404, detail=f"Model {model_id} not in store"
             )
+        # The store-delete above only removed the store host's canonical copy.
+        # Workers cache their own staged shards independently, so broadcast a
+        # fleet-wide eviction to free that disk too (#427).
+        await self.command_sender.send(
+            ForwarderCommand(
+                origin=self._system_id,
+                command=EvictStagedModel(model_id=ModelId(model_id)),
+            )
+        )
         return JSONResponse({"modelId": model_id, "deleted": True})
 
     async def optimize_model(self, model_id: str, request: Request) -> JSONResponse:

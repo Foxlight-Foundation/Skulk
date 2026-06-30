@@ -18,6 +18,7 @@ from skulk.shared.types.events import (
     NodeGatheredInfo,
     NodeTimedOut,
     RunnerStatusUpdated,
+    StagedModelEvicted,
     StateSnapshotHydrated,
     TaskAcknowledged,
     TaskCreated,
@@ -82,6 +83,8 @@ def event_apply(event: Event, state: State) -> State:
             return apply_node_timed_out(event, state)
         case NodeDownloadProgress():
             return apply_node_download_progress(event, state)
+        case StagedModelEvicted():
+            return apply_staged_model_evicted(event, state)
         case NodeGatheredInfo():
             return apply_node_gathered_info(event, state)
         case RunnerStatusUpdated():
@@ -148,6 +151,32 @@ def apply_node_download_progress(event: NodeDownloadProgress, state: State) -> S
         **state.downloads,
         node_id: current,
     }
+    return state.model_copy(update={"downloads": new_downloads})
+
+
+def apply_staged_model_evicted(event: StagedModelEvicted, state: State) -> State:
+    """Drop a store-deleted model's download entries from every node (#427).
+
+    The model's staged copies are being removed from worker disk; clearing the
+    DownloadCompleted/Ongoing entries keeps State honest so the planner re-stages
+    on a future placement instead of dispatching a load at deleted files. Nodes
+    that had no copy are untouched; a node left with no downloads drops its key,
+    matching how an empty download set is otherwise represented.
+    """
+    removed = False
+    new_downloads: dict[NodeId, Sequence[DownloadProgress]] = {}
+    for node_id, progresses in state.downloads.items():
+        kept = [
+            dp
+            for dp in progresses
+            if dp.shard_metadata.model_card.model_id != event.model_id
+        ]
+        if len(kept) != len(progresses):
+            removed = True
+        if kept:
+            new_downloads[node_id] = kept
+    if not removed:
+        return state
     return state.model_copy(update={"downloads": new_downloads})
 
 

@@ -730,6 +730,13 @@ A pin naming a file not present in the repo falls back to the default.
 
 **DELETE** `/store/models/{model_id}`
 
+Removes the model from the store host (registry + disk) and broadcasts a
+cluster-wide eviction so every node also drops its locally-staged copy, freeing
+disk fleet-wide instead of leaving worker copies until they age out under
+staging pressure. Returns `404` if the model is not registered in the store. (To
+clear staged copies without deleting the store copy, use
+`POST /store/purge-staging`.)
+
 ### Purge staging caches
 
 **POST** `/store/purge-staging`
