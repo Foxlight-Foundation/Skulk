@@ -18,8 +18,12 @@ This project records release notes here and mirrors public-facing notes in
   downloads now have no `total` cap and are instead policed by `sock_read` /
   `sock_connect` inactivity timeouts: a genuinely stalled connection still times
   out and retries (resuming from the `.partial`), while a slow-but-alive transfer
-  of any size completes. Store download failures also now record the exception
-  type instead of an empty error string.
+  of any size completes. The worker-side wait for a store download
+  (`request_and_wait_for_download`) is likewise now progress-aware: its timeout
+  is a stall timeout (max time without progress), not a total cap, so the worker
+  no longer gives up on a live, still-progressing multi-hour download and lets
+  the master tear the placement down. Store download failures also now record the
+  exception type instead of an empty error string.
 
 - **Store re-download after a delete no longer silently no-ops.** `ModelStore`
   caches per-model download status in memory; `delete_model` removed the registry
