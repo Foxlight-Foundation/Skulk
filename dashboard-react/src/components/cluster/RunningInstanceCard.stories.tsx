@@ -16,7 +16,7 @@ export const Ready: Story = {
     modelId: 'mlx-community/Qwen3.5-9B-4bit',
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
-    nodeNames: ['kite2'],
+    nodeStatuses: [{ name: 'kite2', state: 'ready' }],
     status: 'ready',
     onDelete: () => {},
   },
@@ -28,11 +28,35 @@ export const ReadyWithSpeculation: Story = {
     modelId: 'mlx-community/Qwen3.5-9B-MLX-4bit',
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
-    nodeNames: ['kite1', 'kite2', 'kite3'],
+    nodeStatuses: [
+      { name: 'kite1', state: 'ready' },
+      { name: 'kite2', state: 'ready' },
+      { name: 'kite3', state: 'ready' },
+    ],
     status: 'ready',
     speculation: { kind: 'sidecar', depth: 1 },
     onDelete: () => {},
   },
+};
+
+export const LoadingMultiNode: Story = {
+  args: {
+    instanceId: 'b917513d-7956-4dfe-9533-0e677c7a62d2',
+    modelId: 'mlx-community/Qwen3.6-27B-4bit',
+    sharding: 'Pipeline',
+    instanceType: 'MlxRing',
+    // One node lagging: kite1 + kite3 ready, kite2 still coming up. The per-node
+    // line makes the laggard obvious instead of a bare "Connecting...".
+    nodeStatuses: [
+      { name: 'kite1', state: 'ready' },
+      { name: 'kite2', state: 'loading' },
+      { name: 'kite3', state: 'ready' },
+    ],
+    status: 'loading',
+    speculation: { kind: 'sidecar', depth: 1 },
+    onDelete: () => {},
+  },
+  name: 'Loading (multi-node, one laggard)',
 };
 
 export const Running: Story = {
@@ -41,7 +65,7 @@ export const Running: Story = {
     modelId: 'mlx-community/Llama-3.1-8B-Instruct-4bit',
     sharding: 'Tensor',
     instanceType: 'MlxJaccl',
-    nodeNames: ['kite1'],
+    nodeStatuses: [{ name: 'kite1', state: 'ready' }],
     status: 'running',
     onDelete: () => {},
   },
@@ -53,7 +77,7 @@ export const Loading: Story = {
     modelId: 'mlx-community/NVIDIA-Nemotron-Nano-9B-v2-4bits',
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
-    nodeNames: ['kite3'],
+    nodeStatuses: [{ name: 'kite3', state: 'loading' }],
     status: 'loading',
     loadProgress: 45,
     statusMessage: 'Downloading layers 14/32...',
@@ -67,7 +91,7 @@ export const WarmingUp: Story = {
     modelId: 'mlx-community/Qwen3-30B-A3B-4bit',
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
-    nodeNames: ['kite2'],
+    nodeStatuses: [{ name: 'kite2', state: 'loading' }],
     status: 'warming_up',
     loadProgress: 90,
     statusMessage: 'Compiling model graph...',
@@ -81,7 +105,7 @@ export const Failed: Story = {
     modelId: 'mlx-community/DeepSeek-V3-0324',
     sharding: 'Tensor',
     instanceType: 'MlxJaccl',
-    nodeNames: ['kite1'],
+    nodeStatuses: [{ name: 'kite1', state: 'failed' }],
     status: 'failed',
     statusMessage: 'Out of memory: requires 48GB, only 32GB available',
     onDelete: () => {},
@@ -94,7 +118,7 @@ export const ShuttingDown: Story = {
     modelId: 'mlx-community/Qwen3.5-9B-4bit',
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
-    nodeNames: ['kite3'],
+    nodeStatuses: [{ name: 'kite3', state: 'stopping' }],
     status: 'shutting_down',
   },
 };
@@ -105,7 +129,7 @@ export const NoDeleteButton: Story = {
     modelId: 'mlx-community/Qwen3.5-9B-4bit',
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
-    nodeNames: ['kite2'],
+    nodeStatuses: [{ name: 'kite2', state: 'ready' }],
     status: 'ready',
   },
 };
@@ -116,7 +140,7 @@ export const LongModelId: Story = {
     modelId: 'mlx-community/some-very-long-model-name-that-might-wrap-to-multiple-lines-4bit',
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
-    nodeNames: ['kite2'],
+    nodeStatuses: [{ name: 'kite2', state: 'ready' }],
     status: 'ready',
     onDelete: () => {},
   },

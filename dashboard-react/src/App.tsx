@@ -17,7 +17,7 @@ import { OperatorPage } from './components/pages/OperatorPage';
 import { InstancePanel, type InstanceCardData } from './components/layout/InstancePanel';
 import { ConversationPanel } from './components/layout/ConversationPanel';
 import { addToast } from './hooks/useToast';
-import type { InstanceStatus } from './components/cluster/RunningInstanceCard';
+import type { InstanceStatus, NodeRunnerState } from './components/cluster/RunningInstanceCard';
 import { chatActions } from './store/slices/chatSlice';
 import { useAppDispatch, useAppSelector } from './store/hooks';
 import { uiActions, type ObservabilityTab } from './store/slices/uiSlice';
@@ -55,6 +55,21 @@ interface StoreDownload {
 }
 
 /* ── Runner status → InstanceStatus mapping ───────────── */
+
+/** Collapse a single runner's tagged status into the per-node category the
+ *  instance card renders. The runner lifecycle is idle -> connecting ->
+ *  connected -> loading -> loaded -> warming up -> ready; everything that is not
+ *  a terminal ready/failed/stopping state reads as "loading", except the initial
+ *  RunnerIdle which reads as "pending" (spawned, not yet driven). */
+function runnerNodeState(runner: Record<string, unknown> | undefined): NodeRunnerState {
+  if (!runner) return 'pending';
+  const key = Object.keys(runner)[0];
+  if (key === 'RunnerReady' || key === 'RunnerRunning') return 'ready';
+  if (key === 'RunnerFailed') return 'failed';
+  if (key === 'RunnerShuttingDown' || key === 'RunnerShutdown') return 'stopping';
+  if (key === 'RunnerIdle') return 'pending';
+  return 'loading';
+}
 
 function deriveInstanceStatus(
   runnerIds: string[],
@@ -396,20 +411,22 @@ export function App() {
       // Derive status from runners
       const derived = deriveInstanceStatus(runnerIds, runners, t);
 
-      // Friendly names for EVERY node the instance is placed on (all ranks of a
-      // pipeline / tensor placement), sorted for a stable, readable order.
-      const nodeNames = nodeIds
-        .map((id) => topology?.nodes[id]?.friendly_name || id.slice(0, 8))
-        .sort();
-      const displayNodeNames =
-        nodeNames.length > 0 ? nodeNames : [t('common.unknownLower', 'unknown')];
+      // Per-node status for EVERY node the instance is placed on (all ranks of a
+      // pipeline / tensor placement), sorted for a stable, readable order, each
+      // carrying that node's runner phase so the card shows the laggard.
+      const nodeStatuses = nodeIds
+        .map((id) => ({
+          name: topology?.nodes[id]?.friendly_name || id.slice(0, 8),
+          state: runnerNodeState(nodeToRunner ? runners[nodeToRunner[id]] : undefined),
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
 
       cards.push({
         instanceId,
         modelId,
         sharding,
         instanceType: isRing ? 'MlxRing' : 'MlxJaccl',
-        nodeNames: displayNodeNames,
+        nodeStatuses,
         status: derived.status,
         statusMessage: derived.message,
         loadProgress: derived.progress,

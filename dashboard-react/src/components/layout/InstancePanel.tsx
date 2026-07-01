@@ -1,5 +1,5 @@
 import styled from 'styled-components';
-import { RunningInstanceCard, type InstanceStatus } from '../cluster/RunningInstanceCard';
+import { RunningInstanceCard, type InstanceStatus, type InstanceNodeStatus } from '../cluster/RunningInstanceCard';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 
 /* ── Types ────────────────────────────────────────────── */
@@ -9,7 +9,7 @@ export interface InstanceCardData {
   modelId: string;
   sharding: 'Pipeline' | 'Tensor';
   instanceType: 'MlxRing' | 'MlxJaccl';
-  nodeNames: string[];
+  nodeStatuses: InstanceNodeStatus[];
   status: InstanceStatus;
   statusMessage?: string;
   loadProgress?: number;

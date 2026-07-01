@@ -1,5 +1,5 @@
 import styled, { keyframes, css, useTheme } from 'styled-components';
-import { FiExternalLink } from 'react-icons/fi';
+import { FiExternalLink, FiCheckCircle, FiXCircle, FiLoader, FiClock } from 'react-icons/fi';
 import { BsChatDotsFill } from 'react-icons/bs';
 import { InfoTooltip } from '../common/InfoTooltip';
 import type { Theme } from '../../theme';
@@ -15,14 +15,26 @@ export type InstanceStatus =
   | 'failed'
   | 'shutting_down';
 
+/** A single node's runner phase, collapsed from the runner lifecycle
+ *  (idle -> connecting -> connected -> loading -> loaded -> warming up -> ready)
+ *  into the categories the per-node status line renders. */
+export type NodeRunnerState = 'ready' | 'loading' | 'pending' | 'failed' | 'stopping';
+
+export interface InstanceNodeStatus {
+  /** Friendly node name (e.g. "kite2"). */
+  name: string;
+  state: NodeRunnerState;
+}
+
 export interface RunningInstanceCardProps {
   instanceId: string;
   modelId: string;
   sharding: 'Pipeline' | 'Tensor';
   instanceType: 'MlxRing' | 'MlxJaccl';
-  /** Friendly names of every node the instance is placed on (all pipeline /
-   *  tensor ranks), not just the first. */
-  nodeNames: string[];
+  /** Per-node placement status: one entry per node the instance is placed on
+   *  (all pipeline / tensor ranks), each with its runner's current phase, so the
+   *  card shows which node is the laggard rather than a single aggregate. */
+  nodeStatuses: InstanceNodeStatus[];
   status: InstanceStatus;
   statusMessage?: string;
   /** 0–100, shown during loading */
@@ -67,6 +79,32 @@ function hfUrl(modelId: string): string | null {
   return modelId.includes('/') ? `https://huggingface.co/${modelId}` : null;
 }
 
+/** Icon + colour + spin for a single node's runner phase. */
+function nodeStateVisual(
+  state: NodeRunnerState,
+  theme: Theme,
+): { Icon: typeof FiCheckCircle; color: string; spin: boolean } {
+  switch (state) {
+    case 'ready': return { Icon: FiCheckCircle, color: theme.colors.healthy, spin: false };
+    case 'failed': return { Icon: FiXCircle, color: theme.colors.error, spin: false };
+    case 'stopping': return { Icon: FiClock, color: theme.colors.warning, spin: false };
+    case 'pending': return { Icon: FiClock, color: theme.colors.textMuted, spin: false };
+    case 'loading':
+    default: return { Icon: FiLoader, color: theme.colors.gold, spin: true };
+  }
+}
+
+function nodeStateLabel(state: NodeRunnerState, t: SkulkTranslate): string {
+  switch (state) {
+    case 'ready': return t('instance.node.ready', 'ready');
+    case 'failed': return t('instance.node.failed', 'failed');
+    case 'stopping': return t('instance.node.stopping', 'stopping');
+    case 'pending': return t('instance.node.pending', 'pending');
+    case 'loading':
+    default: return t('instance.node.loading', 'loading');
+  }
+}
+
 /* ── Animations ───────────────────────────────────────── */
 
 const pulse = keyframes`
@@ -77,6 +115,10 @@ const pulse = keyframes`
 const progressStripe = keyframes`
   0% { background-position: 0 0; }
   100% { background-position: 20px 0; }
+`;
+
+const spin = keyframes`
+  to { transform: rotate(360deg); }
 `;
 
 /* ── Styled components ────────────────────────────────── */
@@ -180,9 +222,22 @@ const HfLink = styled.a`
   }
 `;
 
-const NodeName = styled.div`
+const NodeRow = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 10px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   color: ${({ theme }) => theme.colors.textSecondary};
+`;
+
+const NodeChip = styled.span`
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+
+  svg { flex-shrink: 0; }
+  svg.spin { animation: ${spin} 0.9s linear infinite; }
 `;
 
 const StatusLabel = styled.div<{ $color: string }>`
@@ -261,7 +316,7 @@ export function RunningInstanceCard({
   modelId,
   sharding,
   instanceType,
-  nodeNames,
+  nodeStatuses,
   status,
   statusMessage,
   loadProgress,
@@ -324,7 +379,17 @@ export function RunningInstanceCard({
         </HfLink>
       )}
 
-      <NodeName>{nodeNames.join(', ')}</NodeName>
+      <NodeRow>
+        {nodeStatuses.map((n) => {
+          const v = nodeStateVisual(n.state, theme);
+          return (
+            <NodeChip key={n.name} title={`${n.name}: ${nodeStateLabel(n.state, t)}`}>
+              <v.Icon size={12} color={v.color} className={v.spin ? 'spin' : undefined} />
+              {n.name}
+            </NodeChip>
+          );
+        })}
+      </NodeRow>
 
       {showProgress && (
         <ProgressTrack>
