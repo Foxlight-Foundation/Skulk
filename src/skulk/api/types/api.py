@@ -237,6 +237,31 @@ class RuntimeCapabilitySection(BaseModel):
 
     prompt_renderer: str | None = None
     output_parser: str | None = None
+    mtp_sidecar_repo: str | None = Field(
+        default=None,
+        description=(
+            "Repo of this model's MTP sidecar (prediction heads), when it "
+            "declares one. The sidecar is a companion loaded alongside the base "
+            "model, not an independently placeable model. Lets clients mark the "
+            "sidecar repo as a companion rather than a launchable entry."
+        ),
+    )
+    assistant_model_repo: str | None = Field(
+        default=None,
+        description=(
+            "Repo of this model's speculative-decoding assistant (drafter), when "
+            "it declares one. A companion loaded with the base model, not "
+            "independently placeable."
+        ),
+    )
+    served_spec_draft_repo: str | None = Field(
+        default=None,
+        description=(
+            "Repo of this model's served-engine draft GGUF, when it declares a "
+            "separate one. A companion loaded with the base model, not "
+            "independently placeable."
+        ),
+    )
 
     @classmethod
     def from_model_card(cls, model_card: ModelCard) -> "RuntimeCapabilitySection | None":
@@ -252,6 +277,9 @@ class RuntimeCapabilitySection(BaseModel):
             output_parser=(
                 config.output_parser.value if config.output_parser is not None else None
             ),
+            mtp_sidecar_repo=config.mtp_sidecar_repo,
+            assistant_model_repo=config.assistant_model_repo,
+            served_spec_draft_repo=config.served_spec_draft_repo,
         )
 
 

@@ -3,7 +3,7 @@ import styled, { css } from 'styled-components';
 import type { TopologyData } from '../../types/topology';
 import { detectDeviceModel } from '../../types/topology';
 import type { RawDownloads, NodeDiskInfo, RawInstances, RawRunners } from '../../hooks/useClusterState';
-import { StoreRegistryTable, type StoreRegistryEntry, type StoreDownloadProgress, type ModelCardInfo } from '../layout/StoreRegistryTable';
+import { StoreRegistryTable, type StoreRegistryEntry, type StoreDownloadProgress, type ModelCardInfo, type CompanionInfo } from '../layout/StoreRegistryTable';
 import type { ClusterCardProps, ClusterCardNode } from '../cluster/ClusterCard';
 import { ModelSearchModal } from './ModelSearchModal';
 import { FiTrash2, FiSearch } from 'react-icons/fi';
@@ -150,6 +150,10 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
   const [storeLoading, setStoreLoading] = useState(false);
   const [placementModelId, setPlacementModelId] = useState<string | null>(null);
   const [apiModelCards, setApiModelCards] = useState<Record<string, ModelCardInfo>>({});
+  // Companion (drafter / MTP-head sidecar) repos, keyed by the companion's own
+  // model_id. Derived from each parent card's runtime references so the store
+  // can mark them as non-placeable instead of offering launch/placement/optiq.
+  const [companionRoles, setCompanionRoles] = useState<Record<string, CompanionInfo>>({});
   const pollRef = useRef<ReturnType<typeof setInterval>>(undefined);
   const optimizePollRef = useRef<ReturnType<typeof setInterval>>(undefined);
 
@@ -161,8 +165,26 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
         if (!res.ok) return;
         const data = await res.json();
         const cards: Record<string, ModelCardInfo> = {};
+        // A model's runtime section names the companion repos it pulls in: an
+        // MTP sidecar (prediction heads) and/or a separate draft model (MLX
+        // assistant or served draft GGUF). Those repos land in the store but are
+        // not independently placeable, so map them to a role for the store UI.
+        // Skip self-references (same-repo co-fetch) so the parent isn't hidden.
+        const companions: Record<string, CompanionInfo> = {};
         for (const m of data.data ?? []) {
           if (!m.id) continue;
+          const rt = m.runtime ?? {};
+          const sidecar = rt.mtp_sidecar_repo as string | undefined;
+          const assistant = rt.assistant_model_repo as string | undefined;
+          const draft = rt.served_spec_draft_repo as string | undefined;
+          if (sidecar && sidecar !== m.id) {
+            companions[sidecar] = { role: 'sidecar', parent: m.id };
+          }
+          for (const d of [assistant, draft]) {
+            if (d && d !== m.id && !companions[d]) {
+              companions[d] = { role: 'drafter', parent: m.id };
+            }
+          }
           cards[m.id] = {
             family: m.family ?? undefined,
             quantization: m.quantization ?? undefined,
@@ -186,6 +208,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
           };
         }
         setApiModelCards(cards);
+        setCompanionRoles(companions);
       } catch { /* ignore */ }
     })();
   }, []);
@@ -577,6 +600,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
           loading={storeLoading}
           activeModelIds={activeModelIds}
           modelCards={modelCards}
+          companions={companionRoles}
           actions={
             <>
               <Button variant="danger" size="sm" onClick={() => setPurgeConfirm(true)}>
