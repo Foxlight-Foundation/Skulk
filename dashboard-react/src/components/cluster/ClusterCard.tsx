@@ -3,6 +3,7 @@ import styled, { keyframes, useTheme } from 'styled-components';
 import { FiExternalLink } from 'react-icons/fi';
 import { MdPlayArrow } from 'react-icons/md';
 import { DeviceIcon } from '../topology/DeviceIcon';
+import type { DeviceModel } from '../../types/topology';
 import type { Theme } from '../../theme';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 
@@ -12,6 +13,9 @@ export interface ClusterCardNode {
   nodeId: string;
   name: string;
   memoryUsedPercent: number;
+  /** Device glyph for this node, detected from its hardware (model/chip). Falls
+   *  back to a Mac mini when unknown so an AMD/Strix node isn't drawn as a Mac. */
+  deviceModel?: DeviceModel;
 }
 
 export interface ClusterCardDownload {
@@ -93,7 +97,7 @@ function MiniTopology({ nodes }: { nodes: ClusterCardNode[] }) {
           <g key={node.nodeId}>
             <g transform={`translate(${p.x - iconW / 2}, ${p.y - iconH / 2})`}>
               <DeviceIcon
-                model="mac-mini"
+                model={node.deviceModel ?? 'mac-mini'}
                 ramPercent={node.memoryUsedPercent}
                 width={iconW}
                 height={iconH}
@@ -137,6 +141,10 @@ export function ClusterCard({
   const displayName = modelName ?? modelId.split('/').pop() ?? modelId;
   const showDownloads = !isReady && downloads && downloads.length > 0;
   const showLaunch = !isReady && onLaunch;
+  // GGUF models run on the single-node llama.cpp engines (in-process or served
+  // llama-server), not an MLX ring. Show a single llama.cpp badge instead of the
+  // MLX sharding/transport pair so the label isn't misleading (#store-popover).
+  const isGguf = /gguf/i.test(modelId);
 
   return (
     <Card className={className}>
@@ -154,10 +162,19 @@ export function ClusterCard({
         <ModelIdText>{modelId}</ModelIdText>
       </Header>
 
-      {/* Sharding / Instance type badges */}
+      {/* Engine badges: MLX shows its sharding + transport; a GGUF model runs on
+          the single-node llama.cpp engine, so it shows one llama.cpp badge. */}
       <BadgeRow>
-        <TypeBadge>{sharding === 'Pipeline' ? t('common.pipeline', 'Pipeline') : t('common.tensor', 'Tensor')}</TypeBadge>
-        <TypeBadge>{instanceType === 'MlxRing' ? t('placement.mlxRing', 'MLX Ring') : t('placement.mlxJaccl', 'MLX Jaccl')}</TypeBadge>
+        {isGguf ? (
+          <TypeBadge title={t('modelCard.runtime.llamaCppTooltip', 'Runs on the llama.cpp engine (GPU-offload GGUF), single node.')}>
+            {t('placement.llamaCpp', 'llama.cpp')}
+          </TypeBadge>
+        ) : (
+          <>
+            <TypeBadge>{sharding === 'Pipeline' ? t('common.pipeline', 'Pipeline') : t('common.tensor', 'Tensor')}</TypeBadge>
+            <TypeBadge>{instanceType === 'MlxRing' ? t('placement.mlxRing', 'MLX Ring') : t('placement.mlxJaccl', 'MLX Jaccl')}</TypeBadge>
+          </>
+        )}
         {isReady && <ReadyBadge><PulseDot /> {t('common.ready', 'Ready')}</ReadyBadge>}
       </BadgeRow>
 

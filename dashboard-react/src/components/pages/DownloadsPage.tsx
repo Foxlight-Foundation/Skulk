@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import styled, { css } from 'styled-components';
 import type { TopologyData } from '../../types/topology';
+import { detectDeviceModel } from '../../types/topology';
 import type { RawDownloads, NodeDiskInfo, RawInstances, RawRunners } from '../../hooks/useClusterState';
 import { StoreRegistryTable, type StoreRegistryEntry, type StoreDownloadProgress, type ModelCardInfo } from '../layout/StoreRegistryTable';
 import type { ClusterCardProps, ClusterCardNode } from '../cluster/ClusterCard';
@@ -391,6 +392,7 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
           nodeId: nid,
           name: nodeInfo?.friendly_name ?? nid.slice(0, 8),
           memoryUsedPercent: pct,
+          deviceModel: detectDeviceModel(nodeInfo?.system_info?.model_id, nodeInfo?.system_info?.chip),
         };
       });
 
