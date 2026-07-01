@@ -259,6 +259,7 @@
   "modelCard.insufficientMemory": "INSUFFICIENT MEMORY",
   "modelCard.launch": "▸ LAUNCH",
   "modelCard.launching": "LAUNCHING...",
+  "modelCard.runtime.llamaCppTooltip": "Runs on the llama.cpp engine (GPU-offload GGUF), single node.",
   "modelCard.runtime.mlxRdma": "MLX RDMA",
   "modelCard.runtime.mlxRing": "MLX Ring",
   "modelCard.runtime.rdmaTooltip": "RDMA: direct memory access over Thunderbolt.",
