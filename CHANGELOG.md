@@ -7,6 +7,20 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- **Store re-download after a delete no longer silently no-ops.** `ModelStore`
+  caches per-model download status in memory; `delete_model` removed the registry
+  entry and on-disk files but left a stale `"complete"` status behind, so a later
+  `request_download` short-circuited on it and never re-fetched. The model would
+  then appear "complete" while absent from the registry and disk, and a worker
+  staging it failed with "not found in store". `delete_model` now clears the
+  cached status, and `request_download` treats a cached `"complete"` as stale
+  whenever the model is no longer actually in the store (a backstop for any cause
+  of files-gone, including out-of-band removal). This unblocks re-provisioning a
+  model after a store-delete (e.g. the download/delete/re-download cycle the test
+  harness drives for served-MTP GGUFs).
+
 ### Added
 
 - **Store-delete now evicts worker-staged copies cluster-wide (#427).** Deleting a

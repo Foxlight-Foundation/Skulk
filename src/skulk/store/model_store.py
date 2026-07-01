@@ -351,6 +351,18 @@ class ModelStore:
                 indent=2,
             )
         )
+        # Drop a *terminal* cached download status for the deleted model. Leaving
+        # a stale "complete" here makes a later request_download short-circuit and
+        # never re-fetch the model we just removed (the registry entry and files
+        # are gone but the in-memory status would still say complete). Only clear
+        # complete/failed entries: an in-flight (pending/downloading) entry is
+        # held by a live _do_download task, and popping it would crash that task
+        # (it reads self._active_downloads[model_id]). request_download also
+        # re-checks is_in_store as a backstop, so a surviving in-flight entry that
+        # later completes against a since-deleted model is still self-correcting.
+        cached = self._active_downloads.get(model_id)
+        if cached is not None and cached.status in ("complete", "failed"):
+            del self._active_downloads[model_id]
         return True
 
     def register_model(
@@ -532,15 +544,26 @@ class ModelStore:
         async with self._download_lock:
             existing = self._active_downloads.get(model_id)
             if existing is not None:
-                # A failed entry retries. A cached-complete entry that is missing
-                # a newly-requested companion (or projector) is stale -- a prior
-                # base-only download in this process left a "complete" status, so
-                # returning it here would skip the recovery re-download below
-                # (the registry-based missing checks would never run). Drop it and
-                # fall through. An in-progress (downloading/pending) entry is
-                # returned as-is to dedup concurrent requests.
+                # A failed entry retries. A cached-complete entry is stale when:
+                #  - it is missing a newly-requested companion (or projector) --
+                #    a prior base-only download in this process left a "complete"
+                #    status, so returning it would skip the recovery re-download
+                #    below (the registry-based missing checks would never run); or
+                #  - the model is no longer actually in the store -- a store-delete
+                #    (``delete_model``) or out-of-band file removal drops the
+                #    registry entry and on-disk files but cannot reach this
+                #    in-memory status, so trusting it would short-circuit the
+                #    re-download and the model would never come back (staging then
+                #    fails "not found in store"). ``is_in_store`` re-checks the
+                #    registry + on-disk dir, so a cached "complete" that no longer
+                #    reflects reality is dropped and re-fetched.
+                # Drop a stale entry and fall through. An in-progress
+                # (downloading/pending) entry is returned as-is to dedup
+                # concurrent requests.
                 stale_complete = existing.status == "complete" and (
-                    missing_projector or missing_companion
+                    missing_projector
+                    or missing_companion
+                    or not self.is_in_store(model_id)
                 )
                 if existing.status == "failed" or stale_complete:
                     del self._active_downloads[model_id]
