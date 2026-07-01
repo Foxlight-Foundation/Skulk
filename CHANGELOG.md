@@ -9,6 +9,22 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **Large model downloads no longer time out mid-transfer.** The download session's
+  `long` timeout profile applied a fixed 30-minute `total` cap to the entire file
+  transfer, so a multi-GB GGUF that was downloading fine failed partway through
+  once it outlasted the cap (a 17 GB model at ~7.5 MB/s hit the cap at ~80%,
+  surfacing only as an empty-string `TimeoutError`; larger models like the 62 GB
+  gpt-oss-120B GGUF would fail sooner in percentage terms). Large file-body
+  downloads now have no `total` cap and are instead policed by `sock_read` /
+  `sock_connect` inactivity timeouts: a genuinely stalled connection still times
+  out and retries (resuming from the `.partial`), while a slow-but-alive transfer
+  of any size completes. The worker-side wait for a store download
+  (`request_and_wait_for_download`) is likewise now progress-aware: its timeout
+  is a stall timeout (max time without progress), not a total cap, so the worker
+  no longer gives up on a live, still-progressing multi-hour download and lets
+  the master tear the placement down. Store download failures also now record the
+  exception type instead of an empty error string.
+
 - **Store re-download after a delete no longer silently no-ops.** `ModelStore`
   caches per-model download status in memory; `delete_model` removed the registry
   entry and on-disk files but left a stale `"complete"` status behind, so a later

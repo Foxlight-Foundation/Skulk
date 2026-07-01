@@ -509,7 +509,11 @@ class ModelStoreClient:
         Args:
             model_id: HuggingFace model ID.
             on_progress: Called with progress (0.0-1.0) on each poll.
-            timeout: Maximum wait time in seconds.
+            timeout: Maximum time to wait WITHOUT download progress, in seconds
+                (a stall timeout, not a total cap). A download that keeps
+                advancing never times out, however large; only a genuine stall
+                does. The store host's file-body transfer is itself uncapped, so
+                a very large model can legitimately take hours.
             poll_interval: Seconds between status polls.
             pinned_gguf: The card's pinned GGUF file (``ModelCard.gguf_file``),
                 sent in the POST body so the store fetches that quant's shard
@@ -525,7 +529,7 @@ class ModelStoreClient:
 
         Raises:
             RuntimeError: If the download failed on the store host.
-            TimeoutError: If the download didn't complete within *timeout*.
+            TimeoutError: If the download made no progress for *timeout* seconds.
         """
         import asyncio as _asyncio
 
@@ -557,36 +561,50 @@ class ModelStoreClient:
         status_url = _make_store_url(
             self._store_host, self._store_port, f"/models/{encoded_id}/download/status"
         )
-        elapsed = 0.0
-        while elapsed < timeout:
+        # The wait is progress-aware, not a fixed total. The store host's
+        # file-body download is uncapped (see create_http_session "long"), so a
+        # very large model can legitimately take hours; a fixed total wait here
+        # would give up on a live, still-progressing download and make the master
+        # tear the placement down. Reset the stall clock whenever progress
+        # advances; only a genuine stall (no progress for ``timeout`` seconds)
+        # fails. A poll that could not observe progress (network blip, or no
+        # advance) counts toward the stall.
+        last_progress = -1.0
+        stalled_for = 0.0
+        while stalled_for < timeout:
             await _asyncio.sleep(poll_interval)
-            elapsed += poll_interval
+            advanced = False
             try:
                 async with (
                     create_http_session(timeout_profile="short") as session,
                     session.get(status_url) as resp,
                 ):
-                    if resp.status != 200:
-                        continue
-                    data = await resp.json()
-                    if not isinstance(data, dict):
-                        continue
-                    status = data.get("status", "")
-                    progress = float(data.get("progress", 0.0))
-                    if on_progress is not None:
-                        await on_progress(progress)
-                    if status == "complete":
-                        return True
-                    if status == "failed":
-                        raise RuntimeError(
-                            f"Store download of {model_id} failed: {data.get('error', 'unknown')}"
-                        )
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if isinstance(data, dict):
+                            status = data.get("status", "")
+                            progress = float(data.get("progress", 0.0))
+                            if on_progress is not None:
+                                await on_progress(progress)
+                            if status == "complete":
+                                return True
+                            if status == "failed":
+                                raise RuntimeError(
+                                    f"Store download of {model_id} failed: {data.get('error', 'unknown')}"
+                                )
+                            if progress > last_progress:
+                                last_progress = progress
+                                advanced = True
             except RuntimeError:
                 raise
             except Exception as exc:
                 logger.debug(f"ModelStoreClient: download status poll failed: {exc}")
+            stalled_for = 0.0 if advanced else stalled_for + poll_interval
 
-        raise TimeoutError(f"Store download of {model_id} timed out after {timeout}s")
+        raise TimeoutError(
+            f"Store download of {model_id} made no progress for {timeout}s "
+            f"(last progress {last_progress:.1%})"
+        )
 
     # ------------------------------------------------------------------
     # Local copy path (store host → same filesystem)
