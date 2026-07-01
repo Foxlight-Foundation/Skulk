@@ -90,6 +90,21 @@ function transformTopology(
     const ramAvailable = mem?.ramAvailable?.inBytes ?? 0;
     const ramUsage = Math.max(ramTotal - ramAvailable, 0);
 
+    // Total unified memory for display. We show the machine's total unified RAM
+    // on every node (not the GPU-available or placement-admittable amount) so the
+    // fleet reads consistently. On Apple Silicon all unified RAM is reported as
+    // system RAM, so ramTotal is already the whole pool. An AMD APU (Strix Halo)
+    // is also unified memory, but the BIOS carves a slice out as dedicated "VRAM"
+    // that the OS does not count as system RAM, so ramTotal is only the remaining
+    // slice; add the VRAM carve-out back to show the full unified pool the machine
+    // has. Apple nodes report no carve-out VRAM (vramTotalBytes null), so they are
+    // unchanged.
+    const vramTotal = sys?.accelerator?.vramTotalBytes ?? 0;
+    const vramUsed = sys?.accelerator?.vramUsedBytes ?? 0;
+    const hasCarveoutVram = vramTotal > 0;
+    const unifiedTotal = hasCarveoutVram ? ramTotal + vramTotal : ramTotal;
+    const unifiedUsage = hasCarveoutVram ? ramUsage + vramUsed : ramUsage;
+
     const rawIfaces = net?.interfaces ?? [];
     const networkInterfaces = rawIfaces.map((iface) => ({
       name: iface.name,
@@ -107,12 +122,12 @@ function transformTopology(
       system_info: {
         model_id: identity?.modelId,
         chip: identity?.chipId,
-        memory: ramTotal,
+        memory: unifiedTotal,
       },
       network_interfaces: networkInterfaces,
       ip_to_interface: ipToInterface,
       mactop_info: {
-        memory: { ram_usage: ramUsage, ram_total: ramTotal },
+        memory: { ram_usage: unifiedUsage, ram_total: unifiedTotal },
         temp: sys?.temp != null ? { gpu_temp_avg: Math.max(30, sys.temp) } : undefined,
         // `sys.gpuUsage` is a 0–100 percent; MactopInfo.gpu_usage[1] (and the
         // stories) carry a 0–1 fraction that ClusterNode re-multiplies by 100.
