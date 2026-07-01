@@ -396,18 +396,20 @@ export function App() {
       // Derive status from runners
       const derived = deriveInstanceStatus(runnerIds, runners, t);
 
-      // Get first node's friendly name
-      const firstNodeId = nodeIds[0];
-      const nodeName = firstNodeId && topology?.nodes[firstNodeId]?.friendly_name
-        ? topology.nodes[firstNodeId].friendly_name
-        : firstNodeId?.slice(0, 8) ?? t('common.unknownLower', 'unknown');
+      // Friendly names for EVERY node the instance is placed on (all ranks of a
+      // pipeline / tensor placement), sorted for a stable, readable order.
+      const nodeNames = nodeIds
+        .map((id) => topology?.nodes[id]?.friendly_name || id.slice(0, 8))
+        .sort();
+      const displayNodeNames =
+        nodeNames.length > 0 ? nodeNames : [t('common.unknownLower', 'unknown')];
 
       cards.push({
         instanceId,
         modelId,
         sharding,
         instanceType: isRing ? 'MlxRing' : 'MlxJaccl',
-        nodeName,
+        nodeNames: displayNodeNames,
         status: derived.status,
         statusMessage: derived.message,
         loadProgress: derived.progress,

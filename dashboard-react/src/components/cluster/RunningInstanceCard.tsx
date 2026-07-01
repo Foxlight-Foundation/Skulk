@@ -20,7 +20,9 @@ export interface RunningInstanceCardProps {
   modelId: string;
   sharding: 'Pipeline' | 'Tensor';
   instanceType: 'MlxRing' | 'MlxJaccl';
-  nodeName: string;
+  /** Friendly names of every node the instance is placed on (all pipeline /
+   *  tensor ranks), not just the first. */
+  nodeNames: string[];
   status: InstanceStatus;
   statusMessage?: string;
   /** 0–100, shown during loading */
@@ -259,7 +261,7 @@ export function RunningInstanceCard({
   modelId,
   sharding,
   instanceType,
-  nodeName,
+  nodeNames,
   status,
   statusMessage,
   loadProgress,
@@ -322,7 +324,7 @@ export function RunningInstanceCard({
         </HfLink>
       )}
 
-      <NodeName>{nodeName}</NodeName>
+      <NodeName>{nodeNames.join(', ')}</NodeName>
 
       {showProgress && (
         <ProgressTrack>

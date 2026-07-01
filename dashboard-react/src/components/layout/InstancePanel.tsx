@@ -9,7 +9,7 @@ export interface InstanceCardData {
   modelId: string;
   sharding: 'Pipeline' | 'Tensor';
   instanceType: 'MlxRing' | 'MlxJaccl';
-  nodeName: string;
+  nodeNames: string[];
   status: InstanceStatus;
   statusMessage?: string;
   loadProgress?: number;
