@@ -1,13 +1,23 @@
 # AMD Strix Halo nodes (Linux / ROCm)
 
 Skulk clusters are not Mac-only. An AMD Ryzen AI Max (Strix Halo, `gfx1151`) box
-running Linux can join a cluster as a worker that serves **GGUF models through
-llama.cpp on its integrated Radeon GPU**, alongside Apple Silicon nodes serving
-MLX models. The cluster is heterogeneous: each model is placed on the nodes that
-can actually run it.
+running Linux can join a cluster as a worker that serves **GGUF models on its
+integrated Radeon GPU**, alongside Apple Silicon nodes serving MLX models. The
+cluster is heterogeneous: each model is placed on the nodes that can actually run
+it.
 
-This page covers what such a node needs, how to bring one up, and how the
-cluster decides what to run where.
+An AMD node can run GGUF models through **two engines**:
+
+- **`llama_cpp`** (in-process): the default GGUF path. Skulk loads the model with
+  `llama-cpp-python` and decodes on the Radeon GPU via Vulkan. Single-node.
+- **`llama_server`** (served): Skulk launches an external `llama-server` process
+  and proxies its OpenAI API. This is the only path to llama.cpp's **native
+  multi-token prediction** (`--spec-type draft-mtp`), so it is how you get
+  speculative-decoding speedups on an AMD node. Single-node; enabled per node by
+  pointing `SKULK_LLAMA_SERVER_BIN` at a `llama-server` binary.
+
+This page covers what such a node needs, how to bring one up, both engines, and
+how the cluster decides what to run where.
 
 ## What runs where
 
@@ -17,6 +27,9 @@ A Skulk node advertises the compute **backends** it can serve, written as
 - A macOS node advertises `mlx` and `mlx-metal`.
 - A Linux node with llama.cpp built for the Radeon GPU advertises `llama_cpp`
   and `llama_cpp-vulkan`.
+- If that node also has a `llama-server` binary (`SKULK_LLAMA_SERVER_BIN`), it
+  additionally advertises the served backend for its GPU, e.g.
+  `llama_server-vulkan` (and `llama_server-cpu` as a floor).
 
 Each model card declares which backends can run it. A GGUF model card lists
 llama.cpp backends as compatible; an MLX/safetensors model lists MLX. When you
@@ -132,19 +145,42 @@ llama.cpp's multimodal chat handler, so image chat requests (OpenAI `image_url`
 content) work. A repo is recognized as a vision model from its `config.json`
 vision section, or, when it ships none, from the presence of the `mmproj` file.
 
-One thing is deliberately not on the AMD path today:
+## Native MTP on the AMD node (served engine)
 
-- **Multi-token prediction (MTP) / speculative decoding is MLX-only.** Those
-  speedups come from MLX-specific drafting (model-native prediction heads or a
-  sidecar drafter) and cross-rank coordination, which the llama.cpp engine does
-  not implement, so an AMD node runs plain autoregressive decoding. GGUF models
-  advertise no MTP capability, so it is never shown as available for them (there
-  is no promise to fall short of); the AMD node serves at its native decode speed.
+Speculative decoding (multi-token prediction) **does** run on an AMD node,
+through the served `llama_server` engine. llama.cpp's native MTP lives in the
+`llama-server` application, not in the in-process `llama-cpp-python` binding, so
+Skulk reaches it by launching `llama-server` with `--spec-type draft-mtp` and
+proxying its OpenAI API. A model whose card declares `served_spec_type =
+draft_mtp` and lists `llama_server-*` backends is placed on a node that has a
+`llama-server` binary and served with MTP on.
 
-## Scope
+There are two MTP shapes, both served this way:
 
-A single AMD node serves GGUF models on its own GPU. Sharding one model across an
-AMD node and a Mac is not supported (the two engines do not share a runtime);
-multi-node GGUF inference across several llama.cpp nodes is tracked separately.
+- **Baked-in heads**: a GGUF that ships MTP prediction tensors (for example the
+  Qwen3.5 / Qwen3.6 MTP GGUFs). No separate draft model is needed.
+- **Draft-model MTP**: a base GGUF plus a small separate draft GGUF passed as
+  `--model-draft` (for example Gemma 4 31B with a published draft). The card
+  co-fetches both through the store.
+
+To enable it on a node, install a `llama-server` build with MTP support and point
+`SKULK_LLAMA_SERVER_BIN` at it before launching Skulk. On a Ryzen AI Max the
+Vulkan `llama-server` serves an MTP-capable GGUF on the Radeon GPU and generates
+with speculation active, streaming reasoning and tool calls through the same
+`/v1` endpoints as any other model. Acceptance is per-model: a pairing that does
+not pay is turned off in that model's card, the same discipline MLX MTP uses. See
+[Speculative Decoding](speculative-decoding.md) for how MTP works and what
+speedups to expect.
+
+## What is not on the AMD path today
+
+- **MTP across the in-process `llama_cpp` engine.** The in-process binding does
+  not expose native MTP; use the served `llama_server` engine (above) for MTP.
+  A GGUF served through `llama_cpp` runs plain autoregressive decoding.
+- **Sharding one model across an AMD node and a Mac** (the two engines do not
+  share a runtime), and **multi-node GGUF inference** across several llama.cpp
+  nodes (tracked separately). A single AMD node serves each GGUF model on its own
+  GPU.
+
 The interconnect doctrine still applies: the cluster fabric is trusted, so put
 untrusted segments behind your own network controls.
