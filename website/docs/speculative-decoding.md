@@ -62,6 +62,31 @@ turn-itself-off cases) is about the MLX engine. The served engine's speculation
 is configured on the model card (`served_spec_type`, `served_spec_n_max`) and,
 like MLX MTP, is carded off per model when a pairing does not pay.
 
+### Served-engine speedups (AMD / llama.cpp)
+
+Measured on an AMD Ryzen AI Max+ 395 (Radeon 8060S, `gfx1151`) serving GGUF
+models through the Vulkan `llama-server`, native MTP on (`--spec-type draft-mtp`)
+versus off. Both arms run through Skulk's production API with the same protocol
+as the MLX table: greedy decoding, 200-token completions, median of 3 runs, with
+throughput in decode tokens per second; the off arm is the identical GGUF served
+in plain decode (the node's `SKULK_LLAMA_SERVER_FORCE_NO_SPEC` benchmarking knob),
+so the gain is attributable to speculation alone.
+
+| Model | Class | Plain | With MTP | Gain |
+|---|---|---:|---:|---:|
+| `Qwen3.5-9B-MTP` | dense, small | 55.6 | 76.2 | **+37%** |
+| `Qwen3.6-27B-MTP` | dense, mid | 20.0 | 35.6 | **+78%** |
+| `Qwen3.6-35B-A3B-MTP` | MoE (A3B) | 90.7 | 95.8 | **+6%** |
+| `gemma-4-31B` (+ draft) | dense, draft-model | 17.4 | 25.2 | **+45%** |
+
+The shape mirrors the MLX results: the dense mid-size model gains the most
+(+78%), because its slower base decode gives speculation the most to amortize;
+the MoE model gains the least (+6%), because its small active-parameter count
+already makes decode memory-bound-fast, so the per-round draft and verify
+overhead nets little. The Gemma row uses the other MTP shape (a separate
+`--model-draft` GGUF rather than baked-in heads) and still pays (+45%),
+confirming both served MTP shapes work on the Radeon backend.
+
 ## Which Models Ship With It
 
 These models carry a drafter in their model card and use speculative
