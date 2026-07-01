@@ -67,10 +67,10 @@ like MLX MTP, is carded off per model when a pairing does not pay.
 Measured on an AMD Ryzen AI Max+ 395 (Radeon 8060S, `gfx1151`) serving GGUF
 models through the Vulkan `llama-server`, native MTP on (`--spec-type draft-mtp`)
 versus off. Both arms run through Skulk's production API with the same protocol
-as the MLX table: greedy decoding, 200-token completions, median of 3 runs; the
-off arm is the identical GGUF served in plain decode (the node's
-`SKULK_LLAMA_SERVER_FORCE_NO_SPEC` benchmarking knob), so the gain is
-attributable to speculation alone.
+as the MLX table: greedy decoding, 200-token completions, median of 3 runs, with
+throughput in decode tokens per second; the off arm is the identical GGUF served
+in plain decode (the node's `SKULK_LLAMA_SERVER_FORCE_NO_SPEC` benchmarking knob),
+so the gain is attributable to speculation alone.
 
 | Model | Class | Plain | With MTP | Gain |
 |---|---|---:|---:|---:|
