@@ -31,6 +31,10 @@ export interface RunningInstanceCardProps {
   modelId: string;
   sharding: 'Pipeline' | 'Tensor';
   instanceType: 'MlxRing' | 'MlxJaccl';
+  /** Serving engine: MLX (in-process), in-process llama.cpp, or the served
+   *  llama-server. Drives the type label so a GGUF/served instance is not
+   *  mislabelled as an MLX ring. */
+  engine: 'mlx' | 'llama_cpp' | 'served';
   /** Per-node placement status: one entry per node the instance is placed on
    *  (all pipeline / tensor ranks), each with its runner's current phase, so the
    *  card shows which node is the laggard rather than a single aggregate. */
@@ -71,8 +75,20 @@ function formatInstanceId(id: string): string {
   return id.slice(0, 8).toUpperCase();
 }
 
-function formatInstanceType(type: 'MlxRing' | 'MlxJaccl', t: SkulkTranslate): string {
-  return type === 'MlxRing' ? t('placement.mlxRing', 'MLX Ring') : t('placement.mlxJaccl', 'MLX Jaccl');
+/** The engine/topology label under the model name. MLX shows its sharding +
+ *  ring/jaccl transport; the llama.cpp engines are single-node, so they show the
+ *  engine name instead of an MLX-specific ring label. */
+function formatEngineLabel(
+  engine: 'mlx' | 'llama_cpp' | 'served',
+  sharding: 'Pipeline' | 'Tensor',
+  instanceType: 'MlxRing' | 'MlxJaccl',
+  t: SkulkTranslate,
+): string {
+  if (engine === 'served') return t('placement.served', 'Served (llama.cpp)');
+  if (engine === 'llama_cpp') return t('placement.llamaCpp', 'llama.cpp');
+  const shard = sharding === 'Pipeline' ? t('common.pipeline', 'Pipeline') : t('common.tensor', 'Tensor');
+  const transport = instanceType === 'MlxRing' ? t('placement.mlxRing', 'MLX Ring') : t('placement.mlxJaccl', 'MLX Jaccl');
+  return `${shard} · ${transport}`;
 }
 
 function hfUrl(modelId: string): string | null {
@@ -316,6 +332,7 @@ export function RunningInstanceCard({
   modelId,
   sharding,
   instanceType,
+  engine,
   nodeStatuses,
   status,
   statusMessage,
@@ -350,7 +367,7 @@ export function RunningInstanceCard({
 
       <MetaRow>
         <span>
-          {sharding === 'Pipeline' ? t('common.pipeline', 'Pipeline') : t('common.tensor', 'Tensor')} &middot; {formatInstanceType(instanceType, t)}
+          {formatEngineLabel(engine, sharding, instanceType, t)}
         </span>
         <StatusBadge $color={cfg.color}>{cfg.label}</StatusBadge>
         {speculation && (

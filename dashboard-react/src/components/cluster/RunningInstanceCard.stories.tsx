@@ -16,6 +16,7 @@ export const Ready: Story = {
     modelId: 'mlx-community/Qwen3.5-9B-4bit',
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
+    engine: 'mlx',
     nodeStatuses: [{ name: 'kite2', state: 'ready' }],
     status: 'ready',
     onDelete: () => {},
@@ -28,6 +29,7 @@ export const ReadyWithSpeculation: Story = {
     modelId: 'mlx-community/Qwen3.5-9B-MLX-4bit',
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
+    engine: 'mlx',
     nodeStatuses: [
       { name: 'kite1', state: 'ready' },
       { name: 'kite2', state: 'ready' },
@@ -45,6 +47,7 @@ export const LoadingMultiNode: Story = {
     modelId: 'mlx-community/Qwen3.6-27B-4bit',
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
+    engine: 'mlx',
     // One node lagging: kite1 + kite3 ready, kite2 still coming up. The per-node
     // line makes the laggard obvious instead of a bare "Connecting...".
     nodeStatuses: [
@@ -65,6 +68,7 @@ export const Running: Story = {
     modelId: 'mlx-community/Llama-3.1-8B-Instruct-4bit',
     sharding: 'Tensor',
     instanceType: 'MlxJaccl',
+    engine: 'mlx',
     nodeStatuses: [{ name: 'kite1', state: 'ready' }],
     status: 'running',
     onDelete: () => {},
@@ -77,6 +81,7 @@ export const Loading: Story = {
     modelId: 'mlx-community/NVIDIA-Nemotron-Nano-9B-v2-4bits',
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
+    engine: 'mlx',
     nodeStatuses: [{ name: 'kite3', state: 'loading' }],
     status: 'loading',
     loadProgress: 45,
@@ -91,6 +96,7 @@ export const WarmingUp: Story = {
     modelId: 'mlx-community/Qwen3-30B-A3B-4bit',
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
+    engine: 'mlx',
     nodeStatuses: [{ name: 'kite2', state: 'loading' }],
     status: 'warming_up',
     loadProgress: 90,
@@ -105,6 +111,7 @@ export const Failed: Story = {
     modelId: 'mlx-community/DeepSeek-V3-0324',
     sharding: 'Tensor',
     instanceType: 'MlxJaccl',
+    engine: 'mlx',
     nodeStatuses: [{ name: 'kite1', state: 'failed' }],
     status: 'failed',
     statusMessage: 'Out of memory: requires 48GB, only 32GB available',
@@ -118,6 +125,7 @@ export const ShuttingDown: Story = {
     modelId: 'mlx-community/Qwen3.5-9B-4bit',
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
+    engine: 'mlx',
     nodeStatuses: [{ name: 'kite3', state: 'stopping' }],
     status: 'shutting_down',
   },
@@ -129,6 +137,7 @@ export const NoDeleteButton: Story = {
     modelId: 'mlx-community/Qwen3.5-9B-4bit',
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
+    engine: 'mlx',
     nodeStatuses: [{ name: 'kite2', state: 'ready' }],
     status: 'ready',
   },
@@ -140,8 +149,27 @@ export const LongModelId: Story = {
     modelId: 'mlx-community/some-very-long-model-name-that-might-wrap-to-multiple-lines-4bit',
     sharding: 'Pipeline',
     instanceType: 'MlxRing',
+    engine: 'mlx',
     nodeStatuses: [{ name: 'kite2', state: 'ready' }],
     status: 'ready',
     onDelete: () => {},
   },
+};
+
+export const ServedMtp: Story = {
+  args: {
+    instanceId: '93a2ca7f-ece8-4636-8c55-9ded83c2fb3e',
+    modelId: 'unsloth/Qwen3.5-9B-MTP-GGUF',
+    sharding: 'Pipeline',
+    instanceType: 'MlxRing',
+    engine: 'served',
+    nodeStatuses: [{ name: 'kite4', state: 'ready' }],
+    status: 'ready',
+    // Served native MTP (llama-server --spec-type draft-mtp), depth from
+    // served_spec_n_max. Label reads "Served (llama.cpp)" and the MTP badge fires.
+    speculation: { kind: 'sidecar', depth: 3 },
+    onChat: () => {},
+    onDelete: () => {},
+  },
+  name: 'Served MTP (AMD/llama.cpp)',
 };

@@ -369,6 +369,7 @@ export function App() {
       // Derive sharding and model type from shard metadata
       const runnerToShard = sa?.runnerToShard;
       let sharding: 'Pipeline' | 'Tensor' = 'Pipeline';
+      let engine: InstanceCardData['engine'] = 'mlx';
       let isEmbedding = false;
       let speculation: InstanceCardData['speculation'];
       if (runnerToShard) {
@@ -381,6 +382,19 @@ export function App() {
         const mc = (shardInner?.modelCard ?? shardInner?.model_card) as Record<string, unknown> | undefined;
         const tasks = mc?.tasks as string[] | undefined;
         if (tasks?.includes('TextEmbedding')) isEmbedding = true;
+
+        // Engine: every instance is wrapped as an MlxRing/Jaccl instance on the
+        // wire, so the card's placement backends (not the wrapper) tell us which
+        // engine actually serves it: in-process MLX, in-process llama.cpp, or the
+        // served llama-server. Used for the type label instead of assuming MLX.
+        const placement = mc?.placement as Record<string, unknown> | undefined;
+        const backends = (placement?.compatibleBackends ?? placement?.compatible_backends) as
+          | string[]
+          | undefined;
+        const firstBackend = backends?.[0] ?? '';
+        if (firstBackend.startsWith('llama_server')) engine = 'served';
+        else if (firstBackend.startsWith('llama_cpp')) engine = 'llama_cpp';
+        else engine = 'mlx';
 
         // Speculative-decoding status comes from the card's runtime section —
         // the card is the rank-invariant source of truth for whether drafting
@@ -406,6 +420,18 @@ export function App() {
             depth: typeof depth === 'number' ? depth : 1,
           };
         }
+
+        // Served engine (llama-server) speculation: the card declares
+        // served_spec_type (draft_mtp / draft_eagle3 / draft_simple) with the
+        // draft depth in served_spec_n_max. Surface the same MTP badge as the
+        // in-process MLX drafters so served-MTP instances read as MTP too.
+        if (!speculation) {
+          const servedSpec = rtKey('servedSpecType', 'served_spec_type');
+          if (typeof servedSpec === 'string' && servedSpec.startsWith('draft')) {
+            const nmax = rtKey('servedSpecNMax', 'served_spec_n_max');
+            speculation = { kind: 'sidecar', depth: typeof nmax === 'number' ? nmax : 1 };
+          }
+        }
       }
 
       // Derive status from runners
@@ -426,6 +452,7 @@ export function App() {
         modelId,
         sharding,
         instanceType: isRing ? 'MlxRing' : 'MlxJaccl',
+        engine,
         nodeStatuses,
         status: derived.status,
         statusMessage: derived.message,
