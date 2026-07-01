@@ -41,6 +41,23 @@ def test_delete_model_clears_cached_download_status(tmp_path: Path) -> None:
     assert "org/bundle" not in store._active_downloads  # pyright: ignore[reportPrivateUsage]
 
 
+def test_delete_model_leaves_in_flight_download_status(tmp_path: Path) -> None:
+    # An in-flight (pending/downloading) status is owned by a live _do_download
+    # task that reads self._active_downloads[model_id]; delete_model must not pop
+    # it out from under that task. Only terminal (complete/failed) statuses are
+    # cleared.
+    store = ModelStore(tmp_path)
+    _register(store, "org/bundle", ["base-Q4_K_M.gguf"])
+    store._active_downloads["org/bundle"] = StoreDownloadStatus(  # pyright: ignore[reportPrivateUsage]
+        model_id="org/bundle", status="downloading", progress=0.4
+    )
+
+    assert store.delete_model("org/bundle") is True
+
+    # The in-flight entry survives so the running download task does not crash.
+    assert "org/bundle" in store._active_downloads  # pyright: ignore[reportPrivateUsage]
+
+
 async def test_request_download_redownloads_stale_complete_when_files_gone(
     tmp_path: Path,
 ) -> None:

@@ -351,13 +351,18 @@ class ModelStore:
                 indent=2,
             )
         )
-        # Drop any cached download status for the deleted model. Leaving a stale
-        # "complete" here makes a later request_download short-circuit and never
-        # re-fetch the model we just removed (the registry entry and files are
-        # gone but the in-memory status would still say complete). request_download
-        # also re-checks is_in_store as a backstop, but clearing it at the source
-        # keeps the cache honest.
-        self._active_downloads.pop(model_id, None)
+        # Drop a *terminal* cached download status for the deleted model. Leaving
+        # a stale "complete" here makes a later request_download short-circuit and
+        # never re-fetch the model we just removed (the registry entry and files
+        # are gone but the in-memory status would still say complete). Only clear
+        # complete/failed entries: an in-flight (pending/downloading) entry is
+        # held by a live _do_download task, and popping it would crash that task
+        # (it reads self._active_downloads[model_id]). request_download also
+        # re-checks is_in_store as a backstop, so a surviving in-flight entry that
+        # later completes against a since-deleted model is still self-correcting.
+        cached = self._active_downloads.get(model_id)
+        if cached is not None and cached.status in ("complete", "failed"):
+            del self._active_downloads[model_id]
         return True
 
     def register_model(
