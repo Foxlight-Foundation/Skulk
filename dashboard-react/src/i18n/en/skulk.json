@@ -477,6 +477,7 @@
   "placement.error.noValidPlacement": "No valid placement found",
   "placement.excludeNodeTitle": "Click to exclude this node from this placement",
   "placement.includeNodeTitle": "Click to include this node",
+  "placement.ineligibleNodeTitle": "This node can't run this model",
   "placement.launchModel": "Launch Model",
   "placement.llamaCpp": "llama.cpp",
   "placement.loading": "Analyzing placement options...",
