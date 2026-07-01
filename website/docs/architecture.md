@@ -228,7 +228,11 @@ runs MTP, via its assistant as the draft model). The engine is single-node and c
 in-process llama.cpp runner; the same managed-server-plus-proxy shape is the
 intended on-ramp for vLLM later. See the setup notes for a non-Mac node in
 [AMD / Strix Halo nodes](amd-strix-halo-nodes) and the env vars
-`SKULK_LLAMA_SERVER_BIN` / `SKULK_LLAMA_SERVER_BACKENDS`.
+`SKULK_LLAMA_SERVER_BIN` / `SKULK_LLAMA_SERVER_BACKENDS`. A node-local
+`SKULK_LLAMA_SERVER_FORCE_NO_SPEC=1` forces speculative decoding off even for a
+card that asks for it, so the same GGUF can be served in plain decode as an
+apples-to-apples MTP-off baseline (a benchmarking and diagnostics knob, not for
+normal operation).
 
 A model card declares two placement axes that are deliberately separate from the
 memory/topology axes above:
