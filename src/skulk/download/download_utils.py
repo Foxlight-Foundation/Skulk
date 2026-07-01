@@ -722,13 +722,23 @@ def create_http_session(
     auto_decompress: bool = False,
     timeout_profile: Literal["short", "long"] = "long",
 ) -> aiohttp.ClientSession:
+    total_timeout: int | None
     if timeout_profile == "short":
         total_timeout = 30
         connect_timeout = 10
         sock_read_timeout = 30
         sock_connect_timeout = 10
     else:
-        total_timeout = 1800
+        # No TOTAL cap on large file-body downloads: a fixed wall-clock total
+        # timeout caps the download by elapsed time regardless of progress, so a
+        # multi-GB GGUF that is downloading fine just fails partway through once
+        # it outlasts the cap (a 17 GB model at ~7.5 MB/s hit the old 1800 s cap
+        # at ~80%, surfacing as an empty-string TimeoutError). Progress is
+        # instead policed by ``sock_read`` (per-read inactivity) and
+        # ``sock_connect`` — a genuinely stalled connection still times out and
+        # retries (which resume from the ``.partial``), but a slow-but-alive
+        # transfer of any size completes.
+        total_timeout = None
         connect_timeout = 60
         sock_read_timeout = 60
         sock_connect_timeout = 60

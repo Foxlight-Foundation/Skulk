@@ -752,5 +752,11 @@ class ModelStore:
 
         except Exception as exc:
             status.status = "failed"
-            status.error = str(exc)
-            logger.error(f"ModelStore: download of {model_id} failed: {exc}")
+            # Always record the exception TYPE: several failure modes (notably a
+            # TimeoutError) stringify to "", which produced an empty, useless
+            # error field that hid the real cause of a stalled large download.
+            detail = str(exc)
+            status.error = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+            logger.exception(
+                f"ModelStore: download of {model_id} failed ({type(exc).__name__})"
+            )
