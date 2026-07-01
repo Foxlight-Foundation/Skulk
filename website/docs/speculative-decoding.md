@@ -38,6 +38,30 @@ pipeline (sharded) placements through one shared decode loop. You do not
 enable it, size it, or tune it for normal use: if a model ships with a
 drafter and the placement supports it, it activates on its own.
 
+## Two Engines: MLX and Served (llama.cpp)
+
+MTP runs on both of Skulk's speculative-capable engines, and placement routes
+each model to the right one from its card:
+
+- **MLX** (Apple Silicon, in-process): the drafters and models in the table
+  below. Skulk owns the generation loop, the multi-node ring, and the
+  speculative decode across sharded placements. This is the engine the speedup
+  numbers and multi-node discussion on this page describe.
+- **Served / `llama_server`** (GPU nodes, including AMD): llama.cpp's **native**
+  MTP, reached by launching `llama-server --spec-type draft-mtp` and proxying it
+  (native MTP lives in the server app, not the in-process binding). This is how
+  speculative decoding works on an AMD node. It is single-node and applies to
+  GGUF models whose card declares `served_spec_type = draft_mtp`, in two shapes:
+  baked-in MTP heads (Qwen3.5 / Qwen3.6 MTP GGUFs) and a base plus a separate
+  `--model-draft` GGUF (Gemma 4 31B). See
+  [AMD Strix Halo nodes](amd-strix-halo-nodes.md) for enabling it
+  (`SKULK_LLAMA_SERVER_BIN`) and the served MTP cards.
+
+Everything below (the MLX drafter table, the multi-node speedups, and the
+turn-itself-off cases) is about the MLX engine. The served engine's speculation
+is configured on the model card (`served_spec_type`, `served_spec_n_max`) and,
+like MLX MTP, is carded off per model when a pairing does not pay.
+
 ## Which Models Ship With It
 
 These models carry a drafter in their model card and use speculative

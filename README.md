@@ -198,14 +198,14 @@ Build/runtime note:
 | macOS on Apple Silicon | Primary target. Best experience today. Serves MLX models. |
 | Multi-Mac clusters | Supported. Best results on matched macOS versions and fast networking. |
 | RDMA over Thunderbolt 5 | Supported on eligible macOS 26.2+ hardware after OS-level setup. |
-| AMD / Linux GPU (for example Strix Halo) | Supported. Joins a cluster and serves GGUF models on a llama.cpp engine (Vulkan or ROCm), alongside Apple Silicon nodes. See the [AMD / Strix Halo node guide](https://foxlight-foundation.github.io/Skulk/amd-strix-halo-nodes). |
+| AMD / Linux GPU (for example Strix Halo) | Supported. Joins a cluster and serves GGUF models on its GPU, alongside Apple Silicon nodes, through two engines: in-process `llama_cpp` (Vulkan or ROCm), and a served `llama_server` engine that unlocks llama.cpp's **native multi-token prediction** (`--spec-type draft-mtp`) so speculative decoding runs on AMD too. See the [AMD / Strix Halo node guide](https://foxlight-foundation.github.io/Skulk/amd-strix-halo-nodes). |
 | Linux (CPU only) | Supported as a control/API node; GGUF serving on CPU is possible but slow. |
 
 ## Core Features
 
 - **Distributed inference**: split work across devices instead of treating each machine as an island.
-- **Heterogeneous engines**: Apple Silicon nodes serve MLX models and AMD or other Linux GPU nodes serve GGUF models on a llama.cpp engine (Vulkan or ROCm), in one cluster, with each model routed to a node that can run it.
-- **Speculative decoding**: measured 1.16–2.2× decode speedups via multi-token prediction, on by default for supported model cards, including multi-node placements on mixed hardware.
+- **Heterogeneous engines**: Apple Silicon nodes serve MLX models; AMD or other Linux GPU nodes serve GGUF models through an in-process `llama_cpp` engine (Vulkan or ROCm) and a served `llama_server` engine; all in one cluster, with each model routed to a node that can run it.
+- **Speculative decoding**: measured 1.16–2.2× decode speedups via multi-token prediction, on by default for supported model cards, including multi-node placements on mixed hardware. On AMD/GPU nodes, llama.cpp's native MTP (`--spec-type draft-mtp`) runs through the served engine.
 - **Skulk Dashboard**: React dashboard for topology, model store, chat, settings, and placement workflows.
 - **Model Store**: centralize model files on one node and stage them to the rest of the cluster over the LAN; for GGUF repos it downloads only the quantization a model card pins, and the store host advertises a routable address so downloads work on a Thunderbolt-meshed fleet.
 - **Cluster-wide config sync**: update config from the dashboard and sync it across nodes.
