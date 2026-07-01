@@ -101,6 +101,23 @@ _DRAFT_MODEL_REQUIRED: Final[frozenset[str]] = frozenset(
 )
 
 
+def _force_no_spec() -> bool:
+    """True if this node is configured to serve without speculative decoding.
+
+    ``SKULK_LLAMA_SERVER_FORCE_NO_SPEC`` makes the served runner ignore a card's
+    ``served_spec_type`` and launch ``llama-server`` without any ``--spec-type``
+    flags, so the same GGUF serves as a plain-decode baseline. Intended for an
+    MTP on-vs-off throughput comparison and for debugging a misbehaving spec
+    pairing; unset in normal operation.
+    """
+    return os.environ.get("SKULK_LLAMA_SERVER_FORCE_NO_SPEC", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _draft_model_args(runtime: Any, spec_type: str) -> list[str]:
     """Resolve the ``--model-draft`` args for a served spec mode.
 
@@ -489,6 +506,17 @@ class Runner:
         if reasoning_format_none:
             cmd += ["--reasoning-format", "none"]
         spec_type = getattr(runtime, "served_spec_type", None) if runtime else None
+        # Operator/benchmark override: force plain decode for a served model whose
+        # card asks for speculation. Serving the SAME GGUF with the spec flags
+        # omitted is the apples-to-apples "MTP off" baseline for an on-vs-off
+        # throughput comparison (identical weights, speculation disabled), and a
+        # debug lever when a spec pairing misbehaves. Node-level, read at launch.
+        if spec_type and spec_type != "none" and _force_no_spec():
+            logger.info(
+                f"SKULK_LLAMA_SERVER_FORCE_NO_SPEC set; serving {spec_type!r} model "
+                "with speculative decoding disabled (plain decode)"
+            )
+            spec_type = None
         if spec_type and spec_type != "none":
             flag = _SPEC_TYPE_FLAG.get(spec_type)
             if flag is None:
