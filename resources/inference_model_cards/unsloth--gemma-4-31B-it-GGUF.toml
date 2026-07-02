@@ -5,14 +5,9 @@
 # projector, so the [vision] section is grounded (image_token_id 258880, gemma4
 # model_type, boi/eoi bracketing) and the llama.cpp runner loads the projector.
 # Gemma 4 is a reasoning model that emits its thinking as literal <|channel>
-# markers, but the in-process llama_cpp runner does NOT wire the Gemma channel
-# parser (that lives in the llama_server / MLX paths), so the markers cannot be
-# split into reasoning/content on this engine. Until that is fixed (tracked in
-# #440) this card advertises text + vision only, so the API and chat UI don't
-# present a reasoning affordance the engine can't back. Re-add "thinking" plus a
-# gemma4 output_parser once the llama_cpp runner parses channels. (The markers
-# still pass through as content until then; that is the #440 fix, not this card.)
-# Architecture from config.json (60 layers, hidden 5376, 16 KV heads, 262144 ctx).
+# markers (not tokenizer special tokens), so output_parser = "gemma4" reparses
+# them into a reasoning/content split. Architecture from config.json (60 layers,
+# hidden 5376, 16 KV heads, 262144 ctx).
 model_id = "unsloth/gemma-4-31B-it-GGUF"
 n_layers = 60
 hidden_size = 5376
@@ -22,7 +17,7 @@ tasks = ["TextGeneration"]
 family = "gemma"
 quantization = "Q4_K_M"
 base_model = "Gemma 4 31B-it"
-capabilities = ["text", "vision"]
+capabilities = ["text", "thinking", "vision"]
 context_length = 262144
 gguf_file = "gemma-4-31B-it-Q4_K_M.gguf"
 trust_remote_code = false
@@ -30,6 +25,11 @@ trust_remote_code = false
 [tooling]
 supports_tool_calling = true
 tool_call_format = "gemma4"
+
+[runtime]
+# Gemma 4 emits <|channel> reasoning markers as literal text; the runner strips
+# them and splits reasoning from content (the generic parser can't read them).
+output_parser = "gemma4"
 
 [vision]
 image_token_id = 258880
