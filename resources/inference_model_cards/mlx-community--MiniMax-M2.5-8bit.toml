@@ -8,6 +8,15 @@ family = "minimax"
 quantization = "8bit"
 base_model = "MiniMax M2.5"
 capabilities = ["text", "thinking"]
+context_length = 196608
+
+# MiniMax M2 is an interleaved-thinking model: it always emits token-delimited
+# <think>...</think> reasoning and the thinking content must be retained in the
+# history. There is no documented on/off toggle, so thinking is not toggleable.
+# The "minimax" family has no capability defaults, so declare the contract here.
+[reasoning]
+supports_toggle = false
+format = "token_delimited"
 
 [storage_size]
 in_bytes = 242986745856

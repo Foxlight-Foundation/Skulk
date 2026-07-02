@@ -1,0 +1,33 @@
+# Qwen3-Coder-30B-A3B-Instruct (unsloth GGUF): Qwen3 agentic-coding MoE (30B
+# total, 3B active) for the llama.cpp engine on GPU/Linux nodes. The quant is
+# pinned to Q4_K_M (~18.5 GB); the repo ships no mmproj projector, so this GGUF
+# is TEXT-ONLY. `supports_tensor = false`: the llama.cpp runner is single-node.
+# Coder is instruct-only (no <think> reasoning mode), so no [reasoning] section;
+# the capability resolver excludes Coder variants from the Qwen3 thinking default.
+# OpenAI-style tool calling is declared so it resolves as a tool-using code model.
+# Architecture read from the GGUF header (arch qwen3moe: 48 layers, hidden 2048,
+# 4 KV heads, 262144 ctx).
+model_id = "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF"
+n_layers = 48
+hidden_size = 2048
+num_key_value_heads = 4
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "qwen"
+quantization = "Q4_K_M"
+base_model = "Qwen3 Coder 30B-A3B Instruct"
+capabilities = ["text", "code"]
+context_length = 262144
+gguf_file = "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf"
+trust_remote_code = false
+
+[tooling]
+supports_tool_calling = true
+tool_call_format = "generic"
+
+[placement]
+compatible_backends = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu"]
+backend_preference = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu"]
+
+[storage_size]
+in_bytes = 18556689568

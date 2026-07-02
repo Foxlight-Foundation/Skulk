@@ -1,0 +1,14 @@
+model_id = "mlx-community/Devstral-Small-2-24B-Instruct-2512-4bit"
+n_layers = 40
+hidden_size = 5120
+num_key_value_heads = 8
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "mistral"
+quantization = "4bit"
+base_model = "Devstral Small 2 24B Instruct 2512"
+capabilities = ["text", "code"]
+context_length = 393216
+
+[storage_size]
+in_bytes = 25792912480

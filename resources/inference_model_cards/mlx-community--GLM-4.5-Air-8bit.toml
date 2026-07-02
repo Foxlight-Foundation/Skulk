@@ -8,6 +8,21 @@ family = "glm"
 quantization = "8bit"
 base_model = "GLM 4.5 Air"
 capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 131072
+
+# GLM-4.5-Air is a hybrid reasoner: a toggleable thinking mode (complex
+# reasoning / agentic tool use) and an immediate non-thinking mode. Reasoning
+# is emitted token-delimited (<think>...</think>). The "glm" family has no
+# resolver branch, so declare the format explicitly or it defaults to none.
+[reasoning]
+supports_toggle = true
+format = "token_delimited"
+
+# GLM-4.5-Air natively supports function/tool calling (its own GLM wire format,
+# which is not one of Skulk's enum parsers, so leave tool_call_format at the
+# generic default and only assert support).
+[tooling]
+supports_tool_calling = true
 
 [storage_size]
 in_bytes = 122406567936

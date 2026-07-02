@@ -7,7 +7,8 @@ tasks = ["TextGeneration"]
 family = "qwen"
 quantization = "4bit"
 base_model = "Qwen3.5 27B"
-capabilities = ["text", "thinking", "thinking_toggle"]
+capabilities = ["text", "thinking", "thinking_toggle", "vision"]
+context_length = 262144
 
 [reasoning]
 supports_toggle = true
@@ -28,6 +29,17 @@ disabled_effort = "none"
 mtp_heads = true
 mtp_max_depth = 1
 mtp_sidecar_repo = "FoxlightAI/qwen3-5-27b-mtp"
+
+# Qwen3.5 is a natively multimodal (early-fusion) VLM: config.json ships a
+# vision_config and the repo is tagged image-text-to-text /
+# AutoModelForMultimodalLM. The MLX vision path splices image embeddings at
+# image_token_id, so it is load-bearing here (from config.json).
+[modalities]
+supports_native_multimodal = true
+
+[vision]
+image_token_id = 248056
+model_type = "qwen3_5"
 
 [storage_size]
 in_bytes = 16054266848

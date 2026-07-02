@@ -8,6 +8,7 @@ family = "qwen"
 quantization = "8bit"
 base_model = "Qwen3 0.6B"
 capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 40960
 
 [storage_size]
 in_bytes = 698351616
