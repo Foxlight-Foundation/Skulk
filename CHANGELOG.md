@@ -18,9 +18,11 @@ This project records release notes here and mirrors public-facing notes in
   Moonlight-16B-A3B, and the GGUF serving models gpt-oss-20b/120b, Qwen2.5-7B,
   Llama-3.3-70B, Qwen3-Coder-30B, gemma-4-31B, Llama-3.2-1B, Qwen2-VL-2B). Audited
   and corrected the existing cards, including capability fixes grounded in the real
-  models: Step-3.5-Flash is always-reasoning (no thinking toggle), several Qwen VLMs
-  were missing their vision section, and two MTP-GGUF cards wrongly claimed
-  text-only despite shipping a vision projector.
+  models: Step-3.5-Flash is always-reasoning (no thinking toggle) and several Qwen
+  VLMs were missing their vision section. Cards advertise only what the serving
+  engine can actually deliver, so served-MTP GGUF cards stay text-only (the
+  llama_server engine has no vision projector) and the gemma-4 GGUF card keeps its
+  reasoning even though the in-process llama_cpp path does not yet split it.
 
 - **Dashboard renders AMD Ryzen AI Max nodes as their own device.** The topology
   graph and cluster cards now draw a dedicated AMD Strix Halo glyph (detected from
