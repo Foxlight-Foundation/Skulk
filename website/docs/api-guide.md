@@ -346,7 +346,7 @@ Notes:
 - Reasoning support depends on model capabilities.
 - Use `GET /v1/models` response `data[].resolved_capabilities` to decide whether a model supports thinking and whether clients should render a thinking toggle.
 - Treat `resolved_capabilities` as the default tool-free request path; request-specific options such as tools can change prompt rendering and related resolved values for mixed-mode model families.
-- Phase 2 semantics are model-aware:
+- Thinking-control semantics are model-aware:
   - if `supports_thinking_toggle` is `true`, send `enable_thinking=true` or `false` explicitly
   - `reasoning_effort="none"` disables thinking for toggleable models
   - if a model does not support toggleable thinking, Skulk ignores explicit toggle overrides but still preserves explicit non-disabled reasoning-effort hints when the model family supports them
@@ -566,7 +566,7 @@ Behavior note:
 **GET** `/store/storage`
 
 Returns the local node's storage picture: every staged model with its size,
-last-use time, and whether a live instance (or one of its companion repos —
+last-use time, and whether a live instance (or one of its companion repos:
 MTP sidecar, assistant, vision weights) currently depends on it, plus
 event-log usage and free disk on the models volume. Cluster-wide views query
 each node's API.
@@ -608,7 +608,7 @@ curl -X POST http://localhost:52415/place_instance \
 | `sharding` | `Pipeline` or `Tensor` |
 | `instance_meta` | `MlxRing` or `MlxJaccl` |
 | `min_nodes` | Minimum nodes required for the placement |
-| `excluded_nodes` | Optional. Node IDs the master should treat as if absent when scoring this placement. Already-running instances on those nodes are unaffected — exclusion is per-placement, not cluster-wide. Default: `[]`. Note: node IDs are per-session — they change when a cluster session restarts. |
+| `excluded_nodes` | Optional. Node IDs the master should treat as if absent when scoring this placement. Already-running instances on those nodes are unaffected (exclusion is per-placement, not cluster-wide). Default: `[]`. Note: node IDs are per-session, so they change when a cluster session restarts. |
 
 The placement is validated against the current cluster state **before** the
 command is forwarded, so an impossible placement fails at the API instead of
@@ -621,14 +621,14 @@ silently failing on the master:
 - **503** when cluster info is still being gossiped (a cluster that just
   formed): connection edges lag node identities by a few gossip rounds, and
   per-node memory info lags the edges. The request internally waits up to
-  15 seconds for the info to arrive before giving up — retry shortly on 503.
+  15 seconds for the info to arrive before giving up, so retry shortly on 503.
 
 Memory fitting is checked **per node, not summed across the cycle**: Tensor
 sharding splits weights evenly, Pipeline allocates layers proportionally to
 each node's available memory, and every node must hold its share times a
 runtime-overhead factor (KV cache, activations, runner) on top of the raw
-weight bytes. A model that exactly equals a node's free memory is rejected —
-that placement would thrash, not run.
+weight bytes. A model that exactly equals a node's free memory is rejected,
+because that placement would thrash, not run.
 
 ### Preview valid placements
 
@@ -644,7 +644,7 @@ This is usually the best first Skulk-specific endpoint to call. It shows which c
 |-----------------|---------|
 | `model_id` | Required. Hugging Face-style model ID. |
 | `node_ids` | Optional, repeatable. Restricts previews to candidate cycles that contain *all* of these node IDs (subset matching). |
-| `excluded_node_ids` | Optional, repeatable. Excludes the listed node IDs from candidate cycles for every previewed combination — mirrors the `excluded_nodes` field on `POST /place_instance` so dashboards can render an accurate preview against the post-exclusion topology. |
+| `excluded_node_ids` | Optional, repeatable. Excludes the listed node IDs from candidate cycles for every previewed combination. Mirrors the `excluded_nodes` field on `POST /place_instance` so dashboards can render an accurate preview against the post-exclusion topology. |
 
 ```bash
 # Preview with one node excluded:
@@ -795,7 +795,7 @@ Updates cluster-wide config. Important behavior:
 
 - if you omit `hf_token`, Skulk preserves the existing value
 - if you omit `logging`, Skulk preserves the existing logging config
-- `hf_token` is not broadcast over gossipsub — it stays on the local node's `skulk.yaml`
+- `hf_token` is not broadcast over gossipsub; it stays on the local node's `skulk.yaml`
 - logging changes (enable/disable) take effect immediately on all nodes
 - inference changes affect future launches
 - model-store location changes generally require restart
@@ -816,7 +816,7 @@ Returns hostname, preferred IP, and node identity information used by the dashbo
 
 **POST** `/admin/restart?node_id=<optional node id>`
 
-Gracefully restart the exo process on this or a remote node. When `node_id` is omitted or matches the local node, replaces the current process image in-place via `os.execv` (same PID). When `node_id` targets a remote node, sends a `RestartNode` command via pub/sub.
+Gracefully restart the Skulk process on this or a remote node. When `node_id` is omitted or matches the local node, replaces the current process image in-place via `os.execv` (same PID). When `node_id` targets a remote node, sends a `RestartNode` command via pub/sub.
 
 - GPU/Metal memory is released when the process image is replaced
 - the node rejoins the cluster automatically on startup
@@ -1082,7 +1082,7 @@ curl "http://localhost:52415/v1/connectivity/tailscale?node_id=<node-id>"
 GET /v1/connectivity/remote-access
 ```
 
-Returns aggregated remote access information for the local node: LAN address, Tailscale address, and a `preferredUrl` (Tailscale if running, otherwise LAN). When Tailscale is running, `preferredUrl` uses the node's MagicDNS name (`my-node.tailnet-abc.ts.net`) if available, falling back to the raw `100.x.x.x` IP. `operatorUrl` appends `/operator` to `preferredUrl` — suitable for QR code generation so mobile users land directly on the operator panel.
+Returns aggregated remote access information for the local node: LAN address, Tailscale address, and a `preferredUrl` (Tailscale if running, otherwise LAN). When Tailscale is running, `preferredUrl` uses the node's MagicDNS name (`my-node.tailnet-abc.ts.net`) if available, falling back to the raw `100.x.x.x` IP. `operatorUrl` appends `/operator` to `preferredUrl` (suitable for QR code generation so mobile users land directly on the operator panel).
 
 **Response fields:**
 
@@ -1148,7 +1148,7 @@ The operator panel at `/operator` is designed for mobile access and can also be 
 
 ### Typical operator app workflow
 
-1. Call `GET /v1/connectivity/remote-access` on the initially discovered node to get the `preferredUrl` — use that as the base URL for subsequent calls.
+1. Call `GET /v1/connectivity/remote-access` on the initially discovered node to get the `preferredUrl`, then use that as the base URL for subsequent calls.
 2. Poll `GET /v1/state` every 5 seconds for node health (memory, GPU, temperature).
 3. Show per-node cards with restart buttons that call `POST /v1/nodes/{node_id}/restart`.
 4. On first launch or settings screen, show the `operatorUrl` as a QR code so users can hand it off to another device.

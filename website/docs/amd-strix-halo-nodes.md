@@ -1,4 +1,4 @@
-# AMD Strix Halo nodes (Linux / ROCm)
+# AMD Strix Halo nodes (Linux / Vulkan)
 
 Skulk clusters are not Mac-only. An AMD Ryzen AI Max (Strix Halo, `gfx1151`) box
 running Linux can join a cluster as a worker that serves **GGUF models on its
@@ -41,9 +41,10 @@ lands on the Macs, automatically.
 ## The GPU path: Vulkan, not HIP
 
 On `gfx1151` the reliable, well-supported way to run llama.cpp on the GPU today
-is the **Vulkan backend** (Mesa's RADV driver), not the ROCm/HIP backend. ROCm
-is still installed for its runtime and driver stack, but Skulk's llama.cpp runner
-offloads through Vulkan. On a Ryzen AI Max+ 395 (Radeon 8060S) this fully
+is the **Vulkan backend** (Mesa's RADV driver), not the ROCm/HIP backend. ROCm is
+not required for inference. It is optional and used only for the `rocminfo`
+diagnostic. Skulk's llama.cpp runner offloads through Vulkan (Mesa RADV). On a
+Ryzen AI Max+ 395 (Radeon 8060S) this fully
 offloads a 7B Q4_K_M model to the iGPU and decodes at interactive speed, which is
 what makes the box useful as a cluster node rather than a CPU-only fallback.
 
@@ -52,21 +53,95 @@ what makes the box useful as a cluster node rather than a CPU-only fallback.
 | Component        | Version                                          |
 | ---------------- | ------------------------------------------------ |
 | Hardware         | AMD Ryzen AI Max+ 395 w/ Radeon 8060S (gfx1151)  |
-| OS               | Ubuntu 26.04 LTS (kernel 7.0)                    |
-| ROCm             | 6.4                                              |
-| GPU compute      | Vulkan via Mesa RADV (`STRIX_HALO`)             |
-| Python / uv      | 3.13 / 0.11                                       |
-| llama-cpp-python | 0.3.30, built with the Vulkan backend            |
+| OS               | Ubuntu 26.04 LTS (kernel 7.x)                     |
+| GPU compute      | Vulkan via Mesa RADV 26.x (Vulkan 1.4, `STRIX_HALO`) |
+| Build toolchain  | cmake 4.x, gcc/g++ 15.x, glslc (shaderc)         |
+| Python / uv      | uv-managed Python, uv 0.11+                       |
+| llama-cpp-python | Built from source with the Vulkan backend        |
+| llama.cpp        | Vulkan build (b9820+), for native MTP (`llama-server`) |
+
+On Ubuntu 26.04 the whole Vulkan path is distro-native (Mesa RADV and
+`vulkan-tools` from `main`, `glslc` and the optional `rocminfo` diagnostic from
+`universe`, GPU firmware in `linux-firmware`), so a Skulk node needs **no
+third-party AMD/ROCm apt repository**. Inference runs on Vulkan, not HIP: the
+`llama-server` binary links `libvulkan`, not `libamdhip`, so ROCm is optional and
+used here only for `rocminfo`.
+
+## Unified memory (kernel parameters)
+
+The Ryzen AI Max has a single pool of unified LPDDR5X. The BIOS carves part of it
+out as dedicated GPU VRAM (for example 64 GiB on a 128 GiB box) and leaves the
+rest as system RAM. Two kernel parameters let the GPU address the whole pool, so
+a model larger than the VRAM carve-out still runs on the GPU (its weights map
+through the GTT aperture into system RAM):
+
+- `amdgpu.gttsize=126976` caps the GPU's unified (GTT) aperture at 124 GiB
+  (126976 MiB / 1024).
+- `ttm.pages_limit=32505856` raises the pinned-memory limit to the same 124 GiB
+  (32505856 x 4 KiB pages = 126976 MiB).
+
+Set both to fit your box (scale down proportionally on a smaller machine, for
+example a 64 GiB box). Without them the GPU is capped near the VRAM carve-out and
+large models fail to load. Skulk already understands this: it shows the machine's
+full unified memory in the dashboard (VRAM carve-out plus system RAM) and its
+planner admits models against the whole pool, so a 128 GiB box serves ~128 GiB of
+model rather than only the non-carve-out slice.
+
+A third parameter is optional and trades IOMMU isolation for throughput and
+stability on a trusted node:
+
+- `amd_iommu=off` disables the AMD IOMMU entirely, which removes translation
+  overhead and avoids IOMMU edge cases. Prefer it over `iommu=pt` **only where
+  the node is trusted** (the cluster-fabric assumption), since it removes device
+  isolation.
+
+Apply through GRUB and reboot (the parameters live in `GRUB_CMDLINE_LINUX`):
+
+```bash
+# swap iommu=pt for amd_iommu=off, keeping the memory caps:
+sudo sed -i 's/iommu=pt/amd_iommu=off/' /etc/default/grub
+# the line should now read, e.g.:
+#   GRUB_CMDLINE_LINUX="amd_iommu=off amdgpu.gttsize=126976 ttm.pages_limit=32505856"
+sudo update-grub && sudo reboot
+# after reboot, confirm:
+cat /proc/cmdline
+```
 
 ## Bring-up
 
-The full operational steps and a launcher template live in
+The full operational steps, a one-shot dependency installer, and a launcher
+template live in
 [`deployment/rocm/`](https://github.com/Foxlight-Foundation/Skulk/tree/main/deployment/rocm)
-in the repo. In outline:
+in the repo.
 
-1. **Install the GPU stack**: ROCm plus a working Vulkan driver (RADV). Confirm
-   with `rocminfo | grep gfx` (expect `gfx1151`) and `vulkaninfo | grep deviceName`
-   (expect the Radeon device via RADV).
+### Install the dependencies (one script)
+
+On a fresh Ubuntu box, `deployment/rocm/install-deps.sh` installs everything the
+node needs below the Skulk repo (the Vulkan GPU stack, the build toolchain, `uv`,
+and GPU device-group membership) and, with flags, builds the MTP `llama-server`
+binary and the Skulk `uv` env in the same pass. It is idempotent:
+
+```bash
+git clone https://github.com/Foxlight-Foundation/Skulk.git && cd Skulk
+
+# System deps only:
+deployment/rocm/install-deps.sh
+# Everything, including the MTP llama-server and the Vulkan llama-cpp-python:
+deployment/rocm/install-deps.sh --with-llama-server --with-skulk-env
+# Verify a box without installing:
+deployment/rocm/install-deps.sh --check
+```
+
+If it adds you to the `render` / `video` GPU groups for the first time, log out
+and back in before starting Skulk. The manual steps below are what the script
+automates.
+
+### Manual steps
+
+1. **Install the GPU stack**: a working Vulkan driver (Mesa RADV); ROCm is
+   optional (only `rocminfo`). Confirm with `vulkaninfo | grep deviceName`
+   (expect the Radeon device via RADV) and, if installed, `rocminfo | grep gfx`
+   (expect `gfx1151`).
 2. **Build the Skulk environment**: `git clone` the repo and run `uv sync`. The
    Rust networking bindings compile here. No MLX is needed on a non-Mac node.
 3. **Build llama-cpp-python with Vulkan**: the default install is a CPU wheel,
@@ -84,7 +159,12 @@ in the repo. In outline:
    As a safety net, if the wheel is ever replaced by a CPU-only one (no GPU
    offload compiled in), the node detects that and advertises `llama_cpp-cpu`
    instead of its GPU backend, so GPU work is never routed to a degraded build.
-4. **Launch the node**: declare its backend and point it at the rest of the
+4. **Build `llama-server` for native MTP (optional)**: speculative decoding on
+   the AMD node runs through an external `llama-server` process (the in-process
+   binding does not expose native MTP). Build it once with Vulkan and point the
+   node at it (see the MTP section below). `install-deps.sh --with-llama-server`
+   does this for you.
+5. **Launch the node**: declare its backend and point it at the rest of the
    cluster, using the `launch-skulk.sh.example` template (sets
    `SKULK_LLAMA_CPP_BACKENDS=vulkan`). Nodes on the same LAN segment find each
    other automatically (mDNS); if this node is on a different segment, set
@@ -163,8 +243,20 @@ There are two MTP shapes, both served this way:
   `--model-draft` (for example Gemma 4 31B with a published draft). The card
   co-fetches both through the store.
 
-To enable it on a node, install a `llama-server` build with MTP support and point
-`SKULK_LLAMA_SERVER_BIN` at it before launching Skulk. On a Ryzen AI Max the
+To enable it on a node, build a recent `llama-server` with the Vulkan backend and
+point `SKULK_LLAMA_SERVER_BIN` at it before launching Skulk. Native MTP
+(`--spec-type draft-mtp`) landed in llama.cpp build b9196, so use a newer tag:
+
+```bash
+git clone https://github.com/ggml-org/llama.cpp.git ~/llama.cpp && cd ~/llama.cpp
+cmake -B build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target llama-server -j"$(nproc)"
+# then in ~/.skulk/skulk.env (or launch-skulk.sh):
+#   SKULK_LLAMA_SERVER_BIN=$HOME/llama.cpp/build/bin/llama-server
+```
+
+`deployment/rocm/install-deps.sh --with-llama-server` runs exactly this and prints
+the path to set. On a Ryzen AI Max the
 Vulkan `llama-server` serves an MTP-capable GGUF on the Radeon GPU and generates
 with speculation active, streaming reasoning and tool calls through the same
 `/v1` endpoints as any other model. Acceptance is per-model: a pairing that does

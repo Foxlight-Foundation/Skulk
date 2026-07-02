@@ -6,14 +6,14 @@ sidebar_label: Multi-network clustering
 
 # Multi-network clusters via Tailscale
 
-By default, Skulk discovers cluster peers using mDNS, which only works on the same local network segment. If you want cluster nodes in different locations — a Mac at home, a Linux box at a colo, a cloud VM — mDNS won't reach them.
+By default, Skulk discovers cluster peers using mDNS, which only works on the same local network segment. If you want cluster nodes in different locations (a Mac at home, a Linux box at a colo, a cloud VM), mDNS won't reach them.
 
 Tailscale solves this by giving every node a stable `100.x.x.x` address that works across any network. You configure Skulk to use those addresses as bootstrap peers, and the cluster forms over the Tailscale overlay.
 
 :::info Tailscale must be installed on every cluster node
-Unlike the [remote access](tailscale) scenario (where only the node you want to reach needs Tailscale), multi-network clustering requires **every node** to have Tailscale installed and running. This is because Skulk dials each peer directly by its `100.x.x.x` address — there's no gateway or proxy. If a node doesn't have a Tailscale IP, the other nodes have no address to dial it on.
+Unlike the [remote access](tailscale) scenario (where only the node you want to reach needs Tailscale), multi-network clustering requires **every node** to have Tailscale installed and running. This is because Skulk dials each peer directly by its `100.x.x.x` address; there's no gateway or proxy. If a node doesn't have a Tailscale IP, the other nodes have no address to dial it on.
 
-If all your nodes are on the same local network, you don't need Tailscale at all — mDNS handles discovery automatically. Tailscale is only needed when nodes are on physically separate networks.
+If all your nodes are on the same local network, you don't need Tailscale at all: mDNS handles discovery automatically. Tailscale is only needed when nodes are on physically separate networks.
 :::
 
 ## Prerequisites
@@ -28,7 +28,7 @@ On **every node** that will join the cluster:
 
 ### 1. Enable Tailscale connectivity on every node
 
-Add this to `skulk.yaml` on **every** node — the same three lines everywhere, no per-node IPs to manage:
+Add this to `skulk.yaml` on **every** node, the same three lines everywhere, no per-node IPs to manage:
 
 ```yaml
 connectivity:
@@ -37,7 +37,7 @@ connectivity:
 ```
 
 With this set, each node queries its local tailnet and **auto-discovers every
-other node's `100.x` address as a bootstrap peer** — there is no list to
+other node's `100.x` address as a bootstrap peer**: there is no list to
 maintain. Nodes are dialed on Skulk's libp2p port (default `52416`); peers that
 aren't running Skulk simply fail Skulk's private-network handshake and are
 ignored. When a node's Tailscale IP changes, discovery picks up the new one on
@@ -45,7 +45,7 @@ the next restart with no config edit.
 
 :::tip Local Network permission not needed over Tailscale
 The Tailscale overlay (a `utun` interface) is exempt from macOS Local Network
-Privacy, so — unlike a plain LAN/Thunderbolt cluster — you do **not** need to
+Privacy, so (unlike a plain LAN/Thunderbolt cluster) you do **not** need to
 grant Local Network access for a Tailscale cluster to form. See
 [Thunderbolt clustering](thunderbolt-clustering) for the local-network case.
 :::
@@ -53,8 +53,8 @@ grant Local Network access for a Tailscale cluster to form. See
 ### 2. (Optional) Pin specific peers
 
 Auto-discovery is enough for most setups. If you want to pin specific bootstrap
-addresses anyway — for example to dial a node on a non-default port, or to seed
-peers from outside the tailnet — list them explicitly; they are merged with the
+addresses anyway (for example to dial a node on a non-default port, or to seed
+peers from outside the tailnet), list them explicitly; they are merged with the
 auto-discovered set:
 
 ```yaml
@@ -84,13 +84,13 @@ Skulk reads the config, logs the Tailscale status, and dials the bootstrap peers
 
 ## Verify the cluster formed
 
-**Check startup logs** on each node — look for the Tailscale line:
+**Check startup logs** on each node, looking for the Tailscale line:
 
 ```
 INFO  Tailscale: running | IP 100.101.102.101 | my-node.tailnet-abc.ts.net
 ```
 
-**Check the cluster view** — open the dashboard on any node (`http://100.x.x.x:52415`). Once libp2p has dialed the bootstrap peers and gossipsub has propagated state, all nodes should appear. Allow 10–15 seconds after the last node restarts.
+**Check the cluster view**: open the dashboard on any node (`http://100.x.x.x:52415`). Once libp2p has dialed the bootstrap peers and gossipsub has propagated state, all nodes should appear. Allow 10 to 15 seconds after the last node restarts.
 
 **Check via the API:**
 
@@ -102,9 +102,9 @@ Look for all expected nodes in the `nodes` map.
 
 ## How peer discovery works
 
-Skulk's cluster uses gossipsub for state propagation. You only need to list **some** of the other nodes in `bootstrap_peers` — not all of them. Once Node A connects to Node B, and Node B already knows about Node C, Node A will learn about Node C indirectly within a few seconds. A single well-connected bootstrap node is enough to bring a new node into the cluster.
+Skulk's cluster uses gossipsub for state propagation. You only need to list **some** of the other nodes in `bootstrap_peers`, not all of them. Once Node A connects to Node B, and Node B already knows about Node C, Node A will learn about Node C indirectly within a few seconds. A single well-connected bootstrap node is enough to bring a new node into the cluster.
 
-Tailscale IPs are stable — they don't change unless you reinstall Tailscale. You set `bootstrap_peers` once and leave it.
+Tailscale IPs are stable; they don't change unless you reinstall Tailscale. You set `bootstrap_peers` once and leave it.
 
 ## Troubleshooting
 
@@ -121,7 +121,7 @@ If ping fails between nodes, check:
 
 ### Only some nodes are visible in the dashboard
 
-Gossipsub fans out from bootstrap peers. If Node A only lists Node B, and Node B hasn't connected to Node C yet, Node A won't see Node C immediately. Give it 10–15 seconds after all nodes have restarted. If it doesn't resolve, check that every node has at least one valid bootstrap peer in its config.
+Gossipsub fans out from bootstrap peers. If Node A only lists Node B, and Node B hasn't connected to Node C yet, Node A won't see Node C immediately. Give it 10 to 15 seconds after all nodes have restarted. If it doesn't resolve, check that every node has at least one valid bootstrap peer in its config.
 
 ### Wrong IP in the multiaddr
 
@@ -143,7 +143,7 @@ tailscale up
 
 ## Using Headscale
 
-[Headscale](https://headscale.net/) is a self-hosted Tailscale control server. Skulk works with it identically — `tailscale status --json` returns the same structure regardless of whether the control plane is Tailscale's or Headscale's. No config changes needed.
+[Headscale](https://headscale.net/) is a self-hosted Tailscale control server. Skulk works with it identically: `tailscale status --json` returns the same structure regardless of whether the control plane is Tailscale's or Headscale's. No config changes needed.
 
 ```bash
 tailscale up --login-server https://your-headscale-server.example.com

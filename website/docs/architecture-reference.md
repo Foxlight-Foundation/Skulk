@@ -6,7 +6,7 @@ sidebar_position: 6
 
 <!-- Copyright 2025 Foxlight Foundation -->
 
-Dense per-symbol fact-sheet for AI assistants and operators who prefer reference style. For narrative and design rationale, see [Architecture](architecture). This document is intentionally terse — every entry has a file:line so you can jump to the code.
+Dense per-symbol fact-sheet for AI assistants and operators who prefer reference style. For narrative and design rationale, see [Architecture](architecture). This document is intentionally terse; every entry has a file:line so you can jump to the code.
 
 This file is intentionally dense. If you find a stale fact, fix it inline rather than working around it. The AGENTS.md "Documentation" section requires updates here when architectural shape changes.
 
@@ -16,11 +16,11 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 - **Role:** elects + acts as cluster coordinator; indexes events; plans instance placements; publishes snapshots
 - **Lives in:** `src/skulk/master/main.py`
-- **Owns:** the authoritative event log (via `DiskEventLog`); the indexer that assigns monotonic indices to events; the placement planner. Master identity itself lives outside the master process — each node tracks the current master independently via the election protocol (`src/skulk/shared/election.py`); the `_master_node_id` cache is held on the API side at `src/skulk/api/main.py:461`.
+- **Owns:** the authoritative event log (via `DiskEventLog`); the indexer that assigns monotonic indices to events; the placement planner. Master identity itself lives outside the master process: each node tracks the current master independently via the election protocol (`src/skulk/shared/election.py`); the `_master_node_id` cache is held on the API side at `src/skulk/api/main.py:461`.
 - **Communicates via:** `LOCAL_EVENTS` (consumes), `GLOBAL_EVENTS` (publishes indexed events), `COMMANDS` (consumes), `STATE_SYNC_MESSAGES` (publishes snapshots)
-- **Election:** `src/skulk/shared/election.py` — bully algorithm; a single master at a time
+- **Election:** `src/skulk/shared/election.py`; bully algorithm; a single master at a time
 - **Formation robustness (#400):** a campaign is (re)started by a connection update only when the set of connected peers actually changes (`_apply_connection_updates` tracks `_connected_peers`), and an in-flight campaign is allowed to finish before the next one starts. Peers are multi-homed and libp2p pings/re-dials every few seconds (`PING_INTERVAL` in `rust/networking/src/discovery.rs`), so raw connection updates can arrive faster than `DEFAULT_ELECTION_TIMEOUT`; without this gating each update cancelled and restarted the campaign before it could elect a master, livelocking formation (worst at simultaneous multi-node cold start). Reducing the churn at its source (skip unreachable link-local dials, ping tuning) is a separate follow-up (#401).
-- **Failover:** re-election picks a new master, which seeds its session from the node's prior replicated state (#273, `seed_state_for_new_session` in `src/skulk/shared/session_carryover.py`): **instances, downloads, node info maps, and tracing carry over**; in-flight tasks, runner statuses, topology, and liveness timestamps are deliberately dropped (tasks died with the old session's plumbing; runner processes are torn down by the worker re-creation; topology/liveness must come from live gossip — a carried topology would keep a dead node's out-edges forever). Workers re-create runners for the carried instances through the ordinary plan loop, so placements survive a master restart with a model-reload-sized gap instead of a silent permanent 404. The election winner tears its own worker down and rebuilds it, which cancels its `RunnerSupervisor.run()` tasks; that teardown is **shielded from cancellation** (`runner_supervisor.py`) so each runner process is fully reaped (Metal reclaims its wired GPU memory on exit) before `worker.shutdown()` returns. Without the shield the join was cancelled, the old runner lingered holding its memory, and the rebuilt worker's pre-load memory guard saw the not-yet-reclaimed memory, falsely refused the re-creation, and the #290 re-place-wider path deleted the carried instance (the silent 404 this design exists to prevent). It only bit when the winner also hosted a rank of a carried instance and was memory-tight. The plan loop suppresses liveness-based instance pruning for `TOPOLOGY_SETTLE_GRACE_SECONDS` (60s) after master start so carried instances aren't deleted while topology is still rebuilding; instances whose ranks lived on the dead master are pruned after the grace. A freshly-booted node that wins election seeds empty (it has no prior view) — identical to the pre-#273 behavior. The seed is indexed as **event 0 of the new session** (a logged `StateSnapshotHydrated`, `Master._index_seed_event`): late bootstrappers receive it inside the snapshot, early bootstrappers (including the promoted node's own worker, whose bootstrap races the promotion) receive it as the live first event — one delivery path, no idx-(-1) hydration skip.
+- **Failover:** re-election picks a new master, which seeds its session from the node's prior replicated state (#273, `seed_state_for_new_session` in `src/skulk/shared/session_carryover.py`): **instances, downloads, node info maps, and tracing carry over**; in-flight tasks, runner statuses, topology, and liveness timestamps are deliberately dropped (tasks died with the old session's plumbing; runner processes are torn down by the worker re-creation; topology/liveness must come from live gossip, since a carried topology would keep a dead node's out-edges forever). Workers re-create runners for the carried instances through the ordinary plan loop, so placements survive a master restart with a model-reload-sized gap instead of a silent permanent 404. The election winner tears its own worker down and rebuilds it, which cancels its `RunnerSupervisor.run()` tasks; that teardown is **shielded from cancellation** (`runner_supervisor.py`) so each runner process is fully reaped (Metal reclaims its wired GPU memory on exit) before `worker.shutdown()` returns. Without the shield the join was cancelled, the old runner lingered holding its memory, and the rebuilt worker's pre-load memory guard saw the not-yet-reclaimed memory, falsely refused the re-creation, and the #290 re-place-wider path deleted the carried instance (the silent 404 this design exists to prevent). It only bit when the winner also hosted a rank of a carried instance and was memory-tight. The plan loop suppresses liveness-based instance pruning for `TOPOLOGY_SETTLE_GRACE_SECONDS` (60s) after master start so carried instances aren't deleted while topology is still rebuilding; instances whose ranks lived on the dead master are pruned after the grace. A freshly-booted node that wins election seeds empty (it has no prior view): identical to the pre-#273 behavior. The seed is indexed as **event 0 of the new session** (a logged `StateSnapshotHydrated`, `Master._index_seed_event`): late bootstrappers receive it inside the snapshot, early bootstrappers (including the promoted node's own worker, whose bootstrap races the promotion) receive it as the live first event: one delivery path, no idx-(-1) hydration skip.
 
 ### Worker
 
@@ -41,21 +41,21 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Role:** owns one MLX model; serves inference tasks for it; participates in distributed collectives with peer runners across ranks
 - **Entrypoint:** `src/skulk/worker/runner/bootstrap.py::entrypoint`
 - **Subtypes:**
-  - `src/skulk/worker/runner/llm_inference/runner.py` — text generation
-  - `src/skulk/worker/runner/embeddings/runner.py` — embeddings
-  - `src/skulk/worker/runner/image_models/runner.py` — image generation
+  - `src/skulk/worker/runner/llm_inference/runner.py`: text generation
+  - `src/skulk/worker/runner/embeddings/runner.py`: embeddings
+  - `src/skulk/worker/runner/image_models/runner.py`: image generation
 - **Communicates via:** `mp.Queue` from worker (incoming tasks); `mp.Queue` to worker (outgoing events); `mlx.distributed` collectives with peer runners
 
 ### Drafters (speculative decoding)
 
-`src/skulk/worker/engines/mlx/drafters/`. The loop runs on single-node, tensor-parallel, AND pipeline placements. Multi-node PIPELINE placements use an EXPLICIT decider protocol (#254): exactly one rank — the decider, the last rank — holds the drafter, makes every speculative decision, and fans the outcomes out via fixed-shape per-round collectives: one `all_sum` lands the draft tokens (`_exchange_drafts`; the drafter's effective distribution rides along under sampling), and after the verify forward a second tiny `all_sum` lands the accept length and the next bonus token (`mtp_accept_decision`). The first sampled token of the request is broadcast the same way. Receiving ranks never draft, sample, or compare logits — they apply broadcast decisions to their own cache slices — so correctness never depends on cross-rank numerical determinism (heterogeneous chips, e.g. M5 vs M4 GEMM kernels and NAX reduced-precision B≥2 matmuls, produce divergent per-rank logits; the previous rank-symmetric design desynced on exactly that and SIGABRT'd in the Metal completion block, #252). A per-request `all_sum` agreement settles that exactly one rank holds a working drafter (speculation disables symmetrically otherwise); mid-request drafter failures abort loudly on multi-rank placements instead of silently forking the collective schedule. Assistant drafters (gemma4) cross-attend the target's KV, which the decider seat owns by construction (#201 Track 2b); sidecar drafters draft from the all-gathered trunk hidden from the same seat, and only the decider rank loads drafter weights. Multi-node TENSOR placements do NOT use the decider protocol (#263): draft logits go through the TP-sharded lm_head, an all-rank collective idle receivers would never join, so a lone TP decider GPU-times-out mid-draft. Instead every TP rank loads the sidecar (`sidecar_load_eligible` in `src/skulk/worker/engines/mlx/utils_mlx.py` — same envelope assistants use) and drafts rank-symmetrically; the drafter agreement requires ready_count == group.size() on that path and disables speculation symmetrically on partial loads. Cross-attending drafters declare `reads_target_cache = True` and the loop keeps the target cache fully committed before every draft (no deferred replay) — and they must hold the LIVE cache sequence, since reject-restores replace rotating entries in the loop's list. Forces `SequentialGenerator`. Greedy requests use argmax-prefix acceptance; temperature > 0 uses Leviathan-Chen probability-ratio acceptance over the effective sampler distributions (`src/skulk/worker/engines/mlx/generator/speculative_sampling.py`, depth forced to 1). Draft depth comes from the card's `mtp_max_depth` (default 1). Rounds are *bonus-driven*: the loop carries an emitted-but-unforwarded bonus token, verifies `[bonus, drafts]` in one K+1-token forward (the round's only target forward), commits the longest matching prefix, samples the next bonus from the first non-matching row, and drafts the very next round from the correction position.
+`src/skulk/worker/engines/mlx/drafters/`. The loop runs on single-node, tensor-parallel, AND pipeline placements. Multi-node PIPELINE placements use an EXPLICIT decider protocol (#254): exactly one rank (the decider, the last rank) holds the drafter, makes every speculative decision, and fans the outcomes out via fixed-shape per-round collectives: one `all_sum` lands the draft tokens (`_exchange_drafts`; the drafter's effective distribution rides along under sampling), and after the verify forward a second tiny `all_sum` lands the accept length and the next bonus token (`mtp_accept_decision`). The first sampled token of the request is broadcast the same way. Receiving ranks never draft, sample, or compare logits (they apply broadcast decisions to their own cache slices), so correctness never depends on cross-rank numerical determinism (heterogeneous chips, e.g. M5 vs M4 GEMM kernels and NAX reduced-precision B≥2 matmuls, produce divergent per-rank logits; the previous rank-symmetric design desynced on exactly that and SIGABRT'd in the Metal completion block, #252). A per-request `all_sum` agreement settles that exactly one rank holds a working drafter (speculation disables symmetrically otherwise); mid-request drafter failures abort loudly on multi-rank placements instead of silently forking the collective schedule. Assistant drafters (gemma4) cross-attend the target's KV, which the decider seat owns by construction (#201 Track 2b); sidecar drafters draft from the all-gathered trunk hidden from the same seat, and only the decider rank loads drafter weights. Multi-node TENSOR placements do NOT use the decider protocol (#263): draft logits go through the TP-sharded lm_head, an all-rank collective idle receivers would never join, so a lone TP decider GPU-times-out mid-draft. Instead every TP rank loads the sidecar (`sidecar_load_eligible` in `src/skulk/worker/engines/mlx/utils_mlx.py`, the same envelope assistants use) and drafts rank-symmetrically; the drafter agreement requires ready_count == group.size() on that path and disables speculation symmetrically on partial loads. Cross-attending drafters declare `reads_target_cache = True` and the loop keeps the target cache fully committed before every draft (no deferred replay); and they must hold the LIVE cache sequence, since reject-restores replace rotating entries in the loop's list. Forces `SequentialGenerator`. Greedy requests use argmax-prefix acceptance; temperature > 0 uses Leviathan-Chen probability-ratio acceptance over the effective sampler distributions (`src/skulk/worker/engines/mlx/generator/speculative_sampling.py`, depth forced to 1). Draft depth comes from the card's `mtp_max_depth` (default 1). Rounds are *bonus-driven*: the loop carries an emitted-but-unforwarded bonus token, verifies `[bonus, drafts]` in one K+1-token forward (the round's only target forward), commits the longest matching prefix, samples the next bonus from the first non-matching row, and drafts the very next round from the correction position.
 
-- **Protocol:** `protocol.py::Drafter` — `begin_request(prompt_cache)` / `observe(hiddens, next_tokens)` / `draft(hidden, next_token, depth=1) -> (K, vocab) logits`. The generation loop owns verify/accept/reject and cache reconciliation — preferring the model's native `rollback_speculative_cache` (gemma4), else SSM snapshot/restore with *deferred replay* (restored-but-committed tokens ride at the front of the next verify forward; capped, flushed at stream end), else plain KV trim. Drafters own only their private state. The loop feeds every committed position's `(hidden, next token)` pair exactly once, in order (the pair-stream contract); the hidden convention is per-family (pre-final-norm for qwen-shaped trunks, post-norm for gemma4).
-- **Builder:** `builder.py::build_drafter(model, mtp_weights, runtime)` — detects sidecar key layout, resolves family facts (norm convention, fc concat order) from layout-keyed defaults with model-card `runtime` overrides, and quantizes the sidecar block + fc to the target's `(group_size, bits)` on load (bf16 targets keep bf16 sidecars).
+- **Protocol:** `protocol.py::Drafter`: `begin_request(prompt_cache)` / `observe(hiddens, next_tokens)` / `draft(hidden, next_token, depth=1) -> (K, vocab) logits`. The generation loop owns verify/accept/reject and cache reconciliation, preferring the model's native `rollback_speculative_cache` (gemma4), else SSM snapshot/restore with *deferred replay* (restored-but-committed tokens ride at the front of the next verify forward; capped, flushed at stream end), else plain KV trim. Drafters own only their private state. The loop feeds every committed position's `(hidden, next token)` pair exactly once, in order (the pair-stream contract); the hidden convention is per-family (pre-final-norm for qwen-shaped trunks, post-norm for gemma4).
+- **Builder:** `builder.py::build_drafter(model, mtp_weights, runtime)`: detects sidecar key layout, resolves family facts (norm convention, fc concat order) from layout-keyed defaults with model-card `runtime` overrides, and quantizes the sidecar block + fc to the target's `(group_size, bits)` on load (bf16 targets keep bf16 sidecars).
 - **Implementations:**
-  - `qwen_sidecar.py::QwenSidecarDrafter` — Phase 2: +1.0 zero-centered norm shift, `embed_first` concat, sidecar `mtp.layers.0` block instantiated from the target family's own decoder-layer class (strict-loaded), private `KVCache`. Validated 79–85% acceptance / 1.38–1.90x on Qwen3.5 9B–27B (issue #192, bonus-driven cadence).
-  - `deepseek_sidecar.py::DeepseekSidecarDrafter` — legacy projection-only head; conventions unverified against real weights.
-  - `gemma4_assistant.py::Gemma4AssistantDrafter` — wraps mlx-vlm's chain-trained assistant model: cross-attends over the target's KV (shared-KV extraction incl. RotatingKVCache temporal restore), consumes post-norm hiddens, loads via `assistant_model_repo` (bf16-enforced). Validated 84% acceptance / 35.1 tok/s on gemma-4-26B-A4B-4bit (depth 1) and 1.86x on E4B-8bit (depth 3).
+  - `qwen_sidecar.py::QwenSidecarDrafter`: Phase 2: +1.0 zero-centered norm shift, `embed_first` concat, sidecar `mtp.layers.0` block instantiated from the target family's own decoder-layer class (strict-loaded), private `KVCache`. Validated 79–85% acceptance / 1.38–1.90x on Qwen3.5 9B–27B (issue #192, bonus-driven cadence).
+  - `deepseek_sidecar.py::DeepseekSidecarDrafter`: legacy projection-only head; conventions unverified against real weights.
+  - `gemma4_assistant.py::Gemma4AssistantDrafter`: wraps mlx-vlm's chain-trained assistant model: cross-attends over the target's KV (shared-KV extraction incl. RotatingKVCache temporal restore), consumes post-norm hiddens, loads via `assistant_model_repo` (bf16-enforced). Validated 84% acceptance / 35.1 tok/s on gemma-4-26B-A4B-4bit (depth 1) and 1.86x on E4B-8bit (depth 3).
 - **Observability:** the loop logs `MTP acceptance so far: A/N` every 32 drafts; the public `GenerationResponse` does not carry per-token draft provenance.
 
 ### Router (libp2p)
@@ -93,11 +93,11 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 
 ### Storage
 
-- **Event log:** `src/skulk/utils/disk_event_log.py` — append-only length-prefixed msgpack records (`events.bin`, uncompressed live); rotated archives are zstd-compressed (`events.*.bin.zst`) on rotation/close. Disk is treated as bounded: archives are capped by count (5) AND total bytes (1 GiB); any persistence failure (ENOSPC at init, append, or compaction) drops the log into a degraded counting-only mode with one CRITICAL line — indices keep advancing so follower replay coherence survives — and a proactive free-space floor (2 GiB, checked every 1024 appends) degrades BEFORE the disk hits zero. The API-side log (`event_log/api/`, backs `GET /events` diagnostics only and records per-token chunk events) additionally ring-compacts: past 256 MiB of active file it keeps only the most recent 20k events.
+- **Event log:** `src/skulk/utils/disk_event_log.py`: append-only length-prefixed msgpack records (`events.bin`, uncompressed live); rotated archives are zstd-compressed (`events.*.bin.zst`) on rotation/close. Disk is treated as bounded: archives are capped by count (5) AND total bytes (1 GiB); any persistence failure (ENOSPC at init, append, or compaction) drops the log into a degraded counting-only mode with one CRITICAL line (indices keep advancing so follower replay coherence survives), and a proactive free-space floor (2 GiB, checked every 1024 appends) degrades BEFORE the disk hits zero. The API-side log (`event_log/api/`, backs `GET /events` diagnostics only and records per-token chunk events) additionally ring-compacts: past 256 MiB of active file it keeps only the most recent 20k events.
 - **Model cache:** `SKULK_MODELS_DIR` (default `SKULK_DATA_HOME/models`; on Linux that's `~/.local/share/skulk/models` via XDG, on macOS/Windows it's `~/.skulk/models`); `SKULK_HOME` and `SKULK_MODELS_DIR` env overrides apply
 - **Custom cards:** `SKULK_CUSTOM_MODEL_CARDS_DIR` (default `SKULK_DATA_HOME/custom_model_cards`) as TOML
 - **Built-in cards:** `resources/inference_model_cards/` as TOML
-- **Optional model store:** shared host with rsync-style staging — `src/skulk/store/`
+- **Optional model store:** shared host with rsync-style staging (`src/skulk/store/`)
 
 ## Pubsub topics
 
@@ -107,17 +107,17 @@ Defined in `src/skulk/routing/topics.py`.
 |---|---|---|---|---|
 | `GLOBAL_EVENTS` | `GlobalForwarderEvent` | indexed `Event` (post-master indexing) | Master | All nodes |
 | `LOCAL_EVENTS` | `LocalForwarderEvent` | un-indexed `Event` | Workers (via `event_router.py`) | Master |
-| `COMMANDS` | `ForwarderCommand` | `Command` (`PlaceInstance`, `DeleteInstance`, `RefuseInstancePlacement`, `TaskFinished`, `SetTracingEnabled`, etc.) | API, Worker (`RefuseInstancePlacement`) | Master (command processor); Election (every node — observes commands to inform leader-changeover decisions) |
+| `COMMANDS` | `ForwarderCommand` | `Command` (`PlaceInstance`, `DeleteInstance`, `RefuseInstancePlacement`, `TaskFinished`, `SetTracingEnabled`, etc.) | API, Worker (`RefuseInstancePlacement`) | Master (command processor); Election (every node, observing commands to inform leader-changeover decisions) |
 | `DOWNLOAD_COMMANDS` | `ForwarderDownloadCommand` | `DownloadCommand` (`StartDownload`, `DeleteDownload`, `CancelDownload`, `SyncConfig`, `PurgeStagingCache`, `RestartNode`) | API (download/restart/sync admin ops), Master, Workers | All nodes |
 | `STATE_SYNC_MESSAGES` | `StateSyncMessage` | bidirectional: followers publish `kind="request"` for snapshot/config bootstrap; master publishes `kind="response"` with the requested payload (`StateSnapshotHydrated` etc.) | All nodes (request: followers; response: master) | All nodes |
 | `ELECTION_MESSAGES` | `ElectionMessage` | bully election rounds | All nodes | All nodes |
 | `CONNECTION_MESSAGES` | libp2p connection updates | peer arrivals / departures | Router | All nodes |
-| `TELEMETRY` | `NodeTelemetry` | `GatheredInfo` (`NodeResources` — participation role + backends; `MemoryUsage`/`MactopMetrics`+`MacmonMetrics` — per-node memory + system profile; `LinuxGpuMetrics` — AMD/Linux GPU system profile; `NodeDiskUsage`/`MiscData`/`StaticNodeInformation`/`RdmaCtlStatus` — disk + identity + rdma-ctl, slice 3) | Workers | All nodes (applied into `TelemetryView`) |
-| `DATA` | `DataChunk` | `{command_id, GenerationChunk}` — per-token generation output (data plane, #279 Phase 2) | Serving rank-0 worker | API nodes only (demux by `command_id` into per-command stream queues); master does NOT consume it |
+| `TELEMETRY` | `NodeTelemetry` | `GatheredInfo` (`NodeResources`: participation role + backends; `MemoryUsage`/`MactopMetrics`+`MacmonMetrics`: per-node memory + system profile; `LinuxGpuMetrics`: AMD/Linux GPU system profile; `NodeDiskUsage`/`MiscData`/`StaticNodeInformation`/`RdmaCtlStatus`: disk + identity + rdma-ctl, slice 3) | Workers | All nodes (applied into `TelemetryView`) |
+| `DATA` | `DataChunk` | `{command_id, GenerationChunk}`: per-token generation output (data plane, #279 Phase 2) | Serving rank-0 worker | API nodes only (demux by `command_id` into per-command stream queues); master does NOT consume it |
 
 ### Telemetry plane (#279)
 
-`TELEMETRY` is the first slice of the control/telemetry/data plane separation (#279). Node readings that are **last-write-wins and not decisions** are gossiped on this topic instead of being event-sourced into `State`. They land in an in-memory `TelemetryView` (`src/skulk/shared/types/telemetry.py`), held per-`Node` and read by the planner (placement eligibility) and the API placement previews — they are **not** persisted in the event log or carried in snapshots.
+`TELEMETRY` is the first slice of the control/telemetry/data plane separation (#279). Node readings that are **last-write-wins and not decisions** are gossiped on this topic instead of being event-sourced into `State`. They land in an in-memory `TelemetryView` (`src/skulk/shared/types/telemetry.py`), held per-`Node` and read by the planner (placement eligibility) and the API placement previews; they are **not** persisted in the event log or carried in snapshots.
 
 Slice 1 moved `node_resources` (a node's `participation` role and `backends`); slice 2 moved `node_memory` and `node_system` (the highest-volume readings, carried together by `MactopMetrics`/`MacmonMetrics`); slice 3 moved the observational readings `node_identities`, `node_disk`, and `node_rdma_ctl`. The set that rides telemetry is `TELEMETRY_PLANE_INFO` in `shared/types/telemetry.py`; the worker forwards those `GatheredInfo` variants to the telemetry sender (`worker/main.py`), and `apply_node_gathered_info` treats them as no-ops (`shared/apply.py`). The `TelemetryView` survives master re-election (Node-owned), so a freshly promoted master does not start blind, and these readings are no longer carried in the failover seed (`session_carryover.py`). `GET /state` merges them back in from the view (`API.get_cluster_state`) so the dashboard's wire shape is unchanged. Node identity is assembled from two readings (`MiscData` friendly-name + `StaticNodeInformation` static fields), so `TelemetryView.apply` **merges** them into one `NodeIdentity` rather than overwriting.
 
@@ -147,7 +147,7 @@ Key-addressed unicast (#279 Phase 2) replaces the cluster-wide fan-out. The owni
 
 Hardening toward default-on (#308 + #309). Security (#308): the session sets a Zenoh `namespace` (`ZenohConfig.namespace`) that transparently prefixes every key, so a peer on a different namespace does not receive this fleet's `data`. The namespace is a collision-resistant SHA-256 hash (`_derive_zenoh_namespace`) of the exact token libp2p isolates on: `_libp2p_namespace_token` mirrors `swarm.rs`, using `SKULK_LIBP2P_NAMESPACE` when set and the `NETWORK_VERSION` default `v0.0.1` otherwise (the legacy `EXO_LIBP2P_NAMESPACE` is NOT read; deriving from a different source would split one libp2p cluster across two Zenoh namespaces). This namespace provides isolation between distinct clusters, NOT confidentiality against an adversary already on the same Zenoh network: with no TLS the prefix is the only barrier and its seed is non-secret operator config (it is also surfaced in `/v1/diagnostics/node`), so on an untrusted network use Zenoh TLS or a firewall. As hygiene, startup never logs the raw token (it also seeds libp2p's private-network PSK) or the derived namespace, only a short non-routing fingerprint plus whether the override env was set. `SKULK_ZENOH_LISTEN` is required explicitly (no `0.0.0.0` default). TLS/ACL remain operator-configurable for untrusted links. Robustness (#309): the DATA plane has its own outbound loop (`Router._zenoh_networking_publish` draining a dedicated channel), so its `Block` backpressure can't stall the shared `_networking_publish` control loop; that channel is **bounded** (`_ZENOH_DATA_OUTBOUND_BUFFER`, #312 review) so a stalled subscriber backpressures the producer (the rank-0 emit) rather than growing memory without limit and OOMing the node, and the bound deliberately backpressures rather than drops because the Zenoh plane is Reliable+ordered (dropping would break the reorder-buffer-skip assumption); and `ZenohSession::publish`/`subscribe` clone the publisher `Arc` / check-and-release before the `declare`/`put` await, so the publishers mutex never spans a network put and concurrent per-command publishes don't serialize.
 
-**Version policy:** all cluster nodes must run the same Skulk version — **mixed-version clusters are unsupported** (see "Deployment & versioning" in [Architecture](architecture)). With `extra="forbid"` models there is no cross-version wire compatibility, so the telemetry plane is **not** engineered to bridge an un-upgraded worker's legacy `NodeGatheredInfo` telemetry into the view. There is no transition-hydration concession either: a node never reloads its own persisted `State` across restart (node identity is ephemeral; `State` is rebuilt from the event log / state-sync), so a pre-#279 snapshot carrying the removed `nodeResources`/`nodeMemory`/`nodeSystem` keys is simply rejected by `extra="forbid"`. (A `State` before-validator that stripped those keys was removed in #294 because it silently broke state-sync by forcing strict Python-mode validation, under which ISO datetime strings like `lastSeen` were rejected.) General mixed-version compatibility (a protocol-version handshake) is tracked in #293 as explicitly out of scope.
+**Version policy:** all cluster nodes must run the same Skulk version: **mixed-version clusters are unsupported** (see "Deployment & versioning" in [Architecture](architecture)). With `extra="forbid"` models there is no cross-version wire compatibility, so the telemetry plane is **not** engineered to bridge an un-upgraded worker's legacy `NodeGatheredInfo` telemetry into the view. There is no transition-hydration concession either: a node never reloads its own persisted `State` across restart (node identity is ephemeral; `State` is rebuilt from the event log / state-sync), so a pre-#279 snapshot carrying the removed `nodeResources`/`nodeMemory`/`nodeSystem` keys is simply rejected by `extra="forbid"`. (A `State` before-validator that stripped those keys was removed in #294 because it silently broke state-sync by forcing strict Python-mode validation, under which ISO datetime strings like `lastSeen` were rejected.) General mixed-version compatibility (a protocol-version handshake) is tracked in #293 as explicitly out of scope.
 
 ## Events
 
@@ -160,8 +160,8 @@ Discriminated union at `src/skulk/shared/types/events.py`. Selected events:
 | `RunnerStatusUpdated` | Runner subprocess transitions state | All nodes |
 | `RunnerFailed` | Runner crashes or exits unexpectedly | All nodes |
 | `TaskAcknowledged` | Worker accepts a task | All nodes |
-| `TaskStatusUpdated` | Task transitions state (`Running`, `Failed`, `Cancelled`, `Complete`, `TimedOut` — the last emitted by the worker on shutdown timeouts, `worker/main.py:474`). The `Complete` variant is emitted by the runner / worker on natural finish (e.g. `worker/main.py:362,388,450`, runner `send_task_status(..., TaskStatus.Complete)`). The `TaskFinished` command sent by API on stream end triggers `TaskDeleted` only (`master/main.py:444-450`), not this event. The `Cancelled` variant (operator instance deletion via `get_transition_events`) additionally makes the API terminate that command's open stream with an error chunk. | All nodes |
-| `TaskFailed` | Master plan loop fails in-flight API tasks (TextGeneration / ImageGeneration / ImageEdits / TextEmbedding) whose instance is gone or dying — `orphaned_task_failure_events` in `master/main.py`, emitted BEFORE `InstanceDeleted`/`NodeTimedOut` so it indexes ahead of the applies that delete the task. `apply_task_failed` sets `task_status=Failed` (terminal — makes re-emission idempotent) plus error fields. The API reacts by delivering a terminal `ErrorChunk` into the command's stream (`_terminate_command_stream`): streaming closes with an error event, non-streaming returns 500. On master failover the new session cannot carry old tasks, so the API's session `reset()` fails all open command streams directly instead (`_fail_open_command_streams_for_session_reset`). | All nodes |
+| `TaskStatusUpdated` | Task transitions state (`Running`, `Failed`, `Cancelled`, `Complete`, `TimedOut`, the last emitted by the worker on shutdown timeouts, `worker/main.py:474`). The `Complete` variant is emitted by the runner / worker on natural finish (e.g. `worker/main.py:362,388,450`, runner `send_task_status(..., TaskStatus.Complete)`). The `TaskFinished` command sent by API on stream end triggers `TaskDeleted` only (`master/main.py:444-450`), not this event. The `Cancelled` variant (operator instance deletion via `get_transition_events`) additionally makes the API terminate that command's open stream with an error chunk. | All nodes |
+| `TaskFailed` | Master plan loop fails in-flight API tasks (TextGeneration / ImageGeneration / ImageEdits / TextEmbedding) whose instance is gone or dying (`orphaned_task_failure_events` in `master/main.py`, emitted BEFORE `InstanceDeleted`/`NodeTimedOut` so it indexes ahead of the applies that delete the task). `apply_task_failed` sets `task_status=Failed` (terminal, making re-emission idempotent) plus error fields. The API reacts by delivering a terminal `ErrorChunk` into the command's stream (`_terminate_command_stream`): streaming closes with an error event, non-streaming returns 500. On master failover the new session cannot carry old tasks, so the API's session `reset()` fails all open command streams directly instead (`_fail_open_command_streams_for_session_reset`). | All nodes |
 | `TaskDeleted` | Task is purged from cluster state | All nodes |
 | `ChunkGenerated` | Runner emits an output chunk (token, tool call, error) | API queue subscribers |
 | `TracesCollected` | Runner emits trace events for one rank | Master (merges across ranks) |
@@ -169,13 +169,13 @@ Discriminated union at `src/skulk/shared/types/events.py`. Selected events:
 | `TracingStateChanged` | Cluster tracing toggle changes | All nodes |
 | `StagedModelEvicted` | A store-deleted model's locally-staged copies should be dropped fleet-wide (#427) | All nodes: `apply` removes the model's download entries from State (so the planner re-stages on a future placement instead of loading deleted files); each worker reacts by `rmtree`-ing the model's staged directory (`_evict_staged_model` → `ModelStoreClient.evict_shard`, which never touches the store's canonical copy) |
 
-Apply function: `src/skulk/shared/apply.py::apply` — pure `(State, IndexedEvent) -> State`.
+Apply function: `src/skulk/shared/apply.py::apply`, a pure `(State, IndexedEvent) -> State`.
 
 ## Commands
 
 Two distinct command unions on two distinct topics:
 
-### COMMANDS topic — `Command` union
+### COMMANDS topic: `Command` union
 
 Discriminated union at `src/skulk/shared/types/commands.py`. Carried as `ForwarderCommand` over the `COMMANDS` pubsub topic.
 
@@ -193,9 +193,9 @@ Discriminated union at `src/skulk/shared/types/commands.py`. Carried as `Forward
 
 **Download-failure recovery (#381, plan loop, not a command):** a multi-node instance whose ring forms but where one rank's model **download** fails terminally (disk full, transient HF/network error) sits at `RunnerConnected` forever: the failed rank never becomes load-ready and nothing fails or recovers it. The master's `_plan` reconcile (`_recover_download_failed_instances`, gated on the same `TOPOLOGY_SETTLE_GRACE_SECONDS` as the liveness passes) detects it via `instances_wedged_by_download_failure` (a not-all-ready instance whose any rank node carries a terminal `DownloadFailed` for the model), fails in-flight API tasks bound to it (cause surfaced), tears it down, and re-places at the **same width excluding the failed node(s)** (`replacement_command_for_download_failed_instance` + `place_instance(excluded_nodes=...)`). `PlacementError` (no healthy node set hosts the width, e.g. a cluster-wide failure) is terminal: stop at the teardown. Deduped via `_download_failure_recovered` (same rationale as `_refusal_replaced`: events are emitted by the plan pass but not applied until they round-trip). A ready/serving instance is never torn down by this path even if a stale `DownloadFailed` lingers.
 
-### DOWNLOAD_COMMANDS topic — `DownloadCommand` union
+### DOWNLOAD_COMMANDS topic: `DownloadCommand` union
 
-Discriminated union at `src/skulk/shared/types/commands.py`. Carried as `ForwarderDownloadCommand` over the `DOWNLOAD_COMMANDS` pubsub topic. Used for cluster-wide config sync and model-store coordination — separated from the main command channel because these are typically larger payloads and have different retry semantics.
+Discriminated union at `src/skulk/shared/types/commands.py`. Carried as `ForwarderDownloadCommand` over the `DOWNLOAD_COMMANDS` pubsub topic. Used for cluster-wide config sync and model-store coordination, separated from the main command channel because these are typically larger payloads and have different retry semantics.
 
 | Command | What it requests |
 |---|---|
@@ -236,7 +236,7 @@ Lives in `src/skulk/api/main.py` (route registration in `API.__init__`).
 | `/place_instance` | POST | Place a model: master picks ranks. Takes `PlaceInstanceParams` (model id + placement preferences, optional `excluded_nodes: list[NodeId]` to exclude specific nodes from this placement); not interchangeable with `/instance`, which takes a fully-specified `CreateInstanceParams`. |
 | `/instance/{instance_id}` | GET / DELETE | Fetch / delete an instance |
 | `/instance/placement` | GET | Compute placement preview |
-| `/store/storage` | GET | Local node's storage breakdown: staged models (size, last-use, in-use incl. companions), event-log bytes, disk free. Staging eviction: `cleanup_on_deactivate` default true; not-in-use staged models kept newest-first up to `staging_keep_recent_gb` (40 GiB default), enforced at deactivate AND node startup (crash-orphan reconciliation); `src/skulk/store/staging_eviction.py`. Companion repos (MTP sidecar / assistant / split vision weights) resolve through `companion_download_specs()` (`src/skulk/download/download_utils.py`) on every resolution path — required companions (vision) fail the load loudly, best-effort companions (sidecar/assistant) log and degrade to plain decode. |
+| `/store/storage` | GET | Local node's storage breakdown: staged models (size, last-use, in-use incl. companions), event-log bytes, disk free. Staging eviction: `cleanup_on_deactivate` default true; not-in-use staged models kept newest-first up to `staging_keep_recent_gb` (40 GiB default), enforced at deactivate AND node startup (crash-orphan reconciliation); `src/skulk/store/staging_eviction.py`. Companion repos (MTP sidecar / assistant / split vision weights) resolve through `companion_download_specs()` (`src/skulk/download/download_utils.py`) on every resolution path: required companions (vision) fail the load loudly, best-effort companions (sidecar/assistant) log and degrade to plain decode. |
 | `/instance/previews` | GET | List candidate placements |
 
 ### State / events
@@ -303,68 +303,68 @@ Lives in `src/skulk/api/main.py` (route registration in `API.__init__`).
 
 `src/skulk/shared/types/tasks.py`. Discriminated union of:
 
-- `TextGeneration` — chat / responses / messages / ollama-chat
-- `TextEmbedding` — embeddings
-- `ImageGeneration` — images.generations
-- `ImageEdits` — images.edits
+- `TextGeneration`: chat / responses / messages / ollama-chat
+- `TextEmbedding`: embeddings
+- `ImageGeneration`: images.generations
+- `ImageEdits`: images.edits
 - Sentinel: `Shutdown`, `CANCEL_ALL_TASKS`
 
 ### Chunks
 
 `src/skulk/shared/types/chunks.py`. Per-token output:
 
-- `TokenChunk` — text / tool / token-level metadata
-- `ToolCallChunk` — tool calls
-- `ErrorChunk` — error result; terminal
-- `PrefillProgressChunk` — distributed prefill progress
-- `ImageChunk` — image generation output
-- `EmbeddingChunk` — embedding output
+- `TokenChunk`: text / tool / token-level metadata
+- `ToolCallChunk`: tool calls
+- `ErrorChunk`: error result; terminal
+- `PrefillProgressChunk`: distributed prefill progress
+- `ImageChunk`: image generation output
+- `EmbeddingChunk`: embedding output
 
 ### State
 
 `src/skulk/shared/types/state.py`. Treated as immutable by convention (replaced wholesale by `apply()` rather than mutated in place); the model itself is not declared `frozen=True` on `model_config`, so direct mutation is technically possible but considered a bug at every call site.
 
-- `instances: Mapping[InstanceId, Instance]` — placed model instances (each carries shard assignments + per-runner state)
-- `runners: Mapping[RunnerId, RunnerStatus]` — per-runner status union
-- `downloads: Mapping[NodeId, Sequence[DownloadProgress]]` — in-flight model downloads per node
-- `tasks: Mapping[TaskId, Task]` — in-flight or recently-completed tasks
-- `last_seen: Mapping[NodeId, datetime]` — peer liveness timestamps
-- `topology: Topology` — cluster-wide node graph + capabilities (encoded/decoded via `TopologySnapshot` for JSON round-tripping)
-- `tracing_enabled: bool` — cluster-wide tracing flag
-- `last_event_applied_idx: int` — water mark for the local apply
-- `node_network`, `node_thunderbolt`, `node_thunderbolt_bridge: Mapping[NodeId, *]` — the **connectivity** per-node maps that stay on the event path because they define the topology graph (see "Connectivity readings stay on the control plane" under the Telemetry plane section). They update at independent frequencies via `NodeGatheredInfo`.
+- `instances: Mapping[InstanceId, Instance]`: placed model instances (each carries shard assignments + per-runner state)
+- `runners: Mapping[RunnerId, RunnerStatus]`: per-runner status union
+- `downloads: Mapping[NodeId, Sequence[DownloadProgress]]`: in-flight model downloads per node
+- `tasks: Mapping[TaskId, Task]`: in-flight or recently-completed tasks
+- `last_seen: Mapping[NodeId, datetime]`: peer liveness timestamps
+- `topology: Topology`: cluster-wide node graph + capabilities (encoded/decoded via `TopologySnapshot` for JSON round-tripping)
+- `tracing_enabled: bool`: cluster-wide tracing flag
+- `last_event_applied_idx: int`: water mark for the local apply
+- `node_network`, `node_thunderbolt`, `node_thunderbolt_bridge: Mapping[NodeId, *]`: the **connectivity** per-node maps that stay on the event path because they define the topology graph (see "Connectivity readings stay on the control plane" under the Telemetry plane section). They update at independent frequencies via `NodeGatheredInfo`.
 - `node_resources` (slice 1), `node_memory` + `node_system` (slice 2), and `node_identities` + `node_disk` + `node_rdma_ctl` (slice 3) are **not** `State` fields: they moved to the telemetry plane (`TelemetryView`, gossiped on `TELEMETRY`, see "Telemetry plane" above) as part of #279. `State` keeps `extra="forbid"`, so a pre-#279 snapshot carrying the old `nodeResources`/`nodeMemory`/`nodeSystem`/`nodeIdentities`/`nodeDisk`/`nodeRdmaCtl` keys is rejected, which is the intended behavior, since mixed-version clusters are unsupported and a node never reloads its own persisted `State` across restart anyway (identity is ephemeral; State is rebuilt from the event log / state-sync). An earlier before-validator that stripped those keys was removed in #294 because it broke state-sync (it forced strict Python-mode validation, rejecting ISO datetime strings like `lastSeen`).
-- `thunderbolt_bridge_cycles: Sequence[Sequence[NodeId]]` — detected Thunderbolt-bridge cycles where every node has it enabled (>2 nodes)
+- `thunderbolt_bridge_cycles: Sequence[Sequence[NodeId]]`: detected Thunderbolt-bridge cycles where every node has it enabled (>2 nodes)
 
-Note: there is no `master_node_id` field on `State`. Master identity lives outside the event-sourced state — each node tracks the current master independently via the election protocol (`src/skulk/shared/election.py`). `placements` is also not a field; placement information is derived from `instances` (each `Instance` has its own shard assignments).
+Note: there is no `master_node_id` field on `State`. Master identity lives outside the event-sourced state: each node tracks the current master independently via the election protocol (`src/skulk/shared/election.py`). `placements` is also not a field; placement information is derived from `instances` (each `Instance` has its own shard assignments).
 
 ### Diagnostics
 
 `src/skulk/shared/types/diagnostics.py`. Major models:
 
-- `NodeDiagnostics` — runtime + identity + resources + processes + supervisor_runners + placements + warnings. `warnings` includes a **leaked-wired-memory** alert (`_leaked_wired_warning` in `src/skulk/api/main.py`): emitted when `resources.current_wired` exceeds ~5GB with zero `process_alive` runners — the signature of wired memory leaked by an abnormal Metal termination that only a reboot reclaims (#239). Server-side counterpart of `tests/preflight_mem.sh`. To stop a doomed runner from compounding such a leak, the worker circuit-breaks runner crash loops (`CrashWindow` in `src/skulk/utils/crash_window.py`, 3 failures within 60s) and gives up rather than relaunching it. The give-up action depends on *why*: a genuine crash or GPU wedge deletes the instance via `DeleteInstance`, but a **memory fit refusal** (the pre-spawn guard rejecting the shard) sends `RefuseInstancePlacement` instead, so the master re-places the model one node wider rather than letting it silently vanish (#290). A third trigger is a **first-status-report deadline** (#272, `_RUNNER_FIRST_REPORT_DEADLINE_SECONDS`, 120s, via `runners_never_reported`): a runner frozen between spawn and its first status report (SIGSTOP, a hang in early import) never trips the crash breaker (the process is alive) and stalls `ConnectToGroup` forever (the group-init gate waits for every rank to report), so on expiry the worker gives the instance up through the same edge-latched breaker. The supervisor distinguishes "reported idle" from "never reported" via `has_reported_status` because `status` defaults to `RunnerIdle` before the process ever speaks.
-- `NodeResourceDiagnostics` — gathered_memory, current_memory, **current_wired** (OS-level wired in use; macOS-only via `read_wired_memory_bytes`/psutil — MLX's own accounting can't see leaked wired), disk, system, network. `current_wired` is read locally on the diagnostics path and deliberately kept OFF the gossiped `MemoryUsage` so the `NodeGatheredInfo` event wire format is unchanged across a mixed-version rollout.
-- `MemoryUsage` — ram_total, ram_available, swap_total, swap_available. On macOS, `ram_available` is the GPU-wireable figure `total − wired − anonymous − compressor` from a `vm_stat` snapshot taken per telemetry sample (`MachMemoryCategories` / `parse_vm_stat_output` in `src/skulk/shared/types/profiling.py`), falling back to mactop's raw `available` (free+inactive+speculative, which counts reclaimable file cache as used) when `vm_stat` fails. Value-only change — the gossiped shape is unchanged, so mixed-version clusters interoperate.
-- `RunnerSupervisorDiagnostics` — flight_recorder, status, phase, MLX memory, in_progress_tasks, milestones
-- `RunnerFlightRecorderEntry` — at, phase, event, detail, attrs, context, mlxMemory
-- `MlxMemorySnapshot` — active, cache, peak, wired_limit (MLX's configured limit, not OS wired usage)
-- `ClusterDiagnostics` — fan-out wrapper
-- `ClusterTimeline` — cross-rank merged: runners (synopsis) + timeline (entries sorted by `at`) + unreachableNodes
-- `DiagnosticCaptureResponse` — capture bundle (process samples, flight recorder, MLX memory)
+- `NodeDiagnostics`: runtime + identity + resources + processes + supervisor_runners + placements + warnings. `warnings` includes a **leaked-wired-memory** alert (`_leaked_wired_warning` in `src/skulk/api/main.py`): emitted when `resources.current_wired` exceeds ~5GB with zero `process_alive` runners (the signature of wired memory leaked by an abnormal Metal termination that only a reboot reclaims, #239). Server-side counterpart of `tests/preflight_mem.sh`. To stop a doomed runner from compounding such a leak, the worker circuit-breaks runner crash loops (`CrashWindow` in `src/skulk/utils/crash_window.py`, 3 failures within 60s) and gives up rather than relaunching it. The give-up action depends on *why*: a genuine crash or GPU wedge deletes the instance via `DeleteInstance`, but a **memory fit refusal** (the pre-spawn guard rejecting the shard) sends `RefuseInstancePlacement` instead, so the master re-places the model one node wider rather than letting it silently vanish (#290). A third trigger is a **first-status-report deadline** (#272, `_RUNNER_FIRST_REPORT_DEADLINE_SECONDS`, 120s, via `runners_never_reported`): a runner frozen between spawn and its first status report (SIGSTOP, a hang in early import) never trips the crash breaker (the process is alive) and stalls `ConnectToGroup` forever (the group-init gate waits for every rank to report), so on expiry the worker gives the instance up through the same edge-latched breaker. The supervisor distinguishes "reported idle" from "never reported" via `has_reported_status` because `status` defaults to `RunnerIdle` before the process ever speaks.
+- `NodeResourceDiagnostics`: gathered_memory, current_memory, **current_wired** (OS-level wired in use; macOS-only via `read_wired_memory_bytes`/psutil, since MLX's own accounting can't see leaked wired), disk, system, network. `current_wired` is read locally on the diagnostics path and deliberately kept OFF the gossiped `MemoryUsage` so the `NodeGatheredInfo` event wire format is unchanged across a mixed-version rollout.
+- `MemoryUsage`: ram_total, ram_available, swap_total, swap_available. On macOS, `ram_available` is the GPU-wireable figure `total − wired − anonymous − compressor` from a `vm_stat` snapshot taken per telemetry sample (`MachMemoryCategories` / `parse_vm_stat_output` in `src/skulk/shared/types/profiling.py`), falling back to mactop's raw `available` (free+inactive+speculative, which counts reclaimable file cache as used) when `vm_stat` fails. Value-only change: the gossiped shape is unchanged, so mixed-version clusters interoperate.
+- `RunnerSupervisorDiagnostics`: flight_recorder, status, phase, MLX memory, in_progress_tasks, milestones
+- `RunnerFlightRecorderEntry`: at, phase, event, detail, attrs, context, mlxMemory
+- `MlxMemorySnapshot`: active, cache, peak, wired_limit (MLX's configured limit, not OS wired usage)
+- `ClusterDiagnostics`: fan-out wrapper
+- `ClusterTimeline`: cross-rank merged: runners (synopsis) + timeline (entries sorted by `at`) + unreachableNodes
+- `DiagnosticCaptureResponse`: capture bundle (process samples, flight recorder, MLX memory)
 
 ### Model card
 
 `src/skulk/shared/models/model_cards.py::ModelCard`. Fields:
 
 - `model_id`, `family`, `quantization`, `base_model`, `n_layers`, `hidden_size`, `num_key_value_heads`
-- `tasks: list[ModelTask]` — what task types this model serves
-- `capabilities: list[str]` — text / vision / thinking / thinking_toggle / embedding
+- `tasks: list[ModelTask]`: what task types this model serves
+- `capabilities: list[str]`: text / vision / thinking / thinking_toggle / embedding
 - `context_length`, `storage_size`, `supports_tensor`, `trust_remote_code`, `is_custom`
-- `vision: VisionCardConfig | None` — image_token_id, model_type, BOI/EOI tokens
-- `reasoning: ReasoningCardConfig | None` — supports_toggle, supports_budget, format, default_effort
-- `modalities: ModalitiesCardConfig | None` — supports_native_multimodal, supports_audio_input
-- `tooling: ToolingCardConfig | None` — tool_call_format, supports_tool_calling, builtin_tools
-- `runtime: RuntimeCapabilityCardConfig | None` — prompt_renderer, output_parser, metal_fast_synch, mtp_heads, mtp_max_depth, mtp_sidecar_repo, mtp_norm_convention, mtp_concat_order, assistant_model_repo, speculative_multi_node (set `false` where multi-node speculation measures slower than plain sharded decode — e.g. gemma-4-26B-A4B MoE, 2026-06-06 matrix: 30.2 plain vs 28.2 MTP on 2 nodes; single-node speculation unaffected; card-driven so the agreement collective stays rank-symmetric)
+- `vision: VisionCardConfig | None`: image_token_id, model_type, BOI/EOI tokens
+- `reasoning: ReasoningCardConfig | None`: supports_toggle, supports_budget, format, default_effort
+- `modalities: ModalitiesCardConfig | None`: supports_native_multimodal, supports_audio_input
+- `tooling: ToolingCardConfig | None`: tool_call_format, supports_tool_calling, builtin_tools
+- `runtime: RuntimeCapabilityCardConfig | None`: prompt_renderer, output_parser, metal_fast_synch, mtp_heads, mtp_max_depth, mtp_sidecar_repo, mtp_norm_convention, mtp_concat_order, assistant_model_repo, speculative_multi_node (set `false` where multi-node speculation measures slower than plain sharded decode, e.g. gemma-4-26B-A4B MoE, 2026-06-06 matrix: 30.2 plain vs 28.2 MTP on 2 nodes; single-node speculation unaffected; card-driven so the agreement collective stays rank-symmetric)
 - `placement: PlacementCardConfig` (the only section the planner reads directly, `master/placement.py`). `compatible_backends: frozenset[str]` is a **hard filter** (route only to nodes whose advertised `NodeResources.backends` intersect it; default `{"mlx"}`). `backend_preference: tuple[str, ...]` is a **soft, ordered** rank among those backends: the planner prefers a cycle that can serve an earlier-listed tag (`_cycle_backend_preference_score`) and the runner picks the earliest backend the node has. Backends use compound `<engine>-<compute>` tags (`mlx-metal`, `llama_cpp-vulkan`, `llama_cpp-rocm`, and so on; vocabulary + node probing in `src/skulk/shared/backends.py`); nodes also advertise the bare engine tag (`mlx`) for back-compat with original `{"mlx"}` cards. The split is deliberate: filter answers "which nodes are allowed", preference answers "fastest for *this* model" (Vulkan vs ROCm performance is model-dependent), so a Vulkan-preferring model still degrades gracefully onto a ROCm-only node. Also `min_vram_gib` (hard) and `max_context_tokens` (soft KV-budget cap).
 
 ### Capability profile
@@ -375,11 +375,11 @@ Note: there is no `master_node_id` field on `State`. Master identity lives outsi
 - `supports_thinking`, `supports_thinking_toggle`, `supports_thinking_budget`
 - `supports_image_input`, `supports_audio_input`, `supports_native_multimodal`
 - `supports_tool_calling`
-- `thinking_format: ReasoningFormat` — None_ / TokenDelimited / ChannelDelimited
+- `thinking_format: ReasoningFormat`: None_ / TokenDelimited / ChannelDelimited
 - `default_reasoning_effort`, `disabled_reasoning_effort`
-- `prompt_renderer: PromptRendererType` — Tokenizer / Gemma4 / Dsml
-- `output_parser: OutputParserType` — Generic / Gemma4 / GptOss / DeepseekV32
-- `tool_call_format: ToolCallFormat` — Generic / Gemma4 / GptOss / Dsml
+- `prompt_renderer: PromptRendererType`: Tokenizer / Gemma4 / Dsml
+- `output_parser: OutputParserType`: Generic / Gemma4 / GptOss / DeepseekV32
+- `tool_call_format: ToolCallFormat`: Generic / Gemma4 / GptOss / Dsml
 - `builtin_tools: tuple[BuiltinToolType, ...]`
 
 ## Pipeline-parallel sharding strategies
@@ -400,7 +400,7 @@ Family-specific in `src/skulk/worker/engines/mlx/auto_parallel.py`. Each is a cl
 
 ## Family-specific code locations
 
-Inventory snapshot — see #130 for consolidation plan.
+Inventory snapshot; see #130 for consolidation plan.
 
 | Family | Total lines | Primary locations |
 |---|---|---|
@@ -481,7 +481,7 @@ Only `SKULK_*` names are read. The legacy `EXO_*` deprecation runway was removed
 | `VITE_TOLGEE_AVAILABLE_LANGUAGES` | Dashboard build-time env var. Comma-separated language tags available from the Tolgee CDN/static prefix; `en` is always included and bundled as the fallback namespace. |
 | `SKULK_TEST_DISTRIBUTED_MODEL` | Tests only: force the distributed/prefix-cache slow-test model (`gpt-oss-20b` or `llama-3.2-1b`); default auto-selects by Metal working-set size |
 | `MLX_METAL_FAST_SYNCH` | Set by Skulk based on resolved card preference; not for direct operator use |
-| `MLX_HOSTFILE`, `MLX_RANK`, `MLX_RING_VERBOSE`, `MLX_IBV_DEVICES`, `MLX_JACCL_COORDINATOR` | MLX upstream env vars; auto-set by Skulk during distributed init. Ring hostfile addresses are chosen per neighbor pair from OBSERVED libp2p connections, ranked thunderbolt > maybe_ethernet > ethernet > wifi > unknown > VPN/overlay — Tailscale CGNAT (100.64/10, fd7a:115c:a1e0::/48) addresses are detected by ADDRESS (utun types don't gossip) and rank strictly last: the overlay exists for external reachability and may be DERP-relayed, so it is only used when a pair has no local candidate (#265). Selection lives in `_find_ip_prioritised` / `get_mlx_ring_hosts_by_node` (`src/skulk/master/placement_utils.py`) |
+| `MLX_HOSTFILE`, `MLX_RANK`, `MLX_RING_VERBOSE`, `MLX_IBV_DEVICES`, `MLX_JACCL_COORDINATOR` | MLX upstream env vars; auto-set by Skulk during distributed init. Ring hostfile addresses are chosen per neighbor pair from OBSERVED libp2p connections, ranked thunderbolt > maybe_ethernet > ethernet > wifi > unknown > VPN/overlay. Tailscale CGNAT (100.64/10, fd7a:115c:a1e0::/48) addresses are detected by ADDRESS (utun types don't gossip) and rank strictly last: the overlay exists for external reachability and may be DERP-relayed, so it is only used when a pair has no local candidate (#265). Selection lives in `_find_ip_prioritised` / `get_mlx_ring_hosts_by_node` (`src/skulk/master/placement_utils.py`) |
 
 ### CLI flags
 
@@ -506,18 +506,18 @@ Only `SKULK_*` names are read. The legacy `EXO_*` deprecation runway was removed
 - **Capacity:** last 128 entries per runner
 - **Always-on; local-only.** Not gossiped, but exposed via `/v1/diagnostics/*`
 - **Emission helpers:**
-  - `record_runner_phase(phase, event=..., detail=..., attrs=..., include_memory=False)` — fire one entry
-  - `runner_phase(phase, detail=...)` — context manager: enter / exit pair
+  - `record_runner_phase(phase, event=..., detail=..., attrs=..., include_memory=False)`: fire one entry
+  - `runner_phase(phase, detail=...)`: context manager: enter / exit pair
 
 ### Trace sessions
 
 - **Lives at:** `src/skulk/shared/tracing.py`
 - **API:**
-  - `begin_trace_session(task_id, rank, node_id, model_id, task_kind, tags)` — create
-  - `record_trace_marker(name, rank, task_id, attrs)` — emit one event
-  - `trace(category, name, ...)` — context manager / decorator
-  - `pop_trace_session(task_id)` — collect + remove
-  - `clear_trace_session(task_id)` — remove without collecting
+  - `begin_trace_session(task_id, rank, node_id, model_id, task_kind, tags)`: create
+  - `record_trace_marker(name, rank, task_id, attrs)`: emit one event
+  - `trace(category, name, ...)`: context manager / decorator
+  - `pop_trace_session(task_id)`: collect + remove
+  - `clear_trace_session(task_id)`: remove without collecting
 - **Storage:** module-level dict `_trace_sessions: dict[str, TraceSession]`
 - **Cluster path:** runner emits `TracesCollected` per rank → master merges to `TracesMerged` → API persists Chrome-trace JSON to disk
 
@@ -552,10 +552,10 @@ Only `SKULK_*` names are read. The legacy `EXO_*` deprecation runway was removed
 
 Local Vector → VictoriaLogs → Grafana. Configuration:
 
-- `src/skulk/shared/logging.py` — loguru JSON sink to stdout
-- `deployment/logging/vector.yaml` — Vector pipeline (stdin → VictoriaLogs)
-- `deployment/logging/docker-compose.yml` — VictoriaLogs + Grafana stack
-- `skulk.yaml` `logging.enabled` + `logging.ingest_url` — opt-in; cluster-synced
+- `src/skulk/shared/logging.py`: loguru JSON sink to stdout
+- `deployment/logging/vector.yaml`: Vector pipeline (stdin → VictoriaLogs)
+- `deployment/logging/docker-compose.yml`: VictoriaLogs + Grafana stack
+- `skulk.yaml` `logging.enabled` + `logging.ingest_url`: opt-in; cluster-synced
 
 ## File map quick reference
 
