@@ -1,15 +1,18 @@
 model_id = "mlx-community/NVIDIA-Nemotron-Nano-9B-v2-6bit"
 n_layers = 56
 hidden_size = 4480
+num_key_value_heads = 8
 supports_tensor = true
 tasks = ["TextGeneration"]
 family = "nemotron"
 quantization = "6bit"
 base_model = "NVIDIA Nemotron-Nano-9B-v2"
 capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 131072
 
 [reasoning]
 supports_toggle = true
+supports_budget = true
 format = "token_delimited"
 default_effort = "medium"
 disabled_effort = "none"

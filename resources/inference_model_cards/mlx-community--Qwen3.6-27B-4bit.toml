@@ -7,7 +7,7 @@ tasks = ["TextGeneration"]
 family = "qwen"
 quantization = "4bit"
 base_model = "Qwen3.6 27B"
-capabilities = ["text", "thinking", "thinking_toggle"]
+capabilities = ["text", "thinking", "thinking_toggle", "vision"]
 context_length = 262144
 
 [reasoning]
@@ -29,6 +29,14 @@ disabled_effort = "none"
 mtp_heads = true
 mtp_max_depth = 1
 mtp_sidecar_repo = "FoxlightAI/qwen3-6-27b-mtp"
+
+# Qwen3.6-27B is a natively multimodal VLM (arch Qwen3_5ForConditionalGeneration,
+# vision_config model_type qwen3_5). The MLX vision path splices image embeddings
+# at image_token_id (248056, from config.json); the tower weights ship in this
+# same repo.
+[vision]
+image_token_id = 248056
+model_type = "qwen3_5"
 
 [storage_size]
 in_bytes = 16081490064

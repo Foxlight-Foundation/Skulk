@@ -3,7 +3,10 @@
 # MTP speculative decoding (`--spec-type draft-mtp`). The MoE member of the MTP
 # benchmark set (dense-vs-MoE MTP comparison vs the Qwen3.6-27B dense card).
 # compatible_backends is the llama_server engine, so placement routes it to a node
-# running llama-server (e.g. kite4 on Vulkan). Text-only (no mmproj).
+# running llama-server (e.g. kite4 on Vulkan). Qwen3.6 is natively multimodal
+# and this repo ships an mmproj projector, so the card is vision-capable (the
+# llama.cpp general multimodal handler inserts image features itself, so no
+# image_token_id / model_type is needed).
 # supports_tensor = false: served single-node. Architecture from the GGUF metadata
 # (arch qwen35moe: 41 layers, hidden 2048, 2 KV heads, 256 experts, 262144 ctx).
 model_id = "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"
@@ -15,10 +18,15 @@ tasks = ["TextGeneration"]
 family = "qwen"
 quantization = "Q4_K_M"
 base_model = "Qwen3.6 35B A3B"
-capabilities = ["text", "thinking", "thinking_toggle"]
+capabilities = ["text", "thinking", "thinking_toggle", "vision"]
 context_length = 262144
 gguf_file = "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
 trust_remote_code = false
+
+# Vision via the repo's mmproj projector. No image_token_id / model_type: the
+# llama.cpp general multimodal handler inserts image features itself and does
+# not read them (matches ModelCard._fetch_gguf_from_hf's minimal vision stamp).
+[vision]
 
 [reasoning]
 supports_toggle = true

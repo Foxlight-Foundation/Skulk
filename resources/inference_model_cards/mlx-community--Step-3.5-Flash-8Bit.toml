@@ -7,7 +7,22 @@ tasks = ["TextGeneration"]
 family = "step"
 quantization = "8bit"
 base_model = "Step 3.5 Flash"
-capabilities = ["text", "thinking", "thinking_toggle"]
+capabilities = ["text", "thinking"]
+context_length = 262144
+
+# Step 3.5 Flash is an always-reasoning model: the chat template opens
+# `<think>\n` unconditionally for the assistant turn, so reasoning is
+# token-delimited (`<think>...</think>`) with NO enable_thinking toggle
+# (upstream ships no thinking on/off switch). It supports tool calling, but
+# via its own `step3p5` tool-call parser, for which Skulk has no dedicated
+# ToolCallFormat, so the format stays the generic family default.
+[reasoning]
+supports_toggle = false
+format = "token_delimited"
+default_effort = "medium"
+
+[tooling]
+supports_tool_calling = true
 
 [storage_size]
 in_bytes = 209082699847

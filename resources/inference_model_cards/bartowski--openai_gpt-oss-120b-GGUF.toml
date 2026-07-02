@@ -1,0 +1,42 @@
+# gpt-oss-120b (OpenAI, ~117B total / MoE) GGUF for the in-process llama.cpp
+# engine (AMD/Vulkan and other GPU nodes; proven serving on kite4's 128GB Strix).
+# Single-node llama.cpp path (NOT the served llama_server MTP path): the base repo
+# ships no MTP heads and this GGUF has no mmproj projector, so it is TEXT-ONLY.
+# `supports_tensor = false`: llama.cpp runs single-node. gpt-oss reasons behind
+# OpenAI's harmony channel format with a configurable reasoning effort; the
+# gpt_oss family default in capabilities.py already selects the harmony output
+# parser and tool-call format, and the reasoning-effort contract and builtin tools
+# are declared here to match the MLX gpt-oss sibling cards. Q4_K_M is a sharded
+# quant (two shards); storage_size is the whole shard group. Architecture read
+# from the GGUF metadata header (arch gpt-oss: 36 layers, hidden 2880, 8 KV heads,
+# 131072 ctx).
+model_id = "bartowski/openai_gpt-oss-120b-GGUF"
+n_layers = 36
+hidden_size = 2880
+num_key_value_heads = 8
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "gpt-oss"
+quantization = "Q4_K_M"
+base_model = "GPT-OSS 120B"
+capabilities = ["text", "thinking"]
+context_length = 131072
+gguf_file = "openai_gpt-oss-120b-Q4_K_M/openai_gpt-oss-120b-Q4_K_M-00001-of-00002.gguf"
+trust_remote_code = false
+
+[reasoning]
+supports_toggle = false
+default_effort = "medium"
+disabled_effort = "none"
+
+[tooling]
+supports_tool_calling = true
+builtin_tools = ["web_search", "open_url", "extract_page"]
+tool_call_format = "gpt_oss"
+
+[placement]
+compatible_backends = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu"]
+backend_preference = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu"]
+
+[storage_size]
+in_bytes = 62841713344

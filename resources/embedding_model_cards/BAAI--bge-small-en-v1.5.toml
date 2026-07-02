@@ -1,6 +1,7 @@
 model_id = "BAAI/bge-small-en-v1.5"
 n_layers = 12
 hidden_size = 384
+context_length = 512
 supports_tensor = false
 tasks = ["TextEmbedding"]
 family = "bert"
@@ -9,4 +10,4 @@ base_model = "bge-small-en-v1.5"
 capabilities = ["embedding"]
 
 [storage_size]
-in_bytes = 130000000
+in_bytes = 133466304

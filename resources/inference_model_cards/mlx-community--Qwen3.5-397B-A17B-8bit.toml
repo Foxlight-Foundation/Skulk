@@ -7,7 +7,19 @@ tasks = ["TextGeneration"]
 family = "qwen"
 quantization = "8bit"
 base_model = "Qwen3.5 397B A17B"
-capabilities = ["text", "thinking", "thinking_toggle"]
+capabilities = ["text", "thinking", "thinking_toggle", "vision"]
+context_length = 262144
+
+# Qwen3.5 is a natively multimodal (early-fusion) VLM: config.json ships a
+# vision_config and the repo is tagged image-text-to-text /
+# AutoModelForMultimodalLM. The MLX vision path splices image embeddings at
+# image_token_id, so it is load-bearing here (from config.json).
+[modalities]
+supports_native_multimodal = true
+
+[vision]
+image_token_id = 248056
+model_type = "qwen3_5_moe"
 
 [storage_size]
 in_bytes = 422032580192
