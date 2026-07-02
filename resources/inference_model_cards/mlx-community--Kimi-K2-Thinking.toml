@@ -14,11 +14,12 @@ context_length = 262144
 in_bytes = 706522120192
 
 # Kimi K2 Thinking reasons unconditionally: thinking is integral to the model
-# and cannot be toggled off (unlike Kimi K2.5). Reasoning is returned in a
-# separate reasoning_content field, i.e. a channel-delimited format.
+# and cannot be toggled off (unlike Kimi K2.5). Reasoning surfaces in a separate
+# reasoning_content field; the parse format is left to the tokenizer/default. Do
+# NOT set channel_delimited here: that format routes through the gemma4 channel
+# parser, which does not match Kimi's output.
 [reasoning]
 supports_toggle = false
-format = "channel_delimited"
 
 # Native tool/function calling (trained to interleave reasoning with calls);
 # the "kimi" family carries no default so declare it explicitly.

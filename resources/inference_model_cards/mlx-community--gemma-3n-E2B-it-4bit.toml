@@ -7,14 +7,15 @@ tasks = ["TextGeneration"]
 family = "gemma"
 quantization = "4bit"
 base_model = "Gemma 3n E2B"
-capabilities = ["text", "vision", "audio"]
+capabilities = ["text", "vision"]
 
-# Gemma 3n is Google's on-device omni-modal model: the HF repo tags
-# automatic-speech-recognition / audio-text-to-text / video-text-to-text
-# alongside image-text-to-text, so it natively interleaves audio, image, and
-# text through one encoder stack (not a bolt-on adapter).
+# Gemma 3n is Google's on-device omni-modal model (the HF repo tags ASR /
+# audio-text-to-text / video-text-to-text alongside image-text-to-text). The
+# model can take audio, but Skulk advertises only what the API and runner serve
+# today: text + image. Audio input is NOT exposed (the chat-completions request
+# schema and the MLX runner don't accept it), so it is omitted from capabilities
+# rather than advertised and rejected.
 [modalities]
-supports_audio_input = true
 supports_native_multimodal = true
 
 [vision]

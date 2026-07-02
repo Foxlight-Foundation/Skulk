@@ -20,11 +20,12 @@ weights_repo = "davehind/Kimi-K2.5-vision"
 processor_repo = "moonshotai/Kimi-K2.5"
 
 # Kimi K2.5 thinking is toggleable ({"thinking": {"type": "disabled"}} in the
-# official API / chat_template_kwargs), unlike Kimi K2 Thinking. Reasoning is
-# returned in a separate reasoning_content field (channel-delimited).
+# official API / chat_template_kwargs), unlike Kimi K2 Thinking. Reasoning
+# surfaces in a separate reasoning_content field; the parse format is left to the
+# tokenizer/default. Not channel_delimited: that is the gemma4 channel parser,
+# which does not match Kimi's output.
 [reasoning]
 supports_toggle = true
-format = "channel_delimited"
 
 # Native tool/function calling (search, code-interpreter, web-browsing agent
 # tools); the "kimi" family carries no default so declare it explicitly.
