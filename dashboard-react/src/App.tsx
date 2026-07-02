@@ -17,7 +17,7 @@ import { OperatorPage } from './components/pages/OperatorPage';
 import { InstancePanel, type InstanceCardData } from './components/layout/InstancePanel';
 import { ConversationPanel } from './components/layout/ConversationPanel';
 import { addToast } from './hooks/useToast';
-import type { InstanceStatus } from './components/cluster/RunningInstanceCard';
+import type { InstanceStatus, NodeRunnerState } from './components/cluster/RunningInstanceCard';
 import { chatActions } from './store/slices/chatSlice';
 import { useAppDispatch, useAppSelector } from './store/hooks';
 import { uiActions, type ObservabilityTab } from './store/slices/uiSlice';
@@ -55,6 +55,21 @@ interface StoreDownload {
 }
 
 /* ── Runner status → InstanceStatus mapping ───────────── */
+
+/** Collapse a single runner's tagged status into the per-node category the
+ *  instance card renders. The runner lifecycle is idle -> connecting ->
+ *  connected -> loading -> loaded -> warming up -> ready; everything that is not
+ *  a terminal ready/failed/stopping state reads as "loading", except the initial
+ *  RunnerIdle which reads as "pending" (spawned, not yet driven). */
+function runnerNodeState(runner: Record<string, unknown> | undefined): NodeRunnerState {
+  if (!runner) return 'pending';
+  const key = Object.keys(runner)[0];
+  if (key === 'RunnerReady' || key === 'RunnerRunning') return 'ready';
+  if (key === 'RunnerFailed') return 'failed';
+  if (key === 'RunnerShuttingDown' || key === 'RunnerShutdown') return 'stopping';
+  if (key === 'RunnerIdle') return 'pending';
+  return 'loading';
+}
 
 function deriveInstanceStatus(
   runnerIds: string[],
@@ -354,6 +369,7 @@ export function App() {
       // Derive sharding and model type from shard metadata
       const runnerToShard = sa?.runnerToShard;
       let sharding: 'Pipeline' | 'Tensor' = 'Pipeline';
+      let engine: InstanceCardData['engine'] = 'mlx';
       let isEmbedding = false;
       let speculation: InstanceCardData['speculation'];
       if (runnerToShard) {
@@ -366,6 +382,19 @@ export function App() {
         const mc = (shardInner?.modelCard ?? shardInner?.model_card) as Record<string, unknown> | undefined;
         const tasks = mc?.tasks as string[] | undefined;
         if (tasks?.includes('TextEmbedding')) isEmbedding = true;
+
+        // Engine: every instance is wrapped as an MlxRing/Jaccl instance on the
+        // wire, so the card's placement backends (not the wrapper) tell us which
+        // engine actually serves it: in-process MLX, in-process llama.cpp, or the
+        // served llama-server. Used for the type label instead of assuming MLX.
+        const placement = mc?.placement as Record<string, unknown> | undefined;
+        const backends = (placement?.compatibleBackends ?? placement?.compatible_backends) as
+          | string[]
+          | undefined;
+        const firstBackend = backends?.[0] ?? '';
+        if (firstBackend.startsWith('llama_server')) engine = 'served';
+        else if (firstBackend.startsWith('llama_cpp')) engine = 'llama_cpp';
+        else engine = 'mlx';
 
         // Speculative-decoding status comes from the card's runtime section —
         // the card is the rank-invariant source of truth for whether drafting
@@ -391,23 +420,40 @@ export function App() {
             depth: typeof depth === 'number' ? depth : 1,
           };
         }
+
+        // Served engine (llama-server) speculation: the card declares
+        // served_spec_type (draft_mtp / draft_eagle3 / draft_simple) with the
+        // draft depth in served_spec_n_max. Surface the same MTP badge as the
+        // in-process MLX drafters so served-MTP instances read as MTP too.
+        if (!speculation) {
+          const servedSpec = rtKey('servedSpecType', 'served_spec_type');
+          if (typeof servedSpec === 'string' && servedSpec.startsWith('draft')) {
+            const nmax = rtKey('servedSpecNMax', 'served_spec_n_max');
+            speculation = { kind: 'sidecar', depth: typeof nmax === 'number' ? nmax : 1 };
+          }
+        }
       }
 
       // Derive status from runners
       const derived = deriveInstanceStatus(runnerIds, runners, t);
 
-      // Get first node's friendly name
-      const firstNodeId = nodeIds[0];
-      const nodeName = firstNodeId && topology?.nodes[firstNodeId]?.friendly_name
-        ? topology.nodes[firstNodeId].friendly_name
-        : firstNodeId?.slice(0, 8) ?? t('common.unknownLower', 'unknown');
+      // Per-node status for EVERY node the instance is placed on (all ranks of a
+      // pipeline / tensor placement), sorted for a stable, readable order, each
+      // carrying that node's runner phase so the card shows the laggard.
+      const nodeStatuses = nodeIds
+        .map((id) => ({
+          name: topology?.nodes[id]?.friendly_name || id.slice(0, 8),
+          state: runnerNodeState(nodeToRunner ? runners[nodeToRunner[id]] : undefined),
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
 
       cards.push({
         instanceId,
         modelId,
         sharding,
         instanceType: isRing ? 'MlxRing' : 'MlxJaccl',
-        nodeName,
+        engine,
+        nodeStatuses,
         status: derived.status,
         statusMessage: derived.message,
         loadProgress: derived.progress,

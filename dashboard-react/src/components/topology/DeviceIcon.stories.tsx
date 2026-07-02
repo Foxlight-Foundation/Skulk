@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite';
 import { DeviceIcon } from './DeviceIcon';
 
 const SvgWrap = ({ children, width, height }: { children: React.ReactNode; width: number; height: number }) => (
-  <svg width={width + 20} height={height + 20} style={{ background: '#000' }}>
+  <svg width={width + 20} height={height + 20} style={{ background: 'transparent' }}>
     <g transform="translate(10, 10)">{children}</g>
   </svg>
 );
@@ -12,7 +12,7 @@ const meta: Meta<typeof DeviceIcon> = {
   component: DeviceIcon,
   parameters: { layout: 'centered' },
   argTypes: {
-    model: { control: 'select', options: ['macbook-pro', 'mac-studio', 'mac-mini', 'unknown'] },
+    model: { control: 'select', options: ['macbook-pro', 'mac-studio', 'mac-mini', 'amd-strix', 'unknown'] },
     ramPercent: { control: { type: 'range', min: 0, max: 100, step: 1 } },
     wireColor: { control: 'color' },
     strokeWidth: { control: { type: 'range', min: 0.5, max: 4, step: 0.5 } },
@@ -39,6 +39,16 @@ export const MacStudio: Story = {
 
 export const MacMini: Story = {
   args: { model: 'mac-mini', ramPercent: 45, width: 150, height: 100 },
+};
+
+export const AmdStrix: Story = {
+  args: { model: 'amd-strix', ramPercent: 45, width: 150, height: 110 },
+  name: 'AMD Ryzen AI Max',
+};
+
+export const AmdStrixFull: Story = {
+  args: { model: 'amd-strix', ramPercent: 100, width: 150, height: 110 },
+  name: 'AMD Ryzen AI Max (100% RAM)',
 };
 
 export const UnknownDevice: Story = {

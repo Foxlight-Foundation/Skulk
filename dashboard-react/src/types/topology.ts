@@ -82,10 +82,26 @@ export interface TopologyData {
   edges: TopologyEdge[];
 }
 
-export type DeviceModel = 'macbook-pro' | 'mac-studio' | 'mac-mini' | 'unknown';
+export type DeviceModel = 'macbook-pro' | 'mac-studio' | 'mac-mini' | 'amd-strix' | 'unknown';
 
-/** Best-effort device-family classifier used for dashboard hardware icons. */
-export function detectDeviceModel(modelId?: string): DeviceModel {
+/**
+ * Best-effort device-family classifier used for dashboard hardware icons.
+ *
+ * Macs are identified by their `modelId` ("Mac mini", "Mac Studio"). AMD Ryzen
+ * AI Max (Strix Halo) mini-PCs report a barebones vendor string as `modelId`
+ * (e.g. "Nimo Direct Inc. MME3L"), so they are matched on `chipId` instead,
+ * which carries the SoC name ("AMD Ryzen AI Max+ 395 w/ Radeon 8060S"). This
+ * matches ANY Ryzen AI Max device, not one specific box.
+ *
+ * @param modelId machine model string (Apple's "Mac mini", or a barebones name)
+ * @param chipId  SoC/chip string; the reliable signal for AMD AI Max hardware
+ */
+export function detectDeviceModel(modelId?: string, chipId?: string): DeviceModel {
+  const chip = chipId?.toLowerCase() ?? '';
+  // AMD Ryzen AI Max / Strix Halo: match on the chip, not the barebones modelId.
+  if (chip.includes('ryzen ai max') || chip.includes('strix halo') || chip.includes('ai max')) {
+    return 'amd-strix';
+  }
   if (!modelId) return 'unknown';
   const lower = modelId.toLowerCase();
   if (lower === 'macbook pro' || lower.includes('macbook')) return 'macbook-pro';

@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import styled, { css, keyframes, useTheme } from 'styled-components';
 import type { Theme } from '../../theme';
 import { FiTrash2, FiExternalLink, FiRefreshCw } from 'react-icons/fi';
-import { MdPlayArrow, MdClose, MdTune, MdAutoFixHigh } from 'react-icons/md';
+import { MdPlayArrow, MdClose, MdTune, MdAutoFixHigh, MdExtension } from 'react-icons/md';
 import { BsChatDotsFill } from 'react-icons/bs';
 import { formatBytes } from '../../utils/format';
 import { Button } from '../common/Button';
@@ -48,6 +48,17 @@ export interface ModelCardInfo {
   };
 }
 
+/** A store entry that is a speculative-decoding companion of another model
+ *  (a separate draft model, or an MTP prediction-head sidecar) rather than an
+ *  independently placeable model. Companions are downloaded and loaded
+ *  automatically with their parent, so they get no launch/placement/optiq
+ *  actions in the store, only an identifying badge. */
+export interface CompanionInfo {
+  role: 'drafter' | 'sidecar';
+  /** model_id of the parent model that pulls this companion in. */
+  parent: string;
+}
+
 export interface StoreRegistryTableProps {
   entries: StoreRegistryEntry[];
   activeDownloads?: StoreDownloadProgress[];
@@ -65,6 +76,10 @@ export interface StoreRegistryTableProps {
   /** Total available cluster RAM in bytes — used to disable launch for models that won't fit */
   totalClusterMemoryBytes?: number;
   onOptimize?: (modelId: string) => void;
+  /** Companion (drafter / MTP-head sidecar) entries keyed by model_id. These are
+   *  not independently placeable, so their launch/placement/optiq actions are
+   *  suppressed and a role badge is shown instead. */
+  companions?: Record<string, CompanionInfo>;
 }
 
 /* ---- helpers ---- */
@@ -267,6 +282,26 @@ const TagBadge = styled.span<{ $color: string; $bg: string; $border: string }>`
   border: 1px solid ${({ $border }) => $border};
   border-radius: ${({ theme }) => theme.radii.sm};
   padding: 0 5px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+`;
+
+/** Badge marking a store entry as a speculative-decoding companion (a drafter
+ *  or an MTP-head sidecar) rather than a launchable model. Muted so it reads as
+ *  metadata, not a call to action. */
+const CompanionBadge = styled.span`
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  font-family: ${({ theme }) => theme.fonts.body};
+  font-weight: 500;
+  color: ${({ theme }) => theme.colors.textMuted};
+  background: ${({ theme }) => theme.colors.surfaceSunken};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radii.sm};
+  padding: 0 6px;
   text-transform: uppercase;
   letter-spacing: 0.3px;
 `;
@@ -546,6 +581,7 @@ export function StoreRegistryTable({
   clusterCards = {},
   totalClusterMemoryBytes = 0,
   onOptimize,
+  companions = {},
 }: StoreRegistryTableProps) {
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
@@ -628,6 +664,14 @@ export function StoreRegistryTable({
             const dl = downloadMap.get(entry.model_id);
             const active = isActive(entry.model_id);
             const tooLarge = totalClusterMemoryBytes > 0 && entry.total_bytes > totalClusterMemoryBytes;
+            // Speculative-decoding companion (drafter / MTP-head sidecar): loaded
+            // automatically with its parent, never placed on its own, so it gets
+            // no launch/placement/optiq actions, only a role badge.
+            const companion = companions[entry.model_id];
+            // OptiQ is mlx-optiq mixed-precision quantization, which operates on
+            // MLX (safetensors) weights. GGUF models carry llama.cpp's own quant
+            // format, so OptiQ doesn't apply — hide the optimize action for them.
+            const isGguf = /gguf/i.test(entry.model_id);
             return (
               <TRow key={entry.model_id}>
                 <PlayCell>
@@ -635,7 +679,7 @@ export function StoreRegistryTable({
                     <StopBtn onClick={() => onStop(entry.model_id)} title={t('storeRegistry.stopModel', 'Stop model')}>
                       <MdClose size={20} />
                     </StopBtn>
-                  ) : !active && !dl && onLaunch ? (
+                  ) : !active && !dl && !companion && onLaunch ? (
                     tooLarge ? (
                       <InfoTooltip content={t('storeRegistry.insufficientClusterMemory', 'Insufficient cluster memory')} placement="right" delay={0}>
                         <DisabledBtn aria-label={t('storeRegistry.insufficientMemory', 'Insufficient memory')}>
@@ -650,7 +694,7 @@ export function StoreRegistryTable({
                   ) : null}
                 </PlayCell>
                 <PlayCell>
-                  {!active && !dl && onPlacement ? (
+                  {!active && !dl && !companion && onPlacement ? (
                     <PlacementBtn
                       onClick={() => onPlacement(entry.model_id)}
                       title={t('storeRegistry.configurePlacement', 'Configure placement')}
@@ -662,6 +706,22 @@ export function StoreRegistryTable({
                 </PlayCell>
                 <ModelCell>
                   <ModelId title={entry.model_id}>{entry.model_id}</ModelId>
+                  {companion && (
+                    <InfoTooltip
+                      content={companion.role === 'sidecar'
+                        ? t('storeRegistry.companionSidecarTooltip', 'MTP prediction heads for {parent}. Loaded alongside its parent model; it is not launched on its own.', { parent: companion.parent })
+                        : t('storeRegistry.companionDrafterTooltip', 'Speculative-decoding draft model for {parent}. Loaded with its parent model; it is not launched on its own.', { parent: companion.parent })}
+                      placement="right"
+                      delay={0}
+                    >
+                      <CompanionBadge>
+                        <MdExtension size={11} />
+                        {companion.role === 'sidecar'
+                          ? t('storeRegistry.companionSidecar', 'Sidecar')
+                          : t('storeRegistry.companionDrafter', 'Drafter')}
+                      </CompanionBadge>
+                    </InfoTooltip>
+                  )}
                   {(() => {
                     let tags = modelCards?.[entry.model_id]?.tags ?? [];
                     // Fallback: detect from model ID if no card data
@@ -719,7 +779,7 @@ export function StoreRegistryTable({
                     filled
                     delay={100}
                   />
-                  {!active && onOptimize && !(modelCards?.[entry.model_id]?.tags ?? []).includes('optiq') && !entry.model_id.toLowerCase().includes('optiq') && (
+                  {!active && !companion && !isGguf && onOptimize && !(modelCards?.[entry.model_id]?.tags ?? []).includes('optiq') && !entry.model_id.toLowerCase().includes('optiq') && (
                     <InfoTooltip
                       content={t(
                         'storeRegistry.optimizeTooltip',

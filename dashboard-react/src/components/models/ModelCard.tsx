@@ -76,10 +76,18 @@ function clamp(v: number, min = 0, max = 100): number {
   return Math.min(max, Math.max(min, v));
 }
 
-type DeviceType = 'macbook' | 'studio' | 'mini' | 'unknown';
+type DeviceType = 'macbook' | 'studio' | 'mini' | 'amd' | 'unknown';
 
-function getDeviceType(name: string): DeviceType {
-  const lower = name.toLowerCase();
+/** Classify a node for the placement-preview mini icon. AMD Ryzen AI Max boxes
+ *  report a barebones vendor string as their model_id, so they are matched on
+ *  the chip (SoC name), mirroring the topology device glyph. Macs match on
+ *  model_id. */
+function getDeviceType(modelId: string, chipId?: string): DeviceType {
+  const chip = (chipId ?? '').toLowerCase();
+  if (chip.includes('ryzen ai max') || chip.includes('strix halo') || chip.includes('ai max')) {
+    return 'amd';
+  }
+  const lower = modelId.toLowerCase();
   if (lower.includes('macbook')) return 'macbook';
   if (lower.includes('studio')) return 'studio';
   if (lower.includes('mini')) return 'mini';
@@ -140,7 +148,7 @@ function computePlacement(
 
     return {
       id,
-      deviceType: getDeviceType(info.system_info?.model_id ?? ''),
+      deviceType: getDeviceType(info.system_info?.model_id ?? '', info.system_info?.chip),
       totalGB,
       currentPercent,
       newPercent,
@@ -361,6 +369,10 @@ export function ModelCard({
   const perNode = downloadStatus?.perNode ?? [];
   const hfId = modelIdOverride ?? model.id;
   const filterId = model.id.replace(/[^a-zA-Z0-9]/g, '');
+  // GGUF models run on the llama.cpp engines (in-process or served llama-server),
+  // which are single-node and not an MLX ring. Show a llama.cpp badge instead of
+  // the MLX sharding/transport pair so the label is not misleading.
+  const isGguf = /gguf/i.test(model.id) || /gguf/i.test(model.name ?? '');
 
   const runtimeLabel = runtime === 'MlxRing'
     ? t('modelCard.runtime.mlxRing', 'MLX Ring')
@@ -402,18 +414,27 @@ export function ModelCard({
         <MemorySize $canFit={canFit}>{t('common.sizeGbCompact', '{size}GB', { size: estimatedMemory })}</MemorySize>
       </Header>
 
-      {/* Sharding + runtime badges */}
+      {/* Engine badges: MLX shows its sharding + transport; a GGUF model runs on
+          the single-node llama.cpp engine, so it shows one llama.cpp badge. */}
       <BadgeRow>
-        <Badge title={sharding === 'Pipeline'
-          ? t('modelCard.sharding.pipelineTooltip', 'Pipeline: splits model into sequential stages across devices.')
-          : t('modelCard.sharding.tensorTooltip', 'Tensor: splits each layer across devices. Best with high-bandwidth connections.')}>
-          {sharding === 'Pipeline' ? t('common.pipeline', 'Pipeline') : t('common.tensor', 'Tensor')}
-        </Badge>
-        <Badge title={runtime === 'MlxRing'
-          ? t('modelCard.runtime.ringTooltip', 'Ring: standard networking. Works over any connection.')
-          : t('modelCard.runtime.rdmaTooltip', 'RDMA: direct memory access over Thunderbolt.')}>
-          {runtimeLabel}
-        </Badge>
+        {isGguf ? (
+          <Badge title={t('modelCard.runtime.llamaCppTooltip', 'Runs on the llama.cpp engine (GPU-offload GGUF), single node.')}>
+            {t('placement.llamaCpp', 'llama.cpp')}
+          </Badge>
+        ) : (
+          <>
+            <Badge title={sharding === 'Pipeline'
+              ? t('modelCard.sharding.pipelineTooltip', 'Pipeline: splits model into sequential stages across devices.')
+              : t('modelCard.sharding.tensorTooltip', 'Tensor: splits each layer across devices. Best with high-bandwidth connections.')}>
+              {sharding === 'Pipeline' ? t('common.pipeline', 'Pipeline') : t('common.tensor', 'Tensor')}
+            </Badge>
+            <Badge title={runtime === 'MlxRing'
+              ? t('modelCard.runtime.ringTooltip', 'Ring: standard networking. Works over any connection.')
+              : t('modelCard.runtime.rdmaTooltip', 'RDMA: direct memory access over Thunderbolt.')}>
+              {runtimeLabel}
+            </Badge>
+          </>
+        )}
       </BadgeRow>
 
       {/* Per-node download progress */}
@@ -575,6 +596,21 @@ function PlacementDeviceIcon({ node, filterId }: { node: PlacementNode; filterId
           {node.modelUsageGB > 0 && node.isUsed && (
             <ModelFill x={4} y={s * 0.32 + s * 0.36 * (1 - node.newPercent / 100)} width={s - 8} height={s * 0.36 * ((node.newPercent - node.currentPercent) / 100)} fill={theme.colors.gold} filter={memGlow} />
           )}
+        </g>
+      );
+    case 'amd':
+      // AMD Ryzen AI Max: a wide, low-profile box on a silver base, matching the
+      // topology glyph. RAM fills the body from the bottom like the Mac icons.
+      return (
+        <g transform={`translate(${-half}, ${-half})`}>
+          <rect x={1} y={s * 0.28} width={s - 2} height={s * 0.4} rx={2} fill="none" stroke={stroke} strokeWidth={1.5} />
+          <rect x={3} y={s * 0.3} width={s - 6} height={s * 0.36} fill={bodyFill} />
+          <rect x={3} y={s * 0.3 + s * 0.36 * (1 - node.currentPercent / 100)} width={s - 6} height={s * 0.36 * (node.currentPercent / 100)} fill={usedFill} />
+          {node.modelUsageGB > 0 && node.isUsed && (
+            <ModelFill x={3} y={s * 0.3 + s * 0.36 * (1 - node.newPercent / 100)} width={s - 6} height={s * 0.36 * ((node.newPercent - node.currentPercent) / 100)} fill={theme.colors.gold} filter={memGlow} />
+          )}
+          {/* silver base */}
+          <rect x={s * 0.16} y={s * 0.7} width={s * 0.68} height={s * 0.06} rx={1} fill={stroke} opacity={0.55} />
         </g>
       );
     default:

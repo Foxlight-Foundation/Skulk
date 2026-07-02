@@ -7,6 +7,55 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- **Dashboard renders AMD Ryzen AI Max nodes as their own device.** The topology
+  graph and cluster cards now draw a dedicated AMD Strix Halo glyph (detected from
+  the SoC/chip string) instead of a generic node or a Mac, and AMD APU nodes report
+  their full unified memory (the VRAM carve-out plus system RAM) the same way Macs
+  report unified memory, rather than only the system-RAM slice.
+- **Running-instance cards show every placement node and its status.** A multi-node
+  instance card now lists all of its nodes with per-node state (ready, loading,
+  failed, and so on) instead of a single node, so a lagging node is obvious during
+  load.
+- **`GET /v1/models` reports a model's speculative-decoding companions.** Each
+  entry's `runtime` section now includes `mtp_sidecar_repo`, `assistant_model_repo`,
+  and `served_spec_draft_repo` when the card declares them, so clients can tell a
+  placeable model apart from its drafter or MTP-head companion.
+
+### Changed
+
+- **The placement modal only offers options that apply to the model.** Networking
+  (MLX Ring / Jaccl) is hidden for single-node GGUF models (the llama.cpp and served
+  engines have no MLX transport to pick); the node selector (exclusion pills and the
+  count slider) appears only when more than one node can host the model; and nodes
+  that cannot run the model (wrong engine or hardware) are shown disabled instead of
+  clickable.
+- **The model store no longer presents drafters and MTP-head sidecars as launchable
+  models.** Speculative-decoding companion repos (a separate draft model, or an MTP
+  prediction-head sidecar) now carry a "Drafter" or "Sidecar" badge and have no
+  launch, placement, or optimize actions, because they are downloaded and loaded
+  automatically with their parent model. The OptiQ (mlx-optiq) optimize action is
+  also hidden for GGUF models, since it only applies to MLX weights.
+
+### Fixed
+
+- **Correct engine labels and device glyphs across the dashboard.** Served
+  (llama.cpp / `llama-server`) instances were mislabeled "Pipeline / MLX Ring" and
+  were missing their MTP badge on the instance card, the model-store card, and the
+  store's ready-hover card. The engine is now derived from the model card's backends,
+  so GGUF and served models read as "llama.cpp" and draw the correct AMD device glyph.
+
+### Documentation
+
+- **Comprehensive docs correctness and beginner-readability sweep.** Corrected the
+  AMD/Strix Halo docs to state the inference backend is llama.cpp Vulkan (Mesa RADV),
+  not ROCm (ROCm is optional, used only for the `rocminfo` diagnostic); fixed a
+  fabricated native-MTP model list and a macOS-only log-path claim; added in-site
+  install and first-run commands so a newcomer can reach a running node without
+  leaving the docs; removed internal roadmap, PR, and incident lore from user-facing
+  pages; and removed em dashes from the docs prose.
+
 ## [1.3.1] - 2026-07-01
 
 ### Fixed

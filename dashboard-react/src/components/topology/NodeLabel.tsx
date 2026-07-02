@@ -78,7 +78,7 @@ export function NodeLabel({
       {onRestart && (
         <foreignObject
           x={cx - nameWidth / 2 - (onInspect ? 48 : 24)}
-          y={nameY - 10}
+          y={nameY - 8}
           width={20}
           height={20}
           style={{ overflow: 'visible' }}
@@ -133,7 +133,7 @@ export function NodeLabel({
               onMouseEnter={(event) => { event.currentTarget.style.opacity = '1'; }}
               onMouseLeave={(event) => { event.currentTarget.style.opacity = '0.65'; }}
             >
-              <VscBug size={15} />
+              <VscBug size={20} />
             </button>
           </InfoTooltip>
         </foreignObject>
@@ -148,7 +148,7 @@ export function NodeLabel({
       {debugContent && (
         <foreignObject
           x={cx + nameWidth / 2 + 4}
-          y={nameY - 12}
+          y={nameY - 10}
           width={20}
           height={20}
           style={{ overflow: 'visible' }}

@@ -12,7 +12,7 @@ mid-generation, the disk gets tight, or you need to trace a bad request.
 
 It is written around the live control-plane endpoints and the behaviors that
 shipped for launch. Every action here is something you can do against a
-running cluster with `curl` and the dashboard — there is nothing to recompile.
+running cluster with `curl` and the dashboard. There is nothing to recompile.
 
 Throughout, `localhost:52415` is the local node's API; the same endpoints
 exist on every node, so swap the host to inspect a specific machine.
@@ -24,8 +24,8 @@ exist on every node, so swap the host to inspect a specific machine.
 With the model store enabled, each node keeps its model files in two places.
 The **store** is the authoritative copy served over the LAN from the store
 host. **Staging** is the node-local copy a worker writes before MLX loads it
-— MLX always loads from a local filesystem path, never from the store
-directly. Staged copies live under `node_cache_path` (default
+(MLX always loads from a local filesystem path, never from the store
+directly). Staged copies live under `node_cache_path` (default
 `~/.skulk/staging`), one `<org>--<name>` subdirectory per model.
 
 Staged copies are cheap to recreate from the LAN store but local disk on
@@ -35,10 +35,10 @@ small-disk nodes is the scarce resource, so staging has a lifecycle.
 
 There is one eviction mechanism with three trigger points:
 
-1. **Instance deactivation** — when a model instance shuts down.
-2. **Node startup** — which reconciles staged copies orphaned by a crashed
+1. **Instance deactivation**: when a model instance shuts down.
+2. **Node startup**, which reconciles staged copies orphaned by a crashed
    session (a node that died never got to clean up).
-3. **Operator tooling** — `POST /store/purge-staging` (see below).
+3. **Operator tooling**: `POST /store/purge-staging` (see below).
 
 A staged model becomes an **eviction candidate** when no live runner uses
 it. Candidates are kept newest-first by last use up to the
@@ -46,8 +46,8 @@ it. Candidates are kept newest-first by last use up to the
 deleted.
 
 "In-use includes companions": a model is in use not only when an instance
-names it directly but also when it is the **companion** of an active model —
-an MTP sidecar, an assistant drafter, or split vision weights. Companions
+names it directly but also when it is the **companion** of an active model
+(an MTP sidecar, an assistant drafter, or split vision weights). Companions
 are never eviction candidates, so eviction can never pull weights out from
 under a live runner.
 
@@ -73,12 +73,12 @@ model_store:
     staging_keep_recent_gb: 40
 ```
 
-- **Disk is tight** → lower it. Set `staging_keep_recent_gb: 0` for **strict
+- **Disk is tight**: lower it. Set `staging_keep_recent_gb: 0` for **strict
   evict-on-deactivate**: every not-in-use copy is removed the moment its
   instance stops.
-- **Disk is plentiful and you re-launch the same few models** → raise it, so
+- **Disk is plentiful and you re-launch the same few models**: raise it, so
   the next launch of a recently-used model skips the staging copy.
-- **Store host that loads directly from the store** → set
+- **Store host that loads directly from the store**: set
   `cleanup_on_deactivate: false` in that node's override (it is loading from
   `store_path`, not making a separate staged copy).
 
@@ -93,7 +93,7 @@ volume.
 curl http://localhost:52415/store/storage
 ```
 
-There is no cluster-wide storage endpoint — query each node's API for the
+There is no cluster-wide storage endpoint; query each node's API for the
 fleet view.
 
 ### Manual cleanup
@@ -117,7 +117,7 @@ curl -X POST http://localhost:52415/store/purge-staging \
 
 Use this when you have set `cleanup_on_deactivate: false` and are managing
 staging by hand, or to reclaim space immediately rather than waiting for the
-next deactivation/startup trigger. Remember it acts on **all** nodes — for a
+next deactivation/startup trigger. Remember it acts on **all** nodes; for a
 single node's picture before and after, use that node's `GET /store/storage`.
 
 ## Placement Failures
@@ -127,7 +127,7 @@ reaches the master, with a specific typed reason, instead of returning
 "Command received" and leaving the client with an unexplained `404`. Here is
 how to read each one.
 
-### 400 — per-node memory arithmetic
+### 400: per-node memory arithmetic
 
 A `400` from `POST /place_instance` names the node that cannot fit and shows
 the GB arithmetic. The key fact: **memory is checked per node, not summed
@@ -135,7 +135,7 @@ across the cycle.** Tensor sharding splits weights evenly and Pipeline
 allocates layers proportionally to each node's free memory, and every node
 must hold its share times a runtime-overhead factor (KV cache, activations,
 runner) on top of the raw weight bytes. A model that exactly equals a node's
-free memory is rejected — that placement would thrash rather than run.
+free memory is rejected: that placement would thrash rather than run.
 
 What to do:
 
@@ -150,12 +150,12 @@ Other `400` reasons from the same endpoint:
 - exclusions removed every candidate;
 - the model does not support Tensor sharding.
 
-### 503 — info-pending right after cluster formation
+### 503: info-pending right after cluster formation
 
 A cluster that has just formed has not finished gossiping yet: connection
 edges lag node identities by a few rounds, and per-node memory info lags the
 edges. Placing into that window does **not** produce a false "insufficient
-memory" — it is reported as info-pending. The request internally waits up to
+memory": it is reported as info-pending. The request internally waits up to
 **15 seconds** for the info to arrive before returning `503`.
 
 What to do: **wait a few seconds and retry.** The 15-second internal grace
@@ -165,7 +165,7 @@ attempt shortly after almost always succeeds.
 ### Node IDs are per-session
 
 `excluded_nodes` (and the preview `excluded_node_ids`) take libp2p node IDs.
-**Node IDs change when a cluster session restarts** — they are per-session,
+**Node IDs change when a cluster session restarts**: they are per-session,
 not stable identifiers. Re-read current IDs from `GET /state` before
 constructing an exclusion list; an old ID is simply ignored.
 
@@ -180,8 +180,8 @@ curl "http://localhost:52415/instance/previews?model_id=mlx-community/Qwen3.5-9B
 
 ### A node dies mid-generation
 
-When an instance is lost — node disconnect, crash, or deletion with a
-request in flight — open requests now **error within seconds with a
+When an instance is lost (node disconnect, crash, or deletion with a
+request in flight), open requests now **error within seconds with a
 retryable message** instead of hanging until the client's own timeout.
 
 - For a lost **worker**: the master emits `TaskFailed` for in-flight API
@@ -192,7 +192,7 @@ retryable message** instead of hanging until the client's own timeout.
   at the session boundary with an error explaining the session changed and
   asking the client to retry.
 
-End-to-end, clients receive the error within **~4–6 seconds** of a node kill
+End-to-end, clients receive the error within **~4 to 6 seconds** of a node kill
 (master or worker rank). The correct client behavior in both cases is the
 same: **retry the request.**
 
@@ -203,7 +203,7 @@ Recovery timeline:
 - **Orphaned runners** left by the lost session are reconciled by the runner
   supervisor's escalation path; staged copies orphaned by the crash are
   cleaned up at node startup (trigger 2 above).
-- **Rejoining is automatic** when the process restarts — the node rejoins
+- **Rejoining is automatic** when the process restarts: the node rejoins
   the cluster on startup with no manual step.
 
 ### A wedged GPU vs. a crashed process
@@ -217,7 +217,7 @@ On overrun the runner logs a **CRITICAL** diagnosis (including
 reboot-if-GPU-wedged guidance) and exits, the supervisor reports
 `RunnerFailed`, and **the node keeps dispatching** rather than silently
 sitting in `RunnerWarmingUp` while every request queues and times out. If
-you see the CRITICAL warmup line recur on the same node, the GPU is wedged —
+you see the CRITICAL warmup line recur on the same node, the GPU is wedged:
 follow the log's reboot guidance for that machine.
 
 **Crashed process.** When a runner process exits, **GPU/Metal memory is
@@ -254,7 +254,7 @@ The API-side **event log** records per-token chunk events and backs only the
 
 **Degraded counting-only mode** is what you get when free space hits the
 floor (or a write fails with ENOSPC): the node **keeps serving inference**,
-but event-log *persistence* degrades — events are counted, not written.
+but event-log *persistence* degrades: events are counted, not written.
 Operationally this means `GET /events` history thins out on that node while
 generation continues normally. It is a deliberate trade: before this, a
 master on a full disk throttled the whole cluster to ~0.5 tok/s before
@@ -265,7 +265,7 @@ bytes and disk free alongside the staged models).
 
 ## Tracing
 
-Runtime tracing is a **debugging** feature, not an always-on mode — leave it
+Runtime tracing is a **debugging** feature, not an always-on mode. Leave it
 off in normal operation and switch it on to investigate a specific issue.
 
 Enable it cluster-wide for new requests:
@@ -282,7 +282,7 @@ off by sending `{"enabled": false}`.
 
 Then send the request you want to investigate. Traces are keyed by the
 **master-created task ID, which is not the chat completion's response `id`**
-(that is the API command id) — so list the traces and pick yours by
+(that is the API command id), so list the traces and pick yours by
 `createdAt` and `modelId`, then fetch its stats by the listed `taskId`:
 
 ```bash
@@ -307,7 +307,7 @@ A fast pass to confirm a cluster is healthy and ready to serve:
    curl -s http://localhost:52415/state
    ```
 
-2. **Storage headroom per node.** `GET /store/storage` on each node — check
+2. **Storage headroom per node.** `GET /store/storage` on each node, check
    disk free is well above the 2 GiB event-log floor and that staging is not
    close to filling the volume.
 

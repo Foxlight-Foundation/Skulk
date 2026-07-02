@@ -152,7 +152,7 @@ export function ClusterNode({
 }: ClusterNodeProps) {
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
-  const model = detectDeviceModel(nodeInfo.system_info?.model_id);
+  const model = detectDeviceModel(nodeInfo.system_info?.model_id, nodeInfo.system_info?.chip);
 
   // Icon dimensions (unscaled)
   const iconW = 150;
