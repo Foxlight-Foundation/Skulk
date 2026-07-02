@@ -2,7 +2,10 @@
 # the llama_server (served-backend) engine for llama.cpp native MTP speculative
 # decoding (`--spec-type draft-mtp`). The small/fast member of the MTP benchmark
 # set. compatible_backends is the llama_server engine, so placement routes it to a
-# node running llama-server (e.g. kite4 on Vulkan). Text-only (no mmproj).
+# node running llama-server (e.g. kite4 on Vulkan). Text-only through Skulk: the
+# base model is natively multimodal and this repo ships an mmproj projector, but
+# the served llama_server runner does not load the projector (mmproj/vision lives
+# in the in-process llama_cpp runner), so vision is not exposed for this card.
 # supports_tensor = false: served single-node. Architecture from the GGUF metadata
 # (arch qwen35: 33 layers, hidden 4096, 4 KV heads, 262144 ctx).
 model_id = "unsloth/Qwen3.5-9B-MTP-GGUF"

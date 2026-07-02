@@ -4,8 +4,11 @@
 # MTP on llama.cpp: the MTP orchestration lives in llama-server, not the in-process
 # binding. `compatible_backends` is the `llama_server` engine (not `llama_cpp`), so
 # placement routes it to a node running llama-server (e.g. kite4 on Vulkan). The
-# repo ships no mmproj projector, so this GGUF is TEXT-ONLY. `supports_tensor =
-# false`: served single-node. Architecture values read from the GGUF metadata
+# base Qwen3.6-27B is a VLM and the repo ships an mmproj projector
+# (mmproj-Qwen3.6-27B-f16.gguf), but the served-MTP path does NOT load it, so
+# this card is served TEXT-ONLY (vision on llama.cpp is the separate #128 path).
+# `supports_tensor = false`: served single-node. Architecture values read from
+# the GGUF metadata
 # (arch `qwen35`: 65 layers, hidden 5120, 4 KV heads, 262144 ctx).
 #
 # Phase-0 measured on kite4 Radeon (Vulkan, llama.cpp b9820): draft-mtp n-max 3 =

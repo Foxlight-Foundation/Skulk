@@ -3,7 +3,10 @@
 # MTP speculative decoding (`--spec-type draft-mtp`). The MoE member of the MTP
 # benchmark set (dense-vs-MoE MTP comparison vs the Qwen3.6-27B dense card).
 # compatible_backends is the llama_server engine, so placement routes it to a node
-# running llama-server (e.g. kite4 on Vulkan). Text-only (no mmproj).
+# running llama-server (e.g. kite4 on Vulkan). Text-only through Skulk: the base
+# model is natively multimodal and this repo ships an mmproj projector, but the
+# served llama_server runner does not load the projector (mmproj/vision lives in
+# the in-process llama_cpp runner), so vision is not exposed for this card.
 # supports_tensor = false: served single-node. Architecture from the GGUF metadata
 # (arch qwen35moe: 41 layers, hidden 2048, 2 KV heads, 256 experts, 262144 ctx).
 model_id = "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"

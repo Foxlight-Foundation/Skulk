@@ -8,6 +8,10 @@ family = "llama"
 quantization = "8bit"
 base_model = "Llama 3.2 3B"
 capabilities = ["text"]
+context_length = 131072
+
+[tooling]
+supports_tool_calling = true
 
 [storage_size]
 in_bytes = 3501195264
