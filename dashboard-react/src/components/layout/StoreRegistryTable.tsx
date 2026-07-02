@@ -668,6 +668,10 @@ export function StoreRegistryTable({
             // automatically with its parent, never placed on its own, so it gets
             // no launch/placement/optiq actions, only a role badge.
             const companion = companions[entry.model_id];
+            // OptiQ is mlx-optiq mixed-precision quantization, which operates on
+            // MLX (safetensors) weights. GGUF models carry llama.cpp's own quant
+            // format, so OptiQ doesn't apply — hide the optimize action for them.
+            const isGguf = /gguf/i.test(entry.model_id);
             return (
               <TRow key={entry.model_id}>
                 <PlayCell>
@@ -775,7 +779,7 @@ export function StoreRegistryTable({
                     filled
                     delay={100}
                   />
-                  {!active && !companion && onOptimize && !(modelCards?.[entry.model_id]?.tags ?? []).includes('optiq') && !entry.model_id.toLowerCase().includes('optiq') && (
+                  {!active && !companion && !isGguf && onOptimize && !(modelCards?.[entry.model_id]?.tags ?? []).includes('optiq') && !entry.model_id.toLowerCase().includes('optiq') && (
                     <InfoTooltip
                       content={t(
                         'storeRegistry.optimizeTooltip',
