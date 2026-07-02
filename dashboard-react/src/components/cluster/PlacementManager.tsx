@@ -325,12 +325,14 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
 
   const totalNodes = Object.keys(effectiveNodes).length;
 
-  // Per-node placement eligibility. In Skulk a node's device family *is* its
-  // engine: MLX (safetensors) only runs on Apple Silicon, and the llama.cpp /
-  // served engines (GGUF) only run on the GPU/Linux (AMD/Strix) nodes. So a
-  // GGUF model can only land on an AMD node and a safetensors model only on an
-  // Apple node. We mark a node ineligible only in that confident direction, so
-  // a genuinely valid target is never hidden or disabled.
+  // Per-node placement eligibility. On the current fleet a node's device family
+  // maps to its engine: MLX (safetensors) runs on Apple Silicon, and the
+  // llama.cpp / served engines (GGUF) run on the AMD/Strix GPU nodes. So GGUF is
+  // treated as eligible only on AMD/Strix nodes and safetensors only on non-AMD
+  // nodes. This is a heuristic keyed on the chip family, NOT the authoritative
+  // backend contract: a future non-AMD llama.cpp node (CUDA/CPU) would be hidden
+  // for GGUF until eligibility keys off the advertised backend tags instead. The
+  // backend planner remains the source of truth for what can actually place.
   const isGguf = /gguf/i.test(modelId);
   const nodeEligibility = useMemo(() => {
     const map: Record<string, boolean> = {};

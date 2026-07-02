@@ -144,7 +144,7 @@ interface AmdStrixProps {
  * the Mac glyphs (theme device body, RAM fills from the bottom in the theme
  * accent) so the fleet reads as one family; the distinguishing signal is the
  * AMD wordmark plus the wider, low-profile box on a silver base. The wordmark
- * uses a theme-aware label colour (slate-grey in light mode, gold in dark) so it
+ * uses a theme-aware label colour (slate-grey in light mode, white in dark) so it
  * stays readable over both the empty case and the RAM fill.
  */
 function AmdStrix({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId, bodyColor, ramColor, labelColor }: AmdStrixProps) {
