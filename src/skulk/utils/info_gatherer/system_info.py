@@ -180,6 +180,16 @@ async def get_network_interfaces() -> list[NetworkInterfaceInfo]:
                 case _:
                     pass
 
+    # Deterministic order. `psutil.net_if_addrs()` iterates in an unspecified
+    # order that can differ poll-to-poll (most visibly on Linux/AMD nodes, which
+    # carry the most interfaces: IPv4+IPv6 plus any virtual/veth links). Change
+    # detection on the connectivity event compares the serialized list, so an
+    # unsorted list reports a spurious "change" every poll even when the actual
+    # interfaces are identical. Sorting makes an unchanged topology byte-stable so
+    # the event only fires on a real interface change (storm root cause).
+    interfaces_info.sort(
+        key=lambda i: (i.name, i.ip_address, i.interface_type)
+    )
     return interfaces_info
 
 
