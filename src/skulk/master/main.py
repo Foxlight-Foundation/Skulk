@@ -992,15 +992,22 @@ class Master:
             # it has genuinely stopped talking. `.get(node_id, last_seen_at)` lets a
             # node with no telemetry yet (just-appeared, or telemetry not gossiped)
             # fall back to its last_seen so the 30s window still applies.
+            # last_seen is stamped tz-aware, but normalize defensively before the
+            # max() against the tz-aware telemetry stamp: a tz-naive snapshot value
+            # would raise on comparison and crash the plan loop (mirrors the
+            # nodeHealth guard).
+            def _aware(when: datetime) -> datetime:
+                return when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+
             timed_out_node_ids: set[NodeId] = (
                 {
                     node_id
                     for node_id, last_seen_at in self.state.last_seen.items()
                     if now
                     - max(
-                        last_seen_at,
+                        _aware(last_seen_at),
                         self._telemetry_view.node_last_telemetry.get(
-                            node_id, last_seen_at
+                            node_id, _aware(last_seen_at)
                         ),
                     )
                     > timedelta(seconds=30)

@@ -222,8 +222,11 @@ def compute_node_health(
         # Heartbeat = the fresher of the event-log last_seen and the last telemetry
         # receipt; connectivity readings (which bump last_seen) are now change-gated
         # so telemetry, gossiped every ~1s, is the live signal on non-master nodes.
+        # last_seen is stamped tz-aware by the master, but a tz-naive snapshot value
+        # compared with the tz-aware telemetry stamp would raise and 500 /state, so
+        # normalize before the comparison (mirrors _unreachable_reason's guard).
+        heartbeat = last_seen if last_seen.tzinfo is not None else last_seen.replace(tzinfo=timezone.utc)
         telemetry_seen = telemetry_last_seen.get(node_id)
-        heartbeat = last_seen
         if telemetry_seen is not None and telemetry_seen > heartbeat:
             heartbeat = telemetry_seen
         unreachable = _unreachable_reason(heartbeat, now, unreachable_warn_after)

@@ -216,6 +216,24 @@ def test_stale_last_seen_but_fresh_telemetry_does_not_warn() -> None:
     assert list(health["node-a"].reasons) == []
 
 
+def test_tz_naive_last_seen_with_aware_telemetry_does_not_raise() -> None:
+    # A tz-naive State.last_seen (odd snapshot) compared against the tz-aware
+    # telemetry stamp would raise on the freshness `>` and 500 /state. It must be
+    # normalized before the comparison; here fresh telemetry suppresses the warning.
+    naive_stale = (_NOW - UNREACHABLE_WARN_AFTER - timedelta(seconds=5)).replace(
+        tzinfo=None
+    )
+    health = compute_node_health(
+        live_nodes={_NODE: naive_stale},
+        downloads={},
+        node_disk={},
+        telemetry_last_seen={_NODE: _NOW},
+        now=_NOW,
+    )
+    assert health["node-a"].level == "ok"
+    assert list(health["node-a"].reasons) == []
+
+
 def test_stale_last_seen_and_stale_telemetry_still_warns() -> None:
     # A genuinely departing node stops both signals, so the warning must still
     # fire in the window before the master prunes it.
