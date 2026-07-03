@@ -146,6 +146,57 @@ _COMMAND_TASK_TYPES = (
 )
 
 
+NODE_LIVENESS_TIMEOUT = timedelta(seconds=30)
+
+
+def compute_timed_out_nodes(
+    last_seen: Mapping[NodeId, datetime],
+    telemetry_last_seen: Mapping[NodeId, datetime],
+    *,
+    now: datetime,
+    timeout: timedelta = NODE_LIVENESS_TIMEOUT,
+) -> set[NodeId]:
+    """Nodes whose liveness signals have BOTH gone stale past ``timeout``.
+
+    Liveness is the fresher of the event-log ``State.last_seen`` and the last
+    telemetry receipt (``TelemetryView.node_last_telemetry``). Connectivity
+    readings (which bump ``last_seen``) are only emitted on change (the AMD
+    gossip-storm fix), so a stable node's ``last_seen`` goes cold by design;
+    telemetry gossips every ~1s, so it is the live signal. A node with no
+    telemetry yet (just appeared, or telemetry not gossiped) falls back to its
+    ``last_seen`` so the timeout window still applies.
+
+    ``last_seen`` is stamped tz-aware by the master, but a tz-naive value (an
+    odd snapshot) compared against the tz-aware telemetry stamp would raise
+    and crash the plan loop, so both are normalized defensively (mirrors the
+    nodeHealth guard).
+
+    Args:
+        last_seen: ``State.last_seen`` (last logged event per node).
+        telemetry_last_seen: local receipt time of each node's last telemetry.
+        now: The wall clock (tz-aware); injected for testing.
+        timeout: Staleness past which a node is considered gone.
+
+    Returns:
+        Node ids to time out (drives ``NodeTimedOut``: membership prune plus
+        instance/task cleanup).
+    """
+
+    def _aware(when: datetime) -> datetime:
+        return when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+
+    return {
+        node_id
+        for node_id, last_seen_at in last_seen.items()
+        if now
+        - max(
+            _aware(last_seen_at),
+            _aware(telemetry_last_seen.get(node_id, last_seen_at)),
+        )
+        > timeout
+    }
+
+
 def instances_on_dead_nodes(
     state: State,
     connected_node_ids: AbstractSet[NodeId],
@@ -985,11 +1036,11 @@ class Master:
                 >= TOPOLOGY_SETTLE_GRACE_SECONDS
             )
             timed_out_node_ids: set[NodeId] = (
-                {
-                    node_id
-                    for node_id, last_seen_at in self.state.last_seen.items()
-                    if now - last_seen_at > timedelta(seconds=30)
-                }
+                compute_timed_out_nodes(
+                    self.state.last_seen,
+                    self._telemetry_view.node_last_telemetry,
+                    now=now,
+                )
                 if topology_settled
                 else set()
             )
