@@ -7,7 +7,7 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
-## [1.3.1] - 2026-07-03
+## [1.3.1] - 2026-07-01
 
 ### Added
 
