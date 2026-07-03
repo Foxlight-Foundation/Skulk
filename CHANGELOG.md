@@ -52,6 +52,13 @@ This project records release notes here and mirrors public-facing notes in
   launch, placement, or optimize actions, because they are downloaded and loaded
   automatically with their parent model. The OptiQ (mlx-optiq) optimize action is
   also hidden for GGUF models, since it only applies to MLX weights.
+- **The bundled Qwen3.6-27B MTP card now points at `unsloth/Qwen3.6-27B-MTP-GGUF`**
+  instead of a small community mirror that HuggingFace throttled to roughly 1 MB/s.
+  The 17 GB weights previously never finished downloading into the store (they were
+  re-attempted from near-scratch on every placement); the well-provisioned unsloth
+  repo downloads and finalizes in a few minutes so the store copy persists and
+  re-stages instantly. Same base model, same native multi-token-prediction heads,
+  same `--spec-type draft-mtp` path.
 
 ### Fixed
 
