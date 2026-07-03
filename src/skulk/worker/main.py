@@ -152,20 +152,6 @@ trips because the process is alive. Generous enough to cover slow Python imports
 and weight mmaps, far under an indefinite hang."""
 
 
-_CONNECTIVITY_KEEPALIVE_SECONDS = 15.0
-"""How often an unchanged connectivity reading (network interfaces, thunderbolt)
-is re-forwarded as a liveness keepalive. Connectivity ``NodeGatheredInfo`` events
-ride the ordered event log and double as the node's heartbeat (``apply`` bumps
-``last_seen`` on each). They used to fire every poll unconditionally, so on a
-long-lived cluster they filled the master's 10k-event replay tail with redundant
-churn; a joining node then replayed that burst and saturated the AMD send queues
-into a flap livelock. We now forward a connectivity reading only when it changed,
-or at this cadence as a keepalive. Kept comfortably under the master's 30s
-liveness-prune threshold (``master.main._plan``) so a stable node is never reaped;
-the master drops the unchanged keepalives from the log/broadcast but still bumps
-``last_seen`` from them."""
-
-
 def _wedged_live_instances(
     runners: Mapping[RunnerId, "RunnerSupervisor"],
     live_instances: Container[InstanceId],
@@ -678,12 +664,17 @@ class Worker:
 
     async def _forward_info(self, recv: Receiver[GatheredInfo]):
         # Connectivity readings (network interfaces, thunderbolt) ride the ordered
-        # event log and double as this node's liveness heartbeat. Change-gate them:
-        # a reading is forwarded only when its value changed or once every
-        # _CONNECTIVITY_KEEPALIVE_SECONDS as a keepalive, instead of every poll.
-        # This stops redundant connectivity churn from filling the master's replay
-        # tail (the AMD 5-node storm). Cache last forwarded value + time per type.
-        last_forwarded: dict[type[GatheredInfo], tuple[GatheredInfo, float]] = {}
+        # event log. They rarely change, but were emitted every poll, so on a
+        # long-lived cluster they filled the master's replay tail and stormed the
+        # AMD nodes on join (the 5-node gossip storm). Forward a connectivity
+        # reading only when its value actually changed. The gossip delivery ack
+        # (event_router ``out_for_delivery`` retransmits until the master echoes the
+        # event back) guarantees a real change reaches the log, so no periodic
+        # keepalive is needed; node liveness is carried by the telemetry plane
+        # instead (the master prune and node-health both read telemetry freshness,
+        # which gossips every ~1s), not by these events. Cache the last forwarded
+        # value per reading type.
+        last_forwarded: dict[type[GatheredInfo], GatheredInfo] = {}
         with recv as info_stream:
             async for info in info_stream:
                 try:
@@ -697,17 +688,10 @@ class Worker:
                             NodeTelemetry(node_id=self.node_id, info=info)
                         )
                         continue
-                    # Event-log-bound connectivity reading: forward only on change
-                    # or keepalive so it stops flooding the ordered event log.
-                    now = time.monotonic()
-                    previous = last_forwarded.get(type(info))
-                    if (
-                        previous is not None
-                        and previous[0] == info
-                        and now - previous[1] < _CONNECTIVITY_KEEPALIVE_SECONDS
-                    ):
+                    # Event-log-bound connectivity reading: forward only on change.
+                    if last_forwarded.get(type(info)) == info:
                         continue
-                    last_forwarded[type(info)] = (info, now)
+                    last_forwarded[type(info)] = info
                     await self.event_sender.send(
                         NodeGatheredInfo(
                             node_id=self.node_id,

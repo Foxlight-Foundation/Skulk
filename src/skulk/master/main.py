@@ -316,12 +316,6 @@ class Master:
         )
         self._snapshot_event_cadence = snapshot_event_cadence
         self._last_snapshot_idx = -1
-        # Last connectivity/gathered payload logged per (node, reading type). Used
-        # to drop unchanged NodeGatheredInfo keepalives from the event log (they
-        # still refresh last_seen for liveness but must not accumulate in the 10k
-        # replay tail — the AMD 5-node storm root cause). In-memory only, rebuilt
-        # from live events after a re-election, so it costs nothing on failover.
-        self._last_gathered_info: dict[tuple[NodeId, type], object] = {}
         self._pending_traces: dict[TaskId, dict[int, list[TraceEventData]]] = {}
         self._expected_ranks: dict[TaskId, set[int]] = {}
         # Instance ids whose memory-refusal re-placement has already been
@@ -990,11 +984,26 @@ class Master:
                 time.monotonic() - self._started_monotonic
                 >= TOPOLOGY_SETTLE_GRACE_SECONDS
             )
+            # Liveness = the fresher of the event-log last_seen and the last
+            # telemetry receipt. Connectivity readings (which bump last_seen) are
+            # only emitted on change now (the AMD gossip-storm fix), so a stable
+            # node's last_seen goes cold; telemetry gossips every ~1s, so it is the
+            # live signal. A node is timed out only when BOTH have gone stale, i.e.
+            # it has genuinely stopped talking. `.get(node_id, last_seen_at)` lets a
+            # node with no telemetry yet (just-appeared, or telemetry not gossiped)
+            # fall back to its last_seen so the 30s window still applies.
             timed_out_node_ids: set[NodeId] = (
                 {
                     node_id
                     for node_id, last_seen_at in self.state.last_seen.items()
-                    if now - last_seen_at > timedelta(seconds=30)
+                    if now
+                    - max(
+                        last_seen_at,
+                        self._telemetry_view.node_last_telemetry.get(
+                            node_id, last_seen_at
+                        ),
+                    )
+                    > timedelta(seconds=30)
                 }
                 if topology_settled
                 else set()
@@ -1172,37 +1181,6 @@ class Master:
                             f"{type(event).__name__}({event.task_id})"
                         )
                         continue
-
-                    # Connectivity/gathered readings (network interfaces,
-                    # thunderbolt) refresh last_seen — this node's liveness
-                    # heartbeat — and ride the ordered event log, but their payload
-                    # rarely changes. Re-logging + broadcasting + snapshotting an
-                    # unchanged reading on every keepalive filled the master's
-                    # 10k-event replay tail with redundant churn; a joining node then
-                    # replayed that burst and saturated the AMD send queues into a
-                    # flap livelock (the AMD 5-node storm; same shape as #278/#364).
-                    # De-dup by payload: an unchanged NodeGatheredInfo bumps
-                    # last_seen only and is dropped from the log/broadcast/snapshot.
-                    # last_seen is bumped with model_copy (not apply), so the
-                    # event-log idx sequence is untouched and the next real event
-                    # still satisfies apply()'s strict idx invariant. Followers no
-                    # longer see the keepalive last_seen bumps, which is harmless:
-                    # only the master prunes on last_seen, and a re-elected master
-                    # rebuilds it from live events (the first reading after election
-                    # is a cache miss, so it is logged and re-broadcast).
-                    if isinstance(event, NodeGatheredInfo):
-                        gathered_key = (event.node_id, type(event.info))
-                        if self._last_gathered_info.get(gathered_key) == event.info:
-                            self.state = self.state.model_copy(
-                                update={
-                                    "last_seen": {
-                                        **self.state.last_seen,
-                                        event.node_id: datetime.now(tz=timezone.utc),
-                                    }
-                                }
-                            )
-                            continue
-                        self._last_gathered_info[gathered_key] = event.info
 
                     logger.debug(f"Master indexing event: {str(event)[:100]}")
                     indexed = IndexedEvent(event=event, idx=len(self._event_log))
