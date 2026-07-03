@@ -157,6 +157,20 @@ Rust code in `rust/` provides:
 - `skulk_pyo3_bindings`: PyO3 bindings exposing Rust to Python
 - `system_custodian`: System-level operations
 
+### Extension API (plugins)
+Separately installed packages register a zero-arg factory in the
+`skulk.extensions` entry-point group; `load_extensions()` discovers them once
+at node startup (API-spawning nodes) with PEP 440 version gating against the
+running Skulk (mismatch = refused loudly; same anti-pattern as mixed-version
+clusters). Contract in `src/skulk/extensions/types.py`: chat middleware gets
+`transform_chat_request` (pre-dispatch, on the API node) and
+`observe_chat_response` (immutable summary, background task), plus an
+`ExtensionContext` with `embed_texts` (in-process `/v1/embeddings`,
+`API.embed_texts`). Invariants: every extension call is guarded (a raising
+extension never degrades inference), extensions never own the chunk stream,
+and no extension installed = Skulk unchanged. Kill switch:
+`SKULK_EXTENSIONS_DISABLE=1`.
+
 ### Dashboard
 React + TypeScript + styled-components frontend in `dashboard-react/`. Build output goes to `dashboard-react/dist/` and is served by the API when present. A node without the built assets (a headless/non-Mac worker, or with no `SKULK_DASHBOARD_DIR`) sets `DASHBOARD_DIR=None`, skips the mount, and serves the API without the UI.
 

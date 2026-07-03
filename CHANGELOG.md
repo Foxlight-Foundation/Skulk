@@ -7,6 +7,20 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- **Extension (plugin) API.** Skulk now discovers separately installed Python
+  packages through the `skulk.extensions` entry-point group at startup and
+  calls them at well-defined serving-path hooks: a chat-request transform
+  before cluster dispatch and a completed-response observer after streaming
+  ends, with an `ExtensionContext` giving in-process access to the cluster's
+  embedding serving. Extension calls are guarded (a raising extension is
+  logged and skipped, never degrading inference), extensions never own the
+  response stream (Skulk accumulates and hands observers an immutable
+  summary), and version gating refuses plugins whose `skulk_requires`
+  specifier does not match the running Skulk. `SKULK_EXTENSIONS_DISABLE=1`
+  is a node-local kill switch. No extension installed = Skulk unchanged.
+
 ## [1.3.1] - 2026-07-01
 
 ### Added
