@@ -143,6 +143,33 @@ def make_broken_extension() -> _StubExtension:
     raise RuntimeError("factory exploded")
 
 
+class _FlakyPropertyExtension:
+    """Extension whose metadata properties raise (not AttributeError)."""
+
+    @property
+    def name(self) -> str:
+        raise RuntimeError("flaky name")
+
+    @property
+    def skulk_requires(self) -> str:
+        return ">=1.0"
+
+    def chat_middleware(self) -> None:
+        return None
+
+
+def make_flaky_property_extension() -> _FlakyPropertyExtension:
+    """Entry-point factory: loads, but its name property raises."""
+    return _FlakyPropertyExtension()
+
+
+class _RaisingMiddlewareFactoryExtension(_StubExtension):
+    """Extension whose chat_middleware() itself raises."""
+
+    def chat_middleware(self) -> BaseChatMiddleware | None:
+        raise RuntimeError("middleware factory exploded")
+
+
 def _entry_point(name: str, attribute: str) -> EntryPoint:
     return EntryPoint(
         name=name, value=f"{_TESTS_MODULE}:{attribute}", group="skulk.extensions"
@@ -181,6 +208,34 @@ def test_load_extensions_discovers_and_version_gates() -> None:
     # Only the compatible extension survives; the stale, broken, and missing
     # ones are skipped loudly rather than stopping the node.
     assert loaded.names == ["compatible"]
+
+
+def test_raising_metadata_property_is_skipped_not_fatal() -> None:
+    # hasattr() would only suppress AttributeError; a plugin property raising
+    # anything else must still be skipped without breaking the "loader never
+    # raises" contract (it runs at node startup).
+    loaded = load_extensions(
+        candidates=[
+            _entry_point("flaky", "make_flaky_property_extension"),
+            _entry_point("ok", "make_compatible_extension"),
+        ],
+        skulk_version="1.3.1",
+    )
+    assert loaded.names == ["compatible"]
+
+
+def test_raising_chat_middleware_loads_without_hooks() -> None:
+    # chat_middleware() raising must not crash startup; the extension loads
+    # with no chat hooks and everything else proceeds.
+    recording = _RecordingMiddleware()
+    loaded = LoadedExtensions(
+        [
+            _RaisingMiddlewareFactoryExtension(name="exploder"),
+            _StubExtension(name="recorder", middleware=recording),
+        ]
+    )
+    assert loaded.names == ["exploder", "recorder"]
+    assert loaded.has_chat_middleware
 
 
 def test_kill_switch_skips_discovery(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -59,18 +59,37 @@ class LoadedExtensions:
     """
 
     def __init__(self, extensions: Sequence[SkulkExtension]) -> None:
-        """Wrap already-validated extensions (see :func:`load_extensions`)."""
-        self._extensions = list(extensions)
+        """Wrap validated extensions (see :func:`load_extensions`).
+
+        Every extension attribute access here is guarded too: this runs at
+        node startup, so a plugin whose ``name`` property or
+        ``chat_middleware()`` raises must be skipped loudly, never allowed to
+        crash the process (the "loader never raises" contract).
+        """
+        self._names: list[str] = []
         self._chat_middlewares: list[tuple[str, ChatMiddleware]] = []
-        for extension in self._extensions:
-            middleware = extension.chat_middleware()
+        for extension in extensions:
+            try:
+                name = str(extension.name)
+            except Exception as exc:  # noqa: BLE001 - plugin must not crash startup
+                logger.error(f"extension name property raised; skipping: {exc}")
+                continue
+            try:
+                middleware = extension.chat_middleware()
+            except Exception as exc:  # noqa: BLE001 - plugin must not crash startup
+                logger.error(
+                    f"extension '{name}' chat_middleware() raised; loading it "
+                    f"without chat hooks: {exc}"
+                )
+                middleware = None
+            self._names.append(name)
             if middleware is not None:
-                self._chat_middlewares.append((extension.name, middleware))
+                self._chat_middlewares.append((name, middleware))
 
     @property
     def names(self) -> list[str]:
         """Names of all loaded extensions."""
-        return [extension.name for extension in self._extensions]
+        return list(self._names)
 
     @property
     def has_chat_middleware(self) -> bool:
@@ -192,20 +211,36 @@ class LoadedExtensions:
 def _validate_extension(
     candidate: object, skulk_version: str, source: str
 ) -> SkulkExtension | None:
-    """Duck-type and version-gate one loaded entry-point object."""
-    for attribute in ("name", "skulk_requires", "chat_middleware"):
-        if not hasattr(candidate, attribute):
+    """Duck-type and version-gate one loaded entry-point object.
+
+    Metadata is read exactly once under a guard and the captured values are
+    used for gating and every log line: ``hasattr`` would only suppress
+    ``AttributeError``, and a plugin property that raises anything else must
+    not escape the "loader never raises" contract.
+    """
+    # Unchecked protocol cast; every attribute read below stays inside the
+    # guard because a plugin property may raise anything, not just
+    # AttributeError.
+    extension = cast("SkulkExtension", candidate)
+    try:
+        name = str(extension.name)
+        requires = str(extension.skulk_requires)
+        middleware_factory = extension.chat_middleware
+        if not callable(middleware_factory):
             logger.error(
-                f"extension from {source} is missing '{attribute}'; skipping"
+                f"extension from {source}: chat_middleware is not callable; skipping"
             )
             return None
-    extension: SkulkExtension = candidate  # pyright: ignore[reportAssignmentType]
+    except Exception as exc:  # noqa: BLE001 - plugin must not crash startup
+        logger.error(
+            f"extension from {source} has unreadable metadata; skipping: {exc}"
+        )
+        return None
     try:
-        specifier = SpecifierSet(extension.skulk_requires)
+        specifier = SpecifierSet(requires)
     except InvalidSpecifier:
         logger.error(
-            f"extension '{extension.name}' has invalid skulk_requires "
-            f"{extension.skulk_requires!r}; skipping"
+            f"extension '{name}' has invalid skulk_requires {requires!r}; skipping"
         )
         return None
     try:
@@ -213,17 +248,16 @@ def _validate_extension(
     except InvalidVersion:
         logger.warning(
             f"cannot parse running skulk version {skulk_version!r}; "
-            f"loading extension '{extension.name}' without a version gate"
+            f"loading extension '{name}' without a version gate"
         )
         return extension
     if running not in specifier:
         # Same anti-pattern as a mixed-version cluster: refuse loudly rather
         # than run a plugin against a fabric it was not built for.
         logger.error(
-            f"extension '{extension.name}' requires skulk "
-            f"{extension.skulk_requires!r} but this node runs "
-            f"{skulk_version}; refusing to load it. Upgrade the extension "
-            f"and the fleet together."
+            f"extension '{name}' requires skulk {requires!r} but this node "
+            f"runs {skulk_version}; refusing to load it. Upgrade the "
+            f"extension and the fleet together."
         )
         return None
     return extension
@@ -271,9 +305,10 @@ def load_extensions(
         if extension is not None:
             loaded.append(extension)
 
-    if loaded:
+    result = LoadedExtensions(loaded)
+    if result.names:
+        # Log via the guarded .names, never by re-reading plugin properties.
         logger.info(
-            f"loaded {len(loaded)} extension(s): "
-            f"{', '.join(extension.name for extension in loaded)}"
+            f"loaded {len(result.names)} extension(s): {', '.join(result.names)}"
         )
-    return LoadedExtensions(loaded)
+    return result

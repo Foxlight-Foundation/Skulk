@@ -2468,7 +2468,19 @@ class API:
                         return [list(embedding) for embedding in chunk.embeddings]
             return None
         except TimeoutError:
+            # The runner may still be computing this command. A bare finalize
+            # would emit TaskFinished and mark a live task complete on the
+            # master, so cancel it instead (mirrors the endpoint's
+            # client-disconnect path); _cancelled_command_ids suppresses the
+            # finished signal in the finally below.
             logger.warning(f"embed_texts timed out after {timeout_seconds}s")
+            self._cancelled_command_ids.add(command_id)
+            await self.command_sender.send(
+                ForwarderCommand(
+                    origin=self._system_id,
+                    command=TaskCancelled(cancelled_command_id=command_id),
+                )
+            )
             return None
         finally:
             await self._finalize_command_stream(
