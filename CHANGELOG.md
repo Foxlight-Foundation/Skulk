@@ -7,6 +7,8 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-07-01
+
 ### Added
 
 - **Complete, capability-accurate model cards for the whole store.** Every model in
@@ -38,6 +40,26 @@ This project records release notes here and mirrors public-facing notes in
   and `served_spec_draft_repo` when the card declares them, so clients can tell a
   placeable model apart from its drafter or MTP-head companion.
 
+- **Store-delete now evicts worker-staged copies cluster-wide (#427).** Deleting a
+  model from the store (`DELETE /store/models/{model_id}`) previously removed only
+  the store host's canonical copy; workers cache their own staged shards
+  independently, so the deleted model lingered on worker disk until LRU pressure.
+  The API now broadcasts a fleet-wide `EvictStagedModel` command after a successful
+  store-delete: every node drops its local staged copy and the model's download
+  entries are cleared from cluster `State`, so the planner re-stages on a future
+  placement instead of loading deleted files.
+
+- **Served-backend engine (`llama_server`) with native MTP speculative decoding.**
+  A new inference-engine class that launches an external `llama-server` subprocess
+  and proxies its OpenAI HTTP API, coexisting with the in-process `mlx` and
+  `llama_cpp` runners. This unlocks llama.cpp's native multi-token-prediction
+  (`--spec-type draft-mtp`) for models that ship MTP heads (Qwen3.6, DeepSeek,
+  GLM, Kimi, Nemotron), which is not reachable from the in-process Python binding.
+  Routed per model via a card's `compatible_backends` and configured with the
+  `served_spec_type` / `served_spec_n_max` runtime fields; enabled on a node by
+  pointing `SKULK_LLAMA_SERVER_BIN` at a `llama-server` binary. Measured 2.19x on a
+  dense Qwen3.6-27B on a Strix Halo (Radeon/Vulkan).
+
 ### Changed
 
 - **The placement modal only offers options that apply to the model.** Networking
@@ -68,20 +90,6 @@ This project records release notes here and mirrors public-facing notes in
   store's ready-hover card. The engine is now derived from the model card's backends,
   so GGUF and served models read as "llama.cpp" and draw the correct AMD device glyph.
 
-### Documentation
-
-- **Comprehensive docs correctness and beginner-readability sweep.** Corrected the
-  AMD/Strix Halo docs to state the inference backend is llama.cpp Vulkan (Mesa RADV),
-  not ROCm (ROCm is optional, used only for the `rocminfo` diagnostic); fixed a
-  fabricated native-MTP model list and a macOS-only log-path claim; added in-site
-  install and first-run commands so a newcomer can reach a running node without
-  leaving the docs; removed internal roadmap, PR, and incident lore from user-facing
-  pages; and removed em dashes from the docs prose.
-
-## [1.3.1] - 2026-07-01
-
-### Fixed
-
 - **Large model downloads no longer time out mid-transfer.** The download session's
   `long` timeout profile applied a fixed 30-minute `total` cap to the entire file
   transfer, so a multi-GB GGUF that was downloading fine failed partway through
@@ -110,27 +118,15 @@ This project records release notes here and mirrors public-facing notes in
   model after a store-delete (e.g. the download/delete/re-download cycle the test
   harness drives for served-MTP GGUFs).
 
-### Added
+### Documentation
 
-- **Store-delete now evicts worker-staged copies cluster-wide (#427).** Deleting a
-  model from the store (`DELETE /store/models/{model_id}`) previously removed only
-  the store host's canonical copy; workers cache their own staged shards
-  independently, so the deleted model lingered on worker disk until LRU pressure.
-  The API now broadcasts a fleet-wide `EvictStagedModel` command after a successful
-  store-delete: every node drops its local staged copy and the model's download
-  entries are cleared from cluster `State`, so the planner re-stages on a future
-  placement instead of loading deleted files.
-
-- **Served-backend engine (`llama_server`) with native MTP speculative decoding.**
-  A new inference-engine class that launches an external `llama-server` subprocess
-  and proxies its OpenAI HTTP API, coexisting with the in-process `mlx` and
-  `llama_cpp` runners. This unlocks llama.cpp's native multi-token-prediction
-  (`--spec-type draft-mtp`) for models that ship MTP heads (Qwen3.6, DeepSeek,
-  GLM, Kimi, Nemotron), which is not reachable from the in-process Python binding.
-  Routed per model via a card's `compatible_backends` and configured with the
-  `served_spec_type` / `served_spec_n_max` runtime fields; enabled on a node by
-  pointing `SKULK_LLAMA_SERVER_BIN` at a `llama-server` binary. Measured 2.19x on a
-  dense Qwen3.6-27B on a Strix Halo (Radeon/Vulkan).
+- **Comprehensive docs correctness and beginner-readability sweep.** Corrected the
+  AMD/Strix Halo docs to state the inference backend is llama.cpp Vulkan (Mesa RADV),
+  not ROCm (ROCm is optional, used only for the `rocminfo` diagnostic); fixed a
+  fabricated native-MTP model list and a macOS-only log-path claim; added in-site
+  install and first-run commands so a newcomer can reach a running node without
+  leaving the docs; removed internal roadmap, PR, and incident lore from user-facing
+  pages; and removed em dashes from the docs prose.
 
 ## [1.3.0] - 2026-06-25
 
