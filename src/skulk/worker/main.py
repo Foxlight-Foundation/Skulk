@@ -495,6 +495,12 @@ class Worker:
         self._staging_config = staging_config
 
         self.state: State = State()
+        # Event-log-bound readings (connectivity) confirmed indexed by the
+        # master: keyed by reading type, holding the payload we saw echoed
+        # back as an indexed event. _forward_info gates re-sends on THIS (not
+        # on "last sent"), so a change dropped after bounded delivery retries
+        # keeps being re-sent each poll until it truly lands in the log.
+        self._confirmed_forwarded_info: dict[type[GatheredInfo], GatheredInfo] = {}
         self.runners: dict[RunnerId, RunnerSupervisor] = {}
         # Staging DIRECTORY NAMES (forward-sanitized) of models evicted by
         # startup reconciliation whose DownloadCompleted entries may still
@@ -666,15 +672,17 @@ class Worker:
         # Connectivity readings (network interfaces, thunderbolt) ride the ordered
         # event log. They rarely change, but were emitted every poll, so on a
         # long-lived cluster they filled the master's replay tail and stormed the
-        # AMD nodes on join (the 5-node gossip storm). Forward a connectivity
-        # reading only when its value actually changed. The gossip delivery ack
-        # (event_router ``out_for_delivery`` retransmits until the master echoes the
-        # event back) guarantees a real change reaches the log, so no periodic
-        # keepalive is needed; node liveness is carried by the telemetry plane
-        # instead (the master prune and node-health both read telemetry freshness,
-        # which gossips every ~1s), not by these events. Cache the last forwarded
-        # value per reading type.
-        last_forwarded: dict[type[GatheredInfo], GatheredInfo] = {}
+        # AMD nodes on join (the 5-node gossip storm). Forward a reading only when
+        # its value differs from the last value the master CONFIRMED (echoed back
+        # as an indexed event; see _event_applier, which records the echo into
+        # _confirmed_forwarded_info). Gating on confirmation rather than on "last
+        # sent" matters: the delivery retry (event_router ``out_for_delivery``) is
+        # bounded (retry_max_attempts), so a change sent during a long masterless
+        # window can be dropped permanently; gating on the echo means we simply
+        # re-send it on the next poll until it actually lands in the log, and go
+        # quiet once it does. No periodic keepalive is needed; node liveness is
+        # carried by the telemetry plane (the master prune and node-health read
+        # telemetry freshness, which gossips every ~1s), not by these events.
         with recv as info_stream:
             async for info in info_stream:
                 try:
@@ -688,10 +696,10 @@ class Worker:
                             NodeTelemetry(node_id=self.node_id, info=info)
                         )
                         continue
-                    # Event-log-bound connectivity reading: forward only on change.
-                    if last_forwarded.get(type(info)) == info:
+                    # Event-log-bound reading: skip only when the log already
+                    # holds this exact value (confirmed by the master's echo).
+                    if self._confirmed_forwarded_info.get(type(info)) == info:
                         continue
-                    last_forwarded[type(info)] = info
                     await self.event_sender.send(
                         NodeGatheredInfo(
                             node_id=self.node_id,
@@ -712,6 +720,15 @@ class Worker:
                 # 2. for each event, apply it to the state
                 self.state = apply(self.state, event=event)
                 event = event.event
+
+                # Confirm our own connectivity readings once the master echoes
+                # them back indexed; _forward_info gates on this so an
+                # unconfirmed change keeps re-sending (see its comment).
+                if (
+                    isinstance(event, NodeGatheredInfo)
+                    and event.node_id == self.node_id
+                ):
+                    self._confirmed_forwarded_info[type(event.info)] = event.info
 
                 # Prune telemetry for timed-out nodes from the worker applier.
                 # The API applier does the same; together they cover --no-api
