@@ -179,6 +179,7 @@ def compute_node_health(
     downloads: Mapping[NodeId, Sequence[DownloadProgress]],
     node_disk: Mapping[NodeId, DiskUsage],
     now: datetime,
+    telemetry_last_seen: Mapping[NodeId, datetime] | None = None,
     unreachable_warn_after: timedelta = UNREACHABLE_WARN_AFTER,
 ) -> dict[str, NodeHealth]:
     """Derive a per-node health summary for every live node.
@@ -191,6 +192,15 @@ def compute_node_health(
             terminal ``DownloadFailed`` entries.
         node_disk: ``TelemetryView.node_disk`` -- per-node models-volume usage.
         now: The wall clock used for heartbeat-staleness; injected for testing.
+        telemetry_last_seen: ``TelemetryView.node_last_telemetry`` -- when this node
+            last received telemetry from each peer. Telemetry gossips every ~1s
+            cluster-wide, so it is a live liveness signal independent of whether
+            connectivity events are logged. The heartbeat check uses the fresher of
+            this and ``last_seen``, so the connectivity change-gate/de-dup that
+            stops the AMD gossip storm (and leaves followers' ``last_seen`` stale)
+            does not raise a false "heartbeats are late" warning on healthy nodes.
+            A genuinely departing node stops both, so the warning still fires in the
+            window before it is pruned.
         unreachable_warn_after: Heartbeat-staleness past which a node is flagged
             as at-risk of pruning.
 
@@ -199,6 +209,7 @@ def compute_node_health(
         live node (``level`` is ``ok`` with no reasons for a healthy node), so
         the dashboard can render an indicator (or none) per topology node.
     """
+    telemetry_last_seen = telemetry_last_seen or {}
     health: dict[str, NodeHealth] = {}
     for node_id, last_seen in live_nodes.items():
         reasons: list[NodeHealthReason] = []
@@ -208,7 +219,14 @@ def compute_node_health(
             disk_reason = _disk_reason(disk)
             if disk_reason is not None:
                 reasons.append(disk_reason)
-        unreachable = _unreachable_reason(last_seen, now, unreachable_warn_after)
+        # Heartbeat = the fresher of the event-log last_seen and the last telemetry
+        # receipt; connectivity readings (which bump last_seen) are now change-gated
+        # so telemetry, gossiped every ~1s, is the live signal on non-master nodes.
+        telemetry_seen = telemetry_last_seen.get(node_id)
+        heartbeat = last_seen
+        if telemetry_seen is not None and telemetry_seen > heartbeat:
+            heartbeat = telemetry_seen
+        unreachable = _unreachable_reason(heartbeat, now, unreachable_warn_after)
         if unreachable is not None:
             reasons.append(unreachable)
         health[str(node_id)] = NodeHealth(
