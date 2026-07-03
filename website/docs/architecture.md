@@ -402,6 +402,46 @@ This is why one placed model can be accessed through several compatibility forma
 
 The adapters live in `src/skulk/api/adapters/`. Each one handles request normalization (incoming) and chunk serialization (outgoing) for its wire format. The internal Task and Chunk types are the integration boundary.
 
+## Extensions (plugins)
+
+Skulk can load separately installed Python packages as extensions and call
+them at well-defined points in the serving path. Extensions are how
+deployment-specific behavior (an audit logger, a request policy filter, a
+prompt annotator) rides the fabric without forking Skulk: the package is
+installed into the same environment as Skulk on each node, and Skulk
+discovers it at startup through the `skulk.extensions` entry-point group.
+
+The contract is deliberately small (`src/skulk/extensions/`):
+
+- An extension exposes a zero-argument factory in the entry-point group. The
+  returned object names itself, declares the Skulk versions it supports as a
+  PEP 440 specifier, and can provide **chat middleware**.
+- Chat middleware gets two hooks. `transform_chat_request` runs on the API
+  node after the OpenAI adapter and before the request is dispatched to the
+  cluster; it can return modified task params (for example, an augmented
+  system region). `observe_chat_response` receives an immutable summary of
+  the completed generation (final text, thinking text, finish reason) in a
+  background task after the response ends.
+- Each hook invocation receives an `ExtensionContext` carrying the node
+  identity, the running Skulk version, and programmatic access to the
+  cluster's embedding serving (the in-process equivalent of
+  `POST /v1/embeddings`).
+
+Three invariants shape the design. First, **extensions can never degrade
+inference**: every extension call is guarded, a raising extension is logged
+loudly and skipped, and the request proceeds as if it did not exist. Second,
+**extensions never own the response stream**: Skulk does the accumulation and
+hands observers a summary, so a buggy extension cannot corrupt, reorder, or
+stall token delivery. Third, **no extension installed means Skulk unchanged**:
+the hooks are inert when nothing is loaded.
+
+Version discipline matches the cluster rule. An extension whose version
+specifier does not match the running Skulk is refused at load time with an
+error: mixed plugin/fabric versions are the same anti-pattern as
+mixed-version clusters, and the fix is the same (upgrade the fleet and its
+extensions together). `SKULK_EXTENSIONS_DISABLE=1` is a node-local kill
+switch that skips discovery entirely.
+
 ## The dashboard
 
 The dashboard is the operator-facing UI for the same Skulk runtime. It's a React + TypeScript + styled-components SPA, built with Vite, served by the API at `/` (the API's static-files mount) on nodes where the built assets are present. A node without them (a headless or non-Mac worker built without the UI) still runs the full API; operators reach the dashboard from any node that has it.

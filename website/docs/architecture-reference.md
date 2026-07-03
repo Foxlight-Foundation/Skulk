@@ -91,6 +91,17 @@ This file is intentionally dense. If you find a stale fact, fix it inline rather
 - **Localization:** Tolgee provider in `dashboard-react/src/i18n/tolgee.ts`; app wrapper in `dashboard-react/src/main.tsx`; English namespace data in `dashboard-react/src/i18n/en/skulk.json`. All dashboard keys use the `skulk` namespace and are called through `t(key, englishFallback, params?)`, not `<T>`.
 - **Translation loading:** `BackendFetch` reads CDN/static JSON from `VITE_TOLGEE_CDN_PREFIX` (default `/i18n`) with bundled English fallback; `VITE_TOLGEE_AVAILABLE_LANGUAGES` controls the comma-separated language allow/preload list and always includes `en`.
 
+### Extensions (plugins)
+
+- **Role:** load separately installed packages and call them at serving-path hooks; deployment-specific behavior without forking Skulk
+- **Lives in:** `src/skulk/extensions/` (`types.py` contract, `loader.py` discovery + guarded dispatch); call sites in `API.chat_completions`
+- **Discovery:** `skulk.extensions` entry-point group, scanned once at node startup (`load_extensions()` in `src/skulk/main.py`, API-spawning nodes only); entry point value = zero-arg factory returning a `SkulkExtension`
+- **Contract:** `SkulkExtension` (name, `skulk_requires` PEP 440 specifier, `chat_middleware()`); `ChatMiddleware.transform_chat_request(context, task_params)` pre-dispatch + `ChatMiddleware.observe_chat_response(context, task_params, summary)` post-completion (background task, immutable `ChatResponseSummary`)
+- **Context:** `ExtensionContext` = node_id + skulk_version + `embed_texts` (in-process equivalent of `POST /v1/embeddings`, backed by `API.embed_texts`; returns `None` when no embedding instance is placed)
+- **Invariants:** guarded dispatch (a raising extension is logged and skipped, inference never degrades); extensions never own the chunk stream (Skulk accumulates, observers get a summary); no extension installed = hooks inert
+- **Version gating:** extension refused at load when `skulk_requires` does not match the running version (mixed plugin/fabric versions = mixed-version-cluster anti-pattern)
+- **Kill switch:** `SKULK_EXTENSIONS_DISABLE=1` skips discovery (node-local)
+
 ### Storage
 
 - **Event log:** `src/skulk/utils/disk_event_log.py`: append-only length-prefixed msgpack records (`events.bin`, uncompressed live); rotated archives are zstd-compressed (`events.*.bin.zst`) on rotation/close. Disk is treated as bounded: archives are capped by count (5) AND total bytes (1 GiB); any persistence failure (ENOSPC at init, append, or compaction) drops the log into a degraded counting-only mode with one CRITICAL line (indices keep advancing so follower replay coherence survives), and a proactive free-space floor (2 GiB, checked every 1024 appends) degrades BEFORE the disk hits zero. The API-side log (`event_log/api/`, backs `GET /events` diagnostics only and records per-token chunk events) additionally ring-compacts: past 256 MiB of active file it keeps only the most recent 20k events.
@@ -454,6 +465,7 @@ Only `SKULK_*` names are read. The legacy `EXO_*` deprecation runway was removed
 | `SKULK_PIPELINE_EVAL_TIMEOUT_SECONDS` | Per-eval timeout in pipeline collectives (default 60s) |
 | `SKULK_GROUP_CONNECT_DEADLINE_SECONDS` | Hard deadline for distributed group formation (`mx.distributed.init`, default 120s). Ring init with `strict=True` blocks forever when a neighbor socket fails the post-TCP rank handshake (#265); on expiry the runner exits via the wedge path, the worker gives the instance up on first failure (#260), and a fresh placement mints a new ring port (also clearing stale-socket handshake collisions) |
 | `SKULK_WARMUP_DEADLINE_SECONDS` / `SKULK_WARMUP_DEADLINE_SECONDS` | Hard deadline for runner warmup (default 300s). A wedged Metal eval parks warmup forever at 0% CPU and silently blocks all dispatch; the watchdog hard-exits the runner instead (supervisor reports RunnerFailed, node keeps working) |
+| `SKULK_EXTENSIONS_DISABLE` | `1` skips extension (plugin) discovery entirely on this node; see Extensions component section |
 | `SKULK_MLX_HANG_DEBUG` / `SKULK_MLX_HANG_DEBUG` | Emit periodic stack traces from stuck phases |
 | `SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS` | Interval for above (default 30s) |
 | `SKULK_MAX_OUTPUT_TOKENS` / `SKULK_MAX_TOKENS` | Default `max_tokens` (cluster default 4096; `DEFAULT_MAX_OUTPUT_TOKENS` constant) |
