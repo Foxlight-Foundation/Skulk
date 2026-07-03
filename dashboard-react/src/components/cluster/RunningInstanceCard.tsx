@@ -1,5 +1,5 @@
 import styled, { keyframes, css, useTheme } from 'styled-components';
-import { FiExternalLink } from 'react-icons/fi';
+import { FiExternalLink, FiCheckCircle, FiXCircle, FiLoader, FiClock } from 'react-icons/fi';
 import { BsChatDotsFill } from 'react-icons/bs';
 import { InfoTooltip } from '../common/InfoTooltip';
 import type { Theme } from '../../theme';
@@ -15,12 +15,30 @@ export type InstanceStatus =
   | 'failed'
   | 'shutting_down';
 
+/** A single node's runner phase, collapsed from the runner lifecycle
+ *  (idle -> connecting -> connected -> loading -> loaded -> warming up -> ready)
+ *  into the categories the per-node status line renders. */
+export type NodeRunnerState = 'ready' | 'loading' | 'pending' | 'failed' | 'stopping';
+
+export interface InstanceNodeStatus {
+  /** Friendly node name (e.g. "kite2"). */
+  name: string;
+  state: NodeRunnerState;
+}
+
 export interface RunningInstanceCardProps {
   instanceId: string;
   modelId: string;
   sharding: 'Pipeline' | 'Tensor';
   instanceType: 'MlxRing' | 'MlxJaccl';
-  nodeName: string;
+  /** Serving engine: MLX (in-process), in-process llama.cpp, or the served
+   *  llama-server. Drives the type label so a GGUF/served instance is not
+   *  mislabelled as an MLX ring. */
+  engine: 'mlx' | 'llama_cpp' | 'served';
+  /** Per-node placement status: one entry per node the instance is placed on
+   *  (all pipeline / tensor ranks), each with its runner's current phase, so the
+   *  card shows which node is the laggard rather than a single aggregate. */
+  nodeStatuses: InstanceNodeStatus[];
   status: InstanceStatus;
   statusMessage?: string;
   /** 0–100, shown during loading */
@@ -57,12 +75,50 @@ function formatInstanceId(id: string): string {
   return id.slice(0, 8).toUpperCase();
 }
 
-function formatInstanceType(type: 'MlxRing' | 'MlxJaccl', t: SkulkTranslate): string {
-  return type === 'MlxRing' ? t('placement.mlxRing', 'MLX Ring') : t('placement.mlxJaccl', 'MLX Jaccl');
+/** The engine/topology label under the model name. MLX shows its sharding +
+ *  ring/jaccl transport; the llama.cpp engines are single-node, so they show the
+ *  engine name instead of an MLX-specific ring label. */
+function formatEngineLabel(
+  engine: 'mlx' | 'llama_cpp' | 'served',
+  sharding: 'Pipeline' | 'Tensor',
+  instanceType: 'MlxRing' | 'MlxJaccl',
+  t: SkulkTranslate,
+): string {
+  if (engine === 'served') return t('placement.served', 'Served (llama.cpp)');
+  if (engine === 'llama_cpp') return t('placement.llamaCpp', 'llama.cpp');
+  const shard = sharding === 'Pipeline' ? t('common.pipeline', 'Pipeline') : t('common.tensor', 'Tensor');
+  const transport = instanceType === 'MlxRing' ? t('placement.mlxRing', 'MLX Ring') : t('placement.mlxJaccl', 'MLX Jaccl');
+  return `${shard} · ${transport}`;
 }
 
 function hfUrl(modelId: string): string | null {
   return modelId.includes('/') ? `https://huggingface.co/${modelId}` : null;
+}
+
+/** Icon + colour + spin for a single node's runner phase. */
+function nodeStateVisual(
+  state: NodeRunnerState,
+  theme: Theme,
+): { Icon: typeof FiCheckCircle; color: string; spin: boolean } {
+  switch (state) {
+    case 'ready': return { Icon: FiCheckCircle, color: theme.colors.healthy, spin: false };
+    case 'failed': return { Icon: FiXCircle, color: theme.colors.error, spin: false };
+    case 'stopping': return { Icon: FiClock, color: theme.colors.warning, spin: false };
+    case 'pending': return { Icon: FiClock, color: theme.colors.textMuted, spin: false };
+    case 'loading':
+    default: return { Icon: FiLoader, color: theme.colors.gold, spin: true };
+  }
+}
+
+function nodeStateLabel(state: NodeRunnerState, t: SkulkTranslate): string {
+  switch (state) {
+    case 'ready': return t('instance.node.ready', 'ready');
+    case 'failed': return t('instance.node.failed', 'failed');
+    case 'stopping': return t('instance.node.stopping', 'stopping');
+    case 'pending': return t('instance.node.pending', 'pending');
+    case 'loading':
+    default: return t('instance.node.loading', 'loading');
+  }
 }
 
 /* ── Animations ───────────────────────────────────────── */
@@ -75,6 +131,10 @@ const pulse = keyframes`
 const progressStripe = keyframes`
   0% { background-position: 0 0; }
   100% { background-position: 20px 0; }
+`;
+
+const spin = keyframes`
+  to { transform: rotate(360deg); }
 `;
 
 /* ── Styled components ────────────────────────────────── */
@@ -178,9 +238,22 @@ const HfLink = styled.a`
   }
 `;
 
-const NodeName = styled.div`
+const NodeRow = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 10px;
   font-size: ${({ theme }) => theme.fontSizes.xs};
   color: ${({ theme }) => theme.colors.textSecondary};
+`;
+
+const NodeChip = styled.span`
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+
+  svg { flex-shrink: 0; }
+  svg.spin { animation: ${spin} 0.9s linear infinite; }
 `;
 
 const StatusLabel = styled.div<{ $color: string }>`
@@ -259,7 +332,8 @@ export function RunningInstanceCard({
   modelId,
   sharding,
   instanceType,
-  nodeName,
+  engine,
+  nodeStatuses,
   status,
   statusMessage,
   loadProgress,
@@ -293,7 +367,7 @@ export function RunningInstanceCard({
 
       <MetaRow>
         <span>
-          {sharding === 'Pipeline' ? t('common.pipeline', 'Pipeline') : t('common.tensor', 'Tensor')} &middot; {formatInstanceType(instanceType, t)}
+          {formatEngineLabel(engine, sharding, instanceType, t)}
         </span>
         <StatusBadge $color={cfg.color}>{cfg.label}</StatusBadge>
         {speculation && (
@@ -322,7 +396,17 @@ export function RunningInstanceCard({
         </HfLink>
       )}
 
-      <NodeName>{nodeName}</NodeName>
+      <NodeRow>
+        {nodeStatuses.map((n) => {
+          const v = nodeStateVisual(n.state, theme);
+          return (
+            <NodeChip key={n.name} title={`${n.name}: ${nodeStateLabel(n.state, t)}`}>
+              <v.Icon size={12} color={v.color} className={v.spin ? 'spin' : undefined} />
+              {n.name}
+            </NodeChip>
+          );
+        })}
+      </NodeRow>
 
       {showProgress && (
         <ProgressTrack>

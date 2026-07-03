@@ -35,6 +35,7 @@ export function DeviceIcon({
   const fillColor = fillColorProp ?? theme.colors.deviceIconFill;
   const bodyColor = theme.colors.deviceBody;
   const ramColor = theme.colors.ramFill;
+  const labelColor = theme.colors.deviceLabel;
   const cx = width / 2;
   const cy = height / 2;
   const common = { cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId, ramColor };
@@ -42,6 +43,7 @@ export function DeviceIcon({
   if (model === 'mac-studio') return <MacStudio {...common} bodyColor={bodyColor} />;
   if (model === 'mac-mini') return <MacMini {...common} bodyColor={bodyColor} />;
   if (model === 'macbook-pro') return <MacBookPro {...common} bodyColor={bodyColor} />;
+  if (model === 'amd-strix') return <AmdStrix {...common} bodyColor={bodyColor} labelColor={labelColor} />;
   return <HexagonDefault {...common} fillColor={fillColor} />;
 }
 
@@ -126,6 +128,72 @@ function MacMini({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, cl
       {[cx - boxW * 0.24, cx - boxW * 0.14].map((vx, i) => (
         <rect key={i} x={vx - vSlotW / 2} y={vSlotY} width={vSlotW} height={slotH}
           fill="rgba(0,0,0,0.35)" rx={1.2} />
+      ))}
+    </g>
+  );
+}
+
+interface AmdStrixProps {
+  cx: number; cy: number; width: number; height: number;
+  ramPercent: number; wireColor: string; strokeWidth: number; clipId: string;
+  bodyColor: string; ramColor: string; labelColor: string;
+}
+
+/**
+ * AMD Ryzen AI Max (Strix Halo) mini-PC. Rendered in the same visual language as
+ * the Mac glyphs (theme device body, RAM fills from the bottom in the theme
+ * accent) so the fleet reads as one family; the distinguishing signal is the
+ * AMD wordmark plus the wider, low-profile box on a silver base. The wordmark
+ * uses a theme-aware label colour (slate-grey in light mode, white in dark) so it
+ * stays readable over both the empty case and the RAM fill.
+ */
+function AmdStrix({ cx, cy, width, height, ramPercent, wireColor, strokeWidth, clipId, bodyColor, ramColor, labelColor }: AmdStrixProps) {
+  const boxW = width * 0.88;
+  const bodyH = height * 0.44;
+  const baseH = height * 0.09;
+  const totalH = bodyH + baseH;
+  const x = cx - boxW / 2;
+  const y = cy - totalH / 2;
+  const cornerRadius = 3;
+  const memFillH = (ramPercent / 100) * bodyH;
+
+  const baseY = y + bodyH;
+  const baseW = boxW * 1.04;
+  const baseX = cx - baseW / 2;
+  const footW = boxW * 0.08;
+  const footH = Math.max(1.5, height * 0.02);
+  const footY = baseY + baseH;
+
+  const bodyClip = `${clipId}-amd-body`;
+
+  return (
+    <g>
+      <defs>
+        <clipPath id={bodyClip}>
+          <rect x={x} y={y} width={boxW} height={bodyH} rx={cornerRadius} />
+        </clipPath>
+      </defs>
+
+      {/* Case body (theme colour, like the Mac glyphs) */}
+      <rect x={x} y={y} width={boxW} height={bodyH} rx={cornerRadius}
+        fill={bodyColor} stroke={wireColor} strokeWidth={strokeWidth} />
+      {/* RAM fill rises from the bottom */}
+      {ramPercent > 0 && (
+        <rect x={x} y={y + (bodyH - memFillH)} width={boxW} height={memFillH}
+          fill={ramColor} clipPath={`url(#${bodyClip})`} />
+      )}
+      {/* AMD wordmark (theme-aware label colour) */}
+      <text x={cx} y={y + bodyH / 2} textAnchor="middle" dominantBaseline="central"
+        fontFamily="Arial, Helvetica, sans-serif" fontWeight={700}
+        fontSize={bodyH * 0.42} letterSpacing={bodyH * 0.03}
+        fill={labelColor}>AMD</text>
+
+      {/* Silver base + feet (the low-profile box silhouette) */}
+      <rect x={baseX} y={baseY} width={baseW} height={baseH} rx={2}
+        fill="#c3c7cf" stroke={wireColor} strokeWidth={strokeWidth * 0.6} />
+      {[baseX + baseW * 0.12, baseX + baseW * 0.88 - footW].map((fx, i) => (
+        <rect key={i} x={fx} y={footY} width={footW} height={footH} rx={footH / 2}
+          fill="#8a8f98" />
       ))}
     </g>
   );

@@ -1,0 +1,50 @@
+# Gemma 4 31B-it (official Google QAT Q4_0 GGUF) served via the llama_server
+# engine with native MTP. Base is Google's own GGUF. Gemma 4 is a reasoning model
+# that emits its thinking as literal <|channel>thought ... <channel|> markers in
+# the output (not tokenizer special tokens, no template strips them), and
+# llama-server's reasoning parsers don't understand those tokens, so the served
+# runner reparses them itself (output_parser = "gemma4"): the thought channel
+# becomes reasoning, the rest becomes content, markers stripped.
+#
+# Gemma 4's MTP is its assistant as a SEPARATE draft GGUF via --model-draft
+# (--spec-type draft-mtp). Google ships the assistant only as safetensors, so we
+# publish our OWN GGUF conversion (SWP) of the official QAT assistant rather than
+# depend on a third-party conversion; the draft's template is irrelevant
+# (llama-server templates with this base). Text-only (the repo's mmproj projector
+# is not loaded). supports_tensor = false: served single-node. Architecture from
+# google/gemma-4-31B-it (60 layers, hidden 5376, 16 KV heads, 262144 ctx).
+model_id = "google/gemma-4-31B-it-qat-q4_0-gguf"
+n_layers = 60
+hidden_size = 5376
+num_key_value_heads = 16
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "gemma"
+quantization = "Q4_0"
+base_model = "Gemma 4 31B-it (QAT)"
+capabilities = ["text", "thinking"]
+context_length = 262144
+gguf_file = "gemma-4-31B_q4_0-it.gguf"
+trust_remote_code = false
+
+[tooling]
+supports_tool_calling = true
+tool_call_format = "generic"
+
+[runtime]
+# Native MTP via the Gemma 4 QAT assistant as a SEPARATE draft GGUF
+# (--model-draft); our own SWP conversion of the official Google assistant.
+served_spec_type = "draft_mtp"
+served_spec_n_max = 4
+served_spec_draft_repo = "FoxlightAI/gemma-4-31B-it-qat-mtp-draft-GGUF"
+served_spec_draft_file = "gemma-4-31B-it-qat-q4_0-unquantized-assistant-Q8_0.gguf"
+# Gemma 4 emits <|channel> reasoning markers as literal text; the served runner
+# strips them and splits reasoning from content (llama-server can't parse them).
+output_parser = "gemma4"
+
+[placement]
+compatible_backends = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_server-cpu"]
+backend_preference = ["llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_server-cpu"]
+
+[storage_size]
+in_bytes = 17650000000

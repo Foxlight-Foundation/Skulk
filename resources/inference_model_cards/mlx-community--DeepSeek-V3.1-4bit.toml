@@ -9,5 +9,17 @@ quantization = "4bit"
 base_model = "DeepSeek V3.1"
 capabilities = ["text", "thinking", "thinking_toggle"]
 
+# DeepSeek V3.1 (arch deepseek_v3, NOT v3.2) is a hybrid reasoner: it thinks
+# behind a token-delimited <think>...</think> toggle. It predates the DSML tool
+# grammar V3.2 introduced (its chat template emits the classic
+# <｜tool▁calls▁begin｜> format), so it deliberately does NOT get the v3.2-only
+# `dsml` prompt renderer / `deepseek_v32` output parser (those would mis-render
+# it). Tool calling rides the tokenizer chat template (generic path).
+[reasoning]
+supports_toggle = true
+format = "token_delimited"
+default_effort = "medium"
+disabled_effort = "none"
+
 [storage_size]
 in_bytes = 405874409472

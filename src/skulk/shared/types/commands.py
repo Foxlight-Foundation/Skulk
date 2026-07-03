@@ -129,6 +129,18 @@ class CancelDownload(BaseCommand):
     model_id: ModelId
 
 
+class EvictStagedModel(BaseCommand):
+    """Tell every node to drop its locally-staged copy of a model (#427).
+
+    Sent by the API after a store-delete removes the canonical copy from the
+    store host: workers cache their own staged shards independently of the store,
+    so without this a deleted model lingers on worker disk until LRU pressure.
+    The model is identified, not node-targeted: every node evicts its own copy.
+    """
+
+    model_id: ModelId
+
+
 class SyncConfig(BaseCommand):
     """Broadcast updated exo.yaml content to all nodes in the cluster."""
 
@@ -184,6 +196,7 @@ Command = (
     | SendInputChunk
     | AddCustomModelCard
     | DeleteCustomModelCard
+    | EvictStagedModel
 )
 
 

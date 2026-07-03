@@ -40,23 +40,29 @@ model_store:
     # Staging is where a node prepares model files before MLX loads them.
     enabled: true
     node_cache_path: ~/.skulk/staging
-    # Keep staged model files by default so repeated placements can reuse the
-    # local cache. Use /store/purge-staging when disk needs to be reclaimed.
-    cleanup_on_deactivate: false
+    # Keep the newest idle staged copies warm and evict older ones on
+    # deactivation/startup, so the cache stays warm but bounded. Set false to
+    # keep every staged copy (unbounded) and reclaim disk only via
+    # /store/purge-staging.
+    cleanup_on_deactivate: true
+    # Recency budget (GiB) of idle staged copies to keep warm. In-use models
+    # are always kept and do not count against this. 0 = evict everything not
+    # in use; raise it on large-disk nodes to keep more models warm.
+    staging_keep_recent_gb: 40
 
   node_overrides:
-    # Store-host example: load directly from the store path instead of
-    # making a local copy.
+    # Store-host example: load directly from the store path instead of making a
+    # local copy. The recency budget is skipped when node_cache_path equals the
+    # store path, so the store's canonical copies are never auto-evicted.
     mac-studio-1:
       staging:
         node_cache_path: /Volumes/ModelStore/models
-        cleanup_on_deactivate: false
 
     # Example worker with a fast local NVMe cache:
     # mac-mini-2:
     #   staging:
     #     node_cache_path: /Volumes/FastNVMe/skulk-staging
-    #     cleanup_on_deactivate: false
+    #     staging_keep_recent_gb: 80
 
 inference:
   # Valid values:

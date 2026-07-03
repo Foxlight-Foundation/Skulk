@@ -2,12 +2,15 @@
 """Tests for the backend capability tag vocabulary and node probing."""
 
 import sys
+from pathlib import Path
 
 import pytest
 
 from skulk.shared import backends
 from skulk.shared.backends import (
     LLAMA_CPP_BACKENDS_ENV,
+    LLAMA_SERVER_BACKENDS_ENV,
+    LLAMA_SERVER_BIN_ENV,
     engine_of,
     engine_supports_multi_node,
     make_backend_tag,
@@ -75,6 +78,64 @@ def test_llama_cpp_probe_defaults_to_cpu(monkeypatch: pytest.MonkeyPatch) -> Non
     tags = backends._probe_llama_cpp_backends()
     # Without an operator declaration we claim only CPU, never over-claim GPU.
     assert tags == frozenset({"llama_cpp", "llama_cpp-cpu"})
+
+
+def test_served_probe_empty_without_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No binary configured => the node does not advertise the served engine.
+    monkeypatch.delenv(LLAMA_SERVER_BIN_ENV, raising=False)
+    assert backends._probe_served_backends() == frozenset()
+
+
+def test_served_probe_empty_when_binary_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A configured-but-nonexistent path must not advertise the engine.
+    monkeypatch.setenv(LLAMA_SERVER_BIN_ENV, str(tmp_path / "nope" / "llama-server"))
+    assert backends._probe_served_backends() == frozenset()
+
+
+def _make_executable(path: Path) -> Path:
+    path.write_text("#!/bin/sh\n")
+    path.chmod(0o755)
+    return path
+
+
+def test_served_probe_reads_declared_backends(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    binary = _make_executable(tmp_path / "llama-server")
+    monkeypatch.setenv(LLAMA_SERVER_BIN_ENV, str(binary))
+    monkeypatch.setenv(LLAMA_SERVER_BACKENDS_ENV, "vulkan, rocm , metal")
+    tags = backends._probe_served_backends()
+    assert "llama_server" in tags  # bare engine tag
+    assert "llama_server-vulkan" in tags
+    assert "llama_server-rocm" in tags
+    assert "llama_server-metal" not in tags  # metal is MLX-only, never served here
+
+
+def test_served_probe_falls_back_to_llama_cpp_backends(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # With no dedicated SERVER_BACKENDS, the served engine reuses the node's
+    # llama.cpp backend declaration (same GPU, whichever engine drives it).
+    binary = _make_executable(tmp_path / "llama-server")
+    monkeypatch.setenv(LLAMA_SERVER_BIN_ENV, str(binary))
+    monkeypatch.delenv(LLAMA_SERVER_BACKENDS_ENV, raising=False)
+    monkeypatch.setenv(LLAMA_CPP_BACKENDS_ENV, "vulkan")
+    tags = backends._probe_served_backends()
+    assert tags == frozenset({"llama_server", "llama_server-vulkan"})
+
+
+def test_served_probe_defaults_to_cpu(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    binary = _make_executable(tmp_path / "llama-server")
+    monkeypatch.setenv(LLAMA_SERVER_BIN_ENV, str(binary))
+    monkeypatch.delenv(LLAMA_SERVER_BACKENDS_ENV, raising=False)
+    monkeypatch.delenv(LLAMA_CPP_BACKENDS_ENV, raising=False)
+    assert backends._probe_served_backends() == frozenset(
+        {"llama_server", "llama_server-cpu"}
+    )
 
 
 def _fake_llama_cpp(gpu_offload: bool | None) -> object:

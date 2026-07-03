@@ -1,7 +1,7 @@
 # Thunderbolt clustering (local setup)
 
 This guide walks through standing up a Skulk cluster on several Macs connected
-on the same local network — typically wired together with **Thunderbolt** for
+on the same local network, typically wired together with **Thunderbolt** for
 the high-bandwidth inference path. No Tailscale or cross-network configuration
 is required; that is covered separately in
 [Tailscale clustering](./tailscale-clustering.md).
@@ -9,7 +9,7 @@ is required; that is covered separately in
 The happy path is deliberately small:
 
 1. Install Skulk on each node.
-2. **Grant macOS Local Network access** (the one step people miss — see below).
+2. **Grant macOS Local Network access** (the one step people miss; see below).
 3. Run `uv run skulk` on each node.
 
 Skulk discovers peers automatically over mDNS on your local network, and the
@@ -19,7 +19,7 @@ inference data plane automatically prefers Thunderbolt links when present.
 
 - Two or more Apple-silicon Macs.
 - The Macs on the **same local network** (any of: a shared Ethernet/Wi-Fi LAN,
-  or a Thunderbolt Bridge — see [Thunderbolt wiring](#thunderbolt-wiring)).
+  or a Thunderbolt Bridge; see [Thunderbolt wiring](#thunderbolt-wiring)).
 - [`uv`](https://docs.astral.sh/uv/) and Node.js installed on each node.
 
 ## 2. Install (each node)
@@ -36,13 +36,13 @@ uv sync
 
 > **This is the most common reason a freshly-installed cluster "won't form."**
 
-macOS 15 (Sequoia) and macOS 26 gate access to the **local network** — your
+macOS 15 (Sequoia) and macOS 26 gate access to the **local network** (your
 LAN, link-local addresses, multicast (which mDNS discovery relies on), and the
-Thunderbolt Bridge — behind a per-application privacy permission. Until the app
+Thunderbolt Bridge) behind a per-application privacy permission. Until the app
 you run Skulk from is granted Local Network access, Skulk **cannot discover or
 connect to peers on your local network or over Thunderbolt**. Every local
 connection fails with `No route to host` (`EHOSTUNREACH`), while internet and
-Tailscale traffic keep working — so the symptom is a cluster that silently
+Tailscale traffic keep working, so the symptom is a cluster that silently
 stays at one node.
 
 When you first run Skulk, macOS shows a prompt:
@@ -53,7 +53,7 @@ When you first run Skulk, macOS shows a prompt:
 Click **Allow**. If you missed it (or are running over SSH and never saw it):
 
 1. Open **System Settings → Privacy & Security → Local Network**.
-2. Enable the toggle for the app you launch Skulk from — usually **Terminal**
+2. Enable the toggle for the app you launch Skulk from, usually **Terminal**
    (or iTerm, or your IDE). Tools launched from that app inherit its grant.
 3. Restart Skulk.
 
@@ -102,8 +102,8 @@ sufficient on that machine and the next test should be a frozen/signed
 > **The grant follows the launching app.** macOS attributes Local Network
 > access to the app a process is launched *from*. Run Skulk from the **Terminal
 > you granted** (i.e. `uv run skulk` in that Terminal) and it inherits the
-> grant. A process **detached** from that Terminal — `nohup … &`, or some
-> background/service launchers that reparent it — is attributed separately and
+> grant. A process **detached** from that Terminal (`nohup … &`, or some
+> background/service launchers that reparent it) is attributed separately and
 > may be denied even though the foreground command works. If you run Skulk
 > detached or as a background service and see the denial warning, grant Local
 > Network to that launcher too (see [Run as a service](./run-skulk-as-a-service)).
@@ -133,7 +133,7 @@ node appears in the cluster topology.
 
 ## Thunderbolt wiring
 
-Skulk does not require any Thunderbolt-specific configuration to *cluster* — the
+Skulk does not require any Thunderbolt-specific configuration to *cluster*: the
 control plane (peer discovery, coordination) runs over whatever local network
 your Macs share. Thunderbolt matters for the **data plane**: when a model is
 placed across nodes, Skulk's placement automatically prefers Thunderbolt links
@@ -148,11 +148,11 @@ To use Thunderbolt:
    self-assigned (link-local) addressing is sufficient for the inference ring;
    no manual IP assignment is required.
 3. Run Skulk as above. Placement uses the Thunderbolt path for inference
-   automatically — you can confirm the chosen interface in the placement
+   automatically; you can confirm the chosen interface in the placement
    diagnostics.
 
 If your Macs are *only* connected by Thunderbolt (no shared Ethernet/Wi-Fi),
-peer discovery happens over the Thunderbolt Bridge segment — the same Local
+peer discovery happens over the Thunderbolt Bridge segment, and the same Local
 Network permission applies.
 
 ## With or without Tailscale
@@ -161,7 +161,7 @@ Network permission applies.
   local network. Requires the Local Network permission above.
 - **With Tailscale:** useful when nodes are on different networks. Tailscale's
   overlay is exempt from Local Network Privacy. See
-  [Tailscale clustering](./tailscale-clustering.md). You can run both — Skulk
+  [Tailscale clustering](./tailscale-clustering.md). You can run both; Skulk
   still prefers the direct Thunderbolt/Ethernet path for the data plane.
 
 ## Troubleshooting

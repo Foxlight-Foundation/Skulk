@@ -17,14 +17,22 @@ endpoint, so you can run models far larger than any single machine could hold.
 
 ## Get started
 
-1. Install and start Skulk on each machine. The
-   [README](https://github.com/Foxlight-Foundation/Skulk/blob/main/README.md)
-   covers installation and the first run.
+1. On each machine, install [`uv`](https://docs.astral.sh/uv/), clone the repo,
+   and start Skulk from the repo root:
+
+   ```bash
+   uv run skulk
+   ```
+
+   See [build and runtime paths](build-and-runtime) for prerequisites and the
+   dashboard build, and [run as a service](run-skulk-as-a-service) to keep Skulk
+   running across reboots.
 2. Open the dashboard (default `http://localhost:52415`), pick a model, and
    launch it. Skulk places it across the cluster and starts serving when it is
    ready.
 3. Call the OpenAI-compatible endpoint at `/v1/chat/completions` with any client
-   that speaks that format.
+   that speaks that format. The [API guide](api-guide) walks through a first
+   request step by step, from placement to first token.
 
 For the runtime details, see [build and runtime paths](build-and-runtime) and
 [run as a service](run-skulk-as-a-service).

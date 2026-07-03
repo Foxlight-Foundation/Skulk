@@ -32,6 +32,7 @@ from skulk.shared.types.commands import (
     CreateInstance,
     DeleteCustomModelCard,
     DeleteInstance,
+    EvictStagedModel,
     ForwarderCommand,
     ForwarderDownloadCommand,
     ImageEdits,
@@ -59,6 +60,7 @@ from skulk.shared.types.events import (
     LocalForwarderEvent,
     NodeGatheredInfo,
     NodeTimedOut,
+    StagedModelEvicted,
     StateSnapshotHydrated,
     TaskCreated,
     TaskDeleted,
@@ -924,6 +926,13 @@ class Master:
                         case DeleteCustomModelCard():
                             generated_events.append(
                                 CustomModelCardDeleted(model_id=command.model_id)
+                            )
+                        case EvictStagedModel():
+                            # Broadcast a fleet-wide eviction of the store-deleted
+                            # model: apply() drops its download entries; workers
+                            # remove their staged copies on disk (#427).
+                            generated_events.append(
+                                StagedModelEvicted(model_id=command.model_id)
                             )
                         case RequestEventLog():
                             # We should just be able to send everything, since other buffers will ignore old messages

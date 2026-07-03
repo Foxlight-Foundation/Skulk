@@ -10,11 +10,11 @@ Skulk includes several opt-in KV cache backends for MLX text generation. These b
 
 ## Current Status
 
-- `default`: existing behavior — no cache quantization
+- `default`: existing behavior (no cache quantization)
 - `mlx_quantized`: MLX LM built-in `QuantizedKVCache`
 - `turboquant`: correctness-first TurboQuant-inspired KV cache for standard `KVCache` layers
 - `turboquant_adaptive`: keeps outer KV layers in FP16 and applies TurboQuant to middle KV layers
-- `optiq`: **[NEW]** rotation-based KV cache via [mlx-optiq](https://mlx-optiq.pages.dev/) — uses randomized orthogonal rotations with Lloyd-Max quantization and rotated-space attention for superior long-context quality
+- `optiq`: rotation-based KV cache via [mlx-optiq](https://mlx-optiq.pages.dev/); uses randomized orthogonal rotations with Lloyd-Max quantization and rotated-space attention for superior long-context quality
 
 If `SKULK_KV_CACHE_BACKEND` is unset, or is set to `default`, Skulk behaves as before.
 
@@ -108,7 +108,7 @@ Mixed cache layouts are supported:
 
 - All quantized KV cache backends force sequential generation (no batch/history mode)
 - The optiq backend requires `mlx-optiq` to be installed (`pip install mlx-optiq`)
-- The optiq backend's `patch_attention()` monkey-patches MLX's SDPA — avoid switching between optiq and other backends within the same process lifetime without a restart
+- The optiq backend's `patch_attention()` monkey-patches MLX's SDPA, so avoid switching between optiq and other backends within the same process lifetime without a restart
 
 ## About mlx-optiq
 

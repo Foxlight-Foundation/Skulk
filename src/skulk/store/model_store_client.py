@@ -71,7 +71,7 @@ import shutil
 from collections.abc import Awaitable
 from datetime import timedelta
 from pathlib import Path
-from typing import AsyncIterator, Callable, final
+from typing import TYPE_CHECKING, AsyncIterator, Callable, final
 from urllib.parse import quote
 
 import aiofiles
@@ -86,6 +86,9 @@ from skulk.shared.types.worker.downloads import RepoDownloadProgress
 from skulk.shared.types.worker.shards import ShardMetadata
 from skulk.store.config import StagingNodeConfig
 from skulk.store.staging_eviction import touch_last_used
+
+if TYPE_CHECKING:
+    from skulk.shared.models.model_cards import ModelCard
 
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB per read/write chunk
 _CONNECT_TIMEOUT = 10.0  # seconds — abort if store host unreachable
@@ -167,6 +170,42 @@ def _staged_vision_projector_missing(
 
     return not has_gguf_projector(
         path.name for path in directory.rglob("*") if path.is_file()
+    )
+
+
+def _same_repo_draft_files(card: "ModelCard") -> list[str]:
+    """Repo-relative GGUFs that ride the base repo's store entry but aren't the base.
+
+    Currently the served-engine draft GGUF when ``served_spec_draft_repo`` names
+    the base repo itself (a bundle shipping base + MTP draft, e.g. Gemma 4): the
+    draft shares the base's store entry and staging directory, so it must be
+    co-fetched with the base rather than resolved as a distinct companion repo. A
+    separate-repo draft has its own ``model_id`` / staging dir and is handled by
+    the normal companion path, so it is not returned here.
+    """
+    runtime = card.runtime
+    if (
+        runtime is not None
+        and runtime.served_spec_draft_repo == str(card.model_id)
+        and runtime.served_spec_draft_file
+    ):
+        return [runtime.served_spec_draft_file]
+    return []
+
+
+def _staged_same_repo_draft_missing(shard: ShardMetadata, directory: Path) -> bool:
+    """True when a card's same-repo served draft GGUF is absent from a staged dir.
+
+    The generic completeness probe (``_staged_directory_looks_complete``) only
+    checks the base shard group, so a dir staged before the draft was co-fetched
+    (or from a stale base-only store entry) still "looks complete" yet the served
+    runner's ``--model-draft`` resolution fails. Treating such a dir as incomplete
+    forces re-staging, which (with a draft-complete store entry) pulls the draft
+    down too. Scoped to the same-repo case; a separate-repo draft has its own dir.
+    """
+    return any(
+        not (directory / draft_file).is_file()
+        for draft_file in _same_repo_draft_files(shard.model_card)
     )
 
 
@@ -460,6 +499,7 @@ class ModelStoreClient:
         timeout: float = 7200,
         poll_interval: float = 5.0,
         pinned_gguf: str | None = None,
+        extra_pinned_gguf: list[str] | None = None,
     ) -> bool:
         """Request the store host download a model from HuggingFace, then wait.
 
@@ -469,32 +509,44 @@ class ModelStoreClient:
         Args:
             model_id: HuggingFace model ID.
             on_progress: Called with progress (0.0-1.0) on each poll.
-            timeout: Maximum wait time in seconds.
+            timeout: Maximum time to wait WITHOUT download progress, in seconds
+                (a stall timeout, not a total cap). A download that keeps
+                advancing never times out, however large; only a genuine stall
+                does. The store host's file-body transfer is itself uncapped, so
+                a very large model can legitimately take hours.
             poll_interval: Seconds between status polls.
             pinned_gguf: The card's pinned GGUF file (``ModelCard.gguf_file``),
                 sent in the POST body so the store fetches that quant's shard
                 group rather than its default (#344). ``None`` for non-GGUF
                 models or when no pin applies.
+            extra_pinned_gguf: Same-repo companion GGUFs (a served-engine draft
+                bundled with the base) to co-fetch with the base quant, sent in
+                the POST body. ``None`` when the card declares no same-repo
+                companion. An older store host ignores the unknown field.
 
         Returns:
             ``True`` if download completed successfully.
 
         Raises:
             RuntimeError: If the download failed on the store host.
-            TimeoutError: If the download didn't complete within *timeout*.
+            TimeoutError: If the download made no progress for *timeout* seconds.
         """
         import asyncio as _asyncio
 
         encoded_id = quote(model_id, safe="")
 
-        # Request download. Send the pinned quant in the body when present; an
-        # older store host ignores the unknown body and uses its default (#344).
+        # Request download. Send the pinned quant + same-repo companions in the
+        # body when present; an older store host ignores unknown body fields and
+        # uses its default (#344).
         url = _make_store_url(
             self._store_host, self._store_port, f"/models/{encoded_id}/download"
         )
-        post_kwargs: dict[str, object] = (
-            {"json": {"gguf_file": pinned_gguf}} if pinned_gguf else {}
-        )
+        download_body: dict[str, object] = {}
+        if pinned_gguf:
+            download_body["gguf_file"] = pinned_gguf
+        if extra_pinned_gguf:
+            download_body["extra_gguf_files"] = extra_pinned_gguf
+        post_kwargs: dict[str, object] = {"json": download_body} if download_body else {}
         async with (
             create_http_session(timeout_profile="short") as session,
             session.post(url, **post_kwargs) as resp,  # pyright: ignore[reportArgumentType]
@@ -509,36 +561,50 @@ class ModelStoreClient:
         status_url = _make_store_url(
             self._store_host, self._store_port, f"/models/{encoded_id}/download/status"
         )
-        elapsed = 0.0
-        while elapsed < timeout:
+        # The wait is progress-aware, not a fixed total. The store host's
+        # file-body download is uncapped (see create_http_session "long"), so a
+        # very large model can legitimately take hours; a fixed total wait here
+        # would give up on a live, still-progressing download and make the master
+        # tear the placement down. Reset the stall clock whenever progress
+        # advances; only a genuine stall (no progress for ``timeout`` seconds)
+        # fails. A poll that could not observe progress (network blip, or no
+        # advance) counts toward the stall.
+        last_progress = -1.0
+        stalled_for = 0.0
+        while stalled_for < timeout:
             await _asyncio.sleep(poll_interval)
-            elapsed += poll_interval
+            advanced = False
             try:
                 async with (
                     create_http_session(timeout_profile="short") as session,
                     session.get(status_url) as resp,
                 ):
-                    if resp.status != 200:
-                        continue
-                    data = await resp.json()
-                    if not isinstance(data, dict):
-                        continue
-                    status = data.get("status", "")
-                    progress = float(data.get("progress", 0.0))
-                    if on_progress is not None:
-                        await on_progress(progress)
-                    if status == "complete":
-                        return True
-                    if status == "failed":
-                        raise RuntimeError(
-                            f"Store download of {model_id} failed: {data.get('error', 'unknown')}"
-                        )
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if isinstance(data, dict):
+                            status = data.get("status", "")
+                            progress = float(data.get("progress", 0.0))
+                            if on_progress is not None:
+                                await on_progress(progress)
+                            if status == "complete":
+                                return True
+                            if status == "failed":
+                                raise RuntimeError(
+                                    f"Store download of {model_id} failed: {data.get('error', 'unknown')}"
+                                )
+                            if progress > last_progress:
+                                last_progress = progress
+                                advanced = True
             except RuntimeError:
                 raise
             except Exception as exc:
                 logger.debug(f"ModelStoreClient: download status poll failed: {exc}")
+            stalled_for = 0.0 if advanced else stalled_for + poll_interval
 
-        raise TimeoutError(f"Store download of {model_id} timed out after {timeout}s")
+        raise TimeoutError(
+            f"Store download of {model_id} made no progress for {timeout}s "
+            f"(last progress {last_progress:.1%})"
+        )
 
     # ------------------------------------------------------------------
     # Local copy path (store host → same filesystem)
@@ -894,6 +960,7 @@ class ModelStoreDownloader(ShardDownloader):
                     direct_path.exists()
                     and _staged_directory_looks_complete(direct_path)
                     and not _staged_vision_projector_missing(shard, direct_path)
+                    and not _staged_same_repo_draft_missing(shard, direct_path)
                 ):
                     logger.info(
                         f"ModelStoreDownloader: staging disabled — loading {model_id} directly from store at {direct_path}"
@@ -914,6 +981,7 @@ class ModelStoreDownloader(ShardDownloader):
             dest_path.exists()
             and _staged_directory_looks_complete(dest_path)
             and not _staged_vision_projector_missing(shard, dest_path)
+            and not _staged_same_repo_draft_missing(shard, dest_path)
         ):
             logger.info(
                 f"ModelStoreDownloader: {model_id} already staged at {dest_path} — skipping availability probe"
@@ -922,8 +990,21 @@ class ModelStoreDownloader(ShardDownloader):
             return dest_path
 
         available = await self._store_client.is_model_available(model_id)
+        same_repo_drafts = _same_repo_draft_files(shard.model_card)
 
         if available:
+            if same_repo_drafts:
+                # A stale base-only store entry (registered before this card
+                # declared a same-repo draft) would stage without the draft and
+                # the served runner's --model-draft path would 404. Ensure the
+                # canonical entry carries the draft before staging; idempotent
+                # (a draft-complete entry returns immediately). The store host
+                # performs any needed HF fetch (workers never download directly).
+                await self._store_client.request_and_wait_for_download(
+                    model_id,
+                    pinned_gguf=shard.model_card.gguf_file,
+                    extra_pinned_gguf=same_repo_drafts,
+                )
             logger.info(
                 f"ModelStoreDownloader: staging {model_id} from store → {dest_path}"
             )
@@ -964,8 +1045,10 @@ class ModelStoreDownloader(ShardDownloader):
                         shard, status="in_progress"
                     ),
                     # Forward the card's pinned quant so the store fetches it
-                    # rather than its default preference (#344).
+                    # rather than its default preference (#344), plus any same-repo
+                    # draft GGUF bundled with the base so it is co-fetched.
                     pinned_gguf=shard.model_card.gguf_file,
+                    extra_pinned_gguf=same_repo_drafts,
                 )
             except (RuntimeError, TimeoutError) as exc:
                 raise ModelNotInStoreError(

@@ -197,7 +197,7 @@ Declares runtime integration preferences:
 - `mtp_max_depth`
   - maximum draft depth the MTP heads support; start at `1` for Apple Silicon (deeper values rarely amortize on Metal due to near-linear verify-pass scaling)
 - `mtp_sidecar_repo`
-  - Hugging Face repo ID containing the published `mtp.safetensors` sidecar (e.g. `"FoxlightAI/qwen3-5-7b-instruct-mtp-q4k"`); produced by SWP from the original BF16 checkpoint
+  - Hugging Face repo ID containing the published `mtp.safetensors` sidecar (e.g. `"FoxlightAI/qwen3-5-9b-base-mtp"`); produced by SWP (Skulk Weights Publisher) from the original BF16 checkpoint
 - `mtp_norm_convention`
   - how the MTP heads normalize hidden states (`zero_centered` or `actual_scale`); must match how the sidecar was produced
 - `mtp_concat_order`
@@ -215,7 +215,7 @@ Some models include native multi-token prediction (MTP) heads baked into their c
 
 Standard quantization pipelines (including mlx-lm's `sanitize()`) strip `mtp.*` tensor keys at conversion time. The MLX-quantized checkpoint you download from Hugging Face typically does not contain MTP weights.
 
-SWP (Skulk Weights Publisher) solves this by re-extracting the `mtp.*` tensors from the original BF16 checkpoint, quantizing only those tensors, and publishing the result as `mtp.safetensors` to a dedicated sidecar repo on Hugging Face. This is the same pattern Skulk uses for vision encoder weights.
+SWP solves this by re-extracting the `mtp.*` tensors from the original BF16 checkpoint, quantizing only those tensors, and publishing the result as `mtp.safetensors` to a dedicated sidecar repo on Hugging Face. This is the same pattern Skulk uses for vision encoder weights.
 
 ### How it works
 
@@ -229,9 +229,13 @@ If the sidecar is declared but the file is not found locally, Skulk logs a warni
 
 ### Models with native MTP heads
 
-- Qwen3.5 variants (7B, 14B, 32B, 72B)
-- Qwen3.6 variants
-- DeepSeek V3 / R1
+The shipped cards that declare an MTP sidecar are the Qwen3.5 and Qwen3.6
+quantizations:
+
+- `mlx-community/Qwen3.5-2B-4bit`
+- `mlx-community/Qwen3.5-9B-MLX-4bit`
+- `mlx-community/Qwen3.5-27B-4bit`
+- `mlx-community/Qwen3.6-27B-4bit`
 
 Gemma 4 does **not** use native MTP heads; it uses an external drafter model (`assistant_model_repo`) for speculative decoding, which is a separate feature.
 
@@ -241,10 +245,18 @@ Gemma 4 does **not** use native MTP heads; it uses an external drafter model (`a
 [runtime]
 mtp_heads = true
 mtp_max_depth = 1
-mtp_sidecar_repo = "FoxlightAI/qwen3-5-7b-instruct-mtp-q4k"
+mtp_sidecar_repo = "FoxlightAI/qwen3-5-9b-base-mtp"
 ```
 
 The sidecar repo must be published by SWP before adding these fields. See the [SWP documentation](https://foxlight-foundation.github.io/skulk-weights-publisher/) for how sidecars are produced and published.
+
+### Speculation on the served (GGUF) engine
+
+The sidecar path above is MLX-only. GGUF cards that run under the served
+`llama-server` engine declare speculation through a different set of `[runtime]`
+fields: `served_spec_type`, `served_spec_n_max`, `served_spec_draft_repo`, and
+`served_spec_draft_file`. See [Speculative Decoding](speculative-decoding) for
+how those fields map to the served backend.
 
 ## Declarative vs Resolved
 

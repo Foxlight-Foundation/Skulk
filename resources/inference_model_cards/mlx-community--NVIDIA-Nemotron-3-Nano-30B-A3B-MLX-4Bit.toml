@@ -6,7 +6,20 @@ tasks = ["TextGeneration"]
 family = "nemotron"
 quantization = "4bit"
 base_model = "NVIDIA Nemotron-3-Nano-30B-A3B"
-capabilities = ["text"]
+capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 262144
+
+# Nemotron-3-Nano-30B-A3B is a reasoning model: it emits token-delimited
+# <think> reasoning that can be disabled via the chat template
+# (enable_thinking=False) and supports a reasoning_budget control. The
+# "nemotron" family has no capability defaults, so declare the contract here
+# (mirrors the reconciled Nemotron-Nano-9B-v2 card).
+[reasoning]
+supports_toggle = true
+supports_budget = true
+format = "token_delimited"
+default_effort = "medium"
+disabled_effort = "none"
 
 [runtime]
 metal_fast_synch = false

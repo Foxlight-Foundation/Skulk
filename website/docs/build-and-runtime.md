@@ -53,7 +53,7 @@ Nix gives us:
 
 ## Why This Matters
 
-Upstream exo historically carried a macOS Nix path that also changed how MLX
+Some tooling historically carried a macOS Nix path that also changed how MLX
 and Metal were built. That made Nix behave like a hidden "real" runtime path,
 even though other docs implied that source installs and Nix installs were
 equivalent.
@@ -68,10 +68,22 @@ Skulk intentionally avoids that ambiguity:
 
 For local development on Apple Silicon:
 
-1. Install the normal runtime prerequisites.
-2. Run Skulk with `uv`.
+1. Install [`uv`](https://docs.astral.sh/uv/) (the Python toolchain manager) and
+   clone the Skulk repo. `uv` provides the pinned Python and all dependencies, so
+   you do not install Python separately.
+2. From the repo root, run Skulk with `uv`:
+
+   ```bash
+   uv sync
+   uv run skulk
+   ```
+
+   The API comes up at `http://localhost:52415`. To also serve the web dashboard,
+   build it once: `cd dashboard-react && npm install && npm run build` (a headless
+   node can skip this and serve the API without the UI).
 3. Use Nix for `nix fmt`, `nix develop`, and `nix flake check`.
 
-If you are standing up nodes, treat `uv` as the path that must work first.
+Once a node is up, the [API guide](api-guide) walks from placing a model to your
+first token. If you are standing up nodes, treat `uv` as the path that must work first.
 Treat Nix as a developer convenience and CI reproducibility layer unless the
 project explicitly documents otherwise in a future release note.

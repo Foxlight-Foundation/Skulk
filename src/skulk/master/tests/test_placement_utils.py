@@ -404,6 +404,31 @@ def test_usable_vram_by_node_selects_discrete_gpus_only():
     assert nvidia_busy not in gated  # no resources entry -> excluded under gating
 
 
+def test_usable_vram_by_node_admits_served_engine_gpu_nodes():
+    """A served-backend (llama_server) GPU node offloads weights+KV to the GPU
+    (llama-server -ngl 99) exactly like the in-process llama.cpp runner, so it must
+    be admitted against VRAM. A served node advertising only llama_server-cpu is
+    not, like its llama_cpp-cpu counterpart."""
+    served_gpu = NodeId()
+    served_cpu = NodeId()
+    acc = AcceleratorMetrics(vendor="amd", vram_total_bytes=Memory.from_gb(64).in_bytes)
+    node_system = {
+        served_gpu: SystemPerformanceProfile(accelerator=acc),
+        served_cpu: SystemPerformanceProfile(accelerator=acc),
+    }
+    resources = {
+        served_gpu: NodeResources(
+            backends=frozenset({"llama_server", "llama_server-vulkan"})
+        ),
+        served_cpu: NodeResources(
+            backends=frozenset({"llama_server", "llama_server-cpu"})
+        ),
+    }
+    gated = usable_vram_by_node(node_system, resources)
+    assert served_gpu in gated  # GPU-offload served engine -> VRAM-admitted
+    assert served_cpu not in gated  # CPU-only -> no VRAM admission
+
+
 def test_usable_vram_by_node_uma_counts_gtt():
     """A unified-memory APU (Strix Halo: GTT spans system RAM) must count the
     GPU's GTT-mapped system RAM, not just the BIOS VRAM carve-out. With 64 GiB

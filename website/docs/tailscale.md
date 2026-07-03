@@ -6,19 +6,19 @@ sidebar_label: Remote access
 
 # Remote access via Tailscale
 
-Skulk's dashboard and API are served over plain HTTP on port 52415. On your local network that works fine — but when you want to check on your cluster from your phone, restart a node from a coffee shop, or run inference from another machine, you need a way to reach those nodes without opening ports to the internet.
+Skulk's dashboard and API are served over plain HTTP on port 52415. On your local network that works fine, but when you want to check on your cluster from your phone, restart a node from a coffee shop, or run inference from another machine, you need a way to reach those nodes without opening ports to the internet.
 
-Tailscale solves this cleanly. It creates a private overlay network where every device gets a stable `100.x.x.x` address. Once your cluster node and your phone (or laptop) are both on the same tailnet, you can open `http://100.x.x.x:52415` exactly like you would at home — encrypted, no port forwarding, no VPN configuration.
+Tailscale solves this cleanly. It creates a private overlay network where every device gets a stable `100.x.x.x` address. Once your cluster node and your phone (or laptop) are both on the same tailnet, you can open `http://100.x.x.x:52415` exactly like you would at home: encrypted, no port forwarding, no VPN configuration.
 
 ## What you get
 
-- **Dashboard from anywhere** — full cluster view, observability, traces, model placement
-- **Operator panel** — mobile-friendly cluster control from your phone: node health, memory, GPU, temperature, and tap-twice node restart
-- **API access** — run inference or call management endpoints from any device on your tailnet
-- **Works with [Headscale](https://headscale.net/)** — self-host the control plane if you prefer
+- **Dashboard from anywhere**: full cluster view, observability, traces, model placement
+- **Operator panel**: mobile-friendly cluster control from your phone: node health, memory, GPU, temperature, and tap-twice node restart
+- **API access**: run inference or call management endpoints from any device on your tailnet
+- **Works with [Headscale](https://headscale.net/)**: self-host the control plane if you prefer
 
 :::info Only the cluster node needs Tailscale installed as a service
-Your phone or laptop just needs the **Tailscale app** — it doesn't run a Skulk node. Only the machines that actually run Skulk need `tailscaled` installed and configured. One node on Tailscale is enough to reach the whole cluster dashboard, because the dashboard already shows every node's state regardless of whether those nodes are on Tailscale.
+Your phone or laptop just needs the **Tailscale app**; it doesn't run a Skulk node. Only the machines that actually run Skulk need `tailscaled` installed and configured. One node on Tailscale is enough to reach the whole cluster dashboard, because the dashboard already shows every node's state regardless of whether those nodes are on Tailscale.
 :::
 
 ## Setup
@@ -28,7 +28,7 @@ Your phone or laptop just needs the **Tailscale app** — it doesn't run a Skulk
 On the machine running Skulk:
 
 ```bash
-# macOS — install from tailscale.com/download or:
+# macOS: install from tailscale.com/download or:
 brew install tailscale
 
 # Linux:
@@ -50,7 +50,7 @@ tailscale ip -4
 
 ### 2. Install Tailscale on your remote device
 
-On your phone, tablet, or laptop — install the Tailscale app and log in to the **same Tailscale account**. No configuration beyond logging in.
+On your phone, tablet, or laptop, install the Tailscale app and log in to the **same Tailscale account**. No configuration beyond logging in.
 
 - iOS / Android: search "Tailscale" in the App Store / Play Store
 - macOS / Windows / Linux: [tailscale.com/download](https://tailscale.com/download)
@@ -63,7 +63,7 @@ In any browser on your remote device:
 http://100.101.102.103:52415
 ```
 
-Replace `100.101.102.103` with your node's Tailscale IP from step 1. You get the full Skulk dashboard — chat, cluster view, observability, everything.
+Replace `100.101.102.103` with your node's Tailscale IP from step 1. You get the full Skulk dashboard: chat, cluster view, observability, everything.
 
 :::tip Bookmark it
 Save the `http://100.x.x.x:52415` URL on your phone. iOS and Android both let you add it to your home screen as a web app shortcut.
@@ -71,7 +71,7 @@ Save the `http://100.x.x.x:52415` URL on your phone. iOS and Android both let yo
 
 ## Operator panel
 
-The dashboard includes a mobile-first operator view designed for exactly this scenario — checking on your cluster and restarting nodes from a small screen.
+The dashboard includes a mobile-first operator view designed for exactly this scenario: checking on your cluster and restarting nodes from a small screen.
 
 Navigate directly to:
 
@@ -79,14 +79,14 @@ Navigate directly to:
 http://100.101.102.103:52415/operator
 ```
 
-Bookmark that URL on your phone — iOS and Android both let you add it to your home screen as a web app shortcut so it opens instantly.
+Bookmark that URL on your phone: iOS and Android both let you add it to your home screen as a web app shortcut so it opens instantly.
 
 The operator panel shows:
-- **Cluster summary** — total nodes, aggregate memory usage, average GPU utilization, average temperature
-- **Per-node cards** — role (master/worker), memory bar, GPU usage, temperature, active placements
-- **Tap-twice restart** — tap "Restart" on any node card; a "Confirm?" prompt appears; tap again within 3 seconds to send the restart command. Accidental taps do nothing.
+- **Cluster summary**: total nodes, aggregate memory usage, average GPU utilization, average temperature
+- **Per-node cards**: role (master/worker), memory bar, GPU usage, temperature, active placements
+- **Tap-twice restart**: tap "Restart" on any node card; a "Confirm?" prompt appears; tap again within 3 seconds to send the restart command. Accidental taps do nothing.
 
-Restarts are sent over the cluster's pub/sub channel, so you can restart any node — including remote ones — from any node's dashboard.
+Restarts are sent over the cluster's pub/sub channel, so you can restart any node (including remote ones) from any node's dashboard.
 
 ## API access over Tailscale
 
@@ -113,7 +113,7 @@ curl http://100.101.102.103:52415/v1/connectivity/tailscale
 INFO  Tailscale: running | IP 100.101.102.103 | my-node.tailnet-abc.ts.net
 ```
 
-**Check in the dashboard** — Observability → Node tab → Runtime section shows the Tailscale row with the node's IP and DNS name.
+**Check in the dashboard**: Observability → Node tab → Runtime section shows the Tailscale row with the node's IP and DNS name.
 
 **Check via the API:**
 
@@ -142,7 +142,7 @@ First confirm Tailscale can reach the node at all:
 ping 100.101.102.103
 ```
 
-If ping fails, the devices aren't on the same tailnet — check that both are logged into the same Tailscale account (or Headscale server) and that Tailscale is running on both.
+If ping fails, the devices aren't on the same tailnet: check that both are logged into the same Tailscale account (or Headscale server) and that Tailscale is running on both.
 
 If ping succeeds but port 52415 doesn't respond, Skulk may not be running. SSH in (also works over Tailscale) and check:
 
@@ -159,7 +159,7 @@ systemctl --user status skulk
 tailscaled is installed but not running on the cluster node:
 
 ```bash
-# macOS — open the Tailscale app, or:
+# macOS: open the Tailscale app, or:
 sudo tailscaled &
 tailscale up
 
@@ -174,7 +174,7 @@ By default all devices on the same tailnet can reach each other. If you've custo
 
 ## Using Headscale
 
-[Headscale](https://headscale.net/) is a self-hosted Tailscale control server. Skulk treats it identically to Tailscale's own servers — no config changes needed. Join each device to your Headscale instance:
+[Headscale](https://headscale.net/) is a self-hosted Tailscale control server. Skulk treats it identically to Tailscale's own servers, with no config changes needed. Join each device to your Headscale instance:
 
 ```bash
 tailscale up --login-server https://your-headscale-server.example.com

@@ -247,6 +247,20 @@ def companion_download_specs(
                 False,
             )
         )
+    # Served-engine draft GGUF (`--model-draft`): a separate small draft model
+    # (draft_simple / draft_eagle3) or a Gemma-4 assistant-as-MTP draft. Fetch only
+    # the pinned draft GGUF file (its shard group); it may live in the same repo as
+    # the base (then it lands in the base's dir) or a separate repo.
+    if runtime and runtime.served_spec_draft_repo and runtime.served_spec_draft_file:
+        # Just the pinned draft file -- a draft GGUF is single-file and is not a
+        # vision model, so do not pull mmproj projectors or sibling quants.
+        specs.append(
+            (
+                _bare_shard(runtime.served_spec_draft_repo),
+                [runtime.served_spec_draft_file],
+                False,
+            )
+        )
     return specs
 
 
@@ -302,10 +316,20 @@ def model_companions_present_on_disk(
         is None
     ):
         return False
-    return not (
-        runtime.assistant_model_repo
-        and build_companion_model_path(ModelId(runtime.assistant_model_repo)) is None
-    )
+    if runtime.assistant_model_repo and (
+        build_companion_model_path(ModelId(runtime.assistant_model_repo)) is None
+    ):
+        return False
+    # Served draft GGUF: the specific file must be on disk (it may share the
+    # base's directory or live in its own repo dir).
+    if runtime.served_spec_draft_repo and runtime.served_spec_draft_file:
+        try:
+            draft_dir = build_model_path(ModelId(runtime.served_spec_draft_repo))
+        except FileNotFoundError:
+            return False
+        if not (draft_dir / runtime.served_spec_draft_file).is_file():
+            return False
+    return True
 
 
 def build_model_path(model_id: ModelId) -> Path:
@@ -698,13 +722,23 @@ def create_http_session(
     auto_decompress: bool = False,
     timeout_profile: Literal["short", "long"] = "long",
 ) -> aiohttp.ClientSession:
+    total_timeout: int | None
     if timeout_profile == "short":
         total_timeout = 30
         connect_timeout = 10
         sock_read_timeout = 30
         sock_connect_timeout = 10
     else:
-        total_timeout = 1800
+        # No TOTAL cap on large file-body downloads: a fixed wall-clock total
+        # timeout caps the download by elapsed time regardless of progress, so a
+        # multi-GB GGUF that is downloading fine just fails partway through once
+        # it outlasts the cap (a 17 GB model at ~7.5 MB/s hit the old 1800 s cap
+        # at ~80%, surfacing as an empty-string TimeoutError). Progress is
+        # instead policed by ``sock_read`` (per-read inactivity) and
+        # ``sock_connect`` — a genuinely stalled connection still times out and
+        # retries (which resume from the ``.partial``), but a slow-but-alive
+        # transfer of any size completes.
+        total_timeout = None
         connect_timeout = 60
         sock_read_timeout = 60
         sock_connect_timeout = 60

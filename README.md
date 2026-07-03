@@ -10,7 +10,7 @@
 
 [![Documentation](https://img.shields.io/badge/docs-documentation-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/)
 [![Build & Runtime Paths](https://img.shields.io/badge/docs-build_%26_runtime-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/build-and-runtime/)
-[![Release Notes](https://img.shields.io/badge/release_notes-v1.3.0-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/release-notes/1.3.0/)
+[![Release Notes](https://img.shields.io/badge/release_notes-v1.3.1-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/release-notes/1.3.1/)
 [![Architecture](https://img.shields.io/badge/docs-architecture-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/architecture/)
 
   <br>
@@ -198,14 +198,14 @@ Build/runtime note:
 | macOS on Apple Silicon | Primary target. Best experience today. Serves MLX models. |
 | Multi-Mac clusters | Supported. Best results on matched macOS versions and fast networking. |
 | RDMA over Thunderbolt 5 | Supported on eligible macOS 26.2+ hardware after OS-level setup. |
-| AMD / Linux GPU (for example Strix Halo) | Supported. Joins a cluster and serves GGUF models on a llama.cpp engine (Vulkan or ROCm), alongside Apple Silicon nodes. See the [AMD / Strix Halo node guide](https://foxlight-foundation.github.io/Skulk/amd-strix-halo-nodes). |
+| AMD / Linux GPU (for example Strix Halo) | Supported. Joins a cluster and serves GGUF models on its GPU, alongside Apple Silicon nodes, through two engines: in-process `llama_cpp` (Vulkan or ROCm), and a served `llama_server` engine that unlocks llama.cpp's **native multi-token prediction** (`--spec-type draft-mtp`) so speculative decoding runs on AMD too. See the [AMD / Strix Halo node guide](https://foxlight-foundation.github.io/Skulk/amd-strix-halo-nodes). |
 | Linux (CPU only) | Supported as a control/API node; GGUF serving on CPU is possible but slow. |
 
 ## Core Features
 
 - **Distributed inference**: split work across devices instead of treating each machine as an island.
-- **Heterogeneous engines**: Apple Silicon nodes serve MLX models and AMD or other Linux GPU nodes serve GGUF models on a llama.cpp engine (Vulkan or ROCm), in one cluster, with each model routed to a node that can run it.
-- **Speculative decoding**: measured 1.16–2.2× decode speedups via multi-token prediction, on by default for supported model cards, including multi-node placements on mixed hardware.
+- **Heterogeneous engines**: Apple Silicon nodes serve MLX models; AMD or other Linux GPU nodes serve GGUF models through an in-process `llama_cpp` engine (Vulkan or ROCm) and a served `llama_server` engine; all in one cluster, with each model routed to a node that can run it.
+- **Speculative decoding**: measured 1.16–2.2× decode speedups via multi-token prediction, on by default for supported model cards, including multi-node placements on mixed hardware. On AMD/GPU nodes, llama.cpp's native MTP (`--spec-type draft-mtp`) runs through the served engine.
 - **Skulk Dashboard**: React dashboard for topology, model store, chat, settings, and placement workflows.
 - **Model Store**: centralize model files on one node and stage them to the rest of the cluster over the LAN; for GGUF repos it downloads only the quantization a model card pins, and the store host advertises a routable address so downloads work on a Thunderbolt-meshed fleet.
 - **Cluster-wide config sync**: update config from the dashboard and sync it across nodes.
@@ -611,7 +611,7 @@ Highlights:
 - [Thunderbolt clustering](https://foxlight-foundation.github.io/Skulk/thunderbolt-clustering) and [RDMA on macOS](https://foxlight-foundation.github.io/Skulk/build-and-runtime)
 - [Speculative decoding](https://foxlight-foundation.github.io/Skulk/speculative-decoding)
 - [API guide](https://foxlight-foundation.github.io/Skulk/api-guide) and [architecture](https://foxlight-foundation.github.io/Skulk/architecture)
-- [Release notes](https://foxlight-foundation.github.io/Skulk/release-notes/1.3.0/)
+- [Release notes](https://foxlight-foundation.github.io/Skulk/release-notes/1.3.1/)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## Contributing

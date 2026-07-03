@@ -3,6 +3,7 @@ import styled, { css } from 'styled-components';
 import { FiX, FiInfo } from 'react-icons/fi';
 import { MdPlayArrow } from 'react-icons/md';
 import type { TopologyData } from '../../types/topology';
+import { detectDeviceModel } from '../../types/topology';
 import type { PlacementPreview } from '../../types/models';
 import { ModelCard } from '../models/ModelCard';
 import { Button } from '../common/Button';
@@ -156,27 +157,29 @@ const NodePillRow = styled.div`
   align-items: center;
 `;
 
-const NodePill = styled.button<{ $excluded: boolean }>`
+const NodePill = styled.button<{ $excluded: boolean; $ineligible?: boolean }>`
   all: unset;
-  cursor: pointer;
+  cursor: ${({ $ineligible }) => ($ineligible ? 'not-allowed' : 'pointer')};
   padding: 4px 10px;
   border-radius: 999px;
   font-family: ${({ theme }) => theme.fonts.body};
   font-size: ${({ theme }) => theme.fontSizes.xs};
+  opacity: ${({ $ineligible }) => ($ineligible ? 0.4 : 1)};
   border: 1px solid
     ${({ $excluded, theme }) => ($excluded ? theme.colors.borderLight : theme.colors.border)};
-  background: ${({ $excluded, theme }) =>
-    $excluded ? 'transparent' : theme.colors.goldBg};
+  background: ${({ $excluded, $ineligible, theme }) =>
+    $ineligible ? theme.colors.surfaceSunken : $excluded ? 'transparent' : theme.colors.goldBg};
   color: ${({ $excluded, theme }) =>
     $excluded ? theme.colors.textMuted : theme.colors.text};
   text-decoration: ${({ $excluded }) => ($excluded ? 'line-through' : 'none')};
   transition: background 0.15s, color 0.15s, border-color 0.15s;
 
-  &:hover {
-    background: ${({ $excluded, theme }) =>
-      $excluded ? theme.colors.surfaceHover : theme.colors.goldBg};
-    color: ${({ theme }) => theme.colors.text};
-  }
+  ${({ $ineligible, $excluded }) => !$ineligible && css`
+    &:hover {
+      background: ${({ theme }) => ($excluded ? theme.colors.surfaceHover : theme.colors.goldBg)};
+      color: ${({ theme }) => theme.colors.text};
+    }
+  `}
 
   &:focus-visible {
     outline: 2px solid ${({ theme }) => theme.colors.goldDim};
@@ -322,6 +325,34 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
 
   const totalNodes = Object.keys(effectiveNodes).length;
 
+  // Per-node placement eligibility. On the current fleet a node's device family
+  // maps to its engine: MLX (safetensors) runs on Apple Silicon, and the
+  // llama.cpp / served engines (GGUF) run on the AMD/Strix GPU nodes. So GGUF is
+  // treated as eligible only on AMD/Strix nodes and safetensors only on non-AMD
+  // nodes. This is a heuristic keyed on the chip family, NOT the authoritative
+  // backend contract: a future non-AMD llama.cpp node (CUDA/CPU) would be hidden
+  // for GGUF until eligibility keys off the advertised backend tags instead. The
+  // backend planner remains the source of truth for what can actually place.
+  const isGguf = /gguf/i.test(modelId);
+  const nodeEligibility = useMemo(() => {
+    const map: Record<string, boolean> = {};
+    for (const [nodeId, info] of Object.entries(topology?.nodes ?? {})) {
+      const isAmd = detectDeviceModel(info.system_info?.model_id, info.system_info?.chip) === 'amd-strix';
+      map[nodeId] = isGguf ? isAmd : !isAmd;
+    }
+    return map;
+  }, [topology?.nodes, isGguf]);
+  const eligibleNodeIds = useMemo(
+    () => Object.keys(nodeEligibility).filter((id) => nodeEligibility[id]),
+    [nodeEligibility],
+  );
+  // Node selection (exclusion pills + count slider) is only meaningful when more
+  // than one node can actually host this model; with a single eligible target
+  // there is nothing to choose, so the whole selector is hidden.
+  const showNodeSelector = eligibleNodeIds.length > 1;
+  const effectiveEligibleCount = eligibleNodeIds.filter((id) => !excludedNodes.has(id)).length;
+  const nodeSliderMax = Math.max(effectiveEligibleCount, 1);
+
   // Fetch previews when modal opens
   useEffect(() => {
     if (!open) return;
@@ -465,15 +496,15 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
     });
   }, []);
 
-  // Clamp the slider when an exclusion drops the effective node count below
-  // its current value — otherwise the operator can leave the modal pointed
-  // at a node count that exceeds what's actually available, and previewing
-  // for that count quietly stops working.
+  // Clamp the slider when an exclusion drops the eligible node count below its
+  // current value — otherwise the operator can leave the modal pointed at a
+  // node count that exceeds what's actually available, and previewing for that
+  // count quietly stops working.
   useEffect(() => {
-    if (totalNodes > 0 && minNodes > totalNodes) {
-      setMinNodes(totalNodes);
+    if (minNodes > nodeSliderMax) {
+      setMinNodes(nodeSliderMax);
     }
-  }, [totalNodes, minNodes]);
+  }, [nodeSliderMax, minNodes]);
 
   if (!open) return null;
 
@@ -575,8 +606,10 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
 
               {/* Per-placement node exclusion — click a pill to exclude that
                   node from this placement only. Already-running instances on
-                  the node are unaffected. */}
-              {totalNodes > 0 && (
+                  the node are unaffected. Only shown when more than one node can
+                  host this model; ineligible nodes (wrong engine/hardware) are
+                  rendered disabled so the operator can't steer to a dead end. */}
+              {showNodeSelector && (
                 <Section>
                   <SectionLabel>{t('placement.availableNodes', 'Available Nodes')}</SectionLabel>
                   <NodePillRow>
@@ -589,17 +622,23 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                         a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }),
                       )
                       .map(({ nodeId, label }) => {
-                        const isExcluded = excludedNodes.has(nodeId);
+                        const eligible = nodeEligibility[nodeId];
+                        const isExcluded = eligible && excludedNodes.has(nodeId);
                         return (
                           <NodePill
                             key={nodeId}
                             type="button"
                             $excluded={isExcluded}
-                            onClick={() => toggleNodeExclusion(nodeId)}
-                            aria-pressed={!isExcluded}
-                            title={isExcluded
-                              ? t('placement.includeNodeTitle', 'Click to include this node')
-                              : t('placement.excludeNodeTitle', 'Click to exclude this node from this placement')}
+                            $ineligible={!eligible}
+                            disabled={!eligible}
+                            onClick={() => { if (eligible) toggleNodeExclusion(nodeId); }}
+                            aria-pressed={eligible ? !isExcluded : undefined}
+                            aria-disabled={!eligible}
+                            title={!eligible
+                              ? t('placement.ineligibleNodeTitle', "This node can't run this model")
+                              : isExcluded
+                                ? t('placement.includeNodeTitle', 'Click to include this node')
+                                : t('placement.excludeNodeTitle', 'Click to exclude this node from this placement')}
                           >
                             {label}
                           </NodePill>
@@ -623,19 +662,20 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                 </ErrorCallout>
               )}
 
-              {/* Node count slider — only when placement is possible */}
-              {anyPlacementPossible && (
+              {/* Node count slider: only when placement is possible and more
+                  than one node can host the model. */}
+              {anyPlacementPossible && showNodeSelector && (
                 <Section>
                   <SectionLabel>{t('placement.nodes', 'Nodes')}</SectionLabel>
                   <SliderRow>
                     <Slider
                       type="range"
                       min={1}
-                      max={Math.max(totalNodes, 1)}
+                      max={nodeSliderMax}
                       value={minNodes}
                       onChange={(e) => setMinNodes(Number(e.target.value))}
                     />
-                    <SliderValue>{t('placement.nodeCount', '{selected} of {total}', { selected: minNodes, total: totalNodes })}</SliderValue>
+                    <SliderValue>{t('placement.nodeCount', '{selected} of {total}', { selected: minNodes, total: effectiveEligibleCount })}</SliderValue>
                   </SliderRow>
                 </Section>
               )}
@@ -680,7 +720,11 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                     )}
                   </Section>
 
-                  {/* Networking */}
+                  {/* Networking: MLX Ring / Jaccl are MLX transports, so the
+                      choice only applies to the MLX engine. GGUF models run on
+                      the single-node llama.cpp / served engines, which have no
+                      MLX transport to pick, so the section is hidden for them. */}
+                  {!isGguf && (
                   <Section>
                     <SectionLabel>{t('placement.networking', 'Networking')}</SectionLabel>
                     <OptionRow>
@@ -711,6 +755,7 @@ export function PlacementManager({ modelId, modelSizeMb, topology, open, onClose
                       <Callout><FiInfo size={14} style={{ flexShrink: 0, marginTop: 1 }} /> {networkError}</Callout>
                     )}
                   </Section>
+                  )}
                 </>
               )}
             </>

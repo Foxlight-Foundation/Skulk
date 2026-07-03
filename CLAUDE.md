@@ -107,6 +107,21 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
 - **Election**: Bully algorithm for master election
 - **API**: FastAPI server for OpenAI-compatible chat completions
 
+### Inference engines
+A model card's `placement.compatible_backends` selects which engine serves it
+(`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):
+- **`mlx`** (`worker/engines/mlx/`): in-process MLX on Apple Silicon; owns the
+  generation loop, the multi-node ring, and MTP/speculative decoding.
+- **`llama_cpp`** (`worker/runner/llama_cpp/`): in-process `llama-cpp-python` for
+  GGUF on GPU/Linux nodes (Vulkan/ROCm/CUDA). Single-node.
+- **`llama_server`** (`worker/runner/llama_server/`): served-backend engine; the
+  worker launches an external `llama-server` subprocess and proxies its OpenAI
+  HTTP API. The only path to llama.cpp's **native MTP** (`--spec-type draft-mtp`),
+  whose orchestration lives in the server app, not `libllama` / the Python binding.
+  Enabled per node via `SKULK_LLAMA_SERVER_BIN`; configured per model via the card
+  `served_spec_type` / `served_spec_n_max` runtime fields. Single-node; coexists
+  with `llama_cpp`; the managed-server-plus-proxy shape is the vLLM on-ramp.
+
 ### Message Flow
 Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `GLOBAL_EVENTS`: Master broadcasts indexed events to all workers

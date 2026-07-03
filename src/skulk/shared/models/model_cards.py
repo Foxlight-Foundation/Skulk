@@ -455,6 +455,43 @@ class RuntimeCapabilityCardConfig(CamelCaseModel):
     the runner — declaring it here only pre-downloads it. See the Gemma 4 MTP
     initiative in the foxlight-docs hub (Phase C).
     """
+    served_spec_type: (
+        Literal["none", "draft_mtp", "draft_eagle3", "draft_simple", "ngram"] | None
+    ) = None
+    """Speculative-decoding mode for the ``llama_server`` (served-backend) engine.
+
+    Maps to a ``llama-server --spec-type`` token in the runner
+    (``_SPEC_TYPE_FLAG``): ``draft_mtp`` -> ``draft-mtp`` (the model's own built-in
+    MTP heads, no draft model needed; Qwen3.6/DeepSeek/GLM/Kimi/Nemotron),
+    ``draft_eagle3`` -> ``draft-eagle3`` (an EAGLE-3 head), ``draft_simple`` ->
+    ``draft-simple`` (a separate draft model), ``ngram`` -> ``ngram-cache``
+    (prompt-lookup), ``none``/``None`` plain decoding. Only the served engine reads
+    this; the in-process ``mlx`` and ``llama_cpp`` engines ignore it (MLX
+    speculation is the ``mtp_*`` / ``assistant_model_repo`` fields above)."""
+    served_spec_n_max: int | None = Field(default=None, gt=0)
+    """Max draft tokens per step for the served engine (``--spec-draft-n-max``).
+
+    Must be a positive integer (validated at card load so a bad value fails fast
+    rather than producing an undefined ``--spec-draft-n-max`` at the server).
+    ``None`` uses the llama-server default (3). Acceptance falls off with depth
+    (per-position acceptance drops), so 2-3 is the usual sweet spot; tune per
+    card from measured acceptance."""
+    served_spec_draft_repo: str | None = None
+    """Hugging Face repo of a separate **draft** GGUF for the served engine.
+
+    Some served speculative modes need a second model passed to llama-server via
+    ``--model-draft``, NOT built-in heads: ``draft_simple`` (a vocab-matched small
+    draft model) and ``draft_eagle3`` (an EAGLE-3 head) always require one, and
+    Gemma 4 ``draft_mtp`` uses its *assistant* as a separate draft GGUF (llama.cpp
+    PR #23398) rather than baking heads into the base. Qwen3.6/DeepSeek/GLM
+    ``draft_mtp`` leave this unset (heads are in the base GGUF). When set, the
+    draft GGUF is downloaded as a companion alongside the base and passed as
+    ``--model-draft``. Pairs with ``served_spec_draft_file``."""
+    served_spec_draft_file: str | None = None
+    """Repo-relative GGUF filename of the served draft model (in
+    ``served_spec_draft_repo``), e.g. ``"mtp-gemma-4-31B-it.gguf"``. Required when
+    ``served_spec_draft_repo`` is set; selects the exact draft quant the runner
+    passes to ``--model-draft``."""
 
     @field_validator("prompt_renderer", mode="before")
     @classmethod

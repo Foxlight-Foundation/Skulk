@@ -1,0 +1,26 @@
+# Llama 3.2 1B Instruct (unsloth GGUF): Meta's small dense instruct model for the
+# llama.cpp engine on GPU/Linux nodes. The quant is pinned to Q4_K_M (~0.8 GB);
+# `supports_tensor = false`: the llama.cpp runner is single-node. Text-only, no
+# reasoning mode (a plain instruct model, so no [reasoning] section). Tool calling
+# is the family default. Architecture from config.json (16 layers, hidden 2048,
+# 8 KV heads, 131072 ctx).
+model_id = "unsloth/Llama-3.2-1B-Instruct-GGUF"
+n_layers = 16
+hidden_size = 2048
+num_key_value_heads = 8
+supports_tensor = false
+tasks = ["TextGeneration"]
+family = "llama"
+quantization = "Q4_K_M"
+base_model = "Llama 3.2 1B Instruct"
+capabilities = ["text"]
+context_length = 131072
+gguf_file = "Llama-3.2-1B-Instruct-Q4_K_M.gguf"
+trust_remote_code = false
+
+[placement]
+compatible_backends = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu"]
+backend_preference = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu"]
+
+[storage_size]
+in_bytes = 807694368

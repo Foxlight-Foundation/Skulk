@@ -305,22 +305,38 @@ class ModelStoreServer:
         """``POST /models/{model_id}/download``: request store-side HF download.
 
         Optional JSON body ``{"gguf_file": "<path>"}`` pins which GGUF quant's
-        shard group the store fetches, honoring a card's custom pin (#344). The
-        body is optional: a request without it (or a non-JSON body) falls back to
-        the default quant preference, preserving the prior contract.
+        shard group the store fetches, honoring a card's custom pin (#344).
+        Optional ``{"extra_gguf_files": ["<path>", ...]}`` names same-repo
+        companion GGUFs (a served-engine draft bundled with the base) to
+        co-fetch with the base quant. The body is optional: a request without it
+        (or a non-JSON body) falls back to the default quant preference and no
+        companions, preserving the prior contract.
         """
         model_id = _sanitize_model_id(request.match_info["model_id"])
         pinned_gguf: str | None = None
+        extra_pinned_gguf: list[str] | None = None
         if request.can_read_body:
             try:
                 body: object = cast("object", await request.json())
             except Exception:  # noqa: BLE001 - tolerate empty / non-JSON body
                 body = None
             if isinstance(body, dict):
-                raw = cast("dict[str, object]", body).get("gguf_file")
+                body_dict = cast("dict[str, object]", body)
+                raw = body_dict.get("gguf_file")
                 if isinstance(raw, str) and raw:
                     pinned_gguf = raw
-        status = await self._store.request_download(model_id, pinned_gguf)
+                raw_extra = body_dict.get("extra_gguf_files")
+                if isinstance(raw_extra, list):
+                    extras = [
+                        item
+                        for item in cast("list[object]", raw_extra)
+                        if isinstance(item, str) and item
+                    ]
+                    if extras:
+                        extra_pinned_gguf = extras
+        status = await self._store.request_download(
+            model_id, pinned_gguf, extra_pinned_gguf
+        )
         return web.json_response(
             {
                 "modelId": status.model_id,

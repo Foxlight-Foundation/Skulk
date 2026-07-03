@@ -6,12 +6,12 @@ sidebar_label: External logging
 
 # External logging
 
-Forward Skulk's structured logs from every node to one place where you can search and graph them. This guide walks through the whole stack — what it is, how to install it, how to wire Skulk into it, and how to debug it when it doesn't work.
+Forward Skulk's structured logs from every node to one place where you can search and graph them. This guide walks through the whole stack: what it is, how to install it, how to wire Skulk into it, and how to debug it when it doesn't work.
 
 ## What you'll have when you're done
 
 - Every Skulk node ships its logs to one central store (VictoriaLogs).
-- You can search across the whole cluster from a Grafana panel — by node, by component, by message, by time range.
+- You can search across the whole cluster from a Grafana panel: by node, by component, by message, by time range.
 - Logs survive node reboots, network blips, and the central store being down (Vector buffers up to 512 MB on disk per node).
 - Skulk's inference path is **never blocked** by a slow log shipper, because the shipper runs as a separate process.
 
@@ -53,13 +53,13 @@ Three layers:
 
 ## Why a separate process for Vector?
 
-Skulk's inference threads must never block on logging. If Vector is in the same process and the central store is slow, the kernel pipe between them fills up and every `logger.info()` call in Skulk blocks. By running Vector as a separate agent that reads from a file, slow shipping just means the file grows on disk — Skulk keeps inferring at full speed.
+Skulk's inference threads must never block on logging. If Vector is in the same process and the central store is slow, the kernel pipe between them fills up and every `logger.info()` call in Skulk blocks. By running Vector as a separate agent that reads from a file, slow shipping just means the file grows on disk, and Skulk keeps inferring at full speed.
 
 This is why the LaunchAgent installer (`deployment/install/install-launchd.sh`) installs **two** agents by default: the Skulk service itself, and a `skulk-vector` shipper that runs alongside it.
 
-## Step 1 — Set up the central stack (one-time, on one machine)
+## Step 1: Set up the central stack (one-time, on one machine)
 
-Pick the machine you want logs to live on. Anything that can run Docker works — an R720, a NAS, a Mac mini, a small VPS. It needs to be reachable from every Skulk node on TCP 9428 (ingest) and 3000 (Grafana UI).
+Pick the machine you want logs to live on. Anything that can run Docker works (an R720, a NAS, a Mac mini, a small VPS). It needs to be reachable from every Skulk node on TCP 9428 (ingest) and 3000 (Grafana UI).
 
 On the central host:
 
@@ -68,10 +68,10 @@ On the central host:
 git clone https://github.com/foxlight-foundation/skulk.git
 cd skulk/deployment/logging
 
-# Set the Grafana admin password (required — the compose file refuses to
+# Set the Grafana admin password (required, since the compose file refuses to
 # start without it)
 echo "GF_SECURITY_ADMIN_PASSWORD=$(openssl rand -base64 24)" > .env
-echo "Wrote a Grafana admin password to .env — keep this file safe."
+echo "Wrote a Grafana admin password to .env; keep this file safe."
 
 # Bring the stack up
 docker compose up -d
@@ -79,8 +79,8 @@ docker compose up -d
 
 This launches:
 
-- **VictoriaLogs** on port 9428 — log ingest and storage. Built-in UI at `http://<host>:9428/select/vmui/`.
-- **Grafana** on port 3000 — dashboards. Username `admin`, password from your `.env` file.
+- **VictoriaLogs** on port 9428: log ingest and storage. Built-in UI at `http://<host>:9428/select/vmui/`.
+- **Grafana** on port 3000: dashboards. Username `admin`, password from your `.env` file.
 
 Verify both are healthy:
 
@@ -92,22 +92,22 @@ curl -sI http://localhost:3000/login | head -1
 # expected: HTTP/1.1 200 OK
 ```
 
-The Grafana stack is pre-configured to use VictoriaLogs as its default data source — no manual wiring needed.
+The Grafana stack is pre-configured to use VictoriaLogs as its default data source, so no manual wiring is needed.
 
 ### What gets persisted
 
 The Compose file uses two named volumes:
 
-- `vlogs-data` — VictoriaLogs storage, 90-day retention by default
-- `grafana-data` — Grafana dashboards, users, and config
+- `vlogs-data`: VictoriaLogs storage, 90-day retention by default
+- `grafana-data`: Grafana dashboards, users, and config
 
 These survive container restarts and image upgrades. To wipe them, `docker compose down -v`.
 
-## Step 2 — Point each Skulk node at the central stack
+## Step 2: Point each Skulk node at the central stack
 
 The shipping process model differs between platforms. Both ship to the same central stack:
 
-- **macOS** runs Vector as a separate LaunchAgent (`foundation.foxlight.skulk-vector`) that tails Skulk's captured stdout file. Lifecycle is decoupled from Skulk — a slow VictoriaLogs cannot backpressure inference.
+- **macOS** runs Vector as a separate LaunchAgent (`foundation.foxlight.skulk-vector`) that tails Skulk's captured stdout file. Lifecycle is decoupled from Skulk, so a slow VictoriaLogs cannot backpressure inference.
 - **Linux** runs Vector as an in-process subprocess that Skulk spawns when `logging.enabled: true` is set in `skulk.yaml`. JSON is piped directly into Vector's stdin via `deployment/logging/vector.yaml` (stdin source). This release does not include a separate `skulk-vector` systemd unit.
 
 On every node that's running Skulk:
@@ -116,8 +116,8 @@ On every node that's running Skulk:
 2. **Install the Skulk service** (if you haven't already):
 
    ```bash
-   deployment/install/install-launchd.sh    # macOS — installs both skulk + skulk-vector agents
-   deployment/install/install-systemd.sh    # Linux — installs skulk only
+   deployment/install/install-launchd.sh    # macOS: installs both skulk + skulk-vector agents
+   deployment/install/install-systemd.sh    # Linux: installs skulk only
    ```
 
    On macOS, pass `--no-vector` to skip the external Vector agent and fall back to the in-process subprocess model.
@@ -134,17 +134,17 @@ On every node that's running Skulk:
 5. **Restart so the new config is picked up:**
 
    ```bash
-   # macOS — restart both agents
+   # macOS: restart both agents
    launchctl kickstart -k gui/$(id -u)/foundation.foxlight.skulk
    launchctl kickstart -k gui/$(id -u)/foundation.foxlight.skulk-vector
 
-   # Linux — Skulk respawns its Vector subprocess on restart
+   # Linux: Skulk respawns its Vector subprocess on restart
    systemctl --user restart skulk
    ```
 
 That's it for that node. Repeat on each one.
 
-## Step 3 — Verify logs are flowing
+## Step 3: Verify logs are flowing
 
 On any node:
 
@@ -152,7 +152,7 @@ On any node:
 # Last 5 lines of what Vector is shipping right now
 tail -n 5 ~/.skulk/logs/skulk.stdout.log
 
-# Vector's own status — should show 0 errors and recent successful POSTs
+# Vector's own status: should show 0 errors and recent successful POSTs
 tail -f ~/.skulk/logs/vector.stderr.log
 ```
 
@@ -193,7 +193,7 @@ Each line shipped by Skulk looks like this:
 }
 ```
 
-`node_id` defaults to the machine's hostname. `component` is the second segment of the Python module path (e.g. `exo.worker.runner` → `worker`). Both are indexed by VictoriaLogs as stream fields so queries against them are fast.
+`node_id` defaults to the machine's hostname. `component` is the second segment of the Python module path (e.g. `skulk.worker.runner` gives `worker`). Both are indexed by VictoriaLogs as stream fields so queries against them are fast.
 
 ## Customizing where Vector buffers and ships
 
@@ -215,10 +215,10 @@ After editing, restart the relevant agents (the table in the [service guide](./r
 Check that node's Vector output:
 
 ```bash
-# macOS — separate LaunchAgent has its own log
+# macOS: separate LaunchAgent has its own log
 tail -f ~/.skulk/logs/vector.stderr.log
 
-# Linux — Vector runs as a Skulk subprocess; its output is folded into Skulk's
+# Linux: Vector runs as a Skulk subprocess; its output is folded into Skulk's
 journalctl --user -u skulk -f | grep -i vector
 ```
 
@@ -226,8 +226,8 @@ Common causes:
 
 - **`vector` isn't installed.** The agent fails fast with a clear error. Install Vector and restart.
 - **The node can't reach the central host.** `curl -v http://<central-host>:9428/health` from the node tells you whether it's network or firewall.
-- **The wrong ingest URL is in `~/.skulk/skulk.env`.** Vector logs the URL it's POSTing to on startup — check it matches.
-- **The source file is empty.** Run `tail ~/.skulk/logs/skulk.stdout.log`. If it's empty, Skulk isn't emitting JSON — see next section.
+- **The wrong ingest URL is in `~/.skulk/skulk.env`.** Vector logs the URL it's POSTing to on startup, so check it matches.
+- **The source file is empty.** Run `tail ~/.skulk/logs/skulk.stdout.log`. If it's empty, Skulk isn't emitting JSON, so see the next section.
 
 ### "The skulk.stdout.log file is empty"
 
@@ -259,10 +259,10 @@ Then `docker compose up -d` to apply. VictoriaLogs reclaims space within a few m
 Vector reads its config at startup. Restart the shipper:
 
 ```bash
-# macOS — restart the launchd Vector agent
+# macOS: restart the launchd Vector agent
 launchctl kickstart -k gui/$(id -u)/foundation.foxlight.skulk-vector
 
-# Linux — Vector runs as a Skulk subprocess, so restart Skulk itself
+# Linux: Vector runs as a Skulk subprocess, so restart Skulk itself
 systemctl --user restart skulk
 ```
 
@@ -292,4 +292,4 @@ vector --config deployment/logging/vector-external.yaml
 uv run skulk 2>/dev/tty | vector --config deployment/logging/vector.yaml
 ```
 
-This is useful when iterating on either config — restart picks up changes immediately, and you see Vector's full output in the terminal.
+This is useful when iterating on either config: restart picks up changes immediately, and you see Vector's full output in the terminal.

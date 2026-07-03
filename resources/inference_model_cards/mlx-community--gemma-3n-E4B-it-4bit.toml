@@ -9,6 +9,15 @@ quantization = "4bit"
 base_model = "Gemma 3n E4B"
 capabilities = ["text", "vision"]
 
+# Gemma 3n is Google's on-device omni-modal model (the HF repo tags ASR /
+# audio-text-to-text / video-text-to-text alongside image-text-to-text). The
+# model can take audio, but Skulk advertises only what the API and runner serve
+# today: text + image. Audio input is NOT exposed (the chat-completions request
+# schema and the MLX runner don't accept it), so it is omitted from capabilities
+# rather than advertised and rejected.
+[modalities]
+supports_native_multimodal = true
+
 [vision]
 image_token_id = 262145
 model_type = "gemma3n"

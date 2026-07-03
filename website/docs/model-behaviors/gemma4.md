@@ -99,9 +99,6 @@ This causes the runner to log:
 - whether the first prefill token was ever produced
 - repeated Python stack traces while the stuck phase is still active
 
-The older `SKULK_MLX_HANG_DEBUG` names still work as compatibility fallbacks, but
-new scripts and docs should prefer the `SKULK_` prefix.
-
 For distributed Gemma 4 pipeline warmup specifically, Skulk now forces a
 minimal synthetic prompt by design:
 

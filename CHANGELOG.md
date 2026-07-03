@@ -7,6 +7,127 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-07-01
+
+### Added
+
+- **Complete, capability-accurate model cards for the whole store.** Every model in
+  the store now has a card, and every committed card is complete against the current
+  `ModelCard` schema with each property derived from the model's real capabilities
+  (structural fields from the HF `config.json` via `fetch_from_hf`, capability fields
+  from the HF model card). Added cards for previously-uncarded store models
+  (Qwen3-4B / Qwen3-4B-Instruct-2507 / Qwen3.6-35B-A3B, Devstral-Small-2-24B,
+  Moonlight-16B-A3B, and the GGUF serving models gpt-oss-20b/120b, Qwen2.5-7B,
+  Llama-3.3-70B, Qwen3-Coder-30B, gemma-4-31B, Llama-3.2-1B, Qwen2-VL-2B). Audited
+  and corrected the existing cards, including capability fixes grounded in the real
+  models: Step-3.5-Flash is always-reasoning (no thinking toggle) and several Qwen
+  VLMs were missing their vision section. Cards advertise only what the serving
+  engine can actually deliver, so served-MTP GGUF cards stay text-only (the
+  llama_server engine has no vision projector) and the gemma-4 GGUF card keeps its
+  reasoning even though the in-process llama_cpp path does not yet split it.
+
+- **Dashboard renders AMD Ryzen AI Max nodes as their own device.** The topology
+  graph and cluster cards now draw a dedicated AMD Strix Halo glyph (detected from
+  the SoC/chip string) instead of a generic node or a Mac, and AMD APU nodes report
+  their full unified memory (the VRAM carve-out plus system RAM) the same way Macs
+  report unified memory, rather than only the system-RAM slice.
+- **Running-instance cards show every placement node and its status.** A multi-node
+  instance card now lists all of its nodes with per-node state (ready, loading,
+  failed, and so on) instead of a single node, so a lagging node is obvious during
+  load.
+- **`GET /v1/models` reports a model's speculative-decoding companions.** Each
+  entry's `runtime` section now includes `mtp_sidecar_repo`, `assistant_model_repo`,
+  and `served_spec_draft_repo` when the card declares them, so clients can tell a
+  placeable model apart from its drafter or MTP-head companion.
+
+- **Store-delete now evicts worker-staged copies cluster-wide (#427).** Deleting a
+  model from the store (`DELETE /store/models/{model_id}`) previously removed only
+  the store host's canonical copy; workers cache their own staged shards
+  independently, so the deleted model lingered on worker disk until LRU pressure.
+  The API now broadcasts a fleet-wide `EvictStagedModel` command after a successful
+  store-delete: every node drops its local staged copy and the model's download
+  entries are cleared from cluster `State`, so the planner re-stages on a future
+  placement instead of loading deleted files.
+
+- **Served-backend engine (`llama_server`) with native MTP speculative decoding.**
+  A new inference-engine class that launches an external `llama-server` subprocess
+  and proxies its OpenAI HTTP API, coexisting with the in-process `mlx` and
+  `llama_cpp` runners. This unlocks llama.cpp's native multi-token-prediction
+  (`--spec-type draft-mtp`) for models that ship MTP heads (Qwen3.6, DeepSeek,
+  GLM, Kimi, Nemotron), which is not reachable from the in-process Python binding.
+  Routed per model via a card's `compatible_backends` and configured with the
+  `served_spec_type` / `served_spec_n_max` runtime fields; enabled on a node by
+  pointing `SKULK_LLAMA_SERVER_BIN` at a `llama-server` binary. Measured 2.19x on a
+  dense Qwen3.6-27B on a Strix Halo (Radeon/Vulkan).
+
+### Changed
+
+- **The placement modal only offers options that apply to the model.** Networking
+  (MLX Ring / Jaccl) is hidden for single-node GGUF models (the llama.cpp and served
+  engines have no MLX transport to pick); the node selector (exclusion pills and the
+  count slider) appears only when more than one node can host the model; and nodes
+  that cannot run the model (wrong engine or hardware) are shown disabled instead of
+  clickable.
+- **The model store no longer presents drafters and MTP-head sidecars as launchable
+  models.** Speculative-decoding companion repos (a separate draft model, or an MTP
+  prediction-head sidecar) now carry a "Drafter" or "Sidecar" badge and have no
+  launch, placement, or optimize actions, because they are downloaded and loaded
+  automatically with their parent model. The OptiQ (mlx-optiq) optimize action is
+  also hidden for GGUF models, since it only applies to MLX weights.
+- **The bundled Qwen3.6-27B MTP card now points at `unsloth/Qwen3.6-27B-MTP-GGUF`**
+  instead of a small community mirror that HuggingFace throttled to roughly 1 MB/s.
+  The 17 GB weights previously never finished downloading into the store (they were
+  re-attempted from near-scratch on every placement); the well-provisioned unsloth
+  repo downloads and finalizes in a few minutes so the store copy persists and
+  re-stages instantly. Same base model, same native multi-token-prediction heads,
+  same `--spec-type draft-mtp` path.
+
+### Fixed
+
+- **Correct engine labels and device glyphs across the dashboard.** Served
+  (llama.cpp / `llama-server`) instances were mislabeled "Pipeline / MLX Ring" and
+  were missing their MTP badge on the instance card, the model-store card, and the
+  store's ready-hover card. The engine is now derived from the model card's backends,
+  so GGUF and served models read as "llama.cpp" and draw the correct AMD device glyph.
+
+- **Large model downloads no longer time out mid-transfer.** The download session's
+  `long` timeout profile applied a fixed 30-minute `total` cap to the entire file
+  transfer, so a multi-GB GGUF that was downloading fine failed partway through
+  once it outlasted the cap (a 17 GB model at ~7.5 MB/s hit the cap at ~80%,
+  surfacing only as an empty-string `TimeoutError`; larger models like the 62 GB
+  gpt-oss-120B GGUF would fail sooner in percentage terms). Large file-body
+  downloads now have no `total` cap and are instead policed by `sock_read` /
+  `sock_connect` inactivity timeouts: a genuinely stalled connection still times
+  out and retries (resuming from the `.partial`), while a slow-but-alive transfer
+  of any size completes. The worker-side wait for a store download
+  (`request_and_wait_for_download`) is likewise now progress-aware: its timeout
+  is a stall timeout (max time without progress), not a total cap, so the worker
+  no longer gives up on a live, still-progressing multi-hour download and lets
+  the master tear the placement down. Store download failures also now record the
+  exception type instead of an empty error string.
+
+- **Store re-download after a delete no longer silently no-ops.** `ModelStore`
+  caches per-model download status in memory; `delete_model` removed the registry
+  entry and on-disk files but left a stale `"complete"` status behind, so a later
+  `request_download` short-circuited on it and never re-fetched. The model would
+  then appear "complete" while absent from the registry and disk, and a worker
+  staging it failed with "not found in store". `delete_model` now clears the
+  cached status, and `request_download` treats a cached `"complete"` as stale
+  whenever the model is no longer actually in the store (a backstop for any cause
+  of files-gone, including out-of-band removal). This unblocks re-provisioning a
+  model after a store-delete (e.g. the download/delete/re-download cycle the test
+  harness drives for served-MTP GGUFs).
+
+### Documentation
+
+- **Comprehensive docs correctness and beginner-readability sweep.** Corrected the
+  AMD/Strix Halo docs to state the inference backend is llama.cpp Vulkan (Mesa RADV),
+  not ROCm (ROCm is optional, used only for the `rocminfo` diagnostic); fixed a
+  fabricated native-MTP model list and a macOS-only log-path claim; added in-site
+  install and first-run commands so a newcomer can reach a running node without
+  leaving the docs; removed internal roadmap, PR, and incident lore from user-facing
+  pages; and removed em dashes from the docs prose.
+
 ## [1.3.0] - 2026-06-25
 
 This release makes Skulk a **heterogeneous** inference fabric: alongside Apple
