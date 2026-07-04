@@ -12,66 +12,29 @@ This setup is validated on:
 | Component         | Validated version                                   |
 | ----------------- | --------------------------------------------------- |
 | Hardware          | AMD Ryzen AI Max+ 395 w/ Radeon 8060S (gfx1151)     |
-| OS                | Ubuntu 26.04 LTS (kernel 7.x)                        |
-| Vulkan driver     | Mesa RADV 26.x, Vulkan 1.4, `STRIX_HALO`            |
-| Build toolchain   | cmake 4.x, gcc/g++ 15.x, glslc (shaderc)            |
-| Python / uv       | uv-managed Python, uv 0.11+                          |
-| llama.cpp         | Vulkan build (b9820+), for native MTP (`llama-server`) |
+| OS                | Ubuntu 26.04 LTS (kernel 7.0)                       |
+| ROCm              | 6.4.0                                                |
+| Vulkan driver     | RADV (Mesa), `STRIX_HALO`                            |
+| Python / uv       | Python 3.13, uv 0.11                                 |
+| llama-cpp-python  | 0.3.30, built with the Vulkan backend               |
 
-> The GPU compute path here is **Vulkan (Mesa RADV)**, not the ROCm/HIP backend.
+> The GPU compute path here is **Vulkan (RADV)**, not the ROCm/HIP backend.
 > On gfx1151 the Vulkan backend is the reliable, well-supported route for
-> llama.cpp today, and the served `llama-server` binary links `libvulkan`, not
-> `libamdhip`. On Ubuntu 26.04 the entire Vulkan path is distro-native
-> (main + universe), so a Skulk node needs **no third-party AMD/ROCm apt repo**.
-> ROCm is optional here, useful only for the `rocminfo` diagnostic (also in
-> Ubuntu universe). See `website/docs/amd-strix-halo-nodes.md` for the rationale
-> and benchmarks.
-
-## Install the dependencies (one script)
-
-On a fresh Ubuntu box, install everything the node needs *below* the Skulk repo
-(GPU Vulkan stack, build toolchain, `uv`, GPU device groups) with the bundled
-installer. It is idempotent and installs only what is missing:
-
-```bash
-# System deps only (Vulkan stack + toolchain + uv + GPU groups):
-deployment/rocm/install-deps.sh
-
-# Also build the llama-server binary that native MTP needs, and set up the
-# Skulk uv env + the Vulkan llama-cpp-python wheel in one pass:
-deployment/rocm/install-deps.sh --with-llama-server --with-skulk-env
-
-# Verify an existing box without installing anything:
-deployment/rocm/install-deps.sh --check
-```
-
-`--with-llama-server` clones and builds llama.cpp with Vulkan and prints the
-`SKULK_LLAMA_SERVER_BIN` path to set (that binary is what unlocks speculative
-decoding on the AMD node; see the MTP section in the docs). If you add yourself
-to the `render` / `video` GPU groups for the first time, log out and back in
-before starting Skulk. The manual steps below are what the script automates, for
-reference or a partial install.
+> llama.cpp today; ROCm is installed for the runtime/driver stack. See
+> `website/docs/amd-strix-halo-nodes.md` for the rationale and benchmarks.
 
 ## What a Skulk node needs on this box
 
-1. **A working GPU compute stack**: a Vulkan driver (Mesa RADV) plus the Vulkan
-   loader and tools. ROCm is optional (only for `rocminfo`), not needed for
-   inference. All distro-native on Ubuntu 26.04.
-2. **A build toolchain**: `build-essential`, `cmake`, `git`, and `glslc`
-   (shader compiler) to build the Rust bindings and the Vulkan llama.cpp.
-3. **The Skulk repo + its `uv` environment** (the Rust bindings build via
+1. **A working GPU compute stack**: ROCm runtime + a Vulkan driver (RADV).
+2. **The Skulk repo + its `uv` environment** (the Rust bindings build via
    `uv sync`; no MLX is required or used on a non-Mac node).
-4. **`llama-cpp-python` built with Vulkan**: built from source once (a plain
+3. **`llama-cpp-python` built with Vulkan**: built from source once (a plain
    install or `uv sync` would otherwise leave/replace it with a CPU-only wheel).
    The service entrypoint runs `uv sync --inexact` on a GPU node so a routine sync
    does not prune this wheel; rebuild it by hand only on a llama.cpp version bump.
-5. **A `llama-server` binary (for native MTP)**: speculative decoding on the AMD
-   node runs an external Vulkan `llama-server` that the worker supervises and
-   proxies. Only needed on nodes that serve MTP models; pointed to by
-   `SKULK_LLAMA_SERVER_BIN`. Built by `install-deps.sh --with-llama-server`.
-6. **A launcher** that exports the node's cluster env and starts skulk detached
+4. **A launcher** that exports the node's cluster env and starts skulk detached
    so it survives an SSH disconnect (Linux has no launchd; see
-   `launch-skulk.sh.example`), or the managed systemd user service (below).
+   `launch-skulk.sh.example`).
 
 ## Quick start
 
