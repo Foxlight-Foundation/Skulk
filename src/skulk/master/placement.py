@@ -423,19 +423,40 @@ def place_instance(
         node_vram=node_vram,
     )
     if rpc_candidates:
+        rpc_vram_map: Mapping[NodeId, Memory] = (
+            node_vram_strict if node_vram_strict is not None else node_vram
+        ) or {}
+        # RPC admission is VRAM-carve-only by contract (llama.cpp's RPC split
+        # never touches the UMA/GTT spill). A cycle node missing from the
+        # strict map (telemetry warm-up: NodeResources arrived, node_system's
+        # accelerator reading not yet) must surface as info-pending, NOT fall
+        # back to system RAM inside the memory filter — that would over-admit
+        # a pooled model that llama-server then fails to load, and the RPC
+        # path deliberately bypasses the worker's local fit guard.
+        vram_pending_nodes = {
+            node_id
+            for cycle in rpc_candidates
+            for node_id in cycle.node_ids
+            if node_id not in rpc_vram_map
+        }
+        vram_known_rpc_candidates = [
+            cycle
+            for cycle in rpc_candidates
+            if all(node_id in rpc_vram_map for node_id in cycle.node_ids)
+        ]
         rpc_fit, rpc_diagnostics = filter_cycles_by_memory(
-            rpc_candidates,
+            vram_known_rpc_candidates,
             node_memory,
             command.model_card,
             # llama.cpp splits the pooled model proportional to device memory,
             # which is exactly the Pipeline-proportional fit estimate.
             Sharding.Pipeline,
-            node_vram=node_vram_strict if node_vram_strict is not None else node_vram,
+            node_vram=rpc_vram_map,
         )
         cycles_with_sufficient_memory = cycles_with_sufficient_memory + rpc_fit
         memory_diagnostics.pending_info_node_ids.extend(
             node_id
-            for node_id in rpc_diagnostics.pending_info_node_ids
+            for node_id in (*rpc_diagnostics.pending_info_node_ids, *sorted(vram_pending_nodes))
             if node_id not in memory_diagnostics.pending_info_node_ids
         )
         memory_diagnostics.rejection_reasons.extend(

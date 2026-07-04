@@ -11,6 +11,7 @@ import pytest
 
 from skulk.master.placement import (
     PlacementError,
+    PlacementInfoPendingError,
     _cycle_common_multi_node_engines,
     place_instance,
 )
@@ -254,6 +255,36 @@ def test_link_local_only_path_fails_placement() -> None:
             node_resources=resources,
             node_vram=node_vram,
             node_vram_strict=node_vram,
+        )
+
+
+def test_missing_strict_vram_is_info_pending_not_ram_fallback() -> None:
+    """A node in an RPC cycle with no strict-VRAM entry (telemetry warm-up:
+    NodeResources arrived, node_system's accelerator reading not yet) must
+    surface as info-pending, not fall back to system RAM inside the memory
+    filter — RAM fallback would over-admit a pooled model that llama-server
+    then fails to load, and the RPC path bypasses the worker fit guard."""
+    topology, big, small = _amd_pair()
+    node_memory = {
+        big: create_node_memory(Memory.from_gb(64).in_bytes),
+        # Plenty of system RAM: the RAM fallback WOULD admit this cycle.
+        small: create_node_memory(Memory.from_gb(64).in_bytes),
+    }
+    node_network = {big: create_node_network(), small: create_node_network()}
+    resources = {big: _amd_resources(), small: _amd_resources()}
+    # The small node is missing from the strict map entirely.
+    node_vram_strict = {big: Memory.from_gb(57.6)}
+    command = _command(_gguf_card(storage_gb=70.0), min_nodes=2)
+    with pytest.raises(PlacementInfoPendingError, match=str(small)):
+        place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources=resources,
+            node_vram={big: Memory.from_gb(57.6), small: Memory.from_gb(28.8)},
+            node_vram_strict=node_vram_strict,
         )
 
 
