@@ -15,6 +15,12 @@ class InstanceId(Id):
 class InstanceMeta(str, Enum):
     MlxRing = "MlxRing"
     MlxJaccl = "MlxJaccl"
+    # Multi-node llama.cpp via the served engine's RPC backend (#328): one
+    # driver runs llama-server --rpc, donors run ggml-rpc-server. Requesting it
+    # explicitly is optional -- placement resolves a multi-node GGUF cycle to
+    # this shape automatically when llama_server is the cycle's only common
+    # multi-node engine.
+    LlamaRpc = "LlamaRpc"
 
 
 class BaseInstance(TaggedModel):
@@ -67,8 +73,32 @@ class MlxJacclInstance(BaseInstance):
     jaccl_coordinators: dict[NodeId, str]
 
 
+class LlamaRpcInstance(BaseInstance):
+    """Multi-node llama.cpp placement: one driver plus RPC memory donors (#328).
+
+    The driver node runs the served engine (``llama-server``) with
+    ``--rpc <endpoints>`` and holds the model file; each donor node runs
+    ``ggml-rpc-server`` bound to its stamped endpoint and lends GPU memory.
+    llama.cpp splits weights/KV across the pooled devices proportional to
+    their free memory, so the shard assignments carry no meaningful layer
+    ranges (the driver's shard nominally spans all layers; donors carry the
+    degenerate ``RpcDonorShardMetadata``). Endpoints are chosen at placement
+    time from the observed connectivity between the pair, preferring the
+    fastest interconnect (Thunderbolt first, #265), and must be static
+    routable addresses (never link-local; see the multi-node GGUF design
+    record's asymmetric-routing trap).
+    """
+
+    driver_node: NodeId
+    """The node that runs llama-server and reads the model file."""
+
+    donor_endpoints: dict[NodeId, str]
+    """Per-donor ``ip:port`` the donor's ggml-rpc-server binds and the driver
+    dials, keyed by donor node id."""
+
+
 # TODO: Single node instance
-Instance = MlxRingInstance | MlxJacclInstance
+Instance = MlxRingInstance | MlxJacclInstance | LlamaRpcInstance
 
 
 class BoundInstance(CamelCaseModel):

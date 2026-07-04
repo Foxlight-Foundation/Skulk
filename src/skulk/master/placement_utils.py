@@ -35,6 +35,7 @@ from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import (
     CfgShardMetadata,
     PipelineShardMetadata,
+    RpcDonorShardMetadata,
     Sharding,
     ShardMetadata,
     TensorShardMetadata,
@@ -97,6 +98,7 @@ def usable_vram_by_node(
     node_system: Mapping[NodeId, SystemPerformanceProfile],
     node_resources: Mapping[NodeId, NodeResources] | None = None,
     node_memory: Mapping[NodeId, MemoryUsage] | None = None,
+    include_uma_spill: bool = True,
 ) -> dict[NodeId, Memory]:
     """Per-node usable GPU memory for placement, keyed by node.
 
@@ -126,6 +128,14 @@ def usable_vram_by_node(
       falls back to the discrete path. A discrete GPU also exposes a GTT total
       (often ~= VRAM), so requiring GTT to cover all of system RAM is what keeps
       it off this path.
+
+    ``include_uma_spill=False`` disables the UMA/GTT addition and returns the
+    working-set-capped VRAM carve for every node. Multi-node RPC placements
+    (#328) admit against this strict figure: measured on the Strix pair,
+    llama.cpp's RPC split allocates from the VRAM carve only (GTT used stays 0
+    with the model resident), so admitting a pooled model against the UMA
+    formula would over-admit and crash llama-server at load. Single-node
+    placements keep the UMA spill (proven: gpt-oss-120b on one Strix).
     """
     node_memory = node_memory or {}
     usable: dict[NodeId, Memory] = {}
@@ -154,7 +164,8 @@ def usable_vram_by_node(
         # discrete GPU (gtt ~= vram < system RAM) on the conservative VRAM-only
         # path.
         if (
-            gtt_total is not None
+            include_uma_spill
+            and gtt_total is not None
             and gtt_total > total
             and memory is not None
             and gtt_total >= memory.ram_total.in_bytes
@@ -615,6 +626,106 @@ def get_shard_assignments(
                 model_card=model_card,
                 cycle=cycle,
             )
+
+
+def get_shard_assignments_for_llama_rpc(
+    model_card: ModelCard,
+    cycle: Cycle,
+    driver_node: NodeId,
+) -> ShardAssignments:
+    """Shard assignments for a driver-plus-donors llama.cpp RPC placement (#328).
+
+    The driver (rank 0) gets a shard nominally spanning ALL layers: llama.cpp
+    itself splits weights/KV across the pooled local+remote devices, so the
+    range is bookkeeping for Skulk (download targeting, engine dispatch, memory
+    accounting), not a layer instruction. Donors get the degenerate
+    :class:`RpcDonorShardMetadata` (no layers) so the one-runner-per-node
+    ``ShardAssignments`` invariant holds and the worker can dispatch a donor
+    runner off the shard type.
+
+    Args:
+        model_card: The model to serve; the driver reads its GGUF from disk.
+        cycle: The selected placement cycle; must contain ``driver_node``.
+        driver_node: The node that runs llama-server and holds the model file.
+
+    Returns:
+        Assignments with one runner per node: a pipeline shard on the driver,
+        donor shards elsewhere.
+    """
+    _validate_cycle(cycle)
+    if driver_node not in cycle.node_ids:
+        raise ValueError(
+            f"Driver node {driver_node} is not part of the selected cycle"
+        )
+    world_size = len(cycle.node_ids)
+    runner_to_shard: dict[RunnerId, ShardMetadata] = {}
+    node_to_runner: dict[NodeId, RunnerId] = {}
+    donor_rank = 1
+    for node_id in cycle.node_ids:
+        if node_id == driver_node:
+            shard: ShardMetadata = PipelineShardMetadata(
+                model_card=model_card,
+                device_rank=0,
+                world_size=world_size,
+                start_layer=0,
+                end_layer=model_card.n_layers,
+                n_layers=model_card.n_layers,
+            )
+        else:
+            shard = RpcDonorShardMetadata(
+                model_card=model_card,
+                device_rank=donor_rank,
+                world_size=world_size,
+                start_layer=0,
+                end_layer=0,
+                n_layers=model_card.n_layers,
+            )
+            donor_rank += 1
+        runner_id = RunnerId()
+        runner_to_shard[runner_id] = shard
+        node_to_runner[node_id] = runner_id
+    return ShardAssignments(
+        model_id=model_card.model_id,
+        runner_to_shard=runner_to_shard,
+        node_to_runner=node_to_runner,
+    )
+
+
+def get_llama_rpc_donor_endpoints(
+    selected_cycle: Cycle,
+    driver_node: NodeId,
+    cycle_digraph: Topology,
+    node_network: Mapping[NodeId, NodeNetworkInfo],
+    donor_ports: Mapping[NodeId, int],
+) -> dict[NodeId, str]:
+    """Choose the ``ip:port`` each RPC donor binds and the driver dials (#328).
+
+    For every non-driver node in the cycle, pick the donor-side address the
+    driver can reach from the OBSERVED libp2p connections between the pair,
+    ranked by the donor's gossiped interface type (Thunderbolt first, VPN last;
+    same prioritiser as the MLX ring, #265). The chosen address is stamped on
+    the instance: the donor's ggml-rpc-server binds exactly this address (never
+    0.0.0.0; the fabric is trusted but endpoints stay interface-scoped) and the
+    driver's ``--rpc`` flag dials it.
+
+    Raises:
+        ValueError: When no observed connection exists between the driver and a
+            donor (the pair cannot pool memory without a path).
+    """
+    endpoints: dict[NodeId, str] = {}
+    for node_id in selected_cycle.node_ids:
+        if node_id == driver_node:
+            continue
+        donor_ip = _find_ip_prioritised(
+            driver_node, node_id, cycle_digraph, node_network, ring=True
+        )
+        if donor_ip is None:
+            raise ValueError(
+                "Multi-node llama.cpp (RPC) requires connectivity between the "
+                f"driver and every donor; no path from {driver_node} to {node_id}"
+            )
+        endpoints[node_id] = f"{donor_ip}:{donor_ports[node_id]}"
+    return endpoints
 
 
 def get_mlx_jaccl_devices_matrix(

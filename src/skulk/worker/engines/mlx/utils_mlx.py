@@ -62,12 +62,14 @@ from skulk.shared.types.tasks import TaskId, TextGeneration
 from skulk.shared.types.text_generation import TextGenerationTaskParams
 from skulk.shared.types.worker.instances import (
     BoundInstance,
+    LlamaRpcInstance,
     MlxJacclInstance,
     MlxRingInstance,
 )
 from skulk.shared.types.worker.shards import (
     CfgShardMetadata,
     PipelineShardMetadata,
+    RpcDonorShardMetadata,
     ShardMetadata,
     TensorShardMetadata,
 )
@@ -650,6 +652,17 @@ def mlx_distributed_init(
                 os.environ["MLX_JACCL_COORDINATOR"] = jaccl_coordinator
                 group = mx.distributed.init(backend="jaccl", strict=True)
 
+            case LlamaRpcInstance():
+                # Multi-node llama.cpp (#328) never reaches the MLX runner:
+                # its driver/donor runners are dispatched off the shard type in
+                # bootstrap. Fail loud rather than wedging in a ring init that
+                # cannot complete.
+                raise RuntimeError(
+                    "LlamaRpcInstance cannot initialize an MLX distributed "
+                    "group; it is served by the llama_server driver and RPC "
+                    "donor runners"
+                )
+
         logger.info(f"Rank {rank} mlx distributed initialization complete")
 
         return group
@@ -893,6 +906,11 @@ def shard_and_load(
             raise ValueError(
                 "CfgShardMetadata is not supported for text model loading - "
                 "this metadata type is only for image generation models"
+            )
+        case RpcDonorShardMetadata():
+            raise ValueError(
+                "RpcDonorShardMetadata never loads a model - an RPC donor "
+                "(#328) serves ggml-rpc-server and holds no layers"
             )
 
     # TODO: Do we need this?

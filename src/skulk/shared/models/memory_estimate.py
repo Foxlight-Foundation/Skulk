@@ -24,6 +24,7 @@ from skulk.shared.types.worker.runners import ShardAssignments
 from skulk.shared.types.worker.shards import (
     CfgShardMetadata,
     PipelineShardMetadata,
+    RpcDonorShardMetadata,
     ShardMetadata,
     TensorShardMetadata,
 )
@@ -196,6 +197,13 @@ def shard_fraction_of_model(shard: ShardMetadata) -> float | None:
                 return None
             return (shard.end_layer - shard.start_layer) / shard.n_layers
         case CfgShardMetadata():
+            return None
+        case RpcDonorShardMetadata():
+            # An RPC memory donor (#328) holds no Skulk-assigned share:
+            # llama.cpp splits the pooled model across the devices itself, so
+            # per-node fraction accounting does not apply. None makes the
+            # context-ceiling stamp fall back to the card's advertised limit
+            # for RPC instances.
             return None
 
 

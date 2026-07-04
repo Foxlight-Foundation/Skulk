@@ -7,13 +7,16 @@ from typing import Sequence
 from skulk.master.placement_utils import (
     Cycle,
     filter_cycles_by_memory,
+    get_llama_rpc_donor_endpoints,
     get_mlx_jaccl_coordinators,
     get_mlx_jaccl_devices_matrix,
     get_mlx_ring_hosts_by_node,
     get_shard_assignments,
+    get_shard_assignments_for_llama_rpc,
     get_smallest_cycles,
 )
 from skulk.shared.backends import (
+    EngineType,
     engine_of,
     engine_supports_multi_node,
     resolve_node_backend,
@@ -53,6 +56,7 @@ from skulk.shared.types.worker.instances import (
     Instance,
     InstanceId,
     InstanceMeta,
+    LlamaRpcInstance,
     MlxJacclInstance,
     MlxRingInstance,
 )
@@ -167,6 +171,64 @@ def _cycle_backend_preference_score(
     return 0
 
 
+def _cycle_common_multi_node_engines(
+    cycle: Cycle,
+    card_backends: AbstractSet[str],
+    node_resources: Mapping[NodeId, NodeResources],
+) -> set[EngineType]:
+    """Multi-node-capable engines advertised by EVERY node in the cycle.
+
+    A multi-node placement runs ONE engine across the whole cycle, so a cycle
+    is only viable for a card when some single engine is both (a) present in
+    the intersection of the card's ``compatible_backends`` with every node's
+    advertised backends and (b) multi-node capable. Checking per node
+    independently instead (the pre-#414 behavior) admits a mixed cycle for a
+    hybrid card — e.g. an MLX-only Mac plus a llama.cpp-only AMD node, two
+    engines that cannot form one ring.
+
+    A node with no resources entry yet (gossip warming up) is treated as
+    advertising the ``NodeResources`` default (``{"mlx"}``), matching the
+    optimistic eligibility default elsewhere: MLX cards keep placing during
+    warmup, while engine-specific multi-node shapes (llama_server RPC) wait
+    until the node's real advertisement arrives.
+    """
+    common: set[EngineType] | None = None
+    for node_id in cycle.node_ids:
+        resources = node_resources.get(node_id)
+        backends = (
+            resources.backends if resources is not None else frozenset({"mlx"})
+        )
+        node_engines: set[EngineType] = {
+            engine
+            for tag in backends & card_backends
+            if (engine := engine_of(tag)) is not None
+        }
+        common = node_engines if common is None else (common & node_engines)
+        if not common:
+            return set()
+    return {
+        engine for engine in (common or set()) if engine_supports_multi_node(engine)
+    }
+
+
+def _is_llama_rpc_cycle(
+    cycle: Cycle,
+    card_backends: AbstractSet[str],
+    node_resources: Mapping[NodeId, NodeResources],
+) -> bool:
+    """Whether a multi-node cycle would serve this card via the RPC shape (#328).
+
+    True when ``llama_server`` is a common multi-node engine of the cycle and
+    ``mlx`` is not: the proven MLX shapes keep priority whenever they are an
+    option (in practice the sets never overlap, since no node advertises both).
+    Single-node cycles are never RPC (the served engine runs standalone there).
+    """
+    if len(cycle) <= 1:
+        return False
+    engines = _cycle_common_multi_node_engines(cycle, card_backends, node_resources)
+    return "llama_server" in engines and "mlx" not in engines
+
+
 class PlacementError(ValueError):
     """Placement is impossible for the requested command and current state.
 
@@ -199,6 +261,7 @@ def place_instance(
     excluded_nodes: set[NodeId] | None = None,
     node_resources: Mapping[NodeId, NodeResources] | None = None,
     node_vram: Mapping[NodeId, Memory] | None = None,
+    node_vram_strict: Mapping[NodeId, Memory] | None = None,
 ) -> dict[InstanceId, Instance]:
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
@@ -273,30 +336,55 @@ def place_instance(
                     f"({sorted(compatible_backends)})."
                 )
 
-    # Single-node engine guard. Some engines cannot shard a model across nodes
-    # (today: llama.cpp -- single-node only, its multi-node RPC backend is not yet
-    # wired into the runner, which asserts world_size == 1; see #328). A
-    # multi-node placement of a model whose only compatible engine is single-node
-    # would download and then crash at runner startup. Reject it up front: when
-    # none of the card's compatible backends resolve to a multi-node-capable
-    # engine, restrict candidates to single-node cycles. A card that also allows a
-    # multi-node engine (e.g. MLX) can still place multi-node via that engine, so
-    # this only bites models whose every engine is single-node. The capability
-    # lives in `engine_supports_multi_node`; flipping llama.cpp there (once its
-    # RPC runner lands) lets such models place multi-node with no change here.
+    # Common-engine cycle rule. A multi-node placement runs ONE engine across
+    # the whole cycle, so a multi-node cycle is admissible only when some
+    # single engine is advertised by every node (within the card's
+    # compatible_backends) AND that engine can shard across nodes
+    # (`engine_supports_multi_node`: mlx via ring/jaccl, llama_server via the
+    # RPC driver+donors shape, #328). This subsumes two prior checks in one
+    # place: the single-node engine guard (a card whose only engine is the
+    # in-process llama.cpp gets no multi-node cycles, since llama_cpp is never
+    # multi-node capable) and the #414 mixed-engine hole (a hybrid card no
+    # longer admits a cycle mixing an MLX-only node with a llama.cpp-only
+    # node, which the per-node any() check used to allow). Single-node cycles
+    # are untouched -- the per-node participation/backend filter above already
+    # covers them. Cards with no declared backends (legacy) skip the rule.
+    resolved_node_resources = node_resources or {}
     card_backends = command.model_card.placement.compatible_backends
-    has_multi_node_engine = any(
-        engine_supports_multi_node(engine)
-        for tag in card_backends
-        if (engine := engine_of(tag)) is not None
-    )
-    if card_backends and not has_multi_node_engine:
-        candidate_cycles = [cycle for cycle in candidate_cycles if len(cycle) == 1]
+    if card_backends:
+        candidate_cycles = [
+            cycle
+            for cycle in candidate_cycles
+            if len(cycle) == 1
+            or _cycle_common_multi_node_engines(
+                cycle, card_backends, resolved_node_resources
+            )
+        ]
         if not candidate_cycles:
             raise PlacementError(
-                "This model's engine is single-node only, but no single-node "
-                "cycle is available/eligible for it. Place it on one node, or "
-                "free a node that advertises a compatible backend."
+                "No candidate cycle can serve this model: multi-node placement "
+                "requires one engine common to every node in the cycle that "
+                "supports sharding (MLX, or llama_server via RPC), and no "
+                "single-node cycle is available/eligible. Place it on one "
+                "node, or free a node that advertises a compatible backend."
+            )
+
+    # The RPC shape is Pipeline-shaped by construction (llama.cpp layer-splits
+    # across the pooled devices); a Tensor request cannot be honored on an RPC
+    # cycle, so those cycles drop out of a Tensor placement's candidates.
+    if command.sharding == Sharding.Tensor:
+        candidate_cycles = [
+            cycle
+            for cycle in candidate_cycles
+            if not _is_llama_rpc_cycle(
+                cycle, card_backends, resolved_node_resources
+            )
+        ]
+        if not candidate_cycles:
+            raise PlacementError(
+                "Requested Tensor sharding, but every candidate cycle would "
+                "serve this model via multi-node llama.cpp (RPC), which is "
+                "pipeline-only."
             )
 
     # Filter to cycles containing all required nodes (subset matching)
@@ -311,13 +399,48 @@ def place_instance(
                 "No candidate cycle contains all required nodes "
                 f"[{', '.join(str(n) for n in required_nodes)}]."
             )
+    # Memory admission. RPC cycles (multi-node llama.cpp) admit against the
+    # strict per-node VRAM carve when the caller supplies it: measured on the
+    # Strix pair, llama.cpp's RPC split allocates from the VRAM carve only
+    # (never the UMA/GTT spill), so the UMA-inflated figure would over-admit a
+    # pooled model that llama-server then fails to load. Everything else keeps
+    # the standard figure (single-node UMA spill stays proven and admitted).
+    standard_candidates = [
+        cycle
+        for cycle in candidate_cycles
+        if not _is_llama_rpc_cycle(cycle, card_backends, resolved_node_resources)
+    ]
+    rpc_candidates = [
+        cycle
+        for cycle in candidate_cycles
+        if _is_llama_rpc_cycle(cycle, card_backends, resolved_node_resources)
+    ]
     cycles_with_sufficient_memory, memory_diagnostics = filter_cycles_by_memory(
-        candidate_cycles,
+        standard_candidates,
         node_memory,
         command.model_card,
         command.sharding,
         node_vram=node_vram,
     )
+    if rpc_candidates:
+        rpc_fit, rpc_diagnostics = filter_cycles_by_memory(
+            rpc_candidates,
+            node_memory,
+            command.model_card,
+            # llama.cpp splits the pooled model proportional to device memory,
+            # which is exactly the Pipeline-proportional fit estimate.
+            Sharding.Pipeline,
+            node_vram=node_vram_strict if node_vram_strict is not None else node_vram,
+        )
+        cycles_with_sufficient_memory = cycles_with_sufficient_memory + rpc_fit
+        memory_diagnostics.pending_info_node_ids.extend(
+            node_id
+            for node_id in rpc_diagnostics.pending_info_node_ids
+            if node_id not in memory_diagnostics.pending_info_node_ids
+        )
+        memory_diagnostics.rejection_reasons.extend(
+            rpc_diagnostics.rejection_reasons
+        )
     if len(cycles_with_sufficient_memory) == 0:
         if memory_diagnostics.pending_info_node_ids:
             raise PlacementInfoPendingError(
@@ -391,7 +514,6 @@ def place_instance(
     # dominates the download/memory tie-breakers because serving a model on its
     # faster backend is the whole point of the preference; among cycles with the
     # same preference rank, download locality then free memory still decide.
-    resolved_node_resources = node_resources or {}
     backend_preference = command.model_card.placement.backend_preference
     selected_cycle = max(
         candidate_cycles,
@@ -414,9 +536,45 @@ def place_instance(
         command.instance_meta = InstanceMeta.MlxRing
         command.sharding = Sharding.Pipeline
 
-    shard_assignments = get_shard_assignments(
-        command.model_card, selected_cycle, command.sharding, node_memory, node_vram
+    # The selected cycle's engine decides the instance shape. A multi-node
+    # GGUF cycle (llama_server common, mlx not) resolves to the RPC
+    # driver-plus-donors shape regardless of the requested instance_meta,
+    # mirroring the single-node coercion above: instance_meta is an MLX-shape
+    # vocabulary and the served engine has exactly one multi-node form.
+    selected_is_rpc = _is_llama_rpc_cycle(
+        selected_cycle, card_backends, resolved_node_resources
     )
+    if command.instance_meta == InstanceMeta.LlamaRpc and not selected_is_rpc:
+        raise PlacementError(
+            "Requested a multi-node llama.cpp (RPC) placement, but the "
+            "selected cycle does not serve this model via llama_server on "
+            "every node."
+        )
+
+    driver_node: NodeId | None = None
+    if selected_is_rpc:
+        # Driver = the node with the largest usable VRAM (most layers land
+        # locally, minimizing cross-network boundaries), tie-broken by which
+        # node already has the model on disk (only the driver reads the GGUF).
+        rpc_vram = node_vram_strict if node_vram_strict is not None else (
+            node_vram or {}
+        )
+        driver_node = max(
+            selected_cycle.node_ids,
+            key=lambda node_id: (
+                rpc_vram.get(node_id, Memory()).in_bytes,
+                _get_node_download_fraction(
+                    node_id, command.model_card.model_id, resolved_download_status
+                ),
+            ),
+        )
+        shard_assignments = get_shard_assignments_for_llama_rpc(
+            command.model_card, selected_cycle, driver_node
+        )
+    else:
+        shard_assignments = get_shard_assignments(
+            command.model_card, selected_cycle, command.sharding, node_memory, node_vram
+        )
 
     # Persist the per-node resolved backend tag on each shard (#330). The worker
     # then dispatches its runner from this replicated value instead of
@@ -465,7 +623,41 @@ def place_instance(
     instance_id = InstanceId()
     target_instances = dict(deepcopy(current_instances))
 
+    if selected_is_rpc:
+        assert driver_node is not None
+        # Donor endpoints are chosen once here and stamped on the instance:
+        # the donor binds exactly this address and the driver dials it, so the
+        # two sides can never disagree. Address selection reuses the ring's
+        # observed-connection prioritiser (Thunderbolt first, VPN last, #265).
+        donor_endpoints = get_llama_rpc_donor_endpoints(
+            selected_cycle=selected_cycle,
+            driver_node=driver_node,
+            cycle_digraph=cycle_digraph,
+            node_network=node_network,
+            donor_ports={
+                node_id: random_ephemeral_port()
+                for node_id in selected_cycle.node_ids
+                if node_id != driver_node
+            },
+        )
+        target_instances[instance_id] = LlamaRpcInstance(
+            instance_id=instance_id,
+            shard_assignments=shard_assignments,
+            context_token_limit=context_token_limit,
+            driver_node=driver_node,
+            donor_endpoints=donor_endpoints,
+        )
+        return target_instances
+
     match command.instance_meta:
+        case InstanceMeta.LlamaRpc:
+            # Unreachable: an explicit LlamaRpc request either resolved to the
+            # RPC shape (returned above) or raised when the cycle cannot serve
+            # it. Kept for match exhaustiveness.
+            raise PlacementError(
+                "Requested a multi-node llama.cpp (RPC) placement, but the "
+                "selected cycle does not serve this model via llama_server."
+            )
         case InstanceMeta.MlxJaccl:
             # TODO(evan): shard assignments should contain information about ranks, this is ugly
             def get_device_rank(node_id: NodeId) -> int:
@@ -542,11 +734,12 @@ def _placement_intent_from_instance(
         if any(isinstance(shard, TensorShardMetadata) for shard in shards)
         else Sharding.Pipeline
     )
-    instance_meta = (
-        InstanceMeta.MlxJaccl
-        if isinstance(instance, MlxJacclInstance)
-        else InstanceMeta.MlxRing
-    )
+    if isinstance(instance, MlxJacclInstance):
+        instance_meta = InstanceMeta.MlxJaccl
+    elif isinstance(instance, LlamaRpcInstance):
+        instance_meta = InstanceMeta.LlamaRpc
+    else:
+        instance_meta = InstanceMeta.MlxRing
     width = len(instance.shard_assignments.node_to_runner)
     return model_card, sharding, instance_meta, width
 
