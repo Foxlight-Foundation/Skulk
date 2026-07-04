@@ -173,7 +173,8 @@ class Runner:
             return
         if proc.poll() is not None:
             raise RuntimeError(
-                f"ggml-rpc-server exited unexpectedly (code {proc.returncode})"
+                f"ggml-rpc-server exited unexpectedly (code {proc.returncode}); "
+                f"log tail:\n{self._server_log_tail()}"
             )
 
     def _handle_task(self, task: Task) -> None:
