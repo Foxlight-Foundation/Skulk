@@ -59,7 +59,7 @@ from skulk.shared.types.tasks import (
     TaskStatus,
     TextGeneration,
 )
-from skulk.shared.types.worker.instances import BoundInstance
+from skulk.shared.types.worker.instances import BoundInstance, LlamaRpcInstance
 from skulk.shared.types.worker.runners import (
     RunnerIdle,
     RunnerLoading,
@@ -310,7 +310,22 @@ class Runner:
             bound_instance.bound_runner_id,
             bound_instance.bound_shard,
         )
-        if self.shard_metadata.world_size != 1:
+        # Multi-node is legal only as the RPC driver of a LlamaRpcInstance
+        # (#328): rank 0 runs llama-server with --rpc against the stamped donor
+        # endpoints, and llama.cpp does the cross-device split itself. Any
+        # other multi-node shape reaching this runner is a placement bug.
+        self._rpc_donor_endpoints: dict[str, str] = {}
+        if isinstance(self.instance, LlamaRpcInstance):
+            if self.shard_metadata.device_rank != 0:
+                raise RuntimeError(
+                    "llama-server runner on a LlamaRpcInstance must be the "
+                    f"driver (rank 0), got rank {self.shard_metadata.device_rank}"
+                )
+            self._rpc_donor_endpoints = {
+                str(node_id): endpoint
+                for node_id, endpoint in self.instance.donor_endpoints.items()
+            }
+        elif self.shard_metadata.world_size != 1:
             raise RuntimeError(
                 "llama-server runner requires single-node placement, got "
                 f"world_size={self.shard_metadata.world_size}"
@@ -497,6 +512,11 @@ class Runner:
             # tool calling and reasoning-content extraction work server-side.
             "--jinja",
         ]
+        # RPC driver (#328): dial the placement-stamped donor endpoints so
+        # llama.cpp pools their GPU memory with the local device. Sorted for a
+        # deterministic command line.
+        if self._rpc_donor_endpoints:
+            cmd += ["--rpc", ",".join(sorted(self._rpc_donor_endpoints.values()))]
         # --reasoning-format none hands back raw text in message.content. We use
         # it for (a) plain non-reasoning models (otherwise llama-server's default
         # `auto` extracts their prose into reasoning_content, leaving content

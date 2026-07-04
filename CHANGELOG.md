@@ -9,6 +9,26 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **Multi-node GGUF inference: memory pooling across GPU nodes.** A GGUF model
+  that fits no single GPU node but fits the combined GPU memory of several
+  `llama_server` nodes now places and serves as a driver-plus-donors pair: one
+  driver node runs `llama-server --rpc donor:port,...` and holds the model
+  file, each donor runs a small `ggml-rpc-server` that lends its GPU memory,
+  and llama.cpp splits the weights and KV across the pooled devices itself.
+  Placement admits pooled models against each node's VRAM carve (measured:
+  RPC allocations never use the Strix UMA/GTT spill), picks the biggest-VRAM
+  node as the driver, and stamps routable donor endpoints chosen from the
+  observed connectivity (preferring a USB4/Thunderbolt link when present;
+  link-local addresses are rejected). Single-node placement is always
+  preferred whenever the model fits one node. The multi-node cycle rule also
+  fixes a latent placement hole where a card compatible with several engines
+  could admit a cycle mixing nodes that cannot form one ring (#414).
+  Text-generation GGUF model cards gained `llama_server` compatibility so the
+  catalog can pool; per-card backend preferences are unchanged pending
+  in-process vs served single-node measurements. New env var:
+  `SKULK_RPC_SERVER_BIN` (optional; defaults to the `ggml-rpc-server` next to
+  `SKULK_LLAMA_SERVER_BIN`). (#328)
+
 - **Extension (plugin) API.** Skulk now discovers separately installed Python
   packages through the `skulk.extensions` entry-point group at startup and
   calls them at well-defined serving-path hooks: a chat-request transform

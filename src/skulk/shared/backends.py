@@ -29,9 +29,15 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from typing import Final, Literal
 
 from loguru import logger
+
+
+def _is_executable_file(path: str) -> bool:
+    """Whether ``path`` names an existing executable file."""
+    return os.path.isfile(path) and os.access(path, os.X_OK)
 
 EngineType = Literal["mlx", "llama_cpp", "llama_server"]
 """Inference runtime that loads and runs a model; selects the worker runner.
@@ -81,6 +87,32 @@ LLAMA_SERVER_BIN_ENV: Final = "SKULK_LLAMA_SERVER_BIN"
 # declaration (the GPU is the same regardless of which engine drives it), then to
 # ``cpu``.
 LLAMA_SERVER_BACKENDS_ENV: Final = "SKULK_LLAMA_SERVER_BACKENDS"
+
+# Path to the ``ggml-rpc-server`` binary an RPC memory-donor runner launches
+# (#328, multi-node GGUF pooling). Optional: when unset, the donor looks for
+# ``ggml-rpc-server`` next to the node's ``SKULK_LLAMA_SERVER_BIN`` (the two are
+# built together by ``cmake --build build --target ggml-rpc-server llama-server``
+# with ``-DGGML_RPC=ON``; note the target was renamed upstream from
+# ``rpc-server``).
+RPC_SERVER_BIN_ENV: Final = "SKULK_RPC_SERVER_BIN"
+
+
+def rpc_server_binary() -> str | None:
+    """Resolve the ``ggml-rpc-server`` binary path for an RPC donor runner.
+
+    Prefers the explicit ``SKULK_RPC_SERVER_BIN`` override; otherwise looks for
+    a ``ggml-rpc-server`` sibling of ``SKULK_LLAMA_SERVER_BIN`` (they are built
+    from the same llama.cpp tree). Returns ``None`` when neither yields an
+    executable file, in which case the donor runner fails loudly at spawn.
+    """
+    explicit = os.environ.get(RPC_SERVER_BIN_ENV, "").strip()
+    if explicit:
+        return explicit if _is_executable_file(explicit) else None
+    server = os.environ.get(LLAMA_SERVER_BIN_ENV, "").strip()
+    if not server:
+        return None
+    sibling = str(Path(server).resolve().parent / "ggml-rpc-server")
+    return sibling if _is_executable_file(sibling) else None
 
 
 def make_backend_tag(engine: EngineType, compute: ComputeBackend) -> str:

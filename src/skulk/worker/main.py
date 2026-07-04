@@ -83,7 +83,7 @@ from skulk.shared.types.worker.downloads import (
     DownloadOngoing,
     DownloadPending,
 )
-from skulk.shared.types.worker.instances import InstanceId
+from skulk.shared.types.worker.instances import InstanceId, LlamaRpcInstance
 from skulk.shared.types.worker.runners import RunnerFailed, RunnerId, RunnerStatus
 from skulk.shared.types.worker.shards import ShardMetadata, TensorShardMetadata
 from skulk.store.config import StagingNodeConfig
@@ -864,8 +864,19 @@ class Worker:
             # lets not kill the worker if a runner is unresponsive
             match task:
                 case CreateRunner():
-                    fit_error = self._local_shard_fit_error(
-                        task.bound_instance.bound_shard
+                    # The local fit guard sizes a shard's footprint against this
+                    # node's memory, but an RPC placement's shares are decided
+                    # by llama.cpp at load (the driver's shard nominally spans
+                    # ALL layers and a donor holds none), so per-shard sizing
+                    # is meaningless here. Pooled admission already used the
+                    # strict per-node VRAM figure; a genuine misfit fails at
+                    # llama-server load and the crash cascade recovers (#328).
+                    fit_error = (
+                        None
+                        if isinstance(task.bound_instance.instance, LlamaRpcInstance)
+                        else self._local_shard_fit_error(
+                            task.bound_instance.bound_shard
+                        )
                     )
                     if fit_error is not None:
                         logger.error(fit_error)
