@@ -703,26 +703,39 @@ def get_llama_rpc_donor_endpoints(
     For every non-driver node in the cycle, pick the donor-side address the
     driver can reach from the OBSERVED libp2p connections between the pair,
     ranked by the donor's gossiped interface type (Thunderbolt first, VPN last;
-    same prioritiser as the MLX ring, #265). The chosen address is stamped on
-    the instance: the donor's ggml-rpc-server binds exactly this address (never
-    0.0.0.0; the fabric is trusted but endpoints stay interface-scoped) and the
-    driver's ``--rpc`` flag dials it.
+    same prioritiser as the MLX ring, #265) with link-local and loopback
+    candidates excluded outright (``_is_link_local_or_loopback``: a
+    multi-TB-port host routes all of 169.254/16 out one port, so a link-local
+    endpoint breaks asymmetrically; point-to-point RPC links need a static
+    per-link subnet). The chosen address is stamped on the instance: the
+    donor's ggml-rpc-server binds exactly this address (never 0.0.0.0; the
+    fabric is trusted but endpoints stay interface-scoped) and the driver's
+    ``--rpc`` flag dials it.
 
     Raises:
-        ValueError: When no observed connection exists between the driver and a
-            donor (the pair cannot pool memory without a path).
+        ValueError: When no ROUTABLE observed connection exists between the
+            driver and a donor (no path at all, or only link-local/loopback
+            paths — e.g. an unconfigured Thunderbolt link).
     """
     endpoints: dict[NodeId, str] = {}
     for node_id in selected_cycle.node_ids:
         if node_id == driver_node:
             continue
         donor_ip = _find_ip_prioritised(
-            driver_node, node_id, cycle_digraph, node_network, ring=True
+            driver_node,
+            node_id,
+            cycle_digraph,
+            node_network,
+            ring=True,
+            require_routable=True,
         )
         if donor_ip is None:
             raise ValueError(
-                "Multi-node llama.cpp (RPC) requires connectivity between the "
-                f"driver and every donor; no path from {driver_node} to {node_id}"
+                "Multi-node llama.cpp (RPC) requires a ROUTABLE path between "
+                f"the driver and every donor; none observed from {driver_node} "
+                f"to {node_id} (link-local/loopback addresses are excluded — "
+                "assign a static subnet to point-to-point links, e.g. a "
+                "Thunderbolt pair)"
             )
         endpoints[node_id] = f"{donor_ip}:{donor_ports[node_id]}"
     return endpoints
@@ -817,12 +830,30 @@ _JACCL_TRANSPORT_PRIORITY: dict[str, int] = {
 }
 
 
+def _is_link_local_or_loopback(ip: str) -> bool:
+    """Whether an address is link-local (169.254/16, fe80::/10) or loopback.
+
+    RPC donor endpoints must never be these: a node with more than one
+    Thunderbolt interface routes ALL of 169.254/16 out a single (lowest
+    metric) port, so a link-local endpoint on the other port dials or replies
+    asymmetrically and TCP dies even while ICMP appears fine (measured on the
+    Strix pair). Point-to-point links that should carry RPC traffic get a
+    static per-link subnet instead.
+    """
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return address.is_link_local or address.is_loopback
+
+
 def _find_ip_prioritised(
     node_id: NodeId,
     other_node_id: NodeId,
     cycle_digraph: Topology,
     node_network: Mapping[NodeId, NodeNetworkInfo],
     ring: bool,
+    require_routable: bool = False,
 ) -> str | None:
     """Find an IP address between nodes with transport prioritization.
 
@@ -830,10 +861,15 @@ def _find_ip_prioritised(
     by the sink node's gossiped interface type — ring placements prefer the
     fastest local interconnect (TB first), and VPN/overlay addresses rank
     strictly last regardless of gossiped label (see ``_is_vpn_address``).
+    ``require_routable`` drops link-local and loopback candidates entirely
+    (RPC donor endpoints must be dialable both ways on multi-interface hosts;
+    see ``_is_link_local_or_loopback``).
 
     TODO: Profile and get actual connection speeds.
     """
     ips = list(_find_connection_ip(node_id, other_node_id, cycle_digraph))
+    if require_routable:
+        ips = [ip for ip in ips if not _is_link_local_or_loopback(ip)]
     if not ips:
         return None
     other_network = node_network.get(other_node_id, NodeNetworkInfo())

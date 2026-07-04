@@ -583,7 +583,18 @@ def place_instance(
     # same resolve_node_backend the worker would, against the master's telemetry
     # view of each node's advertised backends. A node absent from node_resources
     # leaves resolved_backend=None, and the worker falls back to its local probe.
+    # An RPC placement restricts resolution to the llama_server tags: the whole
+    # cycle runs the served RPC machinery by construction, and a card that also
+    # allows in-process llama_cpp (with it earlier in preference or alphabetical
+    # order) must not stamp the driver with a tag that would dispatch the
+    # single-node in-process runner.
     compatible_backends = command.model_card.placement.compatible_backends
+    if selected_is_rpc:
+        compatible_backends = frozenset(
+            tag
+            for tag in compatible_backends
+            if engine_of(tag) == "llama_server"
+        )
     stamped_runner_to_shard = dict(shard_assignments.runner_to_shard)
     for node_id, runner_id in shard_assignments.node_to_runner.items():
         resources = resolved_node_resources.get(node_id)

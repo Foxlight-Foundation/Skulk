@@ -29,8 +29,9 @@ from skulk.shared.topology import Topology
 from skulk.shared.types.commands import PlaceInstance
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
+from skulk.shared.types.multiaddr import Multiaddr
 from skulk.shared.types.profiling import NodeResources
-from skulk.shared.types.topology import Connection, Cycle
+from skulk.shared.types.topology import Connection, Cycle, SocketConnection
 from skulk.shared.types.worker.instances import InstanceMeta, LlamaRpcInstance
 from skulk.shared.types.worker.shards import (
     PipelineShardMetadata,
@@ -79,18 +80,31 @@ def _command(card: ModelCard, min_nodes: int = 1) -> PlaceInstance:
     )
 
 
+def _routable_connection(ip_octet: int) -> SocketConnection:
+    """An observed connection on a ROUTABLE (static-subnet) address.
+
+    The shared conftest helper uses 169.254/16 link-local addresses, which
+    donor-endpoint selection rejects by contract; RPC tests need the
+    static-subnet shape (the kite pair's 10.99.0.0/30 TB link).
+    """
+    return SocketConnection(
+        sink_multiaddr=Multiaddr(address=f"/ip4/10.99.0.{ip_octet}/tcp/1234"),
+    )
+
+
 def _amd_pair() -> tuple[Topology, NodeId, NodeId]:
-    """Two bidirectionally connected AMD nodes (the kite4+kite5 shape)."""
+    """Two bidirectionally connected AMD nodes (the kite4+kite5 shape),
+    observed over a routable static-subnet link."""
     topology = Topology()
     big = NodeId()
     small = NodeId()
     topology.add_node(big)
     topology.add_node(small)
     topology.add_connection(
-        Connection(source=big, sink=small, edge=create_socket_connection(1))
+        Connection(source=big, sink=small, edge=_routable_connection(2))
     )
     topology.add_connection(
-        Connection(source=small, sink=big, edge=create_socket_connection(2))
+        Connection(source=small, sink=big, edge=_routable_connection(1))
     )
     return topology, big, small
 
@@ -188,7 +202,9 @@ def test_pooled_gguf_places_rpc_shape_on_amd_pair() -> None:
     assert set(instance.donor_endpoints) == {small}
     endpoint = instance.donor_endpoints[small]
     ip, _, port = endpoint.rpartition(":")
-    assert ip.startswith("169.254.0.")  # a conftest-observed connection address
+    # The donor-side address of the observed driver->donor connection, and by
+    # contract a routable one (never link-local/loopback).
+    assert ip == "10.99.0.2"
     assert int(port) > 0
     driver_runner = instance.shard_assignments.node_to_runner[big]
     donor_runner = instance.shard_assignments.node_to_runner[small]
@@ -202,6 +218,86 @@ def test_pooled_gguf_places_rpc_shape_on_amd_pair() -> None:
     # #330 stamping applies to both roles.
     assert driver_shard.resolved_backend == "llama_server-vulkan"
     assert donor_shard.resolved_backend == "llama_server-vulkan"
+
+
+def test_link_local_only_path_fails_placement() -> None:
+    """A pair whose only observed path is link-local (e.g. an unconfigured
+    Thunderbolt link) must fail cleanly rather than stamp an endpoint the
+    driver cannot reliably dial (the two-TB-port asymmetric-routing trap)."""
+    topology = Topology()
+    big = NodeId()
+    small = NodeId()
+    topology.add_node(big)
+    topology.add_node(small)
+    # conftest connections are 169.254/16 link-local.
+    topology.add_connection(
+        Connection(source=big, sink=small, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=small, sink=big, edge=create_socket_connection(2))
+    )
+    node_memory = {
+        big: create_node_memory(Memory.from_gb(64).in_bytes),
+        small: create_node_memory(Memory.from_gb(32).in_bytes),
+    }
+    node_network = {big: create_node_network(), small: create_node_network()}
+    resources = {big: _amd_resources(), small: _amd_resources()}
+    node_vram = {big: Memory.from_gb(57.6), small: Memory.from_gb(28.8)}
+    command = _command(_gguf_card(storage_gb=55.0))
+    with pytest.raises(ValueError, match="ROUTABLE"):
+        place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources=resources,
+            node_vram=node_vram,
+            node_vram_strict=node_vram,
+        )
+
+
+def test_rpc_shards_stamp_llama_server_even_when_llama_cpp_sorts_first() -> None:
+    """A card allowing both engines with NO preference must still stamp RPC
+    shards with the llama_server tag: alphabetical resolution would pick
+    llama_cpp-vulkan and dispatch the driver to the single-node in-process
+    runner."""
+    topology, big, small = _amd_pair()
+    node_memory = {
+        big: create_node_memory(Memory.from_gb(64).in_bytes),
+        small: create_node_memory(Memory.from_gb(32).in_bytes),
+    }
+    node_network = {big: create_node_network(), small: create_node_network()}
+    resources = {big: _amd_resources(), small: _amd_resources()}
+    node_vram = {big: Memory.from_gb(57.6), small: Memory.from_gb(28.8)}
+    card = ModelCard(
+        model_id=ModelId("test/no-preference"),
+        storage_size=Memory.from_gb(55.0),
+        n_layers=36,
+        hidden_size=2880,
+        supports_tensor=False,
+        tasks=[ModelTask.TextGeneration],
+        placement=PlacementCardConfig(
+            compatible_backends=frozenset(
+                {"llama_cpp-vulkan", "llama_server-vulkan"}
+            ),
+            # No backend_preference: sorted() puts llama_cpp-vulkan first.
+        ),
+    )
+    placements = place_instance(
+        _command(card),
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_resources=resources,
+        node_vram=node_vram,
+        node_vram_strict=node_vram,
+    )
+    instance = next(iter(placements.values()))
+    assert isinstance(instance, LlamaRpcInstance)
+    for shard in instance.shard_assignments.runner_to_shard.values():
+        assert shard.resolved_backend == "llama_server-vulkan"
 
 
 def test_small_gguf_still_prefers_single_node() -> None:
