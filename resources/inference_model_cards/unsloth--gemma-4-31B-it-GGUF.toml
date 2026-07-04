@@ -38,7 +38,13 @@ boi_token_id = 255999
 eoi_token_id = 258882
 
 [placement]
-compatible_backends = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu", "llama_server-vulkan", "llama_server-rocm", "llama_server-cuda"]
+# llama_cpp (in-process) ONLY: this is a VLM whose [vision] section depends on
+# the mmproj projector, which only the in-process runner stages and loads
+# (find_mmproj_file). The served llama_server engine has no --mmproj plumbing
+# yet, so advertising it would silently break the card's vision capability on
+# a served or pooled placement. Add llama_server-* when the served runner
+# passes the projector (vision fast-follow).
+compatible_backends = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu"]
 backend_preference = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu"]
 
 [storage_size]
