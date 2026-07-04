@@ -16,12 +16,15 @@ tears the whole instance down — correct, because llama-server SIGABRTs the
 moment a scheduled-in donor disappears (measured on the Strix pair).
 """
 
+import contextlib
 import os
 import signal
 import socket
 import subprocess
+import tempfile
 import time
-from typing import final
+from pathlib import Path
+from typing import IO, final
 
 from anyio import EndOfStream, WouldBlock
 
@@ -113,6 +116,8 @@ class Runner:
         self.bind_port = int(port)
         self.runner_id = bound_instance.bound_runner_id
         self.server_proc: subprocess.Popen[bytes] | None = None
+        self.server_log: IO[bytes] | None = None
+        self.server_log_path: Path | None = None
         self.current_status: RunnerStatus = RunnerIdle()
         logger.info(
             f"rpc-donor runner created (endpoint={self.bind_host}:{self.bind_port})"
@@ -216,11 +221,22 @@ class Runner:
         bin_dir = os.path.dirname(os.path.realpath(binary))
         existing = env.get("LD_LIBRARY_PATH", "")
         env["LD_LIBRARY_PATH"] = f"{bin_dir}:{existing}" if existing else bin_dir
-        logger.info("launching ggml-rpc-server: " + " ".join(cmd))
+        # Capture server output to a log file (mirrors the served runner) so a
+        # failed bind / missing shared lib is diagnosable instead of a bare
+        # exit code.
+        self.server_log_path = (
+            Path(tempfile.gettempdir()) / f"skulk-rpc-donor-{self.runner_id}.log"
+        )
+        self.server_log = self.server_log_path.open("ab")
+        logger.info(
+            "launching ggml-rpc-server: "
+            + " ".join(cmd)
+            + f" (log: {self.server_log_path})"
+        )
         self.server_proc = subprocess.Popen(  # noqa: S603 - args built here, not user input
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=self.server_log,
+            stderr=subprocess.STDOUT,
             env=env,
             preexec_fn=_set_pdeathsig,  # noqa: PLW1509 - Linux reap-on-parent-death
         )
@@ -232,7 +248,8 @@ class Runner:
             if self.server_proc is not None and self.server_proc.poll() is not None:
                 raise RuntimeError(
                     "ggml-rpc-server exited during startup "
-                    f"(code {self.server_proc.returncode})"
+                    f"(code {self.server_proc.returncode}); log tail:\n"
+                    f"{self._server_log_tail()}"
                 )
             try:
                 with socket.create_connection(
@@ -244,21 +261,34 @@ class Runner:
         raise RuntimeError(
             f"ggml-rpc-server did not accept connections on "
             f"{self.bind_host}:{self.bind_port} within "
-            f"{_HEALTH_DEADLINE_SECONDS:.0f}s"
+            f"{_HEALTH_DEADLINE_SECONDS:.0f}s; log tail:\n"
+            f"{self._server_log_tail()}"
         )
+
+    def _server_log_tail(self, lines: int = 30) -> str:
+        if self.server_log_path is None or not self.server_log_path.exists():
+            return "(no log)"
+        try:
+            text = self.server_log_path.read_text(errors="replace")
+        except OSError:
+            return "(log unreadable)"
+        return "\n".join(text.splitlines()[-lines:])
 
     def _teardown_server(self) -> None:
         """Terminate the RPC server: SIGTERM, then SIGKILL after a grace."""
         proc = self.server_proc
         self.server_proc = None
-        if proc is None or proc.poll() is not None:
-            return
-        proc.terminate()
-        try:
-            _ = proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
             try:
-                _ = proc.wait(timeout=5)
+                _ = proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                logger.error("ggml-rpc-server did not die after SIGKILL")
+                proc.kill()
+                try:
+                    _ = proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    logger.error("ggml-rpc-server did not die after SIGKILL")
+        if self.server_log is not None:
+            with contextlib.suppress(Exception):
+                self.server_log.close()
+            self.server_log = None
