@@ -704,7 +704,7 @@ def get_llama_rpc_donor_endpoints(
     driver can reach from the OBSERVED libp2p connections between the pair,
     ranked by the donor's gossiped interface type (Thunderbolt first, VPN last;
     same prioritiser as the MLX ring, #265) with link-local and loopback
-    candidates excluded outright (``_is_link_local_or_loopback``: a
+    candidates excluded outright (``_is_routable_rpc_donor_address``: a
     multi-TB-port host routes all of 169.254/16 out one port, so a link-local
     endpoint breaks asymmetrically; point-to-point RPC links need a static
     per-link subnet). The chosen address is stamped on the instance: the
@@ -830,21 +830,31 @@ _JACCL_TRANSPORT_PRIORITY: dict[str, int] = {
 }
 
 
-def _is_link_local_or_loopback(ip: str) -> bool:
-    """Whether an address is link-local (169.254/16, fe80::/10) or loopback.
+def _is_routable_rpc_donor_address(ip: str) -> bool:
+    """Whether an address may be stamped as an RPC donor endpoint.
 
-    RPC donor endpoints must never be these: a node with more than one
-    Thunderbolt interface routes ALL of 169.254/16 out a single (lowest
-    metric) port, so a link-local endpoint on the other port dials or replies
-    asymmetrically and TCP dies even while ICMP appears fine (measured on the
-    Strix pair). Point-to-point links that should carry RPC traffic get a
-    static per-link subnet instead.
+    Rejects link-local (169.254/16, fe80::/10) and loopback: a node with more
+    than one Thunderbolt interface routes ALL of 169.254/16 out a single
+    (lowest metric) port, so a link-local endpoint on the other port dials or
+    replies asymmetrically and TCP dies even while ICMP appears fine
+    (measured on the Strix pair). Point-to-point links that should carry RPC
+    traffic get a static per-link subnet instead.
+
+    Also rejects IPv6 outright: donor endpoints are stamped as bare
+    ``host:port`` strings, which is ambiguous for IPv6 and not accepted by
+    ``llama-server --rpc``'s endpoint parsing, so stamping one would mint an
+    instance whose driver can never load. Bracketed-IPv6 support can be added
+    end-to-end if a v6-only fabric ever materializes.
     """
     try:
         address = ipaddress.ip_address(ip)
     except ValueError:
         return False
-    return address.is_link_local or address.is_loopback
+    return (
+        address.version == 4
+        and not address.is_link_local
+        and not address.is_loopback
+    )
 
 
 def _find_ip_prioritised(
@@ -863,13 +873,14 @@ def _find_ip_prioritised(
     strictly last regardless of gossiped label (see ``_is_vpn_address``).
     ``require_routable`` drops link-local and loopback candidates entirely
     (RPC donor endpoints must be dialable both ways on multi-interface hosts;
-    see ``_is_link_local_or_loopback``).
+    see ``_is_routable_rpc_donor_address``; IPv6 is also rejected because
+    endpoints are stamped as bare ``host:port``).
 
     TODO: Profile and get actual connection speeds.
     """
     ips = list(_find_connection_ip(node_id, other_node_id, cycle_digraph))
     if require_routable:
-        ips = [ip for ip in ips if not _is_link_local_or_loopback(ip)]
+        ips = [ip for ip in ips if _is_routable_rpc_donor_address(ip)]
     if not ips:
         return None
     other_network = node_network.get(other_node_id, NodeNetworkInfo())

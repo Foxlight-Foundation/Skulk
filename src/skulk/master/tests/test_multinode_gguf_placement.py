@@ -257,6 +257,44 @@ def test_link_local_only_path_fails_placement() -> None:
         )
 
 
+def test_ipv6_only_path_fails_placement() -> None:
+    """A pair whose only observed path is IPv6 must fail cleanly: donor
+    endpoints are stamped as bare host:port, which llama-server's --rpc
+    parsing does not accept for IPv6, so stamping one would mint an instance
+    whose driver can never load."""
+    topology = Topology()
+    big = NodeId()
+    small = NodeId()
+    topology.add_node(big)
+    topology.add_node(small)
+    def ipv6_edge(host: int) -> SocketConnection:
+        return SocketConnection(
+            sink_multiaddr=Multiaddr(address=f"/ip6/fd00::{host}/tcp/1234")
+        )
+
+    topology.add_connection(Connection(source=big, sink=small, edge=ipv6_edge(2)))
+    topology.add_connection(Connection(source=small, sink=big, edge=ipv6_edge(1)))
+    node_memory = {
+        big: create_node_memory(Memory.from_gb(64).in_bytes),
+        small: create_node_memory(Memory.from_gb(32).in_bytes),
+    }
+    node_network = {big: create_node_network(), small: create_node_network()}
+    resources = {big: _amd_resources(), small: _amd_resources()}
+    node_vram = {big: Memory.from_gb(57.6), small: Memory.from_gb(28.8)}
+    command = _command(_gguf_card(storage_gb=55.0))
+    with pytest.raises(ValueError, match="ROUTABLE"):
+        place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources=resources,
+            node_vram=node_vram,
+            node_vram_strict=node_vram,
+        )
+
+
 def test_rpc_shards_stamp_llama_server_even_when_llama_cpp_sorts_first() -> None:
     """A card allowing both engines with NO preference must still stamp RPC
     shards with the llama_server tag: alphabetical resolution would pick
