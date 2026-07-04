@@ -19,6 +19,7 @@ from skulk.shared.backends import (
     EngineType,
     engine_of,
     engine_supports_multi_node,
+    platform_compatible_backends,
     resolve_node_backend,
 )
 from skulk.shared.models.memory_estimate import instance_context_token_limit
@@ -171,6 +172,22 @@ def _cycle_backend_preference_score(
     return 0
 
 
+def _card_platform_backends(card: ModelCard) -> frozenset[str]:
+    """The card's compatible backends minus current platform limitations.
+
+    Cards declare MODEL truth (what the model and its artifacts can do); which
+    of those capabilities our runner implementations can currently exploit is
+    PLATFORM truth and lives in code (``platform_compatible_backends``), so a
+    platform gap is never encoded on a card. Every placement-side read of
+    ``compatible_backends`` goes through this helper so eligibility, the
+    common-engine cycle rule, and backend stamping all agree.
+    """
+    return platform_compatible_backends(
+        card.placement.compatible_backends,
+        card_serves_vision=card.vision is not None,
+    )
+
+
 def _cycle_common_multi_node_engines(
     cycle: Cycle,
     card_backends: AbstractSet[str],
@@ -314,7 +331,7 @@ def place_instance(
     # Nodes with no resources entry yet (gossip still warming up) are treated
     # as eligible so behavior matches the pre-#149 default of full/mlx.
     if node_resources:
-        compatible_backends = command.model_card.placement.compatible_backends
+        compatible_backends = _card_platform_backends(command.model_card)
         ineligible_nodes = {
             node_id
             for node_id, resources in node_resources.items()
@@ -350,7 +367,7 @@ def place_instance(
     # are untouched -- the per-node participation/backend filter above already
     # covers them. Cards with no declared backends (legacy) skip the rule.
     resolved_node_resources = node_resources or {}
-    card_backends = command.model_card.placement.compatible_backends
+    card_backends = _card_platform_backends(command.model_card)
     if card_backends:
         candidate_cycles = [
             cycle
@@ -609,7 +626,7 @@ def place_instance(
     # allows in-process llama_cpp (with it earlier in preference or alphabetical
     # order) must not stamp the driver with a tag that would dispatch the
     # single-node in-process runner.
-    compatible_backends = command.model_card.placement.compatible_backends
+    compatible_backends = _card_platform_backends(command.model_card)
     if selected_is_rpc:
         compatible_backends = frozenset(
             tag

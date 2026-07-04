@@ -399,6 +399,7 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
     """
     from skulk.shared.backends import (
         engine_of,
+        platform_compatible_backends,
         probe_node_backends,
         resolve_node_engine,
     )
@@ -408,8 +409,15 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
         return engine_of(shard.resolved_backend)
 
     placement = shard.model_card.placement
+    # Same platform-capability filter the master applies at placement: the
+    # card declares MODEL truth, and engines whose runner cannot serve one of
+    # the card's declared capabilities (e.g. vision without served mmproj
+    # support) are subtracted in code so the fallback probe cannot pick one.
     return resolve_node_engine(
-        placement.compatible_backends,
+        platform_compatible_backends(
+            placement.compatible_backends,
+            card_serves_vision=shard.model_card.vision is not None,
+        ),
         placement.backend_preference,
         probe_node_backends(),
     )

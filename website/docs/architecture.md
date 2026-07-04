@@ -275,6 +275,16 @@ concrete engine for its node at runner-spawn time by intersecting the card's
 [AMD Strix Halo nodes](./amd-strix-halo-nodes.md) guide for bringing up a
 non-Mac node.
 
+Cards describe the model; the platform describes itself. A card's
+`compatible_backends` records which engines the model's artifacts run on
+(model truth), and it never encodes a gap in Skulk's own implementation
+(platform truth). When one of our runners cannot yet exploit a capability a
+card declares (for example, the served llama.cpp engine cannot load a vision
+model's projector yet), that limitation lives in a code-level capability
+table that placement and the worker both consult, so the model never lands
+where an advertised capability would silently degrade, and the card needs no
+edit when the platform catches up.
+
 The llama.cpp runner serves GGUF models single-node and matches the MLX runner
 on the capabilities llama.cpp supports natively: per-token logprobs (with the
 top alternatives) and tool calling. A tool-enabled request runs unstreamed so

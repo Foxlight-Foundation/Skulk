@@ -157,6 +157,51 @@ def engine_supports_multi_node(engine: EngineType) -> bool:
     return engine in _MULTI_NODE_ENGINES
 
 
+# Modalities each engine's RUNNER can currently exploit on THIS platform.
+# This is PLATFORM truth, deliberately separate from the model card: a card's
+# [vision] section declares what the MODEL can do (its projector artifact
+# exists and is grounded); this table declares which of our runner
+# implementations can actually serve it. The served ``llama_server`` engine is
+# text-only until its runner stages and passes the mmproj projector (upstream
+# llama-server supports --mmproj; the gap is ours). Keeping the limitation
+# here rather than on cards means a platform capability landing lights up
+# every affected card at once, with no card edits, and cards stay a clean
+# description of the model.
+_VISION_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset(
+    {"mlx", "llama_cpp"}
+)
+
+
+def platform_compatible_backends(
+    compatible_backends: frozenset[str], *, card_serves_vision: bool
+) -> frozenset[str]:
+    """Filter a card's declared backends down to what this platform can serve.
+
+    The card's ``compatible_backends`` is MODEL truth (which engines the model's
+    artifacts run on); this helper subtracts current PLATFORM limitations (which
+    of our runners can exploit the card's declared capabilities) so the two are
+    never conflated on the card itself. Today the only platform gate is vision:
+    a card with a ``[vision]`` section is kept off engines whose runner cannot
+    load its projector, so a placement never silently degrades a capability the
+    card advertises. Placement and the worker's engine resolution both apply
+    this filter, keeping master and worker in agreement.
+
+    Args:
+        compatible_backends: the card's declared backend tags.
+        card_serves_vision: whether the card declares a vision capability.
+
+    Returns:
+        The subset of tags whose engine can serve everything the card declares.
+    """
+    if not card_serves_vision:
+        return compatible_backends
+    return frozenset(
+        tag
+        for tag in compatible_backends
+        if (engine := engine_of(tag)) is None or engine in _VISION_SERVING_ENGINES
+    )
+
+
 def resolve_node_backend(
     compatible_backends: frozenset[str],
     backend_preference: tuple[str, ...],
@@ -177,7 +222,19 @@ def resolve_node_backend(
     if not intersection:
         return None
     ordered = [tag for tag in backend_preference if tag in intersection]
-    ordered += [tag for tag in sorted(intersection) if tag not in backend_preference]
+    # Fallback for tags outside the card's preference list: deterministic, but
+    # never let a CPU compute tag beat a GPU tag on alphabetical accident --
+    # GPU serving dominates CPU for every model class we ship, and a card
+    # without an explicit llama_server preference would otherwise resolve
+    # ``llama_server-cpu`` over ``llama_server-vulkan`` and run ``-ngl 0`` on a
+    # GPU-admitted node. Platform default, not card policy.
+    ordered += [
+        tag
+        for tag in sorted(
+            intersection, key=lambda tag: (tag.endswith(f"{_TAG_SEPARATOR}cpu"), tag)
+        )
+        if tag not in backend_preference
+    ]
     return ordered[0]
 
 

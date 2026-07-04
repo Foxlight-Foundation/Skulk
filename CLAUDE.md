@@ -189,6 +189,8 @@ Skulk now treats model capability handling as two layers:
 
 This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, and additive `/v1/models` metadata consumed by the dashboard.
 
+**Model truth vs platform truth:** a card's `compatible_backends` declares which engines the model's artifacts run on (MODEL truth) and must never encode a gap in Skulk's own runners (PLATFORM truth). Platform limitations live in code: `platform_compatible_backends` in `src/skulk/shared/backends.py` (currently: the served `llama_server` runner cannot load a vision card's mmproj projector, so vision cards are gated off served engines there). Placement (`_card_platform_backends`) and the worker's fallback probe both apply the filter. When a runner gains a capability, flip the code table; do NOT sweep cards.
+
 ### Logging & Observability
 Centralized logging uses a three-layer stack:
 - **Structured JSON stdout**: When `logging.enabled` is `true` and `logging.ingest_url` is set in `skulk.yaml` (or dashboard Settings), skulk emits one JSON object per line on stdout (alongside human-readable stderr). Settings sync to all nodes via gossipsub. Configured in `src/skulk/shared/logging.py`.

@@ -29,6 +29,17 @@ This project records release notes here and mirrors public-facing notes in
   `SKULK_RPC_SERVER_BIN` (optional; defaults to the `ggml-rpc-server` next to
   `SKULK_LLAMA_SERVER_BIN`). (#328)
 
+- **Cards declare model truth; platform limitations moved to code.** A model
+  card's `compatible_backends` now records only which engines the model's
+  artifacts run on. Capabilities our runners cannot yet exploit (currently:
+  the served llama.cpp engine cannot load a vision model's projector) are
+  gated in a code-level capability table (`platform_compatible_backends`)
+  applied by placement and worker engine resolution, so a vision model never
+  lands where its advertised capability would silently degrade, and cards
+  need no edits when the platform catches up. Backend fallback resolution
+  now orders CPU compute tags after GPU tags when a card expresses no
+  explicit preference.
+
 - **Extension (plugin) API.** Skulk now discovers separately installed Python
   packages through the `skulk.extensions` entry-point group at startup and
   calls them at well-defined serving-path hooks: a chat-request transform

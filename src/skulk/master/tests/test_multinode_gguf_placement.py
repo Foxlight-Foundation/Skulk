@@ -258,6 +258,38 @@ def test_link_local_only_path_fails_placement() -> None:
         )
 
 
+def test_vision_card_never_pools_on_served_backends() -> None:
+    """MODEL truth vs PLATFORM truth: a vision card may declare llama_server
+    compatibility (the model runs there), but the served runner cannot load
+    its projector yet, so the platform gate strips llama_server before the
+    common-engine rule and the card never lands on a served or pooled
+    placement where its advertised vision capability would silently break."""
+    from skulk.shared.models.model_cards import VisionCardConfig
+
+    topology, big, small = _amd_pair()
+    card = _gguf_card(storage_gb=70.0).model_copy(
+        update={"vision": VisionCardConfig(model_type="gemma4")}
+    )
+    node_memory = {
+        big: create_node_memory(Memory.from_gb(64).in_bytes),
+        small: create_node_memory(Memory.from_gb(32).in_bytes),
+    }
+    node_network = {big: create_node_network(), small: create_node_network()}
+    resources = {big: _amd_resources(), small: _amd_resources()}
+    node_vram = {big: Memory.from_gb(57.6), small: Memory.from_gb(28.8)}
+    with pytest.raises(PlacementError, match="requires one engine common"):
+        place_instance(
+            _command(card, min_nodes=2),
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources=resources,
+            node_vram=node_vram,
+            node_vram_strict=node_vram,
+        )
+
+
 def test_missing_strict_vram_is_info_pending_not_ram_fallback() -> None:
     """A node in an RPC cycle with no strict-VRAM entry (telemetry warm-up:
     NodeResources arrived, node_system's accelerator reading not yet) must
