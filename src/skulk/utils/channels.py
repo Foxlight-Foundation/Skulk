@@ -204,6 +204,28 @@ class MpReceiver[T]:
                 raise EndOfStream from None
             return item
 
+    def receive_timeout(self, timeout: float) -> T:
+        """Blocking receive that gives up after ``timeout`` seconds.
+
+        Raises ``WouldBlock`` on timeout, mirroring ``receive_nowait``. Lets a
+        receiver loop interleave a blocking wait with periodic side-work (e.g.
+        a runner health-checking its subprocess between tasks) without busy
+        polling.
+        """
+        if self._state.closed.is_set():
+            raise ClosedResourceError
+        try:
+            item = self._state.buffer.get(block=True, timeout=timeout)
+        except Empty:
+            raise WouldBlock from None
+        except (TypeError, OSError):
+            # Same closed-pipe race as receive() above.
+            raise ClosedResourceError from None
+        if isinstance(item, _MpEndOfStream):
+            self.close()
+            raise EndOfStream
+        return item
+
     async def receive_async(self) -> T:
         return await to_thread.run_sync(
             self.receive, limiter=CapacityLimiter(1), abandon_on_cancel=True

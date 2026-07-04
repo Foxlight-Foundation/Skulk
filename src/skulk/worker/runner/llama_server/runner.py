@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Final, Literal, NamedTuple
 
 import httpx
-from anyio import WouldBlock
+from anyio import EndOfStream, WouldBlock
 
 from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
 from skulk.shared.models.model_cards import OutputParserType
@@ -204,6 +204,10 @@ def reasoning_request_overrides(task_params: Any) -> dict[str, Any]:
 # How long to wait for the server to finish loading the model and report healthy.
 # A large GGUF on a GPU node can take a while to map + warm up.
 _HEALTH_DEADLINE_S: Final = 600.0
+# Between tasks the runner wakes at this cadence to verify its llama-server
+# subprocess is still alive (dead server between requests must crash the
+# runner, not wedge it Ready).
+_LIVENESS_POLL_S: Final = 2.0
 
 
 class _StreamDelta(NamedTuple):
@@ -380,7 +384,19 @@ class Runner:
     def main(self) -> None:
         try:
             with self.task_receiver as tasks:
-                for task in tasks:
+                while True:
+                    try:
+                        task = tasks.receive_timeout(_LIVENESS_POLL_S)
+                    except WouldBlock:
+                        # No task within the poll window: verify the server
+                        # subprocess is still alive. Without this a llama-server
+                        # that dies BETWEEN requests (e.g. SIGABRT when an RPC
+                        # donor vanishes) leaves the runner gossiping Ready
+                        # forever while every future request 500s.
+                        self._ensure_server_alive()
+                        continue
+                    except EndOfStream:
+                        break
                     if task.task_id in self.seen:
                         logger.warning("repeat task - potential error")
                     self.seen.add(task.task_id)
@@ -402,6 +418,24 @@ class Runner:
             # Never leave the server subprocess running past the runner loop, even
             # on an unexpected exit (PR_SET_PDEATHSIG is the SIGKILL backstop).
             self._teardown_server()
+
+    def _ensure_server_alive(self) -> None:
+        """Raise if the spawned llama-server exited behind our back.
+
+        Raising kills the runner process; the supervisor observes the crash and
+        the peer-failure cascade tears down the whole instance (donors included
+        for pooled placements) instead of leaving a wedged Ready runner.
+        """
+        proc = self.server_proc
+        if proc is None or isinstance(
+            self.current_status, (RunnerShuttingDown, RunnerShutdown)
+        ):
+            return
+        if proc.poll() is not None:
+            raise RuntimeError(
+                f"llama-server exited unexpectedly (code {proc.returncode}); "
+                f"log tail:\n{self._server_log_tail()}"
+            )
 
     def handle_task(self, task: Task) -> None:
         match task:

@@ -23,6 +23,8 @@ import subprocess
 import time
 from typing import final
 
+from anyio import EndOfStream, WouldBlock
+
 from skulk.shared.backends import RPC_SERVER_BIN_ENV, rpc_server_binary
 from skulk.shared.types.events import (
     Event,
@@ -48,6 +50,10 @@ from skulk.worker.runner.bootstrap import logger
 # immediately (no model to load), so this only papers over slow process start.
 _HEALTH_DEADLINE_SECONDS: float = 30.0
 _HEALTH_POLL_SECONDS: float = 0.25
+# Between tasks the donor wakes at this cadence to verify its rpc-server
+# subprocess is still alive (a dead server must crash the runner, not leave a
+# Ready runner gossiping over a dead port).
+_LIVENESS_POLL_SECONDS: float = 2.0
 
 
 def _set_pdeathsig() -> None:
@@ -133,7 +139,18 @@ class Runner:
                 f"(pid={self.server_proc.pid if self.server_proc else '?'})"
             )
             with self.task_receiver as tasks:
-                for task in tasks:
+                while True:
+                    try:
+                        task = tasks.receive_timeout(_LIVENESS_POLL_SECONDS)
+                    except WouldBlock:
+                        # No task: verify the rpc-server subprocess is still
+                        # alive. A donor whose server died must crash the
+                        # runner (supervisor cascade tears down the instance)
+                        # rather than gossip Ready over a dead port.
+                        self._ensure_server_alive()
+                        continue
+                    except EndOfStream:
+                        break
                     self._handle_task(task)
                     if isinstance(self.current_status, RunnerShutdown):
                         break
@@ -141,6 +158,18 @@ class Runner:
             # Never leave the RPC server running past the runner loop
             # (PR_SET_PDEATHSIG is the SIGKILL backstop on Linux).
             self._teardown_server()
+
+    def _ensure_server_alive(self) -> None:
+        """Raise if the spawned ggml-rpc-server exited behind our back."""
+        proc = self.server_proc
+        if proc is None or isinstance(
+            self.current_status, (RunnerShuttingDown, RunnerShutdown)
+        ):
+            return
+        if proc.poll() is not None:
+            raise RuntimeError(
+                f"ggml-rpc-server exited unexpectedly (code {proc.returncode})"
+            )
 
     def _handle_task(self, task: Task) -> None:
         match task:
