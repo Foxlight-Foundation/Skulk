@@ -258,6 +258,35 @@ def test_link_local_only_path_fails_placement() -> None:
         )
 
 
+def test_missing_node_resources_is_info_pending_for_pooled_request() -> None:
+    """A pooled request during the telemetry warm-up window (topology + memory
+    arrived, NodeResources not yet gossiped for one node) must surface the
+    retry-shortly signal: defaulting the unknown node to mlx would drop the
+    served cycle for the wrong reason and raise a hard PlacementError the
+    caller treats as terminal (observed live after fleet bring-up)."""
+    topology, big, small = _amd_pair()
+    node_memory = {
+        big: create_node_memory(Memory.from_gb(64).in_bytes),
+        small: create_node_memory(Memory.from_gb(32).in_bytes),
+    }
+    node_network = {big: create_node_network(), small: create_node_network()}
+    # The small node's NodeResources have not gossiped yet.
+    resources = {big: _amd_resources()}
+    node_vram = {big: Memory.from_gb(57.6), small: Memory.from_gb(28.8)}
+    command = _command(_gguf_card(storage_gb=70.0), min_nodes=2)
+    with pytest.raises(PlacementInfoPendingError, match=str(small)):
+        place_instance(
+            command,
+            topology,
+            {},
+            node_memory,
+            node_network,
+            node_resources=resources,
+            node_vram=node_vram,
+            node_vram_strict=node_vram,
+        )
+
+
 def test_vision_card_never_pools_on_served_backends() -> None:
     """MODEL truth vs PLATFORM truth: a vision card may declare llama_server
     compatibility (the model runs there), but the served runner cannot load

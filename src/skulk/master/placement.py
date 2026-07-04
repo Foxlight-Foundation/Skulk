@@ -369,6 +369,9 @@ def place_instance(
     resolved_node_resources = node_resources or {}
     card_backends = _card_platform_backends(command.model_card)
     if card_backends:
+        multi_node_candidate_cycles = [
+            cycle for cycle in candidate_cycles if len(cycle) > 1
+        ]
         candidate_cycles = [
             cycle
             for cycle in candidate_cycles
@@ -378,6 +381,27 @@ def place_instance(
             )
         ]
         if not candidate_cycles:
+            # A node with no NodeResources entry yet defaults to mlx in the
+            # common-engine rule, so a served-only cycle evaluated during the
+            # telemetry warm-up window is dropped for the WRONG reason. When
+            # backends telemetry was provided but is missing for multi-node
+            # candidates, surface the retry-shortly signal instead of a hard
+            # error the caller would treat as terminal (observed live: a
+            # pooled placement right after fleet bring-up 400s once, then
+            # succeeds on retry).
+            if node_resources is not None:
+                resources_pending_nodes = {
+                    node_id
+                    for cycle in multi_node_candidate_cycles
+                    for node_id in cycle.node_ids
+                    if node_id not in resolved_node_resources
+                }
+                if resources_pending_nodes:
+                    raise PlacementInfoPendingError(
+                        "Backend info has not been gossiped yet for node(s) "
+                        f"[{', '.join(str(n) for n in sorted(resources_pending_nodes))}] "
+                        "— the cluster may still be starting up. Retry shortly."
+                    )
             raise PlacementError(
                 "No candidate cycle can serve this model: multi-node placement "
                 "requires one engine common to every node in the cycle that "
