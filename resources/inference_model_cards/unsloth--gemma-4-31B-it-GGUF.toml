@@ -38,7 +38,7 @@ boi_token_id = 255999
 eoi_token_id = 258882
 
 [placement]
-compatible_backends = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu", "llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_server-cpu"]
+compatible_backends = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu", "llama_server-vulkan", "llama_server-rocm", "llama_server-cuda"]
 backend_preference = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu"]
 
 [storage_size]

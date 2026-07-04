@@ -95,6 +95,7 @@ from skulk.shared.types.telemetry import TelemetryView
 from skulk.shared.types.worker.downloads import DownloadFailed
 from skulk.shared.types.worker.instances import Instance, InstanceId
 from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
+from skulk.shared.types.worker.shards import RpcDonorShardMetadata
 from skulk.store.config import resolve_config_path
 from skulk.utils.channels import Receiver, Sender
 from skulk.utils.disk_event_log import DiskEventLog
@@ -292,7 +293,13 @@ def instances_wedged_by_download_failure(
         model_id = shards[0].model_card.model_id
         failed_nodes: set[NodeId] = set()
         cause = ""
-        for node_id in instance.shard_assignments.node_to_runner:
+        for node_id, runner_id in instance.shard_assignments.node_to_runner.items():
+            # RPC donors never download the model, so a stale DownloadFailed
+            # for this model on a donor node (from an earlier placement) must
+            # not condemn a pooled instance that only needs the DRIVER's copy.
+            shard = instance.shard_assignments.runner_to_shard.get(runner_id)
+            if isinstance(shard, RpcDonorShardMetadata):
+                continue
             for progress in state.downloads.get(node_id, []):
                 if (
                     isinstance(progress, DownloadFailed)

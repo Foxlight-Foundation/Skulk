@@ -19,7 +19,7 @@ gguf_file = "Llama-3.2-1B-Instruct-Q4_K_M.gguf"
 trust_remote_code = false
 
 [placement]
-compatible_backends = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu", "llama_server-vulkan", "llama_server-rocm", "llama_server-cuda", "llama_server-cpu"]
+compatible_backends = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu", "llama_server-vulkan", "llama_server-rocm", "llama_server-cuda"]
 backend_preference = ["llama_cpp-vulkan", "llama_cpp-rocm", "llama_cpp-cuda", "llama_cpp-cpu"]
 
 [storage_size]
