@@ -67,6 +67,11 @@ check_gap() { CHECK_GAPS=$((CHECK_GAPS + 1)); warn "$@"; }
 # --- Preflight: platform + GPU sanity ---------------------------------------
 preflight() {
   [ "$(uname -s)" = "Linux" ] || die "this installer is for Linux AMD nodes; on macOS use the LaunchAgent path."
+  # Run as the login user that will run Skulk, never as root: the script
+  # escalates with sudo only where needed, and user-scoped steps (uv, rust,
+  # the env build) would otherwise land under /root and leave a root-owned
+  # .venv in the user checkout.
+  [ "$(id -u)" -ne 0 ] || die "do not run as root/sudo; run as the login user that will run Skulk (the script uses sudo internally where needed)."
   if [ -r /etc/os-release ]; then
     # shellcheck disable=SC1091
     . /etc/os-release
@@ -253,8 +258,17 @@ verify() {
     dev="$(sed -n 's/.*deviceName[[:space:]]*=[[:space:]]*//p' <<<"$vk" | head -1 || true)"
     # A GPU Vulkan cannot see is a --check failure, not a footnote: the box
     # would advertise a backend it cannot serve (broken driver binding, or
-    # group membership not yet active in this session).
-    [ -n "$dev" ] && log "  vulkan: ${dev}" || check_gap "vulkaninfo returned no device (driver/permissions?)"
+    # group membership not yet active in this session). A SOFTWARE Vulkan
+    # device (Mesa llvmpipe) also fails: it exists on CPU-only or
+    # permission-broken boxes and would let --check pass while the Radeon is
+    # unusable.
+    if [ -z "$dev" ]; then
+      check_gap "vulkaninfo returned no device (driver/permissions?)"
+    elif grep -qiE 'llvmpipe|swiftshader|software' <<<"$dev"; then
+      check_gap "Vulkan device is a software rasterizer (${dev}); the Radeon GPU is not usable via RADV"
+    else
+      log "  vulkan: ${dev}"
+    fi
   else
     check_gap "vulkaninfo missing"
   fi
