@@ -1,5 +1,5 @@
 import styled, { css, useTheme } from 'styled-components';
-import { FiSettings, FiMenu, FiX, FiSidebar, FiDatabase, FiMessageSquare, FiSun, FiMoon } from 'react-icons/fi';
+import { FiSettings, FiSidebar, FiDatabase, FiMessageSquare, FiSun, FiMoon } from 'react-icons/fi';
 import { MdHub } from 'react-icons/md';
 import { VscBug } from 'react-icons/vsc';
 import { Button } from '../common/Button';
@@ -22,7 +22,12 @@ export interface HeaderNavProps {
   showMobileMenuToggle?: boolean;
   mobileMenuOpen?: boolean;
   onToggleMobileMenu?: () => void;
-  showMobileRightToggle?: boolean;
+  /**
+   * Phone-width presentation: hides the inline nav links and the theme /
+   * observability / settings buttons (they move into the mobile menu sheet),
+   * keeping only status indicators (downloads, instances, warnings).
+   */
+  compact?: boolean;
   mobileRightOpen?: boolean;
   onToggleMobileRight?: () => void;
   instanceCount?: number;
@@ -36,6 +41,10 @@ export interface HeaderNavProps {
 /* ---- styles ---- */
 
 const Nav = styled.header`
+  /* Positioned so the z-index applies: the header must paint above the
+   * mobile menu backdrop (18) and sheet (19) in the HeaderAnchor stacking
+   * context, keeping the hamburger/X interactive while the menu is open. */
+  position: relative;
   z-index: 20;
   background: ${({ theme }) => theme.colors.header};
   border-bottom: none;
@@ -216,6 +225,41 @@ const WarningItem = styled.div<{ $level: 'error' | 'warning' }>`
   }
 `;
 
+/*
+ * Three-bar hamburger that morphs into an X when the mobile menu is open.
+ * Pure CSS transforms (rotate the outer bars onto the diagonal, fade the
+ * middle) so the open/close animation runs both ways without JS.
+ */
+const Hamburger = styled.span<{ $open: boolean }>`
+  position: relative;
+  display: block;
+  width: 18px;
+  height: 14px;
+
+  span {
+    position: absolute;
+    left: 0;
+    width: 100%;
+    height: 2px;
+    border-radius: 1px;
+    background: currentColor;
+    transition: transform 0.25s ease, opacity 0.2s ease, top 0.25s ease;
+  }
+
+  span:nth-child(1) {
+    top: ${({ $open }) => ($open ? '6px' : '0')};
+    transform: rotate(${({ $open }) => ($open ? '45deg' : '0')});
+  }
+  span:nth-child(2) {
+    top: 6px;
+    opacity: ${({ $open }) => ($open ? 0 : 1)};
+  }
+  span:nth-child(3) {
+    top: ${({ $open }) => ($open ? '6px' : '12px')};
+    transform: rotate(${({ $open }) => ($open ? '-45deg' : '0')});
+  }
+`;
+
 const InstanceToggle = styled.button<{ $healthy: boolean; $active: boolean }>`
   all: unset;
   cursor: pointer;
@@ -233,8 +277,6 @@ const InstanceToggle = styled.button<{ $healthy: boolean; $active: boolean }>`
 
 /* ---- icons (react-icons) ---- */
 
-const MenuIcon = () => <FiMenu size={18} />;
-const CloseIcon = () => <FiX size={18} />;
 const SidebarIcon = () => <FiSidebar size={18} />;
 const ClusterIcon = () => <MdHub size={16} />;
 const StoreIcon = () => <FiDatabase size={16} />;
@@ -282,9 +324,9 @@ export function HeaderNav({
   showMobileMenuToggle = false,
   mobileMenuOpen = false,
   onToggleMobileMenu,
-  showMobileRightToggle = false,
   mobileRightOpen = false,
   onToggleMobileRight,
+  compact = false,
   instanceCount = 0,
   instancesHealthy = true,
   downloadProgress = null,
@@ -322,7 +364,11 @@ export function HeaderNav({
             aria-label={t('header.toggleMobileMenu', 'Toggle mobile menu')}
             aria-pressed={mobileMenuOpen}
           >
-            {mobileMenuOpen ? <CloseIcon /> : <MenuIcon />}
+            <Hamburger $open={mobileMenuOpen} aria-hidden>
+              <span />
+              <span />
+              <span />
+            </Hamburger>
           </ToggleBtn>
         )}
         {showSidebarToggle && (
@@ -355,6 +401,7 @@ export function HeaderNav({
       <RightGroup>
         {downloadProgress && <ProgressCircle count={downloadProgress.count} percentage={downloadProgress.percentage} />}
 
+        {!compact && (<>
         <NavLink $active={activeRoute === 'cluster'} onClick={() => navigate('cluster')}>
           <ClusterIcon /> {t('header.nav.cluster', 'Cluster')}
         </NavLink>
@@ -366,6 +413,7 @@ export function HeaderNav({
         <NavLink $active={activeRoute === 'chat'} onClick={() => navigate('chat')}>
           <ChatIcon /> {t('header.nav.chat', 'Chat')}
         </NavLink>
+        </>)}
 
         {instanceCount > 0 && (
           <InstanceToggle
@@ -398,6 +446,7 @@ export function HeaderNav({
           </InstanceToggle>
         )}
 
+        {!compact && (<>
         <Button
           variant="ghost"
           size="lg"
@@ -406,7 +455,6 @@ export function HeaderNav({
           aria-label={themeName === 'dark'
             ? t('header.switchToLightTheme', 'Switch to light theme')
             : t('header.switchToDarkTheme', 'Switch to dark theme')}
-          aria-pressed={themeName === 'light'}
           title={themeName === 'dark'
             ? t('header.switchToLightTheme', 'Switch to light theme')
             : t('header.switchToDarkTheme', 'Switch to dark theme')}
@@ -435,6 +483,7 @@ export function HeaderNav({
         >
           <SettingsIcon />
         </Button>
+        </>)}
       </RightGroup>
     </Nav>
   );

@@ -1,9 +1,22 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
+
+/*
+ * Positioning anchor for the mobile menu sheet: the sheet is absolute at
+ * top: 100% of this wrapper, so it always opens flush under the header
+ * even when the reconnect banner adds height above it. z-index lifts the
+ * sheet above the content row while the header keeps its own higher index.
+ */
+const HeaderAnchor = styled.div`
+  position: relative;
+  z-index: 19;
+`;
 import { ThemeProvider } from 'styled-components';
 import { darkTheme, lightTheme, GlobalStyle } from './theme';
 import { useClusterState } from './hooks/useClusterState';
 import { HeaderNav } from './components/layout/HeaderNav';
+import { MobileMenuSheet } from './components/layout/MobileMenuSheet';
+import { useIsMobile } from './hooks/useMediaQuery';
 import { TopologyGraph } from './components/topology/TopologyGraph';
 // ClusterWarnings replaced by inline header warning indicator
 import { ConnectionBanner } from './components/status/ConnectionBanner';
@@ -143,6 +156,14 @@ export function App() {
     thunderboltBridgeCycles,
   } = useClusterState();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Phone-width header: nav and icon actions collapse into the hamburger
+  // sheet. The open flag resets when the viewport grows past the breakpoint
+  // so a rotation or window resize never strands an invisible open menu.
+  const isMobile = useIsMobile();
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  useEffect(() => {
+    if (!isMobile) setMobileMenuOpen(false);
+  }, [isMobile]);
   const [storeDownloads, setStoreDownloads] = useState<StoreDownload[]>([]);
   // Observability panel state lives on the global UI store so any component (toolbar
   // nav, per-node bug icons, future cross-links) can open the panel to a specific tab.
@@ -485,6 +506,7 @@ export function App() {
       <NetworkMesh radius={2.5} count={43} linkDistance={430} />
       <Shell>
         <ConnectionBanner connected={connected} />
+        <HeaderAnchor>
         <HeaderNav
           showHome
           activeRoute={activeRoute}
@@ -492,6 +514,10 @@ export function App() {
           onOpenSettings={() => setSettingsOpen(true)}
           downloadProgress={downloadProgress}
           warnings={clusterWarnings}
+          compact={isMobile}
+          showMobileMenuToggle={isMobile}
+          mobileMenuOpen={mobileMenuOpen}
+          onToggleMobileMenu={() => setMobileMenuOpen((v) => !v)}
           showSidebarToggle={activeRoute === 'chat' && allConversations.length > 0}
           sidebarVisible={historyPanelOpen}
           onToggleSidebar={toggleHistoryPanel}
@@ -500,6 +526,16 @@ export function App() {
           mobileRightOpen={panelOpen}
           onToggleMobileRight={togglePanel}
         />
+        {isMobile && (
+          <MobileMenuSheet
+            open={mobileMenuOpen}
+            activeRoute={activeRoute}
+            onNavigate={(route) => setActiveRoute(route)}
+            onOpenSettings={() => setSettingsOpen(true)}
+            onClose={() => setMobileMenuOpen(false)}
+          />
+        )}
+        </HeaderAnchor>
         <ContentRow>
           {activeRoute === 'chat' && allConversations.length > 0 && historyPanelOpen && (
             <ConversationPanel
