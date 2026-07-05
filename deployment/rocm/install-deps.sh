@@ -152,8 +152,14 @@ ensure_gpu_groups() {
   local added=0
   for grp in render video; do
     if getent group "$grp" >/dev/null 2>&1 && ! id -nG "$target_user" | tr ' ' '\n' | grep -qx "$grp"; then
-      log "adding $target_user to group $grp"
-      [ "$CHECK_ONLY" -eq 0 ] && sudo usermod -aG "$grp" "$target_user" && added=1
+      if [ "$CHECK_ONLY" -eq 1 ]; then
+        # Missing group membership means the node cannot open /dev/dri: a
+        # verify run must fail on it, not just note it.
+        check_gap "$target_user is not in group $grp (no /dev/dri access)"
+      else
+        log "adding $target_user to group $grp"
+        sudo usermod -aG "$grp" "$target_user" && added=1
+      fi
     fi
   done
   [ "$added" -eq 1 ] && warn "group membership changed: log out and back in (or reboot) before starting Skulk."

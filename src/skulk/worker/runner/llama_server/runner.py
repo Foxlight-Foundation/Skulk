@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Final, Literal, NamedTuple
 
 import httpx
-from anyio import EndOfStream, WouldBlock
+from anyio import ClosedResourceError, EndOfStream, WouldBlock
 
 from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
 from skulk.shared.models.model_cards import OutputParserType
@@ -395,7 +395,11 @@ class Runner:
                         # forever while every future request 500s.
                         self._ensure_server_alive()
                         continue
-                    except EndOfStream:
+                    except (EndOfStream, ClosedResourceError):
+                        # receive_timeout raises ClosedResourceError when the
+                        # sender closed before the end-of-stream sentinel was
+                        # drained (the shared closed flag is checked first);
+                        # treat it like EndOfStream: clean loop exit.
                         break
                     if task.task_id in self.seen:
                         logger.warning("repeat task - potential error")
