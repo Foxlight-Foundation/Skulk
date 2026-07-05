@@ -101,6 +101,22 @@ class LlamaRpcInstance(BaseInstance):
 Instance = MlxRingInstance | MlxJacclInstance | LlamaRpcInstance
 
 
+def instance_meta_of(instance: Instance) -> InstanceMeta:
+    """The ``InstanceMeta`` a concrete instance actually embodies.
+
+    Placement normalizes and resolves shapes (a single-node cycle becomes a
+    ring regardless of the requested meta; an RPC-capable cycle mints a
+    ``LlamaRpcInstance`` even from a ring request), so consumers reporting or
+    recovering intent must derive the meta from the instance TYPE, never echo
+    the requested value. Single source of truth for that derivation.
+    """
+    if isinstance(instance, MlxJacclInstance):
+        return InstanceMeta.MlxJaccl
+    if isinstance(instance, LlamaRpcInstance):
+        return InstanceMeta.LlamaRpc
+    return InstanceMeta.MlxRing
+
+
 class BoundInstance(CamelCaseModel):
     instance: Instance
     bound_runner_id: RunnerId

@@ -60,6 +60,7 @@ from skulk.shared.types.worker.instances import (
     LlamaRpcInstance,
     MlxJacclInstance,
     MlxRingInstance,
+    instance_meta_of,
 )
 from skulk.shared.types.worker.runners import ShardAssignments
 from skulk.shared.types.worker.shards import Sharding, TensorShardMetadata
@@ -807,12 +808,7 @@ def _placement_intent_from_instance(
         if any(isinstance(shard, TensorShardMetadata) for shard in shards)
         else Sharding.Pipeline
     )
-    if isinstance(instance, MlxJacclInstance):
-        instance_meta = InstanceMeta.MlxJaccl
-    elif isinstance(instance, LlamaRpcInstance):
-        instance_meta = InstanceMeta.LlamaRpc
-    else:
-        instance_meta = InstanceMeta.MlxRing
+    instance_meta = instance_meta_of(instance)
     width = len(instance.shard_assignments.node_to_runner)
     return model_card, sharding, instance_meta, width
 
