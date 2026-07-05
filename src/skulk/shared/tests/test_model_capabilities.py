@@ -676,3 +676,55 @@ def test_qwen3_explicit_card_reasoning_still_overrides_family_default() -> None:
     profile = resolve_model_capability_profile(card.model_id, model_card=card)
 
     assert profile.supports_thinking_toggle is False
+
+
+def _qwen3_card(model_id: str, capabilities: list[str]) -> ModelCard:
+    return ModelCard(
+        model_id=ModelId(model_id),
+        storage_size=Memory.from_mb(100),
+        n_layers=10,
+        hidden_size=1024,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+        family="qwen",
+        capabilities=capabilities,
+    )
+
+
+def test_qwen3_instruct_card_declaring_no_thinking_is_respected() -> None:
+    # An instruct-only Qwen3 release explicitly carded with capabilities that
+    # omit "thinking" must not have the family default force a thinking
+    # contract it cannot honor (the audit found five bundled Instruct-2507 /
+    # Next-Instruct cards mis-resolved this way). `supports_thinking` has no
+    # card-level off switch, so the family-default gate is the only guard.
+    card = _qwen3_card("mlx-community/Qwen3-4B-Instruct-2507-4bit", ["text"])
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+    assert profile.supports_thinking is False
+    assert profile.supports_thinking_toggle is False
+
+
+def test_qwen3_auto_imported_card_still_defaults_to_thinking() -> None:
+    # The #384 behavior must survive: an auto-imported card arrives with EMPTY
+    # capabilities (fetch_from_hf never fills the field), and the family
+    # default keeps it toggle-capable so a hybrid Qwen3 does not reason
+    # unconditionally into empty content.
+    card = _qwen3_card("someone/Qwen3.5-9B-fresh-quant", [])
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+    assert profile.supports_thinking is True
+    assert profile.supports_thinking_toggle is True
+    assert profile.thinking_format == ReasoningFormat.TokenDelimited
+
+
+def test_qwen3_thinking_card_keeps_thinking() -> None:
+    card = _qwen3_card(
+        "mlx-community/Qwen3.5-9B-4bit", ["text", "thinking", "thinking_toggle"]
+    )
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+    assert profile.supports_thinking is True
+    assert profile.supports_thinking_toggle is True
+
+
+def test_qwen3_coder_stays_excluded_from_thinking_default() -> None:
+    card = _qwen3_card("mlx-community/Qwen3-Coder-30B-4bit", [])
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+    assert profile.supports_thinking is False

@@ -96,6 +96,22 @@ This project records release notes here and mirrors public-facing notes in
   crashed `llama-server` or `ggml-rpc-server` marks the runner failed (with
   the subprocess log tail in the error) instead of leaving a Ready runner
   over a zombie that wedges the next request. (#451)
+- **Bundled model cards audited end to end; every finding fixed and gated.**
+  A full audit of the 136 bundled cards (schema, cross-field invariants,
+  capability resolution, and a live check of all 148 referenced Hugging Face
+  repos and file paths) found and fixed: the Ornith 1.0-35B MLX card pointed
+  at a deleted repo and now uses the official `mlx-community` conversion
+  (structurally identical, values re-derived from the new artifacts); the
+  Qwen3 family capability default forced a thinking contract onto
+  instruct-only variants that explicitly declare no thinking (five bundled
+  Instruct-2507 / Next-Instruct cards resolved wrong; the resolver now
+  respects explicit card capabilities while keeping the auto-imported-card
+  default); seven cards (DeepSeek V3.1/V3.2, gemma-3n, gemma-4-e4b) were
+  missing `context_length` and three Nemotron-3-Nano cards were missing
+  `num_key_value_heads`, all filled from each repo's real config; and two
+  GLM-5 card filenames did not match their model IDs. Every static audit
+  invariant now runs as a per-card test gate, so a bad bundled card fails CI
+  instead of shipping.
 
 ## [1.3.1] - 2026-07-01
 

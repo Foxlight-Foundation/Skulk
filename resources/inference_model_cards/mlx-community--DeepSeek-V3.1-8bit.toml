@@ -8,6 +8,7 @@ family = "deepseek"
 quantization = "8bit"
 base_model = "DeepSeek V3.1"
 capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 163840
 
 # DeepSeek V3.1 (arch deepseek_v3, NOT v3.2) is a hybrid reasoner: it thinks
 # behind a token-delimited <think>...</think> toggle. It predates the DSML tool
