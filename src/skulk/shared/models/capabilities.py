@@ -251,13 +251,23 @@ def resolve_model_capability_profile(
                 "tool_call_format": ToolCallFormat.GptOss,
             }
         )
-    elif _is_qwen3_thinking_family(profile.family, normalized_model_id):
+    elif _is_qwen3_thinking_family(profile.family, normalized_model_id) and (
+        card is None or not card.capabilities or "thinking" in card.capabilities
+    ):
         # Qwen3/3.5/3.6 reason behind a token-delimited <think> toggle. Default
-        # the thinking contract on so an auto-imported card (empty capabilities)
-        # is still treated as toggle-capable, instead of resolving to
-        # no-thinking and reasoning unconditionally into empty content (#384).
-        # Only the thinking fields are set; tool/prompt/parser behavior stays
-        # generic. Explicit card.reasoning still overrides below.
+        # the thinking contract on so an auto-imported card (empty capabilities;
+        # fetch_from_hf never fills the field) is still treated as
+        # toggle-capable, instead of resolving to no-thinking and reasoning
+        # unconditionally into empty content (#384). A card that DOES declare
+        # capabilities without "thinking" is an explicit statement that this
+        # variant does not think (the Instruct-2507 / Next-Instruct releases),
+        # and the family default must not override card truth: `supports_
+        # thinking` has no card-level off switch below (the [reasoning]
+        # overrides cover toggle/format/effort only), so this gate is the only
+        # thing keeping instruct-only Qwen3 variants from advertising a
+        # thinking contract they cannot honor. Only the thinking fields are
+        # set; tool/prompt/parser behavior stays generic. Explicit
+        # card.reasoning still overrides below.
         profile = profile.model_copy(
             update={
                 "supports_thinking": True,

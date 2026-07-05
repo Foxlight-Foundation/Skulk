@@ -8,6 +8,7 @@ family = "deepseek"
 quantization = "8bit"
 base_model = "DeepSeek V3.2"
 capabilities = ["text", "thinking", "thinking_toggle"]
+context_length = 163840
 
 [reasoning]
 supports_toggle = true
