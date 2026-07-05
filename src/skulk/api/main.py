@@ -267,7 +267,7 @@ from skulk.shared.types.worker.instances import (
     Instance,
     InstanceId,
     InstanceMeta,
-    LlamaRpcInstance,
+    instance_meta_of,
 )
 from skulk.shared.types.worker.runners import RunnerId
 from skulk.shared.types.worker.shards import Sharding
@@ -1788,16 +1788,14 @@ class API:
                     extra = 1 if index < remainder else 0
                     memory_delta_by_node[str(node_id)] = per_node + extra
 
-            # Report the MINTED instance's meta, not the requested one: shape
-            # selection is cycle-driven, so a Pipeline/MlxRing request over an
-            # AMD pair can mint a LlamaRpcInstance (#328). Consumers (dashboard,
-            # test harness) match previews by instance_meta, so the preview
-            # must be truthful about the shape a real placement would produce.
-            minted_meta = (
-                InstanceMeta.LlamaRpc
-                if isinstance(instance, LlamaRpcInstance)
-                else instance_meta
-            )
+            # Report the MINTED instance's meta, not the requested one:
+            # placement normalizes shapes (single-node cycles become rings
+            # regardless of requested meta; an RPC-capable cycle mints a
+            # LlamaRpcInstance from a ring request, #328). Consumers
+            # (dashboard, test harness) match previews by instance_meta, so
+            # the preview must be truthful about the shape a real placement
+            # would produce.
+            minted_meta = instance_meta_of(instance)
             if (
                 model_card.model_id,
                 sharding,
