@@ -440,6 +440,8 @@ deployment-specific behavior (an audit logger, a request policy filter, a
 prompt annotator) rides the fabric without forking Skulk: the package is
 installed into the same environment as Skulk on each node, and Skulk
 discovers it at startup through the `skulk.extensions` entry-point group.
+The developer guide, with a complete worked example, is at
+[Extensions (Plugins)](extensions.md).
 
 The contract is deliberately small (`src/skulk/extensions/`):
 
