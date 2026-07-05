@@ -58,6 +58,7 @@ from skulk.shared.types.events import (
     InputChunkReceived,
     InstanceDeleted,
     LocalForwarderEvent,
+    NodeDownloadProgress,
     NodeGatheredInfo,
     NodeTimedOut,
     StagedModelEvicted,
@@ -92,7 +93,7 @@ from skulk.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
 )
 from skulk.shared.types.telemetry import TelemetryView
-from skulk.shared.types.worker.downloads import DownloadFailed
+from skulk.shared.types.worker.downloads import DownloadFailed, DownloadPending
 from skulk.shared.types.worker.instances import Instance, InstanceId
 from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
 from skulk.shared.types.worker.shards import RpcDonorShardMetadata
@@ -1213,6 +1214,41 @@ class Master:
                 )
             for event in transition_events:
                 await self.event_sender.send(event)
+            # Recovery CONSUMES the terminal failure record: reset each failed
+            # node's download status for this model back to Pending. Without
+            # this, the stale DownloadFailed lingers in session state and this
+            # same scan condemns EVERY future placement of the model that
+            # touches the node, long after the cause (disk full, network blip)
+            # is gone -- one transient failure permanently poisoned the model
+            # on that node until a whole-fleet restart (observed live: an
+            # ENOSPC during a pooled placement kept killing fresh placements
+            # an hour after the disk was freed). This recovery pass already
+            # acted on the failure (teardown + re-place excluding the node);
+            # if the cause persists, the next download fails afresh and
+            # recovery repeats, so nothing is lost by clearing history.
+            for node_id in failed_nodes:
+                runner_id = instance.shard_assignments.node_to_runner.get(node_id)
+                shard = (
+                    instance.shard_assignments.runner_to_shard.get(runner_id)
+                    if runner_id is not None
+                    else None
+                )
+                if shard is None:
+                    continue
+                await self.event_sender.send(
+                    NodeDownloadProgress(
+                        download_progress=DownloadPending(
+                            node_id=node_id,
+                            shard_metadata=shard,
+                            model_directory="",
+                        )
+                    )
+                )
+                logger.info(
+                    f"Reset stale DownloadFailed for "
+                    f"{shard.model_card.model_id} on {node_id} (consumed by "
+                    "recovery)"
+                )
 
     async def _event_processor(self) -> None:
         with self.local_event_receiver as local_events:
