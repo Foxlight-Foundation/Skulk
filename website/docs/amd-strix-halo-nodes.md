@@ -249,8 +249,11 @@ point `SKULK_LLAMA_SERVER_BIN` at it before launching Skulk. Native MTP
 
 ```bash
 git clone https://github.com/ggml-org/llama.cpp.git ~/llama.cpp && cd ~/llama.cpp
-cmake -B build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target llama-server -j"$(nproc)"
+# -DGGML_RPC=ON also builds ggml-rpc-server, which multi-node GGUF pooling
+# needs on donor nodes (see the pooling section below); include it even on a
+# single-node build so the node can join a pool later without a rebuild.
+cmake -B build -DGGML_VULKAN=ON -DGGML_RPC=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target llama-server ggml-rpc-server -j"$(nproc)"
 # then in ~/.skulk/skulk.env (or launch-skulk.sh):
 #   SKULK_LLAMA_SERVER_BIN=$HOME/llama.cpp/build/bin/llama-server
 ```

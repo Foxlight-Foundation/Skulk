@@ -4,8 +4,6 @@ title: Extensions (Plugins)
 
 <!-- Copyright 2025 Foxlight Foundation -->
 
-# Extensions (plugins)
-
 Skulk can load separately installed Python packages as extensions and call
 them at well-defined points in the serving path. Extensions are how
 deployment-specific behavior (an audit logger, a request policy filter, a

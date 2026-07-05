@@ -35,6 +35,10 @@
 # (gfx1151), Mesa 26 RADV, Vulkan 1.4, llama.cpp Vulkan build b9820.
 set -euo pipefail
 
+log() { printf '\033[1;36m[deps]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[deps] WARNING:\033[0m %s\n' "$*" >&2; }
+die() { printf '\033[1;31m[deps] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
 WITH_LLAMA_SERVER=0
 WITH_SKULK_ENV=0
 WANT_ROCMINFO=1
@@ -46,7 +50,7 @@ while [ $# -gt 0 ]; do
     --with-llama-server) WITH_LLAMA_SERVER=1 ;;
     --with-skulk-env) WITH_SKULK_ENV=1 ;;
     --no-rocminfo) WANT_ROCMINFO=0 ;;
-    --llama-cpp-dir) LLAMA_CPP_DIR="$2"; shift ;;
+    --llama-cpp-dir) [ $# -ge 2 ] || die "--llama-cpp-dir requires a directory argument"; LLAMA_CPP_DIR="$2"; shift ;;
     --check) CHECK_ONLY=1 ;;
     -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
@@ -54,9 +58,11 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-log() { printf '\033[1;36m[deps]\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m[deps] WARNING:\033[0m %s\n' "$*" >&2; }
-die() { printf '\033[1;31m[deps] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+# Counts every gap --check would have fixed; a verify run that found gaps must
+# not exit 0, or automation trusting the exit code treats a broken box as ready.
+CHECK_GAPS=0
+
+check_gap() { CHECK_GAPS=$((CHECK_GAPS + 1)); warn "$@"; }
 
 # --- Preflight: platform + GPU sanity ---------------------------------------
 preflight() {
@@ -121,7 +127,7 @@ install_apt() {
   fi
   log "installing apt packages: ${missing[*]}"
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "--check: skipping install of: ${missing[*]}"
+    check_gap "--check: missing apt packages: ${missing[*]}"
     return 0
   fi
   sudo apt-get update -qq
@@ -154,7 +160,7 @@ ensure_uv() {
     return 0
   fi
   log "installing uv (astral installer -> ~/.local/bin)"
-  [ "$CHECK_ONLY" -eq 1 ] && { warn "--check: skipping uv install"; return 0; }
+  [ "$CHECK_ONLY" -eq 1 ] && { check_gap "--check: uv is not installed"; return 0; }
   curl -LsSf https://astral.sh/uv/install.sh | sh
   # Make uv visible for the rest of this script run.
   export PATH="${HOME}/.local/bin:${PATH}"
@@ -172,7 +178,7 @@ ensure_rust() {
     return 0
   fi
   log "installing rust (rustup -> ~/.cargo/bin); the Skulk env build needs cargo"
-  [ "$CHECK_ONLY" -eq 1 ] && { warn "--check: skipping rust install"; return 0; }
+  [ "$CHECK_ONLY" -eq 1 ] && { check_gap "--check: rust (cargo) is not installed"; return 0; }
   curl --proto '=https' --tlsv1.2 -LsSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
   export PATH="${HOME}/.cargo/bin:${PATH}"
   command -v cargo >/dev/null 2>&1 || die "rust install did not land on PATH (~/.cargo/bin); open a new shell and re-run."
@@ -195,7 +201,7 @@ build_llama_server() {
     else
       log "building llama-server with Vulkan at ${LLAMA_CPP_DIR}"
     fi
-    [ "$CHECK_ONLY" -eq 1 ] && { warn "--check: skipping llama-server build"; return 0; }
+    [ "$CHECK_ONLY" -eq 1 ] && { check_gap "--check: llama-server / ggml-rpc-server not built"; return 0; }
     if [ ! -d "${LLAMA_CPP_DIR}/.git" ]; then
       git clone https://github.com/ggml-org/llama.cpp.git "${LLAMA_CPP_DIR}"
     fi
@@ -220,7 +226,7 @@ build_skulk_env() {
   fi
   ensure_rust
   log "uv sync (builds Rust bindings; --inexact preserves a Vulkan llama-cpp-python wheel)"
-  [ "$CHECK_ONLY" -eq 1 ] && { warn "--check: skipping uv sync + llama-cpp-python build"; return 0; }
+  [ "$CHECK_ONLY" -eq 1 ] && { warn "--check: not running uv sync + llama-cpp-python build (build step, not a verifiable state)"; return 0; }
   uv sync --inexact
   log "building llama-cpp-python from source with Vulkan (in-process GGUF engine)"
   # --no-binary forces the source build; without it uv installs a CPU-only wheel
@@ -261,6 +267,9 @@ main() {
   [ "$WITH_LLAMA_SERVER" -eq 1 ] && build_llama_server
   [ "$WITH_SKULK_ENV" -eq 1 ] && build_skulk_env
   verify
+  if [ "$CHECK_ONLY" -eq 1 ] && [ "$CHECK_GAPS" -gt 0 ]; then
+    die "--check found ${CHECK_GAPS} gap(s) above; this node is not ready."
+  fi
   log "done. Next: clone Skulk (if not already), then see deployment/rocm/README.md"
   log "for launching the node (launch-skulk.sh) or the managed systemd service."
 }
