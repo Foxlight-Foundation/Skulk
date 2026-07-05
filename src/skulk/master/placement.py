@@ -2,7 +2,7 @@ import random
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from copy import deepcopy
-from typing import Sequence
+from typing import Final, Sequence
 
 from skulk.master.placement_utils import (
     Cycle,
@@ -65,10 +65,65 @@ from skulk.shared.types.worker.instances import (
 from skulk.shared.types.worker.runners import ShardAssignments
 from skulk.shared.types.worker.shards import Sharding, TensorShardMetadata
 
+# Ring/coordinator/donor listener ports are drawn from a band BELOW the OS
+# ephemeral range (macOS and Linux assign outgoing-connection local ports from
+# ~49152-65535 / 32768-60999). Picking listener ports inside that range made
+# bind collisions a background hazard: any outgoing socket on the placement
+# node (store transfers run exactly when placements happen) could hold the
+# chosen port, the port is immutable on the instance, so every runner retry
+# failed with EADDRINUSE until the crash breaker gave up (observed live in
+# the e2e battery: [ring] Couldn't bind socket (error: 48) on a node that was
+# mid store-download). In this band the only possible collisions are other
+# Skulk listeners, which the caller excludes via live-instance ports.
+_PLACEMENT_PORT_RANGE: Final = (41000, 48999)
 
-def random_ephemeral_port() -> int:
-    port = random.randint(49153, 65535)
-    return port - 1 if port <= 52415 else port
+
+def random_ephemeral_port(
+    in_use_ports: AbstractSet[int] | None = None,
+) -> int:
+    """Pick a listener port for a placement, avoiding known in-use ports.
+
+    ``in_use_ports`` should carry every live instance's ports so concurrent
+    placements cannot collide with each other; the band itself keeps OS
+    outgoing sockets out of play. Random probing first (cheap, no bias), then
+    a deterministic scan under pressure; only a truly exhausted band (8k live
+    listener ports, beyond any real deployment) falls back to a random pick.
+    """
+    low, high = _PLACEMENT_PORT_RANGE
+    for _ in range(64):
+        port = random.randint(low, high)
+        if not in_use_ports or port not in in_use_ports:
+            return port
+    if in_use_ports is not None:
+        for port in range(low, high + 1):
+            if port not in in_use_ports:
+                return port
+    return random.randint(low, high)
+
+
+def _listener_ports_in_use(
+    instances: Mapping[InstanceId, Instance],
+) -> set[int]:
+    """Every listener port claimed by live (or just-minted) instances.
+
+    Fed to :func:`random_ephemeral_port` so concurrent placements cannot
+    collide with each other inside the reserved placement port band.
+    """
+    ports: set[int] = set()
+    for existing in instances.values():
+        if isinstance(existing, MlxRingInstance):
+            ports.add(existing.ephemeral_port)
+            continue
+        endpoints = (
+            existing.jaccl_coordinators.values()
+            if isinstance(existing, MlxJacclInstance)
+            else existing.donor_endpoints.values()
+        )
+        for endpoint in endpoints:
+            _, _, port_text = endpoint.rpartition(":")
+            if port_text.isdigit():
+                ports.add(int(port_text))
+    return ports
 
 
 def add_instance_to_placements(
@@ -703,16 +758,20 @@ def place_instance(
         # the donor binds exactly this address and the driver dials it, so the
         # two sides can never disagree. Address selection reuses the ring's
         # observed-connection prioritiser (Thunderbolt first, VPN last, #265).
+        used_ports = _listener_ports_in_use(target_instances)
+        donor_ports: dict[NodeId, int] = {}
+        for donor_node_id in selected_cycle.node_ids:
+            if donor_node_id == driver_node:
+                continue
+            picked = random_ephemeral_port(used_ports)
+            used_ports.add(picked)
+            donor_ports[donor_node_id] = picked
         donor_endpoints = get_llama_rpc_donor_endpoints(
             selected_cycle=selected_cycle,
             driver_node=driver_node,
             cycle_digraph=cycle_digraph,
             node_network=node_network,
-            donor_ports={
-                node_id: random_ephemeral_port()
-                for node_id in selected_cycle.node_ids
-                if node_id != driver_node
-            },
+            donor_ports=donor_ports,
         )
         target_instances[instance_id] = LlamaRpcInstance(
             instance_id=instance_id,
@@ -754,7 +813,9 @@ def place_instance(
             )
             mlx_jaccl_coordinators = get_mlx_jaccl_coordinators(
                 coordinator=coordinator_node_id,
-                coordinator_port=random_ephemeral_port(),
+                coordinator_port=random_ephemeral_port(
+                    _listener_ports_in_use(target_instances)
+                ),
                 cycle_digraph=cycle_digraph,
                 node_network=node_network,
             )
@@ -766,7 +827,9 @@ def place_instance(
                 jaccl_coordinators=mlx_jaccl_coordinators,
             )
         case InstanceMeta.MlxRing:
-            ephemeral_port = random_ephemeral_port()
+            ephemeral_port = random_ephemeral_port(
+                _listener_ports_in_use(target_instances)
+            )
             hosts_by_node = get_mlx_ring_hosts_by_node(
                 selected_cycle=selected_cycle,
                 cycle_digraph=cycle_digraph,

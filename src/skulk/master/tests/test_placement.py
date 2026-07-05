@@ -1448,3 +1448,34 @@ def test_hybrid_card_with_multi_node_engine_places_multi_node() -> None:
     placements = place_instance(command, topology, {}, node_memory, node_network)
     instance = next(iter(placements.values()))
     assert len(instance.shard_assignments.node_to_runner) == 2
+
+
+def test_placement_ports_stay_outside_os_ephemeral_range() -> None:
+    """Listener ports come from the reserved band below the OS ephemeral
+    range: an outgoing socket on a placement node (store transfers run
+    exactly when placements happen) could otherwise hold the chosen port and
+    every runner retry dies on EADDRINUSE (observed live: [ring] Couldn't
+    bind socket (error: 48) on a node mid store-download)."""
+    from skulk.master.placement import (
+        _PLACEMENT_PORT_RANGE,  # pyright: ignore[reportPrivateUsage]
+        random_ephemeral_port,
+    )
+
+    low, high = _PLACEMENT_PORT_RANGE
+    assert high < 49152  # below the macOS/Linux ephemeral floor
+    for _ in range(200):
+        port = random_ephemeral_port()
+        assert low <= port <= high
+
+
+def test_placement_ports_avoid_live_instance_ports() -> None:
+    from skulk.master.placement import (
+        _PLACEMENT_PORT_RANGE,  # pyright: ignore[reportPrivateUsage]
+        random_ephemeral_port,
+    )
+
+    low, high = _PLACEMENT_PORT_RANGE
+    # Reserve everything except one port; the picker must find it.
+    free = low + 7
+    in_use = {p for p in range(low, high + 1) if p != free}
+    assert random_ephemeral_port(in_use) == free
