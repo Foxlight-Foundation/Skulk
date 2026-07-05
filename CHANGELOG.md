@@ -5,6 +5,17 @@
 This project records release notes here and mirrors public-facing notes in
 `website/docs/release-notes/`.
 
+## [Unreleased]
+
+### Fixed
+
+- **The dashboard header shows the real Skulk version.** The UI version was
+  baked at build time from the dashboard's own `package.json`, which had
+  silently drifted (it still said 1.3.0 through two releases). The build now
+  reads the version from the repo root `pyproject.toml`, the single source
+  of truth the release process bumps, so the UI can never drift again. The
+  dashboard `package.json` version is no longer read by anything.
+
 ## [1.4.0] - 2026-07-05
 
 ### Added
