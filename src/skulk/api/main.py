@@ -263,7 +263,12 @@ from skulk.shared.types.telemetry import (
 )
 from skulk.shared.types.text_generation import TextGenerationTaskParams
 from skulk.shared.types.worker.downloads import DownloadCompleted
-from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
+from skulk.shared.types.worker.instances import (
+    Instance,
+    InstanceId,
+    InstanceMeta,
+    LlamaRpcInstance,
+)
 from skulk.shared.types.worker.runners import RunnerId
 from skulk.shared.types.worker.shards import Sharding
 from skulk.shared.version import get_skulk_version, get_skulk_version_label
@@ -1783,17 +1788,27 @@ class API:
                     extra = 1 if index < remainder else 0
                     memory_delta_by_node[str(node_id)] = per_node + extra
 
+            # Report the MINTED instance's meta, not the requested one: shape
+            # selection is cycle-driven, so a Pipeline/MlxRing request over an
+            # AMD pair can mint a LlamaRpcInstance (#328). Consumers (dashboard,
+            # test harness) match previews by instance_meta, so the preview
+            # must be truthful about the shape a real placement would produce.
+            minted_meta = (
+                InstanceMeta.LlamaRpc
+                if isinstance(instance, LlamaRpcInstance)
+                else instance_meta
+            )
             if (
                 model_card.model_id,
                 sharding,
-                instance_meta,
+                minted_meta,
                 len(placement_node_ids),
             ) not in seen:
                 previews.append(
                     PlacementPreview(
                         model_id=model_card.model_id,
                         sharding=sharding,
-                        instance_meta=instance_meta,
+                        instance_meta=minted_meta,
                         instance=instance,
                         memory_delta_by_node=memory_delta_by_node or None,
                         error=None,
@@ -1803,7 +1818,7 @@ class API:
                 (
                     model_card.model_id,
                     sharding,
-                    instance_meta,
+                    minted_meta,
                     len(placement_node_ids),
                 )
             )
