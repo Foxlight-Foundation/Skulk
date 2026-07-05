@@ -455,7 +455,6 @@ export function HeaderNav({
           aria-label={themeName === 'dark'
             ? t('header.switchToLightTheme', 'Switch to light theme')
             : t('header.switchToDarkTheme', 'Switch to dark theme')}
-          aria-pressed={themeName === 'light'}
           title={themeName === 'dark'
             ? t('header.switchToLightTheme', 'Switch to light theme')
             : t('header.switchToDarkTheme', 'Switch to dark theme')}

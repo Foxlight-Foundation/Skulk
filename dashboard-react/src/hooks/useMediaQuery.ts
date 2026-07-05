@@ -7,30 +7,35 @@ import { useCallback, useSyncExternalStore } from 'react';
  * example when the viewport crosses a breakpoint or the device rotates).
  * Implemented on `useSyncExternalStore` because `matchMedia` is an external
  * store: no effect-time setState, and the subscription follows the query.
- * Environments without `window.matchMedia` (tests) read as `false`.
+ * `matchMedia` is treated as potentially throwing (the uiSlice convention);
+ * a missing implementation, an odd runtime, or a malformed query reads as
+ * a non-match rather than crashing rendering. The server snapshot is a
+ * stable `false`.
  *
  * @param query A media query string, e.g. `'(max-width: 480px)'`.
  */
 export function useMediaQuery(query: string): boolean {
   const subscribe = useCallback(
     (onStoreChange: () => void) => {
-      if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      try {
+        const list = window.matchMedia(query);
+        list.addEventListener('change', onStoreChange);
+        return () => list.removeEventListener('change', onStoreChange);
+      } catch {
         return () => {};
       }
-      const list = window.matchMedia(query);
-      list.addEventListener('change', onStoreChange);
-      return () => list.removeEventListener('change', onStoreChange);
     },
     [query],
   );
-  const getSnapshot = useCallback(
-    () =>
-      typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-        ? window.matchMedia(query).matches
-        : false,
-    [query],
-  );
-  return useSyncExternalStore(subscribe, getSnapshot);
+  const getSnapshot = useCallback(() => {
+    try {
+      return window.matchMedia(query).matches;
+    } catch {
+      return false;
+    }
+  }, [query]);
+  const getServerSnapshot = useCallback(() => false, []);
+  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 }
 
 /**
