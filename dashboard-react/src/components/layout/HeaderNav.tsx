@@ -41,6 +41,10 @@ export interface HeaderNavProps {
 /* ---- styles ---- */
 
 const Nav = styled.header`
+  /* Positioned so the z-index applies: the header must paint above the
+   * mobile menu backdrop (18) and sheet (19) in the HeaderAnchor stacking
+   * context, keeping the hamburger/X interactive while the menu is open. */
+  position: relative;
   z-index: 20;
   background: ${({ theme }) => theme.colors.header};
   border-bottom: none;
