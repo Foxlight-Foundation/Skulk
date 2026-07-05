@@ -65,17 +65,19 @@ from skulk.shared.types.worker.instances import (
 from skulk.shared.types.worker.runners import ShardAssignments
 from skulk.shared.types.worker.shards import Sharding, TensorShardMetadata
 
-# Ring/coordinator/donor listener ports are drawn from a band BELOW the OS
-# ephemeral range (macOS and Linux assign outgoing-connection local ports from
-# ~49152-65535 / 32768-60999). Picking listener ports inside that range made
-# bind collisions a background hazard: any outgoing socket on the placement
-# node (store transfers run exactly when placements happen) could hold the
-# chosen port, the port is immutable on the instance, so every runner retry
-# failed with EADDRINUSE until the crash breaker gave up (observed live in
-# the e2e battery: [ring] Couldn't bind socket (error: 48) on a node that was
-# mid store-download). In this band the only possible collisions are other
-# Skulk listeners, which the caller excludes via live-instance ports.
-_PLACEMENT_PORT_RANGE: Final = (41000, 48999)
+# Ring/coordinator/donor listener ports are drawn from a band BELOW every
+# OS's default ephemeral range: macOS assigns outgoing-connection local ports
+# from 49152-65535 and Linux from 32768-60999, so the band must sit under
+# 32768 to be safe on a heterogeneous fleet. Picking listener ports inside
+# the ephemeral range made bind collisions a background hazard: any outgoing
+# socket on the placement node (store transfers run exactly when placements
+# happen) could hold the chosen port, the port is immutable on the instance,
+# so every runner retry failed with EADDRINUSE until the crash breaker gave
+# up (observed live in the e2e battery: [ring] Couldn't bind socket
+# (error: 48) on a node that was mid store-download). In this band the only
+# possible collisions are other Skulk listeners, which the caller excludes
+# via live-instance ports.
+_PLACEMENT_PORT_RANGE: Final = (24000, 31999)
 
 
 def random_ephemeral_port(
@@ -86,19 +88,23 @@ def random_ephemeral_port(
     ``in_use_ports`` should carry every live instance's ports so concurrent
     placements cannot collide with each other; the band itself keeps OS
     outgoing sockets out of play. Random probing first (cheap, no bias), then
-    a deterministic scan under pressure; only a truly exhausted band (8k live
-    listener ports, beyond any real deployment) falls back to a random pick.
+    a deterministic scan under pressure. A truly exhausted band (8k live
+    listener ports, beyond any real deployment) raises PlacementError rather
+    than knowingly returning an in-use port.
     """
     low, high = _PLACEMENT_PORT_RANGE
     for _ in range(64):
         port = random.randint(low, high)
         if not in_use_ports or port not in in_use_ports:
             return port
-    if in_use_ports is not None:
-        for port in range(low, high + 1):
-            if port not in in_use_ports:
-                return port
-    return random.randint(low, high)
+    assert in_use_ports is not None  # 64 misses require a non-empty set
+    for port in range(low, high + 1):
+        if port not in in_use_ports:
+            return port
+    raise PlacementError(
+        f"No free placement listener port in {low}-{high}: "
+        f"{len(in_use_ports)} ports are claimed by live instances."
+    )
 
 
 def _listener_ports_in_use(

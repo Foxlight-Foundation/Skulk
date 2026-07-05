@@ -1462,7 +1462,7 @@ def test_placement_ports_stay_outside_os_ephemeral_range() -> None:
     )
 
     low, high = _PLACEMENT_PORT_RANGE
-    assert high < 49152  # below the macOS/Linux ephemeral floor
+    assert high < 32768  # below BOTH ephemeral floors (Linux 32768, macOS 49152)
     for _ in range(200):
         port = random_ephemeral_port()
         assert low <= port <= high
