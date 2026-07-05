@@ -28,7 +28,6 @@ export interface HeaderNavProps {
    * keeping only status indicators (downloads, instances, warnings).
    */
   compact?: boolean;
-  showMobileRightToggle?: boolean;
   mobileRightOpen?: boolean;
   onToggleMobileRight?: () => void;
   instanceCount?: number;

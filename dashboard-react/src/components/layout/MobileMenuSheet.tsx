@@ -35,12 +35,17 @@ const Backdrop = styled.div<{ $open: boolean }>`
 `;
 
 const Sheet = styled.nav<{ $open: boolean }>`
-  position: fixed;
-  top: 0;
+  /*
+   * Anchored to the bottom of the header wrapper (position: relative in
+   * App) rather than the viewport, so anything rendered above the header
+   * (the reconnect banner) pushes the sheet down with it.
+   */
+  position: absolute;
+  top: 100%;
   left: 0;
   right: 0;
   z-index: 19; /* under the header (20) so the sheet emerges from beneath it */
-  padding: 76px 12px 12px; /* clears the header; items start just below it */
+  padding: 8px 12px 12px;
   background: ${({ theme }) => theme.colors.header};
   border-bottom: 1px solid ${({ theme }) => theme.colors.border};
   box-shadow: 0 12px 32px ${({ theme }) => theme.colors.shadowStrong};
@@ -48,7 +53,14 @@ const Sheet = styled.nav<{ $open: boolean }>`
   flex-direction: column;
   gap: 4px;
   transform: translateY(${({ $open }) => ($open ? '0' : '-100%')});
-  transition: transform 0.25s ease;
+  /*
+   * visibility flips AFTER the slide-up finishes (it transitions discretely
+   * at the end), so the close animation stays visible while the closed
+   * sheet, which now rests exactly over the header, stops intercepting
+   * pointer events aimed at the hamburger.
+   */
+  visibility: ${({ $open }) => ($open ? 'visible' : 'hidden')};
+  transition: transform 0.25s ease, visibility 0.25s;
 `;
 
 const MenuRow = styled.button<{ $active?: boolean }>`
@@ -67,6 +79,12 @@ const MenuRow = styled.button<{ $active?: boolean }>`
 
   &:active {
     background: ${({ theme }) => theme.colors.goldBg};
+  }
+
+  /* Keyboard focus: all: unset removes the browser outline (Button's pattern). */
+  &:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim};
   }
 `;
 
@@ -126,7 +144,13 @@ export function MobileMenuSheet({ open, activeRoute, onNavigate, onOpenSettings,
         >
           <FiSettings size={18} /> {t('header.settings', 'Settings')}
         </MenuRow>
-        <MenuRow onClick={() => dispatch(uiActions.toggleTheme())} tabIndex={open ? 0 : -1}>
+        <MenuRow
+          onClick={() => {
+            dispatch(uiActions.toggleTheme());
+            onClose();
+          }}
+          tabIndex={open ? 0 : -1}
+        >
           {themeName === 'dark' ? <FiSun size={18} /> : <FiMoon size={18} />}
           {themeName === 'dark'
             ? t('header.switchToLightTheme', 'Switch to light theme')

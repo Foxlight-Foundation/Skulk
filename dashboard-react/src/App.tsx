@@ -1,5 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import styled from 'styled-components';
+
+/*
+ * Positioning anchor for the mobile menu sheet: the sheet is absolute at
+ * top: 100% of this wrapper, so it always opens flush under the header
+ * even when the reconnect banner adds height above it. z-index lifts the
+ * sheet above the content row while the header keeps its own higher index.
+ */
+const HeaderAnchor = styled.div`
+  position: relative;
+  z-index: 19;
+`;
 import { ThemeProvider } from 'styled-components';
 import { darkTheme, lightTheme, GlobalStyle } from './theme';
 import { useClusterState } from './hooks/useClusterState';
@@ -495,6 +506,7 @@ export function App() {
       <NetworkMesh radius={2.5} count={43} linkDistance={430} />
       <Shell>
         <ConnectionBanner connected={connected} />
+        <HeaderAnchor>
         <HeaderNav
           showHome
           activeRoute={activeRoute}
@@ -523,6 +535,7 @@ export function App() {
             onClose={() => setMobileMenuOpen(false)}
           />
         )}
+        </HeaderAnchor>
         <ContentRow>
           {activeRoute === 'chat' && allConversations.length > 0 && historyPanelOpen && (
             <ConversationPanel
