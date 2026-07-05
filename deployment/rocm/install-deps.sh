@@ -161,13 +161,40 @@ ensure_uv() {
   command -v uv >/dev/null 2>&1 || die "uv install did not land on PATH (~/.local/bin); open a new shell and re-run."
 }
 
+# --- Rust toolchain (only needed for --with-skulk-env) ------------------------
+ensure_rust() {
+  # `uv sync` builds the editable rust/skulk_pyo3_bindings workspace via
+  # maturin, which needs cargo/rustc. Ubuntu's packaged rustc lags what the
+  # bindings need, so install via rustup (same pattern as ensure_uv).
+  [ -x "${HOME}/.cargo/bin/cargo" ] && export PATH="${HOME}/.cargo/bin:${PATH}"
+  if command -v cargo >/dev/null 2>&1; then
+    log "rust present: $(cargo --version 2>/dev/null || echo installed)"
+    return 0
+  fi
+  log "installing rust (rustup -> ~/.cargo/bin); the Skulk env build needs cargo"
+  [ "$CHECK_ONLY" -eq 1 ] && { warn "--check: skipping rust install"; return 0; }
+  curl --proto '=https' --tlsv1.2 -LsSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+  export PATH="${HOME}/.cargo/bin:${PATH}"
+  command -v cargo >/dev/null 2>&1 || die "rust install did not land on PATH (~/.cargo/bin); open a new shell and re-run."
+}
+
 # --- Optional: build llama-server (native MTP) -------------------------------
 build_llama_server() {
   local bin="${LLAMA_CPP_DIR}/build/bin/llama-server"
-  if [ -x "$bin" ]; then
+  local rpc_bin="${LLAMA_CPP_DIR}/build/bin/ggml-rpc-server"
+  # Skip only when BOTH binaries exist: a tree built under the earlier
+  # Vulkan-only instructions has llama-server but no ggml-rpc-server (it was
+  # configured without GGML_RPC), and multi-node GGUF pooling needs the
+  # sibling donor daemon. Rebuilding such a tree picks the RPC target up.
+  if [ -x "$bin" ] && [ -x "$rpc_bin" ]; then
     log "llama-server already built: $bin ($("$bin" --version 2>&1 | head -1))"
+    log "ggml-rpc-server (pooling donor daemon) present: $rpc_bin"
   else
-    log "building llama-server with Vulkan at ${LLAMA_CPP_DIR}"
+    if [ -x "$bin" ]; then
+      log "llama-server exists but ggml-rpc-server is missing; rebuilding with -DGGML_RPC=ON for multi-node pooling"
+    else
+      log "building llama-server with Vulkan at ${LLAMA_CPP_DIR}"
+    fi
     [ "$CHECK_ONLY" -eq 1 ] && { warn "--check: skipping llama-server build"; return 0; }
     if [ ! -d "${LLAMA_CPP_DIR}/.git" ]; then
       git clone https://github.com/ggml-org/llama.cpp.git "${LLAMA_CPP_DIR}"
@@ -179,6 +206,7 @@ build_llama_server() {
       cmake -B build -DGGML_VULKAN=ON -DGGML_RPC=ON -DCMAKE_BUILD_TYPE=Release
       cmake --build build --target llama-server ggml-rpc-server -j"$(nproc)" )
     [ -x "$bin" ] || die "llama-server did not build at $bin"
+    [ -x "$rpc_bin" ] || die "ggml-rpc-server did not build at $rpc_bin (multi-node pooling needs it)"
   fi
   log "MTP-capable server ready. Add this to ~/.skulk/skulk.env:"
   printf '    SKULK_LLAMA_SERVER_BIN=%s\n' "$bin"
@@ -190,6 +218,7 @@ build_skulk_env() {
     warn "--with-skulk-env: run this from a Skulk checkout root; skipping."
     return 0
   fi
+  ensure_rust
   log "uv sync (builds Rust bindings; --inexact preserves a Vulkan llama-cpp-python wheel)"
   [ "$CHECK_ONLY" -eq 1 ] && { warn "--check: skipping uv sync + llama-cpp-python build"; return 0; }
   uv sync --inexact
