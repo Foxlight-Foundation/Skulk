@@ -246,9 +246,12 @@ verify() {
     local vk dev
     vk="$(vulkaninfo 2>/dev/null || true)"
     dev="$(sed -n 's/.*deviceName[[:space:]]*=[[:space:]]*//p' <<<"$vk" | head -1 || true)"
-    [ -n "$dev" ] && log "  vulkan: ${dev}" || warn "  vulkaninfo returned no device (driver/permissions?)"
+    # A GPU Vulkan cannot see is a --check failure, not a footnote: the box
+    # would advertise a backend it cannot serve (broken driver binding, or
+    # group membership not yet active in this session).
+    [ -n "$dev" ] && log "  vulkan: ${dev}" || check_gap "vulkaninfo returned no device (driver/permissions?)"
   else
-    warn "  vulkaninfo missing"
+    check_gap "vulkaninfo missing"
   fi
   if command -v rocminfo >/dev/null 2>&1; then
     local roc gfx

@@ -55,9 +55,13 @@ extensions must degrade gracefully on `None`, never raise.
 
 Three invariants shape the design, and Skulk's call sites enforce them:
 
-1. **Extensions can never degrade inference.** Every extension call is
-   guarded. A raising extension is logged loudly and skipped, and the
-   request proceeds as if it did not exist.
+1. **A raising extension never breaks inference.** Every extension call is
+   guarded: an exception is logged loudly and skipped, and the request
+   proceeds as if the extension did not exist. Be precise about the scope,
+   though: request transforms run inline before dispatch, so a *slow or
+   hanging* transform delays the request it is transforming (keep transforms
+   fast and bounded). Observers run as background tasks after the stream ends
+   and can never affect request latency.
 2. **Extensions never own the response stream.** Skulk accumulates the
    response and hands observers a summary, so a buggy extension cannot
    corrupt, reorder, or stall token delivery.

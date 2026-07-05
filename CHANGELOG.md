@@ -46,7 +46,7 @@ This project records release notes here and mirrors public-facing notes in
   before cluster dispatch and a completed-response observer after streaming
   ends, with an `ExtensionContext` giving in-process access to the cluster's
   embedding serving. Extension calls are guarded (a raising extension is
-  logged and skipped, never degrading inference), extensions never own the
+  logged and skipped rather than failing the request), extensions never own the
   response stream (Skulk accumulates and hands observers an immutable
   summary), and version gating refuses plugins whose `skulk_requires`
   specifier does not match the running Skulk. `SKULK_EXTENSIONS_DISABLE=1`
