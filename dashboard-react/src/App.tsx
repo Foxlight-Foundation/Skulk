@@ -4,6 +4,8 @@ import { ThemeProvider } from 'styled-components';
 import { darkTheme, lightTheme, GlobalStyle } from './theme';
 import { useClusterState } from './hooks/useClusterState';
 import { HeaderNav } from './components/layout/HeaderNav';
+import { MobileMenuSheet } from './components/layout/MobileMenuSheet';
+import { useIsMobile } from './hooks/useMediaQuery';
 import { TopologyGraph } from './components/topology/TopologyGraph';
 // ClusterWarnings replaced by inline header warning indicator
 import { ConnectionBanner } from './components/status/ConnectionBanner';
@@ -143,6 +145,14 @@ export function App() {
     thunderboltBridgeCycles,
   } = useClusterState();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Phone-width header: nav and icon actions collapse into the hamburger
+  // sheet. The open flag resets when the viewport grows past the breakpoint
+  // so a rotation or window resize never strands an invisible open menu.
+  const isMobile = useIsMobile();
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  useEffect(() => {
+    if (!isMobile) setMobileMenuOpen(false);
+  }, [isMobile]);
   const [storeDownloads, setStoreDownloads] = useState<StoreDownload[]>([]);
   // Observability panel state lives on the global UI store so any component (toolbar
   // nav, per-node bug icons, future cross-links) can open the panel to a specific tab.
@@ -492,6 +502,10 @@ export function App() {
           onOpenSettings={() => setSettingsOpen(true)}
           downloadProgress={downloadProgress}
           warnings={clusterWarnings}
+          compact={isMobile}
+          showMobileMenuToggle={isMobile}
+          mobileMenuOpen={mobileMenuOpen}
+          onToggleMobileMenu={() => setMobileMenuOpen((v) => !v)}
           showSidebarToggle={activeRoute === 'chat' && allConversations.length > 0}
           sidebarVisible={historyPanelOpen}
           onToggleSidebar={toggleHistoryPanel}
@@ -500,6 +514,15 @@ export function App() {
           mobileRightOpen={panelOpen}
           onToggleMobileRight={togglePanel}
         />
+        {isMobile && (
+          <MobileMenuSheet
+            open={mobileMenuOpen}
+            activeRoute={activeRoute}
+            onNavigate={(route) => setActiveRoute(route)}
+            onOpenSettings={() => setSettingsOpen(true)}
+            onClose={() => setMobileMenuOpen(false)}
+          />
+        )}
         <ContentRow>
           {activeRoute === 'chat' && allConversations.length > 0 && historyPanelOpen && (
             <ConversationPanel
