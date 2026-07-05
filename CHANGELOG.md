@@ -5,7 +5,7 @@
 This project records release notes here and mirrors public-facing notes in
 `website/docs/release-notes/`.
 
-## [Unreleased]
+## [1.4.0] - 2026-07-05
 
 ### Added
 
