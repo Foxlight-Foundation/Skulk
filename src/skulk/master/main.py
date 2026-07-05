@@ -15,6 +15,7 @@ from skulk.master.placement import (
     add_instance_to_placements,
     cancel_unnecessary_downloads,
     delete_instance,
+    fallback_command_for_refused_instance,
     get_transition_events,
     place_instance,
     replacement_command_for_download_failed_instance,
@@ -58,6 +59,7 @@ from skulk.shared.types.events import (
     InputChunkReceived,
     InstanceDeleted,
     LocalForwarderEvent,
+    NodeDownloadProgress,
     NodeGatheredInfo,
     NodeTimedOut,
     StagedModelEvicted,
@@ -92,9 +94,10 @@ from skulk.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
 )
 from skulk.shared.types.telemetry import TelemetryView
-from skulk.shared.types.worker.downloads import DownloadFailed
+from skulk.shared.types.worker.downloads import DownloadFailed, DownloadPending
 from skulk.shared.types.worker.instances import Instance, InstanceId
 from skulk.shared.types.worker.runners import RunnerReady, RunnerRunning
+from skulk.shared.types.worker.shards import RpcDonorShardMetadata
 from skulk.store.config import resolve_config_path
 from skulk.utils.channels import Receiver, Sender
 from skulk.utils.disk_event_log import DiskEventLog
@@ -144,6 +147,57 @@ _COMMAND_TASK_TYPES = (
     ImageEditsTask,
     TextEmbeddingTask,
 )
+
+
+NODE_LIVENESS_TIMEOUT = timedelta(seconds=30)
+
+
+def compute_timed_out_nodes(
+    last_seen: Mapping[NodeId, datetime],
+    telemetry_last_seen: Mapping[NodeId, datetime],
+    *,
+    now: datetime,
+    timeout: timedelta = NODE_LIVENESS_TIMEOUT,
+) -> set[NodeId]:
+    """Nodes whose liveness signals have BOTH gone stale past ``timeout``.
+
+    Liveness is the fresher of the event-log ``State.last_seen`` and the last
+    telemetry receipt (``TelemetryView.node_last_telemetry``). Connectivity
+    readings (which bump ``last_seen``) are only emitted on change (the AMD
+    gossip-storm fix), so a stable node's ``last_seen`` goes cold by design;
+    telemetry gossips every ~1s, so it is the live signal. A node with no
+    telemetry yet (just appeared, or telemetry not gossiped) falls back to its
+    ``last_seen`` so the timeout window still applies.
+
+    ``last_seen`` is stamped tz-aware by the master, but a tz-naive value (an
+    odd snapshot) compared against the tz-aware telemetry stamp would raise
+    and crash the plan loop, so both are normalized defensively (mirrors the
+    nodeHealth guard).
+
+    Args:
+        last_seen: ``State.last_seen`` (last logged event per node).
+        telemetry_last_seen: local receipt time of each node's last telemetry.
+        now: The wall clock (tz-aware); injected for testing.
+        timeout: Staleness past which a node is considered gone.
+
+    Returns:
+        Node ids to time out (drives ``NodeTimedOut``: membership prune plus
+        instance/task cleanup).
+    """
+
+    def _aware(when: datetime) -> datetime:
+        return when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+
+    return {
+        node_id
+        for node_id, last_seen_at in last_seen.items()
+        if now
+        - max(
+            _aware(last_seen_at),
+            _aware(telemetry_last_seen.get(node_id, last_seen_at)),
+        )
+        > timeout
+    }
 
 
 def instances_on_dead_nodes(
@@ -241,7 +295,13 @@ def instances_wedged_by_download_failure(
         model_id = shards[0].model_card.model_id
         failed_nodes: set[NodeId] = set()
         cause = ""
-        for node_id in instance.shard_assignments.node_to_runner:
+        for node_id, runner_id in instance.shard_assignments.node_to_runner.items():
+            # RPC donors never download the model, so a stale DownloadFailed
+            # for this model on a donor node (from an earlier placement) must
+            # not condemn a pooled instance that only needs the DRIVER's copy.
+            shard = instance.shard_assignments.runner_to_shard.get(runner_id)
+            if isinstance(shard, RpcDonorShardMetadata):
+                continue
             for progress in state.downloads.get(node_id, []):
                 if (
                     isinstance(progress, DownloadFailed)
@@ -328,6 +388,15 @@ class Master:
         # or of redelivery. Grows only by refused ids (rare); never reused since
         # InstanceIds are unique.
         self._refusal_replaced: set[InstanceId] = set()
+        # Instances minted by the anywhere-but-the-refuser FALLBACK (second
+        # recovery hop). A refusal against one of these is TERMINAL: without
+        # this, exclusions are lost across recovery cycles (the replacement
+        # command is rebuilt from shard assignments alone) and a tight fleet
+        # oscillates -- A refuses full width, fallback lands on B/C, B refuses,
+        # the wider re-place returns to A at the share it already refused.
+        # Two hops per original placement bounds recovery; ids are unique and
+        # rare, matching _refusal_replaced's growth rationale.
+        self._fallback_placed_instances: set[InstanceId] = set()
         # Instance ids whose download-failure recovery has already been initiated
         # (#381), same dedup rationale as _refusal_replaced: the plan pass emits
         # events but does not apply them, so the wedged instance stays visible
@@ -378,14 +447,23 @@ class Master:
 
     def _placement_memory_inputs(
         self,
-    ) -> tuple[Mapping[NodeId, MemoryUsage], Mapping[NodeId, Memory]]:
-        """Build the (node_memory, node_vram) inputs for placement admission with
-        the recently-freed credit applied (#314).
+    ) -> tuple[
+        Mapping[NodeId, MemoryUsage],
+        Mapping[NodeId, Memory],
+        Mapping[NodeId, Memory],
+    ]:
+        """Build the (node_memory, node_vram, node_vram_strict) placement inputs
+        with the recently-freed credit applied (#314).
 
         Both the gossiped ``ram_available`` and the derived GPU-wireable VRAM lag
         a teardown (telemetry is last-write-wins), so credit both. ``ram_total``
         is left untouched, so context-ceiling math (which reads it) is unchanged.
         The worker's live pre-load guard (#383) still backstops genuine OOM.
+
+        ``node_vram_strict`` is the VRAM-carve-only figure (no UMA/GTT spill),
+        which multi-node llama.cpp RPC placements admit against (#328):
+        llama.cpp's RPC split allocates from the VRAM carve only, so the
+        UMA-inflated figure would over-admit a pooled model.
         """
         credit = self._freed_credit_by_node()
         base_memory = self._telemetry_view.node_memory
@@ -395,7 +473,13 @@ class Master:
                 self._telemetry_view.node_resources,
                 node_memory=base_memory,
             )
-            return base_memory, base_vram
+            base_vram_strict = usable_vram_by_node(
+                self._telemetry_view.node_system,
+                self._telemetry_view.node_resources,
+                node_memory=base_memory,
+                include_uma_spill=False,
+            )
+            return base_memory, base_vram, base_vram_strict
         # Credit the freed bytes onto each node's ram_available, clamped to
         # ram_total so credited availability never exceeds capacity (telemetry
         # may already have partly caught up, or the footprint estimate may be
@@ -426,7 +510,13 @@ class Master:
             self._telemetry_view.node_resources,
             node_memory=memory,
         )
-        return memory, vram
+        vram_strict = usable_vram_by_node(
+            self._telemetry_view.node_system,
+            self._telemetry_view.node_resources,
+            node_memory=memory,
+            include_uma_spill=False,
+        )
+        return memory, vram, vram_strict
 
     def _configure_expected_trace_ranks(
         self, task_id: TaskId, instance_id: InstanceId, *, trace_enabled: bool
@@ -755,7 +845,48 @@ class Master:
                             # stop at the deletion — that terminal case bounds
                             # the refuse→re-place loop to the cluster size.
                             refused = self.state.instances.get(command.instance_id)
-                            if command.instance_id in self._refusal_replaced:
+                            if (
+                                command.instance_id
+                                in self._fallback_placed_instances
+                                and refused is not None
+                            ):
+                                # Second recovery hop already used: tear down
+                                # and stop. Re-placing again would oscillate
+                                # (see _fallback_placed_instances).
+                                self._refusal_replaced.add(command.instance_id)
+                                logger.error(
+                                    "Fallback placement "
+                                    f"{command.instance_id} was itself refused "
+                                    f"on {command.node_id}; giving up on this "
+                                    "placement (two recovery hops used)."
+                                )
+                                after_delete = delete_instance(
+                                    DeleteInstance(
+                                        instance_id=command.instance_id
+                                    ),
+                                    self.state.instances,
+                                )
+                                # Same download hygiene as every other delete
+                                # path: a rank still mid-download for the
+                                # torn-down instance must be cancelled, or it
+                                # wastes bandwidth/disk and can re-trigger
+                                # wedged-download recovery later.
+                                for cancel_cmd in cancel_unnecessary_downloads(
+                                    after_delete, self.state.downloads
+                                ):
+                                    await self.download_command_sender.send(
+                                        ForwarderDownloadCommand(
+                                            origin=self._system_id,
+                                            command=cancel_cmd,
+                                        )
+                                    )
+                                for event in get_transition_events(
+                                    self.state.instances,
+                                    after_delete,
+                                    self.state.tasks,
+                                ):
+                                    await self.event_sender.send(event)
+                            elif command.instance_id in self._refusal_replaced:
                                 # Another rank of the same instance already
                                 # triggered re-placement (self.state lags command
                                 # processing, so both ranks can still see the
@@ -794,6 +925,12 @@ class Master:
                                             self._telemetry_view.node_resources,
                                             node_memory=self._telemetry_view.node_memory,
                                         ),
+                                        node_vram_strict=usable_vram_by_node(
+                                            self._telemetry_view.node_system,
+                                            self._telemetry_view.node_resources,
+                                            node_memory=self._telemetry_view.node_memory,
+                                            include_uma_spill=False,
+                                        ),
                                     )
                                     logger.warning(
                                         "Re-placing "
@@ -818,14 +955,65 @@ class Master:
                                         f"still gossiping ({err}). Torn down."
                                     )
                                 except PlacementError as err:
-                                    final_placement = after_delete
-                                    logger.error(
-                                        "Cannot re-place "
-                                        f"{replace_command.model_card.model_id} after "
-                                        f"refusal on {command.node_id} (tried "
-                                        f"min_nodes={replace_command.min_nodes}): {err}. "
-                                        "Giving up on this placement."
+                                    # The wider width can be unsatisfiable by
+                                    # construction on a heterogeneous fleet (an
+                                    # MLX model refused at the full Mac width
+                                    # cannot add an AMD node). Fall back to
+                                    # anywhere-but-the-refuser at min_nodes=1:
+                                    # the memory fit-check, not the width,
+                                    # decides. Only a second failure is
+                                    # terminal.
+                                    fallback = fallback_command_for_refused_instance(
+                                        refused, command.node_id
                                     )
+                                    try:
+                                        final_placement = place_instance(
+                                            fallback,
+                                            self.state.topology,
+                                            after_delete,
+                                            self._telemetry_view.node_memory,
+                                            self.state.node_network,
+                                            download_status=self.state.downloads,
+                                            excluded_nodes={command.node_id},
+                                            node_resources=self._telemetry_view.node_resources,
+                                            node_vram=usable_vram_by_node(
+                                                self._telemetry_view.node_system,
+                                                self._telemetry_view.node_resources,
+                                                node_memory=self._telemetry_view.node_memory,
+                                            ),
+                                            node_vram_strict=usable_vram_by_node(
+                                                self._telemetry_view.node_system,
+                                                self._telemetry_view.node_resources,
+                                                node_memory=self._telemetry_view.node_memory,
+                                                include_uma_spill=False,
+                                            ),
+                                        )
+                                        for new_id in final_placement:
+                                            if new_id not in after_delete:
+                                                self._fallback_placed_instances.add(
+                                                    new_id
+                                                )
+                                        logger.warning(
+                                            "Re-placing "
+                                            f"{fallback.model_card.model_id} "
+                                            f"excluding refusing node "
+                                            f"{command.node_id} (wider width "
+                                            f"min_nodes={replace_command.min_nodes} "
+                                            f"was unplaceable: {err})"
+                                        )
+                                    except (
+                                        PlacementError,
+                                        PlacementInfoPendingError,
+                                    ) as fallback_err:
+                                        final_placement = after_delete
+                                        logger.error(
+                                            "Cannot re-place "
+                                            f"{replace_command.model_card.model_id} after "
+                                            f"refusal on {command.node_id} (tried "
+                                            f"min_nodes={replace_command.min_nodes}, then "
+                                            f"excluding the refuser: {fallback_err}). "
+                                            "Giving up on this placement."
+                                        )
                                 transition_events = get_transition_events(
                                     self.state.instances,
                                     final_placement,
@@ -847,7 +1035,7 @@ class Master:
                             # gossip-lagged availability (#314). Discrete-GPU VRAM
                             # (AMD/NVIDIA) so big models admit against VRAM, not
                             # 0.75 x system RAM.
-                            credited_memory, credited_vram = (
+                            credited_memory, credited_vram, credited_vram_strict = (
                                 self._placement_memory_inputs()
                             )
                             placement = place_instance(
@@ -860,6 +1048,7 @@ class Master:
                                 excluded_nodes=set(command.excluded_nodes),
                                 node_resources=self._telemetry_view.node_resources,
                                 node_vram=credited_vram,
+                                node_vram_strict=credited_vram_strict,
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
@@ -870,7 +1059,7 @@ class Master:
                             # memory credit (#314) so an exact placement right
                             # after a teardown stamps its ceiling against the
                             # real (about-to-be-freed) availability.
-                            credited_memory, credited_vram = (
+                            credited_memory, credited_vram, _ = (
                                 self._placement_memory_inputs()
                             )
                             placement = add_instance_to_placements(
@@ -985,11 +1174,11 @@ class Master:
                 >= TOPOLOGY_SETTLE_GRACE_SECONDS
             )
             timed_out_node_ids: set[NodeId] = (
-                {
-                    node_id
-                    for node_id, last_seen_at in self.state.last_seen.items()
-                    if now - last_seen_at > timedelta(seconds=30)
-                }
+                compute_timed_out_nodes(
+                    self.state.last_seen,
+                    self._telemetry_view.node_last_telemetry,
+                    now=now,
+                )
                 if topology_settled
                 else set()
             )
@@ -1099,6 +1288,12 @@ class Master:
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,
                     ),
+                    node_vram_strict=usable_vram_by_node(
+                        self._telemetry_view.node_system,
+                        self._telemetry_view.node_resources,
+                        node_memory=self._telemetry_view.node_memory,
+                        include_uma_spill=False,
+                    ),
                 )
                 logger.warning(
                     f"Re-placing {replace_command.model_card.model_id} excluding "
@@ -1121,6 +1316,41 @@ class Master:
                 )
             for event in transition_events:
                 await self.event_sender.send(event)
+            # Recovery CONSUMES the terminal failure record: reset each failed
+            # node's download status for this model back to Pending. Without
+            # this, the stale DownloadFailed lingers in session state and this
+            # same scan condemns EVERY future placement of the model that
+            # touches the node, long after the cause (disk full, network blip)
+            # is gone -- one transient failure permanently poisoned the model
+            # on that node until a whole-fleet restart (observed live: an
+            # ENOSPC during a pooled placement kept killing fresh placements
+            # an hour after the disk was freed). This recovery pass already
+            # acted on the failure (teardown + re-place excluding the node);
+            # if the cause persists, the next download fails afresh and
+            # recovery repeats, so nothing is lost by clearing history.
+            for node_id in failed_nodes:
+                runner_id = instance.shard_assignments.node_to_runner.get(node_id)
+                shard = (
+                    instance.shard_assignments.runner_to_shard.get(runner_id)
+                    if runner_id is not None
+                    else None
+                )
+                if shard is None:
+                    continue
+                await self.event_sender.send(
+                    NodeDownloadProgress(
+                        download_progress=DownloadPending(
+                            node_id=node_id,
+                            shard_metadata=shard,
+                            model_directory="",
+                        )
+                    )
+                )
+                logger.info(
+                    f"Reset stale DownloadFailed for "
+                    f"{shard.model_card.model_id} on {node_id} (consumed by "
+                    "recovery)"
+                )
 
     async def _event_processor(self) -> None:
         with self.local_event_receiver as local_events:

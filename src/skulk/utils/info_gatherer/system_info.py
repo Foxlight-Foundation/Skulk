@@ -1,3 +1,4 @@
+import os
 import platform
 import socket
 import sys
@@ -156,17 +157,78 @@ async def _get_interface_types_from_networksetup() -> dict[str, InterfaceType]:
     return parse_hardware_port_types(result.stdout.decode())
 
 
+def classify_linux_interface(
+    interface_name: str, sysfs_net_root: str = "/sys/class/net"
+) -> InterfaceType:
+    """Classify a Linux network interface's transport type via sysfs.
+
+    macOS interface types come from ``networksetup``, which does not exist on
+    Linux, so before this classifier every Linux interface was labeled
+    ``unknown`` -- which meant the ring/RPC address prioritiser (thunderbolt
+    first, #265) could never distinguish a USB4/Thunderbolt point-to-point link
+    from the ordinary LAN between two Linux nodes and the preference was dead
+    code off-macOS.
+
+    Detection order (most reliable signal first):
+
+    1. ``<sysfs>/<iface>/wireless`` directory present -> ``wifi`` (kernel
+       creates it for any wireless interface regardless of name).
+    2. Device driver symlink resolving to a thunderbolt driver
+       (``thunderbolt-net``) -> ``thunderbolt``.
+    3. Interface name prefix ``thunderbolt``/``tb`` -> ``thunderbolt``
+       (fallback when the driver symlink is unreadable).
+    4. A physical device backing (``<sysfs>/<iface>/device`` exists) with a
+       conventional wired name (``en*``/``eth*``) -> ``ethernet``. Virtual
+       interfaces (veth, bridges, tunnels such as Tailscale's) have no device
+       backing and stay ``unknown``; VPN deprioritisation is address-based
+       elsewhere and unaffected.
+
+    Args:
+        interface_name: Kernel interface name (e.g. ``enp92s0``).
+        sysfs_net_root: Root of the sysfs net class; injectable for tests.
+
+    Returns:
+        The classified :data:`InterfaceType`, ``unknown`` when no signal
+        matches.
+    """
+    interface_root = os.path.join(sysfs_net_root, interface_name)
+    if os.path.isdir(os.path.join(interface_root, "wireless")):
+        return "wifi"
+    driver_link = os.path.join(interface_root, "device", "driver")
+    try:
+        driver_name = os.path.basename(os.path.realpath(driver_link))
+    except OSError:
+        driver_name = ""
+    if "thunderbolt" in driver_name:
+        return "thunderbolt"
+    if interface_name.startswith(("thunderbolt", "tb")):
+        return "thunderbolt"
+    if interface_name.startswith(("en", "eth")) and os.path.exists(
+        os.path.join(interface_root, "device")
+    ):
+        return "ethernet"
+    return "unknown"
+
+
 async def get_network_interfaces() -> list[NetworkInterfaceInfo]:
     """
-    Retrieves detailed network interface information on macOS.
-    Parses output from 'networksetup -listallhardwareports' and 'ifconfig'
-    to determine interface names, IP addresses, and types (ethernet, wifi, vpn, other).
+    Retrieves detailed network interface information.
+    On macOS, parses 'networksetup -listallhardwareports' output to determine
+    interface types (ethernet, wifi, thunderbolt); on Linux, classifies via
+    sysfs (wireless dir, thunderbolt driver, physical device backing).
     Returns a list of NetworkInterfaceInfo objects.
     """
     interfaces_info: list[NetworkInterfaceInfo] = []
     interface_types = await _get_interface_types_from_networksetup()
 
     for iface, services in psutil.net_if_addrs().items():
+        interface_type = interface_types.get(iface)
+        if interface_type is None:
+            interface_type = (
+                classify_linux_interface(iface)
+                if sys.platform == "linux"
+                else "unknown"
+            )
         for service in services:
             match service.family:
                 case socket.AF_INET | socket.AF_INET6:
@@ -174,12 +236,22 @@ async def get_network_interfaces() -> list[NetworkInterfaceInfo]:
                         NetworkInterfaceInfo(
                             name=iface,
                             ip_address=service.address,
-                            interface_type=interface_types.get(iface, "unknown"),
+                            interface_type=interface_type,
                         )
                     )
                 case _:
                     pass
 
+    # Deterministic order. `psutil.net_if_addrs()` iterates in an unspecified
+    # order that can differ poll-to-poll (most visibly on Linux/AMD nodes, which
+    # carry the most interfaces: IPv4+IPv6 plus any virtual/veth links). Change
+    # detection on the connectivity event compares the serialized list, so an
+    # unsorted list reports a spurious "change" every poll even when the actual
+    # interfaces are identical. Sorting makes an unchanged topology byte-stable so
+    # the event only fires on a real interface change (storm root cause).
+    interfaces_info.sort(
+        key=lambda i: (i.name, i.ip_address, i.interface_type)
+    )
     return interfaces_info
 
 

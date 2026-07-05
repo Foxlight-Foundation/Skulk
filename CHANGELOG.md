@@ -5,7 +5,113 @@
 This project records release notes here and mirrors public-facing notes in
 `website/docs/release-notes/`.
 
-## [Unreleased]
+## [1.4.0] - 2026-07-05
+
+### Added
+
+- **Multi-node GGUF inference: memory pooling across GPU nodes.** A GGUF model
+  that fits no single GPU node but fits the combined GPU memory of several
+  `llama_server` nodes now places and serves as a driver-plus-donors pair: one
+  driver node runs `llama-server --rpc donor:port,...` and holds the model
+  file, each donor runs a small `ggml-rpc-server` that lends its GPU memory,
+  and llama.cpp splits the weights and KV across the pooled devices itself.
+  Placement admits pooled models against each node's VRAM carve (measured:
+  RPC allocations never use the Strix UMA/GTT spill), picks the biggest-VRAM
+  node as the driver, and stamps routable donor endpoints chosen from the
+  observed connectivity (preferring a USB4/Thunderbolt link when present;
+  link-local addresses are rejected). Single-node placement is always
+  preferred whenever the model fits one node. The multi-node cycle rule also
+  fixes a latent placement hole where a card compatible with several engines
+  could admit a cycle mixing nodes that cannot form one ring (#414).
+  Text-generation GGUF model cards gained `llama_server` compatibility so the
+  catalog can pool; per-card backend preferences are unchanged pending
+  in-process vs served single-node measurements. New env var:
+  `SKULK_RPC_SERVER_BIN` (optional; defaults to the `ggml-rpc-server` next to
+  `SKULK_LLAMA_SERVER_BIN`). (#328)
+
+- **Cards declare model truth; platform limitations moved to code.** A model
+  card's `compatible_backends` now records only which engines the model's
+  artifacts run on. Capabilities our runners cannot yet exploit (currently:
+  the served llama.cpp engine cannot load a vision model's projector) are
+  gated in a code-level capability table (`platform_compatible_backends`)
+  applied by placement and worker engine resolution, so a vision model never
+  lands where its advertised capability would silently degrade, and cards
+  need no edits when the platform catches up. Backend fallback resolution
+  now orders CPU compute tags after GPU tags when a card expresses no
+  explicit preference.
+
+- **Extension (plugin) API.** Skulk now discovers separately installed Python
+  packages through the `skulk.extensions` entry-point group at startup and
+  calls them at well-defined serving-path hooks: a chat-request transform
+  before cluster dispatch and a completed-response observer after streaming
+  ends, with an `ExtensionContext` giving in-process access to the cluster's
+  embedding serving. Extension calls are guarded (a raising extension is
+  logged and skipped rather than failing the request), extensions never own the
+  response stream (Skulk accumulates and hands observers an immutable
+  summary), and version gating refuses plugins whose `skulk_requires`
+  specifier does not match the running Skulk. `SKULK_EXTENSIONS_DISABLE=1`
+  is a node-local kill switch. No extension installed = Skulk unchanged.
+
+### Fixed
+
+- **Joining a cluster no longer triggers a connectivity-gossip storm.** Workers
+  previously re-emitted their connectivity readings on every gather tick, so a
+  long-lived cluster accumulated a huge replay tail that a joining node had to
+  ingest all at once, saturating send queues and flapping nodes (worst on AMD
+  nodes joining a mostly-Mac fleet). Connectivity events are now emitted only
+  when the readings actually change, and node liveness (pruning plus the
+  dashboard health indicator) rides telemetry freshness instead of event-log
+  heartbeats. (#447)
+- **Linux network interfaces are now typed.** Interface classification
+  previously worked only on macOS, so every Linux NIC reported `unknown` and
+  the Thunderbolt-first address prioritiser could never fire between two Linux
+  nodes. Linux interfaces are now classified via sysfs (thunderbolt, ethernet,
+  wifi), so a USB4/Thunderbolt link between GPU nodes is preferred
+  automatically. (#450)
+- **Placement previews report the instance shape that would actually serve.**
+  A preview used to echo the requested instance meta even when placement would
+  mint a different shape; the preview now derives its meta from the minted
+  instance itself. (#452)
+- **A node's failed download no longer poisons future placements.** Recovery
+  from a terminally failed model download now resets that node's download
+  record; previously the stale failure lingered in session state and condemned
+  every later placement of the same model touching that node (observed live:
+  one out-of-disk error kept killing fresh placements long after space was
+  freed, until a whole-fleet restart). (#454)
+- **A worker refusing a placement now falls back instead of giving up on
+  heterogeneous clusters.** When a node refuses its shard (for example the
+  memory fit guard) and no wider cycle exists, the master now retries the
+  model at single-node width excluding the refuser, instead of tearing the
+  placement down permanently. A refusal against that fallback is terminal
+  (bounded at two hops, never an oscillation), and terminal teardown also
+  cancels the model downloads the doomed placement started. (#455, #456)
+- **Cluster listener ports moved out of the OS ephemeral range.** Ring,
+  coordinator, and RPC donor ports are now allocated from a reserved band
+  below both the Linux and macOS ephemeral floors and exclude ports already
+  held by live instances, eliminating bind collisions with short-lived OS
+  connections; port exhaustion now fails placement loudly instead of looping.
+  (#457)
+- **A served engine or RPC donor process that dies between requests is now
+  detected.** The worker polls subprocess liveness between tasks, so a
+  crashed `llama-server` or `ggml-rpc-server` marks the runner failed (with
+  the subprocess log tail in the error) instead of leaving a Ready runner
+  over a zombie that wedges the next request. (#451)
+- **Bundled model cards audited end to end; every finding fixed and gated.**
+  A full audit of the 136 bundled cards (schema, cross-field invariants,
+  capability resolution, and a live check of all 148 referenced Hugging Face
+  repos and file paths) found and fixed: the Ornith 1.0-35B MLX card pointed
+  at a deleted repo and now uses the official `mlx-community` conversion
+  (structurally identical, values re-derived from the new artifacts); the
+  Qwen3 family capability default forced a thinking contract onto
+  instruct-only variants that explicitly declare no thinking (five bundled
+  Instruct-2507 / Next-Instruct cards resolved wrong; the resolver now
+  respects explicit card capabilities while keeping the auto-imported-card
+  default); seven cards (DeepSeek V3.1/V3.2, gemma-3n, gemma-4-e4b) were
+  missing `context_length` and three Nemotron-3-Nano cards were missing
+  `num_key_value_heads`, all filled from each repo's real config; and two
+  GLM-5 card filenames did not match their model IDs. Every static audit
+  invariant now runs as a per-card test gate, so a bad bundled card fails CI
+  instead of shipping.
 
 ## [1.3.1] - 2026-07-01
 

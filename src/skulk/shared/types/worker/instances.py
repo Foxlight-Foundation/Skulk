@@ -15,6 +15,12 @@ class InstanceId(Id):
 class InstanceMeta(str, Enum):
     MlxRing = "MlxRing"
     MlxJaccl = "MlxJaccl"
+    # Multi-node llama.cpp via the served engine's RPC backend (#328): one
+    # driver runs llama-server --rpc, donors run ggml-rpc-server. Requesting it
+    # explicitly is optional -- placement resolves a multi-node GGUF cycle to
+    # this shape automatically when llama_server is the cycle's only common
+    # multi-node engine.
+    LlamaRpc = "LlamaRpc"
 
 
 class BaseInstance(TaggedModel):
@@ -67,8 +73,48 @@ class MlxJacclInstance(BaseInstance):
     jaccl_coordinators: dict[NodeId, str]
 
 
+class LlamaRpcInstance(BaseInstance):
+    """Multi-node llama.cpp placement: one driver plus RPC memory donors (#328).
+
+    The driver node runs the served engine (``llama-server``) with
+    ``--rpc <endpoints>`` and holds the model file; each donor node runs
+    ``ggml-rpc-server`` bound to its stamped endpoint and lends GPU memory.
+    llama.cpp splits weights/KV across the pooled devices proportional to
+    their free memory, so the shard assignments carry no meaningful layer
+    ranges (the driver's shard nominally spans all layers; donors carry the
+    degenerate ``RpcDonorShardMetadata``). Endpoints are chosen at placement
+    time from the observed connectivity between the pair, preferring the
+    fastest interconnect (Thunderbolt first, #265), and must be static
+    routable addresses (never link-local; see the multi-node GGUF design
+    record's asymmetric-routing trap).
+    """
+
+    driver_node: NodeId
+    """The node that runs llama-server and reads the model file."""
+
+    donor_endpoints: dict[NodeId, str]
+    """Per-donor ``ip:port`` the donor's ggml-rpc-server binds and the driver
+    dials, keyed by donor node id."""
+
+
 # TODO: Single node instance
-Instance = MlxRingInstance | MlxJacclInstance
+Instance = MlxRingInstance | MlxJacclInstance | LlamaRpcInstance
+
+
+def instance_meta_of(instance: Instance) -> InstanceMeta:
+    """The ``InstanceMeta`` a concrete instance actually embodies.
+
+    Placement normalizes and resolves shapes (a single-node cycle becomes a
+    ring regardless of the requested meta; an RPC-capable cycle mints a
+    ``LlamaRpcInstance`` even from a ring request), so consumers reporting or
+    recovering intent must derive the meta from the instance TYPE, never echo
+    the requested value. Single source of truth for that derivation.
+    """
+    if isinstance(instance, MlxJacclInstance):
+        return InstanceMeta.MlxJaccl
+    if isinstance(instance, LlamaRpcInstance):
+        return InstanceMeta.LlamaRpc
+    return InstanceMeta.MlxRing
 
 
 class BoundInstance(CamelCaseModel):

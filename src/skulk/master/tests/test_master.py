@@ -688,3 +688,157 @@ async def test_refuse_instance_placement_replaces_wider_once() -> None:
 
         global_event_receiver.collect()
         tg.cancel_scope.cancel()
+
+
+async def test_fallback_refusal_is_terminal_two_hop_flow() -> None:
+    """The full #290 heterogeneous recovery flow terminates after two hops.
+
+    Width-3 placement on a 3-node fleet -> a rank refuses -> the wider
+    re-place (min_nodes=4) is unsatisfiable -> the fallback places excluding
+    the refuser -> the fallback instance is ALSO refused -> the master tears
+    down and stops. Without the terminal guard the second refusal would mint
+    another replacement that can land back on the first refuser and
+    oscillate.
+    """
+    keypair = get_node_id_keypair()
+    node_id = NodeId(keypair.to_node_id())
+    session_id = SessionId(master_node_id=node_id, election_clock=0)
+
+    node_ids = [node_id, NodeId(), NodeId()]
+    topology = Topology()
+    for nid in node_ids:
+        topology.add_node(nid)
+    port = 1
+    for source in node_ids:
+        for sink in node_ids:
+            if source != sink:
+                topology.add_connection(
+                    Connection(
+                        source=source, sink=sink, edge=create_socket_connection(port)
+                    )
+                )
+                port += 1
+    node_memory = {
+        nid: create_node_memory(Memory.from_gb(40).in_bytes) for nid in node_ids
+    }
+    node_network = {nid: create_node_network() for nid in node_ids}
+
+    card = ModelCard(
+        model_id=ModelId("terminal-fallback-model"),
+        storage_size=Memory.from_gb(6),
+        n_layers=12,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+    )
+    three_node_cmd = PlaceInstance(
+        model_card=card,
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=3,
+    )
+    placed = place_instance(three_node_cmd, topology, {}, node_memory, node_network)
+    instance = next(iter(placed.values()))
+    instance_id = instance.instance_id
+    assert len(instance.shard_assignments.node_to_runner) == 3
+    first_refuser = next(iter(instance.shard_assignments.node_to_runner))
+
+    seed_state = State(
+        topology=topology,
+        instances={instance_id: instance},
+        node_network=node_network,
+    )
+    telemetry = TelemetryView()
+    for nid, mem in node_memory.items():
+        telemetry.node_memory[nid] = mem
+
+    ge_sender, global_event_receiver = channel[GlobalForwarderEvent]()
+    command_sender, co_receiver = channel[ForwarderCommand]()
+    local_event_sender, le_receiver = channel[LocalForwarderEvent]()
+    state_sync_sender, state_sync_receiver = channel[StateSyncMessage]()
+    fcds, _fcdr = channel[ForwarderDownloadCommand]()
+    ev_send, ev_recv = channel[Event]()
+
+    async def mock_event_router() -> None:
+        idx = 0
+        sid = SystemId()
+        with ev_recv as master_events:
+            async for event in master_events:
+                await local_event_sender.send(
+                    LocalForwarderEvent(
+                        origin=sid,
+                        origin_idx=idx,
+                        session=session_id,
+                        event=event,
+                    )
+                )
+                idx += 1
+
+    master = Master(
+        node_id,
+        session_id,
+        event_sender=ev_send,
+        global_event_sender=ge_sender,
+        local_event_receiver=le_receiver,
+        command_receiver=co_receiver,
+        state_sync_receiver=state_sync_receiver,
+        state_sync_sender=state_sync_sender,
+        download_command_sender=fcds,
+        initial_state=seed_state,
+        telemetry_view=telemetry,
+    )
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(master.run)
+        tg.start_soon(mock_event_router)
+
+        with anyio.fail_after(5):
+            while instance_id not in master.state.instances:
+                await anyio.sleep(0.005)
+
+        # Hop 1: refuse at full width; wider (min_nodes=4) is unsatisfiable,
+        # so the fallback must mint a replacement that excludes the refuser.
+        await command_sender.send(
+            ForwarderCommand(
+                origin=SystemId("Worker"),
+                command=RefuseInstancePlacement(
+                    instance_id=instance_id,
+                    node_id=first_refuser,
+                    reason="not enough GPU-wireable memory",
+                ),
+            )
+        )
+        with anyio.fail_after(5):
+            while True:
+                instances = dict(master.state.instances)
+                if instance_id not in instances and len(instances) == 1:
+                    break
+                await anyio.sleep(0.005)
+        fallback_instance = next(iter(master.state.instances.values()))
+        assert first_refuser not in fallback_instance.shard_assignments.node_to_runner
+        tracked = master._fallback_placed_instances  # pyright: ignore[reportPrivateUsage]
+        assert fallback_instance.instance_id in tracked
+
+        # Hop 2: refuse the fallback instance; recovery must be TERMINAL.
+        second_refuser = next(
+            iter(fallback_instance.shard_assignments.node_to_runner)
+        )
+        await command_sender.send(
+            ForwarderCommand(
+                origin=SystemId("Worker"),
+                command=RefuseInstancePlacement(
+                    instance_id=fallback_instance.instance_id,
+                    node_id=second_refuser,
+                    reason="not enough GPU-wireable memory",
+                ),
+            )
+        )
+        with anyio.fail_after(5):
+            while master.state.instances:
+                await anyio.sleep(0.005)
+        # No third placement may appear.
+        await anyio.sleep(0.25)
+        assert master.state.instances == {}
+
+        global_event_receiver.collect()
+        tg.cancel_scope.cancel()

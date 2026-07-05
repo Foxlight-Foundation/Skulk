@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Final, Literal, NamedTuple
 
 import httpx
-from anyio import WouldBlock
+from anyio import ClosedResourceError, EndOfStream, WouldBlock
 
 from skulk.shared.backends import LLAMA_SERVER_BIN_ENV
 from skulk.shared.models.model_cards import OutputParserType
@@ -59,7 +59,7 @@ from skulk.shared.types.tasks import (
     TaskStatus,
     TextGeneration,
 )
-from skulk.shared.types.worker.instances import BoundInstance
+from skulk.shared.types.worker.instances import BoundInstance, LlamaRpcInstance
 from skulk.shared.types.worker.runners import (
     RunnerIdle,
     RunnerLoading,
@@ -204,6 +204,10 @@ def reasoning_request_overrides(task_params: Any) -> dict[str, Any]:
 # How long to wait for the server to finish loading the model and report healthy.
 # A large GGUF on a GPU node can take a while to map + warm up.
 _HEALTH_DEADLINE_S: Final = 600.0
+# Between tasks the runner wakes at this cadence to verify its llama-server
+# subprocess is still alive (dead server between requests must crash the
+# runner, not wedge it Ready).
+_LIVENESS_POLL_S: Final = 2.0
 
 
 class _StreamDelta(NamedTuple):
@@ -310,7 +314,22 @@ class Runner:
             bound_instance.bound_runner_id,
             bound_instance.bound_shard,
         )
-        if self.shard_metadata.world_size != 1:
+        # Multi-node is legal only as the RPC driver of a LlamaRpcInstance
+        # (#328): rank 0 runs llama-server with --rpc against the stamped donor
+        # endpoints, and llama.cpp does the cross-device split itself. Any
+        # other multi-node shape reaching this runner is a placement bug.
+        self._rpc_donor_endpoints: dict[str, str] = {}
+        if isinstance(self.instance, LlamaRpcInstance):
+            if self.shard_metadata.device_rank != 0:
+                raise RuntimeError(
+                    "llama-server runner on a LlamaRpcInstance must be the "
+                    f"driver (rank 0), got rank {self.shard_metadata.device_rank}"
+                )
+            self._rpc_donor_endpoints = {
+                str(node_id): endpoint
+                for node_id, endpoint in self.instance.donor_endpoints.items()
+            }
+        elif self.shard_metadata.world_size != 1:
             raise RuntimeError(
                 "llama-server runner requires single-node placement, got "
                 f"world_size={self.shard_metadata.world_size}"
@@ -365,7 +384,23 @@ class Runner:
     def main(self) -> None:
         try:
             with self.task_receiver as tasks:
-                for task in tasks:
+                while True:
+                    try:
+                        task = tasks.receive_timeout(_LIVENESS_POLL_S)
+                    except WouldBlock:
+                        # No task within the poll window: verify the server
+                        # subprocess is still alive. Without this a llama-server
+                        # that dies BETWEEN requests (e.g. SIGABRT when an RPC
+                        # donor vanishes) leaves the runner gossiping Ready
+                        # forever while every future request 500s.
+                        self._ensure_server_alive()
+                        continue
+                    except (EndOfStream, ClosedResourceError):
+                        # receive_timeout raises ClosedResourceError when the
+                        # sender closed before the end-of-stream sentinel was
+                        # drained (the shared closed flag is checked first);
+                        # treat it like EndOfStream: clean loop exit.
+                        break
                     if task.task_id in self.seen:
                         logger.warning("repeat task - potential error")
                     self.seen.add(task.task_id)
@@ -387,6 +422,24 @@ class Runner:
             # Never leave the server subprocess running past the runner loop, even
             # on an unexpected exit (PR_SET_PDEATHSIG is the SIGKILL backstop).
             self._teardown_server()
+
+    def _ensure_server_alive(self) -> None:
+        """Raise if the spawned llama-server exited behind our back.
+
+        Raising kills the runner process; the supervisor observes the crash and
+        the peer-failure cascade tears down the whole instance (donors included
+        for pooled placements) instead of leaving a wedged Ready runner.
+        """
+        proc = self.server_proc
+        if proc is None or isinstance(
+            self.current_status, (RunnerShuttingDown, RunnerShutdown)
+        ):
+            return
+        if proc.poll() is not None:
+            raise RuntimeError(
+                f"llama-server exited unexpectedly (code {proc.returncode}); "
+                f"log tail:\n{self._server_log_tail()}"
+            )
 
     def handle_task(self, task: Task) -> None:
         match task:
@@ -497,6 +550,11 @@ class Runner:
             # tool calling and reasoning-content extraction work server-side.
             "--jinja",
         ]
+        # RPC driver (#328): dial the placement-stamped donor endpoints so
+        # llama.cpp pools their GPU memory with the local device. Sorted for a
+        # deterministic command line.
+        if self._rpc_donor_endpoints:
+            cmd += ["--rpc", ",".join(sorted(self._rpc_donor_endpoints.values()))]
         # --reasoning-format none hands back raw text in message.content. We use
         # it for (a) plain non-reasoning models (otherwise llama-server's default
         # `auto` extracts their prose into reasoning_content, leaving content

@@ -15,6 +15,8 @@ and power sampler now read them here instead of off the event log.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import Event, NodeTimedOut
 from skulk.shared.types.profiling import (
@@ -89,6 +91,14 @@ class TelemetryView:
         self.node_disk: dict[NodeId, DiskUsage] = {}
         self.node_identities: dict[NodeId, NodeIdentity] = {}
         self.node_rdma_ctl: dict[NodeId, NodeRdmaCtlStatus] = {}
+        # When this node last RECEIVED any telemetry from each peer. Telemetry
+        # gossips last-write-wins every ~1s to every node, so this is a live,
+        # cluster-wide liveness signal that (unlike State.last_seen) does not
+        # depend on connectivity events being logged/broadcast. nodeHealth reads it
+        # so the connectivity change-gate/de-dup (which stops the AMD gossip storm
+        # but leaves followers' State.last_seen stale) does not produce a false
+        # "heartbeats are late" warning on healthy nodes.
+        self.node_last_telemetry: dict[NodeId, datetime] = {}
 
     def prune(self, node_id: NodeId) -> None:
         """Drop all telemetry for a node that left the cluster.
@@ -106,11 +116,14 @@ class TelemetryView:
         self.node_disk.pop(node_id, None)
         self.node_identities.pop(node_id, None)
         self.node_rdma_ctl.pop(node_id, None)
+        self.node_last_telemetry.pop(node_id, None)
 
     def apply(self, message: NodeTelemetry) -> None:
         """Coalesce one telemetry message into the latest-value view."""
         info = message.info
         node_id = message.node_id
+        # Receipt time = liveness signal (see node_last_telemetry above).
+        self.node_last_telemetry[node_id] = datetime.now(tz=timezone.utc)
         if isinstance(info, NodeResources):
             self.node_resources[node_id] = info
         elif isinstance(info, MemoryUsage):

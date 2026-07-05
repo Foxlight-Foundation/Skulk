@@ -35,6 +35,7 @@ from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import (
     CfgShardMetadata,
     PipelineShardMetadata,
+    RpcDonorShardMetadata,
     Sharding,
     ShardMetadata,
     TensorShardMetadata,
@@ -97,6 +98,7 @@ def usable_vram_by_node(
     node_system: Mapping[NodeId, SystemPerformanceProfile],
     node_resources: Mapping[NodeId, NodeResources] | None = None,
     node_memory: Mapping[NodeId, MemoryUsage] | None = None,
+    include_uma_spill: bool = True,
 ) -> dict[NodeId, Memory]:
     """Per-node usable GPU memory for placement, keyed by node.
 
@@ -126,6 +128,14 @@ def usable_vram_by_node(
       falls back to the discrete path. A discrete GPU also exposes a GTT total
       (often ~= VRAM), so requiring GTT to cover all of system RAM is what keeps
       it off this path.
+
+    ``include_uma_spill=False`` disables the UMA/GTT addition and returns the
+    working-set-capped VRAM carve for every node. Multi-node RPC placements
+    (#328) admit against this strict figure: measured on the Strix pair,
+    llama.cpp's RPC split allocates from the VRAM carve only (GTT used stays 0
+    with the model resident), so admitting a pooled model against the UMA
+    formula would over-admit and crash llama-server at load. Single-node
+    placements keep the UMA spill (proven: gpt-oss-120b on one Strix).
     """
     node_memory = node_memory or {}
     usable: dict[NodeId, Memory] = {}
@@ -154,7 +164,8 @@ def usable_vram_by_node(
         # discrete GPU (gtt ~= vram < system RAM) on the conservative VRAM-only
         # path.
         if (
-            gtt_total is not None
+            include_uma_spill
+            and gtt_total is not None
             and gtt_total > total
             and memory is not None
             and gtt_total >= memory.ram_total.in_bytes
@@ -617,6 +628,119 @@ def get_shard_assignments(
             )
 
 
+def get_shard_assignments_for_llama_rpc(
+    model_card: ModelCard,
+    cycle: Cycle,
+    driver_node: NodeId,
+) -> ShardAssignments:
+    """Shard assignments for a driver-plus-donors llama.cpp RPC placement (#328).
+
+    The driver (rank 0) gets a shard nominally spanning ALL layers: llama.cpp
+    itself splits weights/KV across the pooled local+remote devices, so the
+    range is bookkeeping for Skulk (download targeting, engine dispatch, memory
+    accounting), not a layer instruction. Donors get the degenerate
+    :class:`RpcDonorShardMetadata` (no layers) so the one-runner-per-node
+    ``ShardAssignments`` invariant holds and the worker can dispatch a donor
+    runner off the shard type.
+
+    Args:
+        model_card: The model to serve; the driver reads its GGUF from disk.
+        cycle: The selected placement cycle; must contain ``driver_node``.
+        driver_node: The node that runs llama-server and holds the model file.
+
+    Returns:
+        Assignments with one runner per node: a pipeline shard on the driver,
+        donor shards elsewhere.
+    """
+    _validate_cycle(cycle)
+    if driver_node not in cycle.node_ids:
+        raise ValueError(
+            f"Driver node {driver_node} is not part of the selected cycle"
+        )
+    world_size = len(cycle.node_ids)
+    runner_to_shard: dict[RunnerId, ShardMetadata] = {}
+    node_to_runner: dict[NodeId, RunnerId] = {}
+    donor_rank = 1
+    for node_id in cycle.node_ids:
+        if node_id == driver_node:
+            shard: ShardMetadata = PipelineShardMetadata(
+                model_card=model_card,
+                device_rank=0,
+                world_size=world_size,
+                start_layer=0,
+                end_layer=model_card.n_layers,
+                n_layers=model_card.n_layers,
+            )
+        else:
+            shard = RpcDonorShardMetadata(
+                model_card=model_card,
+                device_rank=donor_rank,
+                world_size=world_size,
+                start_layer=0,
+                end_layer=0,
+                n_layers=model_card.n_layers,
+            )
+            donor_rank += 1
+        runner_id = RunnerId()
+        runner_to_shard[runner_id] = shard
+        node_to_runner[node_id] = runner_id
+    return ShardAssignments(
+        model_id=model_card.model_id,
+        runner_to_shard=runner_to_shard,
+        node_to_runner=node_to_runner,
+    )
+
+
+def get_llama_rpc_donor_endpoints(
+    selected_cycle: Cycle,
+    driver_node: NodeId,
+    cycle_digraph: Topology,
+    node_network: Mapping[NodeId, NodeNetworkInfo],
+    donor_ports: Mapping[NodeId, int],
+) -> dict[NodeId, str]:
+    """Choose the ``ip:port`` each RPC donor binds and the driver dials (#328).
+
+    For every non-driver node in the cycle, pick the donor-side address the
+    driver can reach from the OBSERVED libp2p connections between the pair,
+    ranked by the donor's gossiped interface type (Thunderbolt first, VPN last;
+    same prioritiser as the MLX ring, #265) with link-local and loopback
+    candidates excluded outright (``_is_routable_rpc_donor_address``: a
+    multi-TB-port host routes all of 169.254/16 out one port, so a link-local
+    endpoint breaks asymmetrically; point-to-point RPC links need a static
+    per-link subnet). The chosen address is stamped on the instance: the
+    donor's ggml-rpc-server binds exactly this address (never 0.0.0.0; the
+    fabric is trusted but endpoints stay interface-scoped) and the driver's
+    ``--rpc`` flag dials it.
+
+    Raises:
+        ValueError: When no ROUTABLE observed connection exists between the
+            driver and a donor (no path at all, or only link-local/loopback
+            paths — e.g. an unconfigured Thunderbolt link).
+    """
+    endpoints: dict[NodeId, str] = {}
+    for node_id in selected_cycle.node_ids:
+        if node_id == driver_node:
+            continue
+        donor_ip = _find_ip_prioritised(
+            driver_node,
+            node_id,
+            cycle_digraph,
+            node_network,
+            ring=True,
+            require_routable=True,
+        )
+        if donor_ip is None:
+            raise ValueError(
+                "Multi-node llama.cpp (RPC) requires a ROUTABLE path between "
+                f"the driver and every donor; none observed from {driver_node} "
+                f"to {node_id} (link-local/loopback addresses are excluded — "
+                "assign a static subnet to point-to-point links, e.g. a "
+                "Thunderbolt pair)"
+            )
+        endpoints[node_id] = f"{donor_ip}:{donor_ports[node_id]}"
+    return endpoints
+
+
 def get_mlx_jaccl_devices_matrix(
     selected_cycle: list[NodeId],
     cycle_digraph: Topology,
@@ -706,12 +830,40 @@ _JACCL_TRANSPORT_PRIORITY: dict[str, int] = {
 }
 
 
+def _is_routable_rpc_donor_address(ip: str) -> bool:
+    """Whether an address may be stamped as an RPC donor endpoint.
+
+    Rejects link-local (169.254/16, fe80::/10) and loopback: a node with more
+    than one Thunderbolt interface routes ALL of 169.254/16 out a single
+    (lowest metric) port, so a link-local endpoint on the other port dials or
+    replies asymmetrically and TCP dies even while ICMP appears fine
+    (measured on the Strix pair). Point-to-point links that should carry RPC
+    traffic get a static per-link subnet instead.
+
+    Also rejects IPv6 outright: donor endpoints are stamped as bare
+    ``host:port`` strings, which is ambiguous for IPv6 and not accepted by
+    ``llama-server --rpc``'s endpoint parsing, so stamping one would mint an
+    instance whose driver can never load. Bracketed-IPv6 support can be added
+    end-to-end if a v6-only fabric ever materializes.
+    """
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return (
+        address.version == 4
+        and not address.is_link_local
+        and not address.is_loopback
+    )
+
+
 def _find_ip_prioritised(
     node_id: NodeId,
     other_node_id: NodeId,
     cycle_digraph: Topology,
     node_network: Mapping[NodeId, NodeNetworkInfo],
     ring: bool,
+    require_routable: bool = False,
 ) -> str | None:
     """Find an IP address between nodes with transport prioritization.
 
@@ -719,10 +871,16 @@ def _find_ip_prioritised(
     by the sink node's gossiped interface type — ring placements prefer the
     fastest local interconnect (TB first), and VPN/overlay addresses rank
     strictly last regardless of gossiped label (see ``_is_vpn_address``).
+    ``require_routable`` drops link-local and loopback candidates entirely
+    (RPC donor endpoints must be dialable both ways on multi-interface hosts;
+    see ``_is_routable_rpc_donor_address``; IPv6 is also rejected because
+    endpoints are stamped as bare ``host:port``).
 
     TODO: Profile and get actual connection speeds.
     """
     ips = list(_find_connection_ip(node_id, other_node_id, cycle_digraph))
+    if require_routable:
+        ips = [ip for ip in ips if _is_routable_rpc_donor_address(ip)]
     if not ips:
         return None
     other_network = node_network.get(other_node_id, NodeNetworkInfo())

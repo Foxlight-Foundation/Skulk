@@ -606,7 +606,7 @@ curl -X POST http://localhost:52415/place_instance \
 |-------|---------|
 | `model_id` | Hugging Face-style model ID |
 | `sharding` | `Pipeline` or `Tensor` |
-| `instance_meta` | `MlxRing` or `MlxJaccl` |
+| `instance_meta` | `MlxRing`, `MlxJaccl`, or `LlamaRpc` (multi-node GGUF pooling: one driver node holds the model and each donor node lends GPU memory over the network) |
 | `min_nodes` | Minimum nodes required for the placement |
 | `excluded_nodes` | Optional. Node IDs the master should treat as if absent when scoring this placement. Already-running instances on those nodes are unaffected (exclusion is per-placement, not cluster-wide). Default: `[]`. Note: node IDs are per-session, so they change when a cluster session restarts. |
 
@@ -639,6 +639,12 @@ curl "http://localhost:52415/instance/previews?model_id=mlx-community/Qwen3.5-9B
 ```
 
 This is usually the best first Skulk-specific endpoint to call. It shows which combinations of sharding mode, networking mode, and node count are valid, and why invalid combinations fail.
+
+Each preview's `instance_meta` reports the shape placement would *actually*
+mint for that combination, not the shape that was asked about: for example a
+GGUF model previewed at two GPU nodes reports `LlamaRpc` (driver plus memory
+donors) even though the request enumerates the generic metas. Trust the
+preview's reported meta when constructing a follow-up `POST /place_instance`.
 
 | Query parameter | Meaning |
 |-----------------|---------|

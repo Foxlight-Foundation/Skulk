@@ -19,6 +19,7 @@ from skulk.shared.types.events import Event, RunnerStatusUpdated
 from skulk.shared.types.tasks import Task, TaskId
 from skulk.shared.types.worker.instances import BoundInstance
 from skulk.shared.types.worker.runners import RunnerFailed
+from skulk.shared.types.worker.shards import RpcDonorShardMetadata
 from skulk.utils.channels import ClosedResourceError, MpReceiver, MpSender
 from skulk.worker.runner.diagnostics import (
     configure_runner_diagnostics,
@@ -398,6 +399,7 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
     """
     from skulk.shared.backends import (
         engine_of,
+        platform_compatible_backends,
         probe_node_backends,
         resolve_node_engine,
     )
@@ -407,8 +409,15 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
         return engine_of(shard.resolved_backend)
 
     placement = shard.model_card.placement
+    # Same platform-capability filter the master applies at placement: the
+    # card declares MODEL truth, and engines whose runner cannot serve one of
+    # the card's declared capabilities (e.g. vision without served mmproj
+    # support) are subtracted in code so the fallback probe cannot pick one.
     return resolve_node_engine(
-        placement.compatible_backends,
+        platform_compatible_backends(
+            placement.compatible_backends,
+            card_serves_vision=shard.model_card.vision is not None,
+        ),
         placement.backend_preference,
         probe_node_backends(),
     )
@@ -478,6 +487,22 @@ def entrypoint(
 
             runner = EmbeddingRunner(
                 bound_instance, event_sender, task_receiver, cancel_receiver
+            )
+            runner.main()
+        elif isinstance(bound_instance.bound_shard, RpcDonorShardMetadata):
+            # RPC memory donor of a multi-node GGUF placement (#328): serves
+            # ggml-rpc-server on the placement-stamped endpoint and lends GPU
+            # memory to the driver's llama-server --rpc. Dispatched on the
+            # SHARD TYPE, not resolved_backend: the donor's tag also says
+            # llama_server-*, but its job is not to run a server app.
+            from skulk.worker.runner.rpc_donor.runner import Runner as RpcDonorRunner
+
+            runner = RpcDonorRunner(
+                bound_instance,
+                event_sender,
+                task_receiver,
+                cancel_receiver,
+                context_token_limit=context_token_limit,
             )
             runner.main()
         elif _resolve_text_engine(bound_instance) == "llama_cpp":

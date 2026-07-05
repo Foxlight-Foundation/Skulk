@@ -157,6 +157,7 @@ from skulk.api.types.openai_responses import (
 )
 from skulk.connectivity.remote_access import RemoteAccessInfo, build_remote_access_info
 from skulk.connectivity.tailscale import TailscaleStatus, query_tailscale_status
+from skulk.extensions import ExtensionContext, LoadedExtensions, resolve_skulk_version
 from skulk.master.image_store import ImageStore
 from skulk.master.placement import PlacementInfoPendingError
 from skulk.master.placement import place_instance as get_instance_placements
@@ -262,7 +263,12 @@ from skulk.shared.types.telemetry import (
 )
 from skulk.shared.types.text_generation import TextGenerationTaskParams
 from skulk.shared.types.worker.downloads import DownloadCompleted
-from skulk.shared.types.worker.instances import Instance, InstanceId, InstanceMeta
+from skulk.shared.types.worker.instances import (
+    Instance,
+    InstanceId,
+    InstanceMeta,
+    instance_meta_of,
+)
 from skulk.shared.types.worker.runners import RunnerId
 from skulk.shared.types.worker.shards import Sharding
 from skulk.shared.version import get_skulk_version, get_skulk_version_label
@@ -678,8 +684,18 @@ class API:
         telemetry_view: "TelemetryView | None" = None,
         data_receiver: "Receiver[DataChunk] | None" = None,
         data_plane_zenoh: bool = False,
+        extensions: LoadedExtensions | None = None,
     ) -> None:
         self.state = State()
+        # Extensions (plugins) discovered at node startup. None or an empty
+        # set keeps every extension hook inert: no extension installed =
+        # Skulk unchanged.
+        self._extensions = extensions
+        self._extension_context = ExtensionContext(
+            node_id=node_id,
+            skulk_version=resolve_skulk_version(),
+            embed_texts=self.embed_texts,
+        )
         # Data plane (#279 Phase 2): per-token output chunks arrive here direct
         # from the serving worker (DATA topic), not as ChunkGenerated events off
         # the master. Demuxed by command_id into the per-command stream queues.
@@ -1560,6 +1576,12 @@ class API:
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,
                     ),
+                    node_vram_strict=usable_vram_by_node(
+                        self._telemetry_view.node_system,
+                        self._telemetry_view.node_resources,
+                        node_memory=self._telemetry_view.node_memory,
+                        include_uma_spill=False,
+                    ),
                 )
                 break
             except PlacementInfoPendingError as exc:
@@ -1633,6 +1655,12 @@ class API:
                     self._telemetry_view.node_resources,
                     node_memory=self._telemetry_view.node_memory,
                 ),
+                node_vram_strict=usable_vram_by_node(
+                    self._telemetry_view.node_system,
+                    self._telemetry_view.node_resources,
+                    node_memory=self._telemetry_view.node_memory,
+                    include_uma_spill=False,
+                ),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1705,6 +1733,12 @@ class API:
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,
                     ),
+                    node_vram_strict=usable_vram_by_node(
+                        self._telemetry_view.node_system,
+                        self._telemetry_view.node_resources,
+                        node_memory=self._telemetry_view.node_memory,
+                        include_uma_spill=False,
+                    ),
                 )
             except ValueError as exc:
                 if (model_card.model_id, sharding, instance_meta, 0) not in seen:
@@ -1754,17 +1788,25 @@ class API:
                     extra = 1 if index < remainder else 0
                     memory_delta_by_node[str(node_id)] = per_node + extra
 
+            # Report the MINTED instance's meta, not the requested one:
+            # placement normalizes shapes (single-node cycles become rings
+            # regardless of requested meta; an RPC-capable cycle mints a
+            # LlamaRpcInstance from a ring request, #328). Consumers
+            # (dashboard, test harness) match previews by instance_meta, so
+            # the preview must be truthful about the shape a real placement
+            # would produce.
+            minted_meta = instance_meta_of(instance)
             if (
                 model_card.model_id,
                 sharding,
-                instance_meta,
+                minted_meta,
                 len(placement_node_ids),
             ) not in seen:
                 previews.append(
                     PlacementPreview(
                         model_id=model_card.model_id,
                         sharding=sharding,
-                        instance_meta=instance_meta,
+                        instance_meta=minted_meta,
                         instance=instance,
                         memory_delta_by_node=memory_delta_by_node or None,
                         error=None,
@@ -1774,7 +1816,7 @@ class API:
                 (
                     model_card.model_id,
                     sharding,
-                    instance_meta,
+                    minted_meta,
                     len(placement_node_ids),
                 )
             )
@@ -2139,6 +2181,7 @@ class API:
                 live_nodes=live,
                 downloads=self.state.downloads,
                 node_disk=self._telemetry_view.node_disk,
+                telemetry_last_seen=self._telemetry_view.node_last_telemetry,
                 now=datetime.now(tz=timezone.utc),
             ).items()
         }
@@ -2264,14 +2307,29 @@ class API:
             model_card=model_card,
         )
 
+        # Extension hooks: request transform before dispatch, response tap
+        # after. Both are inert when no extension provides chat middleware,
+        # and every extension call inside is guarded (a raising extension is
+        # logged and the request proceeds unchanged).
+        if self._extensions is not None and self._extensions.has_chat_middleware:
+            task_params = await self._extensions.transform_chat_request(
+                self._extension_context, task_params
+            )
+
         command = await self._send_text_generation_with_images(task_params)
+
+        chunk_stream = self._token_chunk_stream(command.command_id)
+        if self._extensions is not None and self._extensions.has_chat_middleware:
+            chunk_stream = self._extensions.tap_chat_stream(
+                self._extension_context, task_params, chunk_stream
+            )
 
         if payload.stream:
             return StreamingResponse(
                 with_sse_keepalive(
                     generate_chat_stream(
                         command.command_id,
-                        self._token_chunk_stream(command.command_id),
+                        chunk_stream,
                     ),
                 ),
                 media_type="text/event-stream",
@@ -2285,7 +2343,7 @@ class API:
             return StreamingResponse(
                 collect_chat_response(
                     command.command_id,
-                    self._token_chunk_stream(command.command_id),
+                    chunk_stream,
                 ),
                 media_type="application/json",
             )
@@ -2391,6 +2449,95 @@ class API:
                 detail=f"No instance found for model {resolved}",
             )
         return resolved
+
+    async def embed_texts(
+        self,
+        texts: list[str],
+        model_id: ModelId | None = None,
+        *,
+        timeout_seconds: float = 30.0,
+    ) -> list[list[float]] | None:
+        """Embed texts through the cluster's embedding serving, in process.
+
+        The programmatic equivalent of ``POST /v1/embeddings`` for in-process
+        callers (extensions receive this via their ``ExtensionContext``).
+        When ``model_id`` is omitted, the first running embedding instance is
+        used. Returns one vector per input text, or ``None`` when no
+        embedding instance is available, the task errors, or the call times
+        out. Callers must treat ``None`` as "degrade gracefully": this method
+        never raises for serving-availability reasons. Side effect: sends a
+        ``TextEmbedding`` command through the cluster pipeline.
+        """
+        from skulk.shared.types.embedding import TextEmbeddingTaskParams
+
+        resolved = (
+            model_id if model_id is not None else self._find_running_embedding_model()
+        )
+        if resolved is None:
+            return None
+        command = TextEmbedding(
+            owner_node=self.node_id,
+            task_params=TextEmbeddingTaskParams(
+                model=resolved,
+                input_texts=texts,
+                encoding_format="float",
+            ),
+        )
+        command_id = command.command_id
+        self._embedding_queues[command_id], recv = channel[
+            EmbeddingChunk | ErrorChunk
+        ]()
+        try:
+            with anyio.fail_after(timeout_seconds):
+                await self._send(command)
+                with recv as chunks:
+                    async for chunk in chunks:
+                        if isinstance(chunk, ErrorChunk):
+                            logger.warning(
+                                f"embed_texts failed: {chunk.error_message}"
+                            )
+                            return None
+                        return [list(embedding) for embedding in chunk.embeddings]
+            return None
+        except TimeoutError:
+            # The runner may still be computing this command. A bare finalize
+            # would emit TaskFinished and mark a live task complete on the
+            # master, so cancel it instead (mirrors the endpoint's
+            # client-disconnect path); _cancelled_command_ids suppresses the
+            # finished signal in the finally below.
+            logger.warning(f"embed_texts timed out after {timeout_seconds}s")
+            self._cancelled_command_ids.add(command_id)
+            await self.command_sender.send(
+                ForwarderCommand(
+                    origin=self._system_id,
+                    command=TaskCancelled(cancelled_command_id=command_id),
+                )
+            )
+            return None
+        finally:
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    "dict[CommandId, Sender[object]]",
+                    self._embedding_queues,
+                ),
+            )
+
+    def _find_running_embedding_model(self) -> ModelId | None:
+        """Return the model id of a running embedding instance, if any.
+
+        Reads the in-memory shard metadata (like text-model resolution) so
+        availability does not depend on model-card cache misses or remote
+        fetches.
+        """
+        from skulk.shared.models.model_cards import ModelTask
+
+        for instance in self.state.instances.values():
+            assignments = instance.shard_assignments
+            for shard in assignments.runner_to_shard.values():
+                if ModelTask.TextEmbedding in shard.model_card.tasks:
+                    return assignments.model_id
+        return None
 
     def stream_events(self) -> StreamingResponse:
         def _generate_json_array(events: Iterable[Event]) -> Iterable[str]:

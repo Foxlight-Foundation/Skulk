@@ -20,6 +20,7 @@ from skulk.shared.types.worker.downloads import (
 from skulk.shared.types.worker.instances import (
     Instance,
     InstanceId,
+    LlamaRpcInstance,
     MlxRingInstance,
     RunnerId,
     ShardAssignments,
@@ -29,7 +30,10 @@ from skulk.shared.types.worker.runners import (
     RunnerReady,
     RunnerStatus,
 )
-from skulk.shared.types.worker.shards import PipelineShardMetadata
+from skulk.shared.types.worker.shards import (
+    PipelineShardMetadata,
+    RpcDonorShardMetadata,
+)
 
 _MODEL = ModelId("test-model")
 
@@ -177,3 +181,125 @@ def test_multiple_failed_ranks_all_reported() -> None:
 
     failed_nodes, _cause = instances_wedged_by_download_failure(state)[iid]
     assert failed_nodes == frozenset({node_a, node_b})
+
+
+async def test_recovery_consumes_the_terminal_failure_record() -> None:
+    """Recovery must reset the failed node's download status to Pending.
+
+    Without the reset, the stale terminal DownloadFailed lingers in session
+    state and the wedge scan condemns EVERY future placement of the model
+    touching that node, long after the cause is gone (observed live: an
+    ENOSPC during a pooled placement kept killing fresh placements an hour
+    after the disk was freed, until a whole-fleet restart).
+    """
+    from anyio import WouldBlock
+
+    from skulk.master.main import Master
+    from skulk.routing.router import get_node_id_keypair
+    from skulk.shared.types.commands import (
+        ForwarderCommand,
+        ForwarderDownloadCommand,
+    )
+    from skulk.shared.types.common import SessionId
+    from skulk.shared.types.events import (
+        Event,
+        GlobalForwarderEvent,
+        LocalForwarderEvent,
+        NodeDownloadProgress,
+    )
+    from skulk.shared.types.state_sync import StateSyncMessage
+    from skulk.shared.types.worker.downloads import DownloadPending
+    from skulk.utils.channels import channel
+
+    master_node = NodeId(get_node_id_keypair().to_node_id())
+    session_id = SessionId(master_node_id=master_node, election_clock=0)
+    ge_sender, _ = channel[GlobalForwarderEvent]()
+    _, co_receiver = channel[ForwarderCommand]()
+    _, le_receiver = channel[LocalForwarderEvent]()
+    ss_sender, ss_receiver = channel[StateSyncMessage]()
+    fcds, _ = channel[ForwarderDownloadCommand]()
+    ev_send, ev_recv = channel[Event]()
+    master = Master(
+        master_node,
+        session_id,
+        event_sender=ev_send,
+        global_event_sender=ge_sender,
+        local_event_receiver=le_receiver,
+        command_receiver=co_receiver,
+        state_sync_receiver=ss_receiver,
+        state_sync_sender=ss_sender,
+        download_command_sender=fcds,
+    )
+
+    iid = InstanceId()
+    node_a, node_b = NodeId("a"), NodeId("b")
+    instance, runner_a, runner_b = _two_node_instance(iid, node_a, node_b)
+    master.state = _state(
+        instance,
+        {runner_a: RunnerConnected(), runner_b: RunnerConnected()},
+        {node_a: [_failed(node_a)], node_b: [_completed(node_b)]},
+    )
+
+    await master._recover_download_failed_instances()  # pyright: ignore[reportPrivateUsage]
+
+    resets: list[NodeDownloadProgress] = []
+    while True:
+        try:
+            event = ev_recv.receive_nowait()
+        except WouldBlock:
+            break
+        if isinstance(event, NodeDownloadProgress):
+            resets.append(event)
+    assert any(
+        isinstance(reset.download_progress, DownloadPending)
+        and reset.download_progress.node_id == node_a
+        and reset.download_progress.shard_metadata.model_card.model_id == _MODEL
+        for reset in resets
+    ), "recovery must emit a DownloadPending reset for the failed node"
+
+
+def test_stale_donor_download_failure_does_not_wedge_rpc_instance() -> None:
+    # RPC donors never download the model (#328). A stale terminal
+    # DownloadFailed for the same model on the DONOR node (from an earlier
+    # placement attempt there) must not condemn a pooled instance during the
+    # driver's load window; only a failure on the driver node counts.
+    iid = InstanceId()
+    driver_node, donor_node = NodeId("driver"), NodeId("donor")
+    card = _model_card()
+    driver_runner, donor_runner = RunnerId(), RunnerId()
+    instance = LlamaRpcInstance(
+        instance_id=iid,
+        shard_assignments=ShardAssignments(
+            model_id=_MODEL,
+            runner_to_shard={
+                driver_runner: _shard(card, 0, 2),
+                donor_runner: RpcDonorShardMetadata(
+                    start_layer=0,
+                    end_layer=0,
+                    n_layers=16,
+                    model_card=card,
+                    device_rank=1,
+                    world_size=2,
+                ),
+            },
+            node_to_runner={driver_node: driver_runner, donor_node: donor_runner},
+        ),
+        driver_node=driver_node,
+        donor_endpoints={donor_node: "10.99.0.2:50052"},
+    )
+    # Donor Ready, driver still loading; stale failure sits on the donor node.
+    state = _state(
+        instance,
+        {driver_runner: RunnerConnected(), donor_runner: RunnerReady()},
+        {donor_node: [_failed(donor_node)], driver_node: []},
+    )
+    assert instances_wedged_by_download_failure(state) == {}
+
+    # A failure on the DRIVER node is still a real wedge.
+    state = _state(
+        instance,
+        {driver_runner: RunnerConnected(), donor_runner: RunnerReady()},
+        {donor_node: [], driver_node: [_failed(driver_node)]},
+    )
+    failed_nodes, _cause = instances_wedged_by_download_failure(state)[iid]
+    assert failed_nodes == frozenset({driver_node})

@@ -25,6 +25,7 @@ from skulk.connectivity.local_network import (
 from skulk.connectivity.tailscale import query_tailscale_status
 from skulk.download.coordinator import DownloadCoordinator
 from skulk.download.impl_shard_downloader import skulk_shard_downloader
+from skulk.extensions import load_extensions
 from skulk.master.main import Master
 from skulk.routing.event_router import EventRouter
 from skulk.routing.router import Router, get_node_id_keypair
@@ -557,6 +558,9 @@ class Node:
                 telemetry_view=telemetry_view,
                 data_receiver=router.receiver(topics.DATA),
                 data_plane_zenoh=_zenoh_on,
+                # Installed plugins (skulk.extensions entry points), discovered
+                # once per process; empty when none are installed.
+                extensions=load_extensions(),
             )
         else:
             api = None

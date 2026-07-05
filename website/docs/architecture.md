@@ -162,11 +162,13 @@ Operationally, the rule of thumb:
 
 The planner's memory admission is per node, not summed across the candidate cycle: Tensor sharding splits the weights evenly across ranks while Pipeline allocates layers proportionally to each node's available memory, and every node must fit its weight share times a runtime-overhead factor (KV cache, activations, MLX buffers, the runner process) plus a flat floor, and an exact weights-equal-free-memory fit is rejected because it thrashes rather than runs. "Available memory" here is the GPU-wireable figure, `total − wired − anonymous − compressor` from a `vm_stat` snapshot taken alongside each telemetry sample, not the naive free-plus-inactive figure, which counts reclaimable file cache as used (after downloading a model, the weights sitting in file cache would deflate availability by the model's full size and refuse a placement that runs comfortably; macOS evicts that cache the moment Metal wires pages). It deliberately does not credit compression of idle anonymous memory. Because that availability rides the telemetry plane (last-write-wins gossip), it lags a teardown by a few rounds: right after an instance is deleted the freed memory is not yet reflected, so a placement issued immediately afterward (a test harness or a rapid model swap) would read deflated availability and be refused until the gossip settles. To avoid that, the master credits a just-deleted instance's per-node footprint back to the admission inputs for a short grace window, then lets the credit expire so a genuine shortfall reasserts; the worker's own pre-load fit guard remains the last-resort check against an over-credit. Placement failures are typed: a topology gap, an exclusion that removed every candidate, a per-node memory shortfall (with the arithmetic), and the not-an-error startup cases where cluster info simply has not finished gossiping (`PlacementInfoPendingError`, which covers both phases: connection edges lagging node identities, and memory info lagging the edges) are all distinct, and `POST /place_instance` dry-runs the placement against replicated state so callers get the real reason as a 400/503 instead of an acknowledged command that silently fails on the master.
 
-The master admits on the gossiped (telemetry-plane, last-write-wins) `ram_available`, while the worker's pre-spawn guard reads a fresh live `vm_stat` figure at load time. On a borderline multi-node split the live reading can sit just below the admitted estimate, so the master admits a cycle the worker then refuses. The worker guard therefore allows a small fit tolerance (10% of usable): a shard's footprint already bakes in the engine overhead factor, a full KV reservation, and a flat floor, so a sub-GB miss is within that pad and within live-versus-gossip jitter, and refusing on it would flip a placement the master admitted into a needless failure (a 0.2GB / 2% miss was observed refusing a 24B model at the load re-check across a 3-node ring). Only a shortfall beyond the tolerance, the signature of a node that genuinely lost memory since admission, trips the guard. When it does, rather than letting that instance vanish, the worker emits `RefuseInstancePlacement` and the master re-places the same model one node wider (`min_nodes` = refused width + 1) so each node holds a smaller share; the loop terminates when even a full-width split raises `PlacementError`. This self-corrects tight splits instead of requiring an operator to notice and re-launch.
+The master admits on the gossiped (telemetry-plane, last-write-wins) `ram_available`, while the worker's pre-spawn guard reads a fresh live `vm_stat` figure at load time. On a borderline multi-node split the live reading can sit just below the admitted estimate, so the master admits a cycle the worker then refuses. The worker guard therefore allows a small fit tolerance (10% of usable): a shard's footprint already bakes in the engine overhead factor, a full KV reservation, and a flat floor, so a sub-GB miss is within that pad and within live-versus-gossip jitter, and refusing on it would flip a placement the master admitted into a needless failure (a 0.2GB / 2% miss was observed refusing a 24B model at the load re-check across a 3-node ring). Only a shortfall beyond the tolerance, the signature of a node that genuinely lost memory since admission, trips the guard. When it does, rather than letting that instance vanish, the worker emits `RefuseInstancePlacement` and the master re-places the same model one node wider (`min_nodes` = refused width + 1) so each node holds a smaller share. On a heterogeneous cluster "wider" is not always possible even when a working placement exists: engines differ per node, so a GGUF model refused by one GPU node may fit alone on another GPU node while a Mac can never join its cycle. When no wider cycle exists, the master therefore falls back once to a single-node placement that excludes the refusing node. A refusal against that fallback is terminal: the master tears the placement down, cancels the model downloads it started, and gives up, which bounds the refusal chain at two hops so it can never oscillate between two refusing nodes. This self-corrects tight splits instead of requiring an operator to notice and re-launch.
 
-A separate failure mode is a rank whose model **download** fails terminally (disk full, a transient Hugging Face or network error). The ring still forms and every rank waits for all ranks to become load-ready, but the failed rank never will, so the instance would otherwise sit "loading" forever with nothing to recover it. The master's plan loop detects this from replicated state (a not-yet-ready instance whose any rank node carries a terminal download failure for the model), fails any in-flight request bound to it with the download error surfaced, tears the instance down, and re-places the model at the same width while excluding the failed node(s). If no healthy node set can host the width (for example the failure was cluster-wide), the re-placement raises `PlacementError` and the master stops at the teardown, which bounds recovery to the available nodes rather than looping. A transient or single-node failure therefore self-heals onto healthy nodes; a genuine shortfall fails cleanly with the reason instead of hanging.
+A separate failure mode is a rank whose model **download** fails terminally (disk full, a transient Hugging Face or network error). The ring still forms and every rank waits for all ranks to become load-ready, but the failed rank never will, so the instance would otherwise sit "loading" forever with nothing to recover it. The master's plan loop detects this from replicated state (a not-yet-ready instance whose any rank node carries a terminal download failure for the model), fails any in-flight request bound to it with the download error surfaced, tears the instance down, and re-places the model at the same width while excluding the failed node(s). If no healthy node set can host the width (for example the failure was cluster-wide), the re-placement raises `PlacementError` and the master stops at the teardown, which bounds recovery to the available nodes rather than looping. A transient or single-node failure therefore self-heals onto healthy nodes; a genuine shortfall fails cleanly with the reason instead of hanging. Recovery also clears the failed download record itself (resetting that node's download status to pending), because a stale terminal failure left in session state would otherwise condemn every future placement of the same model touching that node long after the cause, such as a freed disk, is gone.
 
 This recovery is made visible so it is not mysterious. `GET /state` attaches a derived per-node health summary (a level of ok, warn, or error plus reasons, each with a message and a remediation), computed read-only from state already in the response: a terminal download failure on a node, a low or full models-volume disk (a pre-emptive warning before a download fails), and a node whose heartbeats are late enough to be at risk of pruning. The dashboard renders an amber or red badge on the affected topology node whose hover names the problem and how to fix it, so an operator sees why a node is being routed around rather than watching placements quietly avoid a normal-looking node.
+
+Liveness itself is judged across both planes, and the distinction matters when reading state directly. Ordered events bump a node's `last_seen` in replicated state, but a healthy node may legitimately log nothing for long stretches: readings that rarely change (connectivity among them) are forwarded only when their payload differs from the last value the master confirmed into the log (the worker keeps re-sending an unconfirmed change each poll until it sees it echoed back, then goes quiet), precisely so the event log records history rather than heartbeats. (Periodic identical events are actively harmful here: they fill the bounded replay tail that joining nodes must consume, and replaying that accumulated burst can saturate a slower node's send queues and flap it out of the cluster.) The live signal is the telemetry plane instead: every node records when it last received any telemetry from each peer, and since telemetry gossips roughly every second, that receipt time is a fresh, cluster-wide liveness reading that keeps flowing even while an election is in progress. The master's timeout prune and the health summary's heartbeat warning both use the fresher of `last_seen` and the telemetry receipt, so a node is pruned or flagged only when it has gone quiet on both planes for the full timeout window. The consequence worth remembering: `last_seen` means "last logged event", not "last observed alive"; freshness lives on the telemetry plane.
 
 Task failure is part of the same event flow. The master's plan loop (the
 same reconciliation pass that deletes instances on dead nodes) emits
@@ -224,7 +226,7 @@ opts in through its card's `compatible_backends` (`llama_server-…`) plus the
 GGUF, but some speculative modes need a separate small draft model: a card names it
 with `served_spec_draft_repo` / `served_spec_draft_file` and the worker downloads it
 as a companion and passes it to the server as `--model-draft` (this is how Gemma 4
-runs MTP, via its assistant as the draft model). The engine is single-node and coexists with the
+runs MTP, via its assistant as the draft model). The engine coexists with the
 in-process llama.cpp runner; the same managed-server-plus-proxy shape is the
 intended on-ramp for vLLM later. See the setup notes for a non-Mac node in
 [AMD / Strix Halo nodes](amd-strix-halo-nodes) and the env vars
@@ -233,6 +235,24 @@ intended on-ramp for vLLM later. See the setup notes for a non-Mac node in
 card that asks for it, so the same GGUF can be served in plain decode as an
 apples-to-apples MTP-off baseline (a benchmarking and diagnostics knob, not for
 normal operation).
+
+The served engine is also how a GGUF model larger than any single GPU node gets
+served: **multi-node memory pooling over llama.cpp's RPC backend**. When a model
+fits no single node but fits the combined GPU memory of several `llama_server`
+nodes, the planner places an asymmetric pair of roles instead of a ring: one
+**driver** node runs `llama-server --rpc donor:port,...` and holds the model
+file, and each **donor** node runs a small `ggml-rpc-server` that lends its GPU
+memory. llama.cpp itself splits the weights and KV across the pooled devices in
+proportion to their free memory, so Skulk assigns no layer ranges; the placement
+just picks the driver (the biggest-VRAM node), chooses each donor's endpoint
+address from the observed connectivity between the pair (preferring the fastest
+interconnect, such as a USB4/Thunderbolt link between two Linux boxes), and
+stamps both onto the instance. Pooling trades some decode speed for capacity
+(the point is the model class that otherwise cannot run at all, not a speedup),
+and prefill is unaffected. A single-node placement is always preferred whenever
+the model fits one node, so this shape only appears for genuinely pooled-only
+models. If a donor dies mid-generation the driver exits immediately and the
+normal crash recovery tears the instance down and re-places it.
 
 A model card declares two placement axes that are deliberately separate from the
 memory/topology axes above:
@@ -254,6 +274,16 @@ concrete engine for its node at runner-spawn time by intersecting the card's
 `backend_preference`. See the
 [AMD Strix Halo nodes](./amd-strix-halo-nodes.md) guide for bringing up a
 non-Mac node.
+
+Cards describe the model; the platform describes itself. A card's
+`compatible_backends` records which engines the model's artifacts run on
+(model truth), and it never encodes a gap in Skulk's own implementation
+(platform truth). When one of our runners cannot yet exploit a capability a
+card declares (for example, the served llama.cpp engine cannot load a vision
+model's projector yet), that limitation lives in a code-level capability
+table that placement and the worker both consult, so the model never lands
+where an advertised capability would silently degrade, and the card needs no
+edit when the platform catches up.
 
 The llama.cpp runner serves GGUF models single-node and matches the MLX runner
 on the capabilities llama.cpp supports natively: per-token logprobs (with the
@@ -401,6 +431,51 @@ Skulk-native             → adapter → internal text / image / embedding Task
 This is why one placed model can be accessed through several compatibility formats simultaneously: the underlying execution path doesn't care which adapter normalized the input.
 
 The adapters live in `src/skulk/api/adapters/`. Each one handles request normalization (incoming) and chunk serialization (outgoing) for its wire format. The internal Task and Chunk types are the integration boundary.
+
+## Extensions (plugins)
+
+Skulk can load separately installed Python packages as extensions and call
+them at well-defined points in the serving path. Extensions are how
+deployment-specific behavior (an audit logger, a request policy filter, a
+prompt annotator) rides the fabric without forking Skulk: the package is
+installed into the same environment as Skulk on each node, and Skulk
+discovers it at startup through the `skulk.extensions` entry-point group.
+The developer guide, with a complete worked example, is at
+[Extensions (Plugins)](extensions.md).
+
+The contract is deliberately small (`src/skulk/extensions/`):
+
+- An extension exposes a zero-argument factory in the entry-point group. The
+  returned object names itself, declares the Skulk versions it supports as a
+  PEP 440 specifier, and can provide **chat middleware**.
+- Chat middleware gets two hooks. `transform_chat_request` runs on the API
+  node after the OpenAI adapter and before the request is dispatched to the
+  cluster; it can return modified task params (for example, an augmented
+  system region). `observe_chat_response` receives an immutable summary of
+  the completed generation (final text, thinking text, finish reason) in a
+  background task after the response ends.
+- Each hook invocation receives an `ExtensionContext` carrying the node
+  identity, the running Skulk version, and programmatic access to the
+  cluster's embedding serving (the in-process equivalent of
+  `POST /v1/embeddings`).
+
+Three invariants shape the design. First, **a raising extension never breaks
+inference**: every extension call is guarded, an exception is logged loudly
+and skipped, and the request proceeds as if the extension did not exist (the
+guarantee covers exceptions, not latency: a transform runs inline before
+dispatch, so a hanging transform delays the request it is transforming, while
+observers run in the background and cannot affect request latency). Second,
+**extensions never own the response stream**: Skulk does the accumulation and
+hands observers a summary, so a buggy extension cannot corrupt, reorder, or
+stall token delivery. Third, **no extension installed means Skulk unchanged**:
+the hooks are inert when nothing is loaded.
+
+Version discipline matches the cluster rule. An extension whose version
+specifier does not match the running Skulk is refused at load time with an
+error: mixed plugin/fabric versions are the same anti-pattern as
+mixed-version clusters, and the fix is the same (upgrade the fleet and its
+extensions together). `SKULK_EXTENSIONS_DISABLE=1` is a node-local kill
+switch that skips discovery entirely.
 
 ## The dashboard
 

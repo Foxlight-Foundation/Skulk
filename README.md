@@ -10,7 +10,7 @@
 
 [![Documentation](https://img.shields.io/badge/docs-documentation-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/)
 [![Build & Runtime Paths](https://img.shields.io/badge/docs-build_%26_runtime-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/build-and-runtime/)
-[![Release Notes](https://img.shields.io/badge/release_notes-v1.3.1-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/release-notes/1.3.1/)
+[![Release Notes](https://img.shields.io/badge/release_notes-v1.4.0-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/release-notes/1.4.0/)
 [![Architecture](https://img.shields.io/badge/docs-architecture-2ea44f?style=flat-square&logo=readthedocs&logoColor=white)](https://foxlight-foundation.github.io/Skulk/architecture/)
 
   <br>
@@ -23,7 +23,9 @@ Skulk is an interconnect fabric for multi-node AI compute. It joins several mach
 On top of that, Skulk adds:
 
 - Heterogeneous clusters: Apple Silicon nodes serving MLX models and AMD or other Linux GPU nodes serving GGUF models (through a llama.cpp engine on Vulkan or ROCm) in one cluster, with each model routed to a node that can run it.
+- Multi-node GGUF inference: a GGUF model that fits no single GPU node pools the GPU memory of several (one driver node plus memory donors over llama.cpp RPC), so two AMD Strix Halo boxes can together serve a quant neither could load alone. Guide: [AMD / Strix Halo nodes](https://foxlight-foundation.github.io/Skulk/amd-strix-halo-nodes/).
 - Production-grade speculative decoding delivering 1.16–2.2× speedups across nodes and on heterogeneous hardware.
+- An extension (plugin) API: separately installed Python packages hook the serving path (request transform, response observer, in-process embeddings). A raising extension is contained and skipped, and extensions never own the response stream. Guide: [Extensions](https://foxlight-foundation.github.io/Skulk/extensions/).
 - A real-time React dashboard with easy access to:
   - A central model store
   - A placement manager with live cluster preview

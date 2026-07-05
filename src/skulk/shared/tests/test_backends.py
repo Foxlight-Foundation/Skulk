@@ -14,6 +14,7 @@ from skulk.shared.backends import (
     engine_of,
     engine_supports_multi_node,
     make_backend_tag,
+    platform_compatible_backends,
     probe_node_backends,
     resolve_node_backend,
     resolve_node_engine,
@@ -226,13 +227,54 @@ def test_resolve_node_backend_returns_preferred_tag() -> None:
 
 
 def test_resolve_node_backend_falls_back_to_sorted_when_no_preference() -> None:
-    # With no preference match, the intersection is ordered deterministically.
+    # With no preference match, the intersection is ordered deterministically,
+    # and a CPU compute tag never beats a GPU tag on alphabetical accident:
+    # GPU serving dominates CPU for every model class shipped, so the platform
+    # default puts -cpu last (a card can still prefer CPU explicitly).
     tag = resolve_node_backend(
         frozenset({"llama_cpp-vulkan", "llama_cpp-cpu"}),
         (),
         frozenset({"llama_cpp-vulkan", "llama_cpp-cpu"}),
     )
-    assert tag == "llama_cpp-cpu"  # sorted() puts cpu before vulkan
+    assert tag == "llama_cpp-vulkan"
+    # The served-engine shape from the card sweep: no llama_server preference,
+    # node advertises GPU + CPU server builds -> GPU wins, never -ngl 0.
+    tag = resolve_node_backend(
+        frozenset({"llama_server-vulkan", "llama_server-cpu"}),
+        ("llama_cpp-vulkan",),
+        frozenset({"llama_server-vulkan", "llama_server-cpu"}),
+    )
+    assert tag == "llama_server-vulkan"
+    # An explicit CPU preference still wins: the fallback order is a platform
+    # default, not an override of card policy.
+    tag = resolve_node_backend(
+        frozenset({"llama_cpp-vulkan", "llama_cpp-cpu"}),
+        ("llama_cpp-cpu",),
+        frozenset({"llama_cpp-vulkan", "llama_cpp-cpu"}),
+    )
+    assert tag == "llama_cpp-cpu"
+
+
+def test_platform_compatible_backends_gates_vision_off_served() -> None:
+    # MODEL truth vs PLATFORM truth: a vision card keeps every declared tag on
+    # engines whose runner can load its projector (in-process llama.cpp, MLX)
+    # and loses the served llama_server tags until that runner passes mmproj.
+    declared = frozenset(
+        {
+            "mlx",
+            "llama_cpp-vulkan",
+            "llama_cpp-cpu",
+            "llama_server-vulkan",
+            "llama_server-cpu",
+        }
+    )
+    assert platform_compatible_backends(declared, card_serves_vision=True) == (
+        frozenset({"mlx", "llama_cpp-vulkan", "llama_cpp-cpu"})
+    )
+    # A text-only card is untouched: no platform gate applies.
+    assert (
+        platform_compatible_backends(declared, card_serves_vision=False) == declared
+    )
 
 
 def test_resolve_node_backend_none_when_no_intersection() -> None:

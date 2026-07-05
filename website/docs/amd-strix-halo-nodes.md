@@ -249,8 +249,11 @@ point `SKULK_LLAMA_SERVER_BIN` at it before launching Skulk. Native MTP
 
 ```bash
 git clone https://github.com/ggml-org/llama.cpp.git ~/llama.cpp && cd ~/llama.cpp
-cmake -B build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build --target llama-server -j"$(nproc)"
+# -DGGML_RPC=ON also builds ggml-rpc-server, which multi-node GGUF pooling
+# needs on donor nodes (see the pooling section below); include it even on a
+# single-node build so the node can join a pool later without a rebuild.
+cmake -B build -DGGML_VULKAN=ON -DGGML_RPC=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target llama-server ggml-rpc-server -j"$(nproc)"
 # then in ~/.skulk/skulk.env (or launch-skulk.sh):
 #   SKULK_LLAMA_SERVER_BIN=$HOME/llama.cpp/build/bin/llama-server
 ```
@@ -264,15 +267,63 @@ not pay is turned off in that model's card, the same discipline MLX MTP uses. Se
 [Speculative Decoding](speculative-decoding.md) for how MTP works and what
 speedups to expect.
 
+## Pooling GGUF models across AMD nodes (multi-node)
+
+A GGUF model that fits no single node but fits the combined GPU memory of
+several AMD nodes can be served by pooling: Skulk places one **driver** node,
+which runs `llama-server --rpc donor:port,...` and holds the model file, and
+one or more **donor** nodes, each running a small `ggml-rpc-server` that lends
+its GPU memory. llama.cpp splits the weights and KV across the pooled devices
+itself. Skulk always prefers a single node whenever the model fits one, so
+pooling only engages for models that genuinely need it (or when a placement
+requests `min_nodes` of 2 or more explicitly).
+
+Requirements on every participating node:
+
+- The served engine configured (`SKULK_LLAMA_SERVER_BIN` pointing at a
+  `llama-server` built with `-DGGML_VULKAN=ON -DGGML_RPC=ON`; the install
+  script above does this).
+- The `ggml-rpc-server` binary next to `llama-server` (the same build
+  produces it), or `SKULK_RPC_SERVER_BIN` pointing at it explicitly.
+
+Placing a pooled model is the same placement call as any other, with a
+minimum width:
+
+```bash
+curl -X POST http://<any-node>:52415/place_instance \
+  -H 'Content-Type: application/json' \
+  -d '{"model_id": "bartowski/openai_gpt-oss-120b-GGUF",
+       "sharding": "Pipeline", "instance_meta": "LlamaRpc",
+       "min_nodes": 2, "excluded_nodes": []}'
+```
+
+What to expect, from measurements on a Strix Halo pair:
+
+- **Pooling is a capacity feature, not a speedup.** Decode runs roughly 15%
+  slower pooled than on a single node that fits the model (the per-token hop
+  to the donors is latency-bound), while prefill can improve slightly because
+  the pooled GPUs share the compute. Use pooling for models a single node
+  cannot hold; keep everything else single-node.
+- **A USB4/Thunderbolt link between the nodes helps load time, not decode.**
+  Donor weight transfer at load rides the link; give the link a static
+  point-to-point subnet (for example a /30 per link with MTU 9000) rather
+  than relying on link-local addressing, which multi-port hosts route
+  asymmetrically. Skulk automatically prefers the Thunderbolt address for
+  donor endpoints when one exists.
+- Donors keep a local tensor cache, so reloading the same pooled model is
+  much faster than the first load.
+- If a donor dies mid-generation, the in-flight request fails cleanly, the
+  whole pooled instance tears down within seconds, and no orphan processes
+  are left behind.
+
 ## What is not on the AMD path today
 
 - **MTP across the in-process `llama_cpp` engine.** The in-process binding does
   not expose native MTP; use the served `llama_server` engine (above) for MTP.
   A GGUF served through `llama_cpp` runs plain autoregressive decoding.
-- **Sharding one model across an AMD node and a Mac** (the two engines do not
-  share a runtime), and **multi-node GGUF inference** across several llama.cpp
-  nodes (tracked separately). A single AMD node serves each GGUF model on its own
-  GPU.
+- **Sharding one model across an AMD node and a Mac.** The two engines do not
+  share a runtime; a cycle must agree on one engine. Pooling GGUF models across
+  several AMD nodes IS supported (see the pooling section above).
 
 The interconnect doctrine still applies: the cluster fabric is trusted, so put
 untrusted segments behind your own network controls.

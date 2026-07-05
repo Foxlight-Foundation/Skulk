@@ -83,7 +83,7 @@ from skulk.shared.types.worker.downloads import (
     DownloadOngoing,
     DownloadPending,
 )
-from skulk.shared.types.worker.instances import InstanceId
+from skulk.shared.types.worker.instances import InstanceId, LlamaRpcInstance
 from skulk.shared.types.worker.runners import RunnerFailed, RunnerId, RunnerStatus
 from skulk.shared.types.worker.shards import ShardMetadata, TensorShardMetadata
 from skulk.store.config import StagingNodeConfig
@@ -495,6 +495,12 @@ class Worker:
         self._staging_config = staging_config
 
         self.state: State = State()
+        # Event-log-bound readings (connectivity) confirmed indexed by the
+        # master: keyed by reading type, holding the payload we saw echoed
+        # back as an indexed event. _forward_info gates re-sends on THIS (not
+        # on "last sent"), so a change dropped after bounded delivery retries
+        # keeps being re-sent each poll until it truly lands in the log.
+        self._confirmed_forwarded_info: dict[type[GatheredInfo], GatheredInfo] = {}
         self.runners: dict[RunnerId, RunnerSupervisor] = {}
         # Staging DIRECTORY NAMES (forward-sanitized) of models evicted by
         # startup reconciliation whose DownloadCompleted entries may still
@@ -663,13 +669,25 @@ class Worker:
             self._stopped.set()
 
     async def _forward_info(self, recv: Receiver[GatheredInfo]):
+        # Connectivity readings (network interfaces, thunderbolt) ride the ordered
+        # event log. They rarely change, but were emitted every poll, so on a
+        # long-lived cluster they filled the master's replay tail and stormed the
+        # AMD nodes on join (the 5-node gossip storm). Forward a reading only when
+        # its value differs from the last value the master CONFIRMED (echoed back
+        # as an indexed event; see _event_applier, which records the echo into
+        # _confirmed_forwarded_info). Gating on confirmation rather than on "last
+        # sent" matters: the delivery retry (event_router ``out_for_delivery``) is
+        # bounded (retry_max_attempts), so a change sent during a long masterless
+        # window can be dropped permanently; gating on the echo means we simply
+        # re-send it on the next poll until it actually lands in the log, and go
+        # quiet once it does. No periodic keepalive is needed; node liveness is
+        # carried by the telemetry plane (the master prune and node-health read
+        # telemetry freshness, which gossips every ~1s), not by these events.
         with recv as info_stream:
             async for info in info_stream:
                 try:
                     # Telemetry plane (#279): live readings are gossiped on the
-                    # telemetry topic, off the event log. The remaining node_*
-                    # readings still travel as indexed NodeGatheredInfo events
-                    # until later slices migrate them.
+                    # telemetry topic, off the event log.
                     if (
                         isinstance(info, TELEMETRY_PLANE_INFO)
                         and self._telemetry_sender is not None
@@ -677,6 +695,10 @@ class Worker:
                         await self._telemetry_sender.send(
                             NodeTelemetry(node_id=self.node_id, info=info)
                         )
+                        continue
+                    # Event-log-bound reading: skip only when the log already
+                    # holds this exact value (confirmed by the master's echo).
+                    if self._confirmed_forwarded_info.get(type(info)) == info:
                         continue
                     await self.event_sender.send(
                         NodeGatheredInfo(
@@ -698,6 +720,15 @@ class Worker:
                 # 2. for each event, apply it to the state
                 self.state = apply(self.state, event=event)
                 event = event.event
+
+                # Confirm our own connectivity readings once the master echoes
+                # them back indexed; _forward_info gates on this so an
+                # unconfirmed change keeps re-sending (see its comment).
+                if (
+                    isinstance(event, NodeGatheredInfo)
+                    and event.node_id == self.node_id
+                ):
+                    self._confirmed_forwarded_info[type(event.info)] = event.info
 
                 # Prune telemetry for timed-out nodes from the worker applier.
                 # The API applier does the same; together they cover --no-api
@@ -833,8 +864,19 @@ class Worker:
             # lets not kill the worker if a runner is unresponsive
             match task:
                 case CreateRunner():
-                    fit_error = self._local_shard_fit_error(
-                        task.bound_instance.bound_shard
+                    # The local fit guard sizes a shard's footprint against this
+                    # node's memory, but an RPC placement's shares are decided
+                    # by llama.cpp at load (the driver's shard nominally spans
+                    # ALL layers and a donor holds none), so per-shard sizing
+                    # is meaningless here. Pooled admission already used the
+                    # strict per-node VRAM figure; a genuine misfit fails at
+                    # llama-server load and the crash cascade recovers (#328).
+                    fit_error = (
+                        None
+                        if isinstance(task.bound_instance.instance, LlamaRpcInstance)
+                        else self._local_shard_fit_error(
+                            task.bound_instance.bound_shard
+                        )
                     )
                     if fit_error is not None:
                         logger.error(fit_error)
@@ -1077,7 +1119,19 @@ class Worker:
         if (instance := self.state.instances.get(task.instance_id)) is not None:
             runner_id = instance.shard_assignments.node_to_runner[self.node_id]
             shard = instance.shard(runner_id)
-            if isinstance(task, LoadModel) and shard is not None:
+            if (
+                isinstance(task, LoadModel)
+                and shard is not None
+                # Same bypass as the CreateRunner guard: an RPC driver's
+                # bookkeeping shard nominally spans ALL layers, but llama.cpp
+                # splits the actual allocation across the donors at load, so
+                # sizing the whole model against this node refuses exactly the
+                # pooled-only placements the feature exists for. Pooled
+                # admission already checked the strict per-node VRAM figures;
+                # a genuine misfit fails at llama-server load and the crash
+                # cascade recovers (#328).
+                and not isinstance(instance, LlamaRpcInstance)
+            ):
                 # Re-check fit at load dispatch. The CreateRunner guard runs
                 # before download and before any concurrently-placed instance
                 # has loaded, so this is the last accurate point - current free

@@ -8,6 +8,7 @@ family = "gemma"
 quantization = "4bit"
 base_model = "Gemma 3n E4B"
 capabilities = ["text", "vision"]
+context_length = 32768
 
 # Gemma 3n is Google's on-device omni-modal model (the HF repo tags ASR /
 # audio-text-to-text / video-text-to-text alongside image-text-to-text). The
