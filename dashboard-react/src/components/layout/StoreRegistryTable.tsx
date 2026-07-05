@@ -136,8 +136,12 @@ const HeaderRow = styled.div`
  * Phone width: rows leave the 7-column grid and restack as a card via
  * grid-template-areas (see TRow); each cell declares which area it fills.
  * Purely presentational: same DOM, same handlers, no behavior change.
+ * The union type guards against a typo silently breaking the layout: it
+ * must match the areas named in TRow's grid-template-areas.
  */
-const mobileArea = css<{ $area?: string }>`
+type MobileGridArea = 'model' | 'size' | 'files' | 'status' | 'play' | 'place' | 'actions';
+
+const mobileArea = css<{ $area?: MobileGridArea }>`
   @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
     grid-area: ${({ $area }) => $area ?? 'auto'};
   }
@@ -249,7 +253,7 @@ const TRow = styled.div<{ $highlight?: boolean }>`
     css`background: ${({ theme }) => theme.colors.goldBg};`}
 `;
 
-const ModelCell = styled.div<{ $area?: string }>`
+const ModelCell = styled.div<{ $area?: MobileGridArea }>`
   ${mobileArea}
   display: flex;
   align-items: center;
@@ -371,7 +375,7 @@ const ChatBubble = styled.button`
   }
 `;
 
-const Cell = styled.div<{ $align?: string; $area?: string }>`
+const Cell = styled.div<{ $align?: string; $area?: MobileGridArea }>`
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.textSecondary};
@@ -432,7 +436,7 @@ const RefreshBtn = styled.button<{ $spinning: boolean }>`
   }
 `;
 
-const PlayCell = styled.div<{ $area?: string }>`
+const PlayCell = styled.div<{ $area?: MobileGridArea }>`
   ${mobileArea}
   display: flex;
   align-items: center;
@@ -508,7 +512,7 @@ const StopBtn = styled.button`
   }
 `;
 
-const ActionsCell = styled.div<{ $area?: string }>`
+const ActionsCell = styled.div<{ $area?: MobileGridArea }>`
   ${mobileArea}
 
   @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
@@ -708,6 +712,7 @@ export function StoreRegistryTable({
               <Cell $area="size" />
               <Cell $area="files" />
               <Cell $align="right" $area="status">
+                <MobileLabel>{t('common.status', 'Status')}</MobileLabel>
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
                   <ProgressTrack>
                     <ProgressFill $pct={dl.progress * 100} />
@@ -827,6 +832,7 @@ export function StoreRegistryTable({
                   {entry.files.length}
                 </Cell>
                 <Cell $align="right" $area="status">
+                  <MobileLabel>{t('common.status', 'Status')}</MobileLabel>
                   {dl ? (
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
                       <ProgressTrack>
