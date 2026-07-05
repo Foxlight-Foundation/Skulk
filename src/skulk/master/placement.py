@@ -813,6 +813,34 @@ def _placement_intent_from_instance(
     return model_card, sharding, instance_meta, width
 
 
+def fallback_command_for_refused_instance(
+    instance: Instance, refusing_node: NodeId
+) -> PlaceInstance:
+    """Build the anywhere-but-the-refuser fallback for a memory-refused instance.
+
+    The primary #290 recovery re-places one node WIDER so every shard shrinks,
+    but on a heterogeneous fleet the wider width can be unsatisfiable by
+    construction: an MLX model refused at the full Mac width cannot add an AMD
+    node, so the wider attempt raises and recovery used to give up even though
+    a narrower cycle EXCLUDING the memory-constrained refuser would fit
+    (observed live: a 3-Mac placement refused on the 16GB node dead-ended at
+    min_nodes=4 while the 24GB node could serve the model alone). This
+    fallback re-places at ``min_nodes=1`` with the refusing node excluded,
+    letting the planner pick the best remaining cycle; the memory fit-check,
+    not the width, decides. The caller treats a second failure as terminal.
+    """
+    model_card, sharding, instance_meta, _width = _placement_intent_from_instance(
+        instance
+    )
+    return PlaceInstance(
+        model_card=model_card,
+        sharding=sharding,
+        instance_meta=instance_meta,
+        min_nodes=1,
+        excluded_nodes=[refusing_node],
+    )
+
+
 def replacement_command_for_refused_instance(instance: Instance) -> PlaceInstance:
     """Build a *wider* placement command to recover a memory-refused instance.
 

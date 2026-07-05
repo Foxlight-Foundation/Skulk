@@ -15,6 +15,7 @@ from skulk.master.placement import (
     add_instance_to_placements,
     cancel_unnecessary_downloads,
     delete_instance,
+    fallback_command_for_refused_instance,
     get_transition_events,
     place_instance,
     replacement_command_for_download_failed_instance,
@@ -904,14 +905,60 @@ class Master:
                                         f"still gossiping ({err}). Torn down."
                                     )
                                 except PlacementError as err:
-                                    final_placement = after_delete
-                                    logger.error(
-                                        "Cannot re-place "
-                                        f"{replace_command.model_card.model_id} after "
-                                        f"refusal on {command.node_id} (tried "
-                                        f"min_nodes={replace_command.min_nodes}): {err}. "
-                                        "Giving up on this placement."
+                                    # The wider width can be unsatisfiable by
+                                    # construction on a heterogeneous fleet (an
+                                    # MLX model refused at the full Mac width
+                                    # cannot add an AMD node). Fall back to
+                                    # anywhere-but-the-refuser at min_nodes=1:
+                                    # the memory fit-check, not the width,
+                                    # decides. Only a second failure is
+                                    # terminal.
+                                    fallback = fallback_command_for_refused_instance(
+                                        refused, command.node_id
                                     )
+                                    try:
+                                        final_placement = place_instance(
+                                            fallback,
+                                            self.state.topology,
+                                            after_delete,
+                                            self._telemetry_view.node_memory,
+                                            self.state.node_network,
+                                            download_status=self.state.downloads,
+                                            excluded_nodes={command.node_id},
+                                            node_resources=self._telemetry_view.node_resources,
+                                            node_vram=usable_vram_by_node(
+                                                self._telemetry_view.node_system,
+                                                self._telemetry_view.node_resources,
+                                                node_memory=self._telemetry_view.node_memory,
+                                            ),
+                                            node_vram_strict=usable_vram_by_node(
+                                                self._telemetry_view.node_system,
+                                                self._telemetry_view.node_resources,
+                                                node_memory=self._telemetry_view.node_memory,
+                                                include_uma_spill=False,
+                                            ),
+                                        )
+                                        logger.warning(
+                                            "Re-placing "
+                                            f"{fallback.model_card.model_id} "
+                                            f"excluding refusing node "
+                                            f"{command.node_id} (wider width "
+                                            f"min_nodes={replace_command.min_nodes} "
+                                            f"was unplaceable: {err})"
+                                        )
+                                    except (
+                                        PlacementError,
+                                        PlacementInfoPendingError,
+                                    ) as fallback_err:
+                                        final_placement = after_delete
+                                        logger.error(
+                                            "Cannot re-place "
+                                            f"{replace_command.model_card.model_id} after "
+                                            f"refusal on {command.node_id} (tried "
+                                            f"min_nodes={replace_command.min_nodes}, then "
+                                            f"excluding the refuser: {fallback_err}). "
+                                            "Giving up on this placement."
+                                        )
                                 transition_events = get_transition_events(
                                     self.state.instances,
                                     final_placement,

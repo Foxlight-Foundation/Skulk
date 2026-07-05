@@ -4,6 +4,7 @@ from skulk.master.placement import (
     PlacementError,
     PlacementInfoPendingError,
     add_instance_to_placements,
+    fallback_command_for_refused_instance,
     get_transition_events,
     place_instance,
     replacement_command_for_refused_instance,
@@ -1231,6 +1232,55 @@ def test_replacement_command_widens_refused_instance_by_one_node() -> None:
     assert replacement.model_card.model_id == card.model_id
     assert replacement.sharding == Sharding.Pipeline
     assert replacement.instance_meta == InstanceMeta.MlxRing
+
+
+def test_refusal_fallback_excludes_refuser_at_any_width() -> None:
+    """When the wider re-place is unsatisfiable, the fallback re-places
+    anywhere but the refusing node at min_nodes=1 (#290 on a heterogeneous
+    fleet: an MLX model refused at the full Mac width cannot go wider, but a
+    remaining node can hold it alone)."""
+    topology, node_memory, node_network, node_ids = _fully_connected_three_nodes(
+        (10.0, 10.0, 24.0)
+    )
+    card = ModelCard(
+        model_id=ModelId("fallback-model"),
+        storage_size=Memory.from_gb(9),
+        n_layers=12,
+        hidden_size=30,
+        supports_tensor=True,
+        tasks=[ModelTask.TextGeneration],
+    )
+    three_node = PlaceInstance(
+        model_card=card,
+        sharding=Sharding.Pipeline,
+        instance_meta=InstanceMeta.MlxRing,
+        min_nodes=3,
+    )
+    placed = place_instance(three_node, topology, {}, node_memory, node_network)
+    instance = next(iter(placed.values()))
+    refusing_node = node_ids[0]
+
+    # The wider attempt is unsatisfiable by construction (only 3 nodes).
+    wider = replacement_command_for_refused_instance(instance)
+    assert wider.min_nodes == 4
+    with pytest.raises(PlacementError):
+        place_instance(wider, topology, {}, node_memory, node_network)
+
+    # The fallback places on the remaining nodes with the refuser excluded.
+    fallback = fallback_command_for_refused_instance(instance, refusing_node)
+    assert fallback.min_nodes == 1
+    assert fallback.excluded_nodes == [refusing_node]
+    assert fallback.model_card.model_id == card.model_id
+    result = place_instance(
+        fallback,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        excluded_nodes={refusing_node},
+    )
+    fallback_instance = next(iter(result.values()))
+    assert refusing_node not in fallback_instance.shard_assignments.node_to_runner
 
 
 def test_refused_instance_replaces_onto_a_wider_split() -> None:
