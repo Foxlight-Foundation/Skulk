@@ -37,6 +37,7 @@ const sidebars: SidebarsConfig = {
         "tracing",
         "speculative-decoding",
         "operations",
+        "extensions",
         "model-cards",
         "model-capabilities",
         {
