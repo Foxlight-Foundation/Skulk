@@ -866,6 +866,20 @@ class Master:
                                     ),
                                     self.state.instances,
                                 )
+                                # Same download hygiene as every other delete
+                                # path: a rank still mid-download for the
+                                # torn-down instance must be cancelled, or it
+                                # wastes bandwidth/disk and can re-trigger
+                                # wedged-download recovery later.
+                                for cancel_cmd in cancel_unnecessary_downloads(
+                                    after_delete, self.state.downloads
+                                ):
+                                    await self.download_command_sender.send(
+                                        ForwarderDownloadCommand(
+                                            origin=self._system_id,
+                                            command=cancel_cmd,
+                                        )
+                                    )
                                 for event in get_transition_events(
                                     self.state.instances,
                                     after_delete,
