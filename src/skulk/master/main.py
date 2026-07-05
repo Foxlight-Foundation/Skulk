@@ -388,6 +388,15 @@ class Master:
         # or of redelivery. Grows only by refused ids (rare); never reused since
         # InstanceIds are unique.
         self._refusal_replaced: set[InstanceId] = set()
+        # Instances minted by the anywhere-but-the-refuser FALLBACK (second
+        # recovery hop). A refusal against one of these is TERMINAL: without
+        # this, exclusions are lost across recovery cycles (the replacement
+        # command is rebuilt from shard assignments alone) and a tight fleet
+        # oscillates -- A refuses full width, fallback lands on B/C, B refuses,
+        # the wider re-place returns to A at the share it already refused.
+        # Two hops per original placement bounds recovery; ids are unique and
+        # rare, matching _refusal_replaced's growth rationale.
+        self._fallback_placed_instances: set[InstanceId] = set()
         # Instance ids whose download-failure recovery has already been initiated
         # (#381), same dedup rationale as _refusal_replaced: the plan pass emits
         # events but does not apply them, so the wedged instance stays visible
@@ -836,7 +845,48 @@ class Master:
                             # stop at the deletion — that terminal case bounds
                             # the refuse→re-place loop to the cluster size.
                             refused = self.state.instances.get(command.instance_id)
-                            if command.instance_id in self._refusal_replaced:
+                            if (
+                                command.instance_id
+                                in self._fallback_placed_instances
+                                and refused is not None
+                            ):
+                                # Second recovery hop already used: tear down
+                                # and stop. Re-placing again would oscillate
+                                # (see _fallback_placed_instances).
+                                self._refusal_replaced.add(command.instance_id)
+                                logger.error(
+                                    "Fallback placement "
+                                    f"{command.instance_id} was itself refused "
+                                    f"on {command.node_id}; giving up on this "
+                                    "placement (two recovery hops used)."
+                                )
+                                after_delete = delete_instance(
+                                    DeleteInstance(
+                                        instance_id=command.instance_id
+                                    ),
+                                    self.state.instances,
+                                )
+                                # Same download hygiene as every other delete
+                                # path: a rank still mid-download for the
+                                # torn-down instance must be cancelled, or it
+                                # wastes bandwidth/disk and can re-trigger
+                                # wedged-download recovery later.
+                                for cancel_cmd in cancel_unnecessary_downloads(
+                                    after_delete, self.state.downloads
+                                ):
+                                    await self.download_command_sender.send(
+                                        ForwarderDownloadCommand(
+                                            origin=self._system_id,
+                                            command=cancel_cmd,
+                                        )
+                                    )
+                                for event in get_transition_events(
+                                    self.state.instances,
+                                    after_delete,
+                                    self.state.tasks,
+                                ):
+                                    await self.event_sender.send(event)
+                            elif command.instance_id in self._refusal_replaced:
                                 # Another rank of the same instance already
                                 # triggered re-placement (self.state lags command
                                 # processing, so both ranks can still see the
@@ -938,6 +988,11 @@ class Master:
                                                 include_uma_spill=False,
                                             ),
                                         )
+                                        for new_id in final_placement:
+                                            if new_id not in after_delete:
+                                                self._fallback_placed_instances.add(
+                                                    new_id
+                                                )
                                         logger.warning(
                                             "Re-placing "
                                             f"{fallback.model_card.model_id} "
