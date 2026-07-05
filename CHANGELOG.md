@@ -52,6 +52,51 @@ This project records release notes here and mirrors public-facing notes in
   specifier does not match the running Skulk. `SKULK_EXTENSIONS_DISABLE=1`
   is a node-local kill switch. No extension installed = Skulk unchanged.
 
+### Fixed
+
+- **Joining a cluster no longer triggers a connectivity-gossip storm.** Workers
+  previously re-emitted their connectivity readings on every gather tick, so a
+  long-lived cluster accumulated a huge replay tail that a joining node had to
+  ingest all at once, saturating send queues and flapping nodes (worst on AMD
+  nodes joining a mostly-Mac fleet). Connectivity events are now emitted only
+  when the readings actually change, and node liveness (pruning plus the
+  dashboard health indicator) rides telemetry freshness instead of event-log
+  heartbeats. (#447)
+- **Linux network interfaces are now typed.** Interface classification
+  previously worked only on macOS, so every Linux NIC reported `unknown` and
+  the Thunderbolt-first address prioritiser could never fire between two Linux
+  nodes. Linux interfaces are now classified via sysfs (thunderbolt, ethernet,
+  wifi), so a USB4/Thunderbolt link between GPU nodes is preferred
+  automatically. (#450)
+- **Placement previews report the instance shape that would actually serve.**
+  A preview used to echo the requested instance meta even when placement would
+  mint a different shape; the preview now derives its meta from the minted
+  instance itself. (#452)
+- **A node's failed download no longer poisons future placements.** Recovery
+  from a terminally failed model download now resets that node's download
+  record; previously the stale failure lingered in session state and condemned
+  every later placement of the same model touching that node (observed live:
+  one out-of-disk error kept killing fresh placements long after space was
+  freed, until a whole-fleet restart). (#454)
+- **A worker refusing a placement now falls back instead of giving up on
+  heterogeneous clusters.** When a node refuses its shard (for example the
+  memory fit guard) and no wider cycle exists, the master now retries the
+  model at single-node width excluding the refuser, instead of tearing the
+  placement down permanently. A refusal against that fallback is terminal
+  (bounded at two hops, never an oscillation), and terminal teardown also
+  cancels the model downloads the doomed placement started. (#455, #456)
+- **Cluster listener ports moved out of the OS ephemeral range.** Ring,
+  coordinator, and RPC donor ports are now allocated from a reserved band
+  below both the Linux and macOS ephemeral floors and exclude ports already
+  held by live instances, eliminating bind collisions with short-lived OS
+  connections; port exhaustion now fails placement loudly instead of looping.
+  (#457)
+- **A served engine or RPC donor process that dies between requests is now
+  detected.** The worker polls subprocess liveness between tasks, so a
+  crashed `llama-server` or `ggml-rpc-server` marks the runner failed (with
+  the subprocess log tail in the error) instead of leaving a Ready runner
+  over a zombie that wedges the next request. (#451)
+
 ## [1.3.1] - 2026-07-01
 
 ### Added
