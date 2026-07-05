@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 from typing import IO, final
 
-from anyio import EndOfStream, WouldBlock
+from anyio import ClosedResourceError, EndOfStream, WouldBlock
 
 from skulk.shared.backends import RPC_SERVER_BIN_ENV, rpc_server_binary
 from skulk.shared.types.events import (
@@ -154,7 +154,12 @@ class Runner:
                         # rather than gossip Ready over a dead port.
                         self._ensure_server_alive()
                         continue
-                    except EndOfStream:
+                    except (EndOfStream, ClosedResourceError):
+                        # A sender-side close sets the channel's shared closed
+                        # flag BEFORE the end-of-stream sentinel is drained, and
+                        # receive_timeout checks that flag first, so a normal
+                        # close can surface as ClosedResourceError here. Both
+                        # mean the same thing: no more tasks, exit cleanly.
                         break
                     self._handle_task(task)
                     if isinstance(self.current_status, RunnerShutdown):
