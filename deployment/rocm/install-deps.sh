@@ -20,8 +20,9 @@
 #   deployment/rocm/install-deps.sh [options]
 #
 # Options:
-#   --with-llama-server   Also clone+build llama.cpp with Vulkan and produce the
-#                         llama-server binary (needed for native MTP). Prints the
+#   --with-llama-server   Also clone+build llama.cpp with Vulkan + RPC, producing
+#                         llama-server (native MTP) and ggml-rpc-server (the
+#                         multi-node GGUF pooling donor daemon). Prints the
 #                         SKULK_LLAMA_SERVER_BIN path to set in ~/.skulk/skulk.env.
 #   --with-skulk-env      If run from a Skulk checkout, also run `uv sync` and the
 #                         Vulkan `llama-cpp-python` source build (the in-process
@@ -198,16 +199,25 @@ ensure_rust() {
 build_llama_server() {
   local bin="${LLAMA_CPP_DIR}/build/bin/llama-server"
   local rpc_bin="${LLAMA_CPP_DIR}/build/bin/ggml-rpc-server"
-  # Skip only when BOTH binaries exist: a tree built under the earlier
-  # Vulkan-only instructions has llama-server but no ggml-rpc-server (it was
-  # configured without GGML_RPC), and multi-node GGUF pooling needs the
-  # sibling donor daemon. Rebuilding such a tree picks the RPC target up.
-  if [ -x "$bin" ] && [ -x "$rpc_bin" ]; then
+  local cache="${LLAMA_CPP_DIR}/build/CMakeCache.txt"
+  # Skip only when BOTH binaries exist AND the CMake cache proves the tree
+  # was configured with Vulkan + RPC: a tree built under the earlier
+  # Vulkan-only instructions lacks ggml-rpc-server, and a CPU-only tree has
+  # both binaries but no GPU backend (the node would advertise Vulkan and
+  # then serve on CPU or fail at load). Rebuilding reconfigures with the
+  # right flags either way.
+  local built_right=0
+  if [ -x "$bin" ] && [ -x "$rpc_bin" ] && [ -r "$cache" ] \
+    && grep -q '^GGML_VULKAN:BOOL=ON' "$cache" \
+    && grep -q '^GGML_RPC:BOOL=ON' "$cache"; then
+    built_right=1
+  fi
+  if [ "$built_right" -eq 1 ]; then
     log "llama-server already built: $bin ($("$bin" --version 2>&1 | head -1))"
     log "ggml-rpc-server (pooling donor daemon) present: $rpc_bin"
   else
     if [ -x "$bin" ]; then
-      log "llama-server exists but ggml-rpc-server is missing; rebuilding with -DGGML_RPC=ON for multi-node pooling"
+      log "llama-server exists but the tree lacks ggml-rpc-server or the Vulkan/RPC CMake flags; rebuilding with -DGGML_VULKAN=ON -DGGML_RPC=ON"
     else
       log "building llama-server with Vulkan at ${LLAMA_CPP_DIR}"
     fi
