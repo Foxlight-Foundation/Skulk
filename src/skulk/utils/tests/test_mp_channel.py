@@ -38,3 +38,34 @@ async def test_channel_ipc():
         p2.start()
         p1.join()
         p2.join()
+
+
+def test_receive_timeout_returns_queued_item():
+    s, r = mp_channel[str]()
+    s.send("hello")
+    # multiprocessing queues flush through a feeder thread; a short blocking
+    # timeout absorbs that latency without a sleep.
+    assert r.receive_timeout(1.0) == "hello"
+
+
+def test_receive_timeout_raises_wouldblock_when_empty():
+    from anyio import WouldBlock
+
+    _, r = mp_channel[str]()
+    start = time.monotonic()
+    with pytest.raises(WouldBlock):
+        r.receive_timeout(0.1)
+    # It actually waited (blocking receive with deadline, not an instant fail).
+    assert time.monotonic() - start >= 0.05
+
+
+def test_receive_timeout_closed_on_sender_close():
+    # Sender close sets the shared closed flag, so a receive that STARTS after
+    # the close raises ClosedResourceError (same semantics as receive_nowait);
+    # EndOfStream is only surfaced to a receive already blocked in get().
+    from anyio import ClosedResourceError
+
+    s, r = mp_channel[str]()
+    s.close()
+    with pytest.raises(ClosedResourceError):
+        r.receive_timeout(1.0)

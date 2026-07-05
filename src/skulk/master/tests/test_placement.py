@@ -1345,7 +1345,7 @@ def test_llama_cpp_multi_node_placement_is_rejected() -> None:
     command = place_instance_command(_llama_cpp_card()).model_copy(
         update={"min_nodes": 2}
     )
-    with pytest.raises(ValueError, match="single-node only"):
+    with pytest.raises(ValueError, match="requires one engine common"):
         place_instance(command, topology, {}, node_memory, node_network)
 
 

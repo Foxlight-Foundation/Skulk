@@ -29,9 +29,15 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from typing import Final, Literal
 
 from loguru import logger
+
+
+def _is_executable_file(path: str) -> bool:
+    """Whether ``path`` names an existing executable file."""
+    return os.path.isfile(path) and os.access(path, os.X_OK)
 
 EngineType = Literal["mlx", "llama_cpp", "llama_server"]
 """Inference runtime that loads and runs a model; selects the worker runner.
@@ -82,6 +88,32 @@ LLAMA_SERVER_BIN_ENV: Final = "SKULK_LLAMA_SERVER_BIN"
 # ``cpu``.
 LLAMA_SERVER_BACKENDS_ENV: Final = "SKULK_LLAMA_SERVER_BACKENDS"
 
+# Path to the ``ggml-rpc-server`` binary an RPC memory-donor runner launches
+# (#328, multi-node GGUF pooling). Optional: when unset, the donor looks for
+# ``ggml-rpc-server`` next to the node's ``SKULK_LLAMA_SERVER_BIN`` (the two are
+# built together by ``cmake --build build --target ggml-rpc-server llama-server``
+# with ``-DGGML_RPC=ON``; note the target was renamed upstream from
+# ``rpc-server``).
+RPC_SERVER_BIN_ENV: Final = "SKULK_RPC_SERVER_BIN"
+
+
+def rpc_server_binary() -> str | None:
+    """Resolve the ``ggml-rpc-server`` binary path for an RPC donor runner.
+
+    Prefers the explicit ``SKULK_RPC_SERVER_BIN`` override; otherwise looks for
+    a ``ggml-rpc-server`` sibling of ``SKULK_LLAMA_SERVER_BIN`` (they are built
+    from the same llama.cpp tree). Returns ``None`` when neither yields an
+    executable file, in which case the donor runner fails loudly at spawn.
+    """
+    explicit = os.environ.get(RPC_SERVER_BIN_ENV, "").strip()
+    if explicit:
+        return explicit if _is_executable_file(explicit) else None
+    server = os.environ.get(LLAMA_SERVER_BIN_ENV, "").strip()
+    if not server:
+        return None
+    sibling = str(Path(server).resolve().parent / "ggml-rpc-server")
+    return sibling if _is_executable_file(sibling) else None
+
 
 def make_backend_tag(engine: EngineType, compute: ComputeBackend) -> str:
     """Return the compound ``<engine>-<compute>`` tag for an engine + compute pair."""
@@ -102,12 +134,14 @@ def engine_of(tag: str) -> EngineType | None:
 
 
 # Engines that can serve a model sharded across multiple nodes. MLX has the
-# multi-node ring / jaccl path; llama.cpp is single-node today -- its RPC backend
-# (which shards a GGUF across machines) is not yet wired into the runner (#328),
-# and the runner asserts ``world_size == 1``. This is the single place that
-# constraint lives; flip llama_cpp in here (or make it conditional on an
-# RPC-capable build) when the multi-node llama.cpp runner lands.
-_MULTI_NODE_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx"})
+# multi-node ring / jaccl path. The served ``llama_server`` engine pools memory
+# across nodes via llama.cpp's RPC backend (#328): one driver node runs
+# ``llama-server --rpc donor:port,...`` and each donor runs ``ggml-rpc-server``;
+# llama.cpp splits weights/KV across the devices itself, so Skulk computes no
+# GGUF layer math. The in-process ``llama_cpp`` engine stays single-node: the
+# Python binding cannot drive the RPC backend, and its runner asserts
+# ``world_size == 1``. This is the single place that capability lives.
+_MULTI_NODE_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx", "llama_server"})
 
 
 def engine_supports_multi_node(engine: EngineType) -> bool:
@@ -115,11 +149,57 @@ def engine_supports_multi_node(engine: EngineType) -> bool:
 
     Placement uses this to pin a model to a single-node cycle when none of its
     compatible engines can shard across nodes (otherwise the placement would
-    download and then crash at runner startup with ``world_size != 1``). MLX is
-    multi-node capable; llama.cpp is single-node until its RPC backend is wired
-    into the runner (#328).
+    download and then crash at runner startup with ``world_size != 1``). MLX
+    (ring/jaccl) and the served ``llama_server`` engine (RPC driver + donors,
+    #328) are multi-node capable; the in-process ``llama_cpp`` engine is
+    single-node (binding gap).
     """
     return engine in _MULTI_NODE_ENGINES
+
+
+# Modalities each engine's RUNNER can currently exploit on THIS platform.
+# This is PLATFORM truth, deliberately separate from the model card: a card's
+# [vision] section declares what the MODEL can do (its projector artifact
+# exists and is grounded); this table declares which of our runner
+# implementations can actually serve it. The served ``llama_server`` engine is
+# text-only until its runner stages and passes the mmproj projector (upstream
+# llama-server supports --mmproj; the gap is ours). Keeping the limitation
+# here rather than on cards means a platform capability landing lights up
+# every affected card at once, with no card edits, and cards stay a clean
+# description of the model.
+_VISION_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset(
+    {"mlx", "llama_cpp"}
+)
+
+
+def platform_compatible_backends(
+    compatible_backends: frozenset[str], *, card_serves_vision: bool
+) -> frozenset[str]:
+    """Filter a card's declared backends down to what this platform can serve.
+
+    The card's ``compatible_backends`` is MODEL truth (which engines the model's
+    artifacts run on); this helper subtracts current PLATFORM limitations (which
+    of our runners can exploit the card's declared capabilities) so the two are
+    never conflated on the card itself. Today the only platform gate is vision:
+    a card with a ``[vision]`` section is kept off engines whose runner cannot
+    load its projector, so a placement never silently degrades a capability the
+    card advertises. Placement and the worker's engine resolution both apply
+    this filter, keeping master and worker in agreement.
+
+    Args:
+        compatible_backends: the card's declared backend tags.
+        card_serves_vision: whether the card declares a vision capability.
+
+    Returns:
+        The subset of tags whose engine can serve everything the card declares.
+    """
+    if not card_serves_vision:
+        return compatible_backends
+    return frozenset(
+        tag
+        for tag in compatible_backends
+        if (engine := engine_of(tag)) is None or engine in _VISION_SERVING_ENGINES
+    )
 
 
 def resolve_node_backend(
@@ -142,7 +222,19 @@ def resolve_node_backend(
     if not intersection:
         return None
     ordered = [tag for tag in backend_preference if tag in intersection]
-    ordered += [tag for tag in sorted(intersection) if tag not in backend_preference]
+    # Fallback for tags outside the card's preference list: deterministic, but
+    # never let a CPU compute tag beat a GPU tag on alphabetical accident --
+    # GPU serving dominates CPU for every model class we ship, and a card
+    # without an explicit llama_server preference would otherwise resolve
+    # ``llama_server-cpu`` over ``llama_server-vulkan`` and run ``-ngl 0`` on a
+    # GPU-admitted node. Platform default, not card policy.
+    ordered += [
+        tag
+        for tag in sorted(
+            intersection, key=lambda tag: (tag.endswith(f"{_TAG_SEPARATOR}cpu"), tag)
+        )
+        if tag not in backend_preference
+    ]
     return ordered[0]
 
 

@@ -27,7 +27,12 @@ from skulk.shared.types.worker.downloads import (
     DownloadOngoing,
     DownloadProgress,
 )
-from skulk.shared.types.worker.instances import BoundInstance, Instance, InstanceId
+from skulk.shared.types.worker.instances import (
+    BoundInstance,
+    Instance,
+    InstanceId,
+    LlamaRpcInstance,
+)
 from skulk.shared.types.worker.runners import (
     RunnerConnected,
     RunnerConnecting,
@@ -41,8 +46,15 @@ from skulk.shared.types.worker.runners import (
     RunnerStatus,
     RunnerWarmingUp,
 )
-from skulk.shared.types.worker.shards import ShardMetadata
+from skulk.shared.types.worker.shards import RpcDonorShardMetadata, ShardMetadata
 from skulk.worker.runner.runner_supervisor import RunnerSupervisor
+
+
+def _is_rpc_donor(runner: RunnerSupervisor) -> bool:
+    """Whether this runner is an RPC memory donor of a multi-node GGUF
+    placement (#328). Donors never download, load, warm up, or serve
+    requests; the plan gates below skip them accordingly."""
+    return isinstance(runner.bound_instance.bound_shard, RpcDonorShardMetadata)
 
 
 def plan(
@@ -130,6 +142,11 @@ def _model_needs_download(
     }
 
     for runner in runners.values():
+        # An RPC donor never touches the model file: the driver reads the GGUF
+        # and pushes tensors over the network. Without this skip a donor's brief
+        # RunnerIdle window would plan a multi-GB download for nothing (#328).
+        if _is_rpc_donor(runner):
+            continue
         model_id = runner.bound_instance.bound_shard.model_card.model_id
         if isinstance(runner.status, RunnerIdle) and (
             model_id not in download_status
@@ -155,6 +172,12 @@ def _init_distributed_backend(
 
         is_single_node_instance = len(shard_assignments.runner_to_shard) == 1
         if is_single_node_instance:
+            continue
+
+        # An RPC placement (#328) has no distributed group: the driver's
+        # llama-server dials the donors' rpc-servers directly, so nobody runs
+        # ConnectToGroup (an MLX ring init would wedge forever).
+        if isinstance(instance, LlamaRpcInstance):
             continue
 
         runner_is_idle = isinstance(runner.status, RunnerIdle)
@@ -204,6 +227,33 @@ def _load_model(
         instance = runner.bound_instance.instance
         shard_assignments = instance.shard_assignments
 
+        # RPC placements (#328) are role-asymmetric: donors never load (their
+        # runner reports Ready by itself), and the DRIVER loads when the model
+        # is downloaded on ITS node only (donors never hold the file) and every
+        # donor's rpc-server is already Ready, so the endpoints answer before
+        # llama-server dials them.
+        if isinstance(instance, LlamaRpcInstance):
+            if _is_rpc_donor(runner):
+                continue
+            driver_node = runner.bound_instance.bound_node_id
+            driver_download_complete = driver_node in global_download_status and any(
+                isinstance(dp, DownloadCompleted)
+                and dp.shard_metadata.model_card.model_id == shard_assignments.model_id
+                for dp in global_download_status[driver_node]
+            )
+            donors_ready = all(
+                isinstance(all_runners.get(global_runner_id), RunnerReady)
+                for global_runner_id, shard in shard_assignments.runner_to_shard.items()
+                if isinstance(shard, RpcDonorShardMetadata)
+            )
+            if (
+                isinstance(runner.status, RunnerIdle)
+                and driver_download_complete
+                and donors_ready
+            ):
+                return LoadModel(instance_id=instance.instance_id)
+            continue
+
         all_local_downloads_complete = all(
             nid in global_download_status
             and any(
@@ -242,6 +292,10 @@ def _ready_to_warmup(
 ) -> StartWarmup | None:
     for runner in runners.values():
         instance = runner.bound_instance.instance
+        # No warmup on RPC placements (#328): the served driver goes
+        # Loading -> Ready internally and donors never load a model.
+        if isinstance(instance, LlamaRpcInstance):
+            continue
         shard_assignments = instance.shard_assignments
         shard = runner.bound_instance.bound_shard
         device_rank = shard.device_rank
@@ -330,6 +384,12 @@ def _pending_tasks(
 
         for runner in runners.values():
             if task.instance_id != runner.bound_instance.instance.instance_id:
+                continue
+
+            # Inference traffic never reaches an RPC donor (#328): the driver
+            # is the only rank that serves requests; the donor's process is a
+            # memory endpoint with no model.
+            if _is_rpc_donor(runner):
                 continue
 
             # the task status _should_ be set to completed by the LAST runner

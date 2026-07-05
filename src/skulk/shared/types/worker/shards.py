@@ -89,6 +89,25 @@ class TensorShardMetadata(BaseShardMetadata):
     pass
 
 
+@final
+class RpcDonorShardMetadata(BaseShardMetadata):
+    """Memory-donor shard of a multi-node llama.cpp RPC placement (#328).
+
+    A donor node runs ``ggml-rpc-server`` and lends its GPU memory to the
+    driver's ``llama-server --rpc``; llama.cpp distributes weights/KV across
+    the pooled devices itself, so a donor holds NO Skulk-assigned layer range
+    (``start_layer == end_layer == 0``) and never downloads or reads the model
+    file. The degenerate layer range keeps the one-runner-per-node
+    ``ShardAssignments`` invariant and ``BoundInstance.bound_shard`` working
+    unchanged, while the distinct type is what the worker dispatches on: a
+    donor runner's whole job is to serve ``ggml-rpc-server`` on the endpoint
+    the placement stamped for it and report ready.
+    """
+
+
 ShardMetadata: TypeAlias = (
-    PipelineShardMetadata | CfgShardMetadata | TensorShardMetadata
+    PipelineShardMetadata
+    | CfgShardMetadata
+    | TensorShardMetadata
+    | RpcDonorShardMetadata
 )

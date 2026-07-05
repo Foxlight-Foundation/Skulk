@@ -83,7 +83,7 @@ from skulk.shared.types.worker.downloads import (
     DownloadOngoing,
     DownloadPending,
 )
-from skulk.shared.types.worker.instances import InstanceId
+from skulk.shared.types.worker.instances import InstanceId, LlamaRpcInstance
 from skulk.shared.types.worker.runners import RunnerFailed, RunnerId, RunnerStatus
 from skulk.shared.types.worker.shards import ShardMetadata, TensorShardMetadata
 from skulk.store.config import StagingNodeConfig
@@ -864,8 +864,19 @@ class Worker:
             # lets not kill the worker if a runner is unresponsive
             match task:
                 case CreateRunner():
-                    fit_error = self._local_shard_fit_error(
-                        task.bound_instance.bound_shard
+                    # The local fit guard sizes a shard's footprint against this
+                    # node's memory, but an RPC placement's shares are decided
+                    # by llama.cpp at load (the driver's shard nominally spans
+                    # ALL layers and a donor holds none), so per-shard sizing
+                    # is meaningless here. Pooled admission already used the
+                    # strict per-node VRAM figure; a genuine misfit fails at
+                    # llama-server load and the crash cascade recovers (#328).
+                    fit_error = (
+                        None
+                        if isinstance(task.bound_instance.instance, LlamaRpcInstance)
+                        else self._local_shard_fit_error(
+                            task.bound_instance.bound_shard
+                        )
                     )
                     if fit_error is not None:
                         logger.error(fit_error)
@@ -1108,7 +1119,19 @@ class Worker:
         if (instance := self.state.instances.get(task.instance_id)) is not None:
             runner_id = instance.shard_assignments.node_to_runner[self.node_id]
             shard = instance.shard(runner_id)
-            if isinstance(task, LoadModel) and shard is not None:
+            if (
+                isinstance(task, LoadModel)
+                and shard is not None
+                # Same bypass as the CreateRunner guard: an RPC driver's
+                # bookkeeping shard nominally spans ALL layers, but llama.cpp
+                # splits the actual allocation across the donors at load, so
+                # sizing the whole model against this node refuses exactly the
+                # pooled-only placements the feature exists for. Pooled
+                # admission already checked the strict per-node VRAM figures;
+                # a genuine misfit fails at llama-server load and the crash
+                # cascade recovers (#328).
+                and not isinstance(instance, LlamaRpcInstance)
+            ):
                 # Re-check fit at load dispatch. The CreateRunner guard runs
                 # before download and before any concurrently-placed instance
                 # has loaded, so this is the last accurate point - current free

@@ -1571,6 +1571,12 @@ class API:
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,
                     ),
+                    node_vram_strict=usable_vram_by_node(
+                        self._telemetry_view.node_system,
+                        self._telemetry_view.node_resources,
+                        node_memory=self._telemetry_view.node_memory,
+                        include_uma_spill=False,
+                    ),
                 )
                 break
             except PlacementInfoPendingError as exc:
@@ -1644,6 +1650,12 @@ class API:
                     self._telemetry_view.node_resources,
                     node_memory=self._telemetry_view.node_memory,
                 ),
+                node_vram_strict=usable_vram_by_node(
+                    self._telemetry_view.node_system,
+                    self._telemetry_view.node_resources,
+                    node_memory=self._telemetry_view.node_memory,
+                    include_uma_spill=False,
+                ),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1715,6 +1727,12 @@ class API:
                         self._telemetry_view.node_system,
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,
+                    ),
+                    node_vram_strict=usable_vram_by_node(
+                        self._telemetry_view.node_system,
+                        self._telemetry_view.node_resources,
+                        node_memory=self._telemetry_view.node_memory,
+                        include_uma_spill=False,
                     ),
                 )
             except ValueError as exc:

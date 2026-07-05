@@ -226,7 +226,7 @@ opts in through its card's `compatible_backends` (`llama_server-…`) plus the
 GGUF, but some speculative modes need a separate small draft model: a card names it
 with `served_spec_draft_repo` / `served_spec_draft_file` and the worker downloads it
 as a companion and passes it to the server as `--model-draft` (this is how Gemma 4
-runs MTP, via its assistant as the draft model). The engine is single-node and coexists with the
+runs MTP, via its assistant as the draft model). The engine coexists with the
 in-process llama.cpp runner; the same managed-server-plus-proxy shape is the
 intended on-ramp for vLLM later. See the setup notes for a non-Mac node in
 [AMD / Strix Halo nodes](amd-strix-halo-nodes) and the env vars
@@ -235,6 +235,24 @@ intended on-ramp for vLLM later. See the setup notes for a non-Mac node in
 card that asks for it, so the same GGUF can be served in plain decode as an
 apples-to-apples MTP-off baseline (a benchmarking and diagnostics knob, not for
 normal operation).
+
+The served engine is also how a GGUF model larger than any single GPU node gets
+served: **multi-node memory pooling over llama.cpp's RPC backend**. When a model
+fits no single node but fits the combined GPU memory of several `llama_server`
+nodes, the planner places an asymmetric pair of roles instead of a ring: one
+**driver** node runs `llama-server --rpc donor:port,...` and holds the model
+file, and each **donor** node runs a small `ggml-rpc-server` that lends its GPU
+memory. llama.cpp itself splits the weights and KV across the pooled devices in
+proportion to their free memory, so Skulk assigns no layer ranges; the placement
+just picks the driver (the biggest-VRAM node), chooses each donor's endpoint
+address from the observed connectivity between the pair (preferring the fastest
+interconnect, such as a USB4/Thunderbolt link between two Linux boxes), and
+stamps both onto the instance. Pooling trades some decode speed for capacity
+(the point is the model class that otherwise cannot run at all, not a speedup),
+and prefill is unaffected. A single-node placement is always preferred whenever
+the model fits one node, so this shape only appears for genuinely pooled-only
+models. If a donor dies mid-generation the driver exits immediately and the
+normal crash recovery tears the instance down and re-places it.
 
 A model card declares two placement axes that are deliberately separate from the
 memory/topology axes above:
@@ -256,6 +274,16 @@ concrete engine for its node at runner-spawn time by intersecting the card's
 `backend_preference`. See the
 [AMD Strix Halo nodes](./amd-strix-halo-nodes.md) guide for bringing up a
 non-Mac node.
+
+Cards describe the model; the platform describes itself. A card's
+`compatible_backends` records which engines the model's artifacts run on
+(model truth), and it never encodes a gap in Skulk's own implementation
+(platform truth). When one of our runners cannot yet exploit a capability a
+card declares (for example, the served llama.cpp engine cannot load a vision
+model's projector yet), that limitation lives in a code-level capability
+table that placement and the worker both consult, so the model never lands
+where an advertised capability would silently degrade, and the card needs no
+edit when the platform catches up.
 
 The llama.cpp runner serves GGUF models single-node and matches the MLX runner
 on the capabilities llama.cpp supports natively: per-token logprobs (with the
