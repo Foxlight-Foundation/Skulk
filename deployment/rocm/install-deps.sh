@@ -138,11 +138,16 @@ install_apt() {
 # /dev/dri/renderD128 is owned by group `render`, card by `video`. A Skulk
 # worker must be in both to reach the GPU. Newly-added groups need a fresh login.
 ensure_gpu_groups() {
+  # Target the real login user, not root: under `sudo ./install-deps.sh`,
+  # $USER is root, and adding root to render/video leaves the actual Skulk
+  # user unable to open /dev/dri/*. $USER can also be unset in
+  # non-interactive shells (set -u would abort).
+  local target_user; target_user="${SUDO_USER:-$(id -un)}"
   local added=0
   for grp in render video; do
-    if getent group "$grp" >/dev/null 2>&1 && ! id -nG "$USER" | tr ' ' '\n' | grep -qx "$grp"; then
-      log "adding $USER to group $grp"
-      [ "$CHECK_ONLY" -eq 0 ] && sudo usermod -aG "$grp" "$USER" && added=1
+    if getent group "$grp" >/dev/null 2>&1 && ! id -nG "$target_user" | tr ' ' '\n' | grep -qx "$grp"; then
+      log "adding $target_user to group $grp"
+      [ "$CHECK_ONLY" -eq 0 ] && sudo usermod -aG "$grp" "$target_user" && added=1
     fi
   done
   [ "$added" -eq 1 ] && warn "group membership changed: log out and back in (or reboot) before starting Skulk."

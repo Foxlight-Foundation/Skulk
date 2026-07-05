@@ -464,7 +464,7 @@ inference**: every extension call is guarded, an exception is logged loudly
 and skipped, and the request proceeds as if the extension did not exist (the
 guarantee covers exceptions, not latency: a transform runs inline before
 dispatch, so a hanging transform delays the request it is transforming, while
-observers run in the background and cannot). Second,
+observers run in the background and cannot affect request latency). Second,
 **extensions never own the response stream**: Skulk does the accumulation and
 hands observers a summary, so a buggy extension cannot corrupt, reorder, or
 stall token delivery. Third, **no extension installed means Skulk unchanged**:
