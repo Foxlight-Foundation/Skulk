@@ -16,7 +16,7 @@ import { darkTheme, lightTheme, GlobalStyle } from './theme';
 import { useClusterState } from './hooks/useClusterState';
 import { HeaderNav } from './components/layout/HeaderNav';
 import { MobileMenuSheet } from './components/layout/MobileMenuSheet';
-import { useIsMobile } from './hooks/useMediaQuery';
+import { useIsMobile, MOBILE_BREAKPOINT_PX } from './hooks/useMediaQuery';
 import { TopologyGraph } from './components/topology/TopologyGraph';
 // ClusterWarnings replaced by inline header warning indicator
 import { ConnectionBanner } from './components/status/ConnectionBanner';
@@ -49,6 +49,49 @@ const ContentRow = styled.div`
   min-height: 0;
   display: flex;
   flex-direction: row;
+`;
+
+/*
+ * Side-panel presentation switch (#474). On desktop the wrapper is
+ * display: contents, so the panel participates in ContentRow's flex layout
+ * exactly as before. At the phone breakpoint the panel becomes a fixed
+ * overlay drawer instead of a column: the desktop side-by-side split left
+ * chat's conversation area with no room at all (History + Instances
+ * consumed the whole viewport) and crushed the topology graph into a
+ * sliver whenever the instance panel opened.
+ */
+const PanelOverlay = styled.div<{ $side: 'left' | 'right' }>`
+  display: contents;
+
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    display: block;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    ${({ $side }) => ($side === 'left' ? 'left: 0;' : 'right: 0;')}
+    z-index: 30;
+    max-width: 88vw;
+    box-shadow: ${({ $side }) => ($side === 'left' ? '18px' : '-18px')} 0 48px
+      ${({ theme }) => theme.colors.shadowStrong};
+
+    > aside {
+      height: 100%;
+    }
+  }
+`;
+
+/* Dismiss layer behind an open mobile panel drawer; standard flyover blur. */
+const PanelBackdrop = styled.div`
+  display: none;
+
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 29;
+    background: ${({ theme }) => theme.colors.shadowStrong};
+    backdrop-filter: blur(2px);
+  }
 `;
 
 const Main = styled.main`
@@ -541,7 +584,17 @@ export function App() {
         )}
         </HeaderAnchor>
         <ContentRow>
+          {isMobile && ((activeRoute === 'chat' && allConversations.length > 0 && historyPanelOpen) || (hasInstances && panelOpen)) && (
+            <PanelBackdrop
+              onClick={() => {
+                if (historyPanelOpen) toggleHistoryPanel();
+                if (panelOpen) togglePanel();
+              }}
+              aria-hidden
+            />
+          )}
           {activeRoute === 'chat' && allConversations.length > 0 && historyPanelOpen && (
+            <PanelOverlay $side="left">
             <ConversationPanel
               conversations={allConversations}
               activeConversationId={activeConversationId}
@@ -549,6 +602,7 @@ export function App() {
               onDelete={deleteConversation}
               onNewChat={() => { if (selectedModelId) newConversation(selectedModelId); }}
             />
+            </PanelOverlay>
           )}
           <Main>
             {activeRoute === 'model-store' ? (
@@ -578,11 +632,13 @@ export function App() {
             )}
           </Main>
           {hasInstances && panelOpen && (
+            <PanelOverlay $side="right">
             <InstancePanel
               instances={instanceCards}
               onDelete={handleDeleteInstance}
               onChat={(modelId) => { dispatch(chatActions.selectModel(modelId)); setActiveRoute('chat'); }}
             />
+            </PanelOverlay>
           )}
         </ContentRow>
         <ToastContainer />
