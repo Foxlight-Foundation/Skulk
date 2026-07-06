@@ -49,6 +49,10 @@ const ContentRow = styled.div`
   min-height: 0;
   display: flex;
   flex-direction: row;
+  /* Positioning anchor for the mobile panel drawers: absolute children
+   * cover the content area only, so the header (and the toggles that
+   * opened a drawer) stays visible and interactive above them. */
+  position: relative;
 `;
 
 /*
@@ -65,11 +69,15 @@ const PanelOverlay = styled.div<{ $side: 'left' | 'right' }>`
 
   @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
     display: block;
-    position: fixed;
+    /* Absolute within ContentRow (not fixed over the viewport): the drawer
+     * covers content only, leaving the header and its panel toggles
+     * interactive, so keyboard/screen-reader users can dismiss via the
+     * same aria-pressed toggle that opened it. */
+    position: absolute;
     top: 0;
     bottom: 0;
     ${({ $side }) => ($side === 'left' ? 'left: 0;' : 'right: 0;')}
-    z-index: 30;
+    z-index: 5;
     max-width: 88vw;
     box-shadow: ${({ $side }) => ($side === 'left' ? '18px' : '-18px')} 0 48px
       ${({ theme }) => theme.colors.shadowStrong};
@@ -86,9 +94,9 @@ const PanelBackdrop = styled.div`
 
   @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
     display: block;
-    position: fixed;
+    position: absolute;
     inset: 0;
-    z-index: 29;
+    z-index: 4;
     background: ${({ theme }) => theme.colors.shadowStrong};
     backdrop-filter: blur(2px);
   }
@@ -567,11 +575,18 @@ export function App() {
           onToggleMobileMenu={() => setMobileMenuOpen((v) => !v)}
           showSidebarToggle={activeRoute === 'chat' && allConversations.length > 0}
           sidebarVisible={historyPanelOpen}
-          onToggleSidebar={toggleHistoryPanel}
+          onToggleSidebar={() => {
+            // Phone width fits one drawer: opening History closes Instances.
+            if (isMobile && !historyPanelOpen && panelOpen) togglePanel();
+            toggleHistoryPanel();
+          }}
           instanceCount={instanceCards.length}
           instancesHealthy={instanceCards.every((c) => c.status !== 'failed')}
           mobileRightOpen={panelOpen}
-          onToggleMobileRight={togglePanel}
+          onToggleMobileRight={() => {
+            if (isMobile && !panelOpen && historyPanelOpen) toggleHistoryPanel();
+            togglePanel();
+          }}
         />
         {isMobile && (
           <MobileMenuSheet
@@ -587,10 +602,16 @@ export function App() {
           {isMobile && ((activeRoute === 'chat' && allConversations.length > 0 && historyPanelOpen) || (hasInstances && panelOpen)) && (
             <PanelBackdrop
               onClick={() => {
-                if (historyPanelOpen) toggleHistoryPanel();
-                if (panelOpen) togglePanel();
+                // Only flip flags whose drawer is actually rendered: the
+                // persisted flags can be true while the drawer is absent
+                // (history off the chat route), and blind toggling would
+                // invert that hidden state. Dismissal is also available via
+                // the header's aria-pressed panel toggles; this layer is
+                // pointer convenience.
+                if (activeRoute === 'chat' && allConversations.length > 0 && historyPanelOpen) toggleHistoryPanel();
+                if (hasInstances && panelOpen) togglePanel();
               }}
-              aria-hidden
+              role="presentation"
             />
           )}
           {activeRoute === 'chat' && allConversations.length > 0 && historyPanelOpen && (
