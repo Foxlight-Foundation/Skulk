@@ -7,6 +7,8 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-07-06
+
 ### Added
 
 - **The dashboard works from a phone.** At phone widths (480px and below)
