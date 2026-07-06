@@ -29,6 +29,9 @@ const Backdrop = styled.div<{ $open: boolean }>`
   inset: 0;
   z-index: 18;
   background: ${({ theme }) => theme.colors.shadowStrong};
+  /* Standard flyover treatment (SettingsPanel / ObservabilityPanel): the
+   * content behind the menu blurs, not just dims. */
+  backdrop-filter: blur(2px);
   opacity: ${({ $open }) => ($open ? 1 : 0)};
   visibility: ${({ $open }) => ($open ? 'visible' : 'hidden')};
   transition: opacity 0.2s ease, visibility 0.2s;

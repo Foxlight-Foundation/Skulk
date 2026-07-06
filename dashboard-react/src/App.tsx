@@ -503,7 +503,11 @@ export function App() {
   return (
     <ThemeProvider theme={activeTheme}>
       <GlobalStyle />
-      <NetworkMesh radius={2.5} count={43} linkDistance={430} />
+      {/* Phone width: a third of the mesh particles; the busy full-density
+          field reads as visual noise over content on a small screen. The key
+          remounts the canvas when the breakpoint flips so the particle field
+          re-seeds at the new density. */}
+      <NetworkMesh key={isMobile ? 'mesh-mobile' : 'mesh-desktop'} radius={2.5} count={isMobile ? 14 : 43} linkDistance={430} />
       <Shell>
         <ConnectionBanner connected={connected} />
         <HeaderAnchor>
