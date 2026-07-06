@@ -71,7 +71,7 @@ const Aside = styled.aside<{ $width: number }>`
   animation: ${slideIn} 0.25s cubic-bezier(0.33, 1, 0.68, 1);
 
   /* Phone width: the drawer becomes a full-viewport sheet. The persisted
-   * desktop width (which can exceed a phone viewport and clipped the
+   * desktop width (which can exceed a phone viewport and clip the
    * header/tabs) is ignored; !important beats the drag-resize inline
    * style if one was left behind by a desktop session. */
   @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
