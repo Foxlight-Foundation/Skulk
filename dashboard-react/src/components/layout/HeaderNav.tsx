@@ -8,6 +8,7 @@ import type { Theme } from '../../theme';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
 import { uiActions } from '../../store/slices/uiSlice';
 import { useSkulkTranslation } from '../../i18n/tolgee';
+import { MOBILE_BREAKPOINT_PX } from '../../hooks/useMediaQuery';
 
 export type NavRoute = 'cluster' | 'model-store' | 'chat' | 'operator';
 
@@ -195,6 +196,21 @@ const WarningTooltip = styled.div`
   visibility: hidden;
   transition: opacity 0.2s, visibility 0.2s;
   z-index: 50;
+
+  /* Anchored under a pip near the left screen edge, the centered 300px box
+   * pokes past the right edge of narrow viewports. Even hidden it extends the
+   * document's scrollable area (visibility does not remove layout), giving
+   * phones a horizontal pan wiggle. Pin it inside the viewport instead:
+   * fixed placement contributes no scroll overflow. */
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    position: fixed;
+    top: 60px;
+    left: 12px;
+    right: 12px;
+    width: auto;
+    transform: none;
+    padding-top: 0;
+  }
 `;
 
 const WarningTooltipInner = styled.div`
