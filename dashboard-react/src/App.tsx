@@ -16,7 +16,7 @@ import { darkTheme, lightTheme, GlobalStyle } from './theme';
 import { useClusterState } from './hooks/useClusterState';
 import { HeaderNav } from './components/layout/HeaderNav';
 import { MobileMenuSheet } from './components/layout/MobileMenuSheet';
-import { useIsMobile } from './hooks/useMediaQuery';
+import { useIsMobile, MOBILE_BREAKPOINT_PX } from './hooks/useMediaQuery';
 import { TopologyGraph } from './components/topology/TopologyGraph';
 // ClusterWarnings replaced by inline header warning indicator
 import { ConnectionBanner } from './components/status/ConnectionBanner';
@@ -49,6 +49,61 @@ const ContentRow = styled.div`
   min-height: 0;
   display: flex;
   flex-direction: row;
+  /* Positioning anchor for the mobile panel drawers: absolute children
+   * cover the content area only, so the header (and the toggles that
+   * opened a drawer) stays visible and interactive above them. */
+  position: relative;
+`;
+
+/*
+ * Side-panel presentation switch (#474). On desktop the wrapper is
+ * display: contents, so the panel participates in ContentRow's flex layout
+ * exactly as before. At the phone breakpoint the panel becomes a fixed
+ * overlay drawer instead of a column: the desktop side-by-side split left
+ * chat's conversation area with no room at all (History + Instances
+ * consumed the whole viewport) and crushed the topology graph into a
+ * sliver whenever the instance panel opened.
+ */
+const PanelOverlay = styled.div<{ $side: 'left' | 'right' }>`
+  display: contents;
+
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    display: block;
+    /* Absolute within ContentRow (not fixed over the viewport): the drawer
+     * covers content only, leaving the header and its panel toggles
+     * interactive, so keyboard/screen-reader users can dismiss via the
+     * same aria-pressed toggle that opened it. */
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    ${({ $side }) => ($side === 'left' ? 'left: 0;' : 'right: 0;')}
+    z-index: 5;
+    /* Deterministic drawer width: the panels' own 340px would overflow the
+     * cap on narrow phones (320px viewports), so the overlay owns the width
+     * and the aside fills it. */
+    width: min(340px, 88vw);
+    box-shadow: ${({ $side }) => ($side === 'left' ? '18px' : '-18px')} 0 48px
+      ${({ theme }) => theme.colors.shadowStrong};
+
+    > aside {
+      height: 100%;
+      width: 100%;
+    }
+  }
+`;
+
+/* Dismiss layer behind an open mobile panel drawer; standard flyover blur. */
+const PanelBackdrop = styled.div`
+  display: none;
+
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    background: ${({ theme }) => theme.colors.shadowStrong};
+    backdrop-filter: blur(2px);
+  }
 `;
 
 const Main = styled.main`
@@ -163,6 +218,14 @@ export function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   useEffect(() => {
     if (!isMobile) setMobileMenuOpen(false);
+  }, [isMobile]);
+  // Drawer exclusivity must also hold for PERSISTED state, not just the
+  // toggle handlers: both flags can arrive true from a desktop session, and
+  // independent render predicates would stack both drawers over a phone
+  // viewport. Instances yields to History (the user is mid-conversation).
+  useEffect(() => {
+    if (isMobile && historyPanelOpen && panelOpen) dispatch(uiActions.togglePanel());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMobile]);
   const [storeDownloads, setStoreDownloads] = useState<StoreDownload[]>([]);
   // Observability panel state lives on the global UI store so any component (toolbar
@@ -524,11 +587,18 @@ export function App() {
           onToggleMobileMenu={() => setMobileMenuOpen((v) => !v)}
           showSidebarToggle={activeRoute === 'chat' && allConversations.length > 0}
           sidebarVisible={historyPanelOpen}
-          onToggleSidebar={toggleHistoryPanel}
+          onToggleSidebar={() => {
+            // Phone width fits one drawer: opening History closes Instances.
+            if (isMobile && !historyPanelOpen && panelOpen) togglePanel();
+            toggleHistoryPanel();
+          }}
           instanceCount={instanceCards.length}
           instancesHealthy={instanceCards.every((c) => c.status !== 'failed')}
           mobileRightOpen={panelOpen}
-          onToggleMobileRight={togglePanel}
+          onToggleMobileRight={() => {
+            if (isMobile && !panelOpen && historyPanelOpen) toggleHistoryPanel();
+            togglePanel();
+          }}
         />
         {isMobile && (
           <MobileMenuSheet
@@ -541,7 +611,23 @@ export function App() {
         )}
         </HeaderAnchor>
         <ContentRow>
+          {isMobile && ((activeRoute === 'chat' && allConversations.length > 0 && historyPanelOpen) || (hasInstances && panelOpen)) && (
+            <PanelBackdrop
+              onClick={() => {
+                // Only flip flags whose drawer is actually rendered: the
+                // persisted flags can be true while the drawer is absent
+                // (history off the chat route), and blind toggling would
+                // invert that hidden state. Dismissal is also available via
+                // the header's aria-pressed panel toggles; this layer is
+                // pointer convenience.
+                if (activeRoute === 'chat' && allConversations.length > 0 && historyPanelOpen) toggleHistoryPanel();
+                if (hasInstances && panelOpen) togglePanel();
+              }}
+              role="presentation"
+            />
+          )}
           {activeRoute === 'chat' && allConversations.length > 0 && historyPanelOpen && (
+            <PanelOverlay $side="left">
             <ConversationPanel
               conversations={allConversations}
               activeConversationId={activeConversationId}
@@ -549,6 +635,7 @@ export function App() {
               onDelete={deleteConversation}
               onNewChat={() => { if (selectedModelId) newConversation(selectedModelId); }}
             />
+            </PanelOverlay>
           )}
           <Main>
             {activeRoute === 'model-store' ? (
@@ -578,11 +665,13 @@ export function App() {
             )}
           </Main>
           {hasInstances && panelOpen && (
+            <PanelOverlay $side="right">
             <InstancePanel
               instances={instanceCards}
               onDelete={handleDeleteInstance}
               onChat={(modelId) => { dispatch(chatActions.selectModel(modelId)); setActiveRoute('chat'); }}
             />
+            </PanelOverlay>
           )}
         </ContentRow>
         <ToastContainer />

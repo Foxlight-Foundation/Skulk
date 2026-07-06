@@ -138,7 +138,8 @@ const DownloadBadge = styled.div`
   height: 28px;
 `;
 
-const IconToggle = styled.span<{ $active: boolean }>`
+const IconToggle = styled.button<{ $active: boolean }>`
+  all: unset;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -147,6 +148,12 @@ const IconToggle = styled.span<{ $active: boolean }>`
 
   &:hover {
     color: ${({ theme }) => theme.colors.text};
+  }
+
+  /* Keyboard focus: all: unset removes the browser outline (Button's pattern). */
+  &:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px ${({ theme }) => theme.colors.goldDim};
   }
 `;
 
@@ -373,9 +380,11 @@ export function HeaderNav({
         )}
         {showSidebarToggle && (
           <IconToggle
+            type="button"
             $active={sidebarVisible}
             onClick={onToggleSidebar}
             aria-label={t('header.toggleSidebar', 'Toggle sidebar')}
+            aria-pressed={sidebarVisible}
           >
             <SidebarIcon />
           </IconToggle>
