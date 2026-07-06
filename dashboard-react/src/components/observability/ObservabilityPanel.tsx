@@ -60,7 +60,13 @@ const Aside = styled.aside<{ $width: number }>`
   position: fixed;
   top: 0;
   right: 0;
+  /* dvh tracks the ACTUAL visible viewport on mobile browsers; 100vh
+   * includes the area behind Safari's URL/tool bars, which pushed the
+   * panel's bottom (and the scrolled list's tail) off screen and centered
+   * spinners against the wrong height. Plain vh stays as the fallback for
+   * engines without dvh. */
   height: 100vh;
+  height: 100dvh;
   width: ${({ $width }) => $width}px;
   background: ${({ theme }) => theme.colors.surfaceElevated};
   border-left: 1px solid ${({ theme }) => theme.colors.borderStrong};
