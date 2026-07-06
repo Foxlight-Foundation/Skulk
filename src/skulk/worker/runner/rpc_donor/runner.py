@@ -47,6 +47,7 @@ from skulk.shared.types.worker.runners import (
 from skulk.shared.types.worker.shards import RpcDonorShardMetadata
 from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.bootstrap import logger
+from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
 
 # How long the donor waits for its ggml-rpc-server to accept a TCP connection
 # before declaring the spawn failed. The server binds and listens almost
@@ -136,9 +137,18 @@ class Runner:
     def main(self) -> None:
         """Spawn the RPC server, report Ready, then wait for Shutdown."""
         try:
-            self._spawn_rpc_server()
-            self._await_listening()
+            # "load_model" is the honest mapping in the closed phase vocabulary:
+            # a donor loads no model, but spawning + health-checking the RPC
+            # server is its equivalent get-ready work.
+            with runner_phase(
+                "load_model",
+                detail="spawn_rpc_server",
+                attrs={"endpoint": f"{self.bind_host}:{self.bind_port}"},
+            ):
+                self._spawn_rpc_server()
+                self._await_listening()
             self.update_status(RunnerReady())
+            record_runner_phase("idle", event="runner_ready")
             logger.info(
                 f"rpc-donor serving on {self.bind_host}:{self.bind_port} "
                 f"(pid={self.server_proc.pid if self.server_proc else '?'})"
@@ -177,6 +187,11 @@ class Runner:
         ):
             return
         if proc.poll() is not None:
+            record_runner_phase(
+                "error",
+                event="server_exited",
+                detail=f"ggml-rpc-server exited unexpectedly (code {proc.returncode})",
+            )
             raise RuntimeError(
                 f"ggml-rpc-server exited unexpectedly (code {proc.returncode}); "
                 f"log tail:\n{self._server_log_tail()}"
@@ -186,9 +201,19 @@ class Runner:
         match task:
             case Shutdown():
                 logger.info("rpc-donor runner shutting down")
+                record_runner_phase(
+                    "shutdown_cleanup",
+                    event="runner_shutdown_requested",
+                    task_id=task.task_id,
+                )
                 self.update_status(RunnerShuttingDown())
                 self.event_sender.send(TaskAcknowledged(task_id=task.task_id))
                 self._teardown_server()
+                record_runner_phase(
+                    "shutdown_cleanup",
+                    event="server_teardown_complete",
+                    task_id=task.task_id,
+                )
                 self.event_sender.send(
                     TaskStatusUpdated(
                         task_id=task.task_id, task_status=TaskStatus.Complete

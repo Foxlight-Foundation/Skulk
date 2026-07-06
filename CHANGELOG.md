@@ -9,6 +9,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Fixed
 
+- **GGUF engines now report runner phases to observability.** The `llama_cpp`,
+  `llama_server`, and RPC-donor runners emitted no runner-phase diagnostics at
+  all, so the dashboard's observability Live tab sat at "created" forever for
+  any placement on those engines (every GGUF placement on a GPU/Linux node).
+  All three now record the same lifecycle the MLX runner does: task
+  acknowledgement, model load (server spawn for the served and donor shapes),
+  ready, generation start, completion or cancellation, errors including a
+  server subprocess dying behind the runner, and shutdown teardown.
+
 - **The dashboard header shows the real Skulk version.** The UI version was
   baked at build time from the dashboard's own `package.json`, which had
   silently drifted (it still said 1.3.0 through two releases). The build now
