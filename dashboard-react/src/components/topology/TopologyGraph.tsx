@@ -122,13 +122,14 @@ export function TopologyGraph({ data, onInspectNode }: TopologyGraphProps) {
 
   const edgePairs = useMemo(() => buildEdgePairs(data.edges), [data.edges]);
 
-  // Phone width: device glyphs render at half scale so several node cards
-  // fit a narrow viewport without their stat chips colliding.
+  // Phone width: device glyphs render at 3/4 scale so several node cards
+  // fit a narrow viewport without their stat chips colliding (half scale
+  // read too small on a phone; Tom sized it by eye).
   const isMobile = useIsMobile();
   const nodeScale = useMemo(() => {
     const n = nodeIds.length;
     const base = n <= 1 ? 1 : Math.max(0.6, 1 - (n - 1) * 0.08);
-    return isMobile ? base * 0.5 : base;
+    return isMobile ? base * 0.75 : base;
   }, [nodeIds.length, isMobile]);
 
 
