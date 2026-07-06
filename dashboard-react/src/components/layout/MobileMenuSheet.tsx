@@ -49,7 +49,9 @@ const Sheet = styled.nav<{ $open: boolean }>`
   right: 0;
   z-index: 19; /* under the header (20) so the sheet emerges from beneath it */
   padding: 8px 12px 12px;
-  background: ${({ theme }) => theme.colors.header};
+  /* Fully opaque: the header token is translucent by design (it sits over
+   * the page gradient), which made the menu see-through over content. */
+  background: ${({ theme }) => theme.colors.surface};
   border-bottom: 1px solid ${({ theme }) => theme.colors.border};
   box-shadow: 0 12px 32px ${({ theme }) => theme.colors.shadowStrong};
   display: flex;

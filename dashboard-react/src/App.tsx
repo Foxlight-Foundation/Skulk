@@ -78,6 +78,10 @@ const PanelOverlay = styled.div<{ $side: 'left' | 'right' }>`
     bottom: 0;
     ${({ $side }) => ($side === 'left' ? 'left: 0;' : 'right: 0;')}
     z-index: 5;
+    /* The panels themselves are background: transparent (they sit against
+     * the page gradient as desktop columns); as an overlay that reads as
+     * see-through, so the wrapper supplies a fully opaque base. */
+    background: ${({ theme }) => theme.colors.surface};
     /* Deterministic drawer width: the panels' own 340px would overflow the
      * cap on narrow phones (320px viewports), so the overlay owns the width
      * and the aside fills it. */
