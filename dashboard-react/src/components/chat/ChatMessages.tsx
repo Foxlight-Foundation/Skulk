@@ -296,7 +296,8 @@ const ScrollBtn = styled.button`
   position: sticky;
   bottom: 16px;
   align-self: center;
-  z-index: 10;
+  /* Above message cards, below the mobile panel drawers (z 5) and their backdrop (z 4). */
+  z-index: 3;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -665,7 +666,7 @@ export function ChatMessages({
       )}
 
       {showScrollBtn && (
-        <ScrollBtn onClick={scrollToBottom} aria-label={t('chat.messages.scrollToBottom', 'Scroll to bottom')}>
+        <ScrollBtn onClick={() => scrollToBottom()} aria-label={t('chat.messages.scrollToBottom', 'Scroll to bottom')}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polyline points="6 9 12 15 18 9" />
           </svg>

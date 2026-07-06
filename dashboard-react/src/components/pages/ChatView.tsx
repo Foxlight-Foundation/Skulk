@@ -526,7 +526,17 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   const setChatScrollTop = (pos: number) => dispatch(uiActions.setChatScrollTop(pos));
   const scrollRestored = useRef(false);
   useEffect(() => {
-    if (scrollRestored.current || chatScrollTop <= 0) return;
+    if (scrollRestored.current) return;
+    if (chatScrollTop <= 0) {
+      // Nothing to restore, but latch anyway: the store hydrates synchronously,
+      // so a non-positive value on first run is final. Leaving the guard
+      // unlatched lets later chatScrollTop updates (echoes of the user's own
+      // scrolling, saved by handleScroll) re-enter this effect and assign a
+      // stale scrollTop — which cancels in-flight smooth scrolling and made
+      // the scroll-to-bottom button a no-op in fresh sessions.
+      scrollRestored.current = true;
+      return;
+    }
 
     // Wait for store to hydrate and DOM to render messages
     const tryRestore = () => {
