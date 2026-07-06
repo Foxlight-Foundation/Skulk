@@ -78,12 +78,16 @@ const PanelOverlay = styled.div<{ $side: 'left' | 'right' }>`
     bottom: 0;
     ${({ $side }) => ($side === 'left' ? 'left: 0;' : 'right: 0;')}
     z-index: 5;
-    max-width: 88vw;
+    /* Deterministic drawer width: the panels' own 340px would overflow the
+     * cap on narrow phones (320px viewports), so the overlay owns the width
+     * and the aside fills it. */
+    width: min(340px, 88vw);
     box-shadow: ${({ $side }) => ($side === 'left' ? '18px' : '-18px')} 0 48px
       ${({ theme }) => theme.colors.shadowStrong};
 
     > aside {
       height: 100%;
+      width: 100%;
     }
   }
 `;
@@ -214,6 +218,14 @@ export function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   useEffect(() => {
     if (!isMobile) setMobileMenuOpen(false);
+  }, [isMobile]);
+  // Drawer exclusivity must also hold for PERSISTED state, not just the
+  // toggle handlers: both flags can arrive true from a desktop session, and
+  // independent render predicates would stack both drawers over a phone
+  // viewport. Instances yields to History (the user is mid-conversation).
+  useEffect(() => {
+    if (isMobile && historyPanelOpen && panelOpen) dispatch(uiActions.togglePanel());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMobile]);
   const [storeDownloads, setStoreDownloads] = useState<StoreDownload[]>([]);
   // Observability panel state lives on the global UI store so any component (toolbar
