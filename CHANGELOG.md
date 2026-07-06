@@ -20,8 +20,9 @@ This project records release notes here and mirrors public-facing notes in
   and thins the background mesh for the smaller canvas; and the chat input
   reflows with the model selector on its own line. Verified with headless
   sweeps at 360px, 390px, and 414px showing no horizontal overflow on any
-  view. A new docs page covers managing a cluster from a phone, including
-  Tailscale as the recommended remote-access shape.
+  view. A new documentation page, "Manage Your Cluster from a Phone"
+  (`website/docs/mobile-dashboard.md`), covers the mobile layout and
+  remote access, with Tailscale as the recommended remote-access shape.
 
 ### Fixed
 
