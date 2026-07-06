@@ -71,6 +71,7 @@ from skulk.shared.types.worker.runners import (
 )
 from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.bootstrap import logger
+from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
 from skulk.worker.runner.llama_cpp.runner import (
     generation_kwargs,
     map_finish_reason,
@@ -365,6 +366,12 @@ class Runner:
         )
 
     def acknowledge_task(self, task: Task) -> None:
+        record_runner_phase(
+            "task_submission",
+            event="task_acknowledged",
+            detail=task.__class__.__name__,
+            task_id=task.task_id,
+        )
         self.event_sender.send(TaskAcknowledged(task_id=task.task_id))
 
     def _drain_cancellations(self) -> None:
@@ -436,6 +443,11 @@ class Runner:
         ):
             return
         if proc.poll() is not None:
+            record_runner_phase(
+                "error",
+                event="server_exited",
+                detail=f"llama-server exited unexpectedly (code {proc.returncode})",
+            )
             raise RuntimeError(
                 f"llama-server exited unexpectedly (code {proc.returncode}); "
                 f"log tail:\n{self._server_log_tail()}"
@@ -449,9 +461,19 @@ class Runner:
                 self._generate(task)
             case Shutdown():
                 logger.info("llama-server runner shutting down")
+                record_runner_phase(
+                    "shutdown_cleanup",
+                    event="runner_shutdown_requested",
+                    task_id=task.task_id,
+                )
                 self.update_status(RunnerShuttingDown())
                 self.acknowledge_task(task)
                 self._teardown_server()
+                record_runner_phase(
+                    "shutdown_cleanup",
+                    event="server_teardown_complete",
+                    task_id=task.task_id,
+                )
                 self.current_status = RunnerShutdown()
             case _:
                 raise RuntimeError(
@@ -501,12 +523,21 @@ class Runner:
         )
         n_ctx = serving_n_ctx(self.context_token_limit, logits_all=False)
         try:
-            self._spawn_server(gguf_path, n_ctx, card.runtime, reasoning_format_none)
-            self._await_health()
+            with runner_phase(
+                "load_model",
+                detail="spawn_llama_server",
+                task_id=task.task_id,
+                attrs={"gguf_file": gguf_path.name, "n_ctx": n_ctx},
+            ):
+                self._spawn_server(
+                    gguf_path, n_ctx, card.runtime, reasoning_format_none
+                )
+                self._await_health()
         except Exception:
             self._teardown_server()
             raise
         self.current_status = RunnerReady()
+        record_runner_phase("idle", event="runner_ready", task_id=task.task_id)
         logger.info(
             f"llama-server runner ready in {time.time() - self.setup_start_time:.1f}s "
             f"(url={self.base_url})"
@@ -695,6 +726,13 @@ class Runner:
         # can return empty content under a bounded budget (#428/#420).
         body.update(reasoning_request_overrides(task.task_params))
 
+        record_runner_phase(
+            "task_submission",
+            event="submit_text_generation",
+            task_id=task.task_id,
+            command_id=str(command_id),
+            attrs={"tools": bool(task.task_params.tools)},
+        )
         try:
             # Per-token logprobs are not wired over the SSE proxy yet. Fail loud
             # rather than return a successful response with logprobs silently
@@ -708,12 +746,24 @@ class Runner:
                     "(llama_server) engine: the OpenAI SSE proxy does not surface "
                     "them. Retry without logprobs/top_logprobs."
                 )
+            record_runner_phase(
+                "decode_stream",
+                event="request_started",
+                task_id=task.task_id,
+                command_id=str(command_id),
+            )
             if task.task_params.tools:
                 self._generate_with_tools(task, body, model_id, command_id)
-                self.current_status = RunnerReady()
-                return
-            self._generate_streaming(task, body, model_id, command_id)
+            else:
+                self._generate_streaming(task, body, model_id, command_id)
         except Exception as exc:  # noqa: BLE001 - surface as an ErrorChunk
+            record_runner_phase(
+                "error",
+                event="generation_failed",
+                detail=f"{type(exc).__name__}: {exc}",
+                task_id=task.task_id,
+                command_id=str(command_id),
+            )
             logger.opt(exception=exc).warning("llama-server generation failed")
             self.event_sender.send(
                 ChunkGenerated(
@@ -721,7 +771,21 @@ class Runner:
                     chunk=ErrorChunk(model=model_id, error_message=str(exc)),
                 )
             )
+        else:
+            # Only cancellations OBSERVED during execution: draining the cancel
+            # pipe here would retroactively flip a finished task (see main()).
+            was_cancelled = (
+                task.task_id in self.cancelled_tasks
+                or CANCEL_ALL_TASKS in self.cancelled_tasks
+            )
+            record_runner_phase(
+                "cancel_observed" if was_cancelled else "completion",
+                event="generation_finished",
+                task_id=task.task_id,
+                command_id=str(command_id),
+            )
         self.current_status = RunnerReady()
+        record_runner_phase("idle", event="runner_ready", task_id=task.task_id)
 
     def _generate_streaming(
         self,
