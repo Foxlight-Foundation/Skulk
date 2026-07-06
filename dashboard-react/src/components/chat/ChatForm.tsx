@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { MOBILE_BREAKPOINT_PX } from '../../hooks/useMediaQuery';
 import styled, { css, keyframes } from 'styled-components';
 import type { ChatUploadedFile } from '../../types/chat';
 import { ChatAttachments } from './ChatAttachments';
@@ -66,6 +67,29 @@ const HeaderRow = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.xs};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.textMuted};
+
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+`;
+
+/*
+ * Groups the model label + name so that, at phone width, the model gets its
+ * own full line and the stats (ctx / thinking / TTFT / TPS) flow onto the
+ * next line, instead of the long model id wrapping mid-name in a narrow
+ * column. On desktop the wrapper is display: contents (layout unchanged).
+ */
+const ModelLine = styled.div`
+  display: contents;
+
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-basis: 100%;
+    min-width: 0;
+  }
 `;
 
 const ModelBtn = styled.button`
@@ -163,6 +187,18 @@ const HelperText = styled.div`
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.textMuted};
   text-align: center;
+
+  /* Keyboard hints (Enter / Shift+Enter / drag & drop) mean nothing on a
+   * phone; they and their rule hide below the breakpoint. */
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    display: none;
+  }
+`;
+
+const BottomAccentLine = styled(AccentLine)`
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    display: none;
+  }
 `;
 
 /* ---- component ---- */
@@ -327,10 +363,10 @@ export function ChatForm({
       {showHeader && (
         <HeaderRow>
           {(modelLabel || modelSelector) && (
-            <>
+            <ModelLine>
               <span>{t('chat.form.modelLabel', 'Model:')}</span>
               {modelSelector ?? <ModelBtn onClick={onOpenModelPicker}>{modelLabel}</ModelBtn>}
-            </>
+            </ModelLine>
           )}
           {contextLength > 0 && (
             <Stat>
@@ -422,7 +458,7 @@ export function ChatForm({
         )}
       </InputRow>
 
-      <AccentLine />
+      <BottomAccentLine />
       <HelperText>
         {supportsImageAttachments
           ? t(

@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import styled, { css, keyframes, useTheme } from 'styled-components';
+import { MOBILE_BREAKPOINT_PX } from '../../hooks/useMediaQuery';
 import type { Theme } from '../../theme';
 import { FiTrash2, FiExternalLink, FiRefreshCw } from 'react-icons/fi';
 import { MdPlayArrow, MdClose, MdTune, MdAutoFixHigh, MdExtension } from 'react-icons/md';
@@ -121,6 +122,42 @@ const HeaderRow = styled.div`
   display: flex;
   align-items: center;
   justify-content: space-between;
+
+  /* Phone width: the count text and the toolbar stack instead of squeezing
+   * the text into a one-word-per-line column. */
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+`;
+
+/*
+ * Phone width: rows leave the 7-column grid and restack as a card via
+ * grid-template-areas (see TRow); each cell declares which area it fills.
+ * Purely presentational: same DOM, same handlers, no behavior change.
+ * The union type guards against a typo silently breaking the layout: it
+ * must match the areas named in TRow's grid-template-areas.
+ */
+type MobileGridArea = 'model' | 'size' | 'files' | 'status' | 'play' | 'place' | 'actions';
+
+const mobileArea = css<{ $area?: MobileGridArea }>`
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    grid-area: ${({ $area }) => $area ?? 'auto'};
+  }
+`;
+
+/* Field label rendered only at phone width, where the table header row
+ * (which normally names the columns) is hidden. */
+const MobileLabel = styled.span`
+  display: none;
+
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    display: inline;
+    margin-right: 4px;
+    font-size: ${({ theme }) => theme.fontSizes.xs};
+    color: ${({ theme }) => theme.colors.textMuted};
+  }
 `;
 
 const HeaderActions = styled.div`
@@ -170,6 +207,11 @@ const Table = styled.div`
 const THead = styled.div`
   display: grid;
   grid-template-columns: 36px 32px 1fr 80px 60px 100px 100px;
+
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    /* Cards are self-labeling at phone width (MobileLabel); no header row. */
+    display: none;
+  }
   gap: 8px;
   padding: 8px 12px;
   background: ${({ theme }) => theme.colors.surfaceSunken};
@@ -191,6 +233,16 @@ const TRow = styled.div<{ $highlight?: boolean }>`
   gap: 8px;
   padding: 10px 12px;
   align-items: center;
+
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    grid-template-columns: auto auto 1fr;
+    grid-template-areas:
+      'model model model'
+      'size  files status'
+      'play  place actions';
+    row-gap: 10px;
+    padding: 12px;
+  }
   border-top: 1px solid ${({ theme }) => theme.colors.borderLight};
   transition: background 0.15s;
 
@@ -201,7 +253,8 @@ const TRow = styled.div<{ $highlight?: boolean }>`
     css`background: ${({ theme }) => theme.colors.goldBg};`}
 `;
 
-const ModelCell = styled.div`
+const ModelCell = styled.div<{ $area?: MobileGridArea }>`
+  ${mobileArea}
   display: flex;
   align-items: center;
   gap: 6px;
@@ -322,11 +375,16 @@ const ChatBubble = styled.button`
   }
 `;
 
-const Cell = styled.div<{ $align?: string }>`
+const Cell = styled.div<{ $align?: string; $area?: MobileGridArea }>`
   font-size: ${({ theme }) => theme.fontSizes.tableBody};
   font-family: ${({ theme }) => theme.fonts.body};
   color: ${({ theme }) => theme.colors.textSecondary};
   text-align: ${({ $align }) => $align ?? 'left'};
+  ${mobileArea}
+
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    text-align: left;
+  }
 `;
 
 const ProgressTrack = styled.div`
@@ -378,7 +436,8 @@ const RefreshBtn = styled.button<{ $spinning: boolean }>`
   }
 `;
 
-const PlayCell = styled.div`
+const PlayCell = styled.div<{ $area?: MobileGridArea }>`
+  ${mobileArea}
   display: flex;
   align-items: center;
   justify-content: center;
@@ -453,7 +512,12 @@ const StopBtn = styled.button`
   }
 `;
 
-const ActionsCell = styled.div`
+const ActionsCell = styled.div<{ $area?: MobileGridArea }>`
+  ${mobileArea}
+
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    justify-self: end;
+  }
   display: flex;
   align-items: center;
   gap: 6px;
@@ -640,14 +704,15 @@ export function StoreRegistryTable({
           {/* Pending downloads (not yet registered) */}
           {pendingDownloads.map((dl) => (
             <TRow key={dl.modelId} $highlight>
-              <Cell />
-              <Cell />
-              <ModelCell>
+              <Cell $area="play" />
+              <Cell $area="place" />
+              <ModelCell $area="model">
                 <ModelId title={dl.modelId}>{dl.modelId}</ModelId>
               </ModelCell>
-              <Cell />
-              <Cell />
-              <Cell $align="right">
+              <Cell $area="size" />
+              <Cell $area="files" />
+              <Cell $align="right" $area="status">
+                <MobileLabel>{t('common.status', 'Status')}</MobileLabel>
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
                   <ProgressTrack>
                     <ProgressFill $pct={dl.progress * 100} />
@@ -655,7 +720,7 @@ export function StoreRegistryTable({
                   <ProgressText>{(dl.progress * 100).toFixed(0)}%</ProgressText>
                 </div>
               </Cell>
-              <Cell />
+              <Cell $area="actions" />
             </TRow>
           ))}
 
@@ -674,7 +739,7 @@ export function StoreRegistryTable({
             const isGguf = /gguf/i.test(entry.model_id);
             return (
               <TRow key={entry.model_id}>
-                <PlayCell>
+                <PlayCell $area="play">
                   {active && onStop ? (
                     <StopBtn onClick={() => onStop(entry.model_id)} title={t('storeRegistry.stopModel', 'Stop model')}>
                       <MdClose size={20} />
@@ -693,7 +758,7 @@ export function StoreRegistryTable({
                     )
                   ) : null}
                 </PlayCell>
-                <PlayCell>
+                <PlayCell $area="place">
                   {!active && !dl && !companion && onPlacement ? (
                     <PlacementBtn
                       onClick={() => onPlacement(entry.model_id)}
@@ -704,7 +769,7 @@ export function StoreRegistryTable({
                     </PlacementBtn>
                   ) : null}
                 </PlayCell>
-                <ModelCell>
+                <ModelCell $area="model">
                   <ModelId title={entry.model_id}>{entry.model_id}</ModelId>
                   {companion && (
                     <InfoTooltip
@@ -758,9 +823,16 @@ export function StoreRegistryTable({
                     </>;
                   })()}
                 </ModelCell>
-                <Cell $align="right">{formatBytes(entry.total_bytes)}</Cell>
-                <Cell $align="right">{entry.files.length}</Cell>
-                <Cell $align="right">
+                <Cell $align="right" $area="size">
+                  <MobileLabel>{t('common.size', 'Size')}</MobileLabel>
+                  {formatBytes(entry.total_bytes)}
+                </Cell>
+                <Cell $align="right" $area="files">
+                  <MobileLabel>{t('common.files', 'Files')}</MobileLabel>
+                  {entry.files.length}
+                </Cell>
+                <Cell $align="right" $area="status">
+                  <MobileLabel>{t('common.status', 'Status')}</MobileLabel>
                   {dl ? (
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
                       <ProgressTrack>
@@ -772,7 +844,7 @@ export function StoreRegistryTable({
                     timeAgo(entry.downloaded_at, t)
                   )}
                 </Cell>
-                <ActionsCell>
+                <ActionsCell $area="actions">
                   <InfoTooltip
                     content={<ModelInfoContent entry={entry} card={modelCards[entry.model_id]} />}
                     placement="left"

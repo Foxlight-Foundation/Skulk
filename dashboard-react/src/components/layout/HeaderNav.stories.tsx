@@ -45,7 +45,6 @@ export const Interactive: Story = {
         showMobileMenuToggle
         mobileMenuOpen={mobile}
         onToggleMobileMenu={() => setMobile(!mobile)}
-        showMobileRightToggle
         mobileRightOpen={right}
         onToggleMobileRight={() => setRight(!right)}
         downloadProgress={{ count: 2, percentage: 45 }}

@@ -548,6 +548,21 @@ class NodeResourceDiagnostics(CamelCaseModel):
     )
 
 
+class NodeTailscaleDiagnostics(CamelCaseModel):
+    """This node's own Tailscale state, read locally where the bundle is built.
+
+    Carried inside the diagnostics bundle (which the cluster endpoint proxies
+    to the target node) so a per-node view always shows the SELECTED node's
+    tailnet identity; the standalone connectivity endpoint reports whichever
+    node served the HTTP request, which is wrong in a per-node context.
+    """
+
+    running: bool = Field(description="Whether tailscaled reports BackendState Running.")
+    self_ip: str | None = Field(default=None, description="Tailscale IPv4 (100.x) when running.")
+    hostname: str | None = Field(default=None, description="Tailnet-registered hostname.")
+    dns_name: str | None = Field(default=None, description="MagicDNS name when available.")
+
+
 class NodeDiagnostics(CamelCaseModel):
     """Read-only diagnostic bundle for one Skulk node."""
 
@@ -573,6 +588,14 @@ class NodeDiagnostics(CamelCaseModel):
     warnings: list[str] = Field(
         default_factory=list,
         description="Top-level diagnostic warnings for this node.",
+    )
+    tailscale: NodeTailscaleDiagnostics | None = Field(
+        default=None,
+        description=(
+            "This node's own Tailscale state. The probe is best-effort: a "
+            "missing CLI, timeout, or unparsable output reads as "
+            "running=false; None marks only an unexpected probe exception."
+        ),
     )
 
 

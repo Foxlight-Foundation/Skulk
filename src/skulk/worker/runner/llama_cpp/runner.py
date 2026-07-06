@@ -58,6 +58,7 @@ from skulk.shared.types.worker.runners import (
 )
 from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.bootstrap import logger
+from skulk.worker.runner.diagnostics import record_runner_phase, runner_phase
 from skulk.worker.runner.llm_inference.harmony_text_parser import HarmonyTextParser
 from skulk.worker.runner.llm_inference.think_text_parser import ThinkTextParser
 from skulk.worker.runner.llm_inference.tool_text_parser import (
@@ -645,6 +646,12 @@ class Runner:
         )
 
     def acknowledge_task(self, task: Task) -> None:
+        record_runner_phase(
+            "task_submission",
+            event="task_acknowledged",
+            detail=task.__class__.__name__,
+            task_id=task.task_id,
+        )
         self.event_sender.send(TaskAcknowledged(task_id=task.task_id))
 
     def _drain_cancellations(self) -> None:
@@ -696,9 +703,19 @@ class Runner:
                 self._generate(task)
             case Shutdown():
                 logger.info("llama.cpp runner shutting down")
+                record_runner_phase(
+                    "shutdown_cleanup",
+                    event="runner_shutdown_requested",
+                    task_id=task.task_id,
+                )
                 self.update_status(RunnerShuttingDown())
                 self.acknowledge_task(task)
                 self.model = None
+                record_runner_phase(
+                    "shutdown_cleanup",
+                    event="model_released",
+                    task_id=task.task_id,
+                )
                 self.current_status = RunnerShutdown()
             case _:
                 raise RuntimeError(
@@ -770,16 +787,29 @@ class Runner:
             f"(n_ctx={n_ctx}, logits_all={logits_all}, flash_attn={flash_attn}, "
             f"vision={vision is not None})"
         )
-        self.model = Llama(
-            model_path=str(gguf_path),
-            n_gpu_layers=-1,
-            n_ctx=n_ctx,
-            logits_all=logits_all,
-            flash_attn=flash_attn,
-            verbose=False,
-            chat_handler=chat_handler,
-        )
+        with runner_phase(
+            "load_model",
+            detail="llama_cpp_construct",
+            task_id=task.task_id,
+            attrs={
+                "gguf_file": gguf_path.name,
+                "n_ctx": n_ctx,
+                "logits_all": logits_all,
+                "flash_attn": flash_attn,
+                "vision": vision is not None,
+            },
+        ):
+            self.model = Llama(
+                model_path=str(gguf_path),
+                n_gpu_layers=-1,
+                n_ctx=n_ctx,
+                logits_all=logits_all,
+                flash_attn=flash_attn,
+                verbose=False,
+                chat_handler=chat_handler,
+            )
         self.current_status = RunnerReady()
+        record_runner_phase("idle", event="runner_ready", task_id=task.task_id)
         logger.info(
             f"llama.cpp runner ready in {time.time() - self.setup_start_time:.1f}s"
         )
@@ -813,6 +843,13 @@ class Runner:
             task.task_params.logprobs, task.task_params.top_logprobs
         )
 
+        record_runner_phase(
+            "task_submission",
+            event="submit_text_generation",
+            task_id=task.task_id,
+            command_id=str(command_id),
+            attrs={"tools": bool(task.task_params.tools)},
+        )
         try:
             # Fail loud when logprobs are requested but the model was not loaded
             # with logits_all (#385): llama-cpp-python gates ALL logprobs behind
@@ -833,8 +870,28 @@ class Runner:
             # wants the assembled call), and accumulating OpenAI tool-call deltas
             # is fragile; run it non-streamed and emit one ToolCallChunk.
             if task.task_params.tools:
+                record_runner_phase(
+                    "decode_stream",
+                    event="request_started",
+                    task_id=task.task_id,
+                    command_id=str(command_id),
+                )
                 self._generate_with_tools(task, messages, kwargs, model_id, command_id)
+                # Same observed-cancellation rule as the streaming path: a task
+                # cancelled during the non-streamed tool call must not be
+                # recorded as a completion.
+                tools_cancelled = (
+                    task.task_id in self.cancelled_tasks
+                    or CANCEL_ALL_TASKS in self.cancelled_tasks
+                )
+                record_runner_phase(
+                    "cancel_observed" if tools_cancelled else "completion",
+                    event="generation_finished",
+                    task_id=task.task_id,
+                    command_id=str(command_id),
+                )
                 self.current_status = RunnerReady()
+                record_runner_phase("idle", event="runner_ready", task_id=task.task_id)
                 return
 
             # A reasoning model's markers arrive as literal text in the content
@@ -860,6 +917,12 @@ class Runner:
                     "logprobs/top_logprobs."
                 )
 
+            record_runner_phase(
+                "decode_stream",
+                event="request_started",
+                task_id=task.task_id,
+                command_id=str(command_id),
+            )
             stream = self.model.create_chat_completion(
                 messages=messages, stream=True, **kwargs
             )
@@ -935,6 +998,13 @@ class Runner:
                     )
                 )
         except Exception as exc:
+            record_runner_phase(
+                "error",
+                event="generation_failed",
+                detail=f"{type(exc).__name__}: {exc}",
+                task_id=task.task_id,
+                command_id=str(command_id),
+            )
             logger.opt(exception=exc).warning("llama.cpp generation failed")
             self.event_sender.send(
                 ChunkGenerated(
@@ -942,8 +1012,22 @@ class Runner:
                     chunk=ErrorChunk(model=model_id, error_message=str(exc)),
                 )
             )
+        else:
+            # Only cancellations OBSERVED during execution: draining the cancel
+            # pipe here would retroactively flip a finished task (see main()).
+            was_cancelled = (
+                task.task_id in self.cancelled_tasks
+                or CANCEL_ALL_TASKS in self.cancelled_tasks
+            )
+            record_runner_phase(
+                "cancel_observed" if was_cancelled else "completion",
+                event="generation_finished",
+                task_id=task.task_id,
+                command_id=str(command_id),
+            )
 
         self.current_status = RunnerReady()
+        record_runner_phase("idle", event="runner_ready", task_id=task.task_id)
 
     def _is_harmony_model(self) -> bool:
         """Whether this runner serves a gpt-oss (harmony-format) model.

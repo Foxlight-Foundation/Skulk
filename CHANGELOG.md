@@ -5,6 +5,61 @@
 This project records release notes here and mirrors public-facing notes in
 `website/docs/release-notes/`.
 
+## [Unreleased]
+
+## [1.4.1] - 2026-07-06
+
+### Added
+
+- **The dashboard works from a phone.** At phone widths (480px and below)
+  every view adapts to a single-column layout: the header collapses into an
+  animated hamburger menu carrying the navigation, observability, settings,
+  and theme controls; the model store table becomes stacked cards; the
+  conversation-history and active-instances panels open as drawers over the
+  content (one at a time, fully opaque, dismissed by tapping the dimmed
+  backdrop); observability takes over the full screen and sizes itself to the
+  real visible area on iOS Safari; the cluster topology scales its node cards
+  and thins the background mesh for the smaller canvas; and the chat input
+  reflows with the model selector on its own line. Verified with headless
+  sweeps at 360px, 390px, and 414px showing no horizontal overflow on any
+  view. A new documentation page, "Manage Your Cluster from a Phone"
+  (`website/docs/mobile-dashboard.md`), covers the mobile layout and
+  remote access, with Tailscale as the recommended remote-access shape.
+
+### Fixed
+
+- **The chat scroll-to-bottom button works.** In any fresh session, the
+  scroll-position restore logic re-armed itself off the user's own scrolling
+  and yanked the pane back, cancelling in-flight smooth scrolls; the button
+  visibly did nothing. It also passed its click event where a scroll behavior
+  belongs, and stacked above the mobile drawers instead of beneath them. All
+  three fixed; smooth scrolling in chat is reliable again generally.
+
+- **The observability Node tab reports each node's own Tailscale state.** It
+  previously queried the dashboard-serving node's local Tailscale status and
+  displayed it for every node in the cluster. The reading now rides each
+  node's diagnostics bundle. The Tailscale probe is TTL-cached on the API
+  node, and a probe child that outlives its timeout is killed and reaped
+  instead of leaking one stuck subprocess per poll. A spurious "current
+  master is not a placement node" warning that fired on normal topologies
+  was removed.
+
+- **GGUF engines now report runner phases to observability.** The `llama_cpp`,
+  `llama_server`, and RPC-donor runners emitted no runner-phase diagnostics at
+  all, so the dashboard's observability Live tab sat at "created" forever for
+  any placement on those engines (every GGUF placement on a GPU/Linux node).
+  All three now record the same lifecycle the MLX runner does: task
+  acknowledgement, model load (server spawn for the served and donor shapes),
+  ready, generation start, completion or cancellation, errors including a
+  server subprocess dying behind the runner, and shutdown teardown.
+
+- **The dashboard header shows the real Skulk version.** The UI version was
+  baked at build time from the dashboard's own `package.json`, which had
+  silently drifted (it still said 1.3.0 through two releases). The build now
+  reads the version from the repo root `pyproject.toml`, the single source
+  of truth the release process bumps, so the UI can never drift again. The
+  dashboard `package.json` version is no longer read by anything.
+
 ## [1.4.0] - 2026-07-05
 
 ### Added

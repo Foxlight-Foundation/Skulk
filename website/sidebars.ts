@@ -32,6 +32,7 @@ const sidebars: SidebarsConfig = {
           collapsed: false,
           items: ["tailscale", "tailscale-clustering"],
         },
+        "mobile-dashboard",
         "model-store",
         "kv-cache-backends",
         "tracing",
@@ -52,7 +53,7 @@ const sidebars: SidebarsConfig = {
         {
           type: "category",
           label: "Release Notes",
-          items: ["release-notes/1.4.0", "release-notes/1.3.1", "release-notes/1.3.0", "release-notes/1.2.0", "release-notes/1.1.0", "release-notes/1.0.3", "release-notes/1.0.2"],
+          items: ["release-notes/1.4.1", "release-notes/1.4.0", "release-notes/1.3.1", "release-notes/1.3.0", "release-notes/1.2.0", "release-notes/1.1.0", "release-notes/1.0.3", "release-notes/1.0.2"],
         },
         "cluster-communication",
         "architecture",

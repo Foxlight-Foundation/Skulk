@@ -150,8 +150,11 @@ def test_node_diagnostics_marks_master_outside_placement() -> None:
     placement = _json_mapping(placements[0])
     assert placement["masterIsPlacementNode"] is False
     assert placement["localNodeIsPlacementNode"] is True
+    # A master that hosts no rank is the NORMAL multi-node topology, not a
+    # problem; the old warning here fired for virtually every instance and
+    # was removed as noise.
     warnings = _json_list(placement["warnings"])
-    assert "Current master is not a placement node for this instance." in warnings
+    assert "Current master is not a placement node for this instance." not in warnings
 
 
 def test_node_diagnostics_flags_orphaned_live_runner_tasks() -> None:
@@ -861,3 +864,46 @@ def test_capture_cluster_node_diagnostics_proxies_to_peer(
     assert response.status_code == 200
     body = _json_object(response)
     assert body["nodeId"] == "peer-node"
+
+
+async def test_node_diagnostics_includes_tailscale_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bundle carries this node's own tailnet state (per-node via proxy)."""
+
+    from skulk.connectivity.tailscale import TailscaleStatus
+
+    async def fake_status() -> TailscaleStatus:
+        return TailscaleStatus(
+            running=True,
+            self_ip="100.64.0.9",
+            hostname="kite-test",
+            dns_name="kite-test.tailnet.ts.net",
+        )
+
+    monkeypatch.setattr("skulk.api.main.query_tailscale_status", fake_status)
+    api = _build_api("local-node")
+    client = TestClient(api.app)
+
+    body = _json_object(client.get("/v1/diagnostics/node"))
+    tailscale = _json_mapping(body["tailscale"])
+    assert tailscale["running"] is True
+    assert tailscale["selfIp"] == "100.64.0.9"
+    assert tailscale["dnsName"] == "kite-test.tailnet.ts.net"
+
+
+async def test_node_diagnostics_tailscale_probe_exception_is_null(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected probe exception serializes as null, never fails the bundle."""
+
+    async def exploding_status() -> object:
+        raise RuntimeError("probe blew up")
+
+    monkeypatch.setattr("skulk.api.main.query_tailscale_status", exploding_status)
+    api = _build_api("local-node")
+    client = TestClient(api.app)
+
+    response = client.get("/v1/diagnostics/node")
+    assert response.status_code == 200
+    assert _json_object(response)["tailscale"] is None

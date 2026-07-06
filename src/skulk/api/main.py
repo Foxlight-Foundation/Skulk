@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol, cast
 from uuid import uuid4
 
 import anyio
@@ -239,6 +239,7 @@ from skulk.shared.types.diagnostics import (
     NodeDiagnostics,
     NodeResourceDiagnostics,
     NodeRuntimeDiagnostics,
+    NodeTailscaleDiagnostics,
     PlacementRunnerDiagnostics,
     ProcessRole,
     RunnerSupervisorDiagnostics,
@@ -691,6 +692,9 @@ class API:
         # set keeps every extension hook inert: no extension installed =
         # Skulk unchanged.
         self._extensions = extensions
+        # (timestamp, result) of the last tailscale diagnostics probe; see
+        # _tailscale_diagnostics for the TTL rationale.
+        self._tailscale_diag_cache: tuple[float, NodeTailscaleDiagnostics | None] | None = None
         self._extension_context = ExtensionContext(
             node_id=node_id,
             skulk_version=resolve_skulk_version(),
@@ -4311,11 +4315,6 @@ class API:
             )
             warnings: list[str] = []
 
-            if not master_is_placement_node:
-                warnings.append(
-                    "Current master is not a placement node for this instance."
-                )
-
             runners: list[PlacementRunnerDiagnostics] = []
             for node_id, runner_id in shard_assignments.node_to_runner.items():
                 shard = shard_assignments.runner_to_shard[runner_id]
@@ -4673,8 +4672,46 @@ class API:
             network=self.state.node_network.get(self.node_id),
         )
 
+    # Tailnet identity changes rarely; cache the CLI probe so repeated
+    # diagnostics fetches do not each spawn a tailscale subprocess.
+    _TAILSCALE_DIAG_TTL_SECONDS: Final = 60.0
+
+    async def _tailscale_diagnostics(self) -> NodeTailscaleDiagnostics | None:
+        """This node's tailnet state for the diagnostics bundle, TTL-cached.
+
+        ``query_tailscale_status`` is itself best-effort (a missing CLI,
+        timeout, or unparsable output reads as ``running=False``), so the
+        result is almost always a value; ``None`` marks only the unexpected
+        exception path, logged at debug and never failing diagnostics.
+        """
+
+        now = time.monotonic()
+        cached = self._tailscale_diag_cache
+        if cached is not None and now - cached[0] < self._TAILSCALE_DIAG_TTL_SECONDS:
+            return cached[1]
+        result: NodeTailscaleDiagnostics | None
+        try:
+            ts_status = await query_tailscale_status()
+            result = NodeTailscaleDiagnostics(
+                running=ts_status.running,
+                self_ip=ts_status.self_ip,
+                hostname=ts_status.hostname,
+                dns_name=ts_status.dns_name,
+            )
+        except Exception as exc:  # noqa: BLE001 - diagnostics must not fail on a probe
+            logger.debug(f"tailscale diagnostics probe failed: {exc!r}")
+            result = None
+        self._tailscale_diag_cache = (now, result)
+        return result
+
     async def get_node_diagnostics(self) -> NodeDiagnostics:
         """Return local read-only diagnostics for this Skulk node."""
+
+        # This node's OWN tailnet identity rides the bundle so the per-node
+        # dashboard view shows the selected node's Tailscale state (the
+        # standalone connectivity endpoint reports whichever node served the
+        # HTTP request, which is wrong when browsing another node).
+        tailscale = await self._tailscale_diagnostics()
 
         supervisor_runners = self._collect_runner_supervisor_diagnostics()
         placements = self._placement_diagnostics()
@@ -4697,6 +4734,7 @@ class API:
             supervisor_runners=supervisor_runners,
             placements=placements,
             warnings=sorted(warnings),
+            tailscale=tailscale,
         )
 
     @staticmethod
