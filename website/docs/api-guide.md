@@ -138,6 +138,13 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `POST /v1/diagnostics/cluster/{node_id}/capture`
 - `POST /v1/diagnostics/cluster/{node_id}/runners/{runner_id}/cancel`
 
+The node diagnostics bundle includes the node's own Tailscale state
+(`tailscale`: running flag, tailnet IP, hostname, MagicDNS name), probed on
+the node the bundle describes, so the per-node cluster endpoint reports the
+selected node's tailnet identity rather than whichever node served the HTTP
+request. The probe is best-effort: a node without a working `tailscale` CLI
+reports `running: false`, and `null` marks only an unexpected probe failure.
+
 For the full interactive reference with request/response schemas, see the [API Reference](/api/skulk-api).
 
 ## OpenAI Chat Completions

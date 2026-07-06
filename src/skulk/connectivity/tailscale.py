@@ -10,6 +10,7 @@ state.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -134,6 +135,22 @@ def parse_status_json(raw: dict[str, Any]) -> TailscaleStatus:
     )
 
 
+async def _kill_and_reap(process: asyncio.subprocess.Process | None) -> None:
+    """Kill and reap a probe subprocess that outlived its timeout.
+
+    Without this, a hung ``tailscale status`` child would linger as an orphan
+    after the probe gives up — and the polled diagnostics path re-probes on a
+    TTL, accumulating one stuck subprocess per expiry. The reap wait is
+    bounded so an unkillable child can't stall the caller.
+    """
+    if process is None or process.returncode is not None:
+        return
+    with contextlib.suppress(ProcessLookupError):
+        process.kill()
+    with contextlib.suppress(TimeoutError):
+        _ = await asyncio.wait_for(process.wait(), timeout=1.0)
+
+
 async def query_tailscale_status() -> TailscaleStatus:
     """Query tailscaled and return the node's current Tailscale state.
 
@@ -149,6 +166,7 @@ async def query_tailscale_status() -> TailscaleStatus:
         logger.debug("tailscale binary not found; Tailscale not installed")
         return _not_running
 
+    process: asyncio.subprocess.Process | None = None
     try:
         process = await asyncio.wait_for(
             asyncio.create_subprocess_exec(
@@ -166,9 +184,11 @@ async def query_tailscale_status() -> TailscaleStatus:
         return _not_running
     except TimeoutError:
         logger.debug("tailscale status timed out")
+        await _kill_and_reap(process)
         return _not_running
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"tailscale status failed: {exc}")
+        await _kill_and_reap(process)
         return _not_running
 
     if process.returncode != 0:

@@ -211,6 +211,14 @@ export interface NodeResourceDiagnostics {
   } | null;
 }
 
+/** The SELECTED node's own tailnet state, carried in its diagnostics bundle. */
+export interface NodeTailscaleDiagnostics {
+  running: boolean;
+  selfIp?: string | null;
+  hostname?: string | null;
+  dnsName?: string | null;
+}
+
 export interface NodeDiagnostics {
   generatedAt: string;
   runtime: DiagnosticsRuntime;
@@ -219,6 +227,7 @@ export interface NodeDiagnostics {
   supervisorRunners: RunnerSupervisorDiagnostics[];
   placements: InstancePlacementDiagnostics[];
   warnings: string[];
+  tailscale?: NodeTailscaleDiagnostics | null;
 }
 
 /** Heavyweight process sampling result inside an on-demand capture bundle. */
