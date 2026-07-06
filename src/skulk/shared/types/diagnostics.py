@@ -591,7 +591,11 @@ class NodeDiagnostics(CamelCaseModel):
     )
     tailscale: NodeTailscaleDiagnostics | None = Field(
         default=None,
-        description="This node's own Tailscale state (None when the probe fails).",
+        description=(
+            "This node's own Tailscale state. The probe is best-effort: a "
+            "missing CLI, timeout, or unparsable output reads as "
+            "running=false; None marks only an unexpected probe exception."
+        ),
     )
 
 

@@ -864,3 +864,46 @@ def test_capture_cluster_node_diagnostics_proxies_to_peer(
     assert response.status_code == 200
     body = _json_object(response)
     assert body["nodeId"] == "peer-node"
+
+
+async def test_node_diagnostics_includes_tailscale_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bundle carries this node's own tailnet state (per-node via proxy)."""
+
+    from skulk.connectivity.tailscale import TailscaleStatus
+
+    async def fake_status() -> TailscaleStatus:
+        return TailscaleStatus(
+            running=True,
+            self_ip="100.64.0.9",
+            hostname="kite-test",
+            dns_name="kite-test.tailnet.ts.net",
+        )
+
+    monkeypatch.setattr("skulk.api.main.query_tailscale_status", fake_status)
+    api = _build_api("local-node")
+    client = TestClient(api.app)
+
+    body = _json_object(client.get("/v1/diagnostics/node"))
+    tailscale = _json_mapping(body["tailscale"])
+    assert tailscale["running"] is True
+    assert tailscale["selfIp"] == "100.64.0.9"
+    assert tailscale["dnsName"] == "kite-test.tailnet.ts.net"
+
+
+async def test_node_diagnostics_tailscale_probe_exception_is_null(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected probe exception serializes as null, never fails the bundle."""
+
+    async def exploding_status() -> object:
+        raise RuntimeError("probe blew up")
+
+    monkeypatch.setattr("skulk.api.main.query_tailscale_status", exploding_status)
+    api = _build_api("local-node")
+    client = TestClient(api.app)
+
+    response = client.get("/v1/diagnostics/node")
+    assert response.status_code == 200
+    assert _json_object(response)["tailscale"] is None
