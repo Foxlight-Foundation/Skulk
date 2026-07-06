@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
+import { MOBILE_BREAKPOINT_PX } from '../../hooks/useMediaQuery';
 import styled, { keyframes } from 'styled-components';
 import { FiX } from 'react-icons/fi';
 import { Button } from '../common/Button';
@@ -68,6 +69,15 @@ const Aside = styled.aside<{ $width: number }>`
   flex-direction: column;
   z-index: 50;
   animation: ${slideIn} 0.25s cubic-bezier(0.33, 1, 0.68, 1);
+
+  /* Phone width: the drawer becomes a full-viewport sheet. The persisted
+   * desktop width (which can exceed a phone viewport and clip the
+   * header/tabs) is ignored; !important beats the drag-resize inline
+   * style if one was left behind by a desktop session. */
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    width: 100vw !important;
+    border-left: none;
+  }
 `;
 
 /**
@@ -86,6 +96,11 @@ const ResizeHandle = styled.div`
   &:hover {
     background: ${({ theme }) => theme.colors.goldDim};
     opacity: 0.4;
+  }
+
+  /* No drag-resize on a full-viewport phone sheet. */
+  @media (max-width: ${MOBILE_BREAKPOINT_PX}px) {
+    display: none;
   }
 `;
 
