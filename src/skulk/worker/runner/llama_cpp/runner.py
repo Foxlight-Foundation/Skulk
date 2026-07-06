@@ -877,8 +877,15 @@ class Runner:
                     command_id=str(command_id),
                 )
                 self._generate_with_tools(task, messages, kwargs, model_id, command_id)
+                # Same observed-cancellation rule as the streaming path: a task
+                # cancelled during the non-streamed tool call must not be
+                # recorded as a completion.
+                tools_cancelled = (
+                    task.task_id in self.cancelled_tasks
+                    or CANCEL_ALL_TASKS in self.cancelled_tasks
+                )
                 record_runner_phase(
-                    "completion",
+                    "cancel_observed" if tools_cancelled else "completion",
                     event="generation_finished",
                     task_id=task.task_id,
                     command_id=str(command_id),
