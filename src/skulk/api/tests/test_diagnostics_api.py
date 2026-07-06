@@ -150,8 +150,11 @@ def test_node_diagnostics_marks_master_outside_placement() -> None:
     placement = _json_mapping(placements[0])
     assert placement["masterIsPlacementNode"] is False
     assert placement["localNodeIsPlacementNode"] is True
+    # A master that hosts no rank is the NORMAL multi-node topology, not a
+    # problem; the old warning here fired for virtually every instance and
+    # was removed as noise.
     warnings = _json_list(placement["warnings"])
-    assert "Current master is not a placement node for this instance." in warnings
+    assert "Current master is not a placement node for this instance." not in warnings
 
 
 def test_node_diagnostics_flags_orphaned_live_runner_tasks() -> None:

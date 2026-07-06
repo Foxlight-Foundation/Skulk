@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
 import { copyToClipboard } from '../../utils/clipboard';
-import { useTailscaleStatus } from '../../hooks/useTailscaleStatus';
 import styled from 'styled-components';
 import { Button } from '../common/Button';
 import { AcceleratorPanel } from './AcceleratorPanel';
@@ -328,7 +327,6 @@ function recorderLine(entry: RunnerFlightRecorderEntry): string {
 export function NodeTab({ nodeId }: NodeTabProps) {
   const { t } = useSkulkTranslation();
   const cluster = useClusterState();
-  const tailscaleResult = useTailscaleStatus();
   const dispatch = useAppDispatch();
   const setSelectedNodeId = (nodeId: string | null) =>
     dispatch(uiActions.setObservabilitySelectedNodeId(nodeId));
@@ -586,16 +584,18 @@ export function NodeTab({ nodeId }: NodeTabProps) {
                     : t('observability.node.loggingNotConfigured', 'not configured')}
                 </Value>
               </Row>
+              {/* Tailscale rides the per-node diagnostics bundle (proxied to
+                  the SELECTED node); the standalone connectivity hook reports
+                  the dashboard host, which showed kite3's identity under
+                  every node's view. */}
               <Row>
                 <Key>{t('observability.node.tailscale', 'Tailscale')}</Key>
-                <Value $warn={tailscaleResult.status === 'ok' && !tailscaleResult.data.running}>
-                  {tailscaleResult.status === 'loading'
-                    ? '…'
-                    : tailscaleResult.status === 'error'
-                      ? t('observability.node.unavailable', 'unavailable')
-                      : tailscaleResult.data.running
-                        ? `${tailscaleResult.data.selfIp ?? '?'} · ${tailscaleResult.data.dnsName ?? tailscaleResult.data.hostname ?? '?'}`
-                        : t('observability.node.notRunning', 'not running')}
+                <Value $warn={diagnostics?.tailscale != null && !diagnostics.tailscale.running}>
+                  {diagnostics?.tailscale == null
+                    ? t('observability.node.unavailable', 'unavailable')
+                    : diagnostics.tailscale.running
+                      ? `${diagnostics.tailscale.selfIp ?? '?'} · ${diagnostics.tailscale.dnsName ?? diagnostics.tailscale.hostname ?? '?'}`
+                      : t('observability.node.notRunning', 'not running')}
                 </Value>
               </Row>
             </Section>

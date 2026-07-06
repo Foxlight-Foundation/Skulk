@@ -239,6 +239,7 @@ from skulk.shared.types.diagnostics import (
     NodeDiagnostics,
     NodeResourceDiagnostics,
     NodeRuntimeDiagnostics,
+    NodeTailscaleDiagnostics,
     PlacementRunnerDiagnostics,
     ProcessRole,
     RunnerSupervisorDiagnostics,
@@ -4311,11 +4312,6 @@ class API:
             )
             warnings: list[str] = []
 
-            if not master_is_placement_node:
-                warnings.append(
-                    "Current master is not a placement node for this instance."
-                )
-
             runners: list[PlacementRunnerDiagnostics] = []
             for node_id, runner_id in shard_assignments.node_to_runner.items():
                 shard = shard_assignments.runner_to_shard[runner_id]
@@ -4676,6 +4672,23 @@ class API:
     async def get_node_diagnostics(self) -> NodeDiagnostics:
         """Return local read-only diagnostics for this Skulk node."""
 
+        # This node's OWN tailnet identity rides the bundle so the per-node
+        # dashboard view shows the selected node's Tailscale state (the
+        # standalone connectivity endpoint reports whichever node served the
+        # HTTP request, which is wrong when browsing another node). Probe
+        # failure degrades to None, never fails diagnostics.
+        tailscale: NodeTailscaleDiagnostics | None
+        try:
+            ts_status = await query_tailscale_status()
+            tailscale = NodeTailscaleDiagnostics(
+                running=ts_status.running,
+                self_ip=ts_status.self_ip,
+                hostname=ts_status.hostname,
+                dns_name=ts_status.dns_name,
+            )
+        except Exception:  # noqa: BLE001 - diagnostics must not fail on a probe
+            tailscale = None
+
         supervisor_runners = self._collect_runner_supervisor_diagnostics()
         placements = self._placement_diagnostics()
         resources = self._resource_diagnostics()
@@ -4697,6 +4710,7 @@ class API:
             supervisor_runners=supervisor_runners,
             placements=placements,
             warnings=sorted(warnings),
+            tailscale=tailscale,
         )
 
     @staticmethod
