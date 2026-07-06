@@ -18,15 +18,16 @@ internals all work from a phone browser.
 
 ## Opening the dashboard
 
-Every Skulk node serves the dashboard. From a phone on the same network as
-any node:
+Every Skulk node with the built dashboard assets serves the dashboard (a
+headless node without them serves only the API). From a phone on the same
+network as a dashboard-serving node:
 
 ```
 http://<node-address>:52415
 ```
 
-Any node works, not just the master. The dashboard talks to the whole
-cluster through whichever node serves it.
+It does not need to be the master. The dashboard talks to the whole cluster
+through whichever node serves it.
 
 ### From outside the local network
 

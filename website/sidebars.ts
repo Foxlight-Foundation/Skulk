@@ -32,6 +32,7 @@ const sidebars: SidebarsConfig = {
           collapsed: false,
           items: ["tailscale", "tailscale-clustering"],
         },
+        "mobile-dashboard",
         "model-store",
         "kv-cache-backends",
         "tracing",
