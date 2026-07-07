@@ -37,7 +37,7 @@ def _card(
     storage_gb: float,
     *,
     kv_heads: int | None = None,
-    n_layers: int = 1,
+    n_layers: int = 32,
     context_length: int = 0,
     gguf_file: str | None = None,
 ) -> ModelCard:
@@ -179,6 +179,43 @@ def test_heterogeneous_pipeline_split_weighs_by_usable_not_raw_available():
 
     assert len(filtered_cycles) == 1, diagnostics.rejection_reasons
     assert diagnostics.rejection_reasons == []
+
+
+def test_pipeline_memory_filter_uses_integer_layer_allocation():
+    """A fractional fit estimate must not admit a rounded-up shard.
+
+    With three layers on two equal nodes, the continuous estimate gives each
+    node 1.5 layers and fits. The actual placement must assign 2 layers to one
+    node and 1 to the other, so the 2-layer shard's padded footprint is what the
+    worker will load and what the master must admit against.
+    """
+    node_a = NodeId()
+    node_b = NodeId()
+    topology = Topology()
+    topology.add_node(node_a)
+    topology.add_node(node_b)
+    topology.add_connection(
+        Connection(source=node_a, sink=node_b, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=node_b, sink=node_a, edge=create_socket_connection(2))
+    )
+    node_memory = {
+        node_a: create_node_memory(
+            Memory.from_gb(7).in_bytes, ram_total=Memory.from_gb(32).in_bytes
+        ),
+        node_b: create_node_memory(
+            Memory.from_gb(7).in_bytes, ram_total=Memory.from_gb(32).in_bytes
+        ),
+    }
+    cycles = [cycle for cycle in topology.get_cycles() if len(cycle) == 2]
+
+    filtered_cycles, diagnostics = filter_cycles_by_memory(
+        cycles, node_memory, _card(9, n_layers=3), sharding=Sharding.Pipeline
+    )
+
+    assert filtered_cycles == []
+    assert "needs ~8.0GB" in diagnostics.rejection_reasons[0]
 
 
 def test_filter_multiple_cycles_by_memory():

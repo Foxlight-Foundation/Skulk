@@ -187,7 +187,7 @@ def usable_vram_by_node(
 def _per_node_required_memory(
     cycle: Cycle,
     node_memory: Mapping[NodeId, MemoryUsage],
-    required_memory: Memory,
+    model_card: ModelCard,
     sharding: Sharding,
     node_vram: Mapping[NodeId, Memory] | None = None,
 ) -> dict[NodeId, Memory]:
@@ -195,13 +195,11 @@ def _per_node_required_memory(
 
     Tensor parallelism splits the weights evenly across ranks, so every node
     carries ``required_memory / len(cycle)`` regardless of its capacity.
-    Pipeline parallelism allocates layers proportionally to each node's
-    usable memory (see ``allocate_layers_proportionally``), so a node's
-    share scales with its fraction of the cycle's total usable memory.
-    The continuous fraction is an estimate of the integer layer allocation:
-    the two can differ by up to one layer per node (a few percent of the
-    weights on realistic layer counts), which sits comfortably inside the
-    ``memory_overhead_factor`` margin applied on top.
+    Pipeline parallelism allocates integer layer counts proportionally to each
+    node's usable memory (see ``allocate_layers_proportionally``), so this
+    returns the exact post-rounding weight share the worker will be asked to
+    load. A fractional estimate can pass a borderline heterogeneous cycle that
+    later fails the worker's local guard once one node receives an extra layer.
 
     Both the split here and the per-node admission below weigh by
     ``_node_usable_memory`` (capped at the Metal working-set ceiling), not raw
@@ -212,27 +210,28 @@ def _per_node_required_memory(
     the heterogeneous clusters this check is meant to support.
     """
     node_vram = node_vram or {}
+    required_memory = model_card.storage_size
     if sharding == Sharding.Tensor:
         even_share = required_memory / len(cycle.node_ids)
         return {node_id: even_share for node_id in cycle.node_ids}
-    total_usable = sum(
-        (
-            _node_usable_memory(node_memory[node_id], node_vram.get(node_id))
-            for node_id in cycle.node_ids
-        ),
-        start=Memory(),
-    )
+    node_usable = {
+        node_id: _node_usable_memory(node_memory[node_id], node_vram.get(node_id))
+        for node_id in cycle.node_ids
+    }
+    total_usable = sum(node_usable.values(), start=Memory())
     if total_usable.in_bytes == 0:
         # Degenerate: no node reports any memory; assign everything everywhere
         # so the fit check below rejects the cycle with a concrete reason.
         return {node_id: required_memory for node_id in cycle.node_ids}
+    layer_allocations = allocate_layers_proportionally(
+        total_layers=model_card.n_layers,
+        memory_fractions=[
+            node_usable[node_id] / total_usable for node_id in cycle.node_ids
+        ],
+    )
     return {
-        node_id: required_memory
-        * (
-            _node_usable_memory(node_memory[node_id], node_vram.get(node_id))
-            / total_usable
-        )
-        for node_id in cycle.node_ids
+        node_id: (required_memory * layer_allocations[index]) // model_card.n_layers
+        for index, node_id in enumerate(cycle.node_ids)
     }
 
 
@@ -310,7 +309,7 @@ def filter_cycles_by_memory(
             continue
 
         node_shares = _per_node_required_memory(
-            cycle, node_memory, required_memory, sharding, node_vram
+            cycle, node_memory, model_card, sharding, node_vram
         )
         # GGUF runs on the lighter llama.cpp C++ runtime, so its weight overhead
         # is smaller than MLX's; use the engine-aware factor for the fit decision.
