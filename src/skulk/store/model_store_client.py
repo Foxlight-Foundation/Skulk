@@ -93,8 +93,9 @@ if TYPE_CHECKING:
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB per read/write chunk
 _CONNECT_TIMEOUT = 10.0  # seconds — abort if store host unreachable
 _READ_TIMEOUT = 120.0  # seconds — abort if no data for 2 minutes
-_STORE_HTTP_RETRY_ATTEMPTS = 6
+_STORE_HTTP_RETRY_ATTEMPTS = 12
 _STORE_HTTP_RETRY_BASE_SECONDS = 0.5
+_STORE_HTTP_RETRY_MAX_DELAY_SECONDS = 8.0
 _T = TypeVar("_T")
 
 
@@ -128,14 +129,23 @@ async def _retry_store_http(
     *,
     description: str,
 ) -> _T:
-    """Retry transient store HTTP transport failures with exponential backoff."""
+    """Retry transient store HTTP transport failures with capped backoff.
+
+    The model store sits behind normal node networking, so route flaps can last
+    longer than a single TCP connect timeout during cluster churn or macOS
+    interface changes. Keep retrying for roughly a minute of no-route failures
+    before surfacing a terminal download failure.
+    """
     for attempt in range(1, _STORE_HTTP_RETRY_ATTEMPTS + 1):
         try:
             return await operation()
         except (aiohttp.ClientError, TimeoutError, asyncio.TimeoutError) as error:
             if attempt == _STORE_HTTP_RETRY_ATTEMPTS:
                 raise
-            delay = _STORE_HTTP_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+            delay = min(
+                _STORE_HTTP_RETRY_BASE_SECONDS * (2 ** (attempt - 1)),
+                _STORE_HTTP_RETRY_MAX_DELAY_SECONDS,
+            )
             logger.warning(
                 f"ModelStoreClient: {description} failed on attempt "
                 f"{attempt}/{_STORE_HTTP_RETRY_ATTEMPTS}: {error}; "

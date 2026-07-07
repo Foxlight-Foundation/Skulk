@@ -73,6 +73,35 @@ async def _no_sleep(_delay: float) -> None:
 
 
 @pytest.mark.anyio
+async def test_store_http_retry_covers_minute_scale_route_flaps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    async def flaky_operation() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts < model_store_client._STORE_HTTP_RETRY_ATTEMPTS:
+            raise aiohttp.ClientError("route temporarily unavailable")
+        return "ok"
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(model_store_client.asyncio, "sleep", record_sleep)
+
+    result = await model_store_client._retry_store_http(
+        flaky_operation,
+        description="availability probe for org/model",
+    )
+
+    assert result == "ok"
+    assert attempts == model_store_client._STORE_HTTP_RETRY_ATTEMPTS
+    assert delays == [0.5, 1.0, 2.0, 4.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0]
+
+
+@pytest.mark.anyio
 async def test_store_file_download_retries_and_resumes_partial(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
