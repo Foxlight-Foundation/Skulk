@@ -41,6 +41,7 @@ _BUILTIN_CARD_DIRS = [
     Path(RESOURCES_DIR) / "inference_model_cards",
     Path(RESOURCES_DIR) / "image_model_cards",
     Path(RESOURCES_DIR) / "embedding_model_cards",
+    Path(RESOURCES_DIR) / "speech_model_cards",
 ]
 
 _card_cache: dict[ModelId, "ModelCard"] = {}
@@ -104,10 +105,46 @@ async def get_model_cards() -> list["ModelCard"]:
 
 
 class ModelTask(str, Enum):
+    """Task families a model card can declare as servable."""
+
     TextGeneration = "TextGeneration"
     TextToImage = "TextToImage"
     ImageToImage = "ImageToImage"
     TextEmbedding = "TextEmbedding"
+    TextToSpeech = "TextToSpeech"
+    SpeechToText = "SpeechToText"
+    SpeechTranslation = "SpeechTranslation"
+
+
+_SPEECH_MODEL_TASKS: Final[frozenset[ModelTask]] = frozenset(
+    {
+        ModelTask.TextToSpeech,
+        ModelTask.SpeechToText,
+        ModelTask.SpeechTranslation,
+    }
+)
+
+
+class AudioCardKind(str, Enum):
+    """Speech model kind declared by a model card's ``[audio]`` section."""
+
+    TextToSpeech = "tts"
+    SpeechToText = "stt"
+
+
+class AudioResponseFormat(str, Enum):
+    """Encoded audio response formats supported by the speech serving API."""
+
+    Mp3 = "mp3"
+    Wav = "wav"
+    Flac = "flac"
+    Ogg = "ogg"
+    Opus = "opus"
+
+
+def card_serves_speech(card: "ModelCard") -> bool:
+    """Return whether the card declares a speech serving workload."""
+    return card.audio is not None or any(task in _SPEECH_MODEL_TASKS for task in card.tasks)
 
 
 class ComponentInfo(CamelCaseModel):
@@ -262,6 +299,96 @@ class ModalitiesCardConfig(CamelCaseModel):
     """Whether the model accepts audio input."""
     supports_native_multimodal: bool | None = None
     """Whether the model natively interleaves modalities (vs. a bolt-on adapter)."""
+
+
+class AudioCardConfig(CamelCaseModel):
+    """Optional speech-specific capability declarations for a model card."""
+
+    kind: AudioCardKind | None = None
+    """Speech serving kind: ``tts`` for text-to-speech or ``stt`` for speech-to-text."""
+    default_response_format: AudioResponseFormat | None = None
+    """Default encoded audio response format for TTS requests."""
+    response_formats: tuple[AudioResponseFormat, ...] = ()
+    """Encoded audio formats this model can produce for TTS requests."""
+    supports_streaming: bool | None = None
+    """Whether the model can stream partial speech/transcription output."""
+    supports_realtime: bool | None = None
+    """Whether the model exposes a realtime session interface."""
+    supports_voice_listing: bool | None = None
+    """Whether the model can enumerate voices through a voice-listing API."""
+    supports_reference_audio: bool | None = None
+    """Whether the model accepts managed reference audio for voice conditioning."""
+    supports_translation: bool | None = None
+    """Whether the model can translate speech instead of only transcribing it."""
+    sample_rates: tuple[PositiveInt, ...] = ()
+    """Supported output or input sample rates in hertz."""
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def _validate_kind(cls, value: str | AudioCardKind | None) -> AudioCardKind | None:
+        if value is None or isinstance(value, AudioCardKind):
+            return value
+        return AudioCardKind(value)
+
+    @field_validator("default_response_format", mode="before")
+    @classmethod
+    def _validate_default_response_format(
+        cls, value: str | AudioResponseFormat | None
+    ) -> AudioResponseFormat | None:
+        if value is None or isinstance(value, AudioResponseFormat):
+            return value
+        return AudioResponseFormat(value)
+
+    @field_validator("response_formats", mode="before")
+    @classmethod
+    def _validate_response_formats(
+        cls, value: object
+    ) -> tuple[AudioResponseFormat, ...]:
+        if value is None:
+            return ()
+        if isinstance(value, (str, AudioResponseFormat)):
+            return (
+                value
+                if isinstance(value, AudioResponseFormat)
+                else AudioResponseFormat(value),
+            )
+        if not isinstance(value, Iterable):
+            raise ValueError("response_formats must be a list of audio formats")
+        return tuple(
+            item if isinstance(item, AudioResponseFormat) else AudioResponseFormat(item)
+            for item in cast("Iterable[str | AudioResponseFormat]", value)
+        )
+
+    @field_serializer("response_formats")
+    def _serialize_response_formats(
+        self, value: tuple[AudioResponseFormat, ...]
+    ) -> list[str]:
+        return [item.value for item in value]
+
+    @field_validator("sample_rates", mode="before")
+    @classmethod
+    def _coerce_sample_rates(cls, value: object) -> tuple[int, ...]:
+        if value is None:
+            return ()
+        if not isinstance(value, Iterable) or isinstance(value, (str, bytes)):
+            raise ValueError("sample_rates must be a list of positive integers")
+        return tuple(cast("Iterable[int]", value))
+
+    @field_serializer("sample_rates")
+    def _serialize_sample_rates(self, value: tuple[PositiveInt, ...]) -> list[int]:
+        return list(value)
+
+    @model_validator(mode="after")
+    def _validate_default_format_in_supported_formats(self) -> "AudioCardConfig":
+        if (
+            self.default_response_format is not None
+            and self.response_formats
+            and self.default_response_format not in self.response_formats
+        ):
+            raise ValueError(
+                "default_response_format must be included in response_formats"
+            )
+        return self
 
 
 class ToolingCardConfig(CamelCaseModel):
@@ -552,7 +679,8 @@ class ModelCard(CamelCaseModel):
     when unknown/not applicable."""
     tasks: list[ModelTask]
     """The task types this model serves (``TextGeneration``, ``TextEmbedding``,
-    ``TextToImage``, ``ImageToImage``); selects which runner handles it."""
+    ``TextToImage``, ``ImageToImage``, ``TextToSpeech``, ``SpeechToText``,
+    ``SpeechTranslation``); selects which runner handles it."""
     components: list[ComponentInfo] | None = None
     """For multi-component models (e.g. a diffusion stack), the per-component
     weight layout. ``None`` for a single-weights model."""
@@ -594,6 +722,10 @@ class ModelCard(CamelCaseModel):
     modalities: ModalitiesCardConfig | None = None
     """Optional extra-modality flags (audio input, native multimodal); ``None``
     falls back to family defaults."""
+    audio: AudioCardConfig | None = None
+    """Optional speech-serving configuration (TTS/STT kind, audio formats,
+    streaming/realtime support, voices, reference audio, translation, sample
+    rates); ``None`` for non-speech models."""
     tooling: ToolingCardConfig | None = None
     """Optional tool-calling configuration (support, call format, builtin tools);
     ``None`` falls back to family defaults."""

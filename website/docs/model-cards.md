@@ -78,7 +78,7 @@ node in a cluster must run the same Skulk version.
 - `supports_tensor`
   - whether tensor-style placement is allowed (GGUF/llama.cpp cards set this `false`)
 - `tasks`
-  - supported task families such as `TextGeneration`, `TextEmbedding`, or image tasks
+  - supported task families such as `TextGeneration`, `TextEmbedding`, image tasks, `TextToSpeech`, `SpeechToText`, or `SpeechTranslation`
 - `trust_remote_code`
   - whether the loader may enable remote-code behavior for this model
 - `uses_cfg`
@@ -95,7 +95,7 @@ node in a cluster must run the same Skulk version.
 - `context_length`
   - advertised context length if known
 - `capabilities`
-  - coarse capability list such as `text`, `vision`, `thinking`, `embedding`
+  - coarse capability list such as `text`, `vision`, `thinking`, `embedding`, `tts`, or `stt`
 
 These coarse capabilities remain useful for browsing, badges, and basic compatibility, but they are not expressive enough for model-specific runtime behavior on their own.
 
@@ -170,6 +170,29 @@ Declares refined modality support:
   - whether the model supports audio input
 - `supports_native_multimodal`
   - whether the model uses a native multimodal path rather than generic text-only prompting
+
+### `[audio]`
+
+Declares speech serving metadata for TTS and STT models:
+
+- `kind`
+  - `tts` for text-to-speech or `stt` for speech-to-text
+- `default_response_format`
+  - default encoded audio format for TTS, such as `mp3`
+- `response_formats`
+  - encoded audio formats the model can produce, such as `mp3`, `wav`, `flac`, `ogg`, or `opus`
+- `supports_streaming`
+  - whether the model can stream partial speech or transcription output
+- `supports_realtime`
+  - whether the model exposes a realtime audio session interface
+- `supports_voice_listing`
+  - whether voices can be enumerated by the serving API
+- `supports_reference_audio`
+  - whether managed reference audio can condition the voice
+- `supports_translation`
+  - whether speech translation is supported
+- `sample_rates`
+  - supported input or output sample rates in hertz
 
 ### `[tooling]`
 
@@ -317,6 +340,35 @@ output_parser = "gemma4"
 
 The card stays declarative. Skulk still resolves it into a normalized runtime
 profile before execution code consumes it.
+
+Speech cards use the same pattern:
+
+```toml
+model_id = "custom/kokoro-tts"
+n_layers = 1
+hidden_size = 1
+supports_tensor = false
+tasks = ["TextToSpeech"]
+family = "kokoro"
+capabilities = ["tts"]
+
+[storage_size]
+in_bytes = 1073741824
+
+[placement]
+compatible_backends = ["mlx_audio", "mlx_audio-metal"]
+backend_preference = ["mlx_audio-metal", "mlx_audio"]
+
+[audio]
+kind = "tts"
+default_response_format = "mp3"
+response_formats = ["mp3", "wav"]
+supports_streaming = true
+supports_realtime = false
+supports_voice_listing = true
+supports_reference_audio = false
+sample_rates = [24000]
+```
 
 ## When to Extend a Card
 

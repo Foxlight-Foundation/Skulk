@@ -3,6 +3,9 @@ from skulk.shared.models.capabilities import (
     resolve_model_capability_profile,
 )
 from skulk.shared.models.model_cards import (
+    AudioCardConfig,
+    AudioCardKind,
+    AudioResponseFormat,
     BuiltinToolType,
     ModalitiesCardConfig,
     ModelCard,
@@ -72,6 +75,71 @@ def test_resolve_model_capability_profile_uses_extended_model_card_fields() -> N
     assert profile.tool_call_format == ToolCallFormat.Gemma4
     assert profile.prompt_renderer == PromptRendererType.Gemma4
     assert profile.output_parser == OutputParserType.Gemma4
+
+
+def test_resolve_model_capability_profile_exposes_tts_audio_metadata() -> None:
+    card = ModelCard(
+        model_id=ModelId("mlx-community/kokoro-test"),
+        storage_size=Memory.from_mb(100),
+        n_layers=10,
+        hidden_size=1024,
+        supports_tensor=False,
+        tasks=[ModelTask.TextToSpeech],
+        family="kokoro",
+        capabilities=["tts"],
+        audio=AudioCardConfig(
+            kind=AudioCardKind.TextToSpeech,
+            default_response_format=AudioResponseFormat.Mp3,
+            response_formats=(AudioResponseFormat.Mp3, AudioResponseFormat.Wav),
+            supports_streaming=True,
+            supports_realtime=True,
+            supports_voice_listing=True,
+            sample_rates=(24000,),
+        ),
+    )
+
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+
+    assert profile.supports_speech_synthesis is True
+    assert profile.supports_transcription is False
+    assert profile.supports_speech_translation is False
+    assert profile.supports_audio_output is True
+    assert profile.supports_audio_input is False
+    assert profile.supports_realtime_audio is True
+    assert profile.default_audio_response_format == AudioResponseFormat.Mp3
+    assert profile.audio_response_formats == (
+        AudioResponseFormat.Mp3,
+        AudioResponseFormat.Wav,
+    )
+
+
+def test_resolve_model_capability_profile_exposes_stt_and_translation() -> None:
+    card = ModelCard(
+        model_id=ModelId("mlx-community/whisper-test"),
+        storage_size=Memory.from_mb(100),
+        n_layers=10,
+        hidden_size=1024,
+        supports_tensor=False,
+        tasks=[ModelTask.SpeechToText],
+        family="whisper",
+        capabilities=["stt"],
+        modalities=ModalitiesCardConfig(supports_audio_input=False),
+        audio=AudioCardConfig(
+            kind=AudioCardKind.SpeechToText,
+            supports_translation=True,
+            supports_realtime=False,
+            sample_rates=(16000,),
+        ),
+    )
+
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+
+    assert profile.supports_speech_synthesis is False
+    assert profile.supports_transcription is True
+    assert profile.supports_speech_translation is True
+    assert profile.supports_audio_input is True
+    assert profile.supports_audio_output is False
+    assert profile.supports_realtime_audio is False
 
 
 def test_resolve_model_capability_profile_keeps_gemma4_tool_fallback() -> None:

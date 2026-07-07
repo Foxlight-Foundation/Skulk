@@ -41,7 +41,15 @@ export interface ModelCardInfo {
     supportsThinkingBudget?: boolean;
     supportsImageInput?: boolean;
     supportsAudioInput?: boolean;
+    supportsSpeechSynthesis?: boolean;
+    supportsTranscription?: boolean;
+    supportsSpeechTranslation?: boolean;
+    supportsAudioOutput?: boolean;
+    supportsRealtimeAudio?: boolean;
+    defaultAudioResponseFormat?: string;
+    audioResponseFormats?: string[];
     supportsToolCalling?: boolean;
+    builtinTools?: string[];
     thinkingFormat?: string;
     promptRenderer?: string;
     outputParser?: string;
@@ -322,6 +330,8 @@ function buildTagColors(theme: Theme): Record<string, { color: string; bg: strin
     vision: { color: theme.colors.warning, bg: theme.colors.warningBg, border: theme.colors.warningBg },
     tensor: { color: theme.colors.healthy, bg: theme.colors.accentBg, border: theme.colors.accentBg },
     embedding: { color: '#f472b6', bg: 'rgba(244, 114, 182, 0.1)', border: 'rgba(244, 114, 182, 0.3)' },
+    tts: { color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.1)', border: 'rgba(56, 189, 248, 0.3)' },
+    stt: { color: '#34d399', bg: 'rgba(52, 211, 153, 0.1)', border: 'rgba(52, 211, 153, 0.3)' },
   };
 }
 
@@ -604,6 +614,14 @@ function ModelInfoContent({ entry, card }: { entry: StoreRegistryEntry; card?: M
             <span>{resolved.supportsImageInput ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
             <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.audioInput', 'Audio input')}</span>
             <span>{resolved.supportsAudioInput ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.speechSynthesis', 'Speech synthesis')}</span>
+            <span>{resolved.supportsSpeechSynthesis ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.transcription', 'Transcription')}</span>
+            <span>{resolved.supportsTranscription ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.audioOutput', 'Audio output')}</span>
+            <span>{resolved.supportsAudioOutput ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.realtimeAudio', 'Realtime audio')}</span>
+            <span>{resolved.supportsRealtimeAudio ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
             <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.reasoningFormat', 'Reasoning format')}</span>
             <span>{resolved.thinkingFormat ?? t('common.none', 'none')}</span>
           </>

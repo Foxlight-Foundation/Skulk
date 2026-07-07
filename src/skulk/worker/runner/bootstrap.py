@@ -403,6 +403,7 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
         probe_node_backends,
         resolve_node_engine,
     )
+    from skulk.shared.models.model_cards import card_serves_speech
 
     shard = bound_instance.bound_shard
     if shard.resolved_backend is not None:
@@ -417,6 +418,7 @@ def _resolve_text_engine(bound_instance: BoundInstance) -> str | None:
         platform_compatible_backends(
             placement.compatible_backends,
             card_serves_vision=shard.model_card.vision is not None,
+            card_serves_speech=card_serves_speech(shard.model_card),
         ),
         placement.backend_preference,
         probe_node_backends(),
@@ -505,6 +507,12 @@ def entrypoint(
                 context_token_limit=context_token_limit,
             )
             runner.main()
+        elif _resolve_text_engine(bound_instance) == "mlx_audio":
+            raise RuntimeError(
+                "mlx_audio backend metadata is available, but the speech runner "
+                "is not implemented yet. TTS/STT serving lands in the speech "
+                "serving Phase 1/2 runner work."
+            )
         elif _resolve_text_engine(bound_instance) == "llama_cpp":
             # Heterogeneous (non-MLX) text generation via in-process llama.cpp.
             # Selected when the model card's compatible backends resolve to the

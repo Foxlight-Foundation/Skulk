@@ -39,7 +39,7 @@ def _is_executable_file(path: str) -> bool:
     """Whether ``path`` names an existing executable file."""
     return os.path.isfile(path) and os.access(path, os.X_OK)
 
-EngineType = Literal["mlx", "llama_cpp", "llama_server"]
+EngineType = Literal["mlx", "mlx_audio", "llama_cpp", "llama_server"]
 """Inference runtime that loads and runs a model; selects the worker runner.
 
 ``llama_server`` is a *served-backend* engine: instead of loading the model
@@ -49,6 +49,11 @@ to reach llama.cpp's native multi-token-prediction speculative decoding
 (``--spec-type draft-mtp``), whose orchestration lives in the server application
 rather than ``libllama`` / the Python binding. It coexists with the in-process
 ``llama_cpp`` engine and is selected per model by the card's ``compatible_backends``.
+
+``mlx_audio`` is the single-node speech engine backed by the upstream
+``mlx-audio`` package. It is kept separate from ``mlx`` because TTS/STT model
+loading, generation, and future realtime session contracts are not the same as
+the text/vision MLX runner.
 """
 
 ComputeBackend = Literal["metal", "vulkan", "rocm", "cuda", "cpu"]
@@ -56,7 +61,12 @@ ComputeBackend = Literal["metal", "vulkan", "rocm", "cuda", "cpu"]
 
 # Explicit typed tuples (rather than typing.get_args, which erases to Any) so the
 # values stay narrowed to their Literal types where they are consumed.
-_ENGINES: Final[tuple[EngineType, ...]] = ("mlx", "llama_cpp", "llama_server")
+_ENGINES: Final[tuple[EngineType, ...]] = (
+    "mlx",
+    "mlx_audio",
+    "llama_cpp",
+    "llama_server",
+)
 _COMPUTE_BACKENDS: Final[tuple[ComputeBackend, ...]] = (
     "metal",
     "vulkan",
@@ -170,36 +180,49 @@ def engine_supports_multi_node(engine: EngineType) -> bool:
 _VISION_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset(
     {"mlx", "llama_cpp"}
 )
+_SPEECH_SERVING_ENGINES: Final[frozenset[EngineType]] = frozenset({"mlx_audio"})
 
 
 def platform_compatible_backends(
-    compatible_backends: frozenset[str], *, card_serves_vision: bool
+    compatible_backends: frozenset[str],
+    *,
+    card_serves_vision: bool,
+    card_serves_speech: bool = False,
 ) -> frozenset[str]:
     """Filter a card's declared backends down to what this platform can serve.
 
     The card's ``compatible_backends`` is MODEL truth (which engines the model's
     artifacts run on); this helper subtracts current PLATFORM limitations (which
     of our runners can exploit the card's declared capabilities) so the two are
-    never conflated on the card itself. Today the only platform gate is vision:
-    a card with a ``[vision]`` section is kept off engines whose runner cannot
-    load its projector, so a placement never silently degrades a capability the
-    card advertises. Placement and the worker's engine resolution both apply
-    this filter, keeping master and worker in agreement.
+    never conflated on the card itself. Today the platform gates are vision
+    and speech: a card with a ``[vision]`` section is kept off engines whose
+    runner cannot load its projector, and a TTS/STT card is kept off non-speech
+    engines until the ``mlx_audio`` runner owns that contract. Placement and the
+    worker's engine resolution both apply this filter, keeping master and
+    worker in agreement.
 
     Args:
         compatible_backends: the card's declared backend tags.
         card_serves_vision: whether the card declares a vision capability.
+        card_serves_speech: whether the card declares a speech capability.
 
     Returns:
         The subset of tags whose engine can serve everything the card declares.
     """
-    if not card_serves_vision:
-        return compatible_backends
-    return frozenset(
-        tag
-        for tag in compatible_backends
-        if (engine := engine_of(tag)) is None or engine in _VISION_SERVING_ENGINES
-    )
+    filtered = compatible_backends
+    if card_serves_vision:
+        filtered = frozenset(
+            tag
+            for tag in filtered
+            if (engine := engine_of(tag)) is None or engine in _VISION_SERVING_ENGINES
+        )
+    if card_serves_speech:
+        filtered = frozenset(
+            tag
+            for tag in filtered
+            if (engine := engine_of(tag)) is None or engine in _SPEECH_SERVING_ENGINES
+        )
+    return filtered
 
 
 def resolve_node_backend(
@@ -366,6 +389,22 @@ def _probe_served_backends() -> frozenset[str]:
     return frozenset(tags)
 
 
+def _probe_mlx_audio_backends() -> frozenset[str]:
+    """Probe whether this macOS node can serve speech models via ``mlx_audio``.
+
+    Returns the bare ``mlx_audio`` tag plus ``mlx_audio-metal`` only when the
+    upstream ``mlx_audio`` package imports successfully on Darwin. Other
+    platforms advertise nothing until a non-Metal speech engine is implemented.
+    """
+    if sys.platform != "darwin":
+        return frozenset()
+    try:
+        import mlx_audio  # noqa: F401  # pyright: ignore[reportMissingTypeStubs, reportUnusedImport]
+    except ImportError:
+        return frozenset()
+    return frozenset({"mlx_audio", make_backend_tag("mlx_audio", "metal")})
+
+
 def probe_node_backends() -> frozenset[str]:
     """Probe the backend tags this node can actually serve.
 
@@ -373,12 +412,15 @@ def probe_node_backends() -> frozenset[str]:
     is kept for backward compatibility with cards written against the original
     ``{"mlx"}`` vocabulary). Any node with an importable ``llama_cpp`` adds its
     llama.cpp tags; a node with ``SKULK_LLAMA_SERVER_BIN`` set adds its
-    ``llama_server`` tags. A bare Linux node with none advertises an empty set and
-    is therefore not a placement candidate, which is the pre-existing behavior.
+    ``llama_server`` tags. A macOS node with importable ``mlx_audio`` adds
+    ``{"mlx_audio", "mlx_audio-metal"}`` for single-node speech models. A bare
+    Linux node with none advertises an empty set and is therefore not a placement
+    candidate, which is the pre-existing behavior.
     """
     tags: set[str] = set()
     if sys.platform == "darwin":
         tags |= {"mlx", make_backend_tag("mlx", "metal")}
     tags |= _probe_llama_cpp_backends()
     tags |= _probe_served_backends()
+    tags |= _probe_mlx_audio_backends()
     return frozenset(tags)

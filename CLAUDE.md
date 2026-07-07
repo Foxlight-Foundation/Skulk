@@ -112,6 +112,10 @@ A model card's `placement.compatible_backends` selects which engine serves it
 (`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):
 - **`mlx`** (`worker/engines/mlx/`): in-process MLX on Apple Silicon; owns the
   generation loop, the multi-node ring, and MTP/speculative decoding.
+- **`mlx_audio`**: single-node speech backend vocabulary for upstream
+  `mlx-audio` TTS/STT models. Phase 0 probes and advertises `mlx_audio` /
+  `mlx_audio-metal` when `mlx_audio` imports on macOS, but the worker bootstrap
+  fails dispatch clearly until the speech runner lands.
 - **`llama_cpp`** (`worker/runner/llama_cpp/`): in-process `llama-cpp-python` for
   GGUF on GPU/Linux nodes (Vulkan/ROCm/CUDA). Single-node.
 - **`llama_server`** (`worker/runner/llama_server/`): served-backend engine; the
@@ -184,12 +188,12 @@ language list; English is always included.
 
 ### Model Capability System
 Skulk now treats model capability handling as two layers:
-- **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `tooling`, and `runtime` sections for refined model support
+- **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `audio`, `tooling`, and `runtime` sections for refined model support
 - **Resolved capability profiles**: normalized runtime behavior contracts derived from the card plus conservative family defaults
 
-This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, and additive `/v1/models` metadata consumed by the dashboard.
+This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, speech/TTS/STT metadata, and additive `/v1/models` metadata consumed by the dashboard.
 
-**Model truth vs platform truth:** a card's `compatible_backends` declares which engines the model's artifacts run on (MODEL truth) and must never encode a gap in Skulk's own runners (PLATFORM truth). Platform limitations live in code: `platform_compatible_backends` in `src/skulk/shared/backends.py` (currently: the served `llama_server` runner cannot load a vision card's mmproj projector, so vision cards are gated off served engines there). Placement (`_card_platform_backends`) and the worker's fallback probe both apply the filter. When a runner gains a capability, flip the code table; do NOT sweep cards.
+**Model truth vs platform truth:** a card's `compatible_backends` declares which engines the model's artifacts run on (MODEL truth) and must never encode a gap in Skulk's own runners (PLATFORM truth). Platform limitations live in code: `platform_compatible_backends` in `src/skulk/shared/backends.py` (currently: the served `llama_server` runner cannot load a vision card's mmproj projector, so vision cards are gated off served engines there; TTS/STT cards are gated to `mlx_audio`). Placement (`_card_platform_backends`) and the worker's fallback probe both apply the filter. When a runner gains a capability, flip the code table; do NOT sweep cards.
 
 ### Logging & Observability
 Centralized logging uses a three-layer stack:

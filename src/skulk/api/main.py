@@ -67,6 +67,7 @@ from skulk.api.node_health import compute_node_health
 from skulk.api.types import (
     AddCustomModelParams,
     AdvancedImageParams,
+    AudioCapabilitySection,
     BenchChatCompletionRequest,
     BenchChatCompletionResponse,
     BenchImageGenerationResponse,
@@ -178,8 +179,10 @@ from skulk.shared.election import ElectionMessage
 from skulk.shared.logging import InterceptLogger
 from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.model_cards import (
+    AudioCardKind,
     ModelCard,
     ModelId,
+    ModelTask,
     get_card,
     get_model_cards,
 )
@@ -3386,6 +3389,26 @@ class API:
         # Embedding models
         if "embedding" in card.capabilities:
             tags.append("embedding")
+        # Speech models
+        if (
+            "tts" in card.capabilities
+            or ModelTask.TextToSpeech in card.tasks
+            or (
+                card.audio is not None
+                and card.audio.kind == AudioCardKind.TextToSpeech
+            )
+        ):
+            tags.append("tts")
+        if (
+            "stt" in card.capabilities
+            or ModelTask.SpeechToText in card.tasks
+            or ModelTask.SpeechTranslation in card.tasks
+            or (
+                card.audio is not None
+                and card.audio.kind == AudioCardKind.SpeechToText
+            )
+        ):
+            tags.append("stt")
         return tags
 
     @staticmethod
@@ -3417,6 +3440,7 @@ class API:
             context_length=card.context_length,
             reasoning=ReasoningCapabilitySection.from_model_card(card),
             modalities=ModalitiesCapabilitySection.from_model_card(card),
+            audio=AudioCapabilitySection.from_model_card(card),
             tooling=ToolingCapabilitySection.from_model_card(card),
             runtime=RuntimeCapabilitySection.from_model_card(card),
             resolved_capabilities=ResolvedModelCapabilities.from_profile(

@@ -198,6 +198,13 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
               supportsThinkingBudget: m.resolved_capabilities.supports_thinking_budget ?? false,
               supportsImageInput: m.resolved_capabilities.supports_image_input ?? false,
               supportsAudioInput: m.resolved_capabilities.supports_audio_input ?? false,
+              supportsSpeechSynthesis: m.resolved_capabilities.supports_speech_synthesis ?? false,
+              supportsTranscription: m.resolved_capabilities.supports_transcription ?? false,
+              supportsSpeechTranslation: m.resolved_capabilities.supports_speech_translation ?? false,
+              supportsAudioOutput: m.resolved_capabilities.supports_audio_output ?? false,
+              supportsRealtimeAudio: m.resolved_capabilities.supports_realtime_audio ?? false,
+              defaultAudioResponseFormat: m.resolved_capabilities.default_audio_response_format ?? undefined,
+              audioResponseFormats: m.resolved_capabilities.audio_response_formats ?? [],
               supportsToolCalling: m.resolved_capabilities.supports_tool_calling ?? false,
               builtinTools: m.resolved_capabilities.builtin_tools ?? [],
               thinkingFormat: m.resolved_capabilities.thinking_format ?? 'none',
@@ -244,6 +251,8 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
           if ((raw.capabilities as string[] ?? []).includes('vision')) fallbackTags.push('vision');
           if ((raw.supportsTensor ?? raw.supports_tensor) as boolean) fallbackTags.push('tensor');
           if ((raw.capabilities as string[] ?? []).includes('embedding')) fallbackTags.push('embedding');
+          if ((raw.capabilities as string[] ?? []).includes('tts')) fallbackTags.push('tts');
+          if ((raw.capabilities as string[] ?? []).includes('stt')) fallbackTags.push('stt');
           cards[mid] = {
             family: raw.family as string | undefined,
             quantization: raw.quantization as string | undefined,

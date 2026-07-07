@@ -8,9 +8,12 @@ sprinkling optional-field checks throughout the hot path.
 from typing import TYPE_CHECKING
 
 from skulk.shared.models.model_cards import (
+    AudioCardKind,
+    AudioResponseFormat,
     BuiltinToolType,
     ModelCard,
     ModelId,
+    ModelTask,
     OutputParserType,
     PromptRendererType,
     ReasoningFormat,
@@ -36,6 +39,13 @@ class ResolvedCapabilityProfile(FrozenModel):
     thinking_format: ReasoningFormat = ReasoningFormat.None_
     supports_image_input: bool = False
     supports_audio_input: bool = False
+    supports_speech_synthesis: bool = False
+    supports_transcription: bool = False
+    supports_speech_translation: bool = False
+    supports_audio_output: bool = False
+    supports_realtime_audio: bool = False
+    default_audio_response_format: AudioResponseFormat | None = None
+    audio_response_formats: tuple[AudioResponseFormat, ...] = ()
     supports_tool_calling: bool = False
     builtin_tools: tuple[BuiltinToolType, ...] = ()
     tool_call_format: ToolCallFormat = ToolCallFormat.Generic
@@ -174,6 +184,47 @@ def resolve_model_capability_profile(
             )
         )
     )
+    supports_speech_synthesis = bool(
+        card is not None
+        and (
+            ModelTask.TextToSpeech in card.tasks
+            or "tts" in card.capabilities
+            or (
+                card.audio is not None
+                and card.audio.kind == AudioCardKind.TextToSpeech
+            )
+        )
+    )
+    supports_transcription = bool(
+        card is not None
+        and (
+            ModelTask.SpeechToText in card.tasks
+            or "stt" in card.capabilities
+            or (
+                card.audio is not None
+                and card.audio.kind == AudioCardKind.SpeechToText
+            )
+        )
+    )
+    supports_speech_translation = bool(
+        card is not None
+        and (
+            ModelTask.SpeechTranslation in card.tasks
+            or (
+                card.audio is not None
+                and card.audio.supports_translation is True
+            )
+        )
+    )
+    audio_response_formats: tuple[AudioResponseFormat, ...] = ()
+    default_audio_response_format: AudioResponseFormat | None = None
+    supports_realtime_audio = False
+    if card is not None and card.audio is not None:
+        audio_response_formats = card.audio.response_formats
+        default_audio_response_format = card.audio.default_response_format
+        if default_audio_response_format is None and audio_response_formats:
+            default_audio_response_format = audio_response_formats[0]
+        supports_realtime_audio = card.audio.supports_realtime is True
     supports_thinking = bool(
         card is not None
         and ("thinking" in card.capabilities or card.reasoning is not None)
@@ -206,6 +257,14 @@ def resolve_model_capability_profile(
         supports_thinking=supports_thinking,
         supports_thinking_toggle=supports_thinking_toggle,
         supports_image_input=supports_image_input,
+        supports_audio_input=supports_transcription or supports_speech_translation,
+        supports_speech_synthesis=supports_speech_synthesis,
+        supports_transcription=supports_transcription,
+        supports_speech_translation=supports_speech_translation,
+        supports_audio_output=supports_speech_synthesis,
+        supports_realtime_audio=supports_realtime_audio,
+        default_audio_response_format=default_audio_response_format,
+        audio_response_formats=audio_response_formats,
         supports_tool_calling=supports_tool_calling,
         thinking_format=thinking_format,
         supports_native_multimodal=False,
@@ -294,7 +353,11 @@ def resolve_model_capability_profile(
     if card is not None and card.modalities is not None:
         updates = {}
         if card.modalities.supports_audio_input is not None:
-            updates["supports_audio_input"] = card.modalities.supports_audio_input
+            updates["supports_audio_input"] = (
+                card.modalities.supports_audio_input
+                or profile.supports_transcription
+                or profile.supports_speech_translation
+            )
         if card.modalities.supports_native_multimodal is not None:
             updates["supports_native_multimodal"] = (
                 card.modalities.supports_native_multimodal

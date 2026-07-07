@@ -26,13 +26,14 @@ _CARD_DIRS = {
     "inference": Path(RESOURCES_DIR) / "inference_model_cards",
     "image": Path(RESOURCES_DIR) / "image_model_cards",
     "embedding": Path(RESOURCES_DIR) / "embedding_model_cards",
+    "speech": Path(RESOURCES_DIR) / "speech_model_cards",
 }
 
 # Mirrors _ENGINES x _COMPUTE_BACKENDS in skulk.shared.backends. If an engine
 # or compute backend is added there, extend this and the assertions below.
-_VALID_TAGS = frozenset({"mlx", "llama_cpp", "llama_server"}) | frozenset(
+_VALID_TAGS = frozenset({"mlx", "mlx_audio", "llama_cpp", "llama_server"}) | frozenset(
     f"{engine}-{compute}"
-    for engine in ("mlx", "llama_cpp", "llama_server")
+    for engine in ("mlx", "mlx_audio", "llama_cpp", "llama_server")
     for compute in ("metal", "vulkan", "rocm", "cuda", "cpu")
 )
 
@@ -119,6 +120,14 @@ def test_bundled_card_invariants(kind: str, path: Path) -> None:
     if card.vision is not None:
         assert "vision" in card.capabilities, (
             "[vision] section without the 'vision' capability"
+        )
+    if card.audio is not None:
+        assert {"tts", "stt"} & set(card.capabilities), (
+            "[audio] section without a speech capability"
+        )
+        assert "mlx_audio" in engines, (
+            "speech card must list the mlx_audio engine until another speech "
+            "runner exists"
         )
 
     runtime = card.runtime
