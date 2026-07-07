@@ -8,7 +8,7 @@ to verify Skulk is actually using the link.
 
 ## What the link buys (measured, Strix Halo pair, 2026-07)
 
-| Metric | 2.5GbE LAN | USB4 (20G link) |
+| Metric | 2.5GbE LAN | USB4 (Gen3 x2, 40 Gbit/s link) |
 |---|---:|---:|
 | TCP throughput (iperf3) | 2.36 Gbit/s | 9.4 Gbit/s |
 | Ping RTT (avg) | 0.99 ms | 0.72 ms |
@@ -24,9 +24,8 @@ the llama.cpp RPC protocol, not the wire, and is the same on both transports.
 - A USB4/Thunderbolt cable rated for the speed you want. **Cable
   certification decides the negotiated rate**: 40 Gbit/s needs a
   USB4-40Gbps-certified cable (passive, 0.8 m or shorter is the safe
-  choice); a 20 Gbps-rated cable silently negotiates the link down to
-  20 Gbit/s even between 40G-capable ports. Check the negotiated rate after
-  connecting (below).
+  choice); a lesser cable silently negotiates the link down even between
+  40G-capable ports. Check the negotiated rate after connecting (below).
 - `thunderbolt` and `thunderbolt_net` kernel modules (present in stock
   Ubuntu kernels). The `thunderbolt0` interface appears when the two hosts
   establish their XDomain connection; no pairing/authorization step is
@@ -89,7 +88,9 @@ sudo tc qdisc replace dev thunderbolt0 root fq_codel
 ### 3. Verify the link
 
 ```bash
-# Negotiated rate (per direction, per lane; 20.0 Gb/s x2 = a 20G cable):
+# Negotiated rate. tx_speed is PER LANE (kernel Thunderbolt sysfs ABI), so
+# multiply by tx_lanes for the aggregate: 20.0 Gb/s x 2 lanes = a full
+# 40 Gbit/s Gen3 link; 10.0 Gb/s x 2 = Gen2 (20G aggregate, cable-limited).
 cat /sys/bus/thunderbolt/devices/*/tx_speed /sys/bus/thunderbolt/devices/*/tx_lanes
 # Reachability + latency:
 ping -c 5 10.99.0.2
