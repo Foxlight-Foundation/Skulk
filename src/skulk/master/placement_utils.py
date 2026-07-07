@@ -98,7 +98,6 @@ def usable_vram_by_node(
     node_system: Mapping[NodeId, SystemPerformanceProfile],
     node_resources: Mapping[NodeId, NodeResources] | None = None,
     node_memory: Mapping[NodeId, MemoryUsage] | None = None,
-    include_uma_spill: bool = True,
 ) -> dict[NodeId, Memory]:
     """Per-node usable GPU memory for placement, keyed by node.
 
@@ -129,13 +128,14 @@ def usable_vram_by_node(
       (often ~= VRAM), so requiring GTT to cover all of system RAM is what keeps
       it off this path.
 
-    ``include_uma_spill=False`` disables the UMA/GTT addition and returns the
-    working-set-capped VRAM carve for every node. Multi-node RPC placements
-    (#328) admit against this strict figure: measured on the Strix pair,
-    llama.cpp's RPC split allocates from the VRAM carve only (GTT used stays 0
-    with the model resident), so admitting a pooled model against the UMA
-    formula would over-admit and crash llama-server at load. Single-node
-    placements keep the UMA spill (proven: gpt-oss-120b on one Strix).
+    The same figure serves single-node AND multi-node RPC admission. An
+    earlier revision admitted RPC placements against a VRAM-carve-only
+    variant, misreading a spike where llama.cpp's proportional split simply
+    never asked a donor to exceed its carve (``gtt_used`` stayed 0 because
+    the shares happened to fit, not because RPC cannot reach GTT). On a UMA
+    APU the carve is not an allocation boundary; a pooled gpt-oss-120b was
+    refused by the carve figure and then served fine on the same pair once
+    admitted against unified memory.
     """
     node_memory = node_memory or {}
     usable: dict[NodeId, Memory] = {}
@@ -164,8 +164,7 @@ def usable_vram_by_node(
         # discrete GPU (gtt ~= vram < system RAM) on the conservative VRAM-only
         # path.
         if (
-            include_uma_spill
-            and gtt_total is not None
+            gtt_total is not None
             and gtt_total > total
             and memory is not None
             and gtt_total >= memory.ram_total.in_bytes

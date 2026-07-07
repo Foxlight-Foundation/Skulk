@@ -7,6 +7,22 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Fixed
+
+- **Pooled (multi-node) GGUF placement no longer caps unified-memory nodes at
+  their BIOS VRAM carve.** Admission for RPC placements previously sized each
+  node against a VRAM-carve-only figure, which falsely refused pooled models
+  on AMD Strix Halo nodes: the carve is not an allocation boundary on a
+  unified-memory APU (the GPU maps system RAM through GTT), and the figure
+  was further deflated by transient `vram_used` readings. Pooled admission
+  now uses the same UMA-aware usable-GPU figure as single-node placements.
+  Proven live on a Strix Halo pair: a pooled gpt-oss-120b placement,
+  previously refused with the donor capped at "17.7GB (usable GPU VRAM)",
+  loaded 40.6GB on the driver and 22.8GB on the donor and served coherently
+  at 44 tok/s decode. A node in an RPC cycle whose accelerator telemetry has
+  not arrived still surfaces as info-pending rather than falling back to the
+  system-RAM formula.
+
 ## [1.4.1] - 2026-07-06
 
 ### Added

@@ -450,20 +450,14 @@ class Master:
     ) -> tuple[
         Mapping[NodeId, MemoryUsage],
         Mapping[NodeId, Memory],
-        Mapping[NodeId, Memory],
     ]:
-        """Build the (node_memory, node_vram, node_vram_strict) placement inputs
-        with the recently-freed credit applied (#314).
+        """Build the (node_memory, node_vram) placement inputs with the
+        recently-freed credit applied (#314).
 
         Both the gossiped ``ram_available`` and the derived GPU-wireable VRAM lag
         a teardown (telemetry is last-write-wins), so credit both. ``ram_total``
         is left untouched, so context-ceiling math (which reads it) is unchanged.
         The worker's live pre-load guard (#383) still backstops genuine OOM.
-
-        ``node_vram_strict`` is the VRAM-carve-only figure (no UMA/GTT spill),
-        which multi-node llama.cpp RPC placements admit against (#328):
-        llama.cpp's RPC split allocates from the VRAM carve only, so the
-        UMA-inflated figure would over-admit a pooled model.
         """
         credit = self._freed_credit_by_node()
         base_memory = self._telemetry_view.node_memory
@@ -473,13 +467,7 @@ class Master:
                 self._telemetry_view.node_resources,
                 node_memory=base_memory,
             )
-            base_vram_strict = usable_vram_by_node(
-                self._telemetry_view.node_system,
-                self._telemetry_view.node_resources,
-                node_memory=base_memory,
-                include_uma_spill=False,
-            )
-            return base_memory, base_vram, base_vram_strict
+            return base_memory, base_vram
         # Credit the freed bytes onto each node's ram_available, clamped to
         # ram_total so credited availability never exceeds capacity (telemetry
         # may already have partly caught up, or the footprint estimate may be
@@ -510,13 +498,7 @@ class Master:
             self._telemetry_view.node_resources,
             node_memory=memory,
         )
-        vram_strict = usable_vram_by_node(
-            self._telemetry_view.node_system,
-            self._telemetry_view.node_resources,
-            node_memory=memory,
-            include_uma_spill=False,
-        )
-        return memory, vram, vram_strict
+        return memory, vram
 
     def _configure_expected_trace_ranks(
         self, task_id: TaskId, instance_id: InstanceId, *, trace_enabled: bool
@@ -925,12 +907,6 @@ class Master:
                                             self._telemetry_view.node_resources,
                                             node_memory=self._telemetry_view.node_memory,
                                         ),
-                                        node_vram_strict=usable_vram_by_node(
-                                            self._telemetry_view.node_system,
-                                            self._telemetry_view.node_resources,
-                                            node_memory=self._telemetry_view.node_memory,
-                                            include_uma_spill=False,
-                                        ),
                                     )
                                     logger.warning(
                                         "Re-placing "
@@ -981,12 +957,6 @@ class Master:
                                                 self._telemetry_view.node_resources,
                                                 node_memory=self._telemetry_view.node_memory,
                                             ),
-                                            node_vram_strict=usable_vram_by_node(
-                                                self._telemetry_view.node_system,
-                                                self._telemetry_view.node_resources,
-                                                node_memory=self._telemetry_view.node_memory,
-                                                include_uma_spill=False,
-                                            ),
                                         )
                                         for new_id in final_placement:
                                             if new_id not in after_delete:
@@ -1035,7 +1005,7 @@ class Master:
                             # gossip-lagged availability (#314). Discrete-GPU VRAM
                             # (AMD/NVIDIA) so big models admit against VRAM, not
                             # 0.75 x system RAM.
-                            credited_memory, credited_vram, credited_vram_strict = (
+                            credited_memory, credited_vram = (
                                 self._placement_memory_inputs()
                             )
                             placement = place_instance(
@@ -1048,7 +1018,6 @@ class Master:
                                 excluded_nodes=set(command.excluded_nodes),
                                 node_resources=self._telemetry_view.node_resources,
                                 node_vram=credited_vram,
-                                node_vram_strict=credited_vram_strict,
                             )
                             transition_events = get_transition_events(
                                 self.state.instances, placement, self.state.tasks
@@ -1059,7 +1028,7 @@ class Master:
                             # memory credit (#314) so an exact placement right
                             # after a teardown stamps its ceiling against the
                             # real (about-to-be-freed) availability.
-                            credited_memory, credited_vram, _ = (
+                            credited_memory, credited_vram = (
                                 self._placement_memory_inputs()
                             )
                             placement = add_instance_to_placements(
@@ -1287,12 +1256,6 @@ class Master:
                         self._telemetry_view.node_system,
                         self._telemetry_view.node_resources,
                         node_memory=self._telemetry_view.node_memory,
-                    ),
-                    node_vram_strict=usable_vram_by_node(
-                        self._telemetry_view.node_system,
-                        self._telemetry_view.node_resources,
-                        node_memory=self._telemetry_view.node_memory,
-                        include_uma_spill=False,
                     ),
                 )
                 logger.warning(

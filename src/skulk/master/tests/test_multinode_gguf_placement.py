@@ -180,7 +180,7 @@ def test_pooled_gguf_places_rpc_shape_on_amd_pair() -> None:
     }
     node_network = {big: create_node_network(), small: create_node_network()}
     resources = {big: _amd_resources(), small: _amd_resources()}
-    node_vram_strict = {
+    node_vram = {
         big: Memory.from_gb(57.6),
         small: Memory.from_gb(28.8),
     }
@@ -194,8 +194,7 @@ def test_pooled_gguf_places_rpc_shape_on_amd_pair() -> None:
         node_memory,
         node_network,
         node_resources=resources,
-        node_vram=node_vram_strict,
-        node_vram_strict=node_vram_strict,
+        node_vram=node_vram,
     )
     instance = next(iter(placements.values()))
     assert isinstance(instance, LlamaRpcInstance)
@@ -254,7 +253,6 @@ def test_link_local_only_path_fails_placement() -> None:
             node_network,
             node_resources=resources,
             node_vram=node_vram,
-            node_vram_strict=node_vram,
         )
 
 
@@ -283,7 +281,6 @@ def test_missing_node_resources_is_info_pending_for_pooled_request() -> None:
             node_network,
             node_resources=resources,
             node_vram=node_vram,
-            node_vram_strict=node_vram,
         )
 
 
@@ -315,16 +312,15 @@ def test_vision_card_never_pools_on_served_backends() -> None:
             node_network,
             node_resources=resources,
             node_vram=node_vram,
-            node_vram_strict=node_vram,
         )
 
 
-def test_missing_strict_vram_is_info_pending_not_ram_fallback() -> None:
-    """A node in an RPC cycle with no strict-VRAM entry (telemetry warm-up:
+def test_missing_vram_is_info_pending_not_ram_fallback() -> None:
+    """A node in an RPC cycle with no usable-GPU entry (telemetry warm-up:
     NodeResources arrived, node_system's accelerator reading not yet) must
     surface as info-pending, not fall back to system RAM inside the memory
-    filter — RAM fallback would over-admit a pooled model that llama-server
-    then fails to load, and the RPC path bypasses the worker fit guard."""
+    filter — RAM fallback would size the split off the wrong figure, and the
+    RPC path bypasses the worker fit guard."""
     topology, big, small = _amd_pair()
     node_memory = {
         big: create_node_memory(Memory.from_gb(64).in_bytes),
@@ -333,8 +329,8 @@ def test_missing_strict_vram_is_info_pending_not_ram_fallback() -> None:
     }
     node_network = {big: create_node_network(), small: create_node_network()}
     resources = {big: _amd_resources(), small: _amd_resources()}
-    # The small node is missing from the strict map entirely.
-    node_vram_strict = {big: Memory.from_gb(57.6)}
+    # The small node is missing from the usable-GPU map entirely.
+    node_vram = {big: Memory.from_gb(57.6)}
     command = _command(_gguf_card(storage_gb=70.0), min_nodes=2)
     with pytest.raises(PlacementInfoPendingError, match=str(small)):
         place_instance(
@@ -344,8 +340,7 @@ def test_missing_strict_vram_is_info_pending_not_ram_fallback() -> None:
             node_memory,
             node_network,
             node_resources=resources,
-            node_vram={big: Memory.from_gb(57.6), small: Memory.from_gb(28.8)},
-            node_vram_strict=node_vram_strict,
+            node_vram=node_vram,
         )
 
 
@@ -383,7 +378,6 @@ def test_ipv6_only_path_fails_placement() -> None:
             node_network,
             node_resources=resources,
             node_vram=node_vram,
-            node_vram_strict=node_vram,
         )
 
 
@@ -422,7 +416,6 @@ def test_rpc_shards_stamp_llama_server_even_when_llama_cpp_sorts_first() -> None
         node_network,
         node_resources=resources,
         node_vram=node_vram,
-        node_vram_strict=node_vram,
     )
     instance = next(iter(placements.values()))
     assert isinstance(instance, LlamaRpcInstance)
@@ -450,7 +443,6 @@ def test_small_gguf_still_prefers_single_node() -> None:
         node_network,
         node_resources=resources,
         node_vram=node_vram,
-        node_vram_strict=node_vram,
     )
     instance = next(iter(placements.values()))
     assert not isinstance(instance, LlamaRpcInstance)
@@ -479,36 +471,44 @@ def test_excluded_node_is_neither_driver_nor_donor() -> None:
             excluded_nodes={big},
             node_resources=resources,
             node_vram=node_vram,
-            node_vram_strict=node_vram,
         )
 
 
-def test_rpc_admission_uses_strict_vram() -> None:
-    """Pooled admission must use the VRAM-carve-only figure: a pool that only
-    fits with the UMA/GTT spill is rejected (spike-measured: RPC allocations
-    never touch GTT)."""
+def test_rpc_admission_uses_unified_memory_not_vram_carve() -> None:
+    """Pooled admission sizes each node by the UMA-aware usable-GPU figure,
+    not the BIOS VRAM carve. Regression for the live false refusal on the
+    Strix pair (2026-07-06): gpt-oss-120b pooled was rejected with the donor
+    capped at its carve ("can use 17.7GB"), then loaded 40.6G driver /
+    22.8G donor and served at 44 tok/s once admitted against unified memory.
+    The donor's share here (~19GB of a 58.5GB model) exceeds a carve-only
+    figure but fits its unified memory, so the placement must succeed."""
     topology, big, small = _amd_pair()
     node_memory = {
+        # kite4-shaped: 64GB visible system RAM (other half carved to VRAM).
         big: create_node_memory(Memory.from_gb(64).in_bytes),
+        # kite5-shaped: 32GB visible system RAM.
         small: create_node_memory(Memory.from_gb(32).in_bytes),
     }
     node_network = {big: create_node_network(), small: create_node_network()}
     resources = {big: _amd_resources(), small: _amd_resources()}
-    # UMA-inflated view says the pool is huge; the strict carve says it is not.
-    node_vram_uma = {big: Memory.from_gb(150.0), small: Memory.from_gb(40.0)}
-    node_vram_strict = {big: Memory.from_gb(57.6), small: Memory.from_gb(28.8)}
-    command = _command(_gguf_card(storage_gb=120.0))
-    with pytest.raises(PlacementError, match="fits|No candidate cycle"):
-        place_instance(
-            command,
-            topology,
-            {},
-            node_memory,
-            node_network,
-            node_resources=resources,
-            node_vram=node_vram_uma,
-            node_vram_strict=node_vram_strict,
-        )
+    # UMA-aware usable figures (carve + GTT-mapped RAM, as usable_vram_by_node
+    # computes for a Strix APU). A carve-only view (57.6 / 17.7) refuses the
+    # donor's proportional share of a 58.5GB model; unified memory admits it.
+    node_vram = {big: Memory.from_gb(120.0), small: Memory.from_gb(45.0)}
+    command = _command(_gguf_card(storage_gb=58.5), min_nodes=2)
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_resources=resources,
+        node_vram=node_vram,
+    )
+    instance = next(iter(placements.values()))
+    assert isinstance(instance, LlamaRpcInstance)
+    assert instance.driver_node == big
+    assert set(instance.donor_endpoints) == {small}
 
 
 def test_tensor_request_never_lands_on_rpc_cycle() -> None:
@@ -539,7 +539,6 @@ def test_tensor_request_never_lands_on_rpc_cycle() -> None:
             node_network,
             node_resources=resources,
             node_vram=node_vram,
-            node_vram_strict=node_vram,
         )
 
 
@@ -575,5 +574,4 @@ def test_llama_cpp_only_card_stays_single_node() -> None:
             node_network,
             node_resources=resources,
             node_vram=node_vram,
-            node_vram_strict=node_vram,
         )
