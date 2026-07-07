@@ -31,7 +31,11 @@ from skulk.shared.types.commands import PlaceInstance
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.multiaddr import Multiaddr
-from skulk.shared.types.profiling import NodeResources
+from skulk.shared.types.profiling import (
+    NetworkInterfaceInfo,
+    NodeNetworkInfo,
+    NodeResources,
+)
 from skulk.shared.types.topology import Connection, Cycle, SocketConnection
 from skulk.shared.types.worker.instances import InstanceMeta, LlamaRpcInstance
 from skulk.shared.types.worker.shards import (
@@ -218,6 +222,147 @@ def test_pooled_gguf_places_rpc_shape_on_amd_pair() -> None:
     # #330 stamping applies to both roles.
     assert driver_shard.resolved_backend == "llama_server-vulkan"
     assert donor_shard.resolved_backend == "llama_server-vulkan"
+
+
+def _lan_connection(ip_octet: int) -> SocketConnection:
+    """An observed connection on the LAN (ethernet) subnet."""
+    return SocketConnection(
+        sink_multiaddr=Multiaddr(address=f"/ip4/192.168.0.{ip_octet}/tcp/1234"),
+    )
+
+
+def _dual_path_pair() -> tuple[Topology, NodeId, NodeId]:
+    """The kite4+kite5 shape with BOTH paths observed: the 2.5GbE LAN and the
+    USB4/Thunderbolt static-subnet link. This is the fixture that exercises
+    the transport CHOICE; ``_amd_pair`` only ever observes the TB path."""
+    topology = Topology()
+    big = NodeId()
+    small = NodeId()
+    topology.add_node(big)
+    topology.add_node(small)
+    for edge_to_small, edge_to_big in (
+        (_lan_connection(129), _lan_connection(123)),
+        (_routable_connection(2), _routable_connection(1)),
+    ):
+        topology.add_connection(
+            Connection(source=big, sink=small, edge=edge_to_small)
+        )
+        topology.add_connection(
+            Connection(source=small, sink=big, edge=edge_to_big)
+        )
+    return topology, big, small
+
+
+def _dual_path_network(tb_octet: int, lan_octet: int) -> NodeNetworkInfo:
+    """Gossiped interfaces for a node on both the LAN and the TB subnet."""
+    return NodeNetworkInfo(
+        interfaces=[
+            NetworkInterfaceInfo(
+                name="eno1",
+                ip_address=f"192.168.0.{lan_octet}",
+                interface_type="ethernet",
+            ),
+            NetworkInterfaceInfo(
+                name="thunderbolt0",
+                ip_address=f"10.99.0.{tb_octet}",
+                interface_type="thunderbolt",
+            ),
+        ]
+    )
+
+
+def test_rpc_donor_endpoint_prefers_thunderbolt_over_ethernet() -> None:
+    """When BOTH the LAN and the USB4/TB path are observed between driver and
+    donor, the donor endpoint must be stamped on the Thunderbolt address.
+
+    This is the operator guarantee that the pooled tensor path automatically
+    rides the fastest interconnect (proven live on the kite pair 2026-07-06:
+    re-placing pooled gpt-oss-120b after the TB link came up stamped
+    10.99.0.2 unaided, and the donor's 24GB tensor push rode thunderbolt0).
+    The other RPC tests observe only one path, so without this test the
+    LAN-vs-TB CHOICE has no regression coverage.
+    """
+    topology, big, small = _dual_path_pair()
+    node_memory = {
+        big: create_node_memory(Memory.from_gb(64).in_bytes),
+        small: create_node_memory(Memory.from_gb(32).in_bytes),
+    }
+    node_network = {
+        big: _dual_path_network(tb_octet=1, lan_octet=123),
+        small: _dual_path_network(tb_octet=2, lan_octet=129),
+    }
+    resources = {big: _amd_resources(), small: _amd_resources()}
+    node_vram = {big: Memory.from_gb(57.6), small: Memory.from_gb(28.8)}
+    command = _command(_gguf_card(storage_gb=55.0), min_nodes=1)
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_resources=resources,
+        node_vram=node_vram,
+    )
+    instance = next(iter(placements.values()))
+    assert isinstance(instance, LlamaRpcInstance)
+    ip, _, _ = instance.donor_endpoints[small].rpartition(":")
+    assert ip == "10.99.0.2"
+
+
+def test_rpc_donor_endpoint_falls_back_to_ethernet_without_thunderbolt() -> None:
+    """With only the LAN path observed (no TB link), the donor endpoint is the
+    ethernet address: preferring TB must never make LAN-only pairs unplaceable."""
+    topology = Topology()
+    big = NodeId()
+    small = NodeId()
+    topology.add_node(big)
+    topology.add_node(small)
+    topology.add_connection(
+        Connection(source=big, sink=small, edge=_lan_connection(129))
+    )
+    topology.add_connection(
+        Connection(source=small, sink=big, edge=_lan_connection(123))
+    )
+    node_memory = {
+        big: create_node_memory(Memory.from_gb(64).in_bytes),
+        small: create_node_memory(Memory.from_gb(32).in_bytes),
+    }
+    node_network = {
+        big: NodeNetworkInfo(
+            interfaces=[
+                NetworkInterfaceInfo(
+                    name="eno1",
+                    ip_address="192.168.0.123",
+                    interface_type="ethernet",
+                )
+            ]
+        ),
+        small: NodeNetworkInfo(
+            interfaces=[
+                NetworkInterfaceInfo(
+                    name="eno1",
+                    ip_address="192.168.0.129",
+                    interface_type="ethernet",
+                )
+            ]
+        ),
+    }
+    resources = {big: _amd_resources(), small: _amd_resources()}
+    node_vram = {big: Memory.from_gb(57.6), small: Memory.from_gb(28.8)}
+    command = _command(_gguf_card(storage_gb=55.0), min_nodes=1)
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_resources=resources,
+        node_vram=node_vram,
+    )
+    instance = next(iter(placements.values()))
+    assert isinstance(instance, LlamaRpcInstance)
+    ip, _, _ = instance.donor_endpoints[small].rpartition(":")
+    assert ip == "192.168.0.129"
 
 
 def test_link_local_only_path_fails_placement() -> None:
