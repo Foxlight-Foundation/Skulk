@@ -189,6 +189,8 @@ def _per_node_required_memory(
     model_card: ModelCard,
     sharding: Sharding,
     node_vram: Mapping[NodeId, Memory] | None = None,
+    *,
+    exact_pipeline_layers: bool = True,
 ) -> dict[NodeId, Memory]:
     """Estimate the weight bytes each node in the cycle must hold.
 
@@ -199,6 +201,8 @@ def _per_node_required_memory(
     returns the exact post-rounding weight share the worker will be asked to
     load. A fractional estimate can pass a borderline heterogeneous cycle that
     later fails the worker's local guard once one node receives an extra layer.
+    Callers that use ``Sharding.Pipeline`` as a proportional-memory proxy rather
+    than real Skulk layer ranges can set ``exact_pipeline_layers=False``.
 
     Both the split here and the per-node admission below weigh by
     ``_node_usable_memory`` (capped at the Metal working-set ceiling), not raw
@@ -222,6 +226,11 @@ def _per_node_required_memory(
         # Degenerate: no node reports any memory; assign everything everywhere
         # so the fit check below rejects the cycle with a concrete reason.
         return {node_id: required_memory for node_id in cycle.node_ids}
+    if not exact_pipeline_layers:
+        return {
+            node_id: required_memory * (node_usable[node_id] / total_usable)
+            for node_id in cycle.node_ids
+        }
     layer_allocations = allocate_layers_proportionally(
         total_layers=model_card.n_layers,
         memory_fractions=[
@@ -260,6 +269,8 @@ def filter_cycles_by_memory(
     sharding: Sharding = Sharding.Pipeline,
     context_budget: int = PLACEMENT_KV_CONTEXT_BUDGET_TOKENS,
     node_vram: Mapping[NodeId, Memory] | None = None,
+    *,
+    exact_pipeline_layers: bool = True,
 ) -> tuple[list[Cycle], CycleMemoryDiagnostics]:
     """Keep cycles whose every node can hold its shard with runtime headroom.
 
@@ -278,9 +289,9 @@ def filter_cycles_by_memory(
     memory.
 
     ``kv_share`` reserves KV cache for ``context_budget`` tokens. It scales with
-    a node's shard exactly as the weights do (per-layer for pipeline, per-rank
-    for tensor), so it is derived from the node's weight share rather than
-    recomputing the split.
+    a node's shard exactly as the weights do (per-layer for exact pipeline,
+    proportional for RPC-style pipeline, per-rank for tensor), so it is derived
+    from the node's weight share rather than recomputing the split.
 
     Cycles touching nodes with no memory info at all (cluster still starting
     up) are recorded in ``diagnostics.pending_info_node_ids`` instead of being
@@ -306,7 +317,11 @@ def filter_cycles_by_memory(
                 if node_id not in diagnostics.pending_info_node_ids:
                     diagnostics.pending_info_node_ids.append(node_id)
             continue
-        if sharding == Sharding.Pipeline and len(cycle.node_ids) > model_card.n_layers:
+        if (
+            exact_pipeline_layers
+            and sharding == Sharding.Pipeline
+            and len(cycle.node_ids) > model_card.n_layers
+        ):
             diagnostics.rejection_reasons.append(
                 f"cycle [{', '.join(str(n) for n in cycle.node_ids)}] "
                 f"({sharding.value} sharding): {len(cycle.node_ids)} nodes exceed "
@@ -315,7 +330,12 @@ def filter_cycles_by_memory(
             continue
 
         node_shares = _per_node_required_memory(
-            cycle, node_memory, model_card, sharding, node_vram
+            cycle,
+            node_memory,
+            model_card,
+            sharding,
+            node_vram,
+            exact_pipeline_layers=exact_pipeline_layers,
         )
         # GGUF runs on the lighter llama.cpp C++ runtime, so its weight overhead
         # is smaller than MLX's; use the engine-aware factor for the fit decision.
