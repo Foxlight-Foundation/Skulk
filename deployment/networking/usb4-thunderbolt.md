@@ -64,6 +64,17 @@ MTU 65520 is the thunderbolt-net maximum (it is a virtual interface, not
 ethernet; jumbo-frame conventions like 9000 leave packet-count savings on
 the table for bulk transfers).
 
+`nmcli connection modify` edits the stored profile only; an already-active
+`thunderbolt0` keeps its old address and MTU until the profile is
+re-applied. Reactivate it on both nodes before verifying:
+
+```bash
+nmcli connection up "Wired connection 1"
+```
+
+(`nmcli device reapply thunderbolt0` also works for address changes, but an
+MTU change needs the full reactivation on some NetworkManager versions.)
+
 ### 2. Queueing discipline
 
 `fq_codel` measurably reduces TCP retransmits on thunderbolt-net links.
