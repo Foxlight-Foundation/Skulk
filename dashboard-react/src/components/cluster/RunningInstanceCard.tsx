@@ -30,7 +30,7 @@ export interface RunningInstanceCardProps {
   instanceId: string;
   modelId: string;
   sharding: 'Pipeline' | 'Tensor';
-  instanceType: 'MlxRing' | 'MlxJaccl';
+  instanceType: 'MlxRing' | 'MlxJaccl' | 'LlamaRpc';
   /** Serving engine: MLX (in-process), in-process llama.cpp, or the served
    *  llama-server. Drives the type label so a GGUF/served instance is not
    *  mislabelled as an MLX ring. */
@@ -81,10 +81,16 @@ function formatInstanceId(id: string): string {
 function formatEngineLabel(
   engine: 'mlx' | 'llama_cpp' | 'served',
   sharding: 'Pipeline' | 'Tensor',
-  instanceType: 'MlxRing' | 'MlxJaccl',
+  instanceType: 'MlxRing' | 'MlxJaccl' | 'LlamaRpc',
   t: SkulkTranslate,
 ): string {
-  if (engine === 'served') return t('placement.served', 'Served (llama.cpp)');
+  if (engine === 'served') {
+    // A pooled instance is served across the RPC pair; distinguish it from a
+    // single-node served instance so the multi-node nature is legible.
+    return instanceType === 'LlamaRpc'
+      ? t('placement.servedPooled', 'Served (pooled)')
+      : t('placement.served', 'Served (llama.cpp)');
+  }
   if (engine === 'llama_cpp') return t('placement.llamaCpp', 'llama.cpp');
   const shard = sharding === 'Pipeline' ? t('common.pipeline', 'Pipeline') : t('common.tensor', 'Tensor');
   const transport = instanceType === 'MlxRing' ? t('placement.mlxRing', 'MLX Ring') : t('placement.mlxJaccl', 'MLX Jaccl');

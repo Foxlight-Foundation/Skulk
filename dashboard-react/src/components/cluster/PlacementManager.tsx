@@ -57,7 +57,8 @@ function comboKey(sharding: string, meta: string): keyof NodeCountOptions {
 function extractNodeCount(preview: PlacementPreview): number {
   if (!preview.instance || typeof preview.instance !== 'object') return 1;
   const inner = (preview.instance as Record<string, unknown>).MlxRingInstance
-    ?? (preview.instance as Record<string, unknown>).MlxJacclInstance;
+    ?? (preview.instance as Record<string, unknown>).MlxJacclInstance
+    ?? (preview.instance as Record<string, unknown>).LlamaRpcInstance;
   if (!inner || typeof inner !== 'object') return 1;
   const sa = (inner as Record<string, unknown>).shardAssignments;
   if (!sa || typeof sa !== 'object') return 1;

@@ -363,7 +363,8 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
     const ids: string[] = [];
     const mapping: Record<string, string> = {};
     for (const [iid, inst] of Object.entries(instances)) {
-      const inner = inst.MlxRingInstance ?? inst.MlxJacclInstance;
+      const inner =
+        inst.MlxRingInstance ?? inst.MlxJacclInstance ?? inst.LlamaRpcInstance;
       const modelId = inner?.shardAssignments?.modelId;
       if (modelId) {
         ids.push(modelId);
@@ -378,7 +379,8 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
     const cards: Record<string, Omit<ClusterCardProps, 'onLaunch'>> = {};
     for (const [, inst] of Object.entries(instances)) {
       const isRing = !!inst.MlxRingInstance;
-      const inner = inst.MlxRingInstance ?? inst.MlxJacclInstance;
+      const inner =
+        inst.MlxRingInstance ?? inst.MlxJacclInstance ?? inst.LlamaRpcInstance;
       if (!inner) continue;
       const sa = inner.shardAssignments;
       const modelId = sa?.modelId;
@@ -425,7 +427,11 @@ export function ModelStorePage({ topology, downloads, nodeDisk, instances, runne
         modelId,
         sizeBytes: storeEntry?.total_bytes,
         sharding,
-        instanceType: isRing ? 'MlxRing' : 'MlxJaccl',
+        instanceType: isRing
+          ? 'MlxRing'
+          : inst.MlxJacclInstance
+            ? 'MlxJaccl'
+            : 'LlamaRpc',
         nodes: cardNodes,
         isReady,
       };
