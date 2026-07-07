@@ -1531,7 +1531,7 @@ convert = [
 
 [[package]]
 name = "mlx-vlm"
-version = "0.6.1"
+version = "0.6.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "datasets", marker = "sys_platform == 'darwin'" },
@@ -1544,15 +1544,16 @@ dependencies = [
     { name = "numpy", marker = "sys_platform == 'darwin'" },
     { name = "opencv-python", marker = "sys_platform == 'darwin'" },
     { name = "pillow", marker = "sys_platform == 'darwin'" },
+    { name = "python-multipart", marker = "sys_platform == 'darwin'" },
     { name = "requests", marker = "sys_platform == 'darwin'" },
     { name = "starlette", marker = "sys_platform == 'darwin'" },
     { name = "tqdm", marker = "sys_platform == 'darwin'" },
     { name = "transformers", marker = "sys_platform == 'darwin'" },
     { name = "uvicorn", marker = "sys_platform == 'darwin'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/69/bc/5e6ecd5db33fa04e8b9b4939984c8966425c65c27ce94968a136dc4d0233/mlx_vlm-0.6.1.tar.gz", hash = "sha256:8ea7e1989f6ee462632b07d96d06c10ee77a545470236d2e9fb592df72f077be", size = 1315770, upload-time = "2026-06-03T17:27:01.65Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/22/de/03810d375be44e04a0889a7709aa72d8f187ec94a5172dea3d91051032e4/mlx_vlm-0.6.4.tar.gz", hash = "sha256:2a911692aedc3861ae26f4057b1c05dcb9abfb954d50123df3ef63eab0c58e29", size = 1453442, upload-time = "2026-07-06T21:11:12.567Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/aa/40/c72bb2e8a0d89b8c62981a2e85e689eb3788e6bdccaa96c23bd9c34b64f6/mlx_vlm-0.6.1-py3-none-any.whl", hash = "sha256:961a1539e35826a4b92f1f87929f1074c661c47d02f4c11eec8651cacef260b9", size = 1573590, upload-time = "2026-06-03T17:26:59.822Z" },
+    { url = "https://files.pythonhosted.org/packages/6e/4d/45bc2462366fcec5fe7ffc1803d21c3042e9f4d55fdcf7c617a5b4af3c61/mlx_vlm-0.6.4-py3-none-any.whl", hash = "sha256:23810d8aa7b8610d6a5e9b3e24a0f81e768e131efdcb224e570b08147d763aa7", size = 1735033, upload-time = "2026-07-06T21:11:10.809Z" },
 ]
 
 [[package]]
@@ -2932,7 +2933,7 @@ requires-dist = [
     { name = "mlx", extras = ["cpu"], marker = "sys_platform == 'linux'", specifier = "==0.30.6" },
     { name = "mlx-lm", git = "https://github.com/Foxlight-Foundation/mlx-lm?rev=e2f7ddcd31ec7d5214447a8d3206af0d2bff6e35" },
     { name = "mlx-optiq", extras = ["convert"], marker = "sys_platform == 'darwin'" },
-    { name = "mlx-vlm", marker = "sys_platform == 'darwin'", specifier = "==0.6.1" },
+    { name = "mlx-vlm", marker = "sys_platform == 'darwin'", specifier = "==0.6.4" },
     { name = "msgspec", specifier = ">=0.19.0" },
     { name = "openai-harmony", specifier = ">=0.0.8" },
     { name = "packaging", specifier = ">=24.0" },
