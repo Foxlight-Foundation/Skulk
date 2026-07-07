@@ -71,7 +71,7 @@ import shutil
 from collections.abc import Awaitable
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, AsyncIterator, Callable, final
+from typing import TYPE_CHECKING, AsyncIterator, Callable, TypeVar, final
 from urllib.parse import quote
 
 import aiofiles
@@ -93,6 +93,9 @@ if TYPE_CHECKING:
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB per read/write chunk
 _CONNECT_TIMEOUT = 10.0  # seconds — abort if store host unreachable
 _READ_TIMEOUT = 120.0  # seconds — abort if no data for 2 minutes
+_STORE_HTTP_RETRY_ATTEMPTS = 6
+_STORE_HTTP_RETRY_BASE_SECONDS = 0.5
+_T = TypeVar("_T")
 
 
 class ModelNotInStoreError(Exception):
@@ -118,6 +121,28 @@ def _sanitize_model_id(model_id: str) -> str:
 def _staging_dir(node_cache_path: str, model_id: str) -> Path:
     """Resolve the staging directory for *model_id* on this node."""
     return Path(node_cache_path).expanduser() / _sanitize_model_id(model_id)
+
+
+async def _retry_store_http(
+    operation: Callable[[], Awaitable[_T]],
+    *,
+    description: str,
+) -> _T:
+    """Retry transient store HTTP transport failures with exponential backoff."""
+    for attempt in range(1, _STORE_HTTP_RETRY_ATTEMPTS + 1):
+        try:
+            return await operation()
+        except (aiohttp.ClientError, TimeoutError, asyncio.TimeoutError) as error:
+            if attempt == _STORE_HTTP_RETRY_ATTEMPTS:
+                raise
+            delay = _STORE_HTTP_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+            logger.warning(
+                f"ModelStoreClient: {description} failed on attempt "
+                f"{attempt}/{_STORE_HTTP_RETRY_ATTEMPTS}: {error}; "
+                f"retrying in {delay:.1f}s"
+            )
+            await asyncio.sleep(delay)
+    raise AssertionError("store HTTP retry loop exhausted without returning")
 
 
 def _make_store_url(host: str, port: int, path: str) -> str:
@@ -307,13 +332,21 @@ class ModelStoreClient:
             self._store_port,
             f"/models/{quote(model_id, safe='')}/files",
         )
-        try:
+
+        async def _request() -> bool:
             async with (
                 create_http_session(timeout_profile="short") as session,
                 session.get(url) as resp,
             ):
                 return resp.status == 200
-        except Exception:
+
+        try:
+            return await _retry_store_http(
+                _request,
+                description=f"availability probe for {model_id}",
+            )
+        except Exception as exc:
+            logger.debug(f"ModelStoreClient: availability probe failed: {exc}")
             return False
 
     async def stage_shard(
@@ -547,15 +580,23 @@ class ModelStoreClient:
         if extra_pinned_gguf:
             download_body["extra_gguf_files"] = extra_pinned_gguf
         post_kwargs: dict[str, object] = {"json": download_body} if download_body else {}
-        async with (
-            create_http_session(timeout_profile="short") as session,
-            session.post(url, **post_kwargs) as resp,  # pyright: ignore[reportArgumentType]
+        async def _post_download_request() -> bool:
+            async with (
+                create_http_session(timeout_profile="short") as session,
+                session.post(url, **post_kwargs) as resp,  # pyright: ignore[reportArgumentType]
+            ):
+                if resp.status not in (200, 201):
+                    raise RuntimeError(
+                        f"Store download request failed: HTTP {resp.status}"
+                    )
+                data: object = await resp.json()
+                return isinstance(data, dict) and data.get("status") == "complete"
+
+        if await _retry_store_http(
+            _post_download_request,
+            description=f"download request for {model_id}",
         ):
-            if resp.status not in (200, 201):
-                raise RuntimeError(f"Store download request failed: HTTP {resp.status}")
-            data: object = await resp.json()
-            if isinstance(data, dict) and data.get("status") == "complete":
-                return True
+            return True
 
         # Poll for completion
         status_url = _make_store_url(
@@ -661,22 +702,29 @@ class ModelStoreClient:
             self._store_port,
             f"/models/{quote(model_id, safe='')}/files",
         )
-        async with (
-            create_http_session(timeout_profile="short") as session,
-            session.get(url) as resp,
-        ):
-            if resp.status == 404:
-                raise ModelNotInStoreError(f"Model {model_id} not found in store")
-            if resp.status != 200:
-                raise RuntimeError(
-                    f"ModelStoreClient: /models/{model_id}/files returned {resp.status}"
-                )
-            data: object = await resp.json()
-            if not isinstance(data, list):
-                raise RuntimeError(
-                    "ModelStoreClient: unexpected file list response type"
-                )
-            return [str(item) for item in data if isinstance(item, str)]
+
+        async def _request() -> list[str]:
+            async with (
+                create_http_session(timeout_profile="short") as session,
+                session.get(url) as resp,
+            ):
+                if resp.status == 404:
+                    raise ModelNotInStoreError(f"Model {model_id} not found in store")
+                if resp.status != 200:
+                    raise RuntimeError(
+                        f"ModelStoreClient: /models/{model_id}/files returned {resp.status}"
+                    )
+                data: object = await resp.json()
+                if not isinstance(data, list):
+                    raise RuntimeError(
+                        "ModelStoreClient: unexpected file list response type"
+                    )
+                return [str(item) for item in data if isinstance(item, str)]
+
+        return await _retry_store_http(
+            _request,
+            description=f"file list fetch for {model_id}",
+        )
 
     async def _download_store_file(
         self,
@@ -696,64 +744,73 @@ class ModelStoreClient:
         Returns:
             Number of bytes written (for progress accumulation).
         """
-        target = dest_path / file_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        partial = dest_path / f"{file_path}.partial"
+        async def _request() -> int:
+            target = dest_path / file_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            partial = dest_path / f"{file_path}.partial"
 
-        # Already fully downloaded — skip
-        if target.exists():
-            return target.stat().st_size
+            # Already fully downloaded — skip
+            if target.exists():
+                return target.stat().st_size
 
-        # Resume from partial if it exists
-        resume_from = partial.stat().st_size if partial.exists() else 0
+            # Recompute the partial length on every retry so a mid-stream
+            # transport failure resumes from the bytes already written.
+            resume_from = partial.stat().st_size if partial.exists() else 0
 
-        headers: dict[str, str] = {}
-        if resume_from > 0:
-            headers["Range"] = f"bytes={resume_from}-"
-            logger.debug(
-                f"ModelStoreClient: resuming {file_path} from byte {resume_from:,}"
+            headers: dict[str, str] = {}
+            if resume_from > 0:
+                headers["Range"] = f"bytes={resume_from}-"
+                logger.debug(
+                    f"ModelStoreClient: resuming {file_path} from byte {resume_from:,}"
+                )
+
+            url = _make_store_url(
+                self._store_host,
+                self._store_port,
+                f"/models/{quote(model_id, safe='')}/{file_path}",
             )
+            timeout = aiohttp.ClientTimeout(
+                total=3600,
+                connect=_CONNECT_TIMEOUT,
+                sock_read=_READ_TIMEOUT,
+            )
+            async with (
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.get(url, headers=headers) as resp,
+            ):
+                if resp.status == 404:
+                    raise ModelNotInStoreError(
+                        f"File not found in store: {model_id}/{file_path}"
+                    )
+                # 416 Range Not Satisfiable means the partial file already
+                # contains all bytes (process died after writing but before
+                # the atomic rename).  Just promote it to final.
+                if resp.status == 416 and resume_from > 0:
+                    await aios.rename(partial, target)
+                    return resume_from
+                if resp.status not in (200, 206):
+                    raise RuntimeError(
+                        f"ModelStoreClient: GET {url} returned {resp.status}"
+                    )
 
-        url = _make_store_url(
-            self._store_host,
-            self._store_port,
-            f"/models/{quote(model_id, safe='')}/{file_path}",
+                n_read = resume_from
+                async with aiofiles.open(
+                    partial, "ab" if resume_from > 0 else "wb"
+                ) as f:
+                    async for chunk in resp.content.iter_chunked(_CHUNK_SIZE):
+                        await f.write(chunk)
+                        n_read += len(chunk)
+                        if on_progress is not None:
+                            await on_progress(total_bytes_offset + n_read, grand_total)
+
+            # Atomic rename: partial → final
+            await aios.rename(partial, target)
+            return n_read
+
+        return await _retry_store_http(
+            _request,
+            description=f"file download for {model_id}/{file_path}",
         )
-        timeout = aiohttp.ClientTimeout(
-            total=3600,
-            connect=_CONNECT_TIMEOUT,
-            sock_read=_READ_TIMEOUT,
-        )
-        async with (
-            aiohttp.ClientSession(timeout=timeout) as session,
-            session.get(url, headers=headers) as resp,
-        ):
-            if resp.status == 404:
-                raise ModelNotInStoreError(
-                    f"File not found in store: {model_id}/{file_path}"
-                )
-            # 416 Range Not Satisfiable means the partial file already
-            # contains all bytes (process died after writing but before
-            # the atomic rename).  Just promote it to final.
-            if resp.status == 416 and resume_from > 0:
-                await aios.rename(partial, target)
-                return resume_from
-            if resp.status not in (200, 206):
-                raise RuntimeError(
-                    f"ModelStoreClient: GET {url} returned {resp.status}"
-                )
-
-            n_read = resume_from
-            async with aiofiles.open(partial, "ab" if resume_from > 0 else "wb") as f:
-                async for chunk in resp.content.iter_chunked(_CHUNK_SIZE):
-                    await f.write(chunk)
-                    n_read += len(chunk)
-                    if on_progress is not None:
-                        await on_progress(total_bytes_offset + n_read, grand_total)
-
-        # Atomic rename: partial → final
-        await aios.rename(partial, target)
-        return n_read
 
     async def _stage_http(
         self,
