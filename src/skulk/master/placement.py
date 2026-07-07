@@ -340,7 +340,6 @@ def place_instance(
     excluded_nodes: set[NodeId] | None = None,
     node_resources: Mapping[NodeId, NodeResources] | None = None,
     node_vram: Mapping[NodeId, Memory] | None = None,
-    node_vram_strict: Mapping[NodeId, Memory] | None = None,
 ) -> dict[InstanceId, Instance]:
     cycles = topology.get_cycles()
     candidate_cycles = list(filter(lambda it: len(it) >= command.min_nodes, cycles))
@@ -503,11 +502,14 @@ def place_instance(
                 f"[{', '.join(str(n) for n in required_nodes)}]."
             )
     # Memory admission. RPC cycles (multi-node llama.cpp) admit against the
-    # strict per-node VRAM carve when the caller supplies it: measured on the
-    # Strix pair, llama.cpp's RPC split allocates from the VRAM carve only
-    # (never the UMA/GTT spill), so the UMA-inflated figure would over-admit a
-    # pooled model that llama-server then fails to load. Everything else keeps
-    # the standard figure (single-node UMA spill stays proven and admitted).
+    # same UMA-aware usable-GPU figure as single-node placements: on a
+    # unified-memory APU the BIOS VRAM carve is not an allocation boundary
+    # (the GPU maps system RAM through GTT), so a carve-only figure refuses
+    # placements that load and serve fine. Proven live on the Strix pair:
+    # pooled gpt-oss-120b, refused by the carve figure, loaded 40.6G/22.8G
+    # and served at 44 tok/s once admitted against unified memory. RPC still
+    # goes through its own filter call because its missing-telemetry
+    # semantics differ (see below).
     standard_candidates = [
         cycle
         for cycle in candidate_cycles
@@ -526,16 +528,12 @@ def place_instance(
         node_vram=node_vram,
     )
     if rpc_candidates:
-        rpc_vram_map: Mapping[NodeId, Memory] = (
-            node_vram_strict if node_vram_strict is not None else node_vram
-        ) or {}
-        # RPC admission is VRAM-carve-only by contract (llama.cpp's RPC split
-        # never touches the UMA/GTT spill). A cycle node missing from the
-        # strict map (telemetry warm-up: NodeResources arrived, node_system's
-        # accelerator reading not yet) must surface as info-pending, NOT fall
-        # back to system RAM inside the memory filter — that would over-admit
-        # a pooled model that llama-server then fails to load, and the RPC
-        # path deliberately bypasses the worker's local fit guard.
+        rpc_vram_map: Mapping[NodeId, Memory] = node_vram or {}
+        # A cycle node missing from the usable-GPU map (telemetry warm-up:
+        # NodeResources arrived, node_system's accelerator reading not yet)
+        # must surface as info-pending, NOT fall back to system RAM inside
+        # the memory filter — that would size the split off the wrong figure,
+        # and the RPC path deliberately bypasses the worker's local fit guard.
         vram_pending_nodes = {
             node_id
             for cycle in rpc_candidates
@@ -680,9 +678,7 @@ def place_instance(
         # Driver = the node with the largest usable VRAM (most layers land
         # locally, minimizing cross-network boundaries), tie-broken by which
         # node already has the model on disk (only the driver reads the GGUF).
-        rpc_vram = node_vram_strict if node_vram_strict is not None else (
-            node_vram or {}
-        )
+        rpc_vram = node_vram or {}
         driver_node = max(
             selected_cycle.node_ids,
             key=lambda node_id: (

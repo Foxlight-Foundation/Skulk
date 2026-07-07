@@ -31,7 +31,11 @@ from skulk.shared.types.commands import PlaceInstance
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.multiaddr import Multiaddr
-from skulk.shared.types.profiling import NodeResources
+from skulk.shared.types.profiling import (
+    NetworkInterfaceInfo,
+    NodeNetworkInfo,
+    NodeResources,
+)
 from skulk.shared.types.topology import Connection, Cycle, SocketConnection
 from skulk.shared.types.worker.instances import InstanceMeta, LlamaRpcInstance
 from skulk.shared.types.worker.shards import (
@@ -180,7 +184,7 @@ def test_pooled_gguf_places_rpc_shape_on_amd_pair() -> None:
     }
     node_network = {big: create_node_network(), small: create_node_network()}
     resources = {big: _amd_resources(), small: _amd_resources()}
-    node_vram_strict = {
+    node_vram = {
         big: Memory.from_gb(57.6),
         small: Memory.from_gb(28.8),
     }
@@ -194,8 +198,7 @@ def test_pooled_gguf_places_rpc_shape_on_amd_pair() -> None:
         node_memory,
         node_network,
         node_resources=resources,
-        node_vram=node_vram_strict,
-        node_vram_strict=node_vram_strict,
+        node_vram=node_vram,
     )
     instance = next(iter(placements.values()))
     assert isinstance(instance, LlamaRpcInstance)
@@ -219,6 +222,147 @@ def test_pooled_gguf_places_rpc_shape_on_amd_pair() -> None:
     # #330 stamping applies to both roles.
     assert driver_shard.resolved_backend == "llama_server-vulkan"
     assert donor_shard.resolved_backend == "llama_server-vulkan"
+
+
+def _lan_connection(ip_octet: int) -> SocketConnection:
+    """An observed connection on the LAN (ethernet) subnet."""
+    return SocketConnection(
+        sink_multiaddr=Multiaddr(address=f"/ip4/192.168.0.{ip_octet}/tcp/1234"),
+    )
+
+
+def _dual_path_pair() -> tuple[Topology, NodeId, NodeId]:
+    """The kite4+kite5 shape with BOTH paths observed: the 2.5GbE LAN and the
+    USB4/Thunderbolt static-subnet link. This is the fixture that exercises
+    the transport CHOICE; ``_amd_pair`` only ever observes the TB path."""
+    topology = Topology()
+    big = NodeId()
+    small = NodeId()
+    topology.add_node(big)
+    topology.add_node(small)
+    for edge_to_small, edge_to_big in (
+        (_lan_connection(129), _lan_connection(123)),
+        (_routable_connection(2), _routable_connection(1)),
+    ):
+        topology.add_connection(
+            Connection(source=big, sink=small, edge=edge_to_small)
+        )
+        topology.add_connection(
+            Connection(source=small, sink=big, edge=edge_to_big)
+        )
+    return topology, big, small
+
+
+def _dual_path_network(tb_octet: int, lan_octet: int) -> NodeNetworkInfo:
+    """Gossiped interfaces for a node on both the LAN and the TB subnet."""
+    return NodeNetworkInfo(
+        interfaces=[
+            NetworkInterfaceInfo(
+                name="eno1",
+                ip_address=f"192.168.0.{lan_octet}",
+                interface_type="ethernet",
+            ),
+            NetworkInterfaceInfo(
+                name="thunderbolt0",
+                ip_address=f"10.99.0.{tb_octet}",
+                interface_type="thunderbolt",
+            ),
+        ]
+    )
+
+
+def test_rpc_donor_endpoint_prefers_thunderbolt_over_ethernet() -> None:
+    """When BOTH the LAN and the USB4/TB path are observed between driver and
+    donor, the donor endpoint must be stamped on the Thunderbolt address.
+
+    This is the operator guarantee that the pooled tensor path automatically
+    rides the fastest interconnect (proven live on the kite pair 2026-07-06:
+    re-placing pooled gpt-oss-120b after the TB link came up stamped
+    10.99.0.2 unaided, and the donor's 24GB tensor push rode thunderbolt0).
+    The other RPC tests observe only one path, so without this test the
+    LAN-vs-TB CHOICE has no regression coverage.
+    """
+    topology, big, small = _dual_path_pair()
+    node_memory = {
+        big: create_node_memory(Memory.from_gb(64).in_bytes),
+        small: create_node_memory(Memory.from_gb(32).in_bytes),
+    }
+    node_network = {
+        big: _dual_path_network(tb_octet=1, lan_octet=123),
+        small: _dual_path_network(tb_octet=2, lan_octet=129),
+    }
+    resources = {big: _amd_resources(), small: _amd_resources()}
+    node_vram = {big: Memory.from_gb(57.6), small: Memory.from_gb(28.8)}
+    command = _command(_gguf_card(storage_gb=55.0), min_nodes=1)
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_resources=resources,
+        node_vram=node_vram,
+    )
+    instance = next(iter(placements.values()))
+    assert isinstance(instance, LlamaRpcInstance)
+    ip, _, _ = instance.donor_endpoints[small].rpartition(":")
+    assert ip == "10.99.0.2"
+
+
+def test_rpc_donor_endpoint_falls_back_to_ethernet_without_thunderbolt() -> None:
+    """With only the LAN path observed (no TB link), the donor endpoint is the
+    ethernet address: preferring TB must never make LAN-only pairs unplaceable."""
+    topology = Topology()
+    big = NodeId()
+    small = NodeId()
+    topology.add_node(big)
+    topology.add_node(small)
+    topology.add_connection(
+        Connection(source=big, sink=small, edge=_lan_connection(129))
+    )
+    topology.add_connection(
+        Connection(source=small, sink=big, edge=_lan_connection(123))
+    )
+    node_memory = {
+        big: create_node_memory(Memory.from_gb(64).in_bytes),
+        small: create_node_memory(Memory.from_gb(32).in_bytes),
+    }
+    node_network = {
+        big: NodeNetworkInfo(
+            interfaces=[
+                NetworkInterfaceInfo(
+                    name="eno1",
+                    ip_address="192.168.0.123",
+                    interface_type="ethernet",
+                )
+            ]
+        ),
+        small: NodeNetworkInfo(
+            interfaces=[
+                NetworkInterfaceInfo(
+                    name="eno1",
+                    ip_address="192.168.0.129",
+                    interface_type="ethernet",
+                )
+            ]
+        ),
+    }
+    resources = {big: _amd_resources(), small: _amd_resources()}
+    node_vram = {big: Memory.from_gb(57.6), small: Memory.from_gb(28.8)}
+    command = _command(_gguf_card(storage_gb=55.0), min_nodes=1)
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_resources=resources,
+        node_vram=node_vram,
+    )
+    instance = next(iter(placements.values()))
+    assert isinstance(instance, LlamaRpcInstance)
+    ip, _, _ = instance.donor_endpoints[small].rpartition(":")
+    assert ip == "192.168.0.129"
 
 
 def test_link_local_only_path_fails_placement() -> None:
@@ -254,7 +398,6 @@ def test_link_local_only_path_fails_placement() -> None:
             node_network,
             node_resources=resources,
             node_vram=node_vram,
-            node_vram_strict=node_vram,
         )
 
 
@@ -283,7 +426,6 @@ def test_missing_node_resources_is_info_pending_for_pooled_request() -> None:
             node_network,
             node_resources=resources,
             node_vram=node_vram,
-            node_vram_strict=node_vram,
         )
 
 
@@ -315,16 +457,15 @@ def test_vision_card_never_pools_on_served_backends() -> None:
             node_network,
             node_resources=resources,
             node_vram=node_vram,
-            node_vram_strict=node_vram,
         )
 
 
-def test_missing_strict_vram_is_info_pending_not_ram_fallback() -> None:
-    """A node in an RPC cycle with no strict-VRAM entry (telemetry warm-up:
+def test_missing_vram_is_info_pending_not_ram_fallback() -> None:
+    """A node in an RPC cycle with no usable-GPU entry (telemetry warm-up:
     NodeResources arrived, node_system's accelerator reading not yet) must
     surface as info-pending, not fall back to system RAM inside the memory
-    filter — RAM fallback would over-admit a pooled model that llama-server
-    then fails to load, and the RPC path bypasses the worker fit guard."""
+    filter — RAM fallback would size the split off the wrong figure, and the
+    RPC path bypasses the worker fit guard."""
     topology, big, small = _amd_pair()
     node_memory = {
         big: create_node_memory(Memory.from_gb(64).in_bytes),
@@ -333,8 +474,8 @@ def test_missing_strict_vram_is_info_pending_not_ram_fallback() -> None:
     }
     node_network = {big: create_node_network(), small: create_node_network()}
     resources = {big: _amd_resources(), small: _amd_resources()}
-    # The small node is missing from the strict map entirely.
-    node_vram_strict = {big: Memory.from_gb(57.6)}
+    # The small node is missing from the usable-GPU map entirely.
+    node_vram = {big: Memory.from_gb(57.6)}
     command = _command(_gguf_card(storage_gb=70.0), min_nodes=2)
     with pytest.raises(PlacementInfoPendingError, match=str(small)):
         place_instance(
@@ -344,8 +485,7 @@ def test_missing_strict_vram_is_info_pending_not_ram_fallback() -> None:
             node_memory,
             node_network,
             node_resources=resources,
-            node_vram={big: Memory.from_gb(57.6), small: Memory.from_gb(28.8)},
-            node_vram_strict=node_vram_strict,
+            node_vram=node_vram,
         )
 
 
@@ -383,7 +523,6 @@ def test_ipv6_only_path_fails_placement() -> None:
             node_network,
             node_resources=resources,
             node_vram=node_vram,
-            node_vram_strict=node_vram,
         )
 
 
@@ -422,7 +561,6 @@ def test_rpc_shards_stamp_llama_server_even_when_llama_cpp_sorts_first() -> None
         node_network,
         node_resources=resources,
         node_vram=node_vram,
-        node_vram_strict=node_vram,
     )
     instance = next(iter(placements.values()))
     assert isinstance(instance, LlamaRpcInstance)
@@ -450,7 +588,6 @@ def test_small_gguf_still_prefers_single_node() -> None:
         node_network,
         node_resources=resources,
         node_vram=node_vram,
-        node_vram_strict=node_vram,
     )
     instance = next(iter(placements.values()))
     assert not isinstance(instance, LlamaRpcInstance)
@@ -479,36 +616,44 @@ def test_excluded_node_is_neither_driver_nor_donor() -> None:
             excluded_nodes={big},
             node_resources=resources,
             node_vram=node_vram,
-            node_vram_strict=node_vram,
         )
 
 
-def test_rpc_admission_uses_strict_vram() -> None:
-    """Pooled admission must use the VRAM-carve-only figure: a pool that only
-    fits with the UMA/GTT spill is rejected (spike-measured: RPC allocations
-    never touch GTT)."""
+def test_rpc_admission_uses_unified_memory_not_vram_carve() -> None:
+    """Pooled admission sizes each node by the UMA-aware usable-GPU figure,
+    not the BIOS VRAM carve. Regression for the live false refusal on the
+    Strix pair (2026-07-06): gpt-oss-120b pooled was rejected with the donor
+    capped at its carve ("can use 17.7GB"), then loaded 40.6G driver /
+    22.8G donor and served at 44 tok/s once admitted against unified memory.
+    The donor's share here (~19GB of a 58.5GB model) exceeds a carve-only
+    figure but fits its unified memory, so the placement must succeed."""
     topology, big, small = _amd_pair()
     node_memory = {
+        # kite4-shaped: 64GB visible system RAM (other half carved to VRAM).
         big: create_node_memory(Memory.from_gb(64).in_bytes),
+        # kite5-shaped: 32GB visible system RAM.
         small: create_node_memory(Memory.from_gb(32).in_bytes),
     }
     node_network = {big: create_node_network(), small: create_node_network()}
     resources = {big: _amd_resources(), small: _amd_resources()}
-    # UMA-inflated view says the pool is huge; the strict carve says it is not.
-    node_vram_uma = {big: Memory.from_gb(150.0), small: Memory.from_gb(40.0)}
-    node_vram_strict = {big: Memory.from_gb(57.6), small: Memory.from_gb(28.8)}
-    command = _command(_gguf_card(storage_gb=120.0))
-    with pytest.raises(PlacementError, match="fits|No candidate cycle"):
-        place_instance(
-            command,
-            topology,
-            {},
-            node_memory,
-            node_network,
-            node_resources=resources,
-            node_vram=node_vram_uma,
-            node_vram_strict=node_vram_strict,
-        )
+    # UMA-aware usable figures (carve + GTT-mapped RAM, as usable_vram_by_node
+    # computes for a Strix APU). A carve-only view (57.6 / 17.7) refuses the
+    # donor's proportional share of a 58.5GB model; unified memory admits it.
+    node_vram = {big: Memory.from_gb(120.0), small: Memory.from_gb(45.0)}
+    command = _command(_gguf_card(storage_gb=58.5), min_nodes=2)
+    placements = place_instance(
+        command,
+        topology,
+        {},
+        node_memory,
+        node_network,
+        node_resources=resources,
+        node_vram=node_vram,
+    )
+    instance = next(iter(placements.values()))
+    assert isinstance(instance, LlamaRpcInstance)
+    assert instance.driver_node == big
+    assert set(instance.donor_endpoints) == {small}
 
 
 def test_tensor_request_never_lands_on_rpc_cycle() -> None:
@@ -539,7 +684,6 @@ def test_tensor_request_never_lands_on_rpc_cycle() -> None:
             node_network,
             node_resources=resources,
             node_vram=node_vram,
-            node_vram_strict=node_vram,
         )
 
 
@@ -575,5 +719,4 @@ def test_llama_cpp_only_card_stays_single_node() -> None:
             node_network,
             node_resources=resources,
             node_vram=node_vram,
-            node_vram_strict=node_vram,
         )

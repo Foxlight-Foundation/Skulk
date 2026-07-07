@@ -102,7 +102,7 @@ def test_no_recent_free_leaves_memory_unchanged() -> None:
     master = _make_master()
     node_id = NodeId(get_node_id_keypair().to_node_id())
     master._telemetry_view.node_memory[node_id] = _mem(4.0)
-    memory, _vram, _vram_strict = master._placement_memory_inputs()
+    memory, _vram = master._placement_memory_inputs()
     assert memory[node_id].ram_available.in_gb == 4.0
 
 
@@ -115,7 +115,7 @@ def test_freed_instance_credit_is_disabled_by_default() -> None:
     master._telemetry_view.node_memory[node_id] = _mem(2.0)
 
     master._record_freed_instance(instance)
-    memory, _vram, _vram_strict = master._placement_memory_inputs()
+    memory, _vram = master._placement_memory_inputs()
 
     assert card.model_id == ModelId("org/m")
     assert memory[node_id].ram_available.in_gb == 2.0
@@ -140,6 +140,6 @@ def test_credit_expires_after_grace(monkeypatch: pytest.MonkeyPatch) -> None:
         "monotonic",
         lambda: base + master_main.RECENTLY_FREED_MEMORY_GRACE_SECONDS + 1.0,
     )
-    memory, _vram, _vram_strict = master._placement_memory_inputs()
+    memory, _vram = master._placement_memory_inputs()
     assert memory[node_id].ram_available.in_gb == 2.0
     assert node_id not in master._recently_freed_bytes
