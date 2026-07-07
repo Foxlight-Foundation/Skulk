@@ -1,22 +1,17 @@
 # pyright: reportPrivateUsage=false
-"""Recently-freed memory credit for placement admission (#314).
+"""Recently-freed memory credit bookkeeping for placement admission (#314).
 
-After a teardown, gossiped node memory lags the freed capacity, so the master
-credits a just-deleted instance's per-node footprint back to the placement
-fit-check inputs for a short grace window. This keeps back-to-back placements
-from being spuriously refused on stale availability; the credit expires so a
-genuine shortfall reasserts, and the worker's live pre-load guard (#383) is the
-OOM backstop.
+The speculative credit is disabled by default because live MLX teardown can lag
+``InstanceDeleted``: crediting memory back before the worker actually releases it
+over-admits the next placement and forces the worker's local pre-load guard to
+refuse. These tests keep the bookkeeping explicit and verify the default
+placement inputs stay grounded in observed telemetry.
 """
 
 import pytest
 
 from skulk.master.main import Master
 from skulk.routing.router import get_node_id_keypair
-from skulk.shared.models.memory_estimate import (
-    estimate_shard_footprint,
-    shard_fraction_of_model,
-)
 from skulk.shared.models.model_cards import ModelCard, ModelId, ModelTask
 from skulk.shared.types.commands import (
     ForwarderCommand,
@@ -111,23 +106,20 @@ def test_no_recent_free_leaves_memory_unchanged() -> None:
     assert memory[node_id].ram_available.in_gb == 4.0
 
 
-def test_freed_instance_credits_its_footprint() -> None:
+def test_freed_instance_credit_is_disabled_by_default() -> None:
     master = _make_master()
     node_id = NodeId(get_node_id_keypair().to_node_id())
     instance, card = _instance(node_id)
-    # Gossip still shows the loaded memory (deflated availability).
+    # Gossip still shows the loaded memory (deflated availability), but Skulk
+    # must not speculate that deletion instantly unwired the model locally.
     master._telemetry_view.node_memory[node_id] = _mem(2.0)
 
     master._record_freed_instance(instance)
     memory, _vram = master._placement_memory_inputs()
 
-    fraction = shard_fraction_of_model(
-        next(iter(instance.shard_assignments.runner_to_shard.values()))
-    )
-    assert fraction is not None
-    footprint = estimate_shard_footprint(card, fraction)
-    expected = Memory.from_gb(2.0).in_bytes + footprint.in_bytes
-    assert memory[node_id].ram_available.in_bytes == expected
+    assert card.model_id == ModelId("org/m")
+    assert memory[node_id].ram_available.in_gb == 2.0
+    assert node_id not in master._recently_freed_bytes
     # ram_total is never credited (context-ceiling math reads it).
     assert memory[node_id].ram_total.in_gb == 64.0
 

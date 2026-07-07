@@ -553,6 +553,7 @@ def place_instance(
             # which is exactly the Pipeline-proportional fit estimate.
             Sharding.Pipeline,
             node_vram=rpc_vram_map,
+            exact_pipeline_layers=False,
         )
         cycles_with_sufficient_memory = cycles_with_sufficient_memory + rpc_fit
         memory_diagnostics.pending_info_node_ids.extend(

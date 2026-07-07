@@ -292,6 +292,19 @@ Only fix comments rated 4 or 5. Do not iterate on minor wording, style, or specu
 
 ### PR Review Loop
 
+Foxlight PRs are never opened as drafts. After opening or updating a PR, keep it
+ready for review, check for merge conflicts and failing checks, and continue
+watching review/check state until no unresolved severity 4 or 5 comments remain.
+If a branch is not ready for review, do not open the PR yet.
+
+PR descriptions, review replies, and validation notes must not include private
+environment details such as IP addresses, internal hostnames or node names,
+VPN/tailnet identifiers, local config keys or values, route workarounds, file
+system paths outside the repo, credentials, or secrets. Summarize live-cluster
+validation generically (for example, cluster size, test suite, pass/fail counts,
+and behavior exercised) and keep raw environment details in private logs or
+notes.
+
 When working an open pull request, use this review loop until no unresolved
 severity 4 or 5 comments remain:
 

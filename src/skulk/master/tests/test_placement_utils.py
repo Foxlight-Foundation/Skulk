@@ -37,9 +37,10 @@ def _card(
     storage_gb: float,
     *,
     kv_heads: int | None = None,
-    n_layers: int = 1,
+    n_layers: int = 32,
     context_length: int = 0,
     gguf_file: str | None = None,
+    uses_cfg: bool = False,
 ) -> ModelCard:
     """Minimal ModelCard for memory-filter tests.
 
@@ -57,7 +58,8 @@ def _card(
         num_key_value_heads=kv_heads,
         context_length=context_length,
         gguf_file=gguf_file,
-        tasks=[ModelTask.TextGeneration],
+        uses_cfg=uses_cfg,
+        tasks=[ModelTask.TextToImage if uses_cfg else ModelTask.TextGeneration],
     )
 
 
@@ -178,6 +180,157 @@ def test_heterogeneous_pipeline_split_weighs_by_usable_not_raw_available():
     )
 
     assert len(filtered_cycles) == 1, diagnostics.rejection_reasons
+    assert diagnostics.rejection_reasons == []
+
+
+def test_pipeline_memory_filter_uses_integer_layer_allocation():
+    """A fractional fit estimate must not admit a rounded-up shard.
+
+    With three layers on two equal nodes, the continuous estimate gives each
+    node 1.5 layers and fits. The actual placement must assign 2 layers to one
+    node and 1 to the other, so the 2-layer shard's padded footprint is what the
+    worker will load and what the master must admit against.
+    """
+    node_a = NodeId()
+    node_b = NodeId()
+    topology = Topology()
+    topology.add_node(node_a)
+    topology.add_node(node_b)
+    topology.add_connection(
+        Connection(source=node_a, sink=node_b, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=node_b, sink=node_a, edge=create_socket_connection(2))
+    )
+    node_memory = {
+        node_a: create_node_memory(
+            Memory.from_gb(7).in_bytes, ram_total=Memory.from_gb(32).in_bytes
+        ),
+        node_b: create_node_memory(
+            Memory.from_gb(7).in_bytes, ram_total=Memory.from_gb(32).in_bytes
+        ),
+    }
+    cycles = [cycle for cycle in topology.get_cycles() if len(cycle) == 2]
+
+    filtered_cycles, diagnostics = filter_cycles_by_memory(
+        cycles, node_memory, _card(9, n_layers=3), sharding=Sharding.Pipeline
+    )
+
+    assert filtered_cycles == []
+    assert "needs ~8.0GB" in diagnostics.rejection_reasons[0]
+
+
+def test_pipeline_memory_filter_rejects_more_nodes_than_layers():
+    node_a = NodeId()
+    node_b = NodeId()
+    node_c = NodeId()
+    topology = Topology()
+    for node_id in (node_a, node_b, node_c):
+        topology.add_node(node_id)
+    topology.add_connection(
+        Connection(source=node_a, sink=node_b, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=node_b, sink=node_c, edge=create_socket_connection(2))
+    )
+    topology.add_connection(
+        Connection(source=node_c, sink=node_a, edge=create_socket_connection(3))
+    )
+    node_memory = {
+        node_a: create_node_memory(
+            Memory.from_gb(64).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+        node_b: create_node_memory(
+            Memory.from_gb(64).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+        node_c: create_node_memory(
+            Memory.from_gb(64).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+    }
+
+    filtered_cycles, diagnostics = filter_cycles_by_memory(
+        topology.get_cycles(),
+        node_memory,
+        _card(1, n_layers=2),
+        sharding=Sharding.Pipeline,
+    )
+
+    assert all(len(cycle.node_ids) <= 2 for cycle in filtered_cycles)
+    assert any(
+        "3 pipeline stages exceed 2 model layers" in reason
+        for reason in diagnostics.rejection_reasons
+    )
+
+
+def test_pipeline_memory_filter_counts_cfg_pipeline_stages_before_rejecting():
+    nodes = [NodeId() for _ in range(4)]
+    topology = Topology()
+    for node_id in nodes:
+        topology.add_node(node_id)
+    for index, node_id in enumerate(nodes):
+        topology.add_connection(
+            Connection(
+                source=node_id,
+                sink=nodes[(index + 1) % len(nodes)],
+                edge=create_socket_connection(index + 1),
+            )
+        )
+    node_memory = {
+        node_id: create_node_memory(
+            Memory.from_gb(64).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        )
+        for node_id in nodes
+    }
+    cycles = [cycle for cycle in topology.get_cycles() if len(cycle.node_ids) == 4]
+
+    filtered_cycles, diagnostics = filter_cycles_by_memory(
+        cycles,
+        node_memory,
+        _card(1, n_layers=2, uses_cfg=True),
+        sharding=Sharding.Pipeline,
+    )
+
+    assert filtered_cycles == cycles
+    assert diagnostics.rejection_reasons == []
+
+
+def test_pipeline_memory_filter_can_keep_rpc_proportional_sizing():
+    node_a = NodeId()
+    node_b = NodeId()
+    node_c = NodeId()
+    topology = Topology()
+    for node_id in (node_a, node_b, node_c):
+        topology.add_node(node_id)
+    topology.add_connection(
+        Connection(source=node_a, sink=node_b, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=node_b, sink=node_c, edge=create_socket_connection(2))
+    )
+    topology.add_connection(
+        Connection(source=node_c, sink=node_a, edge=create_socket_connection(3))
+    )
+    node_memory = {
+        node_a: create_node_memory(
+            Memory.from_gb(64).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+        node_b: create_node_memory(
+            Memory.from_gb(64).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+        node_c: create_node_memory(
+            Memory.from_gb(64).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+    }
+
+    filtered_cycles, diagnostics = filter_cycles_by_memory(
+        topology.get_cycles(),
+        node_memory,
+        _card(1, n_layers=2),
+        sharding=Sharding.Pipeline,
+        exact_pipeline_layers=False,
+    )
+
+    assert any(len(cycle.node_ids) == 3 for cycle in filtered_cycles)
     assert diagnostics.rejection_reasons == []
 
 

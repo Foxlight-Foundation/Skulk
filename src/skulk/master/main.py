@@ -123,19 +123,16 @@ preserved. 60s comfortably covers several probe cycles; the dead master's
 instances are still pruned — just one minute later, once absence reflects
 real liveness rather than an unsettled view."""
 
-RECENTLY_FREED_MEMORY_GRACE_SECONDS = 30.0
-"""How long the planner credits a just-deleted instance's memory back to its
-nodes during placement admission (#314).
+RECENTLY_FREED_MEMORY_GRACE_SECONDS = 0.0
+"""How long the planner credits just-deleted instance memory during placement.
 
-Node memory is gossiped last-write-wins, so after a teardown the freed memory
-takes a few gossip rounds to be reflected in `ramAvailable` (and the GPU-wireable
-figure). A back-to-back placement (test harness, rapid model swap) therefore
-reads stale, deflated availability and is spuriously refused. The master knows
-deterministically what it just freed, so it credits that node's footprint back
-to the fit-check inputs for this window: long enough to bridge the gossip lag,
-short enough that a genuine shortfall reasserts once the credit expires. The
-worker's live pre-load fit guard (#383) remains the OOM backstop, so an
-over-credit at most causes a refuse-and-re-place, never an OOM."""
+This is intentionally disabled by default. The old 30s credit bridged gossip
+lag after teardown, but live MLX runs showed the inverse failure: Metal memory
+can remain unwired locally after the master has deleted the instance, so
+crediting the freed footprint over-admits the next placement and leaves the
+worker to refuse it. Placement must prefer the observed telemetry over an
+optimistic teardown credit; the worker's local guard should be a last resort,
+not the normal correction path."""
 JsonObject = dict[str, object]
 
 # API-facing task types: the ones whose loss strands an open HTTP request.
@@ -404,18 +401,18 @@ class Master:
         # id makes recovery fire once per wedged instance. Grows only by wedged
         # ids (rare); never reused since InstanceIds are unique.
         self._download_failure_recovered: set[InstanceId] = set()
-        # Per-node memory (bytes) freed by a just-deleted instance, credited back
-        # to placement admission until gossiped node memory reflects it (#314).
-        # Each entry is (freed_bytes, monotonic_deadline); expired entries are
-        # pruned on read. See RECENTLY_FREED_MEMORY_GRACE_SECONDS.
+        # Per-node memory (bytes) freed by a just-deleted instance. The grace
+        # window is zero by default, so entries are normally pruned without being
+        # applied; keeping the structure preserves one place to revisit this if
+        # we later have a shutdown-complete signal that proves memory recovered.
         self._recently_freed_bytes: dict[NodeId, list[tuple[int, float]]] = {}
 
     def _record_freed_instance(self, instance: Instance) -> None:
-        """Credit a deleted instance's per-node footprint for the grace window.
+        """Record a deleted instance's per-node footprint for the grace window.
 
-        Estimates each hosting node's shard footprint with the same accounting
-        the planner admits against, so a back-to-back placement is not refused on
-        the not-yet-refreshed (gossip-lagged) node memory (#314).
+        The default grace is zero, which makes this a no-credit bookkeeping path.
+        A future nonzero grace should be tied to a signal that the local worker
+        has actually released the model memory, not merely to InstanceDeleted.
         """
         assignments = instance.shard_assignments
         deadline = time.monotonic() + RECENTLY_FREED_MEMORY_GRACE_SECONDS
@@ -451,13 +448,18 @@ class Master:
         Mapping[NodeId, MemoryUsage],
         Mapping[NodeId, Memory],
     ]:
-        """Build the (node_memory, node_vram) placement inputs with the
-        recently-freed credit applied (#314).
+        """Build the node-memory and usable-GPU placement inputs.
 
-        Both the gossiped ``ram_available`` and the derived GPU-wireable VRAM lag
-        a teardown (telemetry is last-write-wins), so credit both. ``ram_total``
-        is left untouched, so context-ceiling math (which reads it) is unchanged.
-        The worker's live pre-load guard (#383) still backstops genuine OOM.
+        Expired recently-freed entries are pruned before building the inputs.
+        With the default zero grace, no speculative credit is applied: live MLX
+        teardown can lag InstanceDeleted, and using observed telemetry produces
+        placements whose concrete shard allocations match the worker's local
+        pre-load guard.
+
+        If an operator later enables a nonzero grace, both ``ram_available`` and
+        the derived usable-GPU map are built from the credited memory snapshot;
+        ``ram_total`` is never credited, so context-ceiling math stays anchored
+        to physical capacity.
         """
         credit = self._freed_credit_by_node()
         base_memory = self._telemetry_view.node_memory
@@ -1000,11 +1002,10 @@ class Master:
                                 generated_events.extend(transition_events)
                         case PlaceInstance():
                             # node_memory/node_vram come from the telemetry plane
-                            # (#279 slice 2) with a just-freed-memory credit so a
-                            # placement right after a teardown is not refused on
-                            # gossip-lagged availability (#314). Discrete-GPU VRAM
-                            # (AMD/NVIDIA) so big models admit against VRAM, not
-                            # 0.75 x system RAM.
+                            # (#279 slice 2). Recently-freed credit is pruned
+                            # here and disabled by default (#314); the usable-GPU
+                            # map admits discrete/UMA GPU nodes against the pool
+                            # their backend can actually allocate from.
                             credited_memory, credited_vram = (
                                 self._placement_memory_inputs()
                             )
@@ -1024,10 +1025,9 @@ class Master:
                             )
                             generated_events.extend(transition_events)
                         case CreateInstance():
-                            # telemetry plane (#279 slice 2), with the just-freed
-                            # memory credit (#314) so an exact placement right
-                            # after a teardown stamps its ceiling against the
-                            # real (about-to-be-freed) availability.
+                            # Placement inputs come from telemetry (#279 slice 2);
+                            # the recently-freed bookkeeping path is pruned here
+                            # and normally contributes no speculative credit.
                             credited_memory, credited_vram = (
                                 self._placement_memory_inputs()
                             )

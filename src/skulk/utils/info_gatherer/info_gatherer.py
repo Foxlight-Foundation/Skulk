@@ -2,7 +2,7 @@ import os
 import shutil
 import sys
 import tomllib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Self
 
@@ -56,8 +56,44 @@ from .system_info import (
 IS_DARWIN = sys.platform == "darwin"
 IS_LINUX = sys.platform.startswith("linux")
 
+_HOMEBREW_MACTOP_PATHS: tuple[str, ...] = (
+    "/opt/homebrew/bin/mactop",
+    "/usr/local/bin/mactop",
+)
+
 
 _vm_stat_failure_logged = False
+
+
+def _is_executable_file(path: str) -> bool:
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def find_mactop_path(
+    *,
+    which: Callable[[str], str | None] = shutil.which,
+    is_executable: Callable[[str], bool] = _is_executable_file,
+) -> str | None:
+    """Return the mactop executable path, including standard Homebrew prefixes.
+
+    Args:
+        which: Executable lookup function, injectable for tests.
+        is_executable: Predicate used for absolute fallback candidates.
+
+    Returns:
+        The path to an executable ``mactop`` binary, or ``None`` when unavailable.
+    """
+    found = which("mactop")
+    if found is not None:
+        return found
+
+    # Skulk is often launched by SSH/launchd with a minimal PATH. Homebrew's
+    # standard prefixes still carry mactop there, and losing it silently drops
+    # the dashboard's GPU/temp/power telemetry to unknown.
+    for candidate in _HOMEBREW_MACTOP_PATHS:
+        if is_executable(candidate):
+            return candidate
+    return None
 
 
 async def _read_mach_memory_categories() -> MachMemoryCategories | None:
@@ -491,7 +527,7 @@ class InfoGatherer:
         try:
             async with self._tg as tg:
                 if IS_DARWIN:
-                    if (mactop_path := shutil.which("mactop")) is not None:
+                    if (mactop_path := find_mactop_path()) is not None:
                         tg.start_soon(self._monitor_mactop, mactop_path)
                     else:
                         # mactop not installed — fall back to psutil for memory.
