@@ -40,6 +40,7 @@ def _card(
     n_layers: int = 32,
     context_length: int = 0,
     gguf_file: str | None = None,
+    uses_cfg: bool = False,
 ) -> ModelCard:
     """Minimal ModelCard for memory-filter tests.
 
@@ -57,7 +58,8 @@ def _card(
         num_key_value_heads=kv_heads,
         context_length=context_length,
         gguf_file=gguf_file,
-        tasks=[ModelTask.TextGeneration],
+        uses_cfg=uses_cfg,
+        tasks=[ModelTask.TextToImage if uses_cfg else ModelTask.TextGeneration],
     )
 
 
@@ -255,9 +257,41 @@ def test_pipeline_memory_filter_rejects_more_nodes_than_layers():
 
     assert all(len(cycle.node_ids) <= 2 for cycle in filtered_cycles)
     assert any(
-        "3 nodes exceed 2 model layers" in reason
+        "3 pipeline stages exceed 2 model layers" in reason
         for reason in diagnostics.rejection_reasons
     )
+
+
+def test_pipeline_memory_filter_counts_cfg_pipeline_stages_before_rejecting():
+    nodes = [NodeId() for _ in range(4)]
+    topology = Topology()
+    for node_id in nodes:
+        topology.add_node(node_id)
+    for index, node_id in enumerate(nodes):
+        topology.add_connection(
+            Connection(
+                source=node_id,
+                sink=nodes[(index + 1) % len(nodes)],
+                edge=create_socket_connection(index + 1),
+            )
+        )
+    node_memory = {
+        node_id: create_node_memory(
+            Memory.from_gb(64).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        )
+        for node_id in nodes
+    }
+    cycles = [cycle for cycle in topology.get_cycles() if len(cycle.node_ids) == 4]
+
+    filtered_cycles, diagnostics = filter_cycles_by_memory(
+        cycles,
+        node_memory,
+        _card(1, n_layers=2, uses_cfg=True),
+        sharding=Sharding.Pipeline,
+    )
+
+    assert filtered_cycles == cycles
+    assert diagnostics.rejection_reasons == []
 
 
 def test_pipeline_memory_filter_can_keep_rpc_proportional_sizing():

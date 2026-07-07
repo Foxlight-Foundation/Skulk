@@ -199,10 +199,13 @@ def _per_node_required_memory(
     Pipeline parallelism allocates integer layer counts proportionally to each
     node's usable memory (see ``allocate_layers_proportionally``), so this
     returns the exact post-rounding weight share the worker will be asked to
-    load. A fractional estimate can pass a borderline heterogeneous cycle that
-    later fails the worker's local guard once one node receives an extra layer.
-    Callers that use ``Sharding.Pipeline`` as a proportional-memory proxy rather
-    than real Skulk layer ranges can set ``exact_pipeline_layers=False``.
+    load. CFG-parallel image models allocate layers across one pipeline group
+    and mirror those ranges across the second CFG group, matching
+    ``_get_shard_assignments_for_cfg_parallel``. A fractional estimate can pass
+    a borderline heterogeneous cycle that later fails the worker's local guard
+    once one node receives an extra layer. Callers that use ``Sharding.Pipeline``
+    as a proportional-memory proxy rather than real Skulk layer ranges can set
+    ``exact_pipeline_layers=False``.
 
     Both the split here and the per-node admission below weigh by
     ``_node_usable_memory`` (capped at the Metal working-set ceiling), not raw
@@ -231,6 +234,31 @@ def _per_node_required_memory(
             node_id: required_memory * (node_usable[node_id] / total_usable)
             for node_id in cycle.node_ids
         }
+    if _uses_cfg_parallel(model_card, len(cycle.node_ids)):
+        cfg_world_size = 2
+        pipeline_world_size = len(cycle.node_ids) // cfg_world_size
+        pipeline_node_ids = cycle.node_ids[:pipeline_world_size]
+        pipeline_usable = {
+            node_id: node_usable[node_id] for node_id in pipeline_node_ids
+        }
+        pipeline_total_usable = sum(pipeline_usable.values(), start=Memory())
+        if pipeline_total_usable.in_bytes == 0:
+            return {node_id: required_memory for node_id in cycle.node_ids}
+        layer_allocations = allocate_layers_proportionally(
+            total_layers=model_card.n_layers,
+            memory_fractions=[
+                pipeline_usable[node_id] / pipeline_total_usable
+                for node_id in pipeline_node_ids
+            ],
+        )
+        pipeline_ranks = list(range(pipeline_world_size)) + list(
+            reversed(range(pipeline_world_size))
+        )
+        return {
+            node_id: (required_memory * layer_allocations[pipeline_ranks[index]])
+            // model_card.n_layers
+            for index, node_id in enumerate(cycle.node_ids)
+        }
     layer_allocations = allocate_layers_proportionally(
         total_layers=model_card.n_layers,
         memory_fractions=[
@@ -241,6 +269,18 @@ def _per_node_required_memory(
         node_id: (required_memory * layer_allocations[index]) // model_card.n_layers
         for index, node_id in enumerate(cycle.node_ids)
     }
+
+
+def _uses_cfg_parallel(model_card: ModelCard, world_size: int) -> bool:
+    """Whether pipeline placement will use mirrored CFG groups for this cycle."""
+    return model_card.uses_cfg and world_size >= 2 and world_size % 2 == 0
+
+
+def _effective_pipeline_stage_count(model_card: ModelCard, world_size: int) -> int:
+    """Count real pipeline stages for exact layer allocation guards."""
+    if _uses_cfg_parallel(model_card, world_size):
+        return world_size // 2
+    return world_size
 
 
 def _node_usable_memory(
@@ -317,14 +357,18 @@ def filter_cycles_by_memory(
                 if node_id not in diagnostics.pending_info_node_ids:
                     diagnostics.pending_info_node_ids.append(node_id)
             continue
+        pipeline_stage_count = _effective_pipeline_stage_count(
+            model_card, len(cycle.node_ids)
+        )
         if (
             exact_pipeline_layers
             and sharding == Sharding.Pipeline
-            and len(cycle.node_ids) > model_card.n_layers
+            and pipeline_stage_count > model_card.n_layers
         ):
             diagnostics.rejection_reasons.append(
                 f"cycle [{', '.join(str(n) for n in cycle.node_ids)}] "
-                f"({sharding.value} sharding): {len(cycle.node_ids)} nodes exceed "
+                f"({sharding.value} sharding): {pipeline_stage_count} pipeline "
+                "stages exceed "
                 f"{model_card.n_layers} model layers"
             )
             continue
