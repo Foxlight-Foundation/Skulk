@@ -261,7 +261,14 @@ export interface RawInstanceInner {
 
 export type RawInstances = Record<
   string,
-  { MlxRingInstance?: RawInstanceInner; MlxJacclInstance?: RawInstanceInner }
+  {
+    MlxRingInstance?: RawInstanceInner;
+    MlxJacclInstance?: RawInstanceInner;
+    // Pooled multi-node GGUF (llama.cpp RPC driver+donor, #328). A third
+    // instance variant; consumers that only knew MlxRing/MlxJaccl silently
+    // dropped every pooled instance.
+    LlamaRpcInstance?: RawInstanceInner;
+  }
 >;
 
 export type RawRunners = Record<string, Record<string, unknown>>;

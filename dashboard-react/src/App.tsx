@@ -442,8 +442,16 @@ export function App() {
   const instanceCards = useMemo<InstanceCardData[]>(() => {
     const cards: InstanceCardData[] = [];
     for (const [iid, inst] of Object.entries(instances)) {
-      const isRing = !!inst.MlxRingInstance;
-      const inner = inst.MlxRingInstance ?? inst.MlxJacclInstance;
+      // Instance is a tagged union: MlxRing / MlxJaccl (in-process) and
+      // LlamaRpc (pooled multi-node GGUF, #328). Handling only the first two
+      // silently dropped every pooled instance from the Active Instances panel.
+      const instanceType: InstanceCardData['instanceType'] = inst.MlxRingInstance
+        ? 'MlxRing'
+        : inst.MlxJacclInstance
+          ? 'MlxJaccl'
+          : 'LlamaRpc';
+      const inner =
+        inst.MlxRingInstance ?? inst.MlxJacclInstance ?? inst.LlamaRpcInstance;
       if (!inner) continue;
       const sa = inner.shardAssignments;
       const modelId = sa?.modelId;
@@ -457,7 +465,10 @@ export function App() {
       // Derive sharding and model type from shard metadata
       const runnerToShard = sa?.runnerToShard;
       let sharding: 'Pipeline' | 'Tensor' = 'Pipeline';
-      let engine: InstanceCardData['engine'] = 'mlx';
+      // A pooled instance is always served by llama-server across the RPC pair,
+      // so default its engine to 'served' regardless of shard-card ordering;
+      // the backend read below only refines the in-process MLX/llama_cpp split.
+      let engine: InstanceCardData['engine'] = instanceType === 'LlamaRpc' ? 'served' : 'mlx';
       let isEmbedding = false;
       let speculation: InstanceCardData['speculation'];
       if (runnerToShard) {
@@ -539,7 +550,7 @@ export function App() {
         instanceId,
         modelId,
         sharding,
-        instanceType: isRing ? 'MlxRing' : 'MlxJaccl',
+        instanceType,
         engine,
         nodeStatuses,
         status: derived.status,

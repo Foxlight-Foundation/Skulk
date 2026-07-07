@@ -29,7 +29,7 @@ export interface ClusterCardProps {
   modelName?: string;
   sizeBytes?: number;
   sharding: 'Pipeline' | 'Tensor';
-  instanceType: 'MlxRing' | 'MlxJaccl';
+  instanceType: 'MlxRing' | 'MlxJaccl' | 'LlamaRpc';
   nodes: ClusterCardNode[];
   isReady?: boolean;
   downloads?: ClusterCardDownload[];
