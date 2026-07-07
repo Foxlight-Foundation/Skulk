@@ -218,6 +218,48 @@ def test_pipeline_memory_filter_uses_integer_layer_allocation():
     assert "needs ~8.0GB" in diagnostics.rejection_reasons[0]
 
 
+def test_pipeline_memory_filter_rejects_more_nodes_than_layers():
+    node_a = NodeId()
+    node_b = NodeId()
+    node_c = NodeId()
+    topology = Topology()
+    for node_id in (node_a, node_b, node_c):
+        topology.add_node(node_id)
+    topology.add_connection(
+        Connection(source=node_a, sink=node_b, edge=create_socket_connection(1))
+    )
+    topology.add_connection(
+        Connection(source=node_b, sink=node_c, edge=create_socket_connection(2))
+    )
+    topology.add_connection(
+        Connection(source=node_c, sink=node_a, edge=create_socket_connection(3))
+    )
+    node_memory = {
+        node_a: create_node_memory(
+            Memory.from_gb(64).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+        node_b: create_node_memory(
+            Memory.from_gb(64).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+        node_c: create_node_memory(
+            Memory.from_gb(64).in_bytes, ram_total=Memory.from_gb(64).in_bytes
+        ),
+    }
+
+    filtered_cycles, diagnostics = filter_cycles_by_memory(
+        topology.get_cycles(),
+        node_memory,
+        _card(1, n_layers=2),
+        sharding=Sharding.Pipeline,
+    )
+
+    assert all(len(cycle.node_ids) <= 2 for cycle in filtered_cycles)
+    assert any(
+        "3 nodes exceed 2 model layers" in reason
+        for reason in diagnostics.rejection_reasons
+    )
+
+
 def test_filter_multiple_cycles_by_memory():
     # arrange
     node_a_id = NodeId()

@@ -306,6 +306,13 @@ def filter_cycles_by_memory(
                 if node_id not in diagnostics.pending_info_node_ids:
                     diagnostics.pending_info_node_ids.append(node_id)
             continue
+        if sharding == Sharding.Pipeline and len(cycle.node_ids) > model_card.n_layers:
+            diagnostics.rejection_reasons.append(
+                f"cycle [{', '.join(str(n) for n in cycle.node_ids)}] "
+                f"({sharding.value} sharding): {len(cycle.node_ids)} nodes exceed "
+                f"{model_card.n_layers} model layers"
+            )
+            continue
 
         node_shares = _per_node_required_memory(
             cycle, node_memory, model_card, sharding, node_vram

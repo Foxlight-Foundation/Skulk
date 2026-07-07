@@ -802,6 +802,12 @@ class ModelStoreClient:
                     raise RuntimeError(
                         f"ModelStoreClient: GET {url} returned {resp.status}"
                     )
+                if resume_from > 0 and resp.status == 200:
+                    logger.warning(
+                        "ModelStoreClient: store ignored Range for "
+                        f"{model_id}/{file_path}; restarting partial download"
+                    )
+                    resume_from = 0
 
                 n_read = resume_from
                 async with aiofiles.open(

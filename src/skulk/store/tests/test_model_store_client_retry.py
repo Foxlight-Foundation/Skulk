@@ -133,3 +133,34 @@ async def test_store_file_download_retries_and_resumes_partial(
     assert (tmp_path / "weights.safetensors").read_bytes() == b"abcd"
     assert not (tmp_path / "weights.safetensors.partial").exists()
     assert factory.requests == [{}, {"Range": "bytes=2-"}]
+
+
+@pytest.mark.anyio
+async def test_store_file_download_restarts_when_range_is_ignored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    partial = tmp_path / "weights.safetensors.partial"
+    partial.write_bytes(b"ab")
+    factory = _FakeClientSessionFactory(
+        [
+            _FakeFileResponse(200, [b"abcd"]),
+        ]
+    )
+    monkeypatch.setattr(model_store_client.aiohttp, "ClientSession", factory)
+    monkeypatch.setattr(model_store_client.asyncio, "sleep", _no_sleep)
+    client = ModelStoreClient(store_host="store.local", store_port=58080)
+
+    written = await client._download_store_file(
+        "org/model",
+        "weights.safetensors",
+        tmp_path,
+        on_progress=None,
+        total_bytes_offset=0,
+        grand_total=4,
+    )
+
+    assert written == 4
+    assert (tmp_path / "weights.safetensors").read_bytes() == b"abcd"
+    assert not partial.exists()
+    assert factory.requests == [{"Range": "bytes=2-"}]
