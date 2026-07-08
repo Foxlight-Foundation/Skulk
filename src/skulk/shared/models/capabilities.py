@@ -228,6 +228,11 @@ def resolve_model_capability_profile(
         if default_audio_response_format is None and audio_response_formats:
             default_audio_response_format = audio_response_formats[0]
         supports_realtime_audio = card.audio.supports_realtime is True
+    supports_reference_audio = bool(
+        card is not None
+        and card.audio is not None
+        and card.audio.supports_reference_audio is True
+    )
     supports_thinking = bool(
         card is not None
         and ("thinking" in card.capabilities or card.reasoning is not None)
@@ -260,7 +265,11 @@ def resolve_model_capability_profile(
         supports_thinking=supports_thinking,
         supports_thinking_toggle=supports_thinking_toggle,
         supports_image_input=supports_image_input,
-        supports_audio_input=supports_transcription or supports_speech_translation,
+        supports_audio_input=(
+            supports_transcription
+            or supports_speech_translation
+            or supports_reference_audio
+        ),
         supports_speech_synthesis=supports_speech_synthesis,
         supports_transcription=supports_transcription,
         supports_speech_translation=supports_speech_translation,
@@ -357,9 +366,7 @@ def resolve_model_capability_profile(
         updates = {}
         if card.modalities.supports_audio_input is not None:
             updates["supports_audio_input"] = (
-                card.modalities.supports_audio_input
-                or profile.supports_transcription
-                or profile.supports_speech_translation
+                card.modalities.supports_audio_input or profile.supports_audio_input
             )
         if card.modalities.supports_native_multimodal is not None:
             updates["supports_native_multimodal"] = (

@@ -117,6 +117,30 @@ def test_resolve_model_capability_profile_exposes_tts_audio_metadata() -> None:
     )
 
 
+def test_resolve_model_capability_profile_treats_reference_audio_as_input() -> None:
+    card = ModelCard(
+        model_id=ModelId("mlx-community/kokoro-voice-clone-test"),
+        storage_size=Memory.from_mb(100),
+        n_layers=10,
+        hidden_size=1024,
+        supports_tensor=False,
+        tasks=[ModelTask.TextToSpeech],
+        family="kokoro",
+        capabilities=["tts"],
+        modalities=ModalitiesCardConfig(supports_audio_input=False),
+        audio=AudioCardConfig(
+            kind=AudioCardKind.TextToSpeech,
+            supports_reference_audio=True,
+        ),
+    )
+
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+
+    assert profile.supports_speech_synthesis is True
+    assert profile.supports_audio_input is True
+    assert profile.supports_audio_output is True
+
+
 def test_resolve_model_capability_profile_exposes_stt_and_translation() -> None:
     card = ModelCard(
         model_id=ModelId("mlx-community/whisper-test"),
