@@ -2,7 +2,9 @@
 """Unit coverage for the single-node speech runner."""
 
 import base64
+import hashlib
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -11,8 +13,11 @@ import pytest
 from anyio import WouldBlock
 
 from skulk.shared.models.model_cards import AudioResponseFormat, ModelId
-from skulk.shared.types.audio import SpeechSynthesisTaskParams
-from skulk.shared.types.chunks import AudioChunk
+from skulk.shared.types.audio import (
+    AudioTranscriptionTaskParams,
+    SpeechSynthesisTaskParams,
+)
+from skulk.shared.types.chunks import AudioChunk, TranscriptionChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import (
     ChunkGenerated,
@@ -21,7 +26,7 @@ from skulk.shared.types.events import (
     TaskAcknowledged,
     TaskStatusUpdated,
 )
-from skulk.shared.types.tasks import SpeechSynthesis, TaskStatus
+from skulk.shared.types.tasks import AudioTranscription, SpeechSynthesis, TaskStatus
 from skulk.shared.types.worker.instances import BoundInstance, InstanceId
 from skulk.shared.types.worker.runners import (
     RunnerId,
@@ -86,6 +91,32 @@ class _FakeSpeechModel:
     ) -> list[_FakeSpeechResult]:
         self.calls.append((text, voice, speed, stream))
         return [_FakeSpeechResult()]
+
+
+class _FakeTranscriptionModel:
+    """Small fake with an STT-style ``generate`` method."""
+
+    def __init__(self, expected_audio: bytes) -> None:
+        self.expected_audio = expected_audio
+        self.calls: list[tuple[str, str | None, bool, bool]] = []
+
+    def generate(
+        self,
+        audio_path: str,
+        *,
+        language: str | None = None,
+        stream: bool = False,
+        verbose: bool = False,
+    ) -> dict[str, object]:
+        assert Path(audio_path).read_bytes() == self.expected_audio
+        self.calls.append((Path(audio_path).suffix, language, stream, verbose))
+        return {
+            "text": "hello world",
+            "language": language or "en",
+            "segments": [
+                {"id": 0, "text": "hello world", "start": 0.0, "end": 1.2}
+            ],
+        }
 
 
 def _make_runner() -> tuple[Runner, _CaptureSender]:
@@ -198,4 +229,48 @@ def test_speech_synthesis_emits_audio_chunk_and_active_status(
     assert base64.b64decode(chunk.data.encode("ascii"), validate=True) == b"WAVDATA"
     assert chunk.format == AudioResponseFormat.Wav
     assert chunk.sample_rate == 24000
+    assert chunk.finish_reason == "stop"
+
+
+def test_audio_transcription_emits_terminal_transcription_chunk() -> None:
+    """An STT task should decode uploaded audio and emit transcript output."""
+
+    runner, sender = _make_runner()
+    audio_bytes = b"RIFFtestWAVE"
+    model = _FakeTranscriptionModel(audio_bytes)
+    runner.model = model
+    runner.current_status = RunnerReady()
+
+    command_id = CommandId("transcription-command-1")
+    task = AudioTranscription(
+        instance_id=InstanceId("speech-instance-1"),
+        command_id=command_id,
+        task_params=AudioTranscriptionTaskParams(
+            model=ModelId("mlx-community/whisper-test"),
+            filename="sample.wav",
+            content_type="audio/wav",
+            total_input_chunks=1,
+            audio_sha256=hashlib.sha256(audio_bytes).hexdigest(),
+            audio_data=base64.b64encode(audio_bytes).decode("ascii"),
+            language="en",
+        ),
+    )
+    runner.task_receiver = cast("object", _OneShotReceiver([task]))  # pyright: ignore[reportAttributeAccessIssue]
+
+    runner.main()
+
+    assert model.calls == [(".wav", "en", False, True)]
+    generated: list[tuple[CommandId, TranscriptionChunk]] = []
+    for event in sender.events:
+        if isinstance(event, ChunkGenerated) and isinstance(
+            event.chunk, TranscriptionChunk
+        ):
+            generated.append((event.command_id, event.chunk))
+
+    assert len(generated) == 1
+    generated_command_id, chunk = generated[0]
+    assert generated_command_id == command_id
+    assert chunk.text == "hello world"
+    assert chunk.language == "en"
+    assert chunk.segments[0]["start"] == 0.0
     assert chunk.finish_reason == "stop"

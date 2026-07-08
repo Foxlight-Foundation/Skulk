@@ -80,6 +80,28 @@ class InputImageChunk(BaseChunk):
                 yield name, value
 
 
+class AudioInputChunk(BaseChunk):
+    """Base64-encoded input audio chunk for speech-to-text requests."""
+
+    command_id: CommandId
+    data: str
+    chunk_index: int
+    total_chunks: int
+    filename: str | None = None
+    content_type: str | None = None
+    audio_sha256: str
+
+    def __repr_args__(self) -> Generator[tuple[str, Any], None, None]:
+        for name, value in super().__repr_args__():  # pyright: ignore[reportAny]
+            if name == "data" and hasattr(value, "__len__"):  # pyright: ignore[reportAny]
+                yield name, f"<{len(self.data)} chars>"
+            elif name is not None:
+                yield name, value
+
+
+InputChunk = InputImageChunk | AudioInputChunk
+
+
 class EmbeddingChunk(BaseChunk):
     """Response chunk for embedding inference — single batch response, no streaming."""
 
@@ -126,6 +148,10 @@ class TranscriptionChunk(BaseChunk):
     """Whether this chunk is an interim streaming transcript."""
     language: str | None = None
     """Detected or requested language code when available."""
+    segments: list[dict[str, str | int | float | bool | None]] = Field(
+        default_factory=list
+    )
+    """Model-provided segment metadata normalized for verbose transcript formats."""
     finish_reason: FinishReason | None = None
     """Terminal reason when this is the last output chunk."""
     error_message: str | None = None

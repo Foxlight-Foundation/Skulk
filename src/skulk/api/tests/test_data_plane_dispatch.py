@@ -21,6 +21,7 @@ from skulk.shared.types.chunks import (
     PrefillProgressChunk,
     TokenChunk,
     ToolCallChunk,
+    TranscriptionChunk,
 )
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
 from skulk.shared.types.common import CommandId, NodeId
@@ -283,6 +284,24 @@ async def test_dispatch_routes_audio_chunk_to_speech_queue() -> None:
         chunk_index=0,
         total_chunks=1,
         format=AudioResponseFormat.Wav,
+        finish_reason="stop",
+    )
+    await api._dispatch_generation_chunk(cmd, chunk)  # pyright: ignore[reportPrivateUsage]
+    with recv as stream:
+        assert stream.receive_nowait() is chunk
+
+
+@pytest.mark.asyncio
+async def test_dispatch_routes_transcription_chunk_to_transcription_queue() -> None:
+    api = _build_api()
+    cmd = CommandId("cmd-transcription")
+    send, recv = channel[TranscriptionChunk | ErrorChunk]()
+    api._audio_transcription_queues[cmd] = send  # pyright: ignore[reportPrivateUsage]
+
+    chunk = TranscriptionChunk(
+        model=ModelId("mlx-community/whisper-test"),
+        text="hello",
+        language="en",
         finish_reason="stop",
     )
     await api._dispatch_generation_chunk(cmd, chunk)  # pyright: ignore[reportPrivateUsage]

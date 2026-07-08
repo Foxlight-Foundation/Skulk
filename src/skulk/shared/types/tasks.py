@@ -6,7 +6,10 @@ from skulk.api.types import (
     ImageEditsTaskParams,
     ImageGenerationTaskParams,
 )
-from skulk.shared.types.audio import SpeechSynthesisTaskParams
+from skulk.shared.types.audio import (
+    AudioTranscriptionTaskParams,
+    SpeechSynthesisTaskParams,
+)
 from skulk.shared.types.common import CommandId, Id, NodeId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
 from skulk.shared.types.text_generation import TextGenerationTaskParams
@@ -118,6 +121,18 @@ class SpeechSynthesis(BaseTask):  # emitted by Master
     error_message: str | None = Field(default=None)
 
 
+class AudioTranscription(BaseTask):  # emitted by Master
+    """Task executed by the speech runner for speech-to-text requests."""
+
+    command_id: CommandId
+    owner_node: NodeId | None = None  # owning API node (#279 Phase 2)
+    task_params: AudioTranscriptionTaskParams
+    trace_enabled: bool = False
+
+    error_type: str | None = Field(default=None)
+    error_message: str | None = Field(default=None)
+
+
 class Shutdown(BaseTask):  # emitted by Worker
     runner_id: RunnerId
 
@@ -134,5 +149,6 @@ Task = (
     | ImageEdits
     | TextEmbedding
     | SpeechSynthesis
+    | AudioTranscription
     | Shutdown
 )

@@ -37,6 +37,7 @@ from skulk.shared.types.events import (
 )
 from skulk.shared.types.tasks import (
     CANCEL_ALL_TASKS,
+    AudioTranscription,
     ImageEdits,
     ImageGeneration,
     SpeechSynthesis,
@@ -384,6 +385,7 @@ class RunnerSupervisor:
                     ImageEdits,
                     TextEmbedding,
                     SpeechSynthesis,
+                    AudioTranscription,
                 ),
             )
             and task.owner_node is not None
@@ -496,6 +498,7 @@ class RunnerSupervisor:
                                 ImageEdits,
                                 TextEmbedding,
                                 SpeechSynthesis,
+                                AudioTranscription,
                             ),
                         ):
                             self._chunk_sequence.pop(ending_task.command_id, None)
@@ -716,6 +719,7 @@ class RunnerSupervisor:
                 ImageEdits,
                 TextEmbedding,
                 SpeechSynthesis,
+                AudioTranscription,
             ),
         ):
             command_id = str(task.command_id)

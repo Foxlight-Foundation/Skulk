@@ -1,18 +1,22 @@
 # pyright: reportAny=false, reportMissingTypeStubs=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false
 """Single-node speech runner backed by upstream ``mlx_audio``.
 
-Phase 1 implements non-streaming text-to-speech. Speech-to-text and realtime
-session handling intentionally land in later phases so the first audio route has
-one stable runner contract.
+Supports non-streaming text-to-speech and speech-to-text. Realtime session
+handling intentionally lands in a later phase so the first audio routes keep one
+stable request/response contract.
 """
 
 import base64
+import binascii
+import hashlib
 import inspect
 import io
+import os
+import tempfile
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from anyio import WouldBlock
@@ -26,7 +30,7 @@ from skulk.shared.tracing import (
     record_trace_marker,
     trace,
 )
-from skulk.shared.types.chunks import AudioChunk, ErrorChunk
+from skulk.shared.types.chunks import AudioChunk, ErrorChunk, TranscriptionChunk
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
     ChunkGenerated,
@@ -39,6 +43,7 @@ from skulk.shared.types.events import (
 )
 from skulk.shared.types.tasks import (
     CANCEL_ALL_TASKS,
+    AudioTranscription,
     LoadModel,
     Shutdown,
     SpeechSynthesis,
@@ -167,6 +172,186 @@ def _emit_audio_chunks(
         )
 
 
+def _emit_transcription_chunk(
+    *,
+    event_sender: MpSender[Event],
+    command_id: CommandId,
+    model_id: ModelId,
+    text: str,
+    language: str | None,
+    segments: list[dict[str, str | int | float | bool | None]],
+) -> None:
+    """Emit one terminal transcript chunk for a completed STT request."""
+    event_sender.send(
+        ChunkGenerated(
+            command_id=command_id,
+            chunk=TranscriptionChunk(
+                model=model_id,
+                text=text,
+                language=language,
+                segments=segments,
+                finish_reason="stop",
+            ),
+        )
+    )
+
+
+def _transcription_text(result: Any) -> str:
+    """Extract transcript text from common ``mlx_audio`` STT result shapes."""
+    if isinstance(result, str):
+        return result
+    if isinstance(result, dict):
+        text = result.get("text") or result.get("transcript")
+        return text if isinstance(text, str) else ""
+    text = getattr(result, "text", None)
+    if isinstance(text, str):
+        return text
+    transcript = getattr(result, "transcript", None)
+    return transcript if isinstance(transcript, str) else ""
+
+
+def _transcription_language(result: Any) -> str | None:
+    """Extract detected/requested language from a model result when present."""
+    if isinstance(result, dict):
+        language = result.get("language")
+    else:
+        language = getattr(result, "language", None)
+    return language if isinstance(language, str) else None
+
+
+def _coerce_float(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _coerce_int(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _segment_value(
+    value: Any,
+) -> str | int | float | bool | None:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _normalize_segment(
+    raw_segment: Any,
+    fallback_index: int,
+) -> dict[str, str | int | float | bool | None]:
+    """Normalize dict/object segment metadata without depending on one STT schema."""
+    if isinstance(raw_segment, dict):
+        raw_mapping = cast(dict[str, object], raw_segment)
+
+        def get_value(name: str, default: object | None = None) -> object | None:
+            return raw_mapping.get(name, default)
+    else:
+
+        def get_value(name: str, default: object | None = None) -> object | None:
+            return getattr(raw_segment, name, default)
+
+    segment_id = _coerce_int(
+        get_value("id", get_value("segment_index", fallback_index))
+    )
+    text = get_value("text", "")
+    start = _coerce_float(get_value("start", get_value("start_time")))
+    end = _coerce_float(get_value("end", get_value("end_time")))
+    language = get_value("language")
+    segment: dict[str, str | int | float | bool | None] = {
+        "id": segment_id if segment_id is not None else fallback_index,
+        "text": text if isinstance(text, str) else "",
+        "start": start,
+        "end": end,
+    }
+    if isinstance(language, str):
+        segment["language"] = language
+    for key in ("confidence", "is_final"):
+        value = get_value(key)
+        if value is not None:
+            segment[key] = _segment_value(value)
+    return segment
+
+
+def _extract_segments(
+    result: Any,
+    start_index: int,
+) -> list[dict[str, str | int | float | bool | None]]:
+    """Extract any segment list, or synthesize one from chunk timestamps."""
+    if isinstance(result, dict):
+        segments = result.get("segments")
+        has_direct_timestamps = "start_time" in result or "start" in result
+    else:
+        segments = getattr(result, "segments", None)
+        has_direct_timestamps = any(
+            hasattr(result, name) for name in ("start_time", "start", "end_time", "end")
+        )
+    if isinstance(segments, Iterable) and not isinstance(segments, (str, bytes, dict)):
+        return [
+            _normalize_segment(segment, start_index + index)
+            for index, segment in enumerate(segments)
+        ]
+    if has_direct_timestamps:
+        return [_normalize_segment(result, start_index)]
+    return []
+
+
+def _iter_result_chunks(result: Any) -> Iterable[Any]:
+    """Treat generator-style STT output as chunks without splitting strings/dicts."""
+    if isinstance(result, (str, bytes, dict)):
+        return (result,)
+    if isinstance(result, Iterable):
+        return result
+    return (result,)
+
+
+def _normalize_transcription_result(
+    result: Any,
+) -> tuple[str, str | None, list[dict[str, str | int | float | bool | None]]]:
+    """Normalize STT result text, language, and segments for API formatting."""
+    text_parts: list[str] = []
+    segments: list[dict[str, str | int | float | bool | None]] = []
+    language: str | None = None
+    for chunk in _iter_result_chunks(result):
+        chunk_text = _transcription_text(chunk)
+        if chunk_text:
+            text_parts.append(chunk_text)
+        if language is None:
+            language = _transcription_language(chunk)
+        segments.extend(_extract_segments(chunk, len(segments)))
+
+    text = "".join(text_parts).strip()
+    if not text and segments:
+        text = " ".join(
+            segment_text
+            for segment in segments
+            if isinstance((segment_text := segment.get("text")), str)
+        ).strip()
+    return text, language, segments
+
+
+def _audio_upload_suffix(filename: str | None, content_type: str | None) -> str:
+    """Pick a stable temp-file suffix for audio decoders that inspect extensions."""
+    if filename is not None:
+        _, suffix = os.path.splitext(filename)
+        if suffix:
+            return suffix
+    return {
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+        "audio/mpeg": ".mp3",
+        "audio/mp3": ".mp3",
+        "audio/flac": ".flac",
+        "audio/ogg": ".ogg",
+        "audio/webm": ".webm",
+        "audio/mp4": ".mp4",
+        "audio/x-m4a": ".m4a",
+    }.get(content_type or "", ".audio")
+
+
 class Runner:
     """Runner process for single-node ``mlx_audio`` speech models."""
 
@@ -254,12 +439,14 @@ class Runner:
                     break
 
     def handle_task(self, task: Task) -> None:
-        """Execute one lifecycle or TTS task."""
+        """Execute one lifecycle or speech inference task."""
         match task:
             case LoadModel() if isinstance(self.current_status, RunnerIdle):
                 self._load_model(task)
             case SpeechSynthesis() if isinstance(self.current_status, RunnerReady):
                 self._synthesize(task)
+            case AudioTranscription() if isinstance(self.current_status, RunnerReady):
+                self._transcribe(task)
             case Shutdown():
                 logger.info("speech runner shutting down")
                 self.update_status(RunnerShuttingDown())
@@ -378,6 +565,148 @@ class Runner:
                     )
                 )
             self.current_status = RunnerReady()
+
+    def _transcribe(self, task: AudioTranscription) -> None:
+        """Run one non-streaming speech-to-text task and emit transcript output."""
+        self.update_status(RunnerRunning())
+        self.acknowledge_task(task)
+        assert self.model is not None
+        model_id = self.shard_metadata.model_card.model_id
+
+        if task.trace_enabled:
+            begin_trace_session(
+                task.task_id,
+                rank=self.shard_metadata.device_rank,
+                node_id=str(self.bound_instance.bound_node_id),
+                model_id=str(model_id),
+                task_kind="speech",
+                tags=["stt"],
+            )
+            record_trace_marker(
+                "queued",
+                self.shard_metadata.device_rank,
+                task_id=task.task_id,
+            )
+
+        try:
+            with bind_trace_session(task.task_id), trace(
+                "stt_generate", self.shard_metadata.device_rank, "speech"
+            ):
+                text, language, segments = self._run_stt(task)
+            if self._is_cancelled(task.task_id):
+                return
+            if task.trace_enabled:
+                record_trace_marker(
+                    "finish",
+                    self.shard_metadata.device_rank,
+                    task_id=task.task_id,
+                )
+            _emit_transcription_chunk(
+                event_sender=self.event_sender,
+                command_id=task.command_id,
+                model_id=model_id,
+                text=text,
+                language=language,
+                segments=segments,
+            )
+        except Exception as exc:
+            if task.trace_enabled:
+                record_trace_marker(
+                    "error",
+                    self.shard_metadata.device_rank,
+                    task_id=task.task_id,
+                    tags=["error"],
+                    attrs={"message": str(exc)},
+                )
+            logger.opt(exception=exc).warning("speech transcription failed")
+            self.event_sender.send(
+                ChunkGenerated(
+                    command_id=task.command_id,
+                    chunk=ErrorChunk(
+                        model=model_id,
+                        error_message=str(exc),
+                    ),
+                )
+            )
+        finally:
+            if task.trace_enabled:
+                traces = pop_trace_session(task.task_id)
+                self.event_sender.send(
+                    TracesCollected(
+                        task_id=task.task_id,
+                        rank=self.shard_metadata.device_rank,
+                        traces=[
+                            TraceEventData(
+                                name=trace_event.name,
+                                start_us=trace_event.start_us,
+                                duration_us=trace_event.duration_us,
+                                rank=trace_event.rank,
+                                category=trace_event.category,
+                                node_id=trace_event.node_id,
+                                model_id=trace_event.model_id,
+                                task_kind=trace_event.task_kind,
+                                tags=list(trace_event.tags),
+                                attrs=trace_event.attrs,
+                            )
+                            for trace_event in traces
+                        ],
+                    )
+                )
+            self.current_status = RunnerReady()
+
+    def _run_stt(
+        self, task: AudioTranscription
+    ) -> tuple[str, str | None, list[dict[str, str | int | float | bool | None]]]:
+        """Write uploaded audio to a temp file and call the STT model."""
+        assert self.model is not None
+        params = task.task_params
+        if params.audio_data is None:
+            raise ValueError("No audio payload received")
+        try:
+            audio_bytes = base64.b64decode(
+                params.audio_data.encode("ascii"), validate=True
+            )
+        except binascii.Error as exc:
+            raise ValueError("Invalid base64 audio payload") from exc
+
+        actual_sha256 = hashlib.sha256(audio_bytes).hexdigest()
+        if actual_sha256 != params.audio_sha256:
+            raise ValueError("Audio payload checksum mismatch")
+
+        tmp_path: str | None = None
+        try:
+            suffix = _audio_upload_suffix(params.filename, params.content_type)
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_file:
+                tmp_file.write(audio_bytes)
+                tmp_path = tmp_file.name
+
+            generate_kwargs = {
+                "language": params.language,
+                "prompt": params.prompt,
+                "temperature": params.temperature,
+                "max_tokens": params.max_tokens,
+                "chunk_duration": params.chunk_duration,
+                "frame_threshold": params.frame_threshold,
+                "stream": False,
+                "context": params.context,
+                "prefill_step_size": params.prefill_step_size,
+                "text": params.text or params.prompt,
+                "word_timestamps": params.word_timestamps,
+                "timestamp_granularities": list(params.timestamp_granularities)
+                if params.timestamp_granularities
+                else None,
+                "verbose": True,
+            }
+            generate = self.model.generate
+            filtered_kwargs = _filter_kwargs(generate, generate_kwargs)
+            result = generate(tmp_path, **filtered_kwargs)
+            return _normalize_transcription_result(result)
+        finally:
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    logger.warning(f"Failed to remove temporary speech upload {tmp_path}")
 
     def _run_tts(self, task: SpeechSynthesis) -> tuple[bytes, int]:
         """Generate and encode the complete TTS response."""

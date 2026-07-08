@@ -21,6 +21,7 @@ def _make_api() -> Any:
     api._image_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._embedding_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._audio_speech_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._audio_transcription_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._cancelled_command_ids = set()  # pyright: ignore[reportPrivateUsage]
     api._chunk_reorder = {}  # pyright: ignore[reportPrivateUsage]
     api._data_dedup_cursor = {}  # pyright: ignore[reportPrivateUsage]
@@ -94,6 +95,27 @@ def test_cancel_active_audio_speech() -> None:
     cid = CommandId("speech-cmd-789")
     sender = MagicMock()
     api._audio_speech_queues[cid] = sender
+
+    response = client.post(f"/v1/cancel/{cid}")
+    assert response.status_code == 200
+    data: dict[str, Any] = response.json()
+    assert data["message"] == "Command cancelled."
+    assert data["command_id"] == str(cid)
+    sender.close.assert_called_once()
+    api._send.assert_called_once()
+    assert cid in api._cancelled_command_ids
+    task_cancelled = api._send.call_args[0][0]
+    assert task_cancelled.cancelled_command_id == cid
+
+
+def test_cancel_active_audio_transcription() -> None:
+    """Cancel an active speech transcription command."""
+    api = _make_api()
+    client = TestClient(api.app)
+
+    cid = CommandId("transcription-cmd-789")
+    sender = MagicMock()
+    api._audio_transcription_queues[cid] = sender
 
     response = client.post(f"/v1/cancel/{cid}")
     assert response.status_code == 200

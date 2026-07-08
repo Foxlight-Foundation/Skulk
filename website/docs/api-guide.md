@@ -79,6 +79,7 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
 - `POST /v1/audio/speech`
+- `POST /v1/audio/transcriptions`
 - `POST /v1/messages`
 - `POST /ollama/api/chat`
 - `POST /ollama/api/generate`
@@ -524,10 +525,55 @@ Request fields:
 The response body is raw audio bytes with a matching audio media type
 (`audio/mpeg`, `audio/wav`, `audio/flac`, `audio/ogg`, or `audio/opus`).
 
-Phase 1 is intentionally non-streaming and text-only. `stream=true`,
+The speech endpoint is intentionally non-streaming and text-only. `stream=true`,
 `streaming_interval`, `reference_audio`, and `reference_text` return
-**400 Bad Request**. Speech-to-text, translation, realtime sessions, voice
-listing, and managed reference-audio uploads are later phases.
+**400 Bad Request**. Speech translation, realtime sessions, voice listing, and
+managed reference-audio uploads are later phases.
+
+## OpenAI Audio Transcriptions API
+
+**POST** `/v1/audio/transcriptions`
+
+Transcribes a multipart audio upload with a mounted speech-to-text model. The
+model must be placed and running, and its resolved capabilities must include
+`supports_transcription`.
+
+```bash
+curl -X POST http://localhost:52415/v1/audio/transcriptions \
+  -F model=mlx-community/whisper-test \
+  -F file=@sample.wav \
+  -F response_format=verbose_json
+```
+
+Request fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `file` | file | Required audio upload. Common WAV, MP3, FLAC, OGG, Opus, WebM, MP4/M4A containers are accepted up to 25 MiB |
+| `model` | string | Required mounted STT model id |
+| `language` | string or null | Optional input language hint |
+| `prompt`, `context`, `text` | string or null | Optional model-specific transcription context |
+| `response_format` | string | Optional output format: `json`, `text`, `verbose_json`, `srt`, `vtt`, or `ndjson`; default `json` |
+| `temperature`, `max_tokens`, `chunk_duration`, `frame_threshold`, `prefill_step_size` | number or integer | Optional model-specific generation controls passed through only when the runner supports them |
+| `word_timestamps` | boolean | Optional request for word timestamp metadata when supported |
+| `timestamp_granularities` | string | Optional comma-separated or JSON-list timestamp granularity hints |
+
+Response formats:
+
+| Format | Media type | Shape |
+|--------|------------|-------|
+| `json` | `application/json` | `{ "text": "..." }` |
+| `text` | `text/plain` | Plain transcript text |
+| `verbose_json` | `application/json` | Transcript text plus language and segment metadata when the model returns it |
+| `srt` | `application/x-subrip` | Subtitle output from model segments, with a zero-length fallback segment when timestamps are absent |
+| `vtt` | `text/vtt` | WebVTT subtitle output from model segments |
+| `ndjson` | `application/x-ndjson` | One JSON line per transcription chunk |
+
+The endpoint never accepts server-local file paths. The API reads the multipart
+upload, chunks the base64 payload through Skulk's command/input-chunk pipeline,
+and the worker writes a temporary local audio file only inside the serving
+runner process. `stream=true` returns **400 Bad Request** until streaming STT
+lands.
 
 ## Claude Messages API
 
@@ -836,8 +882,9 @@ Important fields:
 The dashboard uses `tags` for compact badges and `capabilities` for filtering
 and richer tooltips. The `audio` and `resolved_capabilities.*speech*` fields
 identify speech-capable models; `supports_speech_synthesis` models can serve
-non-streaming `/v1/audio/speech` when mounted, while STT/translation metadata is
-reserved for later audio endpoints. The three `runtime.*_repo` fields name a model's
+non-streaming `/v1/audio/speech` when mounted, and `supports_transcription`
+models can serve non-streaming `/v1/audio/transcriptions`. Speech translation
+metadata remains reserved for later audio endpoints. The three `runtime.*_repo` fields name a model's
 speculative-decoding companions (a draft model or an MTP-head sidecar). Those
 companion repos are downloaded and loaded automatically with their parent and
 are not independently placeable, so the dashboard marks any store entry matching

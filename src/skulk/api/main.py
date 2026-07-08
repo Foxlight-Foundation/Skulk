@@ -70,6 +70,7 @@ from skulk.api.types import (
     AdvancedImageParams,
     AudioCapabilitySection,
     AudioSpeechRequest,
+    AudioTranscriptionResponseFormat,
     BenchChatCompletionRequest,
     BenchChatCompletionResponse,
     BenchImageGenerationResponse,
@@ -195,9 +196,13 @@ from skulk.shared.tracing import (
     export_trace,
     load_trace_file,
 )
-from skulk.shared.types.audio import SpeechSynthesisTaskParams
+from skulk.shared.types.audio import (
+    AudioTranscriptionTaskParams,
+    SpeechSynthesisTaskParams,
+)
 from skulk.shared.types.chunks import (
     AudioChunk,
+    AudioInputChunk,
     DataChunk,
     EmbeddingChunk,
     ErrorChunk,
@@ -207,9 +212,11 @@ from skulk.shared.types.chunks import (
     PrefillProgressChunk,
     TokenChunk,
     ToolCallChunk,
+    TranscriptionChunk,
 )
 from skulk.shared.types.commands import (
     AddCustomModelCard,
+    AudioTranscription,
     Command,
     CreateInstance,
     DeleteCustomModelCard,
@@ -358,6 +365,221 @@ _AUDIO_CONTENT_TYPES: Final[dict[AudioResponseFormat, str]] = {
     AudioResponseFormat.Ogg: "audio/ogg",
     AudioResponseFormat.Opus: "audio/opus",
 }
+_MAX_AUDIO_UPLOAD_BYTES: Final[int] = 25 * 1024 * 1024
+_AUDIO_TRANSCRIPTION_FORMATS: Final[set[str]] = {
+    "json",
+    "text",
+    "verbose_json",
+    "srt",
+    "vtt",
+    "ndjson",
+}
+_AUDIO_UPLOAD_EXTENSIONS: Final[set[str]] = {
+    ".flac",
+    ".m4a",
+    ".mp3",
+    ".mp4",
+    ".mpeg",
+    ".oga",
+    ".ogg",
+    ".opus",
+    ".wav",
+    ".webm",
+}
+_AUDIO_UPLOAD_CONTENT_TYPES: Final[set[str]] = {
+    "application/octet-stream",
+    "audio/flac",
+    "audio/mp3",
+    "audio/mp4",
+    "audio/mpeg",
+    "audio/ogg",
+    "audio/opus",
+    "audio/wav",
+    "audio/webm",
+    "audio/x-m4a",
+    "audio/x-wav",
+}
+
+
+def _normalize_upload_content_type(content_type: str | None) -> str | None:
+    """Return the lowercase media type without parameters."""
+    if content_type is None:
+        return None
+    normalized = content_type.split(";", 1)[0].strip().lower()
+    return normalized or None
+
+
+def _validate_audio_upload_metadata(file: UploadFile) -> None:
+    """Reject uploads whose metadata is clearly not an audio container."""
+    content_type = _normalize_upload_content_type(file.content_type)
+    suffix = Path(file.filename or "").suffix.lower()
+    if (
+        content_type is not None
+        and content_type not in _AUDIO_UPLOAD_CONTENT_TYPES
+        and suffix not in _AUDIO_UPLOAD_EXTENSIONS
+    ):
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported audio upload content type: {content_type}",
+        )
+
+
+async def _read_audio_upload(file: UploadFile) -> bytes:
+    """Read an uploaded audio file with Skulk's non-streaming size cap."""
+    audio_bytes = await file.read(_MAX_AUDIO_UPLOAD_BYTES + 1)
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Audio upload is empty")
+    if len(audio_bytes) > _MAX_AUDIO_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "Audio upload exceeds Skulk's "
+                f"{_MAX_AUDIO_UPLOAD_BYTES} byte transcription limit"
+            ),
+        )
+    return audio_bytes
+
+
+def _chunk_base64_payload(encoded: str) -> list[str]:
+    """Split a base64 payload into command input chunks."""
+    return [
+        encoded[index : index + SKULK_MAX_CHUNK_SIZE]
+        for index in range(0, len(encoded), SKULK_MAX_CHUNK_SIZE)
+    ] or [""]
+
+
+def _parse_timestamp_granularities(value: str | None) -> tuple[str, ...]:
+    """Parse multipart timestamp granularity hints from JSON or comma syntax."""
+    if value is None or not value.strip():
+        return ()
+    stripped = value.strip()
+    try:
+        parsed = cast(object, json.loads(stripped))
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, list):
+        parsed_items = cast(list[object], parsed)
+        if all(isinstance(item, str) for item in parsed_items):
+            return tuple(cast(list[str], parsed_items))
+    return tuple(item.strip() for item in stripped.split(",") if item.strip())
+
+
+def _segment_float(
+    segment: dict[str, str | int | float | bool | None], key: str
+) -> float | None:
+    value = segment.get(key)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _transcript_segments_or_fallback(
+    text: str,
+    segments: list[dict[str, str | int | float | bool | None]],
+) -> list[dict[str, str | int | float | bool | None]]:
+    if segments:
+        return segments
+    if not text:
+        return []
+    return [{"id": 0, "text": text, "start": 0.0, "end": 0.0}]
+
+
+def _format_srt_timestamp(seconds: float) -> str:
+    milliseconds_total = max(0, int(round(seconds * 1000)))
+    milliseconds = milliseconds_total % 1000
+    seconds_total = milliseconds_total // 1000
+    second = seconds_total % 60
+    minutes_total = seconds_total // 60
+    minute = minutes_total % 60
+    hour = minutes_total // 60
+    return f"{hour:02}:{minute:02}:{second:02},{milliseconds:03}"
+
+
+def _format_transcript_srt(
+    text: str, segments: list[dict[str, str | int | float | bool | None]]
+) -> str:
+    blocks: list[str] = []
+    for index, segment in enumerate(_transcript_segments_or_fallback(text, segments), 1):
+        segment_text = segment.get("text")
+        if not isinstance(segment_text, str):
+            segment_text = ""
+        start = _segment_float(segment, "start") or 0.0
+        end = _segment_float(segment, "end")
+        if end is None or end < start:
+            end = start
+        blocks.append(
+            f"{index}\n"
+            f"{_format_srt_timestamp(start)} --> {_format_srt_timestamp(end)}\n"
+            f"{segment_text}"
+        )
+    return "\n\n".join(blocks) + ("\n" if blocks else "")
+
+
+def _format_transcript_vtt(
+    text: str, segments: list[dict[str, str | int | float | bool | None]]
+) -> str:
+    body = _format_transcript_srt(text, segments)
+    lines = body.splitlines()
+    cleaned_lines = [
+        line
+        for line in lines
+        if not line.isdigit()
+    ]
+    return "WEBVTT\n\n" + "\n".join(
+        line.replace(",", ".") if " --> " in line else line for line in cleaned_lines
+    ) + ("\n" if cleaned_lines else "")
+
+
+def _transcription_chunk_payload(chunk: TranscriptionChunk) -> dict[str, object]:
+    """Return the public JSON shape for one transcription chunk."""
+    payload: dict[str, object] = {"text": chunk.text}
+    if chunk.language is not None:
+        payload["language"] = chunk.language
+    if chunk.segments:
+        payload["segments"] = chunk.segments
+    if chunk.finish_reason is not None:
+        payload["finish_reason"] = chunk.finish_reason
+    return payload
+
+
+def _build_audio_transcription_response(
+    response_format: AudioTranscriptionResponseFormat,
+    chunks: list[TranscriptionChunk],
+) -> Response:
+    """Format collected transcription chunks as an OpenAI-compatible response."""
+    text = "".join(chunk.text for chunk in chunks).strip()
+    language = next(
+        (chunk.language for chunk in chunks if chunk.language is not None), None
+    )
+    segments: list[dict[str, str | int | float | bool | None]] = []
+    for chunk in chunks:
+        segments.extend(chunk.segments)
+
+    if response_format == "text":
+        return Response(content=text, media_type="text/plain; charset=utf-8")
+    if response_format == "srt":
+        return Response(
+            content=_format_transcript_srt(text, segments),
+            media_type="application/x-subrip; charset=utf-8",
+        )
+    if response_format == "vtt":
+        return Response(
+            content=_format_transcript_vtt(text, segments),
+            media_type="text/vtt; charset=utf-8",
+        )
+    if response_format == "ndjson":
+        content = "".join(
+            json.dumps(_transcription_chunk_payload(chunk), separators=(",", ":"))
+            + "\n"
+            for chunk in chunks
+        )
+        return Response(content=content, media_type="application/x-ndjson")
+    if response_format == "verbose_json":
+        payload: dict[str, object] = {"text": text, "segments": segments}
+        if language is not None:
+            payload["language"] = language
+        return JSONResponse(payload)
+    return JSONResponse({"text": text})
 
 # How long the reorder buffer waits for a missing sequence before giving up on
 # it and releasing the chunks behind the gap (#279 Phase 2b). A genuine mesh
@@ -827,6 +1049,9 @@ class API:
         self._audio_speech_queues: dict[
             CommandId, Sender[AudioChunk | ErrorChunk]
         ] = {}
+        self._audio_transcription_queues: dict[
+            CommandId, Sender[TranscriptionChunk | ErrorChunk]
+        ] = {}
         self._cancelled_command_ids: set[CommandId] = set()
         # Per-command data-plane reorder buffers (#279 Phase 2b). The DATA gossip
         # topic has no total order (unlike the master event idx it replaced), so
@@ -907,6 +1132,7 @@ class API:
         self._image_generation_queues = {}
         self._embedding_queues = {}
         self._audio_speech_queues = {}
+        self._audio_transcription_queues = {}
         self._cancelled_command_ids = set()
         self.unpause(result_clock, master_node_id=master_node_id)
         self.event_receiver.close()
@@ -937,6 +1163,7 @@ class API:
             self._image_generation_queues,
             self._embedding_queues,
             self._audio_speech_queues,
+            self._audio_transcription_queues,
         ):
             for sender in list(queue_map.values()):
                 # The originating task is gone with the old session, so the
@@ -1096,6 +1323,16 @@ class API:
                 "must already be placed and running as a text-to-speech model."
             ),
         )(self.audio_speech)
+        self.app.post(
+            "/v1/audio/transcriptions",
+            response_model=None,
+            tags=["Audio"],
+            summary="Transcribe speech audio",
+            description=(
+                "OpenAI-compatible speech-to-text endpoint. The requested model "
+                "must already be placed and running as a speech-to-text model."
+            ),
+        )(self.audio_transcriptions)
         self.app.post(
             "/bench/chat/completions",
             tags=["Compatibility APIs"],
@@ -1866,6 +2103,7 @@ class API:
             or self._image_generation_queues.get(command_id)
             or self._embedding_queues.get(command_id)
             or self._audio_speech_queues.get(command_id)
+            or self._audio_transcription_queues.get(command_id)
         )
         if sender is None:
             raise HTTPException(
@@ -2473,7 +2711,7 @@ class API:
     ) -> ModelId:
         """Validate a mounted text-to-speech model and requested output format."""
 
-        model_card = await ModelCard.load(model_id)
+        model_card = await self._get_running_model_card(model_id)
         resolved = model_card.model_id
         profile = resolve_model_capability_profile(resolved, model_card=model_card)
         if not profile.supports_speech_synthesis:
@@ -2494,6 +2732,28 @@ class API:
                     f"Model {resolved} does not support audio response format "
                     f"{response_format.value}; supported formats: {supported}"
                 ),
+            )
+        if not any(
+            instance.shard_assignments.model_id == resolved
+            for instance in self.state.instances.values()
+        ):
+            await self._trigger_notify_user_to_download_model(resolved)
+            raise HTTPException(
+                status_code=404,
+                detail=f"No instance found for model {resolved}",
+            )
+        return resolved
+
+    async def _validate_audio_transcription_model(self, model_id: ModelId) -> ModelId:
+        """Validate a mounted speech-to-text model exists and is servable."""
+
+        model_card = await self._get_running_model_card(model_id)
+        resolved = model_card.model_id
+        profile = resolve_model_capability_profile(resolved, model_card=model_card)
+        if not profile.supports_transcription:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {resolved} is not a speech-to-text model",
             )
         if not any(
             instance.shard_assignments.model_id == resolved
@@ -3749,6 +4009,7 @@ class API:
             or command_id in self._image_generation_queues
             or command_id in self._embedding_queues
             or command_id in self._audio_speech_queues
+            or command_id in self._audio_transcription_queues
         )
 
     async def _reorder_and_dispatch(
@@ -3893,6 +4154,12 @@ class API:
                 await queue.send(chunk)
             except (BrokenResourceError, ClosedResourceError):
                 self._audio_speech_queues.pop(command_id, None)
+        if queue := self._audio_transcription_queues.get(command_id, None):
+            assert isinstance(chunk, (TranscriptionChunk, ErrorChunk))
+            try:
+                await queue.send(chunk)
+            except (BrokenResourceError, ClosedResourceError):
+                self._audio_transcription_queues.pop(command_id, None)
 
     async def _terminate_command_stream(
         self, task_id: task_types.TaskId, error_message: str
@@ -3915,6 +4182,7 @@ class API:
                 task_types.ImageEdits,
                 task_types.TextEmbedding,
                 task_types.SpeechSynthesis,
+                task_types.AudioTranscription,
             ),
         ):
             return
@@ -3929,6 +4197,7 @@ class API:
             self._image_generation_queues,
             self._embedding_queues,
             self._audio_speech_queues,
+            self._audio_transcription_queues,
         ):
             if queue := queue_map.get(task.command_id):
                 try:
@@ -4341,6 +4610,7 @@ class API:
                 task_types.ImageEdits,
                 task_types.TextEmbedding,
                 task_types.SpeechSynthesis,
+                task_types.AudioTranscription,
             ),
         ):
             return str(task.command_id)
@@ -4360,6 +4630,7 @@ class API:
                 task_types.ImageEdits,
                 task_types.TextEmbedding,
                 task_types.SpeechSynthesis,
+                task_types.AudioTranscription,
             ),
         ):
             return str(task.task_params.model)
@@ -6063,6 +6334,206 @@ class API:
                 cast(
                     dict[CommandId, Sender[object]],
                     self._audio_speech_queues,
+                ),
+            )
+
+    async def audio_transcriptions(
+        self,
+        file: Annotated[
+            UploadFile,
+            File(
+                description="Audio file to transcribe.",
+            ),
+        ],
+        model: Annotated[
+            str,
+            Form(
+                description="Mounted speech-to-text model id to serve.",
+            ),
+        ],
+        language: Annotated[
+            str | None,
+            Form(
+                description="Optional input language hint.",
+            ),
+        ] = None,
+        prompt: Annotated[
+            str | None,
+            Form(
+                description="Optional transcription prompt or context.",
+            ),
+        ] = None,
+        response_format: Annotated[
+            AudioTranscriptionResponseFormat,
+            Form(
+                description="Transcription response format.",
+            ),
+        ] = "json",
+        temperature: Annotated[
+            float | None,
+            Form(
+                description="Optional model-specific sampling temperature.",
+            ),
+        ] = None,
+        stream: Annotated[
+            bool,
+            Form(
+                description="Streaming transcription is reserved for a later phase.",
+            ),
+        ] = False,
+        max_tokens: Annotated[
+            int | None,
+            Form(
+                description="Optional model-specific maximum token budget.",
+            ),
+        ] = None,
+        chunk_duration: Annotated[
+            float | None,
+            Form(
+                description="Optional model-specific audio chunk duration.",
+            ),
+        ] = None,
+        frame_threshold: Annotated[
+            int | None,
+            Form(
+                description="Optional model-specific frame threshold.",
+            ),
+        ] = None,
+        context: Annotated[
+            str | None,
+            Form(
+                description="Optional model-specific context text.",
+            ),
+        ] = None,
+        prefill_step_size: Annotated[
+            int | None,
+            Form(
+                description="Optional model-specific prefill step size.",
+            ),
+        ] = None,
+        text: Annotated[
+            str | None,
+            Form(
+                description="Optional model-specific text prefix.",
+            ),
+        ] = None,
+        word_timestamps: Annotated[
+            bool,
+            Form(
+                description="Whether to request word timestamp metadata when supported.",
+            ),
+        ] = False,
+        timestamp_granularities: Annotated[
+            str | None,
+            Form(
+                description="Comma-separated or JSON list of timestamp granularities.",
+            ),
+        ] = None,
+    ) -> Response:
+        """OpenAI-compatible speech-to-text endpoint."""
+
+        if not model.strip():
+            raise HTTPException(status_code=400, detail="`model` must not be empty")
+        if stream:
+            raise HTTPException(
+                status_code=400,
+                detail="`stream=true` is not supported by Skulk's STT endpoint yet",
+            )
+        if response_format not in _AUDIO_TRANSCRIPTION_FORMATS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported transcription response_format: {response_format}",
+            )
+
+        _validate_audio_upload_metadata(file)
+        audio_bytes = await _read_audio_upload(file)
+        audio_sha256 = hashlib.sha256(audio_bytes).hexdigest()
+        encoded_audio = base64.b64encode(audio_bytes).decode("ascii")
+        audio_chunks = _chunk_base64_payload(encoded_audio)
+        model_id = await self._validate_audio_transcription_model(ModelId(model))
+        normalized_content_type = _normalize_upload_content_type(file.content_type)
+
+        command = AudioTranscription(
+            owner_node=self.node_id,
+            task_params=AudioTranscriptionTaskParams(
+                model=model_id,
+                filename=file.filename,
+                content_type=normalized_content_type,
+                total_input_chunks=len(audio_chunks),
+                audio_sha256=audio_sha256,
+                language=language,
+                prompt=prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                chunk_duration=chunk_duration,
+                frame_threshold=frame_threshold,
+                context=context,
+                prefill_step_size=prefill_step_size,
+                text=text,
+                word_timestamps=word_timestamps,
+                timestamp_granularities=_parse_timestamp_granularities(
+                    timestamp_granularities
+                ),
+            ),
+        )
+        command_id = command.command_id
+
+        try:
+            self._audio_transcription_queues[command_id], recv = channel[
+                TranscriptionChunk | ErrorChunk
+            ]()
+
+            for chunk_index, chunk_data in enumerate(audio_chunks):
+                await self._send(
+                    SendInputChunk(
+                        chunk=AudioInputChunk(
+                            model=model_id,
+                            command_id=command_id,
+                            data=chunk_data,
+                            chunk_index=chunk_index,
+                            total_chunks=len(audio_chunks),
+                            filename=file.filename,
+                            content_type=normalized_content_type,
+                            audio_sha256=audio_sha256,
+                        )
+                    )
+                )
+            await self._send(command)
+
+            transcript_chunks: list[TranscriptionChunk] = []
+            with recv as chunks:
+                async for chunk in chunks:
+                    if isinstance(chunk, ErrorChunk):
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Speech transcription failed: {chunk.error_message}",
+                        )
+                    transcript_chunks.append(chunk)
+                    if chunk.finish_reason is not None:
+                        break
+
+            if not transcript_chunks:
+                raise HTTPException(
+                    status_code=500, detail="No speech transcription response received"
+                )
+            return _build_audio_transcription_response(
+                response_format, transcript_chunks
+            )
+
+        except anyio.get_cancelled_exc_class():
+            cancel_command = TaskCancelled(cancelled_command_id=command_id)
+            self._cancelled_command_ids.add(command_id)
+            with anyio.CancelScope(shield=True):
+                await self.command_sender.send(
+                    ForwarderCommand(origin=self._system_id, command=cancel_command)
+                )
+            raise
+        finally:
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._audio_transcription_queues,
                 ),
             )
 

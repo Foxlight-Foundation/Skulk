@@ -13,8 +13,12 @@ from skulk.shared.models.model_cards import (
     ModelId,
     ModelTask,
 )
-from skulk.shared.types.audio import SpeechSynthesisTaskParams
+from skulk.shared.types.audio import (
+    AudioTranscriptionTaskParams,
+    SpeechSynthesisTaskParams,
+)
 from skulk.shared.types.commands import (
+    AudioTranscription,
     ForwarderCommand,
     ForwarderDownloadCommand,
     SetTracingEnabled,
@@ -31,6 +35,7 @@ from skulk.shared.types.events import (
 )
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state_sync import StateSyncMessage
+from skulk.shared.types.tasks import AudioTranscription as AudioTranscriptionTask
 from skulk.shared.types.tasks import SpeechSynthesis as SpeechSynthesisTask
 from skulk.shared.types.tasks import TextGeneration as TextGenerationTask
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
@@ -137,6 +142,40 @@ def _single_node_speech_instance(node_id: NodeId) -> MlxRingInstance:
     )
 
 
+def _single_node_transcription_instance(node_id: NodeId) -> MlxRingInstance:
+    instance_id = InstanceId("transcription-instance-1")
+    runner_id = RunnerId("transcription-runner-1")
+    model_card = ModelCard(
+        model_id=ModelId("mlx-community/whisper-test"),
+        storage_size=Memory.from_mb(1024),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.SpeechToText],
+        capabilities=["stt"],
+        audio=AudioCardConfig(kind=AudioCardKind.SpeechToText),
+    )
+    shard_metadata = PipelineShardMetadata(
+        model_card=model_card,
+        device_rank=0,
+        world_size=1,
+        start_layer=0,
+        end_layer=1,
+        n_layers=1,
+    )
+    shard_assignments = ShardAssignments(
+        model_id=model_card.model_id,
+        runner_to_shard={runner_id: shard_metadata},
+        node_to_runner={node_id: runner_id},
+    )
+    return MlxRingInstance(
+        instance_id=instance_id,
+        shard_assignments=shard_assignments,
+        hosts_by_node={node_id: [Host(ip="0.0.0.0", port=58485)]},
+        ephemeral_port=58485,
+    )
+
+
 @pytest.mark.asyncio
 async def test_master_emits_tracing_state_changed_for_toggle_command() -> None:
     """The master should translate SetTracingEnabled into TracingStateChanged."""
@@ -230,6 +269,47 @@ async def test_master_new_speech_tasks_inherit_cluster_tracing_state() -> None:
 
     assert isinstance(event, TaskCreated)
     assert isinstance(event.task, SpeechSynthesisTask)
+    assert event.task.owner_node == NodeId("api-node")
+    assert event.task.task_params == command.task_params
+    assert event.task.trace_enabled is True
+    assert master.command_task_mapping[command.command_id] == event.task_id
+    assert master._expected_ranks[event.task_id] == {0}  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_master_new_transcription_tasks_inherit_cluster_tracing_state() -> None:
+    """New STT tasks should inherit tracing and preserve the owning API node."""
+
+    master, node_id, command_sender, event_receiver = _build_master()
+    instance = _single_node_transcription_instance(node_id)
+    event: Event | None = None
+    master.state = master.state.model_copy(
+        update={
+            "tracing_enabled": True,
+            "instances": {instance.instance_id: instance},
+        }
+    )
+
+    command = AudioTranscription(
+        command_id=CommandId("transcription-cmd-1"),
+        owner_node=NodeId("api-node"),
+        task_params=AudioTranscriptionTaskParams(
+            model=instance.shard_assignments.model_id,
+            total_input_chunks=1,
+            audio_sha256="abc123",
+        ),
+    )
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(master._command_processor)  # pyright: ignore[reportPrivateUsage]
+        await command_sender.send(
+            ForwarderCommand(origin=SystemId("API"), command=command)
+        )
+        event = await event_receiver.receive()
+        task_group.cancel_scope.cancel()
+
+    assert isinstance(event, TaskCreated)
+    assert isinstance(event.task, AudioTranscriptionTask)
     assert event.task.owner_node == NodeId("api-node")
     assert event.task.task_params == command.task_params
     assert event.task.trace_enabled is True
