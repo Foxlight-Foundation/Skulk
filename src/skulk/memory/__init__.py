@@ -7,6 +7,13 @@ field implementation. No I/O and no fabric here; the content store, the MEMORY
 plane, and the capture/surfacing hooks are later phases that compose these.
 """
 
+from skulk.memory.config import (
+    DEFAULT_FIELD_DIM,
+    ENABLE_ENV_VAR,
+    MemorySettings,
+    memory_enabled,
+    resolve_memory_settings,
+)
 from skulk.memory.hrr import (
     bind,
     cosine,
@@ -29,20 +36,20 @@ from skulk.memory.separation import (
     Whitener,
 )
 
-# Field dimension derived from the Phase 0 measurements: 128 KB fp32 in RAM,
-# 64 KB fp16 on the wire, ~400-800 episode-level traces at 91-97% accuracy.
-DEFAULT_FIELD_DIM = 32768
-
 __all__ = [
     "DEFAULT_ALPHA",
     "DEFAULT_CONFIDENCE_GATE",
     "DEFAULT_FIELD_DIM",
     "DEFAULT_SHRINKAGE",
+    "ENABLE_ENV_VAR",
     "ExactIndex",
     "HolographicField",
     "MemoryIndex",
+    "MemorySettings",
     "ProbeResult",
     "Whitener",
+    "memory_enabled",
+    "resolve_memory_settings",
     "bind",
     "cosine",
     "make_unitary",
