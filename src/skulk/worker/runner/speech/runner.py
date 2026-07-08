@@ -31,6 +31,7 @@ from skulk.shared.tracing import (
     record_trace_marker,
     trace,
 )
+from skulk.shared.types.audio import AudioTranscriptionTaskParams
 from skulk.shared.types.chunks import AudioChunk, ErrorChunk, TranscriptionChunk
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
@@ -102,6 +103,57 @@ def _filter_kwargs(fn: Callable[..., Any], kwargs: dict[str, Any]) -> dict[str, 
     return {k: v for k, v in kwargs.items() if v is not None and k in accepted.params}
 
 
+def _first_non_empty_text(*values: str | None) -> str | None:
+    """Return the first non-empty text value from OpenAI-style STT aliases."""
+    for value in values:
+        if value:
+            return value
+    return None
+
+
+def _stt_generate_kwargs(
+    fn: Callable[..., Any], params: AudioTranscriptionTaskParams
+) -> dict[str, Any]:
+    """Build model-aware STT generation kwargs from the shared task params."""
+    accepted = _callable_parameters(fn)
+    if accepted is not None and "initial_prompt" in accepted.params:
+        granularities = {
+            granularity.lower() for granularity in params.timestamp_granularities
+        }
+        word_timestamps = params.word_timestamps or "word" in granularities
+        return_timestamps = bool(granularities) if granularities else None
+        return {
+            "language": params.language,
+            "initial_prompt": _first_non_empty_text(
+                params.prompt, params.context, params.text
+            ),
+            "temperature": params.temperature,
+            "sample_len": params.max_tokens,
+            "chunk_duration": params.chunk_duration,
+            "stream": False,
+            "return_timestamps": return_timestamps,
+            "word_timestamps": word_timestamps,
+            "verbose": True,
+        }
+    return {
+        "language": params.language,
+        "prompt": params.prompt,
+        "temperature": params.temperature,
+        "max_tokens": params.max_tokens,
+        "chunk_duration": params.chunk_duration,
+        "frame_threshold": params.frame_threshold,
+        "stream": False,
+        "context": params.context,
+        "prefill_step_size": params.prefill_step_size,
+        "text": params.text or params.prompt,
+        "word_timestamps": params.word_timestamps,
+        "timestamp_granularities": list(params.timestamp_granularities)
+        if params.timestamp_granularities
+        else None,
+        "verbose": True,
+    }
+
+
 def _to_numpy_audio(audio: Any) -> np.ndarray:
     """Normalize model-emitted audio arrays to numpy for ``mlx_audio`` encoding."""
     if isinstance(audio, np.ndarray):
@@ -155,8 +207,10 @@ def _resolve_staged_voice_path(
     staged_voice_path = voices_dir / (
         voice if voice.endswith(".safetensors") else f"{voice}.safetensors"
     )
+    resolved_model_path = local_model_path.resolve(strict=True)
     resolved_voices_dir = voices_dir.resolve(strict=True)
     try:
+        resolved_voices_dir.relative_to(resolved_model_path)
         resolved_voice_path = staged_voice_path.resolve(strict=True)
         resolved_voice_path.relative_to(resolved_voices_dir)
     except FileNotFoundError as exc:
@@ -164,7 +218,9 @@ def _resolve_staged_voice_path(
             f"Staged TTS voice {voice!r} was not found as a regular voice file"
         ) from exc
     except ValueError as exc:
-        raise ValueError("Staged TTS voice files must stay under voices/") from exc
+        raise ValueError(
+            "Staged TTS voice files and voices directory must stay under voices/"
+        ) from exc
     if resolved_voice_path.is_file():
         return str(resolved_voice_path)
     raise FileNotFoundError(
@@ -717,24 +773,8 @@ class Runner:
                 tmp_file.write(audio_bytes)
                 tmp_path = tmp_file.name
 
-            generate_kwargs = {
-                "language": params.language,
-                "prompt": params.prompt,
-                "temperature": params.temperature,
-                "max_tokens": params.max_tokens,
-                "chunk_duration": params.chunk_duration,
-                "frame_threshold": params.frame_threshold,
-                "stream": False,
-                "context": params.context,
-                "prefill_step_size": params.prefill_step_size,
-                "text": params.text or params.prompt,
-                "word_timestamps": params.word_timestamps,
-                "timestamp_granularities": list(params.timestamp_granularities)
-                if params.timestamp_granularities
-                else None,
-                "verbose": True,
-            }
             generate = self.model.generate
+            generate_kwargs = _stt_generate_kwargs(generate, params)
             filtered_kwargs = _filter_kwargs(generate, generate_kwargs)
             result = generate(tmp_path, **filtered_kwargs)
             return _normalize_transcription_result(result)

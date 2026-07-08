@@ -123,6 +123,44 @@ class _FakeTranscriptionModel:
         }
 
 
+class _FakeWhisperTranscriptionModel:
+    """Fake Whisper-like model with explicit aliases and loose decode options."""
+
+    def __init__(self, expected_audio: bytes) -> None:
+        self.expected_audio = expected_audio
+        self.calls: list[dict[str, object]] = []
+
+    def generate(
+        self,
+        audio_path: str,
+        *,
+        verbose: bool | None = None,
+        language: str | None = None,
+        chunk_duration: float = 1.0,
+        stream: bool = False,
+        temperature: float | tuple[float, ...] = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+        initial_prompt: str | None = None,
+        return_timestamps: bool = True,
+        word_timestamps: bool = False,
+        **decode_options: object,
+    ) -> dict[str, object]:
+        assert Path(audio_path).read_bytes() == self.expected_audio
+        self.calls.append(
+            {
+                "language": language,
+                "chunk_duration": chunk_duration,
+                "stream": stream,
+                "temperature": temperature,
+                "initial_prompt": initial_prompt,
+                "return_timestamps": return_timestamps,
+                "word_timestamps": word_timestamps,
+                "verbose": verbose,
+                "decode_options": decode_options,
+            }
+        )
+        return {"text": "hello world", "language": language or "en"}
+
+
 def _make_runner() -> tuple[Runner, _CaptureSender]:
     sender = _CaptureSender()
     bound = SimpleNamespace(
@@ -223,6 +261,19 @@ def test_resolve_staged_voice_path_rejects_symlink_escape(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="under voices"):
         _resolve_staged_voice_path(tmp_path, "escape")
+
+
+def test_resolve_staged_voice_path_rejects_voices_dir_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    """The staged voices directory itself must not point outside the model."""
+
+    outside_dir = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside_dir.mkdir()
+    (tmp_path / "voices").symlink_to(outside_dir, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="voices directory"):
+        _resolve_staged_voice_path(tmp_path, "af_heart")
 
 
 def test_resolve_staged_voice_path_requires_regular_file(tmp_path: Path) -> None:
@@ -393,3 +444,54 @@ def test_audio_transcription_emits_terminal_transcription_chunk() -> None:
     assert chunk.language == "en"
     assert chunk.segments[0]["start"] == 0.0
     assert chunk.finish_reason == "stop"
+
+
+def test_audio_transcription_maps_whisper_aliases_without_decode_leak() -> None:
+    """OpenAI STT aliases should not reach Whisper's loose decode kwargs."""
+
+    runner, _sender = _make_runner()
+    audio_bytes = b"RIFFtestWAVE"
+    model = _FakeWhisperTranscriptionModel(audio_bytes)
+    runner.model = model
+    runner.current_status = RunnerReady()
+    task = AudioTranscription(
+        instance_id=InstanceId("speech-instance-1"),
+        command_id=CommandId("transcription-command-1"),
+        task_params=AudioTranscriptionTaskParams(
+            model=ModelId("mlx-community/whisper-test"),
+            filename="sample.wav",
+            content_type="audio/wav",
+            total_input_chunks=1,
+            audio_sha256=hashlib.sha256(audio_bytes).hexdigest(),
+            audio_data=base64.b64encode(audio_bytes).decode("ascii"),
+            language="en",
+            prompt="domain vocabulary",
+            context="fallback context",
+            text="fallback text",
+            temperature=0.2,
+            max_tokens=32,
+            chunk_duration=2.5,
+            frame_threshold=12,
+            prefill_step_size=3,
+            timestamp_granularities=("word",),
+        ),
+    )
+
+    text, language, segments = runner._run_stt(task)
+
+    assert text == "hello world"
+    assert language == "en"
+    assert segments == []
+    assert model.calls == [
+        {
+            "language": "en",
+            "chunk_duration": 2.5,
+            "stream": False,
+            "temperature": 0.2,
+            "initial_prompt": "domain vocabulary",
+            "return_timestamps": True,
+            "word_timestamps": True,
+            "verbose": True,
+            "decode_options": {"sample_len": 32},
+        }
+    ]
