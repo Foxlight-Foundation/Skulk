@@ -50,6 +50,7 @@ from skulk.shared.types.events import (
     NodeGatheredInfo,
     StagedModelEvicted,
     TaskCreated,
+    TaskDeleted,
     TaskStatusUpdated,
     TopologyEdgeCreated,
     TopologyEdgeDeleted,
@@ -387,6 +388,27 @@ def _inject_assembled_image_edit(task: ImageEdits, assembled_image: str) -> Imag
     )
 
 
+def _audio_input_cleanup_command_id(
+    event: Event,
+    previous_tasks: Mapping[TaskId, Task],
+    current_tasks: Mapping[TaskId, Task],
+) -> CommandId | None:
+    """Return the STT command whose uploaded chunks can be released."""
+    task: Task | None = None
+    if isinstance(event, TaskDeleted):
+        task = previous_tasks.get(event.task_id)
+    elif isinstance(event, TaskStatusUpdated) and event.task_status in {
+        TaskStatus.Cancelled,
+        TaskStatus.Complete,
+        TaskStatus.Failed,
+        TaskStatus.TimedOut,
+    }:
+        task = current_tasks.get(event.task_id) or previous_tasks.get(event.task_id)
+    if isinstance(task, AudioTranscription):
+        return task.command_id
+    return None
+
+
 def _log_image_transport(message: str) -> None:
     """Emit image transport logs only at INFO when explicitly requested.
 
@@ -721,6 +743,7 @@ class Worker:
         with self.event_receiver as events:
             async for event in events:
                 # 2. for each event, apply it to the state
+                previous_tasks = self.state.tasks
                 self.state = apply(self.state, event=event)
                 event = event.event
 
@@ -760,6 +783,14 @@ class Worker:
                         self.input_chunk_buffer[cmd_id][event.chunk.chunk_index] = (
                             event.chunk
                         )
+
+                if (
+                    cleanup_cmd_id := _audio_input_cleanup_command_id(
+                        event, previous_tasks, self.state.tasks
+                    )
+                ) is not None:
+                    self.input_audio_chunk_buffer.pop(cleanup_cmd_id, None)
+                    self.input_audio_chunk_counts.pop(cleanup_cmd_id, None)
 
                 if isinstance(event, CustomModelCardAdded):
                     try:

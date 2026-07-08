@@ -6500,17 +6500,9 @@ class API:
                 )
             await self._send(command)
 
-            transcript_chunks: list[TranscriptionChunk] = []
-            with recv as chunks:
-                async for chunk in chunks:
-                    if isinstance(chunk, ErrorChunk):
-                        raise HTTPException(
-                            status_code=500,
-                            detail=f"Speech transcription failed: {chunk.error_message}",
-                        )
-                    transcript_chunks.append(chunk)
-                    if chunk.finish_reason is not None:
-                        break
+            transcript_chunks = await self._collect_transcription_chunks(
+                command_id, recv
+            )
 
             if not transcript_chunks:
                 raise HTTPException(
@@ -6536,6 +6528,42 @@ class API:
                     self._audio_transcription_queues,
                 ),
             )
+
+    async def _collect_transcription_chunks(
+        self,
+        command_id: CommandId,
+        recv: Receiver[TranscriptionChunk | ErrorChunk],
+    ) -> list[TranscriptionChunk]:
+        """Collect a non-streaming STT response with a terminal-task backstop."""
+        transcript_chunks: list[TranscriptionChunk] = []
+        with recv as chunks:
+            while True:
+                chunk: TranscriptionChunk | ErrorChunk | None = None
+                with anyio.move_on_after(_STREAM_IDLE_TIMEOUT_SECONDS) as scope:
+                    try:
+                        chunk = await chunks.receive()
+                    except (EndOfStream, ClosedResourceError):
+                        break
+                if scope.cancelled_caught:
+                    if self._command_task_is_terminal(command_id):
+                        raise HTTPException(
+                            status_code=500,
+                            detail=(
+                                "Speech transcription completed, but the final "
+                                "response chunk was not received"
+                            ),
+                        )
+                    continue
+                assert chunk is not None
+                if isinstance(chunk, ErrorChunk):
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Speech transcription failed: {chunk.error_message}",
+                    )
+                transcript_chunks.append(chunk)
+                if chunk.finish_reason is not None:
+                    break
+        return transcript_chunks
 
     async def restart_node(self, node_id: NodeId | None = None) -> JSONResponse:
         """Restart the Skulk process on this or a remote node.

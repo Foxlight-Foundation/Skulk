@@ -11,6 +11,7 @@ import pytest
 from fastapi import HTTPException, UploadFile
 from starlette.datastructures import Headers
 
+import skulk.api.main as api_main
 from skulk.api.main import API
 from skulk.shared.election import ElectionMessage
 from skulk.shared.models.model_cards import ModelId
@@ -23,6 +24,10 @@ from skulk.shared.types.commands import (
 )
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import IndexedEvent
+from skulk.shared.types.state import State
+from skulk.shared.types.tasks import AudioTranscription as AudioTranscriptionTask
+from skulk.shared.types.tasks import TaskId, TaskStatus
+from skulk.shared.types.worker.instances import InstanceId
 from skulk.utils.channels import channel
 
 
@@ -195,3 +200,42 @@ async def test_audio_transcriptions_sends_input_chunks_and_returns_verbose_json(
         == audio_bytes
     )
     assert command.command_id not in api._audio_transcription_queues
+
+
+@pytest.mark.anyio
+async def test_audio_transcriptions_errors_if_terminal_chunk_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed task with no final data-plane chunk should not hang forever."""
+
+    api = _build_api()
+    model_id = ModelId("mlx-community/whisper-test")
+
+    async def _validate_model(self: API, requested_model: ModelId) -> ModelId:
+        assert self is api
+        assert requested_model == model_id
+        return model_id
+
+    async def _send(command: object) -> None:
+        if isinstance(command, AudioTranscription):
+            task = AudioTranscriptionTask(
+                task_id=TaskId("terminal-transcription-task"),
+                instance_id=InstanceId("terminal-transcription-instance"),
+                task_status=TaskStatus.Complete,
+                command_id=command.command_id,
+                task_params=command.task_params,
+            )
+            api.state = State().model_copy(update={"tasks": {task.task_id: task}})
+
+    monkeypatch.setattr(API, "_validate_audio_transcription_model", _validate_model)
+    monkeypatch.setattr(api, "_send", _send)
+    monkeypatch.setattr(api_main, "_STREAM_IDLE_TIMEOUT_SECONDS", 0.01)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.audio_transcriptions(
+            file=_upload(b"RIFFtestWAVE"),
+            model=str(model_id),
+        )
+
+    assert exc_info.value.status_code == 500
+    assert "final response chunk" in str(exc_info.value.detail)
