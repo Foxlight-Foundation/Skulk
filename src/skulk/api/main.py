@@ -1,4 +1,5 @@
 import base64
+import binascii
 import contextlib
 import copy
 import hashlib
@@ -31,7 +32,7 @@ from anyio import (
 )
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from hypercorn.config import Config
 from hypercorn.typing import ASGIFramework
@@ -68,6 +69,7 @@ from skulk.api.types import (
     AddCustomModelParams,
     AdvancedImageParams,
     AudioCapabilitySection,
+    AudioSpeechRequest,
     BenchChatCompletionRequest,
     BenchChatCompletionResponse,
     BenchImageGenerationResponse,
@@ -180,6 +182,7 @@ from skulk.shared.logging import InterceptLogger
 from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.model_cards import (
     AudioCardKind,
+    AudioResponseFormat,
     ModelCard,
     ModelId,
     ModelTask,
@@ -192,7 +195,9 @@ from skulk.shared.tracing import (
     export_trace,
     load_trace_file,
 )
+from skulk.shared.types.audio import SpeechSynthesisTaskParams
 from skulk.shared.types.chunks import (
+    AudioChunk,
     DataChunk,
     EmbeddingChunk,
     ErrorChunk,
@@ -219,6 +224,7 @@ from skulk.shared.types.commands import (
     PlaceInstance,
     SendInputChunk,
     SetTracingEnabled,
+    SpeechSynthesis,
     StartDownload,
     TaskCancelled,
     TaskFinished,
@@ -345,6 +351,13 @@ _STREAM_IDLE_TIMEOUT_SECONDS = 120.0
 # and converting an undeliverable gap into (rare) minor loss rather than a hang.
 # Normal mesh reordering spans only a few chunks, far below this.
 _MAX_CHUNK_REORDER_BUFFER = 512
+_AUDIO_CONTENT_TYPES: Final[dict[AudioResponseFormat, str]] = {
+    AudioResponseFormat.Mp3: "audio/mpeg",
+    AudioResponseFormat.Wav: "audio/wav",
+    AudioResponseFormat.Flac: "audio/flac",
+    AudioResponseFormat.Ogg: "audio/ogg",
+    AudioResponseFormat.Opus: "audio/opus",
+}
 
 # How long the reorder buffer waits for a missing sequence before giving up on
 # it and releasing the chunks behind the gap (#279 Phase 2b). A genuine mesh
@@ -811,6 +824,9 @@ class API:
         self._embedding_queues: dict[
             CommandId, Sender[EmbeddingChunk | ErrorChunk]
         ] = {}
+        self._audio_speech_queues: dict[
+            CommandId, Sender[AudioChunk | ErrorChunk]
+        ] = {}
         self._cancelled_command_ids: set[CommandId] = set()
         # Per-command data-plane reorder buffers (#279 Phase 2b). The DATA gossip
         # topic has no total order (unlike the master event idx it replaced), so
@@ -890,6 +906,7 @@ class API:
         self._text_generation_queues = {}
         self._image_generation_queues = {}
         self._embedding_queues = {}
+        self._audio_speech_queues = {}
         self._cancelled_command_ids = set()
         self.unpause(result_clock, master_node_id=master_node_id)
         self.event_receiver.close()
@@ -919,6 +936,7 @@ class API:
             self._text_generation_queues,
             self._image_generation_queues,
             self._embedding_queues,
+            self._audio_speech_queues,
         ):
             for sender in list(queue_map.values()):
                 # The originating task is gone with the old session, so the
@@ -1069,6 +1087,16 @@ class API:
             summary="Generate embeddings",
         )(self.embeddings)
         self.app.post(
+            "/v1/audio/speech",
+            response_model=None,
+            tags=["Audio"],
+            summary="Generate speech audio",
+            description=(
+                "OpenAI-compatible text-to-speech endpoint. The requested model "
+                "must already be placed and running as a text-to-speech model."
+            ),
+        )(self.audio_speech)
+        self.app.post(
             "/bench/chat/completions",
             tags=["Compatibility APIs"],
             summary="Benchmark chat completions",
@@ -1124,8 +1152,8 @@ class API:
         self.app.post(
             "/v1/cancel/{command_id}",
             tags=["Compatibility APIs"],
-            summary="Cancel an active text or image command",
-            description="Request cancellation for an in-flight text or image generation command by its command ID.",
+            summary="Cancel an active generation command",
+            description="Request cancellation for an in-flight text, image, embedding, or speech command by its command ID.",
         )(self.cancel_command)
         self.app.post(
             "/v1/tools/web_search",
@@ -1837,6 +1865,7 @@ class API:
             self._text_generation_queues.get(command_id)
             or self._image_generation_queues.get(command_id)
             or self._embedding_queues.get(command_id)
+            or self._audio_speech_queues.get(command_id)
         )
         if sender is None:
             raise HTTPException(
@@ -2427,6 +2456,44 @@ class API:
             raise HTTPException(
                 status_code=400,
                 detail=f"Model {resolved} is not an embedding model",
+            )
+        if not any(
+            instance.shard_assignments.model_id == resolved
+            for instance in self.state.instances.values()
+        ):
+            await self._trigger_notify_user_to_download_model(resolved)
+            raise HTTPException(
+                status_code=404,
+                detail=f"No instance found for model {resolved}",
+            )
+        return resolved
+
+    async def _validate_speech_synthesis_model(
+        self, model_id: ModelId, response_format: AudioResponseFormat
+    ) -> ModelId:
+        """Validate a mounted text-to-speech model and requested output format."""
+
+        model_card = await ModelCard.load(model_id)
+        resolved = model_card.model_id
+        profile = resolve_model_capability_profile(resolved, model_card=model_card)
+        if not profile.supports_speech_synthesis:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model {resolved} is not a text-to-speech model",
+            )
+        if (
+            profile.audio_response_formats
+            and response_format not in profile.audio_response_formats
+        ):
+            supported = ", ".join(
+                audio_format.value for audio_format in profile.audio_response_formats
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Model {resolved} does not support audio response format "
+                    f"{response_format.value}; supported formats: {supported}"
+                ),
             )
         if not any(
             instance.shard_assignments.model_id == resolved
@@ -3681,6 +3748,7 @@ class API:
             command_id in self._text_generation_queues
             or command_id in self._image_generation_queues
             or command_id in self._embedding_queues
+            or command_id in self._audio_speech_queues
         )
 
     async def _reorder_and_dispatch(
@@ -3819,6 +3887,12 @@ class API:
                 await queue.send(chunk)
             except (BrokenResourceError, ClosedResourceError):
                 self._embedding_queues.pop(command_id, None)
+        if queue := self._audio_speech_queues.get(command_id, None):
+            assert isinstance(chunk, (AudioChunk, ErrorChunk))
+            try:
+                await queue.send(chunk)
+            except (BrokenResourceError, ClosedResourceError):
+                self._audio_speech_queues.pop(command_id, None)
 
     async def _terminate_command_stream(
         self, task_id: task_types.TaskId, error_message: str
@@ -3840,6 +3914,7 @@ class API:
                 task_types.ImageGeneration,
                 task_types.ImageEdits,
                 task_types.TextEmbedding,
+                task_types.SpeechSynthesis,
             ),
         ):
             return
@@ -3853,6 +3928,7 @@ class API:
             self._text_generation_queues,
             self._image_generation_queues,
             self._embedding_queues,
+            self._audio_speech_queues,
         ):
             if queue := queue_map.get(task.command_id):
                 try:
@@ -4264,6 +4340,7 @@ class API:
                 task_types.ImageGeneration,
                 task_types.ImageEdits,
                 task_types.TextEmbedding,
+                task_types.SpeechSynthesis,
             ),
         ):
             return str(task.command_id)
@@ -4282,6 +4359,7 @@ class API:
                 task_types.ImageGeneration,
                 task_types.ImageEdits,
                 task_types.TextEmbedding,
+                task_types.SpeechSynthesis,
             ),
         ):
             return str(task.task_params.model)
@@ -5876,6 +5954,115 @@ class API:
                 cast(
                     dict[CommandId, Sender[object]],
                     self._embedding_queues,
+                ),
+            )
+
+    async def audio_speech(self, request: AudioSpeechRequest) -> Response:
+        """OpenAI-compatible text-to-speech endpoint."""
+
+        if request.stream:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "`stream=true` is not supported by Skulk's speech endpoint yet"
+                ),
+            )
+        if request.streaming_interval is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "`streaming_interval` is only supported when speech streaming lands"
+                ),
+            )
+        if request.reference_audio is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "`reference_audio` managed uploads are not supported yet; "
+                    "server-local paths are never accepted"
+                ),
+            )
+        if request.reference_text is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="`reference_text` is only supported with reference-audio TTS flows",
+            )
+
+        model_id = await self._validate_speech_synthesis_model(
+            ModelId(request.model), request.response_format
+        )
+        command = SpeechSynthesis(
+            owner_node=self.node_id,
+            task_params=SpeechSynthesisTaskParams(
+                model=model_id,
+                input_text=request.input,
+                response_format=request.response_format,
+                voice=request.voice,
+                speed=request.speed,
+                instruct=request.instruct,
+                lang_code=request.lang_code,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                top_k=request.top_k,
+                repetition_penalty=request.repetition_penalty,
+                max_tokens=request.max_tokens,
+            ),
+        )
+        command_id = command.command_id
+
+        try:
+            self._audio_speech_queues[command_id], recv = channel[
+                AudioChunk | ErrorChunk
+            ]()
+
+            await self._send(command)
+
+            encoded_parts: list[str] = []
+            response_format = request.response_format
+            with recv as chunks:
+                async for chunk in chunks:
+                    if isinstance(chunk, ErrorChunk):
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Speech synthesis failed: {chunk.error_message}",
+                        )
+                    encoded_parts.append(chunk.data)
+                    response_format = chunk.format
+                    if chunk.finish_reason is not None:
+                        break
+
+            if not encoded_parts:
+                raise HTTPException(
+                    status_code=500, detail="No speech audio response received"
+                )
+            try:
+                audio_bytes = base64.b64decode(
+                    "".join(encoded_parts).encode("ascii"), validate=True
+                )
+            except binascii.Error as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Speech runner returned invalid base64 audio",
+                ) from exc
+            return Response(
+                content=audio_bytes,
+                media_type=_AUDIO_CONTENT_TYPES[response_format],
+            )
+
+        except anyio.get_cancelled_exc_class():
+            cancel_command = TaskCancelled(cancelled_command_id=command_id)
+            self._cancelled_command_ids.add(command_id)
+            with anyio.CancelScope(shield=True):
+                await self.command_sender.send(
+                    ForwarderCommand(origin=self._system_id, command=cancel_command)
+                )
+            raise
+        finally:
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._audio_speech_queues,
                 ),
             )
 

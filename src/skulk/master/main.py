@@ -43,6 +43,7 @@ from skulk.shared.types.commands import (
     RequestEventLog,
     SendInputChunk,
     SetTracingEnabled,
+    SpeechSynthesis,
     TaskCancelled,
     TaskFinished,
     TestCommand,
@@ -82,6 +83,9 @@ from skulk.shared.types.tasks import (
 )
 from skulk.shared.types.tasks import (
     ImageGeneration as ImageGenerationTask,
+)
+from skulk.shared.types.tasks import (
+    SpeechSynthesis as SpeechSynthesisTask,
 )
 from skulk.shared.types.tasks import (
     TaskId,
@@ -777,6 +781,57 @@ class Master:
                                 TaskCreated(
                                     task_id=task_id,
                                     task=TextEmbeddingTask(
+                                        task_id=task_id,
+                                        command_id=command.command_id,
+                                        owner_node=command.owner_node,  # #279 Phase 2
+                                        instance_id=selected_instance_id,
+                                        task_status=TaskStatus.Pending,
+                                        task_params=command.task_params,
+                                        trace_enabled=trace_enabled,
+                                    ),
+                                )
+                            )
+
+                            self.command_task_mapping[command.command_id] = task_id
+                            self._configure_expected_trace_ranks(
+                                task_id,
+                                selected_instance_id,
+                                trace_enabled=trace_enabled,
+                            )
+                        case SpeechSynthesis():
+                            for instance in self.state.instances.values():
+                                if (
+                                    instance.shard_assignments.model_id
+                                    == command.task_params.model
+                                ):
+                                    task_count = sum(
+                                        1
+                                        for task in self.state.tasks.values()
+                                        if task.instance_id == instance.instance_id
+                                    )
+                                    instance_task_counts[instance.instance_id] = (
+                                        task_count
+                                    )
+
+                            if not instance_task_counts:
+                                raise ValueError(
+                                    f"No instance found for model {command.task_params.model}"
+                                )
+
+                            available_instance_ids = sorted(
+                                instance_task_counts.keys(),
+                                key=lambda instance_id: instance_task_counts[
+                                    instance_id
+                                ],
+                            )
+
+                            task_id = TaskId()
+                            selected_instance_id = available_instance_ids[0]
+                            trace_enabled = self.state.tracing_enabled
+                            generated_events.append(
+                                TaskCreated(
+                                    task_id=task_id,
+                                    task=SpeechSynthesisTask(
                                         task_id=task_id,
                                         command_id=command.command_id,
                                         owner_node=command.owner_node,  # #279 Phase 2

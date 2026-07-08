@@ -271,6 +271,26 @@ async def test_dispatch_drops_speech_chunk_for_text_queue() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_routes_audio_chunk_to_speech_queue() -> None:
+    api = _build_api()
+    cmd = CommandId("cmd-speech")
+    send, recv = channel[AudioChunk | ErrorChunk]()
+    api._audio_speech_queues[cmd] = send  # pyright: ignore[reportPrivateUsage]
+
+    chunk = AudioChunk(
+        model=ModelId("mlx-community/kokoro-test"),
+        data="UklGRg==",
+        chunk_index=0,
+        total_chunks=1,
+        format=AudioResponseFormat.Wav,
+        finish_reason="stop",
+    )
+    await api._dispatch_generation_chunk(cmd, chunk)  # pyright: ignore[reportPrivateUsage]
+    with recv as stream:
+        assert stream.receive_nowait() is chunk
+
+
+@pytest.mark.asyncio
 async def test_dispatch_routes_embedding_chunk_to_embedding_queue() -> None:
     api = _build_api()
     cmd = CommandId("cmd-embed")

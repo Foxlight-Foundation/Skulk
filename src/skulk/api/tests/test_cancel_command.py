@@ -20,6 +20,7 @@ def _make_api() -> Any:
     api._text_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._image_generation_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._embedding_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._audio_speech_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._cancelled_command_ids = set()  # pyright: ignore[reportPrivateUsage]
     api._chunk_reorder = {}  # pyright: ignore[reportPrivateUsage]
     api._data_dedup_cursor = {}  # pyright: ignore[reportPrivateUsage]
@@ -72,6 +73,27 @@ def test_cancel_active_image_generation() -> None:
     cid = CommandId("img-cmd-456")
     sender = MagicMock()
     api._image_generation_queues[cid] = sender
+
+    response = client.post(f"/v1/cancel/{cid}")
+    assert response.status_code == 200
+    data: dict[str, Any] = response.json()
+    assert data["message"] == "Command cancelled."
+    assert data["command_id"] == str(cid)
+    sender.close.assert_called_once()
+    api._send.assert_called_once()
+    assert cid in api._cancelled_command_ids
+    task_cancelled = api._send.call_args[0][0]
+    assert task_cancelled.cancelled_command_id == cid
+
+
+def test_cancel_active_audio_speech() -> None:
+    """Cancel an active speech synthesis command: returns 200 and closes sender."""
+    api = _make_api()
+    client = TestClient(api.app)
+
+    cid = CommandId("speech-cmd-789")
+    sender = MagicMock()
+    api._audio_speech_queues[cid] = sender
 
     response = client.post(f"/v1/cancel/{cid}")
     assert response.status_code == 200

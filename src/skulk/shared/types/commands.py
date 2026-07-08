@@ -5,6 +5,7 @@ from skulk.api.types import (
     ImageGenerationTaskParams,
 )
 from skulk.shared.models.model_cards import ModelCard, ModelId
+from skulk.shared.types.audio import SpeechSynthesisTaskParams
 from skulk.shared.types.chunks import InputImageChunk
 from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
@@ -44,6 +45,13 @@ class ImageEdits(BaseCommand):
 
 class TextEmbedding(BaseCommand):
     task_params: TextEmbeddingTaskParams
+    owner_node: NodeId | None = None
+
+
+class SpeechSynthesis(BaseCommand):
+    """Command to synthesize speech from text on a mounted TTS model."""
+
+    task_params: SpeechSynthesisTaskParams
     owner_node: NodeId | None = None
 
 
@@ -186,6 +194,7 @@ Command = (
     | ImageGeneration
     | ImageEdits
     | TextEmbedding
+    | SpeechSynthesis
     | SetTracingEnabled
     | PlaceInstance
     | CreateInstance

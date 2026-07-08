@@ -6,7 +6,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from skulk.shared.models.capabilities import ResolvedCapabilityProfile
-from skulk.shared.models.model_cards import ModelCard, ModelId
+from skulk.shared.models.model_cards import AudioResponseFormat, ModelCard, ModelId
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import ReasoningEffort
@@ -831,6 +831,94 @@ class CancelCommandResponse(BaseModel):
     command_id: CommandId
 
 
+class AudioSpeechRequest(BaseModel):
+    """OpenAI-compatible text-to-speech request payload."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    model: str = Field(description="Mounted text-to-speech model id to serve.")
+    input: str = Field(
+        min_length=1,
+        description="Text to synthesize into speech.",
+    )
+    voice: str | None = Field(
+        default=None,
+        description="Model-specific voice name or preset when supported.",
+    )
+    speed: float | None = Field(
+        default=None,
+        gt=0,
+        description="Optional model-specific speaking speed multiplier.",
+    )
+    response_format: AudioResponseFormat = Field(
+        default=AudioResponseFormat.Mp3,
+        description="Encoded audio format to return.",
+    )
+    stream: bool = Field(
+        default=False,
+        description=(
+            "Whether to stream audio chunks. Phase 1 accepts only false while "
+            "the non-streaming path is validated."
+        ),
+    )
+    streaming_interval: float | None = Field(
+        default=None,
+        gt=0,
+        description="Requested streaming chunk interval in seconds when streaming lands.",
+    )
+    instruct: str | None = Field(
+        default=None,
+        description="Optional model-specific style or instruction text.",
+    )
+    lang_code: str | None = Field(
+        default=None,
+        description="Optional language code passed to models that accept it.",
+    )
+    temperature: float | None = Field(
+        default=None,
+        description="Optional model-specific sampling temperature.",
+    )
+    top_p: float | None = Field(
+        default=None,
+        description="Optional nucleus sampling parameter.",
+    )
+    top_k: int | None = Field(
+        default=None,
+        ge=0,
+        description="Optional top-k sampling parameter.",
+    )
+    repetition_penalty: float | None = Field(
+        default=None,
+        gt=0,
+        description="Optional model-specific repetition penalty.",
+    )
+    max_tokens: int | None = Field(
+        default=None,
+        gt=0,
+        description="Optional model-specific maximum generation token budget.",
+    )
+    reference_audio: str | None = Field(
+        default=None,
+        description=(
+            "Managed reference-audio id for voice conditioning. Arbitrary server "
+            "filesystem paths are not accepted."
+        ),
+    )
+    reference_text: str | None = Field(
+        default=None,
+        description="Transcript for the managed reference audio when supported.",
+    )
+
+    @field_validator("response_format", mode="before")
+    @classmethod
+    def _validate_response_format(
+        cls, value: str | AudioResponseFormat
+    ) -> AudioResponseFormat:
+        if isinstance(value, AudioResponseFormat):
+            return value
+        return AudioResponseFormat(value)
+
+
 ImageSize = Literal[
     "auto",
     "512x512",
@@ -1060,7 +1148,7 @@ class NodeStorageSummary(CamelCaseModel):
     (falls back to the models directory when staging is not configured)."""
 
 
-TraceTaskKind = Literal["image", "text", "embedding"]
+TraceTaskKind = Literal["image", "text", "embedding", "speech"]
 
 
 class TraceSourceNode(CamelCaseModel):

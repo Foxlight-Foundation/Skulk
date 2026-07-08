@@ -1,6 +1,7 @@
 from .api import AddCustomModelParams as AddCustomModelParams
 from .api import AdvancedImageParams as AdvancedImageParams
 from .api import AudioCapabilitySection as AudioCapabilitySection
+from .api import AudioSpeechRequest as AudioSpeechRequest
 from .api import BenchChatCompletionRequest as BenchChatCompletionRequest
 from .api import BenchChatCompletionResponse as BenchChatCompletionResponse
 from .api import BenchImageGenerationResponse as BenchImageGenerationResponse

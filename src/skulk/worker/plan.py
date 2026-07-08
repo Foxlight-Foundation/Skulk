@@ -14,6 +14,7 @@ from skulk.shared.types.tasks import (
     ImageGeneration,
     LoadModel,
     Shutdown,
+    SpeechSynthesis,
     StartWarmup,
     Task,
     TaskId,
@@ -365,7 +366,14 @@ def _pending_tasks(
     for task in tasks.values():
         # Forward inference tasks to runners
         if not isinstance(
-            task, (TextGeneration, ImageGeneration, ImageEdits, TextEmbedding)
+            task,
+            (
+                TextGeneration,
+                ImageGeneration,
+                ImageEdits,
+                TextEmbedding,
+                SpeechSynthesis,
+            ),
         ):
             continue
         if task.task_status not in (TaskStatus.Pending, TaskStatus.Running):

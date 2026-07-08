@@ -149,7 +149,7 @@ class TraceEventData(FrozenModel):
     category: str
     node_id: str | None = None
     model_id: str | None = None
-    task_kind: Literal["image", "text", "embedding"] | None = None
+    task_kind: Literal["image", "text", "embedding", "speech"] | None = None
     tags: list[str] = Field(default_factory=list)
     attrs: dict[str, str | int | float | bool | list[str]] = Field(
         default_factory=dict
