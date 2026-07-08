@@ -486,6 +486,21 @@ mixed-version clusters, and the fix is the same (upgrade the fleet and its
 extensions together). `SKULK_EXTENSIONS_DISABLE=1` is a node-local kill
 switch that skips discovery entirely.
 
+## Experimental features
+
+Skulk stages in-development features behind a single node-local switch,
+`SKULK_ENABLE_EXPERIMENTAL_MODE`, so a released build can carry work-in-progress
+UX without exposing it by default. When the switch is on, the dashboard reveals
+an "Experiments" section in Settings; when it is off, the section is hidden and
+any feature that opts into the gate stays inert, so the node behaves exactly as
+it does today. The gate (`src/skulk/shared/experimental.py`) is deliberately
+feature-agnostic: it knows about no particular experiment. A feature that wants
+to be gated reads the flag and, when it needs an operator-facing switch, adds
+its own toggle under the same section, so its UX is built alongside it. This is
+the fabric's discipline for shipping unfinished work safely, and it composes
+with extensions: an out-of-tree capability can ride the fabric as a plugin and
+still surface a gated toggle here.
+
 ## The dashboard
 
 The dashboard is the operator-facing UI for the same Skulk runtime. It's a React + TypeScript + styled-components SPA, built with Vite, served by the API at `/` (the API's static-files mount) on nodes where the built assets are present. A node without them (a headless or non-Mac worker built without the UI) still runs the full API; operators reach the dashboard from any node that has it.
@@ -505,7 +520,7 @@ The dashboard's main surfaces:
 - **Model Store**: search Hugging Face, place models, monitor downloads
 - **Chat**: simple chat client against the placed models
 - **Observability panel**: right-side resizable dock for live cluster health, per-node diagnostics, trace browsing (work in progress)
-- **Settings**: cluster config (model store, KV cache backend, logging, tracing)
+- **Settings**: cluster config (model store, KV cache backend, logging, tracing), plus a gated Experiments section on nodes running with `SKULK_ENABLE_EXPERIMENTAL_MODE`
 
 ## Trade-offs and constraints
 

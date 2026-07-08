@@ -610,6 +610,32 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               </>
             )}
           </Fieldset>
+
+          {/* Experiments: only shown when the node runs with
+              SKULK_ENABLE_EXPERIMENTAL_MODE. This is the fabric's staging
+              area for in-development features: each such feature adds its own
+              toggle here so its UX is built alongside it. With no experimental
+              feature in this release, the section shows a placeholder. */}
+          {effective?.experimental_mode_enabled && (
+            <Fieldset>
+              <Legend>
+                {t('settings.experiments.legend', 'Experiments')}
+                <InfoTooltip
+                  filled
+                  content={t(
+                    'settings.experiments.legendTooltip',
+                    'Opt-in, in-development features. This section is visible because this node runs with SKULK_ENABLE_EXPERIMENTAL_MODE. Features here are unfinished and off by default.',
+                  )}
+                />
+              </Legend>
+              <HintText>
+                {t(
+                  'settings.experiments.none',
+                  'No experimental features are available in this release.',
+                )}
+              </HintText>
+            </Fieldset>
+          )}
         </Body>
 
         <Footer>
