@@ -199,6 +199,7 @@ def resolve_model_capability_profile(
         card is not None
         and (
             ModelTask.SpeechToText in card.tasks
+            or ModelTask.SpeechTranslation in card.tasks
             or "stt" in card.capabilities
             or (
                 card.audio is not None

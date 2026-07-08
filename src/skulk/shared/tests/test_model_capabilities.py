@@ -143,6 +143,26 @@ def test_resolve_model_capability_profile_exposes_stt_and_translation() -> None:
     assert profile.supports_realtime_audio is False
 
 
+def test_resolve_model_capability_profile_treats_translation_as_transcription() -> None:
+    card = ModelCard(
+        model_id=ModelId("mlx-community/whisper-translate-test"),
+        storage_size=Memory.from_mb(100),
+        n_layers=10,
+        hidden_size=1024,
+        supports_tensor=False,
+        tasks=[ModelTask.SpeechTranslation],
+        family="whisper",
+        capabilities=[],
+    )
+
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+
+    assert profile.supports_transcription is True
+    assert profile.supports_speech_translation is True
+    assert profile.supports_audio_input is True
+    assert profile.supports_audio_output is False
+
+
 def test_card_serves_speech_treats_legacy_capability_tags_as_speech() -> None:
     text_card = _base_model_card("example/text-test").model_copy(
         update={"capabilities": ["text"]}
