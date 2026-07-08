@@ -300,7 +300,8 @@ multipart audio upload, sends base64 `AudioInputChunk` events ahead of an
 `AudioTranscription` command, the worker assembles the upload for the speech
 runner, and the runner emits terminal `TranscriptionChunk` output on the data
 plane. Streaming TTS/STT, voice/reference-audio management, speech translation,
-and realtime sessions remain later phases.
+and realtime sessions remain later phases. The realtime/fabric follow-on is
+tracked in [Speech Fabric and Realtime Design](speech-fabric-realtime).
 
 The llama.cpp runner serves GGUF models single-node and matches the MLX runner
 on the capabilities llama.cpp supports natively: per-token logprobs (with the

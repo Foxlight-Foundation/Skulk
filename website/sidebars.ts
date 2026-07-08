@@ -41,6 +41,7 @@ const sidebars: SidebarsConfig = {
         "extensions",
         "model-cards",
         "model-capabilities",
+        "speech-fabric-realtime",
         {
           type: "category",
           label: "Model Behaviors",
