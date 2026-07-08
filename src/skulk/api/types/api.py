@@ -853,9 +853,12 @@ class AudioSpeechRequest(BaseModel):
         gt=0,
         description="Optional model-specific speaking speed multiplier.",
     )
-    response_format: AudioResponseFormat = Field(
-        default=AudioResponseFormat.Mp3,
-        description="Encoded audio format to return.",
+    response_format: AudioResponseFormat | None = Field(
+        default=None,
+        description=(
+            "Encoded audio format to return. When omitted, Skulk uses the mounted "
+            "model card default when declared and otherwise falls back to mp3."
+        ),
     )
     stream: bool = Field(
         default=False,
@@ -915,8 +918,10 @@ class AudioSpeechRequest(BaseModel):
     @field_validator("response_format", mode="before")
     @classmethod
     def _validate_response_format(
-        cls, value: str | AudioResponseFormat
-    ) -> AudioResponseFormat:
+        cls, value: str | AudioResponseFormat | None
+    ) -> AudioResponseFormat | None:
+        if value is None:
+            return None
         if isinstance(value, AudioResponseFormat):
             return value
         return AudioResponseFormat(value)

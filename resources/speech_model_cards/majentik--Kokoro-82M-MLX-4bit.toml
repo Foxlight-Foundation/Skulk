@@ -12,7 +12,7 @@ context_length = 512
 [audio]
 kind = "tts"
 default_response_format = "wav"
-response_formats = ["mp3", "wav", "flac", "ogg", "opus"]
+response_formats = ["wav"]
 supports_streaming = false
 supports_realtime = false
 supports_voice_listing = true

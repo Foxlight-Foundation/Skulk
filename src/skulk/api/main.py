@@ -2707,9 +2707,9 @@ class API:
         return resolved
 
     async def _validate_speech_synthesis_model(
-        self, model_id: ModelId, response_format: AudioResponseFormat
-    ) -> ModelId:
-        """Validate a mounted text-to-speech model and requested output format."""
+        self, model_id: ModelId, response_format: AudioResponseFormat | None
+    ) -> tuple[ModelId, AudioResponseFormat]:
+        """Validate a mounted TTS model and resolve the output audio format."""
 
         model_card = await self._get_running_model_card(model_id)
         resolved = model_card.model_id
@@ -2719,9 +2719,14 @@ class API:
                 status_code=400,
                 detail=f"Model {resolved} is not a text-to-speech model",
             )
+        resolved_response_format = (
+            response_format
+            or profile.default_audio_response_format
+            or AudioResponseFormat.Mp3
+        )
         if (
             profile.audio_response_formats
-            and response_format not in profile.audio_response_formats
+            and resolved_response_format not in profile.audio_response_formats
         ):
             supported = ", ".join(
                 audio_format.value for audio_format in profile.audio_response_formats
@@ -2730,7 +2735,7 @@ class API:
                 status_code=400,
                 detail=(
                     f"Model {resolved} does not support audio response format "
-                    f"{response_format.value}; supported formats: {supported}"
+                    f"{resolved_response_format.value}; supported formats: {supported}"
                 ),
             )
         if not any(
@@ -2742,7 +2747,7 @@ class API:
                 status_code=404,
                 detail=f"No instance found for model {resolved}",
             )
-        return resolved
+        return resolved, resolved_response_format
 
     async def _validate_audio_transcription_model(self, model_id: ModelId) -> ModelId:
         """Validate a mounted speech-to-text model exists and is servable."""
@@ -6259,7 +6264,7 @@ class API:
                 detail="`reference_text` is only supported with reference-audio TTS flows",
             )
 
-        model_id = await self._validate_speech_synthesis_model(
+        model_id, response_format = await self._validate_speech_synthesis_model(
             ModelId(request.model), request.response_format
         )
         command = SpeechSynthesis(
@@ -6267,7 +6272,7 @@ class API:
             task_params=SpeechSynthesisTaskParams(
                 model=model_id,
                 input_text=request.input,
-                response_format=request.response_format,
+                response_format=response_format,
                 voice=request.voice,
                 speed=request.speed,
                 instruct=request.instruct,
@@ -6289,7 +6294,6 @@ class API:
             await self._send(command)
 
             encoded_parts: list[str] = []
-            response_format = request.response_format
             with recv as chunks:
                 async for chunk in chunks:
                     if isinstance(chunk, ErrorChunk):
