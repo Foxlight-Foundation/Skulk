@@ -212,6 +212,30 @@ def test_resolve_staged_voice_path_rejects_path_components(tmp_path: Path) -> No
         _resolve_staged_voice_path(tmp_path, "../af_heart.safetensors")
 
 
+def test_resolve_staged_voice_path_rejects_symlink_escape(tmp_path: Path) -> None:
+    """Resolved voice paths must remain under the staged voices directory."""
+
+    outside_voice = tmp_path / "outside.safetensors"
+    outside_voice.write_bytes(b"voice")
+    voices_dir = tmp_path / "voices"
+    voices_dir.mkdir()
+    (voices_dir / "escape.safetensors").symlink_to(outside_voice)
+
+    with pytest.raises(ValueError, match="under voices"):
+        _resolve_staged_voice_path(tmp_path, "escape")
+
+
+def test_resolve_staged_voice_path_requires_regular_file(tmp_path: Path) -> None:
+    """Directories under voices/ are not valid staged voice assets."""
+
+    voices_dir = tmp_path / "voices"
+    voices_dir.mkdir()
+    (voices_dir / "af_heart.safetensors").mkdir()
+
+    with pytest.raises(FileNotFoundError, match="regular file"):
+        _resolve_staged_voice_path(tmp_path, "af_heart")
+
+
 def test_speech_synthesis_emits_audio_chunk_and_active_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -155,10 +155,20 @@ def _resolve_staged_voice_path(
     staged_voice_path = voices_dir / (
         voice if voice.endswith(".safetensors") else f"{voice}.safetensors"
     )
-    if staged_voice_path.exists():
-        return str(staged_voice_path)
+    resolved_voices_dir = voices_dir.resolve(strict=True)
+    try:
+        resolved_voice_path = staged_voice_path.resolve(strict=True)
+        resolved_voice_path.relative_to(resolved_voices_dir)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"Staged TTS voice {voice!r} was not found as a regular file under {voices_dir}"
+        ) from exc
+    except ValueError as exc:
+        raise ValueError("Staged TTS voice files must stay under voices/") from exc
+    if resolved_voice_path.is_file():
+        return str(resolved_voice_path)
     raise FileNotFoundError(
-        f"Staged TTS voice {voice!r} was not found under {voices_dir}"
+        f"Staged TTS voice {voice!r} was not found as a regular file under {voices_dir}"
     )
 
 
