@@ -5,7 +5,7 @@ from pydantic import Field
 
 from skulk.shared.models.model_cards import ModelCard
 from skulk.shared.topology import Connection
-from skulk.shared.types.chunks import GenerationChunk, InputImageChunk
+from skulk.shared.types.chunks import GenerationChunk, InputChunk
 from skulk.shared.types.common import (
     CommandId,
     Id,
@@ -104,7 +104,7 @@ class ChunkGenerated(BaseEvent):
 
 class InputChunkReceived(BaseEvent):
     command_id: CommandId
-    chunk: InputImageChunk
+    chunk: InputChunk
 
 
 class TopologyEdgeCreated(BaseEvent):

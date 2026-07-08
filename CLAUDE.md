@@ -115,8 +115,9 @@ A model card's `placement.compatible_backends` selects which engine serves it
 - **`mlx_audio`**: single-node speech backend vocabulary for upstream
   `mlx-audio` TTS/STT models. Skulk probes and advertises `mlx_audio` /
   `mlx_audio-metal` when `mlx_audio` imports on macOS. Mounted TTS models serve
-  non-streaming `/v1/audio/speech` through the speech runner; STT, translation,
-  realtime, and streaming speech remain later phases.
+  non-streaming `/v1/audio/speech` through the speech runner, and mounted STT
+  models serve non-streaming `/v1/audio/transcriptions`; translation, realtime,
+  and streaming speech remain later phases.
 - **`llama_cpp`** (`worker/runner/llama_cpp/`): in-process `llama-cpp-python` for
   GGUF on GPU/Linux nodes (Vulkan/ROCm/CUDA). Single-node.
 - **`llama_server`** (`worker/runner/llama_server/`): served-backend engine; the

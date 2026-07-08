@@ -6,7 +6,10 @@ import pytest
 from anyio import to_thread
 
 from skulk.shared.models.model_cards import ModelId
-from skulk.shared.types.audio import SpeechSynthesisTaskParams
+from skulk.shared.types.audio import (
+    AudioTranscriptionTaskParams,
+    SpeechSynthesisTaskParams,
+)
 from skulk.shared.types.chunks import ErrorChunk, TokenChunk
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.diagnostics import (
@@ -22,6 +25,7 @@ from skulk.shared.types.events import (
     TaskStatusUpdated,
 )
 from skulk.shared.types.tasks import (
+    AudioTranscription,
     SpeechSynthesis,
     Task,
     TaskId,
@@ -397,6 +401,82 @@ async def test_start_task_records_speech_owner_and_terminal_status_clears_it() -
                 1,
             )
             assert isinstance(dispatched, SpeechSynthesis)
+            assert dispatched.command_id == command_id
+            assert supervisor._command_owner[command_id] == owner  # pyright: ignore[reportPrivateUsage]
+
+            ev_send.send(TaskAcknowledged(task_id=task.task_id))
+            ev_send.send(
+                TaskStatusUpdated(
+                    task_id=task.task_id,
+                    task_status=TaskStatus.Complete,
+                )
+            )
+
+            forwarded_status = await event_receiver.receive()
+            assert isinstance(forwarded_status, TaskStatusUpdated)
+            assert forwarded_status.task_id == task.task_id
+            assert command_id not in supervisor._command_owner  # pyright: ignore[reportPrivateUsage]
+            assert task.task_id not in supervisor.in_progress
+
+            tg.cancel_scope.cancel()
+
+    ev_send.close()
+    event_sender.close()
+
+
+@pytest.mark.asyncio
+async def test_start_task_records_transcription_owner_and_terminal_status_clears_it() -> None:
+    """STT output keeps the command owner needed for Zenoh DATA routing."""
+
+    event_sender, event_receiver = channel[Event]()
+    task_sender, task_receiver = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    ev_send, ev_recv = mp_channel[Event]()
+    _, diag_recv = mp_channel[RunnerDiagnosticUpdate]()
+
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-a"),
+        model_id=ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit"),
+        runner_id=RunnerId("runner-a"),
+        node_id=NodeId("node-a"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=ev_recv,
+        _diag_recv=diag_recv,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+    )
+    supervisor.status = RunnerRunning()
+
+    command_id = CommandId("cmd-transcription-owner")
+    owner = NodeId("api-node-transcription")
+    task = AudioTranscription(
+        task_id=TaskId("task-transcription-owner"),
+        instance_id=bound_instance.instance.instance_id,
+        command_id=command_id,
+        owner_node=owner,
+        task_params=AudioTranscriptionTaskParams(
+            model=bound_instance.bound_shard.model_card.model_id,
+            total_input_chunks=1,
+            audio_sha256="abc123",
+        ),
+    )
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(supervisor._forward_events)  # pyright: ignore[reportPrivateUsage]
+            tg.start_soon(supervisor.start_task, task)
+
+            dispatched = await to_thread.run_sync(
+                task_receiver.receive_timeout,
+                1,
+            )
+            assert isinstance(dispatched, AudioTranscription)
             assert dispatched.command_id == command_id
             assert supervisor._command_owner[command_id] == owner  # pyright: ignore[reportPrivateUsage]
 

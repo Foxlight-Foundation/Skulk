@@ -27,7 +27,7 @@ from skulk.shared.models.model_cards import (
     add_to_card_cache,
     delete_custom_card,
 )
-from skulk.shared.types.chunks import DataChunk, InputImageChunk
+from skulk.shared.types.chunks import AudioInputChunk, DataChunk, InputImageChunk
 from skulk.shared.types.commands import (
     DeleteInstance,
     ForwarderCommand,
@@ -50,6 +50,7 @@ from skulk.shared.types.events import (
     NodeGatheredInfo,
     StagedModelEvicted,
     TaskCreated,
+    TaskDeleted,
     TaskStatusUpdated,
     TopologyEdgeCreated,
     TopologyEdgeDeleted,
@@ -59,6 +60,7 @@ from skulk.shared.types.multiaddr import Multiaddr
 from skulk.shared.types.profiling import MemoryUsage
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import (
+    AudioTranscription,
     CancelTask,
     CreateRunner,
     DownloadModel,
@@ -386,6 +388,27 @@ def _inject_assembled_image_edit(task: ImageEdits, assembled_image: str) -> Imag
     )
 
 
+def _audio_input_cleanup_command_id(
+    event: Event,
+    previous_tasks: Mapping[TaskId, Task],
+    current_tasks: Mapping[TaskId, Task],
+) -> CommandId | None:
+    """Return the STT command whose uploaded chunks can be released."""
+    task: Task | None = None
+    if isinstance(event, TaskDeleted):
+        task = previous_tasks.get(event.task_id)
+    elif isinstance(event, TaskStatusUpdated) and event.task_status in {
+        TaskStatus.Cancelled,
+        TaskStatus.Complete,
+        TaskStatus.Failed,
+        TaskStatus.TimedOut,
+    }:
+        task = current_tasks.get(event.task_id) or previous_tasks.get(event.task_id)
+    if isinstance(task, AudioTranscription):
+        return task.command_id
+    return None
+
+
 def _log_image_transport(message: str) -> None:
     """Emit image transport logs only at INFO when explicitly requested.
 
@@ -519,6 +542,8 @@ class Worker:
         # Buffer for input image chunks (for image editing)
         self.input_chunk_buffer: dict[CommandId, dict[int, InputImageChunk]] = {}
         self.input_chunk_counts: dict[CommandId, int] = {}
+        self.input_audio_chunk_buffer: dict[CommandId, dict[int, AudioInputChunk]] = {}
+        self.input_audio_chunk_counts: dict[CommandId, int] = {}
         self.image_cache: dict[str, str] = {}
 
         self._download_backoff: KeyedBackoff[ModelId] = KeyedBackoff(base=0.5, cap=10.0)
@@ -718,6 +743,7 @@ class Worker:
         with self.event_receiver as events:
             async for event in events:
                 # 2. for each event, apply it to the state
+                previous_tasks = self.state.tasks
                 self.state = apply(self.state, event=event)
                 event = event.event
 
@@ -736,16 +762,35 @@ class Worker:
                 if self._telemetry_view is not None:
                     record_membership_from_event(self._telemetry_view, event)
 
-                # Buffer input image chunks for image editing
+                # Buffer input media chunks until the worker can dispatch the
+                # task with a complete payload to its local runner.
                 if isinstance(event, InputChunkReceived):
                     cmd_id = event.command_id
-                    if cmd_id not in self.input_chunk_buffer:
-                        self.input_chunk_buffer[cmd_id] = {}
-                        self.input_chunk_counts[cmd_id] = event.chunk.total_chunks
+                    if isinstance(event.chunk, AudioInputChunk):
+                        if cmd_id not in self.input_audio_chunk_buffer:
+                            self.input_audio_chunk_buffer[cmd_id] = {}
+                            self.input_audio_chunk_counts[cmd_id] = (
+                                event.chunk.total_chunks
+                            )
+                        self.input_audio_chunk_buffer[cmd_id][
+                            event.chunk.chunk_index
+                        ] = event.chunk
+                    else:
+                        if cmd_id not in self.input_chunk_buffer:
+                            self.input_chunk_buffer[cmd_id] = {}
+                            self.input_chunk_counts[cmd_id] = event.chunk.total_chunks
 
-                    self.input_chunk_buffer[cmd_id][event.chunk.chunk_index] = (
-                        event.chunk
+                        self.input_chunk_buffer[cmd_id][event.chunk.chunk_index] = (
+                            event.chunk
+                        )
+
+                if (
+                    cleanup_cmd_id := _audio_input_cleanup_command_id(
+                        event, previous_tasks, self.state.tasks
                     )
+                ) is not None:
+                    self.input_audio_chunk_buffer.pop(cleanup_cmd_id, None)
+                    self.input_audio_chunk_counts.pop(cleanup_cmd_id, None)
 
                 if isinstance(event, CustomModelCardAdded):
                     try:
@@ -846,6 +891,7 @@ class Worker:
                 self.state.runners,
                 self.state.tasks,
                 self.input_chunk_buffer,
+                self.input_audio_chunk_buffer,
             )
             if task is None:
                 continue
@@ -1107,6 +1153,43 @@ class Worker:
                         del self.input_chunk_buffer[cmd_id]
                     if cmd_id in self.input_chunk_counts:
                         del self.input_chunk_counts[cmd_id]
+                    await self._start_runner_task(modified_task)
+                case AudioTranscription() if task.task_params.total_input_chunks > 0:
+                    cmd_id = task.command_id
+                    chunks = self.input_audio_chunk_buffer.get(cmd_id, {})
+                    try:
+                        assembled = "".join(
+                            chunks[i].data
+                            for i in range(task.task_params.total_input_chunks)
+                        )
+                    except KeyError as exc:
+                        logger.error(
+                            "AudioTranscription task reached dispatch with missing "
+                            f"audio chunk {exc.args[0]} "
+                            f"(task_id={task.task_id}, command_id={cmd_id})"
+                        )
+                        self.input_audio_chunk_buffer.pop(cmd_id, None)
+                        self.input_audio_chunk_counts.pop(cmd_id, None)
+                        await self.event_sender.send(
+                            TaskStatusUpdated(
+                                task_id=task.task_id,
+                                task_status=TaskStatus.Failed,
+                            )
+                        )
+                        continue
+                    logger.info(
+                        f"Assembled speech input from {len(chunks)} chunks, "
+                        f"base64 size: {len(assembled)} bytes"
+                    )
+                    modified_task = task.model_copy(
+                        update={
+                            "task_params": task.task_params.model_copy(
+                                update={"audio_data": assembled}
+                            )
+                        }
+                    )
+                    self.input_audio_chunk_buffer.pop(cmd_id, None)
+                    self.input_audio_chunk_counts.pop(cmd_id, None)
                     await self._start_runner_task(modified_task)
                 case task:
                     await self._start_runner_task(task)

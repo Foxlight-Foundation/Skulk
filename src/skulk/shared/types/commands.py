@@ -5,8 +5,11 @@ from skulk.api.types import (
     ImageGenerationTaskParams,
 )
 from skulk.shared.models.model_cards import ModelCard, ModelId
-from skulk.shared.types.audio import SpeechSynthesisTaskParams
-from skulk.shared.types.chunks import InputImageChunk
+from skulk.shared.types.audio import (
+    AudioTranscriptionTaskParams,
+    SpeechSynthesisTaskParams,
+)
+from skulk.shared.types.chunks import InputChunk
 from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.embedding import TextEmbeddingTaskParams
 from skulk.shared.types.text_generation import TextGenerationTaskParams
@@ -52,6 +55,13 @@ class SpeechSynthesis(BaseCommand):
     """Command to synthesize speech from text on a mounted TTS model."""
 
     task_params: SpeechSynthesisTaskParams
+    owner_node: NodeId | None = None
+
+
+class AudioTranscription(BaseCommand):
+    """Command to transcribe uploaded audio on a mounted STT model."""
+
+    task_params: AudioTranscriptionTaskParams
     owner_node: NodeId | None = None
 
 
@@ -113,9 +123,9 @@ class TaskFinished(BaseCommand):
 
 
 class SendInputChunk(BaseCommand):
-    """Command to send an input image chunk (converted to event by master)."""
+    """Command to send input media chunks converted to events by the master."""
 
-    chunk: InputImageChunk
+    chunk: InputChunk
 
 
 class RequestEventLog(BaseCommand):
@@ -195,6 +205,7 @@ Command = (
     | ImageEdits
     | TextEmbedding
     | SpeechSynthesis
+    | AudioTranscription
     | SetTracingEnabled
     | PlaceInstance
     | CreateInstance

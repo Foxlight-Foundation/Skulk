@@ -28,6 +28,7 @@ def _make_api() -> Any:
     api._image_generation_queues = {}
     api._embedding_queues = {}
     api._audio_speech_queues = {}
+    api._audio_transcription_queues = {}
     return api
 
 

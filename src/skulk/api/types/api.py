@@ -18,6 +18,9 @@ from skulk.utils.pydantic_ext import CamelCaseModel
 FinishReason = Literal[
     "stop", "length", "tool_calls", "content_filter", "function_call", "error"
 ]
+AudioTranscriptionResponseFormat = Literal[
+    "json", "text", "verbose_json", "srt", "vtt", "ndjson"
+]
 
 
 class ErrorInfo(BaseModel):

@@ -28,3 +28,30 @@ class SpeechSynthesisTaskParams(BaseModel, frozen=True):
     max_tokens: int | None = None
     reference_audio: str | None = None
     reference_text: str | None = None
+
+
+class AudioTranscriptionTaskParams(BaseModel, frozen=True):
+    """Internal task params for speech-to-text inference.
+
+    The API receives multipart audio bytes, sends them through command-owned
+    input chunks, and the worker injects the assembled base64 payload before
+    dispatching the task to the speech runner.
+    """
+
+    model: ModelId
+    filename: str | None = None
+    content_type: str | None = None
+    total_input_chunks: int = Field(default=0, ge=0)
+    audio_sha256: str
+    audio_data: str | None = None
+    language: str | None = None
+    prompt: str | None = None
+    temperature: float | None = None
+    max_tokens: int | None = Field(default=None, gt=0)
+    chunk_duration: float | None = Field(default=None, gt=0)
+    frame_threshold: int | None = Field(default=None, gt=0)
+    context: str | None = None
+    prefill_step_size: int | None = Field(default=None, gt=0)
+    text: str | None = None
+    word_timestamps: bool = False
+    timestamp_granularities: tuple[str, ...] = ()
