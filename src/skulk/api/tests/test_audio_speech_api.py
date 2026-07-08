@@ -56,6 +56,19 @@ def test_audio_speech_request_accepts_audio_format_strings() -> None:
     assert request.response_format == AudioResponseFormat.Wav
 
 
+def test_audio_speech_request_allows_model_default_response_format() -> None:
+    """Omitted response_format is resolved from the mounted model card later."""
+
+    request = AudioSpeechRequest.model_validate(
+        {
+            "model": "mlx-community/kokoro-test",
+            "input": "hello",
+        }
+    )
+
+    assert request.response_format is None
+
+
 def test_audio_speech_request_rejects_unknown_audio_format() -> None:
     """Unsupported audio container names should fail request validation."""
 
@@ -154,12 +167,12 @@ async def test_audio_speech_collects_audio_chunks_and_sends_command(
     sent_commands: list[SpeechSynthesis] = []
 
     async def _validate_model(
-        self: API, requested_model: ModelId, response_format: AudioResponseFormat
-    ) -> ModelId:
+        self: API, requested_model: ModelId, response_format: AudioResponseFormat | None
+    ) -> tuple[ModelId, AudioResponseFormat]:
         assert self is api
         assert requested_model == model_id
         assert response_format == AudioResponseFormat.Wav
-        return model_id
+        return model_id, AudioResponseFormat.Wav
 
     async def _send(command: object) -> None:
         if isinstance(command, SpeechSynthesis):
@@ -199,3 +212,53 @@ async def test_audio_speech_collects_audio_chunks_and_sends_command(
     assert command.task_params.voice == "af_heart"
     assert command.task_params.speed == 1.1
     assert command.command_id not in api._audio_speech_queues
+
+
+@pytest.mark.anyio
+async def test_audio_speech_uses_resolved_model_default_response_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Requests without response_format should use the mounted model default."""
+
+    api = _build_api()
+    model_id = ModelId("mlx-community/kokoro-test")
+    audio_bytes = b"RIFFtestWAVE"
+    sent_commands: list[SpeechSynthesis] = []
+
+    async def _validate_model(
+        self: API, requested_model: ModelId, response_format: AudioResponseFormat | None
+    ) -> tuple[ModelId, AudioResponseFormat]:
+        assert self is api
+        assert requested_model == model_id
+        assert response_format is None
+        return model_id, AudioResponseFormat.Wav
+
+    async def _send(command: object) -> None:
+        if isinstance(command, SpeechSynthesis):
+            sent_commands.append(command)
+            await api._audio_speech_queues[command.command_id].send(
+                AudioChunk(
+                    model=model_id,
+                    data=base64.b64encode(audio_bytes).decode("ascii"),
+                    chunk_index=0,
+                    total_chunks=1,
+                    format=AudioResponseFormat.Wav,
+                    sample_rate=24000,
+                    finish_reason="stop",
+                )
+            )
+
+    monkeypatch.setattr(API, "_validate_speech_synthesis_model", _validate_model)
+    monkeypatch.setattr(api, "_send", _send)
+
+    response = await api.audio_speech(
+        AudioSpeechRequest(
+            model=str(model_id),
+            input="hello there",
+        )
+    )
+
+    assert response.media_type == "audio/wav"
+    assert response.body == audio_bytes
+    assert len(sent_commands) == 1
+    assert sent_commands[0].task_params.response_format == AudioResponseFormat.Wav

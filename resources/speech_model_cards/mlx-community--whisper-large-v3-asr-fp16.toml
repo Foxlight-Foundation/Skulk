@@ -1,0 +1,24 @@
+model_id = "mlx-community/whisper-large-v3-asr-fp16"
+n_layers = 32
+hidden_size = 1280
+supports_tensor = false
+tasks = ["SpeechToText"]
+family = "whisper"
+quantization = "fp16"
+base_model = "openai/whisper-large-v3"
+capabilities = ["stt"]
+context_length = 448
+
+[audio]
+kind = "stt"
+supports_streaming = false
+supports_realtime = false
+supports_translation = false
+sample_rates = [16000]
+
+[placement]
+compatible_backends = ["mlx_audio", "mlx_audio-metal"]
+backend_preference = ["mlx_audio-metal", "mlx_audio"]
+
+[storage_size]
+in_bytes = 3083275393

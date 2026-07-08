@@ -34,7 +34,11 @@ from skulk.shared.types.worker.runners import (
     RunnerRunning,
 )
 from skulk.worker.runner.speech import runner as speech_runner
-from skulk.worker.runner.speech.runner import Runner, _filter_kwargs
+from skulk.worker.runner.speech.runner import (
+    Runner,
+    _filter_kwargs,
+    _resolve_staged_voice_path,
+)
 
 
 class _CaptureSender:
@@ -119,6 +123,44 @@ class _FakeTranscriptionModel:
         }
 
 
+class _FakeWhisperTranscriptionModel:
+    """Fake Whisper-like model with explicit aliases and loose decode options."""
+
+    def __init__(self, expected_audio: bytes) -> None:
+        self.expected_audio = expected_audio
+        self.calls: list[dict[str, object]] = []
+
+    def generate(
+        self,
+        audio_path: str,
+        *,
+        verbose: bool | None = None,
+        language: str | None = None,
+        chunk_duration: float = 1.0,
+        stream: bool = False,
+        temperature: float | tuple[float, ...] = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+        initial_prompt: str | None = None,
+        return_timestamps: bool = True,
+        word_timestamps: bool = False,
+        **decode_options: object,
+    ) -> dict[str, object]:
+        assert Path(audio_path).read_bytes() == self.expected_audio
+        self.calls.append(
+            {
+                "language": language,
+                "chunk_duration": chunk_duration,
+                "stream": stream,
+                "temperature": temperature,
+                "initial_prompt": initial_prompt,
+                "return_timestamps": return_timestamps,
+                "word_timestamps": word_timestamps,
+                "verbose": verbose,
+                "decode_options": decode_options,
+            }
+        )
+        return {"text": "hello world", "language": language or "en"}
+
+
 def _make_runner() -> tuple[Runner, _CaptureSender]:
     sender = _CaptureSender()
     bound = SimpleNamespace(
@@ -158,6 +200,91 @@ def test_filter_kwargs_drops_unsupported_and_none_values() -> None:
             "reference_audio": None,
         },
     ) == {"voice": "af_heart", "stream": False}
+
+
+def test_resolve_staged_voice_path_uses_default_voice_from_model_store(
+    tmp_path: Path,
+) -> None:
+    """Default Kokoro voice requests should stay inside the staged model."""
+
+    voice_path = tmp_path / "voices" / "af_heart.safetensors"
+    voice_path.parent.mkdir()
+    voice_path.write_bytes(b"voice")
+
+    assert _resolve_staged_voice_path(tmp_path, None) == str(voice_path)
+
+
+def test_resolve_staged_voice_path_requires_named_staged_voice(
+    tmp_path: Path,
+) -> None:
+    """Named Kokoro voices should fail locally instead of fetching elsewhere."""
+
+    voices_dir = tmp_path / "voices"
+    voices_dir.mkdir()
+
+    with pytest.raises(FileNotFoundError, match="bf_emma"):
+        _resolve_staged_voice_path(tmp_path, "bf_emma")
+
+
+def test_resolve_staged_voice_path_keeps_safetensors_inside_store(
+    tmp_path: Path,
+) -> None:
+    """Explicit voice filenames should resolve under the staged voices dir."""
+
+    voice_path = tmp_path / "voices" / "af_heart.safetensors"
+    voice_path.parent.mkdir()
+    voice_path.write_bytes(b"voice")
+
+    assert _resolve_staged_voice_path(tmp_path, "af_heart.safetensors") == str(
+        voice_path
+    )
+
+
+def test_resolve_staged_voice_path_rejects_path_components(tmp_path: Path) -> None:
+    """Voice requests must not escape the staged voices directory."""
+
+    voices_dir = tmp_path / "voices"
+    voices_dir.mkdir()
+
+    with pytest.raises(ValueError, match="path components"):
+        _resolve_staged_voice_path(tmp_path, "../af_heart.safetensors")
+
+
+def test_resolve_staged_voice_path_rejects_symlink_escape(tmp_path: Path) -> None:
+    """Resolved voice paths must remain under the staged voices directory."""
+
+    outside_voice = tmp_path / "outside.safetensors"
+    outside_voice.write_bytes(b"voice")
+    voices_dir = tmp_path / "voices"
+    voices_dir.mkdir()
+    (voices_dir / "escape.safetensors").symlink_to(outside_voice)
+
+    with pytest.raises(ValueError, match="under voices"):
+        _resolve_staged_voice_path(tmp_path, "escape")
+
+
+def test_resolve_staged_voice_path_rejects_voices_dir_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    """The staged voices directory itself must not point outside the model."""
+
+    outside_dir = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside_dir.mkdir()
+    (tmp_path / "voices").symlink_to(outside_dir, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="voices directory"):
+        _resolve_staged_voice_path(tmp_path, "af_heart")
+
+
+def test_resolve_staged_voice_path_requires_regular_file(tmp_path: Path) -> None:
+    """Directories under voices/ are not valid staged voice assets."""
+
+    voices_dir = tmp_path / "voices"
+    voices_dir.mkdir()
+    (voices_dir / "af_heart.safetensors").mkdir()
+
+    with pytest.raises(FileNotFoundError, match="regular voice file"):
+        _resolve_staged_voice_path(tmp_path, "af_heart")
 
 
 def test_speech_synthesis_emits_audio_chunk_and_active_status(
@@ -232,6 +359,49 @@ def test_speech_synthesis_emits_audio_chunk_and_active_status(
     assert chunk.finish_reason == "stop"
 
 
+def test_speech_synthesis_uses_staged_voice_assets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Kokoro generation should receive a local voice file from the model store."""
+
+    runner, _sender = _make_runner()
+    model = _FakeSpeechModel()
+    runner.model = model
+    runner.local_model_path = tmp_path
+    runner.current_status = RunnerReady()
+    voice_path = tmp_path / "voices" / "af_heart.safetensors"
+    voice_path.parent.mkdir()
+    voice_path.write_bytes(b"voice")
+
+    def _fake_encode(
+        audio: np.ndarray,
+        sample_rate: int,
+        response_format: AudioResponseFormat,
+    ) -> bytes:
+        del audio, sample_rate, response_format
+        return b"WAVDATA"
+
+    monkeypatch.setattr(speech_runner, "_encode_audio", _fake_encode)
+
+    task = SpeechSynthesis(
+        instance_id=InstanceId("speech-instance-1"),
+        command_id=CommandId("speech-command-1"),
+        task_params=SpeechSynthesisTaskParams(
+            model=ModelId("mlx-community/kokoro-test"),
+            input_text="hello world",
+            response_format=AudioResponseFormat.Wav,
+            voice=None,
+            speed=1.1,
+        ),
+    )
+
+    encoded, sample_rate = runner._run_tts(task)
+
+    assert encoded == b"WAVDATA"
+    assert sample_rate == 24000
+    assert model.calls == [("hello world", str(voice_path), 1.1, False)]
+
+
 def test_audio_transcription_emits_terminal_transcription_chunk() -> None:
     """An STT task should decode uploaded audio and emit transcript output."""
 
@@ -274,3 +444,54 @@ def test_audio_transcription_emits_terminal_transcription_chunk() -> None:
     assert chunk.language == "en"
     assert chunk.segments[0]["start"] == 0.0
     assert chunk.finish_reason == "stop"
+
+
+def test_audio_transcription_maps_whisper_aliases_without_decode_leak() -> None:
+    """OpenAI STT aliases should not reach Whisper's loose decode kwargs."""
+
+    runner, _sender = _make_runner()
+    audio_bytes = b"RIFFtestWAVE"
+    model = _FakeWhisperTranscriptionModel(audio_bytes)
+    runner.model = model
+    runner.current_status = RunnerReady()
+    task = AudioTranscription(
+        instance_id=InstanceId("speech-instance-1"),
+        command_id=CommandId("transcription-command-1"),
+        task_params=AudioTranscriptionTaskParams(
+            model=ModelId("mlx-community/whisper-test"),
+            filename="sample.wav",
+            content_type="audio/wav",
+            total_input_chunks=1,
+            audio_sha256=hashlib.sha256(audio_bytes).hexdigest(),
+            audio_data=base64.b64encode(audio_bytes).decode("ascii"),
+            language="en",
+            prompt="domain vocabulary",
+            context="fallback context",
+            text="fallback text",
+            temperature=0.2,
+            max_tokens=32,
+            chunk_duration=2.5,
+            frame_threshold=12,
+            prefill_step_size=3,
+            timestamp_granularities=("word",),
+        ),
+    )
+
+    text, language, segments = runner._run_stt(task)
+
+    assert text == "hello world"
+    assert language == "en"
+    assert segments == []
+    assert model.calls == [
+        {
+            "language": "en",
+            "chunk_duration": 2.5,
+            "stream": False,
+            "temperature": 0.2,
+            "initial_prompt": "domain vocabulary",
+            "return_timestamps": True,
+            "word_timestamps": True,
+            "verbose": True,
+            "decode_options": {"sample_len": 32},
+        }
+    ]

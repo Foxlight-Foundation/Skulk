@@ -16,6 +16,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -30,6 +31,7 @@ from skulk.shared.tracing import (
     record_trace_marker,
     trace,
 )
+from skulk.shared.types.audio import AudioTranscriptionTaskParams
 from skulk.shared.types.chunks import AudioChunk, ErrorChunk, TranscriptionChunk
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
@@ -64,6 +66,8 @@ from skulk.shared.types.worker.runners import (
 from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.bootstrap import logger
 
+_DEFAULT_STAGED_TTS_VOICE = "af_heart"
+
 
 @dataclass(frozen=True)
 class _CallableParameters:
@@ -97,6 +101,57 @@ def _filter_kwargs(fn: Callable[..., Any], kwargs: dict[str, Any]) -> dict[str, 
     if accepted is None or accepted.accepts_var_kwargs:
         return {k: v for k, v in kwargs.items() if v is not None}
     return {k: v for k, v in kwargs.items() if v is not None and k in accepted.params}
+
+
+def _first_non_empty_text(*values: str | None) -> str | None:
+    """Return the first non-empty text value from OpenAI-style STT aliases."""
+    for value in values:
+        if value:
+            return value
+    return None
+
+
+def _stt_generate_kwargs(
+    fn: Callable[..., Any], params: AudioTranscriptionTaskParams
+) -> dict[str, Any]:
+    """Build model-aware STT generation kwargs from the shared task params."""
+    accepted = _callable_parameters(fn)
+    if accepted is not None and "initial_prompt" in accepted.params:
+        granularities = {
+            granularity.lower() for granularity in params.timestamp_granularities
+        }
+        word_timestamps = params.word_timestamps or "word" in granularities
+        return_timestamps = bool(granularities) if granularities else None
+        return {
+            "language": params.language,
+            "initial_prompt": _first_non_empty_text(
+                params.prompt, params.context, params.text
+            ),
+            "temperature": params.temperature,
+            "sample_len": params.max_tokens,
+            "chunk_duration": params.chunk_duration,
+            "stream": False,
+            "return_timestamps": return_timestamps,
+            "word_timestamps": word_timestamps,
+            "verbose": True,
+        }
+    return {
+        "language": params.language,
+        "prompt": params.prompt,
+        "temperature": params.temperature,
+        "max_tokens": params.max_tokens,
+        "chunk_duration": params.chunk_duration,
+        "frame_threshold": params.frame_threshold,
+        "stream": False,
+        "context": params.context,
+        "prefill_step_size": params.prefill_step_size,
+        "text": params.text or params.prompt,
+        "word_timestamps": params.word_timestamps,
+        "timestamp_granularities": list(params.timestamp_granularities)
+        if params.timestamp_granularities
+        else None,
+        "verbose": True,
+    }
 
 
 def _to_numpy_audio(audio: Any) -> np.ndarray:
@@ -135,6 +190,42 @@ def _load_speech_model(local_path: str) -> Any:
     from mlx_audio.utils import load_model
 
     return load_model(local_path)
+
+
+def _resolve_staged_voice_path(
+    local_model_path: Path | None, requested_voice: str | None
+) -> str | None:
+    """Resolve named Kokoro voices to staged ``voices/*.safetensors`` assets."""
+    if local_model_path is None:
+        return requested_voice
+    voices_dir = local_model_path / "voices"
+    if not voices_dir.is_dir():
+        return requested_voice
+    voice = requested_voice or _DEFAULT_STAGED_TTS_VOICE
+    if Path(voice).name != voice:
+        raise ValueError("Staged TTS voice names must not include path components")
+    staged_voice_path = voices_dir / (
+        voice if voice.endswith(".safetensors") else f"{voice}.safetensors"
+    )
+    resolved_model_path = local_model_path.resolve(strict=True)
+    resolved_voices_dir = voices_dir.resolve(strict=True)
+    try:
+        resolved_voices_dir.relative_to(resolved_model_path)
+        resolved_voice_path = staged_voice_path.resolve(strict=True)
+        resolved_voice_path.relative_to(resolved_voices_dir)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"Staged TTS voice {voice!r} was not found as a regular voice file"
+        ) from exc
+    except ValueError as exc:
+        raise ValueError(
+            "Staged TTS voice files and voices directory must stay under voices/"
+        ) from exc
+    if resolved_voice_path.is_file():
+        return str(resolved_voice_path)
+    raise FileNotFoundError(
+        f"Staged TTS voice {voice!r} was not found as a regular voice file"
+    )
 
 
 def _emit_audio_chunks(
@@ -381,6 +472,7 @@ class Runner:
         self.setup_start_time = time.time()
         self.cancelled_tasks = set[TaskId]()
         self.model: Any = None
+        self.local_model_path: Path | None = None
         self.current_status: RunnerStatus = RunnerIdle()
         self.seen = set[TaskId]()
         self.update_status(RunnerIdle())
@@ -470,9 +562,10 @@ class Runner:
         from skulk.download.download_utils import build_model_path
         from skulk.shared.types.common import ModelId
 
-        local_path = str(build_model_path(ModelId(model_id)))
+        local_path = build_model_path(ModelId(model_id))
+        self.local_model_path = local_path
         logger.info(f"loading speech model from local path: {local_path}")
-        self.model = _load_speech_model(local_path)
+        self.model = _load_speech_model(str(local_path))
         self.current_status = RunnerReady()
         logger.info(
             f"speech runner ready in {time.time() - self.setup_start_time:.1f}s"
@@ -680,24 +773,8 @@ class Runner:
                 tmp_file.write(audio_bytes)
                 tmp_path = tmp_file.name
 
-            generate_kwargs = {
-                "language": params.language,
-                "prompt": params.prompt,
-                "temperature": params.temperature,
-                "max_tokens": params.max_tokens,
-                "chunk_duration": params.chunk_duration,
-                "frame_threshold": params.frame_threshold,
-                "stream": False,
-                "context": params.context,
-                "prefill_step_size": params.prefill_step_size,
-                "text": params.text or params.prompt,
-                "word_timestamps": params.word_timestamps,
-                "timestamp_granularities": list(params.timestamp_granularities)
-                if params.timestamp_granularities
-                else None,
-                "verbose": True,
-            }
             generate = self.model.generate
+            generate_kwargs = _stt_generate_kwargs(generate, params)
             filtered_kwargs = _filter_kwargs(generate, generate_kwargs)
             result = generate(tmp_path, **filtered_kwargs)
             return _normalize_transcription_result(result)
@@ -713,7 +790,9 @@ class Runner:
         assert self.model is not None
         params = task.task_params
         generate_kwargs = {
-            "voice": params.voice,
+            "voice": _resolve_staged_voice_path(
+                self.local_model_path, params.voice
+            ),
             "speed": params.speed,
             "instruct": params.instruct,
             "lang_code": params.lang_code,
