@@ -190,6 +190,26 @@ export const SIZE_RANGES = [
 
 export type PickerMode = 'launch' | 'store-download';
 
+function isKnownCapability(value: string): value is Capability {
+  return (CAPABILITIES as readonly string[]).includes(value);
+}
+
+function modelFilterCapabilities(model: ModelInfo): string[] {
+  const capabilities = new Set<string>();
+  for (const value of model.capabilities ?? []) {
+    if (isKnownCapability(value)) capabilities.add(value);
+  }
+  for (const value of model.tags ?? []) {
+    if (isKnownCapability(value)) capabilities.add(value);
+  }
+  const resolved = model.resolved_capabilities;
+  if (resolved?.supports_speech_synthesis) capabilities.add('tts');
+  if (resolved?.supports_transcription || resolved?.supports_speech_translation) {
+    capabilities.add('stt');
+  }
+  return Array.from(capabilities);
+}
+
 /**
  * Group model variants by base model (or model id if no base model is present).
  * Variants are sorted by size ascending so the UI can show the smallest representative first.
@@ -211,7 +231,9 @@ export function groupModels(models: ModelInfo[]): ModelGroup[] {
     return {
       id: key,
       name: first.name ?? first.id,
-      capabilities: first.capabilities ?? [],
+      capabilities: Array.from(
+        new Set(sorted.flatMap((variant) => modelFilterCapabilities(variant))),
+      ),
       family: first.family ?? '',
       variants: sorted,
       smallestVariant: first,

@@ -13,8 +13,9 @@ import pytest
 import skulk.api.main as api_main
 from skulk.api.main import API
 from skulk.shared.election import ElectionMessage
-from skulk.shared.models.model_cards import ModelId
+from skulk.shared.models.model_cards import AudioResponseFormat, ModelId
 from skulk.shared.types.chunks import (
+    AudioChunk,
     EmbeddingChunk,
     ErrorChunk,
     PrefillProgressChunk,
@@ -245,6 +246,28 @@ async def test_dispatch_routes_token_chunk_to_text_queue() -> None:
     await api._dispatch_generation_chunk(cmd, chunk)  # pyright: ignore[reportPrivateUsage]
     with recv as stream:
         assert stream.receive_nowait() is chunk
+
+
+@pytest.mark.asyncio
+async def test_dispatch_drops_speech_chunk_for_text_queue() -> None:
+    api = _build_api()
+    cmd = CommandId("cmd-text-speech")
+    send, recv = channel[
+        TokenChunk | ErrorChunk | ToolCallChunk | PrefillProgressChunk
+    ]()
+    api._text_generation_queues[cmd] = send  # pyright: ignore[reportPrivateUsage]
+
+    chunk = AudioChunk(
+        model=ModelId("mlx-community/kokoro-test"),
+        data="UklGRg==",
+        chunk_index=0,
+        total_chunks=1,
+        format=AudioResponseFormat.Wav,
+        finish_reason="stop",
+    )
+    await api._dispatch_generation_chunk(cmd, chunk)  # pyright: ignore[reportPrivateUsage]
+    with recv as stream, pytest.raises(anyio.WouldBlock):
+        stream.receive_nowait()
 
 
 @pytest.mark.asyncio

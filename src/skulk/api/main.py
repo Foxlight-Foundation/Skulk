@@ -3801,9 +3801,14 @@ class API:
             except (BrokenResourceError, ClosedResourceError):
                 self._image_generation_queues.pop(command_id, None)
         if queue := self._text_generation_queues.get(command_id, None):
-            assert isinstance(
+            if not isinstance(
                 chunk, (TokenChunk, ErrorChunk, ToolCallChunk, PrefillProgressChunk)
-            )
+            ):
+                logger.warning(
+                    "Dropping unsupported output chunk "
+                    f"{type(chunk).__name__} for text command {command_id}"
+                )
+                return
             try:
                 await queue.send(chunk)
             except (BrokenResourceError, ClosedResourceError):
