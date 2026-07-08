@@ -5448,6 +5448,10 @@ class API:
                     "fileExists": False,
                     "effective": {
                         "kv_cache_backend": self._effective_kv_cache_backend(),
+                        # No config file, so no file token; a token can still come
+                        # from the environment. Keep the effective shape identical
+                        # to the file-present branch so clients never branch on it.
+                        "has_hf_token": "HF_TOKEN" in os.environ,
                         "experimental_mode_enabled": experimental_mode_enabled(),
                     },
                 }
