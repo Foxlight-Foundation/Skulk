@@ -16,6 +16,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -63,6 +64,8 @@ from skulk.shared.types.worker.runners import (
 )
 from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.bootstrap import logger
+
+_DEFAULT_STAGED_TTS_VOICE = "af_heart"
 
 
 @dataclass(frozen=True)
@@ -135,6 +138,26 @@ def _load_speech_model(local_path: str) -> Any:
     from mlx_audio.utils import load_model
 
     return load_model(local_path)
+
+
+def _resolve_staged_voice_path(
+    local_model_path: Path | None, requested_voice: str | None
+) -> str | None:
+    """Resolve named Kokoro voices to staged ``voices/*.safetensors`` assets."""
+    if local_model_path is None:
+        return requested_voice
+    voices_dir = local_model_path / "voices"
+    if not voices_dir.is_dir():
+        return requested_voice
+    voice = requested_voice or _DEFAULT_STAGED_TTS_VOICE
+    if voice.endswith(".safetensors"):
+        return voice
+    staged_voice_path = voices_dir / f"{voice}.safetensors"
+    if staged_voice_path.exists():
+        return str(staged_voice_path)
+    raise FileNotFoundError(
+        f"Staged TTS voice {voice!r} was not found under {voices_dir}"
+    )
 
 
 def _emit_audio_chunks(
@@ -381,6 +404,7 @@ class Runner:
         self.setup_start_time = time.time()
         self.cancelled_tasks = set[TaskId]()
         self.model: Any = None
+        self.local_model_path: Path | None = None
         self.current_status: RunnerStatus = RunnerIdle()
         self.seen = set[TaskId]()
         self.update_status(RunnerIdle())
@@ -470,9 +494,10 @@ class Runner:
         from skulk.download.download_utils import build_model_path
         from skulk.shared.types.common import ModelId
 
-        local_path = str(build_model_path(ModelId(model_id)))
+        local_path = build_model_path(ModelId(model_id))
+        self.local_model_path = local_path
         logger.info(f"loading speech model from local path: {local_path}")
-        self.model = _load_speech_model(local_path)
+        self.model = _load_speech_model(str(local_path))
         self.current_status = RunnerReady()
         logger.info(
             f"speech runner ready in {time.time() - self.setup_start_time:.1f}s"
@@ -713,7 +738,9 @@ class Runner:
         assert self.model is not None
         params = task.task_params
         generate_kwargs = {
-            "voice": params.voice,
+            "voice": _resolve_staged_voice_path(
+                self.local_model_path, params.voice
+            ),
             "speed": params.speed,
             "instruct": params.instruct,
             "lang_code": params.lang_code,

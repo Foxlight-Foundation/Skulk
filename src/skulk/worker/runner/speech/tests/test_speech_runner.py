@@ -34,7 +34,11 @@ from skulk.shared.types.worker.runners import (
     RunnerRunning,
 )
 from skulk.worker.runner.speech import runner as speech_runner
-from skulk.worker.runner.speech.runner import Runner, _filter_kwargs
+from skulk.worker.runner.speech.runner import (
+    Runner,
+    _filter_kwargs,
+    _resolve_staged_voice_path,
+)
 
 
 class _CaptureSender:
@@ -160,6 +164,30 @@ def test_filter_kwargs_drops_unsupported_and_none_values() -> None:
     ) == {"voice": "af_heart", "stream": False}
 
 
+def test_resolve_staged_voice_path_uses_default_voice_from_model_store(
+    tmp_path: Path,
+) -> None:
+    """Default Kokoro voice requests should stay inside the staged model."""
+
+    voice_path = tmp_path / "voices" / "af_heart.safetensors"
+    voice_path.parent.mkdir()
+    voice_path.write_bytes(b"voice")
+
+    assert _resolve_staged_voice_path(tmp_path, None) == str(voice_path)
+
+
+def test_resolve_staged_voice_path_requires_named_staged_voice(
+    tmp_path: Path,
+) -> None:
+    """Named Kokoro voices should fail locally instead of fetching elsewhere."""
+
+    voices_dir = tmp_path / "voices"
+    voices_dir.mkdir()
+
+    with pytest.raises(FileNotFoundError, match="bf_emma"):
+        _resolve_staged_voice_path(tmp_path, "bf_emma")
+
+
 def test_speech_synthesis_emits_audio_chunk_and_active_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -230,6 +258,49 @@ def test_speech_synthesis_emits_audio_chunk_and_active_status(
     assert chunk.format == AudioResponseFormat.Wav
     assert chunk.sample_rate == 24000
     assert chunk.finish_reason == "stop"
+
+
+def test_speech_synthesis_uses_staged_voice_assets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Kokoro generation should receive a local voice file from the model store."""
+
+    runner, _sender = _make_runner()
+    model = _FakeSpeechModel()
+    runner.model = model
+    runner.local_model_path = tmp_path
+    runner.current_status = RunnerReady()
+    voice_path = tmp_path / "voices" / "af_heart.safetensors"
+    voice_path.parent.mkdir()
+    voice_path.write_bytes(b"voice")
+
+    def _fake_encode(
+        audio: np.ndarray,
+        sample_rate: int,
+        response_format: AudioResponseFormat,
+    ) -> bytes:
+        del audio, sample_rate, response_format
+        return b"WAVDATA"
+
+    monkeypatch.setattr(speech_runner, "_encode_audio", _fake_encode)
+
+    task = SpeechSynthesis(
+        instance_id=InstanceId("speech-instance-1"),
+        command_id=CommandId("speech-command-1"),
+        task_params=SpeechSynthesisTaskParams(
+            model=ModelId("mlx-community/kokoro-test"),
+            input_text="hello world",
+            response_format=AudioResponseFormat.Wav,
+            voice=None,
+            speed=1.1,
+        ),
+    )
+
+    encoded, sample_rate = runner._run_tts(task)
+
+    assert encoded == b"WAVDATA"
+    assert sample_rate == 24000
+    assert model.calls == [("hello world", str(voice_path), 1.1, False)]
 
 
 def test_audio_transcription_emits_terminal_transcription_chunk() -> None:
