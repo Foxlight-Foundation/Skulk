@@ -3,8 +3,12 @@ import { v4 as uuidv4 } from 'uuid';
 import styled from 'styled-components';
 import { ChatMessages } from '../chat/ChatMessages';
 import { ChatForm } from '../chat/ChatForm';
-import type { ChatMessage } from '../../types/chat';
-import type { ChatUploadedFile } from '../../types/chat';
+import type {
+  AudioResponseFormat,
+  ChatMessage,
+  ChatSpeechModelOption,
+  ChatUploadedFile,
+} from '../../types/chat';
 import type { ModelInfo } from '../../types/models';
 import type { InstanceCardData } from '../layout/InstancePanel';
 import { useAppDispatch, useAppSelector } from '../../store/hooks';
@@ -92,6 +96,7 @@ const HARMONY_CONTROL_TOKENS = [
   '<|constrain|>',
 ];
 const MAX_TOOL_ROUNDS = 4;
+const AUDIO_RESPONSE_FORMATS: readonly AudioResponseFormat[] = ['mp3', 'wav', 'flac', 'ogg', 'opus'];
 const GPT_OSS_BROWSER_TOOLS = {
   web_search: {
     type: 'function',
@@ -164,6 +169,69 @@ const GPT_OSS_BROWSER_TOOLS = {
 type BuiltinBrowserToolName = keyof typeof GPT_OSS_BROWSER_TOOLS;
 
 type ApiMessagePayload = Record<string, unknown>;
+
+function isAudioResponseFormat(value: string | null | undefined): value is AudioResponseFormat {
+  return AUDIO_RESPONSE_FORMATS.includes(value as AudioResponseFormat);
+}
+
+function shortModelLabel(modelId: string): string {
+  const parts = modelId.split('/');
+  return parts[parts.length - 1] || modelId;
+}
+
+function modelSupportsChat(model: ModelInfo | undefined): boolean {
+  if (!model) return true;
+  const tasks = new Set(model.tasks ?? []);
+  if (tasks.has('TextGeneration')) return true;
+  if (tasks.has('TextEmbedding')) return false;
+  const resolved = model.resolved_capabilities;
+  const speechOnly = Boolean(
+    resolved?.supports_speech_synthesis
+      || resolved?.supports_transcription
+      || resolved?.supports_speech_translation
+      || tasks.has('TextToSpeech')
+      || tasks.has('SpeechToText')
+      || tasks.has('SpeechTranslation'),
+  );
+  return !speechOnly;
+}
+
+function speechModelOption(modelId: string, model: ModelInfo | undefined): ChatSpeechModelOption {
+  const resolved = model?.resolved_capabilities;
+  const responseFormats = (
+    resolved?.audio_response_formats
+      ?? model?.audio?.response_formats
+      ?? []
+  ).filter(isAudioResponseFormat);
+  const resolvedDefault = resolved?.default_audio_response_format ?? null;
+  const cardDefault = model?.audio?.default_response_format ?? null;
+  const defaultResponseFormat: AudioResponseFormat = isAudioResponseFormat(resolvedDefault)
+    ? resolvedDefault
+    : isAudioResponseFormat(cardDefault)
+      ? cardDefault
+      : responseFormats[0] ?? 'mp3';
+  const formats = responseFormats.length > 0 ? responseFormats : [defaultResponseFormat];
+  return {
+    modelId,
+    label: shortModelLabel(modelId),
+    defaultResponseFormat,
+    responseFormats: formats,
+    supportsVoiceListing: model?.audio?.supports_voice_listing ?? false,
+  };
+}
+
+async function responseErrorMessage(response: Response): Promise<string> {
+  const body = await response.text().catch(() => '');
+  if (!body) return `HTTP ${response.status}`;
+  try {
+    const parsed = JSON.parse(body) as { detail?: unknown; error?: { message?: unknown } };
+    if (typeof parsed.detail === 'string') return parsed.detail;
+    if (typeof parsed.error?.message === 'string') return parsed.error.message;
+  } catch {
+    // Fall through to the raw response body.
+  }
+  return body;
+}
 
 interface StreamToolCall {
   id: string;
@@ -492,6 +560,10 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   const { t } = useSkulkTranslation();
   // Store state
   const selectedModelId = useAppSelector((s) => s.chat.selectedModelId);
+  const selectedTranscriptionModelId = useAppSelector((s) => s.chat.selectedTranscriptionModelId);
+  const selectedSpeechModelId = useAppSelector((s) => s.chat.selectedSpeechModelId);
+  const selectedVoice = useAppSelector((s) => s.chat.selectedVoice);
+  const autoSpeakAssistant = useAppSelector((s) => s.chat.autoSpeakAssistant);
   const activeConversationId = useAppSelector((s) => s.chat.activeConversationId);
   const messages = useAppSelector((s) =>
     s.chat.activeConversationId
@@ -499,6 +571,14 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
       : EMPTY_MESSAGES,
   );
   const selectModel = (modelId: string) => dispatch(chatActions.selectModel(modelId));
+  const selectTranscriptionModel = (modelId: string | null) =>
+    dispatch(chatActions.selectTranscriptionModel(modelId));
+  const selectSpeechModel = (modelId: string | null) =>
+    dispatch(chatActions.selectSpeechModel(modelId));
+  const setSelectedVoice = (voice: string | null) =>
+    dispatch(chatActions.setSelectedVoice(voice));
+  const setAutoSpeakAssistant = (enabled: boolean) =>
+    dispatch(chatActions.setAutoSpeakAssistant(enabled));
   const addMessage = (msg: ChatMessage) => dispatch(chatActions.addMessage(msg));
   const deleteMessageAction = (id: string) => dispatch(chatActions.deleteMessage(id));
   const editMessageAction = (messageId: string, content: string) =>
@@ -519,6 +599,11 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
   const [modelImageInputSupport, setModelImageInputSupport] = useState<Record<string, boolean>>({});
   const [modelBuiltinTools, setModelBuiltinTools] = useState<Record<string, string[]>>({});
   const [modelContextLengths, setModelContextLengths] = useState<Record<string, number>>({});
+  const [modelCatalogById, setModelCatalogById] = useState<Record<string, ModelInfo>>({});
+  const [speechError, setSpeechError] = useState<string | null>(null);
+  const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
+  const audioPlaybackRef = useRef<HTMLAudioElement | null>(null);
+  const audioObjectUrlRef = useRef<string | null>(null);
 
   // Restore scroll position after store hydration + DOM render
   const dispatch = useAppDispatch();
@@ -577,8 +662,10 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
         const imageSupport: Record<string, boolean> = {};
         const builtinTools: Record<string, string[]> = {};
         const ctxLens: Record<string, number> = {};
+        const catalogById: Record<string, ModelInfo> = {};
         for (const m of data.data ?? []) {
           if (m.id) {
+            catalogById[m.id] = m;
             toggleSupport[m.id] = m.resolved_capabilities?.supports_thinking_toggle ?? false;
             imageSupport[m.id] = m.resolved_capabilities?.supports_image_input ?? false;
             builtinTools[m.id] = m.tooling?.builtin_tools
@@ -591,6 +678,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
         setModelImageInputSupport(imageSupport);
         setModelBuiltinTools(builtinTools);
         setModelContextLengths(ctxLens);
+        setModelCatalogById(catalogById);
       } catch { /* ignore */ }
     })();
   }, []);
@@ -613,18 +701,85 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     }
   }, [supportsThinking, thinkingEnabled]);
 
-  // Ready models
-  const readyModels = useMemo(
-    () => readyInstances.filter((i) => (i.status === 'ready' || i.status === 'running') && !i.isEmbedding),
+  const readyRunnableInstances = useMemo(
+    () => readyInstances.filter((i) => i.status === 'ready' || i.status === 'running'),
     [readyInstances],
   );
 
+  // Ready models
+  const readyModels = useMemo(
+    () => readyRunnableInstances.filter((i) => !i.isEmbedding && modelSupportsChat(modelCatalogById[i.modelId])),
+    [modelCatalogById, readyRunnableInstances],
+  );
+
+  const readyTranscriptionModels = useMemo(() => {
+    const seen = new Set<string>();
+    const options: ChatSpeechModelOption[] = [];
+    for (const instance of readyRunnableInstances) {
+      const model = modelCatalogById[instance.modelId];
+      if (
+        !model?.resolved_capabilities?.supports_transcription
+        && !model?.resolved_capabilities?.supports_speech_translation
+      ) {
+        continue;
+      }
+      if (seen.has(instance.modelId)) continue;
+      seen.add(instance.modelId);
+      options.push(speechModelOption(instance.modelId, model));
+    }
+    return options;
+  }, [modelCatalogById, readyRunnableInstances]);
+
+  const readySpeechModels = useMemo(() => {
+    const seen = new Set<string>();
+    const options: ChatSpeechModelOption[] = [];
+    for (const instance of readyRunnableInstances) {
+      const model = modelCatalogById[instance.modelId];
+      if (!model?.resolved_capabilities?.supports_speech_synthesis) {
+        continue;
+      }
+      if (seen.has(instance.modelId)) continue;
+      seen.add(instance.modelId);
+      options.push(speechModelOption(instance.modelId, model));
+    }
+    return options;
+  }, [modelCatalogById, readyRunnableInstances]);
+
   // Auto-select first ready model if none selected
   useEffect(() => {
-    if (!selectedModelId && readyModels.length > 0) {
+    if (
+      readyModels.length > 0
+      && (!selectedModelId || !readyModels.some((model) => model.modelId === selectedModelId))
+    ) {
       selectModel(readyModels[0].modelId);
     }
   }, [selectedModelId, readyModels, selectModel]);
+
+  useEffect(() => {
+    if (readyTranscriptionModels.length === 0) {
+      if (selectedTranscriptionModelId) selectTranscriptionModel(null);
+      return;
+    }
+    if (
+      !selectedTranscriptionModelId
+      || !readyTranscriptionModels.some((model) => model.modelId === selectedTranscriptionModelId)
+    ) {
+      selectTranscriptionModel(readyTranscriptionModels[0].modelId);
+    }
+  }, [readyTranscriptionModels, selectedTranscriptionModelId, selectTranscriptionModel]);
+
+  useEffect(() => {
+    if (readySpeechModels.length === 0) {
+      if (selectedSpeechModelId) selectSpeechModel(null);
+      return;
+    }
+    if (
+      !selectedSpeechModelId
+      || !readySpeechModels.some((model) => model.modelId === selectedSpeechModelId)
+    ) {
+      selectSpeechModel(readySpeechModels[0].modelId);
+    }
+  }, [readySpeechModels, selectedSpeechModelId, selectSpeechModel]);
 
   const selectedLabel = useMemo(() => {
     if (!selectedModelId) return undefined;
@@ -632,8 +787,106 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     return parts[parts.length - 1];
   }, [selectedModelId]);
 
+  const selectedSpeechOption = useMemo(
+    () => readySpeechModels.find((model) => model.modelId === selectedSpeechModelId) ?? null,
+    [readySpeechModels, selectedSpeechModelId],
+  );
+
+  const canSendMessages = Boolean(
+    selectedModelId && readyModels.some((model) => model.modelId === selectedModelId),
+  );
+
+  const stopSpeechPlayback = useCallback(() => {
+    audioPlaybackRef.current?.pause();
+    audioPlaybackRef.current = null;
+    if (audioObjectUrlRef.current) {
+      URL.revokeObjectURL(audioObjectUrlRef.current);
+      audioObjectUrlRef.current = null;
+    }
+    setSpeakingMessageId(null);
+  }, []);
+
+  const speakText = useCallback(async (text: string, messageId: string | null = 'draft') => {
+    const input = text.trim();
+    if (!input || !selectedSpeechModelId) return;
+    setSpeechError(null);
+    stopSpeechPlayback();
+
+    const responseFormat = selectedSpeechOption?.defaultResponseFormat ?? 'mp3';
+    try {
+      const response = await fetch('/v1/audio/speech', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: selectedSpeechModelId,
+          input,
+          response_format: responseFormat,
+          ...(selectedVoice ? { voice: selectedVoice } : {}),
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(await responseErrorMessage(response));
+      }
+
+      const audioBlob = await response.blob();
+      const objectUrl = URL.createObjectURL(audioBlob);
+      const audio = new Audio(objectUrl);
+      audioPlaybackRef.current = audio;
+      audioObjectUrlRef.current = objectUrl;
+      setSpeakingMessageId(messageId);
+
+      audio.onended = stopSpeechPlayback;
+      audio.onerror = () => {
+        setSpeechError(t('chat.view.errors.speechPlaybackFailed', 'Speech playback failed.'));
+        stopSpeechPlayback();
+      };
+      await audio.play();
+    } catch (error) {
+      stopSpeechPlayback();
+      const messageText = error instanceof Error
+        ? error.message
+        : t('chat.view.errors.speechSynthesisFailed', 'Speech synthesis failed.');
+      setSpeechError(messageText);
+    }
+  }, [
+    selectedSpeechModelId,
+    selectedSpeechOption,
+    selectedVoice,
+    stopSpeechPlayback,
+    t,
+  ]);
+
+  const transcribeAudio = useCallback(async (audio: Blob): Promise<string> => {
+    if (!selectedTranscriptionModelId) {
+      throw new Error(t('chat.view.errors.noTranscriptionModel', 'No transcription model is ready.'));
+    }
+
+    setSpeechError(null);
+    const formData = new FormData();
+    const extension = audio.type.includes('mp4')
+      ? 'mp4'
+      : audio.type.includes('ogg')
+        ? 'ogg'
+        : 'webm';
+    formData.append('file', audio, `recording.${extension}`);
+    formData.append('model', selectedTranscriptionModelId);
+    formData.append('response_format', 'json');
+
+    const response = await fetch('/v1/audio/transcriptions', {
+      method: 'POST',
+      body: formData,
+    });
+    if (!response.ok) {
+      throw new Error(await responseErrorMessage(response));
+    }
+    const body = await response.json() as { text?: unknown };
+    return typeof body.text === 'string' ? body.text : '';
+  }, [selectedTranscriptionModelId, t]);
+
+  useEffect(() => stopSpeechPlayback, [stopSpeechPlayback]);
+
   const handleSend = useCallback(async (text: string, files: ChatUploadedFile[]) => {
-    if (!selectedModelId || isLoading) return;
+    if (!selectedModelId || !canSendMessages || isLoading) return;
 
     // Convert image files to base64 data URLs for the API and message history
     const imageAttachments: { dataUrl: string; file: ChatUploadedFile }[] = [];
@@ -925,6 +1178,9 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
       };
 
       addMessage(assistantMsg);
+      if (autoSpeakAssistant && selectedSpeechModelId && finalAssistantContent) {
+        void speakText(finalAssistantContent, assistantMsg.id);
+      }
     }
     setStreamingContent(null);
     setStreamingThinking(null);
@@ -932,7 +1188,19 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     abortRef.current = null;
     activeCommandIdRef.current = null;
 
-  }, [selectedModelId, isLoading, thinkingEnabled, supportsThinking, selectedBuiltinTools, addMessage, t]);
+  }, [
+    addMessage,
+    autoSpeakAssistant,
+    canSendMessages,
+    isLoading,
+    selectedBuiltinTools,
+    selectedModelId,
+    selectedSpeechModelId,
+    speakText,
+    supportsThinking,
+    thinkingEnabled,
+    t,
+  ]);
 
   const handleCancel = useCallback(async () => {
     const commandId = activeCommandIdRef.current;
@@ -992,7 +1260,7 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
     setExpandedThinking(activeConversationId, next);
   }, [activeConversationId, expandedThinkingMap, setExpandedThinking]);
 
-  if (readyModels.length === 0) {
+  if (readyModels.length === 0 && readyTranscriptionModels.length === 0 && readySpeechModels.length === 0) {
     return (
       <NoModels>
         {t(
@@ -1024,6 +1292,10 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
           onDelete={handleDelete}
           onEdit={handleEdit}
           onRegenerate={handleRegenerate}
+          isSpeechPlaybackAvailable={readySpeechModels.length > 0}
+          speakingMessageId={speakingMessageId}
+          onSpeakMessage={(messageId, content) => { void speakText(content, messageId); }}
+          onStopSpeaking={stopSpeechPlayback}
           expandedThinkingIds={expandedThinkingIds}
           onToggleThinking={handleToggleThinking}
         />
@@ -1033,20 +1305,36 @@ export function ChatView({ readyInstances, className }: ChatViewProps) {
           onSend={handleSend}
           onCancel={handleCancel}
           isLoading={isLoading}
-          modelLabel={selectedLabel}
+          modelLabel={canSendMessages ? selectedLabel : undefined}
           modelSelector={modelSelector}
           ttftMs={ttftMs}
           tps={tps}
-          contextLength={contextLength}
-          showThinkingToggle={supportsThinking}
+          contextLength={canSendMessages ? contextLength : 0}
+          showThinkingToggle={canSendMessages && supportsThinking}
           thinkingEnabled={thinkingEnabled}
           onToggleThinking={() => setThinkingEnabled((v) => !v)}
-          supportsImageAttachments={supportsImageAttachments}
-          placeholder={selectedModelId
+          supportsImageAttachments={canSendMessages && supportsImageAttachments}
+          canSendMessages={canSendMessages}
+          transcriptionModels={readyTranscriptionModels}
+          speechModels={readySpeechModels}
+          selectedTranscriptionModelId={selectedTranscriptionModelId}
+          selectedSpeechModelId={selectedSpeechModelId}
+          selectedVoice={selectedVoice}
+          autoSpeakAssistant={autoSpeakAssistant}
+          isSpeaking={speakingMessageId !== null}
+          voiceError={speechError}
+          onSelectTranscriptionModel={selectTranscriptionModel}
+          onSelectSpeechModel={selectSpeechModel}
+          onSelectedVoiceChange={setSelectedVoice}
+          onAutoSpeakAssistantChange={setAutoSpeakAssistant}
+          onTranscribeAudio={transcribeAudio}
+          onSpeakText={(text) => { void speakText(text, 'draft'); }}
+          onStopSpeaking={stopSpeechPlayback}
+          placeholder={canSendMessages && selectedModelId
             ? t('chat.view.messagePlaceholder', 'Message {model}...', {
                 model: selectedLabel ?? t('chat.view.selectedModel', 'selected model'),
               })
-            : t('chat.view.selectModelPlaceholder', 'Select a model to chat')}
+            : t('chat.view.voiceDraftPlaceholder', 'Type text for speech or transcription')}
         />
       </InputArea>
     </Container>
