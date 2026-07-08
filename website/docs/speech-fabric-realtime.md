@@ -155,10 +155,12 @@ Realtime/fabric speech must preserve the existing plane split:
 - dropped terminal data must have a control-plane backstop so HTTP/WebSocket
   clients do not hang forever.
 
-For clip-based STT the current base64 chunk path is acceptable because the upload
-is bounded. Realtime audio frames should not become event-sourced
-`AudioInputChunk` entries; they need a streaming input path with bounded queues
-and cancellation-aware cleanup.
+For clip-based REST STT, the current base64 chunk path is acceptable only because
+the upload is bounded and non-streaming. It is not a no-retention path: the
+current `AudioInputChunk` control-plane events are indexed and can be retained in
+the disk event log. Realtime audio frames must not reuse that event-sourced input
+path; they need a streaming input path with bounded queues and
+cancellation-aware cleanup.
 
 ## Metrics
 
@@ -181,13 +183,19 @@ ledger has a speech result schema.
 
 ## Privacy And Retention
 
-The default policy is no retention:
+The target policy for realtime/fabric speech is no payload retention by default:
 
 - do not log audio payloads;
-- do not retain browser recordings or uploaded clips after the request ends;
+- do not retain browser recordings or uploaded clips after the request/session
+  ends;
 - delete temporary files in `finally`;
 - redact transcripts before any optional result publication;
 - make any retention or benchmark publication mode explicit and opt-in.
+
+The current REST STT implementation still routes bounded upload chunks through
+the event-sourced control plane, so its audio bytes can persist in event history.
+Moving input audio onto a non-event streaming/blob path is a prerequisite before
+Skulk can truthfully claim no-retention semantics for uploaded speech.
 
 Reference-audio voice conditioning should use managed uploads or voice IDs, never
 caller-provided filesystem paths.
