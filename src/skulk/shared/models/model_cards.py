@@ -384,7 +384,7 @@ class AudioCardConfig(CamelCaseModel):
         return list(value)
 
     @model_validator(mode="after")
-    def _validate_default_format_in_supported_formats(self) -> "AudioCardConfig":
+    def _validate_audio_metadata_consistency(self) -> "AudioCardConfig":
         if (
             self.default_response_format is not None
             and self.response_formats
@@ -393,6 +393,11 @@ class AudioCardConfig(CamelCaseModel):
             raise ValueError(
                 "default_response_format must be included in response_formats"
             )
+        if (
+            self.supports_translation is True
+            and self.kind != AudioCardKind.SpeechToText
+        ):
+            raise ValueError("supports_translation requires kind to be stt")
         return self
 
 

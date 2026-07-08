@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from skulk.shared.models.capabilities import (
     ResolvedCapabilityProfile,
     resolve_model_capability_profile,
@@ -143,6 +146,17 @@ def test_resolve_model_capability_profile_exposes_stt_and_translation() -> None:
     assert profile.supports_realtime_audio is False
 
 
+def test_audio_card_config_requires_stt_kind_for_translation() -> None:
+    with pytest.raises(ValidationError, match="supports_translation"):
+        AudioCardConfig(supports_translation=True)
+
+    with pytest.raises(ValidationError, match="supports_translation"):
+        AudioCardConfig(
+            kind=AudioCardKind.TextToSpeech,
+            supports_translation=True,
+        )
+
+
 def test_resolve_model_capability_profile_treats_translation_as_transcription() -> None:
     card = ModelCard(
         model_id=ModelId("mlx-community/whisper-translate-test"),
@@ -161,6 +175,33 @@ def test_resolve_model_capability_profile_treats_translation_as_transcription() 
     assert profile.supports_speech_translation is True
     assert profile.supports_audio_input is True
     assert profile.supports_audio_output is False
+
+
+def test_resolve_model_capability_profile_keeps_legacy_translation_coherent() -> None:
+    legacy_audio = AudioCardConfig.model_construct(
+        kind=None,
+        default_response_format=None,
+        response_formats=(),
+        supports_streaming=None,
+        supports_realtime=None,
+        supports_voice_listing=None,
+        supports_reference_audio=None,
+        supports_translation=True,
+        sample_rates=(),
+    )
+    card = _base_model_card("mlx-community/legacy-translation-test").model_copy(
+        update={
+            "capabilities": [],
+            "modalities": ModalitiesCardConfig(supports_audio_input=False),
+            "audio": legacy_audio,
+        }
+    )
+
+    profile = resolve_model_capability_profile(card.model_id, model_card=card)
+
+    assert profile.supports_speech_translation is True
+    assert profile.supports_transcription is True
+    assert profile.supports_audio_input is True
 
 
 def test_card_serves_speech_treats_legacy_capability_tags_as_speech() -> None:

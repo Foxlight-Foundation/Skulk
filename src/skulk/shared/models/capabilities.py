@@ -217,6 +217,8 @@ def resolve_model_capability_profile(
             )
         )
     )
+    if supports_speech_translation:
+        supports_transcription = True
     audio_response_formats: tuple[AudioResponseFormat, ...] = ()
     default_audio_response_format: AudioResponseFormat | None = None
     supports_realtime_audio = False
