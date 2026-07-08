@@ -17,7 +17,7 @@ This project records release notes here and mirrors public-facing notes in
   feature-agnostic (it knows about no particular experiment); a feature that
   wants to be gated reads it and adds its own toggle to the section, so its
   operator UX is built alongside it. No experimental features ship in this
-  release, so with the flag on the section shows a placeholder.
+  release, so with the flag on, the section shows a placeholder.
 
 ### Fixed
 

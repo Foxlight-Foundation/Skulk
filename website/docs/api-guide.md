@@ -810,6 +810,12 @@ offering it launch, placement, or optimize actions.
 
 Returns the current cluster config and config path. Sensitive values (`hf_token`) are stripped from the response.
 
+The response also carries an `effective` block describing runtime-resolved values that are not part of the persisted file:
+
+- `kv_cache_backend`: the KV cache backend actually in effect (config value or `SKULK_KV_CACHE_BACKEND` override)
+- `has_hf_token`: whether a HuggingFace token is configured (via the file or `HF_TOKEN`), without exposing the token
+- `experimental_mode_enabled`: whether this node runs with `SKULK_ENABLE_EXPERIMENTAL_MODE` set; the dashboard uses it to reveal the gated Experiments settings section
+
 ### Update config
 
 **PUT** `/config`
