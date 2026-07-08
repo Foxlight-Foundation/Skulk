@@ -232,7 +232,7 @@ def test_resolve_staged_voice_path_requires_regular_file(tmp_path: Path) -> None
     voices_dir.mkdir()
     (voices_dir / "af_heart.safetensors").mkdir()
 
-    with pytest.raises(FileNotFoundError, match="regular file"):
+    with pytest.raises(FileNotFoundError, match="regular voice file"):
         _resolve_staged_voice_path(tmp_path, "af_heart")
 
 
