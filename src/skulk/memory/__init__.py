@@ -9,8 +9,9 @@ plane, and the capture/surfacing hooks are later phases that compose these.
 
 from skulk.memory.config import (
     DEFAULT_FIELD_DIM,
-    ENABLE_ENV_VAR,
+    EXPERIMENTAL_MODE_ENV_VAR,
     MemorySettings,
+    experimental_mode_enabled,
     memory_enabled,
     resolve_memory_settings,
 )
@@ -41,13 +42,14 @@ __all__ = [
     "DEFAULT_CONFIDENCE_GATE",
     "DEFAULT_FIELD_DIM",
     "DEFAULT_SHRINKAGE",
-    "ENABLE_ENV_VAR",
+    "EXPERIMENTAL_MODE_ENV_VAR",
     "ExactIndex",
     "HolographicField",
     "MemoryIndex",
     "MemorySettings",
     "ProbeResult",
     "Whitener",
+    "experimental_mode_enabled",
     "memory_enabled",
     "resolve_memory_settings",
     "bind",

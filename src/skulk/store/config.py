@@ -313,7 +313,27 @@ class SkulkConfig(FrozenModel):
     logging: "LoggingConfig | None" = None
     tracing: "TracingConfig | None" = None
     connectivity: ConnectivityConfig | None = None
+    experiments: "ExperimentsConfig | None" = None
     hf_token: str | None = None
+
+
+@final
+class ExperimentsConfig(FrozenModel):
+    """Toggles for experimental, opt-in features.
+
+    This section is only surfaced in the dashboard when a node runs with
+    ``SKULK_ENABLE_EXPERIMENTAL_MODE`` set (the master gate). Its toggles are
+    synced to every node via gossipsub like the rest of the config, but each
+    feature stays inert on a node that has not opted into experimental mode, so
+    the whole section is safe to leave in a shipped release.
+
+    Attributes:
+        memory_enabled: Enable the fabric-memory subsystem (cluster short-term
+            associative memory). Off by default; effective only when the node is
+            also in experimental mode.
+    """
+
+    memory_enabled: bool = False
 
 
 @final

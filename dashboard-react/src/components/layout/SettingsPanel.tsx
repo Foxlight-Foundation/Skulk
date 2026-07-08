@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import styled, { keyframes } from 'styled-components';
-import { useConfig, type StoreConfig, type FullConfig, type LoggingConfig } from '../../hooks/useConfig';
+import { useConfig, type StoreConfig, type FullConfig, type LoggingConfig, type ExperimentsConfig } from '../../hooks/useConfig';
 import { Button } from '../common/Button';
 import { Field } from '../common/Field';
 import { InfoTooltip } from '../common/InfoTooltip';
@@ -242,6 +242,9 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const [draft, setDraft] = useState<StoreConfig | null>(null);
   const [kvBackend, setKvBackend] = useState('default');
   const [hfToken, setHfToken] = useState('');
+  const [experimentsDraft, setExperimentsDraft] = useState<ExperimentsConfig>({
+    memory_enabled: false,
+  });
   const [loggingDraft, setLoggingDraft] = useState<LoggingConfig>({
     enabled: false, ingest_url: '',
   });
@@ -259,6 +262,9 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     setDraft(fullConfig?.model_store ? { ...fullConfig.model_store } : null);
     setKvBackend(effective?.kv_cache_backend ?? fullConfig?.inference?.kv_cache_backend ?? 'default');
     setHfToken(fullConfig?.hf_token ?? '');
+    setExperimentsDraft({
+      memory_enabled: fullConfig?.experiments?.memory_enabled ?? false,
+    });
     setLoggingDraft({
       enabled: fullConfig?.logging?.enabled ?? false,
       ingest_url: fullConfig?.logging?.ingest_url ?? '',
@@ -292,6 +298,8 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     updated.inference = { kv_cache_backend: kvBackend };
     // Include logging config
     updated.logging = { ...loggingDraft };
+    // Include experiments config (only meaningful when a node is in experimental mode)
+    updated.experiments = { ...experimentsDraft };
     // Only send hf_token when user entered a new one
     if (hfToken && hfToken !== '') updated.hf_token = hfToken;
     const ok = await saveFullConfig(updated);
@@ -307,7 +315,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     } else {
       addToast({ type: 'error', message: t('settings.toasts.saveFailed', 'Failed to save settings') });
     }
-  }, [draft, fullConfig, hfToken, kvBackend, loggingDraft, onClose, saveFullConfig, t]);
+  }, [draft, experimentsDraft, fullConfig, hfToken, kvBackend, loggingDraft, onClose, saveFullConfig, t]);
 
   // ESC to close
   useEffect(() => {
@@ -610,6 +618,37 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               </>
             )}
           </Fieldset>
+
+          {/* Experiments: only shown on nodes running with SKULK_ENABLE_EXPERIMENTAL_MODE */}
+          {effective?.experimental_mode_enabled && (
+            <Fieldset>
+              <Legend>{t('settings.experiments.legend', 'Experiments')}</Legend>
+              <Row>
+                <FieldLabel>
+                  {t('settings.experiments.memory', 'Fabric Memory')}
+                  <InfoTooltip
+                    filled
+                    content={t(
+                      'settings.experiments.memoryTooltip',
+                      'Give the cluster a short-term associative memory: capture is a side effect of inference, and relevant past context resurfaces on its own across sessions. Experimental and off by default. Synced to all nodes, but only takes effect on nodes that are themselves in experimental mode.',
+                    )}
+                  />
+                </FieldLabel>
+                <Toggle
+                  $on={experimentsDraft.memory_enabled}
+                  onClick={() =>
+                    setExperimentsDraft((prev) => ({ ...prev, memory_enabled: !prev.memory_enabled }))
+                  }
+                />
+              </Row>
+              <HintText>
+                {t(
+                  'settings.experiments.hint',
+                  'Experimental features are opt-in and may change or be removed. This section is only visible because this node runs with SKULK_ENABLE_EXPERIMENTAL_MODE.',
+                )}
+              </HintText>
+            </Fieldset>
+          )}
         </Body>
 
         <Footer>

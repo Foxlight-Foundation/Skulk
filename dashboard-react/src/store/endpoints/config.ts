@@ -26,16 +26,24 @@ export interface LoggingConfig {
   ingest_url: string;
 }
 
+/** Toggles for experimental, opt-in features (only shown in experimental mode). */
+export interface ExperimentsConfig {
+  memory_enabled: boolean;
+}
+
 export interface FullConfig {
   model_store?: StoreConfig;
   inference?: InferenceConfig;
   logging?: LoggingConfig;
+  experiments?: ExperimentsConfig;
   hf_token?: string;
 }
 
 export interface EffectiveConfig {
   kv_cache_backend: string;
   has_hf_token?: boolean;
+  /** True when the node runs with SKULK_ENABLE_EXPERIMENTAL_MODE; gates the section. */
+  experimental_mode_enabled?: boolean;
 }
 
 export interface ConfigResponse {

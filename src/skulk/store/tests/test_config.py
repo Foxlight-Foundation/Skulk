@@ -113,3 +113,20 @@ def test_load_skulk_config_fails_loud_on_legacy_exo_yaml(tmp_path: Path) -> None
     target = tmp_path / "skulk.yaml"
     with pytest.raises(FileNotFoundError, match="exo.yaml is no longer read"):
         load_skulk_config(target)
+
+
+def test_experiments_config_defaults_off() -> None:
+    """The experiments section defaults to absent, and its toggles default off."""
+    from skulk.store.config import ExperimentsConfig, SkulkConfig
+
+    assert SkulkConfig.model_validate({}).experiments is None
+    assert ExperimentsConfig().memory_enabled is False
+
+
+def test_experiments_config_round_trips_toggle() -> None:
+    """A memory toggle set in yaml parses back through SkulkConfig."""
+    from skulk.store.config import SkulkConfig
+
+    config = SkulkConfig.model_validate({"experiments": {"memory_enabled": True}})
+    assert config.experiments is not None
+    assert config.experiments.memory_enabled is True

@@ -11,6 +11,7 @@ export type {
   StoreConfig,
   InferenceConfig,
   LoggingConfig,
+  ExperimentsConfig,
   FullConfig,
   EffectiveConfig,
   ConfigResponse,

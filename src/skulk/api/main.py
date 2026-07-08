@@ -5408,6 +5408,8 @@ class API:
         return configured_backend
 
     async def get_config(self) -> JSONResponse:
+        from skulk.memory.config import experimental_mode_enabled
+
         if not self._config_path.exists():
             return JSONResponse(
                 {
@@ -5416,6 +5418,7 @@ class API:
                     "fileExists": False,
                     "effective": {
                         "kv_cache_backend": self._effective_kv_cache_backend(),
+                        "experimental_mode_enabled": experimental_mode_enabled(),
                     },
                 }
             )
@@ -5431,6 +5434,7 @@ class API:
                 "effective": {
                     "kv_cache_backend": self._effective_kv_cache_backend(),
                     "has_hf_token": has_hf_token or "HF_TOKEN" in os.environ,
+                    "experimental_mode_enabled": experimental_mode_enabled(),
                 },
             }
         )
@@ -5457,6 +5461,9 @@ class API:
                 # Preserve logging config when omitted from the request
                 if "logging" not in config_data and "logging" in existing:
                     config_data["logging"] = existing["logging"]
+                # Preserve experiments config when omitted from the request
+                if "experiments" not in config_data and "experiments" in existing:
+                    config_data["experiments"] = existing["experiments"]
             except Exception:
                 pass
         # Validate by attempting to parse with Pydantic
