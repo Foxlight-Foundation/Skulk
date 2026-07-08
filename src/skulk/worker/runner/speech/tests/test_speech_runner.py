@@ -188,6 +188,30 @@ def test_resolve_staged_voice_path_requires_named_staged_voice(
         _resolve_staged_voice_path(tmp_path, "bf_emma")
 
 
+def test_resolve_staged_voice_path_keeps_safetensors_inside_store(
+    tmp_path: Path,
+) -> None:
+    """Explicit voice filenames should resolve under the staged voices dir."""
+
+    voice_path = tmp_path / "voices" / "af_heart.safetensors"
+    voice_path.parent.mkdir()
+    voice_path.write_bytes(b"voice")
+
+    assert _resolve_staged_voice_path(tmp_path, "af_heart.safetensors") == str(
+        voice_path
+    )
+
+
+def test_resolve_staged_voice_path_rejects_path_components(tmp_path: Path) -> None:
+    """Voice requests must not escape the staged voices directory."""
+
+    voices_dir = tmp_path / "voices"
+    voices_dir.mkdir()
+
+    with pytest.raises(ValueError, match="path components"):
+        _resolve_staged_voice_path(tmp_path, "../af_heart.safetensors")
+
+
 def test_speech_synthesis_emits_audio_chunk_and_active_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -150,9 +150,11 @@ def _resolve_staged_voice_path(
     if not voices_dir.is_dir():
         return requested_voice
     voice = requested_voice or _DEFAULT_STAGED_TTS_VOICE
-    if voice.endswith(".safetensors"):
-        return voice
-    staged_voice_path = voices_dir / f"{voice}.safetensors"
+    if Path(voice).name != voice:
+        raise ValueError("Staged TTS voice names must not include path components")
+    staged_voice_path = voices_dir / (
+        voice if voice.endswith(".safetensors") else f"{voice}.safetensors"
+    )
     if staged_voice_path.exists():
         return str(staged_voice_path)
     raise FileNotFoundError(
