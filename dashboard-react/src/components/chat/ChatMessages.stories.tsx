@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { ChatMessages } from './ChatMessages';
 import type { ChatMessage } from '../../types/chat';
@@ -79,5 +78,24 @@ export const WithImages: Story = {
         generatedImages: ['https://picsum.photos/seed/mountain/512/512'],
       },
     ],
+  },
+};
+
+export const WithSpeechReplay: Story = {
+  args: {
+    messages: sampleMessages,
+    isSpeechPlaybackAvailable: true,
+    onSpeakMessage: (id, content) => console.log('Speak', id, content),
+    onStopSpeaking: () => console.log('Stop speech'),
+  },
+};
+
+export const SpeechPlaybackActive: Story = {
+  args: {
+    messages: sampleMessages,
+    isSpeechPlaybackAvailable: true,
+    speakingMessageId: '2',
+    onSpeakMessage: (id, content) => console.log('Speak', id, content),
+    onStopSpeaking: () => console.log('Stop speech'),
   },
 };

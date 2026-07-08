@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { copyToClipboard } from '../../utils/clipboard';
 import styled, { css, keyframes, useTheme } from 'styled-components';
+import { FiChevronDown, FiVolume2, FiVolumeX } from 'react-icons/fi';
 import type { Theme } from '../../theme';
 import type { ChatMessage } from '../../types/chat';
 import { getFileIcon } from '../../types/chat';
@@ -23,6 +24,14 @@ export interface ChatMessagesProps {
   onEdit?: (messageId: string, content: string) => void;
   onRegenerate?: () => void;
   onRegenerateFromToken?: (tokenIndex: number) => void;
+  /** Whether assistant messages can be sent to a mounted TTS model. */
+  isSpeechPlaybackAvailable?: boolean;
+  /** Message id currently being spoken, if any. */
+  speakingMessageId?: string | null;
+  /** Speak an assistant message through the selected TTS model. */
+  onSpeakMessage?: (messageId: string, content: string) => void;
+  /** Stop dashboard-managed speech playback. */
+  onStopSpeaking?: () => void;
   /** Externally controlled expanded thinking message IDs */
   expandedThinkingIds?: Set<string>;
   onToggleThinking?: (messageId: string) => void;
@@ -328,6 +337,10 @@ export function ChatMessages({
   onEdit,
   onRegenerate,
   onRegenerateFromToken,
+  isSpeechPlaybackAvailable = false,
+  speakingMessageId = null,
+  onSpeakMessage,
+  onStopSpeaking,
   expandedThinkingIds: externalExpanded,
   onToggleThinking: externalToggle,
   className,
@@ -609,6 +622,32 @@ export function ChatMessages({
                     {t('chat.messages.heatmap', 'Heatmap')}
                   </ActiveGhostBtn>
                 )}
+                {msg.role === 'assistant' && msg.content && isSpeechPlaybackAvailable && onSpeakMessage && (
+                  speakingMessageId === msg.id ? (
+                    <ActiveGhostBtn
+                      variant="ghost"
+                      size="sm"
+                      icon
+                      $active
+                      onClick={onStopSpeaking}
+                      aria-label={t('chat.messages.stopSpeech', 'Stop speech')}
+                      title={t('chat.messages.stopSpeech', 'Stop speech')}
+                    >
+                      <FiVolumeX size={15} />
+                    </ActiveGhostBtn>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon
+                      onClick={() => onSpeakMessage(msg.id, msg.content)}
+                      aria-label={t('chat.messages.speakMessage', 'Speak message')}
+                      title={t('chat.messages.speakMessage', 'Speak message')}
+                    >
+                      <FiVolume2 size={15} />
+                    </Button>
+                  )
+                )}
                 {msg.role === 'user' && onEdit && (
                   <Button variant="ghost" size="sm" onClick={() => { setEditingId(msg.id); setEditContent(msg.content); }}>
                     {t('common.edit', 'Edit')}
@@ -667,9 +706,7 @@ export function ChatMessages({
 
       {showScrollBtn && (
         <ScrollBtn onClick={() => scrollToBottom()} aria-label={t('chat.messages.scrollToBottom', 'Scroll to bottom')}>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
+          <FiChevronDown size={16} />
         </ScrollBtn>
       )}
 

@@ -15,6 +15,18 @@ export interface ChatUploadedFile {
   preview?: string;
 }
 
+/** Audio container formats the dashboard can request from Skulk TTS models. */
+export type AudioResponseFormat = 'mp3' | 'wav' | 'flac' | 'ogg' | 'opus';
+
+/** Mounted speech model option shown by the chat voice controls. */
+export interface ChatSpeechModelOption {
+  modelId: string;
+  label: string;
+  defaultResponseFormat?: AudioResponseFormat | null;
+  responseFormats: AudioResponseFormat[];
+  supportsVoiceListing?: boolean;
+}
+
 /** Attachment persisted on an individual chat message. */
 export interface MessageAttachment {
   id: string;

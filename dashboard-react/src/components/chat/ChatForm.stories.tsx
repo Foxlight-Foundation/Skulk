@@ -1,6 +1,21 @@
 import { useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { ChatForm } from './ChatForm';
+import type { ChatSpeechModelOption } from '../../types/chat';
+
+const sttModel: ChatSpeechModelOption = {
+  modelId: 'mlx-community/whisper-large-v3-mlx',
+  label: 'whisper-large-v3-mlx',
+  defaultResponseFormat: 'wav',
+  responseFormats: ['wav'],
+};
+
+const ttsModel: ChatSpeechModelOption = {
+  modelId: 'mlx-community/Kokoro-82M-bf16',
+  label: 'Kokoro-82M-bf16',
+  defaultResponseFormat: 'mp3',
+  responseFormats: ['mp3', 'wav'],
+};
 
 const meta: Meta<typeof ChatForm> = {
   title: 'Chat/ChatForm',
@@ -29,6 +44,62 @@ export const WithModelHeader: Story = {
     onToggleThinking: () => {},
     ttftMs: 245,
     tps: 42.3,
+  },
+};
+
+export const NoSpeechModels: Story = {
+  args: {
+    onSend: () => {},
+    modelLabel: 'Qwen3-30B-A3B-4bit',
+    transcriptionModels: [],
+    speechModels: [],
+  },
+};
+
+export const SttOnly: Story = {
+  args: {
+    onSend: () => {},
+    modelLabel: 'Qwen3-30B-A3B-4bit',
+    transcriptionModels: [sttModel],
+    selectedTranscriptionModelId: sttModel.modelId,
+    onTranscribeAudio: async () => 'recorded transcript',
+  },
+};
+
+export const TtsOnly: Story = {
+  args: {
+    onSend: () => {},
+    canSendMessages: false,
+    speechModels: [ttsModel],
+    selectedSpeechModelId: ttsModel.modelId,
+    selectedVoice: 'af_heart',
+    autoSpeakAssistant: true,
+    onSpeakText: (text) => console.log('Speak:', text),
+    onAutoSpeakAssistantChange: (enabled) => console.log('Auto speak:', enabled),
+  },
+};
+
+export const PlaybackActive: Story = {
+  args: {
+    onSend: () => {},
+    modelLabel: 'Qwen3-30B-A3B-4bit',
+    speechModels: [ttsModel],
+    selectedSpeechModelId: ttsModel.modelId,
+    isSpeaking: true,
+    onStopSpeaking: () => console.log('Stop speech'),
+  },
+};
+
+export const TranscriptionError: Story = {
+  args: {
+    onSend: () => {},
+    modelLabel: 'Qwen3-30B-A3B-4bit',
+    transcriptionModels: [sttModel],
+    selectedTranscriptionModelId: sttModel.modelId,
+    voiceError: 'Transcription failed.',
+    onTranscribeAudio: async () => {
+      throw new Error('Transcription failed.');
+    },
   },
 };
 
