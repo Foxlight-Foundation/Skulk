@@ -23,6 +23,7 @@ token.
 - First working request: [First Success Flow](#first-success-flow)
 - OpenAI-compatible chat: [OpenAI Chat Completions](#openai-chat-completions)
 - OpenAI Responses format: [OpenAI Responses API](#openai-responses-api)
+- OpenAI text-to-speech: [OpenAI Audio Speech API](#openai-audio-speech-api)
 - Claude format: [Claude Messages API](#claude-messages-api)
 - Ollama compatibility: [Ollama API](#ollama-api)
 - Placement and launch: [Placement and Instance Management](#placement-and-instance-management)
@@ -77,6 +78,7 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
+- `POST /v1/audio/speech`
 - `POST /v1/messages`
 - `POST /ollama/api/chat`
 - `POST /ollama/api/generate`
@@ -487,6 +489,46 @@ curl -X POST http://localhost:52415/v1/responses \
   }'
 ```
 
+## OpenAI Audio Speech API
+
+**POST** `/v1/audio/speech`
+
+Generates non-streaming speech audio from a mounted text-to-speech model. The
+model must be placed and running, and its resolved capabilities must include
+`supports_speech_synthesis`.
+
+```bash
+curl -X POST http://localhost:52415/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  --output speech.wav \
+  -d '{
+    "model": "mlx-community/kokoro-test",
+    "input": "Hello from Skulk speech serving",
+    "voice": "af_heart",
+    "response_format": "wav"
+  }'
+```
+
+Request fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `model` | string | Required mounted TTS model id |
+| `input` | string | Required text to synthesize |
+| `voice` | string or null | Optional model-specific voice name |
+| `speed` | number or null | Optional positive speaking speed multiplier |
+| `response_format` | string | Optional encoded output format, default `mp3`; supported values are constrained by the model card when declared |
+| `instruct`, `lang_code` | string or null | Optional model-specific generation hints |
+| `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number or integer | Optional model-specific sampling controls |
+
+The response body is raw audio bytes with a matching audio media type
+(`audio/mpeg`, `audio/wav`, `audio/flac`, `audio/ogg`, or `audio/opus`).
+
+Phase 1 is intentionally non-streaming and text-only. `stream=true`,
+`streaming_interval`, `reference_audio`, and `reference_text` return
+**400 Bad Request**. Speech-to-text, translation, realtime sessions, voice
+listing, and managed reference-audio uploads are later phases.
+
 ## Claude Messages API
 
 **POST** `/v1/messages`
@@ -793,9 +835,9 @@ Important fields:
 
 The dashboard uses `tags` for compact badges and `capabilities` for filtering
 and richer tooltips. The `audio` and `resolved_capabilities.*speech*` fields
-are catalog metadata only until the speech serving routes land; they identify
-TTS/STT models without implying that `/v1/audio/*` endpoints are enabled in this
-Phase 0 schema slice. The three `runtime.*_repo` fields name a model's
+identify speech-capable models; `supports_speech_synthesis` models can serve
+non-streaming `/v1/audio/speech` when mounted, while STT/translation metadata is
+reserved for later audio endpoints. The three `runtime.*_repo` fields name a model's
 speculative-decoding companions (a draft model or an MTP-head sidecar). Those
 companion repos are downloaded and loaded automatically with their parent and
 are not independently placeable, so the dashboard marks any store entry matching

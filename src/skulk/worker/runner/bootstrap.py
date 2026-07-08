@@ -492,6 +492,20 @@ def entrypoint(
                 bound_instance, event_sender, task_receiver, cancel_receiver
             )
             runner.main()
+        elif card_serves_speech(bound_instance.bound_shard.model_card):
+            resolved_text_engine = _resolve_text_engine(bound_instance)
+            if resolved_text_engine != "mlx_audio":
+                raise RuntimeError(
+                    "Speech model cards require an mlx_audio-capable serving "
+                    "node, but this node did not resolve the mlx_audio backend "
+                    f"for {bound_instance.bound_shard.model_card.model_id}."
+                )
+            from skulk.worker.runner.speech.runner import Runner as SpeechRunner
+
+            runner = SpeechRunner(
+                bound_instance, event_sender, task_receiver, cancel_receiver
+            )
+            runner.main()
         elif isinstance(bound_instance.bound_shard, RpcDonorShardMetadata):
             # RPC memory donor of a multi-node GGUF placement (#328): serves
             # ggml-rpc-server on the placement-stamped endpoint and lends GPU
@@ -510,18 +524,6 @@ def entrypoint(
             runner.main()
         else:
             resolved_text_engine = _resolve_text_engine(bound_instance)
-            if card_serves_speech(bound_instance.bound_shard.model_card):
-                if resolved_text_engine != "mlx_audio":
-                    raise RuntimeError(
-                        "Speech model cards require an mlx_audio-capable serving "
-                        "node, but this node did not resolve the mlx_audio backend "
-                        f"for {bound_instance.bound_shard.model_card.model_id}."
-                    )
-                raise RuntimeError(
-                    "mlx_audio backend metadata is available, but the speech "
-                    "runner is not implemented yet. TTS/STT serving lands in the "
-                    "speech serving Phase 1/2 runner work."
-                )
             if resolved_text_engine == "llama_cpp":
                 # Heterogeneous (non-MLX) text generation via in-process llama.cpp.
                 # Selected when the model card's compatible backends resolve to the

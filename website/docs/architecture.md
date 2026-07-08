@@ -287,12 +287,15 @@ that limitation lives in a code-level capability table that placement and the
 worker both consult, so the model never lands where an advertised capability
 would silently degrade, and the card needs no edit when the platform catches up.
 
-Speech serving is in a staged rollout. The Phase 0 contract adds
-`TextToSpeech`, `SpeechToText`, `SpeechTranslation`, the `[audio]` card section,
-and the `mlx_audio` backend tags (`mlx_audio`, `mlx_audio-metal`) when the
-upstream `mlx_audio` package imports on macOS. The worker bootstrap explicitly
-fails an `mlx_audio` dispatch until the speech runner lands, so this metadata
-slice does not claim `/v1/audio/*` serving is already available.
+Speech serving is in a staged rollout. Phase 0 added `TextToSpeech`,
+`SpeechToText`, `SpeechTranslation`, the `[audio]` card section, and the
+`mlx_audio` backend tags (`mlx_audio`, `mlx_audio-metal`) when the upstream
+`mlx_audio` package imports on macOS. Phase 1 adds non-streaming TTS serving:
+`POST /v1/audio/speech` validates a mounted TTS model, sends a
+`SpeechSynthesis` command through the master, the worker dispatches it to the
+single-node `mlx_audio` speech runner, and the runner emits `AudioChunk` output
+on the data plane. Streaming TTS, voice/reference-audio management,
+speech-to-text, speech translation, and realtime sessions remain later phases.
 
 The llama.cpp runner serves GGUF models single-node and matches the MLX runner
 on the capabilities llama.cpp supports natively: per-token logprobs (with the

@@ -39,6 +39,7 @@ from skulk.shared.types.tasks import (
     CANCEL_ALL_TASKS,
     ImageEdits,
     ImageGeneration,
+    SpeechSynthesis,
     Task,
     TaskId,
     TaskStatus,
@@ -377,7 +378,13 @@ class RunnerSupervisor:
         if (
             isinstance(
                 task,
-                (TextGeneration, ImageGeneration, ImageEdits, TextEmbedding),
+                (
+                    TextGeneration,
+                    ImageGeneration,
+                    ImageEdits,
+                    TextEmbedding,
+                    SpeechSynthesis,
+                ),
             )
             and task.owner_node is not None
         ):
@@ -488,6 +495,7 @@ class RunnerSupervisor:
                                 ImageGeneration,
                                 ImageEdits,
                                 TextEmbedding,
+                                SpeechSynthesis,
                             ),
                         ):
                             self._chunk_sequence.pop(ending_task.command_id, None)
@@ -702,7 +710,13 @@ class RunnerSupervisor:
         model_id = str(self.shard_metadata.model_card.model_id)
         if isinstance(
             task,
-            (TextGeneration, ImageGeneration, ImageEdits, TextEmbedding),
+            (
+                TextGeneration,
+                ImageGeneration,
+                ImageEdits,
+                TextEmbedding,
+                SpeechSynthesis,
+            ),
         ):
             command_id = str(task.command_id)
             model_id = str(task.task_params.model)

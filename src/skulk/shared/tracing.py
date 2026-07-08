@@ -18,7 +18,7 @@ _current_trace_task_id: ContextVar[str | None] = ContextVar(
     "current_trace_task_id", default=None
 )
 
-TraceTaskKind = Literal["image", "text", "embedding"]
+TraceTaskKind = Literal["image", "text", "embedding", "speech"]
 TraceAttrValue = str | int | float | bool | list[str]
 
 
@@ -428,7 +428,7 @@ def load_trace_file(path: Path) -> list[TraceEvent]:
             if isinstance(model_id_value, str) and model_id_value:
                 model_id = model_id_value
             task_kind_value = args_dict.get("task_kind")
-            if task_kind_value in ("image", "text", "embedding"):
+            if task_kind_value in ("image", "text", "embedding", "speech"):
                 task_kind = task_kind_value
             tags_value = args_dict.get("tags")
             if isinstance(tags_value, list):
