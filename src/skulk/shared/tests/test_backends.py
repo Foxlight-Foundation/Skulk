@@ -1,8 +1,12 @@
 # pyright: reportPrivateUsage=false
 """Tests for the backend capability tag vocabulary and node probing."""
 
+import importlib.abc
+import importlib.machinery
 import sys
+from collections.abc import Sequence
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -23,6 +27,7 @@ from skulk.shared.backends import (
 
 def test_make_backend_tag_is_compound() -> None:
     assert make_backend_tag("mlx", "metal") == "mlx-metal"
+    assert make_backend_tag("mlx_audio", "metal") == "mlx_audio-metal"
     assert make_backend_tag("llama_cpp", "vulkan") == "llama_cpp-vulkan"
 
 
@@ -31,6 +36,8 @@ def test_make_backend_tag_is_compound() -> None:
     [
         ("mlx", "mlx"),
         ("mlx-metal", "mlx"),
+        ("mlx_audio", "mlx_audio"),
+        ("mlx_audio-metal", "mlx_audio"),
         ("llama_cpp", "llama_cpp"),
         ("llama_cpp-vulkan", "llama_cpp"),
         ("llama_cpp-rocm", "llama_cpp"),
@@ -57,6 +64,48 @@ def test_llama_cpp_probe_empty_without_binding(monkeypatch: pytest.MonkeyPatch) 
     # Force the probe import to fail regardless of what is installed locally.
     monkeypatch.setitem(sys.modules, "llama_cpp", None)
     assert backends._probe_llama_cpp_backends() == frozenset()
+
+
+def test_mlx_audio_probe_empty_without_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "mlx_audio", None)
+    assert backends._probe_mlx_audio_backends() == frozenset()
+
+
+def test_mlx_audio_probe_empty_when_native_import_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenMlxAudioFinder(importlib.abc.MetaPathFinder):
+        def find_spec(
+            self,
+            fullname: str,
+            path: Sequence[str] | None,
+            target: ModuleType | None = None,
+        ) -> importlib.machinery.ModuleSpec | None:
+            if fullname == "mlx_audio":
+                raise OSError("dlopen failed")
+            return None
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.delitem(sys.modules, "mlx_audio", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [BrokenMlxAudioFinder(), *sys.meta_path])
+    assert backends._probe_mlx_audio_backends() == frozenset()
+
+
+def test_mlx_audio_probe_empty_off_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setitem(sys.modules, "mlx_audio", ModuleType("mlx_audio"))
+    assert backends._probe_mlx_audio_backends() == frozenset()
+
+
+def test_mlx_audio_probe_advertises_on_darwin_when_importable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "mlx_audio", ModuleType("mlx_audio"))
+    assert backends._probe_mlx_audio_backends() == frozenset(
+        {"mlx_audio", "mlx_audio-metal"}
+    )
 
 
 def test_llama_cpp_probe_reads_declared_backends(
@@ -277,6 +326,28 @@ def test_platform_compatible_backends_gates_vision_off_served() -> None:
     )
 
 
+def test_platform_compatible_backends_gates_speech_to_mlx_audio() -> None:
+    # Speech cards stay on the dedicated speech engine until another runner owns
+    # the TTS/STT contract.
+    declared = frozenset(
+        {
+            "mlx",
+            "mlx-metal",
+            "mlx_audio",
+            "mlx_audio-metal",
+            "llama_cpp-vulkan",
+            "future_speech_engine",
+        }
+    )
+    assert platform_compatible_backends(
+        declared,
+        card_serves_vision=False,
+        card_serves_speech=True,
+    ) == frozenset(
+        {"mlx_audio", "mlx_audio-metal", "future_speech_engine"}
+    )
+
+
 def test_resolve_node_backend_none_when_no_intersection() -> None:
     assert (
         resolve_node_backend(
@@ -300,4 +371,5 @@ def test_engine_supports_multi_node() -> None:
     # MLX shards across nodes (ring/jaccl); llama.cpp is single-node until its
     # RPC runner lands (#328). This is the placement single-node guard's hinge.
     assert engine_supports_multi_node("mlx") is True
+    assert engine_supports_multi_node("mlx_audio") is False
     assert engine_supports_multi_node("llama_cpp") is False

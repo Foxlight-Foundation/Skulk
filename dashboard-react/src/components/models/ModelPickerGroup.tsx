@@ -244,6 +244,12 @@ function ModelGroupInfo({ group }: { group: ModelGroup }) {
             <span>{resolved.supports_image_input ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
             <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.audioInput', 'Audio input')}</span>
             <span>{resolved.supports_audio_input ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.speechSynthesis', 'Speech synthesis')}</span>
+            <span>{resolved.supports_speech_synthesis ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.transcription', 'Transcription')}</span>
+            <span>{resolved.supports_transcription ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
+            <span style={{ color: theme.colors.textMuted }}>{t('modelInfo.realtimeAudio', 'Realtime audio')}</span>
+            <span>{resolved.supports_realtime_audio ? t('common.supported', 'Supported') : t('common.notSupported', 'Not supported')}</span>
           </>
         )}
       </div>

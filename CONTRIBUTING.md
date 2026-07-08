@@ -47,7 +47,10 @@ Skulk is built with a mix of Rust, Python, TypeScript (React for the dashboard),
 - `src/skulk/` — Python backend (inference, API, store, worker, routing)
 - `dashboard-react/` — React dashboard (Skulk UI)
 - `rust/` — Rust components (networking, libp2p, PyO3 bindings)
-- `resources/inference_model_cards/` — Model metadata TOML files
+- `resources/inference_model_cards/` — Text generation model metadata TOML files
+- `resources/image_model_cards/` — Image model metadata TOML files
+- `resources/embedding_model_cards/` — Embedding model metadata TOML files
+- `resources/speech_model_cards/` — Speech model metadata TOML files
 - `deployment/logging/` — VictoriaLogs + Grafana stack and Vector config
 - `docs/` — Technical documentation
 - `docs/model-runtime-notes/` — Internal per-model clustered runtime notes
@@ -124,6 +127,8 @@ For the React dashboard:
 Skulk uses TOML-based model cards to define model metadata and capabilities. Model cards are stored in:
 - `resources/inference_model_cards/` for text generation models
 - `resources/image_model_cards/` for image generation models
+- `resources/embedding_model_cards/` for embedding models
+- `resources/speech_model_cards/` for TTS/STT speech models
 - `~/.skulk/custom_model_cards/` for user-added custom models
 
 ### Adding a Model Card

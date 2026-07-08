@@ -3,6 +3,9 @@
 
 from skulk.api.main import API
 from skulk.shared.models.model_cards import (
+    AudioCardConfig,
+    AudioCardKind,
+    AudioResponseFormat,
     BuiltinToolType,
     ModelCard,
     ModelTask,
@@ -32,6 +35,33 @@ def test_model_tags_include_vision() -> None:
     )
 
     assert API._model_tags(card) == ["thinking", "vision", "tensor"]
+
+
+def test_model_tags_include_speech() -> None:
+    """Speech-capable models should expose compact speech display tags."""
+    tts_card = ModelCard(
+        model_id=ModelId("mlx-community/kokoro-test"),
+        storage_size=Memory.from_bytes(1024),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextToSpeech],
+        capabilities=["tts"],
+        audio=AudioCardConfig(kind=AudioCardKind.TextToSpeech),
+    )
+    stt_card = ModelCard(
+        model_id=ModelId("mlx-community/whisper-test"),
+        storage_size=Memory.from_bytes(1024),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.SpeechToText],
+        capabilities=["stt"],
+        audio=AudioCardConfig(kind=AudioCardKind.SpeechToText),
+    )
+
+    assert API._model_tags(tts_card) == ["tts"]
+    assert API._model_tags(stt_card) == ["stt"]
 
 
 def test_model_list_entry_exposes_declared_and_resolved_capabilities() -> None:
@@ -64,6 +94,44 @@ def test_model_list_entry_exposes_declared_and_resolved_capabilities() -> None:
     assert entry.resolved_capabilities is not None
     assert entry.resolved_capabilities.supports_thinking_toggle is True
     assert entry.resolved_capabilities.prompt_renderer == "gemma4"
+
+
+def test_model_list_entry_exposes_audio_capabilities() -> None:
+    """Model list entries should expose declared and resolved speech metadata."""
+    card = ModelCard(
+        model_id=ModelId("mlx-community/kokoro-test"),
+        storage_size=Memory.from_bytes(1024),
+        n_layers=1,
+        hidden_size=1,
+        supports_tensor=False,
+        tasks=[ModelTask.TextToSpeech],
+        capabilities=["tts"],
+        family="kokoro",
+        audio=AudioCardConfig(
+            kind=AudioCardKind.TextToSpeech,
+            default_response_format=AudioResponseFormat.Mp3,
+            response_formats=(AudioResponseFormat.Mp3, AudioResponseFormat.Wav),
+            supports_streaming=True,
+            supports_realtime=False,
+            supports_voice_listing=True,
+            supports_reference_audio=False,
+            sample_rates=(24000,),
+        ),
+    )
+
+    entry = API._model_list_entry(card)
+
+    assert entry.audio is not None
+    assert entry.audio.kind == "tts"
+    assert entry.audio.default_response_format == "mp3"
+    assert entry.audio.response_formats == ["mp3", "wav"]
+    assert entry.audio.supports_streaming is True
+    assert entry.audio.supports_voice_listing is True
+    assert entry.resolved_capabilities is not None
+    assert entry.resolved_capabilities.supports_speech_synthesis is True
+    assert entry.resolved_capabilities.supports_audio_output is True
+    assert entry.resolved_capabilities.default_audio_response_format == "mp3"
+    assert entry.resolved_capabilities.audio_response_formats == ["mp3", "wav"]
 
 
 def test_model_list_entry_exposes_gpt_oss_runtime_capabilities() -> None:

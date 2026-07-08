@@ -23,7 +23,7 @@ from skulk.shared.backends import (
     resolve_node_backend,
 )
 from skulk.shared.models.memory_estimate import instance_context_token_limit
-from skulk.shared.models.model_cards import ModelCard, ModelId
+from skulk.shared.models.model_cards import ModelCard, ModelId, card_serves_speech
 from skulk.shared.topology import Topology
 from skulk.shared.types.commands import (
     CancelDownload,
@@ -247,6 +247,7 @@ def _card_platform_backends(card: ModelCard) -> frozenset[str]:
     return platform_compatible_backends(
         card.placement.compatible_backends,
         card_serves_vision=card.vision is not None,
+        card_serves_speech=card_serves_speech(card),
     )
 
 

@@ -63,6 +63,10 @@ class ModelListModel(BaseModel):
         default=None,
         description="Optional declarative modality support details from the model card.",
     )
+    audio: "AudioCapabilitySection | None" = Field(
+        default=None,
+        description="Optional declarative speech-serving metadata from the model card.",
+    )
     tooling: "ToolingCapabilitySection | None" = Field(
         default=None,
         description="Optional declarative tool-calling metadata from the model card.",
@@ -117,6 +121,34 @@ class ResolvedModelCapabilities(BaseModel):
         default=False,
         description="Whether the runtime should treat the model as accepting audio inputs.",
     )
+    supports_speech_synthesis: bool = Field(
+        default=False,
+        description="Whether the runtime should treat the model as a text-to-speech model.",
+    )
+    supports_transcription: bool = Field(
+        default=False,
+        description="Whether the runtime should treat the model as a speech-to-text model.",
+    )
+    supports_speech_translation: bool = Field(
+        default=False,
+        description="Whether the runtime should treat the model as supporting speech translation.",
+    )
+    supports_audio_output: bool = Field(
+        default=False,
+        description="Whether the runtime should expect this model to produce audio output.",
+    )
+    supports_realtime_audio: bool = Field(
+        default=False,
+        description="Whether the runtime should expect this model to expose realtime audio sessions.",
+    )
+    default_audio_response_format: str | None = Field(
+        default=None,
+        description="Default encoded audio response format for speech synthesis, when declared.",
+    )
+    audio_response_formats: list[str] = Field(
+        default_factory=list,
+        description="Encoded audio response formats the model can produce.",
+    )
     supports_tool_calling: bool = Field(
         default=False,
         description="Whether the runtime expects the model to support structured tool calling.",
@@ -156,6 +188,20 @@ class ResolvedModelCapabilities(BaseModel):
             thinking_format=profile.thinking_format.value,
             supports_image_input=profile.supports_image_input,
             supports_audio_input=profile.supports_audio_input,
+            supports_speech_synthesis=profile.supports_speech_synthesis,
+            supports_transcription=profile.supports_transcription,
+            supports_speech_translation=profile.supports_speech_translation,
+            supports_audio_output=profile.supports_audio_output,
+            supports_realtime_audio=profile.supports_realtime_audio,
+            default_audio_response_format=(
+                profile.default_audio_response_format.value
+                if profile.default_audio_response_format is not None
+                else None
+            ),
+            audio_response_formats=[
+                response_format.value
+                for response_format in profile.audio_response_formats
+            ],
             supports_tool_calling=profile.supports_tool_calling,
             builtin_tools=[tool.value for tool in profile.builtin_tools],
             tool_call_format=profile.tool_call_format.value,
@@ -202,6 +248,68 @@ class ModalitiesCapabilitySection(BaseModel):
         return cls(
             supports_audio_input=config.supports_audio_input,
             supports_native_multimodal=config.supports_native_multimodal,
+        )
+
+
+class AudioCapabilitySection(BaseModel):
+    """Snake-case speech metadata exposed by the models API."""
+
+    kind: str | None = Field(
+        default=None,
+        description="Speech serving kind declared by the card: tts or stt.",
+    )
+    default_response_format: str | None = Field(
+        default=None,
+        description="Default encoded audio response format for TTS requests.",
+    )
+    response_formats: list[str] = Field(
+        default_factory=list,
+        description="Encoded audio response formats declared for TTS requests.",
+    )
+    supports_streaming: bool | None = Field(
+        default=None,
+        description="Whether the model declares streaming speech support.",
+    )
+    supports_realtime: bool | None = Field(
+        default=None,
+        description="Whether the model declares realtime audio session support.",
+    )
+    supports_voice_listing: bool | None = Field(
+        default=None,
+        description="Whether the model declares voice-listing support.",
+    )
+    supports_reference_audio: bool | None = Field(
+        default=None,
+        description="Whether the model accepts managed reference audio.",
+    )
+    supports_translation: bool | None = Field(
+        default=None,
+        description="Whether the model declares speech translation support.",
+    )
+    sample_rates: list[int] = Field(
+        default_factory=list,
+        description="Declared input or output sample rates in hertz.",
+    )
+
+    @classmethod
+    def from_model_card(cls, model_card: ModelCard) -> "AudioCapabilitySection | None":
+        config = model_card.audio
+        if config is None:
+            return None
+        return cls(
+            kind=config.kind.value if config.kind is not None else None,
+            default_response_format=(
+                config.default_response_format.value
+                if config.default_response_format is not None
+                else None
+            ),
+            response_formats=[item.value for item in config.response_formats],
+            supports_streaming=config.supports_streaming,
+            supports_realtime=config.supports_realtime,
+            supports_voice_listing=config.supports_voice_listing,
+            supports_reference_audio=config.supports_reference_audio,
+            supports_translation=config.supports_translation,
+            sample_rates=list(config.sample_rates),
         )
 
 

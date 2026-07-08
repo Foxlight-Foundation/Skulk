@@ -7,11 +7,13 @@ missed a strict round-trip failure, and the slice-1/2 telemetry round-trip.
 """
 
 from skulk.routing.topics import DATA
-from skulk.shared.models.model_cards import ModelId
+from skulk.shared.models.model_cards import AudioResponseFormat, ModelId
 from skulk.shared.types.chunks import (
+    AudioChunk,
     DataChunk,
     ErrorChunk,
     TokenChunk,
+    TranscriptionChunk,
 )
 from skulk.shared.types.common import CommandId
 
@@ -51,3 +53,41 @@ def test_data_chunk_error_survives_topic_codec_round_trip() -> None:
     assert isinstance(restored.chunk, ErrorChunk)
     assert restored.chunk.finish_reason == "error"
     assert "runner shutdown" in restored.chunk.error_message
+
+
+def test_data_chunk_speech_chunks_survive_topic_codec_round_trip() -> None:
+    audio = DataChunk(
+        command_id=CommandId("cmd-audio"),
+        chunk=AudioChunk(
+            model=ModelId("mlx-community/kokoro-test"),
+            data="UklGRg==",
+            chunk_index=0,
+            total_chunks=1,
+            format=AudioResponseFormat.Wav,
+            sample_rate=24000,
+            finish_reason="stop",
+        ),
+        sequence=0,
+    )
+    restored_audio = DATA.deserialize(DATA.serialize(audio))
+    assert restored_audio.command_id == CommandId("cmd-audio")
+    assert isinstance(restored_audio.chunk, AudioChunk)
+    assert restored_audio.chunk.format == AudioResponseFormat.Wav
+    assert restored_audio.chunk.sample_rate == 24000
+
+    transcript = DataChunk(
+        command_id=CommandId("cmd-transcript"),
+        chunk=TranscriptionChunk(
+            model=ModelId("mlx-community/whisper-test"),
+            text="hello",
+            segment_index=0,
+            language="en",
+            finish_reason="stop",
+        ),
+        sequence=1,
+    )
+    restored_transcript = DATA.deserialize(DATA.serialize(transcript))
+    assert restored_transcript.command_id == CommandId("cmd-transcript")
+    assert isinstance(restored_transcript.chunk, TranscriptionChunk)
+    assert restored_transcript.chunk.text == "hello"
+    assert restored_transcript.chunk.language == "en"

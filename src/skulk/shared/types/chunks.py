@@ -11,7 +11,7 @@ from skulk.api.types import (
     TopLogprobItem,
     Usage,
 )
-from skulk.shared.models.model_cards import ModelId
+from skulk.shared.models.model_cards import AudioResponseFormat, ModelId
 from skulk.utils.pydantic_ext import CamelCaseModel, TaggedModel
 
 from .common import CommandId, NodeId
@@ -87,6 +87,51 @@ class EmbeddingChunk(BaseChunk):
     token_count: int
 
 
+class AudioChunk(BaseChunk):
+    """Encoded audio output chunk for speech-synthesis responses."""
+
+    data: str
+    """Base64-encoded audio bytes for this chunk."""
+    chunk_index: int
+    """Zero-based chunk index within the response."""
+    total_chunks: int | None = None
+    """Total number of chunks when known for non-streaming responses."""
+    format: AudioResponseFormat
+    """Encoded audio format for ``data``."""
+    sample_rate: int | None = None
+    """Audio sample rate in hertz when the runner reports it."""
+    is_partial: bool = False
+    """Whether this chunk is a partial streaming result."""
+    finish_reason: FinishReason | None = None
+    """Terminal reason when this is the last output chunk."""
+    error_message: str | None = None
+    """Error text when a speech runner fails after beginning output."""
+
+    def __repr_args__(self) -> Generator[tuple[str, Any], None, None]:
+        for name, value in super().__repr_args__():  # pyright: ignore[reportAny]
+            if name == "data" and hasattr(value, "__len__"):  # pyright: ignore[reportAny]
+                yield name, f"<{len(self.data)} chars>"
+            elif name is not None:
+                yield name, value
+
+
+class TranscriptionChunk(BaseChunk):
+    """Text output chunk for speech-to-text and speech-translation responses."""
+
+    text: str
+    """Transcript or translated text carried by this chunk."""
+    segment_index: int | None = None
+    """Model-provided segment index when the runner reports segmented output."""
+    is_partial: bool = False
+    """Whether this chunk is an interim streaming transcript."""
+    language: str | None = None
+    """Detected or requested language code when available."""
+    finish_reason: FinishReason | None = None
+    """Terminal reason when this is the last output chunk."""
+    error_message: str | None = None
+    """Error text when a speech runner fails after beginning output."""
+
+
 class PrefillProgressChunk(BaseChunk):
     """Data class for prefill progress events during streaming."""
 
@@ -100,6 +145,8 @@ GenerationChunk = (
     | ToolCallChunk
     | ErrorChunk
     | EmbeddingChunk
+    | AudioChunk
+    | TranscriptionChunk
     | PrefillProgressChunk
 )
 

@@ -104,6 +104,20 @@ A single Skulk `Node` (src/skulk/main.py) runs multiple components:
 - **Election**: Bully algorithm for master election
 - **API**: FastAPI server for OpenAI-compatible chat completions
 
+### Inference engines
+A model card's `placement.compatible_backends` selects which engine serves it
+(`bootstrap._resolve_text_engine`, backend tags in `src/skulk/shared/backends.py`):
+- **`mlx`**: in-process MLX on Apple Silicon; owns the generation loop,
+  multi-node ring, and MTP/speculative decoding.
+- **`mlx_audio`**: single-node speech backend vocabulary for upstream
+  `mlx-audio` TTS/STT models. Phase 0 probes and advertises `mlx_audio` /
+  `mlx_audio-metal` when `mlx_audio` imports on macOS, but the worker bootstrap
+  fails dispatch clearly until the speech runner lands.
+- **`llama_cpp`**: in-process `llama-cpp-python` for GGUF on GPU/Linux nodes.
+  Single-node.
+- **`llama_server`**: served-backend engine; the worker launches an external
+  `llama-server` subprocess and proxies its OpenAI HTTP API.
+
 ### Message Flow
 Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `GLOBAL_EVENTS`: Master broadcasts indexed events to all workers
@@ -139,10 +153,19 @@ React + TypeScript + styled-components frontend in `dashboard-react/`. Build out
 
 ### Model Capability System
 Skulk now treats model capability handling as two layers:
-- **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `tooling`, and `runtime` sections for refined model support
+- **Model cards**: persisted declarative metadata, including optional `reasoning`, `modalities`, `audio`, `tooling`, and `runtime` sections for refined model support
 - **Resolved capability profiles**: normalized runtime behavior contracts derived from the card plus conservative family defaults
 
-This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, and additive `/v1/models` metadata consumed by the dashboard.
+This capability spine is the source of truth for model-aware reasoning defaults, prompt rendering, output parsing, tool-call handling, speech/TTS/STT metadata, and additive `/v1/models` metadata consumed by the dashboard.
+
+**Model truth vs platform truth:** a card's `compatible_backends` declares which
+engines the model's artifacts run on (MODEL truth) and must never encode a gap
+in Skulk's own runners (PLATFORM truth). Platform limitations live in code:
+`platform_compatible_backends` in `src/skulk/shared/backends.py` (currently:
+served `llama_server` vision cards are gated off served engines; TTS/STT cards
+are gated to `mlx_audio`). Placement (`_card_platform_backends`) and the
+worker's fallback probe both apply the filter. When a runner gains a
+capability, flip the code table; do not sweep cards.
 
 ### Logging & Observability
 Centralized logging uses a three-layer stack:

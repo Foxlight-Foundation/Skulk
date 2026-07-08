@@ -13,6 +13,19 @@ export interface ModalitiesCapabilityInfo {
   supports_native_multimodal?: boolean;
 }
 
+/** Optional declarative speech metadata copied from a model card. */
+export interface AudioCapabilityInfo {
+  kind?: string;
+  default_response_format?: string;
+  response_formats?: string[];
+  supports_streaming?: boolean;
+  supports_realtime?: boolean;
+  supports_voice_listing?: boolean;
+  supports_reference_audio?: boolean;
+  supports_translation?: boolean;
+  sample_rates?: number[];
+}
+
 /** Optional declarative tool-calling metadata copied from a model card. */
 export interface ToolingCapabilityInfo {
   supports_tool_calling?: boolean;
@@ -37,6 +50,13 @@ export interface ResolvedModelCapabilities {
   thinking_format: string;
   supports_image_input: boolean;
   supports_audio_input: boolean;
+  supports_speech_synthesis: boolean;
+  supports_transcription: boolean;
+  supports_speech_translation: boolean;
+  supports_audio_output: boolean;
+  supports_realtime_audio: boolean;
+  default_audio_response_format?: string | null;
+  audio_response_formats: string[];
   supports_tool_calling: boolean;
   builtin_tools: string[];
   tool_call_format: string;
@@ -62,6 +82,7 @@ export interface ModelInfo {
   hugging_face_id?: string;
   reasoning?: ReasoningCapabilityInfo;
   modalities?: ModalitiesCapabilityInfo;
+  audio?: AudioCapabilityInfo;
   tooling?: ToolingCapabilityInfo;
   runtime?: RuntimeCapabilityInfo;
   resolved_capabilities?: ResolvedModelCapabilities;
@@ -153,6 +174,8 @@ export const CAPABILITIES = [
   'image_gen',
   'image_edit',
   'embedding',
+  'tts',
+  'stt',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -166,6 +189,26 @@ export const SIZE_RANGES = [
 ] as const;
 
 export type PickerMode = 'launch' | 'store-download';
+
+function isKnownCapability(value: string): value is Capability {
+  return (CAPABILITIES as readonly string[]).includes(value);
+}
+
+function modelFilterCapabilities(model: ModelInfo): string[] {
+  const capabilities = new Set<string>();
+  for (const value of model.capabilities ?? []) {
+    if (isKnownCapability(value)) capabilities.add(value);
+  }
+  for (const value of model.tags ?? []) {
+    if (isKnownCapability(value)) capabilities.add(value);
+  }
+  const resolved = model.resolved_capabilities;
+  if (resolved?.supports_speech_synthesis) capabilities.add('tts');
+  if (resolved?.supports_transcription || resolved?.supports_speech_translation) {
+    capabilities.add('stt');
+  }
+  return Array.from(capabilities);
+}
 
 /**
  * Group model variants by base model (or model id if no base model is present).
@@ -188,7 +231,9 @@ export function groupModels(models: ModelInfo[]): ModelGroup[] {
     return {
       id: key,
       name: first.name ?? first.id,
-      capabilities: first.capabilities ?? [],
+      capabilities: Array.from(
+        new Set(sorted.flatMap((variant) => modelFilterCapabilities(variant))),
+      ),
       family: first.family ?? '',
       variants: sorted,
       smallestVariant: first,

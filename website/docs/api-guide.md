@@ -776,16 +776,26 @@ Important fields:
 | Field | Type | Meaning |
 |-------|------|---------|
 | `id` | string | Canonical model ID |
-| `capabilities` | array | Functional capabilities such as `text`, `vision`, `thinking`, `code`, or `embedding` |
-| `tags` | array | UI-friendly derived labels such as `vision`, `thinking`, `embedding`, `tensor`, and `optiq` |
+| `capabilities` | array | Functional capabilities such as `text`, `vision`, `thinking`, `code`, `embedding`, `tts`, or `stt` |
+| `tags` | array | UI-friendly derived labels such as `vision`, `thinking`, `embedding`, `tts`, `stt`, `tensor`, and `optiq` |
 | `supports_tensor` | boolean | Whether tensor parallel launch is supported |
 | `base_model` | string | Base family or upstream source model when known |
+| `audio` | object | Declared speech metadata from the model card, including `kind`, audio response formats, streaming/realtime flags, voice/reference-audio flags, translation support, and sample rates |
+| `resolved_capabilities.supports_speech_synthesis` | boolean | Whether clients should treat the model as a text-to-speech model |
+| `resolved_capabilities.supports_transcription` | boolean | Whether clients should treat the model as a speech-to-text model |
+| `resolved_capabilities.supports_speech_translation` | boolean | Whether clients should treat the model as supporting speech translation |
+| `resolved_capabilities.supports_audio_output` | boolean | Whether the model produces audio output |
+| `resolved_capabilities.supports_realtime_audio` | boolean | Whether the model declares realtime audio support |
+| `resolved_capabilities.audio_response_formats` | array | Encoded audio formats the model can produce for speech synthesis |
 | `runtime.mtp_sidecar_repo` | string | Repo of this model's MTP sidecar (prediction heads), when it declares one |
 | `runtime.assistant_model_repo` | string | Repo of this model's speculative-decoding assistant (drafter), when it declares one |
 | `runtime.served_spec_draft_repo` | string | Repo of this model's separate served-engine draft GGUF, when it declares one |
 
 The dashboard uses `tags` for compact badges and `capabilities` for filtering
-and richer tooltips. The three `runtime.*_repo` fields name a model's
+and richer tooltips. The `audio` and `resolved_capabilities.*speech*` fields
+are catalog metadata only until the speech serving routes land; they identify
+TTS/STT models without implying that `/v1/audio/*` endpoints are enabled in this
+Phase 0 schema slice. The three `runtime.*_repo` fields name a model's
 speculative-decoding companions (a draft model or an MTP-head sidecar). Those
 companion repos are downloaded and loaded automatically with their parent and
 are not independently placeable, so the dashboard marks any store entry matching

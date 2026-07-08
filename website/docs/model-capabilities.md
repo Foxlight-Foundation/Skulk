@@ -72,6 +72,7 @@ The decisions it drives today are:
 - reasoning/thinking defaults
 - prompt renderer selection
 - output parser selection
+- speech model discovery and TTS/STT dashboard affordances
 
 ## Thinking contract
 
@@ -100,6 +101,44 @@ If a model supports reasoning but does not support thinking toggle:
 - requests otherwise fall back to the model's supported default behavior
 
 This keeps the public API stable without pretending every reasoning-capable model can switch on and off cleanly.
+
+## Speech contract
+
+Speech models are represented as first-class model-card tasks instead of model
+name conventions:
+
+- `TextToSpeech`
+- `SpeechToText`
+- `SpeechTranslation`
+
+Cards can add an `[audio]` section to describe speech-specific behavior:
+
+```toml
+[audio]
+kind = "tts" # or "stt"
+default_response_format = "mp3"
+response_formats = ["mp3", "wav"]
+supports_streaming = true
+supports_realtime = false
+supports_voice_listing = true
+supports_reference_audio = false
+supports_translation = false
+sample_rates = [16000, 24000]
+```
+
+The resolver exposes that as `resolved_capabilities` fields:
+
+- `supports_speech_synthesis`
+- `supports_transcription`
+- `supports_speech_translation`
+- `supports_audio_output`
+- `supports_realtime_audio`
+- `default_audio_response_format`
+- `audio_response_formats`
+
+These fields are metadata in the Phase 0 speech-serving work. They let clients
+and placement identify TTS/STT models before the `/v1/audio/*` serving routes
+and speech runners are enabled in later phases.
 
 ## Fallback Behavior
 
@@ -136,7 +175,7 @@ Once the capability spine exists, Skulk can evolve cleanly toward:
 
 - model-aware thinking controls
 - reasoning budget support
-- audio modality support
+- speech serving controls for TTS, transcription, and translation
 - richer tool grammars
 - safer dashboard controls based on real support instead of guesswork
 

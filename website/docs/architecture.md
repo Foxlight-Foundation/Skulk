@@ -126,7 +126,7 @@ The eleven steps in detail:
 
 1. **HTTP arrival.** Request hits FastAPI on any node's port (default 52415). The adapter for the wire format (OpenAI / Ollama / Claude / Responses) lives in `src/skulk/api/adapters/`.
 2. **Normalization.** The adapter transforms the wire-format payload into an internal `Task` (`src/skulk/shared/types/tasks.py`).
-3. **Capability resolution.** The API resolves the request against the bound `ModelCard` and computes a `ResolvedCapabilityProfile` (`src/skulk/shared/models/capabilities.py`). This decides prompt rendering, output parsing, tool-call format, reasoning format, vision handling, and a few MLX runtime knobs. Output parsing for channel-delimited reasoning formats (notably gpt-oss "harmony") is applied in the runner per engine: the MLX runner parses harmony at the token level (`parse_gpt_oss`), and the llama.cpp runner reparses it from llama.cpp's detokenized text (`HarmonyTextParser`), both splitting the `analysis` channel into reasoning and the `final` channel into content so control markers never reach the client.
+3. **Capability resolution.** The API resolves the request against the bound `ModelCard` and computes a `ResolvedCapabilityProfile` (`src/skulk/shared/models/capabilities.py`). This decides prompt rendering, output parsing, tool-call format, reasoning format, vision handling, speech metadata, and a few MLX runtime knobs. Output parsing for channel-delimited reasoning formats (notably gpt-oss "harmony") is applied in the runner per engine: the MLX runner parses harmony at the token level (`parse_gpt_oss`), and the llama.cpp runner reparses it from llama.cpp's detokenized text (`HarmonyTextParser`), both splitting the `analysis` channel into reasoning and the `final` channel into content so control markers never reach the client.
 4. **Runner discovery.** The API resolves the request against running instances via `_resolve_and_validate_text_model`. If no instance is currently placed for the model, the API returns HTTP 404: placement is **not** automatic on chat requests; operators must call `/instance` or `/place_instance` first to spin up the model. Once an instance exists, the API issues a command on the `COMMANDS` topic that the master indexes.
 5. **Worker dispatch and runner acknowledgement.** Each rank's worker forwards the `Task` over an `mp.Queue` to its runner subprocess. The runner emits `TaskAcknowledged` on its outgoing event channel (see `src/skulk/worker/runner/llm_inference/runner.py:236`); the worker forwards that to `LOCAL_EVENTS`, the master indexes it, and it is republished on `GLOBAL_EVENTS` so every node observes the same acknowledged-state transition.
 6. **Prompt rendering.** The runner renders the chat history into tokens. Family-specific renderers (e.g., Gemma 4's `<|turn>` template, DeepSeek's DSML) handle the format. Vision preprocessing happens here for multimodal requests.
@@ -260,8 +260,10 @@ memory/topology axes above:
 - `compatible_backends` is a **hard filter**: the planner excludes any node whose
   advertised backends do not intersect it. A GGUF card lists the llama.cpp
   backends, so it can only land on a llama.cpp node; an MLX card lists MLX, so it
-  stays on the Macs. This is what keeps an MLX model off an AMD node and a GGUF
-  model off a Mac without an MLX llama.cpp shim.
+  stays on the Macs; a speech card lists `mlx_audio`, so it can only land on a
+  node whose probed `mlx_audio` package can serve it. This is what keeps an MLX
+  model off an AMD node, a GGUF model off a Mac without an MLX llama.cpp shim,
+  and a TTS/STT model off a text-only MLX runner.
 - `backend_preference` is a **soft score**: when several compatible nodes
   qualify, the planner prefers the node whose backend ranks earliest in the
   card's preference list (for example preferring a GPU backend over CPU).
@@ -280,10 +282,17 @@ Cards describe the model; the platform describes itself. A card's
 (model truth), and it never encodes a gap in Skulk's own implementation
 (platform truth). When one of our runners cannot yet exploit a capability a
 card declares (for example, the served llama.cpp engine cannot load a vision
-model's projector yet), that limitation lives in a code-level capability
-table that placement and the worker both consult, so the model never lands
-where an advertised capability would silently degrade, and the card needs no
-edit when the platform catches up.
+model's projector yet, and only the `mlx_audio` engine currently owns TTS/STT),
+that limitation lives in a code-level capability table that placement and the
+worker both consult, so the model never lands where an advertised capability
+would silently degrade, and the card needs no edit when the platform catches up.
+
+Speech serving is in a staged rollout. The Phase 0 contract adds
+`TextToSpeech`, `SpeechToText`, `SpeechTranslation`, the `[audio]` card section,
+and the `mlx_audio` backend tags (`mlx_audio`, `mlx_audio-metal`) when the
+upstream `mlx_audio` package imports on macOS. The worker bootstrap explicitly
+fails an `mlx_audio` dispatch until the speech runner lands, so this metadata
+slice does not claim `/v1/audio/*` serving is already available.
 
 The llama.cpp runner serves GGUF models single-node and matches the MLX runner
 on the capabilities llama.cpp supports natively: per-token logprobs (with the
@@ -552,9 +561,9 @@ rust/                   # Rust crates: networking (libp2p), skulk_pyo3_bindings,
 
 **Bound instance**: A `Task` materializing a particular placement: the model card, the shard ranges per rank, the network configuration (ring or jaccl), the bound runners.
 
-**Capability profile**: `ResolvedCapabilityProfile`. The runtime answer to "what does this model do?", derived from the model card plus family defaults plus tokenizer hints. Drives prompt rendering, output parsing, tool grammar, vision handling.
+**Capability profile**: `ResolvedCapabilityProfile`. The runtime answer to "what does this model do?", derived from the model card plus family defaults plus tokenizer hints. Drives prompt rendering, output parsing, tool grammar, vision handling, and speech metadata.
 
-**Card** / **Model card**: Per-model declarative metadata: model id, layer count, supported tasks, family, capabilities, modalities, tooling, runtime knobs. Stored as TOML.
+**Card** / **Model card**: Per-model declarative metadata: model id, layer count, supported tasks, family, capabilities, modalities, audio metadata, tooling, runtime knobs. Stored as TOML.
 
 **Command**: Imperative request on the `COMMANDS` topic. "PlaceInstance," "DeleteInstance," "SetTracingEnabled." Master decides whether to act on it.
 
