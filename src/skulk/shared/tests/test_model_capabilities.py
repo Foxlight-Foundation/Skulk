@@ -18,6 +18,7 @@ from skulk.shared.models.model_cards import (
     RuntimeCapabilityCardConfig,
     ToolCallFormat,
     ToolingCardConfig,
+    card_serves_speech,
 )
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.text_generation import (
@@ -140,6 +141,22 @@ def test_resolve_model_capability_profile_exposes_stt_and_translation() -> None:
     assert profile.supports_audio_input is True
     assert profile.supports_audio_output is False
     assert profile.supports_realtime_audio is False
+
+
+def test_card_serves_speech_treats_legacy_capability_tags_as_speech() -> None:
+    text_card = _base_model_card("example/text-test").model_copy(
+        update={"capabilities": ["text"]}
+    )
+    tts_card = _base_model_card("example/tts-test").model_copy(
+        update={"capabilities": ["tts"]}
+    )
+    stt_card = _base_model_card("example/stt-test").model_copy(
+        update={"capabilities": ["stt"]}
+    )
+
+    assert card_serves_speech(text_card) is False
+    assert card_serves_speech(tts_card) is True
+    assert card_serves_speech(stt_card) is True
 
 
 def test_resolve_model_capability_profile_keeps_gemma4_tool_fallback() -> None:

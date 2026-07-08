@@ -123,6 +123,7 @@ _SPEECH_MODEL_TASKS: Final[frozenset[ModelTask]] = frozenset(
         ModelTask.SpeechTranslation,
     }
 )
+_SPEECH_MODEL_CAPABILITIES: Final[frozenset[str]] = frozenset({"tts", "stt"})
 
 
 class AudioCardKind(str, Enum):
@@ -144,7 +145,11 @@ class AudioResponseFormat(str, Enum):
 
 def card_serves_speech(card: "ModelCard") -> bool:
     """Return whether the card declares a speech serving workload."""
-    return card.audio is not None or any(task in _SPEECH_MODEL_TASKS for task in card.tasks)
+    return (
+        card.audio is not None
+        or any(task in _SPEECH_MODEL_TASKS for task in card.tasks)
+        or bool(_SPEECH_MODEL_CAPABILITIES.intersection(card.capabilities))
+    )
 
 
 class ComponentInfo(CamelCaseModel):
