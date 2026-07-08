@@ -473,7 +473,18 @@ export function ChatForm({
       };
 
       recorder.onerror = () => {
+        recordingCancelledRef.current = true;
         setMediaError(t('chat.form.voiceErrors.recordingFailed', 'Recording failed.'));
+        if (recorder.state === 'inactive') {
+          cleanupRecordingResources();
+          return;
+        }
+
+        try {
+          recorder.stop();
+        } catch {
+          cleanupRecordingResources();
+        }
       };
 
       recorder.onstop = () => {
