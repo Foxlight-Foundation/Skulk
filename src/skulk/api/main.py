@@ -179,6 +179,7 @@ from skulk.shared.constants import (
     preferred_env_value,
 )
 from skulk.shared.election import ElectionMessage
+from skulk.shared.experimental import experimental_mode_enabled
 from skulk.shared.logging import InterceptLogger
 from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.model_cards import (
@@ -5796,6 +5797,11 @@ class API:
                     "fileExists": False,
                     "effective": {
                         "kv_cache_backend": self._effective_kv_cache_backend(),
+                        # No config file, so no file token; a token can still come
+                        # from the environment. Keep the effective shape identical
+                        # to the file-present branch so clients never branch on it.
+                        "has_hf_token": "HF_TOKEN" in os.environ,
+                        "experimental_mode_enabled": experimental_mode_enabled(),
                     },
                 }
             )
@@ -5811,6 +5817,7 @@ class API:
                 "effective": {
                     "kv_cache_backend": self._effective_kv_cache_backend(),
                     "has_hf_token": has_hf_token or "HF_TOKEN" in os.environ,
+                    "experimental_mode_enabled": experimental_mode_enabled(),
                 },
             }
         )

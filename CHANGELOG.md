@@ -7,6 +7,18 @@ This project records release notes here and mirrors public-facing notes in
 
 ## [Unreleased]
 
+### Added
+
+- **A gated "Experiments" area for staging in-development features.** A node
+  started with `SKULK_ENABLE_EXPERIMENTAL_MODE` set reveals an Experiments
+  section in the dashboard Settings; without it, the section is hidden and any
+  feature that opts into the gate stays inert, so a released build can carry
+  work-in-progress UX without exposing it. The switch is deliberately
+  feature-agnostic (it knows about no particular experiment); a feature that
+  wants to be gated reads it and adds its own toggle to the section, so its
+  operator UX is built alongside it. No experimental features ship in this
+  release, so with the flag on, the section shows a placeholder.
+
 ### Fixed
 
 - **Pooled (multi-node) GGUF placement no longer caps unified-memory nodes at

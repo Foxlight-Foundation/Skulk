@@ -36,6 +36,11 @@ export interface FullConfig {
 export interface EffectiveConfig {
   kv_cache_backend: string;
   has_hf_token?: boolean;
+  /**
+   * True when the node runs with SKULK_ENABLE_EXPERIMENTAL_MODE. Gates the
+   * dashboard's Experiments settings section; memory-agnostic.
+   */
+  experimental_mode_enabled?: boolean;
 }
 
 export interface ConfigResponse {
