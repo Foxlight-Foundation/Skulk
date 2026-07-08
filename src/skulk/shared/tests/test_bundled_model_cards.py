@@ -8,8 +8,8 @@ honor. The repo-existence check needs the network and stays an operational
 script, but every static invariant it applied lives here so a bad card fails
 CI instead of shipping.
 
-Every check runs over ALL bundled cards (inference, image, embedding), so a
-newly added card is held to the same bar automatically.
+Every check runs over ALL bundled cards (inference, image, embedding, speech),
+so a newly added card is held to the same bar automatically.
 """
 
 import tomllib
