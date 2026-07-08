@@ -518,7 +518,7 @@ Request fields:
 | `input` | string | Required text to synthesize |
 | `voice` | string or null | Optional model-specific voice name |
 | `speed` | number or null | Optional positive speaking speed multiplier |
-| `response_format` | string or null | Optional encoded output format. When omitted, Skulk uses the mounted model card default when declared and otherwise falls back to `mp3`; supported values are constrained by the model card when declared |
+| `response_format` | string or null | Optional encoded output format. When omitted or set to `null`, Skulk uses the mounted model card default when declared and otherwise falls back to `mp3`; supported values are constrained by the model card when declared |
 | `instruct`, `lang_code` | string or null | Optional model-specific generation hints |
 | `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number or integer | Optional model-specific sampling controls |
 
