@@ -9,6 +9,7 @@ instance is gone (or being torn down in the same plan pass).
 
 from skulk.master.main import instances_on_dead_nodes, orphaned_task_failure_events
 from skulk.shared.models.model_cards import ModelCard, ModelTask
+from skulk.shared.types.audio import SpeechSynthesisTaskParams
 from skulk.shared.types.common import CommandId, ModelId, NodeId
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
@@ -17,6 +18,9 @@ from skulk.shared.types.tasks import (
     Task,
     TaskId,
     TaskStatus,
+)
+from skulk.shared.types.tasks import (
+    SpeechSynthesis as SpeechSynthesisTask,
 )
 from skulk.shared.types.tasks import (
     TextGeneration as TextGenerationTask,
@@ -81,6 +85,23 @@ def _text_task(
     )
 
 
+def _speech_task(
+    task_id: TaskId,
+    instance_id: InstanceId,
+    status: TaskStatus = TaskStatus.Running,
+) -> SpeechSynthesisTask:
+    return SpeechSynthesisTask(
+        task_id=task_id,
+        instance_id=instance_id,
+        task_status=status,
+        command_id=CommandId(),
+        task_params=SpeechSynthesisTaskParams(
+            model=ModelId("test-model"),
+            input_text="hi",
+        ),
+    )
+
+
 def _state(
     tasks: dict[TaskId, Task],
     instances: dict[InstanceId, Instance],
@@ -102,6 +123,18 @@ def test_task_with_missing_instance_is_failed() -> None:
     instance_id = InstanceId()
     task_id = TaskId()
     state = _state({task_id: _text_task(task_id, instance_id)}, {})
+    events = orphaned_task_failure_events(state, frozenset())
+    assert len(events) == 1
+    assert events[0].task_id == task_id
+    assert events[0].error_type == "instance_lost"
+
+
+def test_speech_task_with_missing_instance_is_failed() -> None:
+    """A lost TTS instance must unblock the waiting speech HTTP request."""
+
+    instance_id = InstanceId()
+    task_id = TaskId()
+    state = _state({task_id: _speech_task(task_id, instance_id)}, {})
     events = orphaned_task_failure_events(state, frozenset())
     assert len(events) == 1
     assert events[0].task_id == task_id

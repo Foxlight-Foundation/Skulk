@@ -147,6 +147,7 @@ _COMMAND_TASK_TYPES = (
     ImageGenerationTask,
     ImageEditsTask,
     TextEmbeddingTask,
+    SpeechSynthesisTask,
 )
 
 
