@@ -400,7 +400,9 @@ def _probe_mlx_audio_backends() -> frozenset[str]:
         return frozenset()
     try:
         import mlx_audio  # noqa: F401  # pyright: ignore[reportMissingTypeStubs, reportUnusedImport]
-    except ImportError:
+    except Exception:  # noqa: BLE001
+        # Optional native wheels can fail during extension loading with OSError
+        # or ABI errors; backend probing must degrade to "unavailable".
         return frozenset()
     return frozenset({"mlx_audio", make_backend_tag("mlx_audio", "metal")})
 

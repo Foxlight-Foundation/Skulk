@@ -1,7 +1,10 @@
 # pyright: reportPrivateUsage=false
 """Tests for the backend capability tag vocabulary and node probing."""
 
+import importlib.abc
+import importlib.machinery
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
 
@@ -66,6 +69,26 @@ def test_llama_cpp_probe_empty_without_binding(monkeypatch: pytest.MonkeyPatch) 
 def test_mlx_audio_probe_empty_without_binding(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setitem(sys.modules, "mlx_audio", None)
+    assert backends._probe_mlx_audio_backends() == frozenset()
+
+
+def test_mlx_audio_probe_empty_when_native_import_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenMlxAudioFinder(importlib.abc.MetaPathFinder):
+        def find_spec(
+            self,
+            fullname: str,
+            path: Sequence[str] | None,
+            target: ModuleType | None = None,
+        ) -> importlib.machinery.ModuleSpec | None:
+            if fullname == "mlx_audio":
+                raise OSError("dlopen failed")
+            return None
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.delitem(sys.modules, "mlx_audio", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [BrokenMlxAudioFinder(), *sys.meta_path])
     assert backends._probe_mlx_audio_backends() == frozenset()
 
 

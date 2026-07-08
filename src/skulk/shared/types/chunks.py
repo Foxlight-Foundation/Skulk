@@ -145,6 +145,8 @@ GenerationChunk = (
     | ToolCallChunk
     | ErrorChunk
     | EmbeddingChunk
+    | AudioChunk
+    | TranscriptionChunk
     | PrefillProgressChunk
 )
 

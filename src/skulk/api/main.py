@@ -3801,7 +3801,9 @@ class API:
             except (BrokenResourceError, ClosedResourceError):
                 self._image_generation_queues.pop(command_id, None)
         if queue := self._text_generation_queues.get(command_id, None):
-            assert not isinstance(chunk, (ImageChunk, EmbeddingChunk))
+            assert isinstance(
+                chunk, (TokenChunk, ErrorChunk, ToolCallChunk, PrefillProgressChunk)
+            )
             try:
                 await queue.send(chunk)
             except (BrokenResourceError, ClosedResourceError):
