@@ -478,7 +478,7 @@ def test_streaming_speech_synthesis_emits_partial_and_terminal_chunks(
         for event in sender.events
         if isinstance(event, ChunkGenerated) and isinstance(event.chunk, AudioChunk)
     ]
-    assert len(generated) == 2
+    assert len(generated) == 3
     assert base64.b64decode(generated[0].data.encode("ascii"), validate=True) == b"mp3-1"
     assert generated[0].chunk_index == 0
     assert generated[0].total_chunks is None
@@ -487,8 +487,13 @@ def test_streaming_speech_synthesis_emits_partial_and_terminal_chunks(
     assert base64.b64decode(generated[1].data.encode("ascii"), validate=True) == b"mp3-2"
     assert generated[1].chunk_index == 1
     assert generated[1].total_chunks is None
-    assert generated[1].is_partial is False
-    assert generated[1].finish_reason == "stop"
+    assert generated[1].is_partial is True
+    assert generated[1].finish_reason is None
+    assert base64.b64decode(generated[2].data.encode("ascii"), validate=True) == b""
+    assert generated[2].chunk_index == 2
+    assert generated[2].total_chunks is None
+    assert generated[2].is_partial is False
+    assert generated[2].finish_reason == "stop"
 
 
 def test_speech_synthesis_handles_single_tuple_result(

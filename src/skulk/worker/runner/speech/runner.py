@@ -324,6 +324,33 @@ def _emit_streaming_audio_chunks(
     return next_index
 
 
+def _emit_streaming_terminal_audio_chunk(
+    *,
+    event_sender: MpSender[Event],
+    command_id: CommandId,
+    model_id: ModelId,
+    response_format: AudioResponseFormat,
+    sample_rate: int,
+    chunk_index: int,
+) -> None:
+    """Emit a zero-byte terminal marker after streamed TTS audio segments."""
+    event_sender.send(
+        ChunkGenerated(
+            command_id=command_id,
+            chunk=AudioChunk(
+                model=model_id,
+                data="",
+                chunk_index=chunk_index,
+                total_chunks=None,
+                format=response_format,
+                sample_rate=sample_rate,
+                is_partial=False,
+                finish_reason="stop",
+            ),
+        )
+    )
+
+
 def _emit_transcription_chunk(
     *,
     event_sender: MpSender[Event],
@@ -925,9 +952,8 @@ class Runner:
         """Generate streaming TTS chunks and emit each encoded segment promptly."""
         assert self.model is not None
         params = task.task_params
-        pending_audio: bytes | None = None
-        pending_sample_rate: int | None = None
         chunk_index = 0
+        sample_rate: int | None = None
 
         for result in self._iter_tts_results(task, stream=True):
             if self._is_cancelled(task.task_id):
@@ -948,31 +974,27 @@ class Runner:
                 result_sample_rate,
                 params.response_format,
             )
-            if pending_audio is not None and pending_sample_rate is not None:
-                chunk_index = _emit_streaming_audio_chunks(
-                    event_sender=self.event_sender,
-                    command_id=task.command_id,
-                    model_id=model_id,
-                    encoded_audio=pending_audio,
-                    response_format=params.response_format,
-                    sample_rate=pending_sample_rate,
-                    chunk_index=chunk_index,
-                    is_final=False,
-                )
-            pending_audio = encoded_audio
-            pending_sample_rate = result_sample_rate
+            chunk_index = _emit_streaming_audio_chunks(
+                event_sender=self.event_sender,
+                command_id=task.command_id,
+                model_id=model_id,
+                encoded_audio=encoded_audio,
+                response_format=params.response_format,
+                sample_rate=result_sample_rate,
+                chunk_index=chunk_index,
+                is_final=False,
+            )
+            sample_rate = result_sample_rate
 
         if self._is_cancelled(task.task_id):
             return
-        if pending_audio is None or pending_sample_rate is None:
+        if chunk_index == 0 or sample_rate is None:
             raise ValueError("No audio generated")
-        _emit_streaming_audio_chunks(
+        _emit_streaming_terminal_audio_chunk(
             event_sender=self.event_sender,
             command_id=task.command_id,
             model_id=model_id,
-            encoded_audio=pending_audio,
             response_format=params.response_format,
-            sample_rate=pending_sample_rate,
+            sample_rate=sample_rate,
             chunk_index=chunk_index,
-            is_final=True,
         )
