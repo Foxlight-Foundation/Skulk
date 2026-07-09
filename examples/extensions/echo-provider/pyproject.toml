@@ -1,0 +1,20 @@
+# Reference provider extension (fabric-citizenship). Install into a node's
+# venv to serve a trivial "echo" capability on the fabric:
+#   uv pip install -e examples/extensions/echo-provider --python .venv/bin/python
+# Not installed by default: no extension installed = Skulk unchanged.
+[project]
+name = "skulk-echo-provider"
+version = "0.1.0"
+description = "Reference Skulk provider extension serving a trivial echo capability"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.entry-points."skulk.extensions"]
+echo-provider = "skulk_echo_provider:EchoProviderExtension"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/skulk_echo_provider"]

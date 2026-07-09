@@ -20,11 +20,13 @@ Design invariants (enforced by the call sites in :mod:`skulk.api.main` and
   loaded-extension list is empty.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, final
+from typing import Protocol, final, runtime_checkable
 
 from pydantic import BaseModel
 
+from skulk.extensions.capabilities import CapabilityDescriptor
 from skulk.extensions.telemetry import ClusterNodeView
 from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.text_generation import TextGenerationTaskParams
@@ -76,6 +78,72 @@ class AdvertiseCapability(Protocol):
     def __call__(self, capability: str) -> None: ...
 
 
+class WithdrawCapability(Protocol):
+    """Synchronous callable that withdraws a previously advertised capability.
+
+    The provider-liveness counterpart of :class:`AdvertiseCapability`: a plugin
+    that stops offering a capability (shutting down its backend, entering
+    maintenance) withdraws the tag so callers stop selecting it. Withdrawing a
+    tag that was never advertised is a no-op. Peers see the withdrawal on the
+    node's next telemetry poll.
+    """
+
+    def __call__(self, capability: str) -> None: ...
+
+
+class DescribeNode(Protocol):
+    """Async callable returning a node's full capability descriptors.
+
+    The heavy half of discovery: the telemetry tag says *that* a node offers a
+    capability; ``describe_node`` fetches the self-describing
+    :class:`~skulk.extensions.capabilities.CapabilityDescriptor` list that says
+    *how to call it* (schemas, I/O mode, version). Returns an empty tuple when
+    the node is unreachable or serves no capabilities; callers must degrade
+    gracefully, never raise. Descriptors travel on demand so telemetry stays
+    cheap.
+    """
+
+    async def __call__(
+        self, node_id: NodeId
+    ) -> tuple[CapabilityDescriptor, ...]: ...
+
+
+@runtime_checkable
+class CapabilityProvider(Protocol):
+    """Optional extension facet: the extension serves capabilities.
+
+    An extension that implements ``capabilities()`` is a **provider**: its
+    descriptors are collected at load time, exposed to the cluster via the
+    node's describe surface (``GET /v1/capabilities`` and peers'
+    ``describe_node``), and their ids are auto-advertised on the telemetry
+    plane. Detected structurally (``isinstance`` against this runtime
+    protocol), so a plain chat-middleware extension is unaffected.
+    """
+
+    def capabilities(self) -> Sequence[CapabilityDescriptor]:
+        """Return the capability descriptors this extension serves."""
+        ...
+
+
+@runtime_checkable
+class SupportsExtensionStartup(Protocol):
+    """Optional extension facet: a startup hook.
+
+    ``on_start`` runs once, when the node's extension surface comes up, with
+    the same :class:`ExtensionContext` the request hooks receive. It exists
+    because a pure provider has no chat hook through which to reach the
+    context; without it, advertising or any startup registration would depend
+    on a chat request arriving. Guarded like every extension call (a raising
+    ``on_start`` is logged and the extension continues without its startup
+    work). Must be fast and non-blocking: it runs during node startup, so
+    heavy initialization belongs in background work the extension owns.
+    """
+
+    def on_start(self, context: "ExtensionContext") -> None:
+        """Run startup registration with the live extension context."""
+        ...
+
+
 @final
 @dataclass(frozen=True)
 class ExtensionContext:
@@ -92,6 +160,10 @@ class ExtensionContext:
         advertise_capability: The telemetry-plane advertise surface: publishes
             an opaque capability tag this node offers so peers discover it via
             their own ``read_cluster`` snapshots.
+        withdraw_capability: The advertise surface's liveness counterpart:
+            stops advertising a tag so callers stop selecting this node for it.
+        describe_node: The heavy half of discovery: fetches a node's full
+            capability descriptors (schemas, I/O modes, versions) on demand.
     """
 
     node_id: NodeId
@@ -99,6 +171,8 @@ class ExtensionContext:
     embed_texts: EmbedTexts
     read_cluster: ReadClusterTelemetry
     advertise_capability: AdvertiseCapability
+    withdraw_capability: WithdrawCapability
+    describe_node: DescribeNode
 
 
 @final

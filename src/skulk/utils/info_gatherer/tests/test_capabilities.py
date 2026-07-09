@@ -84,3 +84,40 @@ async def test_monitor_disabled_without_provider() -> None:
     info_send.close()
     received = [info async for info in info_recv]
     assert received == []
+
+
+async def test_monitor_publishes_empty_once_after_withdrawal() -> None:
+    # Provider liveness (fabric-citizenship Phase 2a): when the advertised set
+    # transitions non-empty -> empty, ONE empty reading is published so peers
+    # clear their last-write-wins entry; after that the monitor goes quiet
+    # again (no steady-state empty gossip).
+    empty: frozenset[str] = frozenset()
+    sets = iter(
+        [
+            frozenset({"memory"}),  # advertised
+            empty,  # withdrawn -> publish empty once
+            empty,  # stays empty -> quiet
+            empty,
+        ]
+    )
+    info_send, info_recv = channel[GatheredInfo]()
+    gatherer = _capabilities_only_gatherer(
+        info_send, lambda: next(sets, empty)
+    )
+    received: list[frozenset[str]] = []
+
+    async def collect() -> None:
+        with info_recv as stream:
+            async for info in stream:
+                assert isinstance(info, NodeCapabilities)
+                received.append(info.capabilities)
+
+    with anyio.move_on_after(0.3):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(gatherer._monitor_capabilities)  # pyright: ignore[reportPrivateUsage]
+            tg.start_soon(collect)
+
+    assert received[:2] == [frozenset({"memory"}), frozenset()]
+    # Nothing after the single empty reading: the monitor went quiet.
+    assert all(not caps for caps in received[1:])
+    assert len(received) == 2

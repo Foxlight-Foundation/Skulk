@@ -37,6 +37,7 @@ from fastapi.staticfiles import StaticFiles
 from hypercorn.config import Config
 from hypercorn.typing import ASGIFramework
 from loguru import logger
+from pydantic import ValidationError
 
 import skulk.shared.types.tasks as task_types
 from skulk.api.adapters.chat_completions import (
@@ -162,8 +163,10 @@ from skulk.api.types.openai_responses import (
 from skulk.connectivity.remote_access import RemoteAccessInfo, build_remote_access_info
 from skulk.connectivity.tailscale import TailscaleStatus, query_tailscale_status
 from skulk.extensions import (
+    CapabilityDescriptor,
     ExtensionContext,
     LoadedExtensions,
+    descriptor_revision,
     resolve_skulk_version,
     snapshot_cluster,
 )
@@ -972,6 +975,10 @@ class API:
             # the tag on the shared view's outbound set; the worker's info gatherer
             # gossips it on its next poll. Reads self._telemetry_view lazily too.
             advertise_capability=self._advertise_capability,
+            withdraw_capability=self._withdraw_capability,
+            # Capability discovery, heavy half (fabric-citizenship Phase 2a):
+            # full descriptors on demand, local or via a reachable peer API.
+            describe_node=self._describe_node_capabilities,
         )
         # Data plane (#279 Phase 2): per-token output chunks arrive here direct
         # from the serving worker (DATA topic), not as ChunkGenerated events off
@@ -983,6 +990,15 @@ class API:
         self._telemetry_view = (
             telemetry_view if telemetry_view is not None else TelemetryView()
         )
+        # Provider extensions (fabric-citizenship Phase 2a): auto-advertise
+        # each served capability's id as its telemetry discovery tag, then run
+        # the extensions' startup hooks with the live context (a pure provider
+        # has no chat hook through which to reach it). Both are guarded; a
+        # broken plugin can never block node startup.
+        if self._extensions is not None:
+            for descriptor in self._extensions.capability_descriptors:
+                self._telemetry_view.local_advertised_capabilities.add(descriptor.id)
+            self._extensions.run_startup_hooks(self._extension_context)
         self._event_log = DiskEventLog(_API_EVENT_LOG_DIR) if enable_event_log else None
         self._event_log_appends_since_retention_check = 0
         self._system_id = SystemId()
@@ -1599,6 +1615,25 @@ class API:
             description="Download a raw Chrome trace artifact from local storage or a reachable peer node.",
             response_model=None,
         )(self.get_cluster_trace_raw)
+        self.app.get(
+            "/v1/capabilities",
+            tags=["Extensions"],
+            summary="List this node's extension-served capabilities",
+            description=(
+                "Return the self-describing capability descriptors served by "
+                "this node's provider extensions (fabric-citizenship). Each "
+                "descriptor carries the capability id, semantic version, "
+                "human/LLM-readable description, JSON Schemas for input and "
+                "output, the call's I/O mode, and a content revision digest. "
+                "This is the heavy half of capability discovery; the light "
+                "half is the capability tag gossiped on the telemetry plane "
+                "(surfaced per node as nodeCapabilities in GET /state). "
+                "Pass the node_id query parameter to describe a reachable "
+                "peer instead of this node (an empty list when the peer is "
+                "unreachable). An empty list otherwise means no provider "
+                "extension is installed."
+            ),
+        )(self.list_node_capabilities)
         self.app.get(
             "/v1/diagnostics/node",
             tags=["Diagnostics"],
@@ -2465,6 +2500,14 @@ class API:
             for node_id, status in self._telemetry_view.node_rdma_ctl.items()
             if node_id in live
         }
+        # Extension-advertised capability tags (fabric-citizenship): the light
+        # discovery layer, made operator-visible. Full descriptors are fetched
+        # via GET /v1/capabilities, not carried here.
+        payload["nodeCapabilities"] = {
+            str(node_id): sorted(tags)
+            for node_id, tags in self._telemetry_view.node_capabilities.items()
+            if node_id in live and tags
+        }
         # Derived per-node health (#388): explain a node's problems (and the fix)
         # in the topology so the master's silent recovery of a wedged/failed node
         # is legible. Read-only derivation from the same state/telemetry above; no
@@ -2881,6 +2924,131 @@ class API:
             )
             return
         self._telemetry_view.local_advertised_capabilities.add(tag)
+
+    def _withdraw_capability(self, capability: str) -> None:
+        """Withdraw a previously advertised capability tag.
+
+        The liveness counterpart of :meth:`_advertise_capability`
+        (fabric-citizenship Phase 2a): a provider that stops offering a
+        capability withdraws the tag so callers stop selecting this node for
+        it. The worker's info gatherer publishes the shrunken set on its next
+        poll (including a final empty reading when the last tag goes, so peers
+        clear the entry instead of keeping the stale last-write-wins value).
+        Withdrawing a tag that was never advertised is a no-op.
+
+        Args:
+            capability: The tag to withdraw (matched after whitespace trim).
+        """
+        self._telemetry_view.local_advertised_capabilities.discard(capability.strip())
+
+    async def list_node_capabilities(
+        self, node_id: str | None = None
+    ) -> dict[str, object]:
+        """Serve ``GET /v1/capabilities``: a node's capability descriptors.
+
+        The describe surface of capability discovery (fabric-citizenship
+        Phase 2a). Without ``node_id`` (or with this node's id), returns the
+        descriptors served by this node's provider extensions; with a peer's
+        ``node_id``, proxies the peer's describe surface (the same read-only
+        fan-out pattern the trace cluster browsing uses), returning an empty
+        list when the peer is unreachable. Each descriptor's content revision
+        digest is included so callers can pin the exact shape they discovered.
+        Extensions consume this through ``describe_node``.
+
+        Args:
+            node_id: Optional peer node to describe instead of this node.
+
+        Returns:
+            ``{"node_id": ..., "capabilities": [...], "revisions": {...}}``
+            where ``revisions`` maps ``id@version`` to the revision digest.
+        """
+        # A blank or whitespace-padded node_id means "this node", not a
+        # literal peer id that would always proxy to nothing.
+        requested = node_id.strip() if node_id is not None else None
+        if not requested or requested == str(self.node_id):
+            descriptors = (
+                self._extensions.capability_descriptors
+                if self._extensions is not None
+                else ()
+            )
+            described: NodeId = self.node_id
+        else:
+            described = NodeId(requested)
+            descriptors = await self._describe_node_capabilities(described)
+        return {
+            "node_id": str(described),
+            "capabilities": [
+                descriptor.model_dump(mode="json") for descriptor in descriptors
+            ],
+            "revisions": {
+                descriptor.qualified_id: descriptor_revision(descriptor)
+                for descriptor in descriptors
+            },
+        }
+
+    async def _describe_node_capabilities(
+        self, node_id: NodeId
+    ) -> tuple[CapabilityDescriptor, ...]:
+        """Fetch a node's full capability descriptors (the describe verb).
+
+        The heavy half of capability discovery (fabric-citizenship Phase 2a):
+        the telemetry tag says *that* a node offers a capability; this returns
+        the self-describing descriptors that say *how to call it*. For the
+        local node it reads the loaded extensions directly; for a peer it
+        proxies ``GET /v1/capabilities`` over the reachable-peer-API path the
+        trace cluster-browse already uses (an existing mechanism, not a new
+        transport; the extension-facing contract stays transport-abstract so
+        this can later ride the provider call plane instead).
+
+        Returns an empty tuple when the node is unreachable, serves no
+        capabilities, or returns an unparsable payload; never raises.
+
+        Args:
+            node_id: The node whose descriptors to fetch.
+
+        Returns:
+            The node's capability descriptors, or ``()``.
+        """
+        if node_id == self.node_id:
+            if self._extensions is None:
+                return ()
+            return self._extensions.capability_descriptors
+        peer_urls = await self._reachable_peer_api_urls()
+        base_url = peer_urls.get(str(node_id))
+        if base_url is None:
+            return ()
+        timeout = httpx.Timeout(timeout=10.0, connect=2.0)
+        try:
+            async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+                response = await client.get(f"{base_url}/v1/capabilities")
+                response.raise_for_status()
+                payload_raw: object = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning(
+                f"describe_node: peer {node_id} capabilities fetch failed: {exc}"
+            )
+            return ()
+        # A peer can return any JSON shape; a non-object payload degrades to
+        # "no capabilities" rather than violating the never-raises contract.
+        if not isinstance(payload_raw, dict):
+            return ()
+        payload = cast("dict[str, object]", payload_raw)
+        raw_descriptors = payload.get("capabilities")
+        if not isinstance(raw_descriptors, list):
+            return ()
+        descriptors: list[CapabilityDescriptor] = []
+        for entry in cast("list[object]", raw_descriptors):
+            try:
+                descriptors.append(CapabilityDescriptor.model_validate(entry))
+            except ValidationError as exc:
+                # A malformed entry degrades to "not offered" rather than
+                # poisoning the whole describe (mixed-version peers are
+                # unsupported, but a plugin can publish garbage on any version).
+                logger.warning(
+                    f"describe_node: peer {node_id} returned an invalid "
+                    f"capability descriptor; skipping it: {exc}"
+                )
+        return tuple(descriptors)
 
     async def embed_texts(
         self,

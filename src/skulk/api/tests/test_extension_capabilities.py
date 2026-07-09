@@ -6,7 +6,16 @@ observable locally: a node advertising a capability sees it in its own
 `read_cluster` snapshot once the reading coalesces back into the view.
 """
 
+from datetime import datetime, timezone
+from typing import cast
+
 from skulk.api.main import API
+from skulk.extensions import (
+    CapabilityDescriptor,
+    ExtensionContext,
+    LoadedExtensions,
+    descriptor_revision,
+)
 from skulk.shared.election import ElectionMessage
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
 from skulk.shared.types.common import NodeId
@@ -16,7 +25,9 @@ from skulk.utils.channels import channel
 from skulk.utils.info_gatherer.info_gatherer import NodeCapabilities
 
 
-def _build_api(view: TelemetryView) -> API:
+def _build_api(
+    view: TelemetryView, extensions: LoadedExtensions | None = None
+) -> API:
     command_sender, _ = channel[ForwarderCommand]()
     download_sender, _ = channel[ForwarderDownloadCommand]()
     _, event_receiver = channel[IndexedEvent]()
@@ -31,6 +42,7 @@ def _build_api(view: TelemetryView) -> API:
         enable_event_log=False,
         mount_dashboard=False,
         telemetry_view=view,
+        extensions=extensions,
     )
 
 
@@ -82,3 +94,131 @@ def test_advertised_capability_round_trips_into_read_cluster() -> None:
     snapshot = api._extension_context.read_cluster()  # pyright: ignore[reportPrivateUsage]
     node = next(n for n in snapshot if n.node_id == NodeId("api-node"))
     assert node.capabilities == ("memory",)
+
+
+# --- Provider surface (fabric-citizenship Phase 2a) --------------------------
+
+_ECHO = CapabilityDescriptor(
+    id="echo",
+    version="1.0.0",
+    title="Echo",
+    description="Returns the input text unchanged.",
+    input_schema={"type": "object"},
+)
+
+
+class _ProviderExtension:
+    """Minimal provider extension for API wiring tests."""
+
+    name = "test-provider"
+    skulk_requires = ">=0"
+
+    def __init__(self) -> None:
+        self.started_with: list[ExtensionContext] = []
+
+    def chat_middleware(self) -> None:
+        return None
+
+    def capabilities(self) -> list[CapabilityDescriptor]:
+        return [_ECHO]
+
+    def on_start(self, context: ExtensionContext) -> None:
+        self.started_with.append(context)
+
+
+def test_provider_descriptor_id_is_auto_advertised_and_on_start_runs() -> None:
+    provider = _ProviderExtension()
+    view = TelemetryView()
+    _build_api(view, extensions=LoadedExtensions([provider]))
+    # The descriptor's id became the telemetry discovery tag without the
+    # extension calling advertise itself, and on_start ran with the live
+    # context (a pure provider has no chat hook through which to reach it).
+    assert view.local_advertised_capabilities == {"echo"}
+    assert len(provider.started_with) == 1
+
+
+async def test_list_node_capabilities_serves_descriptors_and_revisions() -> None:
+    api = _build_api(TelemetryView(), extensions=LoadedExtensions([_ProviderExtension()]))
+    payload = await api.list_node_capabilities()
+    assert payload["node_id"] == "api-node"
+    capabilities = cast("list[object]", payload["capabilities"])
+    assert isinstance(capabilities, list) and len(capabilities) == 1
+    restored = CapabilityDescriptor.model_validate(capabilities[0])
+    assert restored == _ECHO
+    revisions = payload["revisions"]
+    assert isinstance(revisions, dict)
+    assert revisions["echo@1.0.0"] == descriptor_revision(_ECHO)
+
+
+async def test_list_node_capabilities_empty_without_extensions() -> None:
+    payload = await _build_api(TelemetryView()).list_node_capabilities()
+    assert payload["capabilities"] == []
+    assert payload["revisions"] == {}
+
+
+async def test_describe_node_local_returns_descriptors() -> None:
+    api = _build_api(TelemetryView(), extensions=LoadedExtensions([_ProviderExtension()]))
+    descriptors = await api._extension_context.describe_node(NodeId("api-node"))  # pyright: ignore[reportPrivateUsage]
+    assert descriptors == (_ECHO,)
+
+
+async def test_describe_node_unknown_peer_returns_empty() -> None:
+    api = _build_api(TelemetryView())
+    # No topology, so the peer is unreachable: degrade to (), never raise.
+    descriptors = await api._extension_context.describe_node(NodeId("n-ghost"))  # pyright: ignore[reportPrivateUsage]
+    assert descriptors == ()
+
+
+def test_withdraw_capability_removes_tag() -> None:
+    view = TelemetryView()
+    api = _build_api(view)
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    context.advertise_capability("memory")
+    context.advertise_capability("search")
+    context.withdraw_capability("memory")
+    assert view.local_advertised_capabilities == {"search"}
+    # Withdrawing an unknown or already-withdrawn tag is a no-op.
+    context.withdraw_capability("memory")
+    context.withdraw_capability("never-advertised")
+    assert view.local_advertised_capabilities == {"search"}
+
+
+async def test_list_node_capabilities_with_own_node_id_serves_local() -> None:
+    api = _build_api(TelemetryView(), extensions=LoadedExtensions([_ProviderExtension()]))
+    payload = await api.list_node_capabilities(node_id="api-node")
+    assert payload["node_id"] == "api-node"
+    assert len(cast("list[object]", payload["capabilities"])) == 1
+
+
+async def test_list_node_capabilities_unreachable_peer_is_empty() -> None:
+    api = _build_api(TelemetryView())
+    payload = await api.list_node_capabilities(node_id="n-ghost")
+    assert payload["node_id"] == "n-ghost"
+    assert payload["capabilities"] == []
+
+
+async def test_state_merge_surfaces_node_capabilities() -> None:
+    # The light discovery layer is operator-visible: GET /state carries a
+    # nodeCapabilities map for live nodes with a non-empty tag set (sorted).
+    view = TelemetryView()
+    api = _build_api(view)
+    peer = NodeId("n-peer")
+    dead = NodeId("n-dead")
+    view.node_capabilities[peer] = frozenset({"tts", "memory"})
+    view.node_capabilities[dead] = frozenset({"ghost"})
+    api.state = api.state.model_copy(
+        update={"last_seen": {peer: datetime.now(tz=timezone.utc)}}
+    )
+    payload = await api.get_cluster_state()
+    # Only the live node appears; the dead node's tags are filtered out.
+    assert payload["nodeCapabilities"] == {"n-peer": ["memory", "tts"]}
+
+
+async def test_list_node_capabilities_blank_node_id_means_local() -> None:
+    # A blank or whitespace-padded node_id describes this node rather than
+    # proxying to a literal empty peer id.
+    api = _build_api(TelemetryView(), extensions=LoadedExtensions([_ProviderExtension()]))
+    for raw in ("", "   "):
+        payload = await api.list_node_capabilities(node_id=raw)
+        assert payload["node_id"] == "api-node"
+        assert len(cast("list[object]", payload["capabilities"])) == 1

@@ -8,6 +8,7 @@ import pytest
 
 from skulk.extensions import (
     BaseChatMiddleware,
+    CapabilityDescriptor,
     ChatResponseSummary,
     ExtensionContext,
     LoadedExtensions,
@@ -31,6 +32,11 @@ async def _embed_stub(
     return [[float(len(text))] for text in texts]
 
 
+async def _describe_stub(node_id: NodeId) -> tuple[CapabilityDescriptor, ...]:
+    """Empty describe surface for tests."""
+    return ()
+
+
 def _context() -> ExtensionContext:
     return ExtensionContext(
         node_id=NodeId("test-node"),
@@ -38,6 +44,8 @@ def _context() -> ExtensionContext:
         embed_texts=_embed_stub,
         read_cluster=lambda: (),
         advertise_capability=lambda capability: None,  # noqa: ARG005
+        withdraw_capability=lambda capability: None,  # noqa: ARG005
+        describe_node=_describe_stub,
     )
 
 
@@ -324,3 +332,74 @@ async def test_no_middleware_returns_stream_unwrapped() -> None:
     loaded = LoadedExtensions([_StubExtension(middleware=None)])
     stream = _stream_of([_token("x", finish=True)])
     assert loaded.tap_chat_stream(_context(), _params(), stream) is stream
+
+
+# --- Provider facet (fabric-citizenship Phase 2a) ---------------------------
+
+_ECHO_DESCRIPTOR = CapabilityDescriptor(
+    id="echo",
+    version="1.0.0",
+    title="Echo",
+    description="Returns the input text unchanged.",
+    input_schema={"type": "object"},
+)
+
+
+class _ProviderExtension(_StubExtension):
+    """Extension that serves one capability and records on_start calls."""
+
+    def __init__(self, name: str = "provider") -> None:
+        super().__init__(name=name)
+        self.started_with: list[ExtensionContext] = []
+
+    def capabilities(self) -> list[CapabilityDescriptor]:
+        return [_ECHO_DESCRIPTOR]
+
+    def on_start(self, context: ExtensionContext) -> None:
+        self.started_with.append(context)
+
+
+class _RaisingProviderExtension(_StubExtension):
+    """Extension whose provider facet raises everywhere."""
+
+    def capabilities(self) -> list[CapabilityDescriptor]:
+        raise RuntimeError("capabilities exploded")
+
+    def on_start(self, context: ExtensionContext) -> None:
+        raise RuntimeError("on_start exploded")
+
+
+def test_provider_descriptors_are_collected() -> None:
+    loaded = LoadedExtensions([_ProviderExtension(), _StubExtension()])
+    assert loaded.capability_descriptors == (_ECHO_DESCRIPTOR,)
+
+
+def test_duplicate_qualified_ids_are_rejected() -> None:
+    # One provider per id@version per node: a duplicate would make
+    # describe/call ambiguous locally. First one wins; the duplicate is
+    # skipped loudly.
+    loaded = LoadedExtensions(
+        [_ProviderExtension(name="first"), _ProviderExtension(name="second")]
+    )
+    assert loaded.capability_descriptors == (_ECHO_DESCRIPTOR,)
+
+
+def test_raising_capabilities_loads_extension_without_them() -> None:
+    loaded = LoadedExtensions([_RaisingProviderExtension()])
+    assert loaded.names == ["stub"]
+    assert loaded.capability_descriptors == ()
+
+
+def test_run_startup_hooks_dispatches_and_guards() -> None:
+    provider = _ProviderExtension()
+    loaded = LoadedExtensions([provider, _RaisingProviderExtension()])
+    context = _context()
+    # The raising hook must not prevent the healthy one from running, and
+    # must not raise out of the dispatch.
+    loaded.run_startup_hooks(context)
+    assert provider.started_with == [context]
+
+
+def test_non_provider_extension_has_no_capabilities() -> None:
+    loaded = LoadedExtensions([_StubExtension()])
+    assert loaded.capability_descriptors == ()

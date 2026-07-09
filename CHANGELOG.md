@@ -9,6 +9,24 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **Extensions can serve self-describing capabilities (the provider role).**
+  Skulk cannot enumerate future plugin capabilities, so it standardizes the
+  description instead: a provider extension publishes one `CapabilityDescriptor`
+  per capability it serves, carrying the capability id, a semantic version, a
+  human/LLM-readable description, JSON Schemas for input and output, the call's
+  I/O mode (`unary`, `server_streaming`, `client_streaming`, `bidirectional`),
+  and a content revision digest that detects any drift in the published shape.
+  Discovery is two-layered: the descriptor's id is auto-advertised as the node's
+  telemetry capability tag (cheap, gossiped), and the full descriptors travel on
+  demand via `ExtensionContext.describe_node(node_id)` or the new
+  `GET /v1/capabilities` endpoint (heavy, fetched). Providers get an `on_start`
+  startup hook (a pure provider has no chat hook through which to reach the
+  context), and `withdraw_capability(tag)` reverses an advertisement, with the
+  telemetry publisher emitting one final empty reading when a node's last tag is
+  withdrawn so peers clear their entry instead of holding a stale value. A
+  reference provider lives at `examples/extensions/echo-provider/`. Invoking a
+  capability (the generic call envelope) is the next slice of this surface.
+
 - **Extensions get telemetry-plane access (read + advertise).** First-class
   fabric citizenship expressed as plane access: a plugin can now both discover
   the cluster it belongs to and announce what it offers.

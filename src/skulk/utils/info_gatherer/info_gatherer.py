@@ -667,23 +667,26 @@ class InfoGatherer:
         The set is polled (not emitted once) so a node that joins after a
         capability was advertised still learns it on the next tick (the
         last-write-wins plane has no replay). Nothing is published while the set
-        is empty: the overwhelming majority of nodes advertise nothing, and an
+        stays empty: the overwhelming majority of nodes advertise nothing, and an
         empty reading every poll would be pure gossip volume on a plane that
-        exists to stay quiet (#279). A consequence is that a peer drops an
-        advertised capability from its view only when the node leaves (prune),
-        not by the node un-advertising it; capability advertisement is additive
-        in this slice.
+        exists to stay quiet (#279). One exception: when the set transitions
+        non-empty -> empty (the provider withdrew its last capability), a single
+        empty reading is published so peers clear their last-write-wins entry
+        instead of keeping the stale value until the node leaves the cluster
+        (provider liveness, fabric-citizenship Phase 2a).
         """
         if self.capabilities_poll_interval is None or self.capabilities_provider is None:
             return
+        published_nonempty = False
         while True:
             try:
                 capabilities = self.capabilities_provider()
-                if capabilities:
+                if capabilities or published_nonempty:
                     with fail_after(30):
                         await self.info_sender.send(
                             NodeCapabilities(capabilities=capabilities)
                         )
+                    published_nonempty = bool(capabilities)
             except (ClosedResourceError, BrokenResourceError):
                 # Consumer gone (worker shutdown/replacement): a stop signal,
                 # not a fault — escape the per-iteration catch-all so the loop
