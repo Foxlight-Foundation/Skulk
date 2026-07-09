@@ -1,0 +1,27 @@
+model_id = "mlx-community/LongCat-AudioDiT-1B-4bit"
+n_layers = 24
+hidden_size = 1536
+supports_tensor = false
+tasks = ["TextToSpeech"]
+family = "longcat_audiodit"
+quantization = "4bit"
+base_model = "meituan-longcat/LongCat-AudioDiT-1B"
+capabilities = ["tts"]
+context_length = 0
+
+[audio]
+kind = "tts"
+default_response_format = "wav"
+response_formats = ["wav"]
+supports_streaming = false
+supports_realtime = false
+supports_voice_listing = false
+supports_reference_audio = false
+sample_rates = [24000]
+
+[placement]
+compatible_backends = ["mlx_audio", "mlx_audio-metal"]
+backend_preference = ["mlx_audio-metal", "mlx_audio"]
+
+[storage_size]
+in_bytes = 1417906487
