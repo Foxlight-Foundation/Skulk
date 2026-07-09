@@ -428,10 +428,12 @@ export function ChatForm({
       : null;
   const speechReady = Boolean(selectedSpeechId && onSpeakText);
   const transcriptionReady = Boolean(selectedTranscriptionId && onTranscribeAudio);
-  const canRecordAudio = transcriptionReady && browserRecordingAvailable;
   const canSpeakDraft = speechReady && message.trim().length > 0 && !isRecording && !isTranscribing;
   const displayVoiceError = mediaError ?? voiceError;
   const showVoiceControls = transcriptionModels.length > 0 || speechModels.length > 0 || Boolean(displayVoiceError);
+  const recordingButtonLabel = transcriptionReady && recordingUnavailableReason
+    ? recordingUnavailableReason
+    : t('chat.form.startRecording', 'Start recording');
 
   // Auto-resize textarea
   const resize = useCallback(() => {
@@ -796,10 +798,10 @@ export function ChatForm({
                 icon
                 type="button"
                 loading={isTranscribing}
-                disabled={!canRecordAudio || isLoading}
+                disabled={!transcriptionReady || isLoading}
                 onClick={startRecording}
-                aria-label={recordingUnavailableReason ?? t('chat.form.startRecording', 'Start recording')}
-                title={recordingUnavailableReason ?? t('chat.form.startRecording', 'Start recording')}
+                aria-label={recordingButtonLabel}
+                title={recordingButtonLabel}
               >
                 <FiMic size={16} />
               </VoiceIconBtn>
