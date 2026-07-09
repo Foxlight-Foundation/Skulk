@@ -208,6 +208,55 @@ def _staged_vision_projector_missing(
     )
 
 
+def _staged_pinned_gguf_missing(shard: ShardMetadata, directory: Path) -> bool:
+    """Return whether a staged directory lacks the card-selected GGUF group.
+
+    The generic completeness probe accepts any complete GGUF quant in the
+    directory. A card can later select another quant from the same repository,
+    so staged-cache reuse must verify that exact file and, for split weights,
+    every sibling shard required by the backend entrypoint.
+
+    Args:
+        shard: Shard whose model card may pin a GGUF file.
+        directory: Canonical store or node-local staging directory to inspect.
+
+    Returns:
+        ``True`` when a selected GGUF path is unsafe, absent, or incomplete.
+    """
+    pinned = shard.model_card.gguf_file
+    if not pinned:
+        return False
+
+    relative_path = Path(pinned)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        return True
+    selected_path = directory.joinpath(*relative_path.parts)
+    if not selected_path.is_file():
+        return True
+
+    stem_parts = selected_path.stem.rsplit("-", 3)
+    if not (
+        len(stem_parts) == 4
+        and stem_parts[1].isdigit()
+        and stem_parts[2] == "of"
+        and stem_parts[3].isdigit()
+    ):
+        return False
+
+    base, index_token, _, total_token = stem_parts
+    total_shards = int(total_token)
+    return any(
+        not (
+            selected_path.parent
+            / (
+                f"{base}-{index:0{len(index_token)}d}-of-"
+                f"{total_token}.gguf"
+            )
+        ).is_file()
+        for index in range(1, total_shards + 1)
+    )
+
+
 def _same_repo_draft_files(card: "ModelCard") -> list[str]:
     """Repo-relative GGUFs that ride the base repo's store entry but aren't the base.
 
@@ -1039,6 +1088,7 @@ class ModelStoreDownloader(ShardDownloader):
                 if (
                     direct_path.exists()
                     and _staged_directory_looks_complete(direct_path)
+                    and not _staged_pinned_gguf_missing(shard, direct_path)
                     and not _staged_vision_projector_missing(shard, direct_path)
                     and not _staged_same_repo_draft_missing(shard, direct_path)
                 ):
@@ -1060,6 +1110,7 @@ class ModelStoreDownloader(ShardDownloader):
         if (
             dest_path.exists()
             and _staged_directory_looks_complete(dest_path)
+            and not _staged_pinned_gguf_missing(shard, dest_path)
             and not _staged_vision_projector_missing(shard, dest_path)
             and not _staged_same_repo_draft_missing(shard, dest_path)
         ):
