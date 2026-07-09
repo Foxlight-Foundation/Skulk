@@ -23,7 +23,7 @@ import numpy as np
 from anyio import WouldBlock
 
 from skulk.shared.constants import SKULK_MAX_CHUNK_SIZE
-from skulk.shared.models.model_cards import AudioResponseFormat
+from skulk.shared.models.model_cards import AudioCardKind, AudioResponseFormat
 from skulk.shared.tracing import (
     begin_trace_session,
     bind_trace_session,
@@ -185,11 +185,27 @@ def _encode_audio(
     return buffer.getvalue()
 
 
-def _load_speech_model(local_path: str) -> Any:
-    """Load an ``mlx_audio`` model from the staged local model directory."""
+def _load_speech_model(local_path: Path, audio_kind: AudioCardKind | None) -> Any:
+    """Load a staged ``mlx_audio`` model using the card-declared speech kind.
+
+    The generic upstream loader infers the category from repo/config names. That
+    breaks for some staged Skulk paths because ``owner--repo`` normalization can
+    bias the inference toward a TTS package before the STT family token is tried.
+    The card already declares the serving kind, so prefer the category-specific
+    loader and keep the generic path only for legacy cards without ``[audio]``.
+    """
+    if audio_kind == AudioCardKind.SpeechToText:
+        from mlx_audio.stt.utils import load_model
+
+        return load_model(local_path)
+    if audio_kind == AudioCardKind.TextToSpeech:
+        from mlx_audio.tts.utils import load_model
+
+        return load_model(local_path)
+
     from mlx_audio.utils import load_model
 
-    return load_model(local_path)
+    return load_model(str(local_path))
 
 
 def _resolve_staged_voice_path(
@@ -565,7 +581,9 @@ class Runner:
         local_path = build_model_path(ModelId(model_id))
         self.local_model_path = local_path
         logger.info(f"loading speech model from local path: {local_path}")
-        self.model = _load_speech_model(str(local_path))
+        audio_config = self.shard_metadata.model_card.audio
+        audio_kind = audio_config.kind if audio_config is not None else None
+        self.model = _load_speech_model(local_path, audio_kind)
         self.current_status = RunnerReady()
         logger.info(
             f"speech runner ready in {time.time() - self.setup_start_time:.1f}s"

@@ -3,16 +3,17 @@
 
 import base64
 import hashlib
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import cast
 
 import numpy as np
 import pytest
 from anyio import WouldBlock
 
-from skulk.shared.models.model_cards import AudioResponseFormat, ModelId
+from skulk.shared.models.model_cards import AudioCardKind, AudioResponseFormat, ModelId
 from skulk.shared.types.audio import (
     AudioTranscriptionTaskParams,
     SpeechSynthesisTaskParams,
@@ -37,6 +38,7 @@ from skulk.worker.runner.speech import runner as speech_runner
 from skulk.worker.runner.speech.runner import (
     Runner,
     _filter_kwargs,
+    _load_speech_model,
     _resolve_staged_voice_path,
 )
 
@@ -200,6 +202,56 @@ def test_filter_kwargs_drops_unsupported_and_none_values() -> None:
             "reference_audio": None,
         },
     ) == {"voice": "af_heart", "stream": False}
+
+
+def _stub_mlx_audio_loader(
+    monkeypatch: pytest.MonkeyPatch,
+    category: str,
+    load_model: object,
+) -> None:
+    """Install an importable ``mlx_audio.<category>.utils`` stub."""
+    root = ModuleType("mlx_audio")
+    root.__dict__["__path__"] = []
+    category_module = ModuleType(f"mlx_audio.{category}")
+    category_module.__dict__["__path__"] = []
+    utils_module = ModuleType(f"mlx_audio.{category}.utils")
+    utils_module.__dict__["load_model"] = load_model
+
+    monkeypatch.setitem(sys.modules, "mlx_audio", root)
+    monkeypatch.setitem(sys.modules, f"mlx_audio.{category}", category_module)
+    monkeypatch.setitem(sys.modules, f"mlx_audio.{category}.utils", utils_module)
+
+
+def test_load_speech_model_uses_stt_loader(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """STT cards should bypass upstream generic TTS/STT name inference."""
+    calls: list[Path] = []
+
+    def _fake_load_model(model_path: Path) -> object:
+        calls.append(model_path)
+        return "stt-model"
+
+    _stub_mlx_audio_loader(monkeypatch, "stt", _fake_load_model)
+
+    assert _load_speech_model(tmp_path, AudioCardKind.SpeechToText) == "stt-model"
+    assert calls == [tmp_path]
+
+
+def test_load_speech_model_uses_tts_loader(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """TTS cards should use the TTS loader directly."""
+    calls: list[Path] = []
+
+    def _fake_load_model(model_path: Path) -> object:
+        calls.append(model_path)
+        return "tts-model"
+
+    _stub_mlx_audio_loader(monkeypatch, "tts", _fake_load_model)
+
+    assert _load_speech_model(tmp_path, AudioCardKind.TextToSpeech) == "tts-model"
+    assert calls == [tmp_path]
 
 
 def test_resolve_staged_voice_path_uses_default_voice_from_model_store(
