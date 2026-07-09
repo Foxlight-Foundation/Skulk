@@ -9,6 +9,23 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **Extensions can call capabilities (the generic call verb).** The unary loop
+  of the provider surface is complete: a provider extension that implements
+  `handle_call` becomes callable, and any extension invokes a discovered
+  capability with `ExtensionContext.call_capability(node, id, version,
+  revision, payload)`. Calls are node-addressed and direct (the master is never
+  in the hot path; nothing is event-sourced), pin the exact `id@version` plus
+  the descriptor revision digest from discovery so a drifted contract is
+  rejected instead of misinterpreted, and are schema-validated in both
+  directions (bounded JSON Schema 2020-12 validation that never fetches remote
+  references). Every failure is a typed, machine-readable error code on the
+  result rather than an exception. Calls are bounded: a deadline (default
+  30s), 1 MiB payload and result caps, and a per-node concurrency bound that
+  rejects excess calls as `overloaded` instead of queueing them. Served over
+  the new `POST /v1/capabilities/call` endpoint; calling the local node is an
+  in-process fast path with identical guards. The reference echo provider now
+  serves calls end to end.
+
 - **Extensions can serve self-describing capabilities (the provider role).**
   Skulk cannot enumerate future plugin capabilities, so it standardizes the
   description instead: a provider extension publishes one `CapabilityDescriptor`

@@ -38,6 +38,7 @@ dependencies = [
   # request-local M-RoPE batching fixes; Skulk wrappers are audited against it.
   "mlx-vlm==0.6.4; sys_platform == 'darwin'",
   "transformers>=5.5.0,<6.0.0",
+  "jsonschema>=4.26.0",
 ]
 
 [project.scripts]

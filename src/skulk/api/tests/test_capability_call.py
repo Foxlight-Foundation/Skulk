@@ -1,0 +1,238 @@
+"""Provider-side capability-call dispatch (fabric-citizenship Phase 2b).
+
+`_dispatch_capability_call` is the single guarded chokepoint every call runs
+through (the endpoint, the local fast path, and a future queryable transport
+all land here), so the guard matrix is tested against it directly.
+"""
+
+import anyio
+
+from skulk.api.main import API
+from skulk.extensions import (
+    CapabilityCall,
+    CapabilityDescriptor,
+    CapabilityResult,
+    ExtensionContext,
+    LoadedExtensions,
+    descriptor_revision,
+)
+from skulk.shared.election import ElectionMessage
+from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
+from skulk.shared.types.common import NodeId
+from skulk.shared.types.events import IndexedEvent
+from skulk.shared.types.telemetry import TelemetryView
+from skulk.utils.channels import channel
+
+_ECHO = CapabilityDescriptor(
+    id="echo",
+    version="1.0.0",
+    title="Echo",
+    description="Returns the input text unchanged.",
+    input_schema={
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+        "additionalProperties": False,
+    },
+    output_schema={
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+    },
+)
+_ECHO_REVISION = descriptor_revision(_ECHO)
+
+
+class _EchoProvider:
+    """Callable provider used across the dispatch tests."""
+
+    name = "echo-test"
+    skulk_requires = ">=0"
+
+    def chat_middleware(self) -> None:
+        return None
+
+    def capabilities(self) -> list[CapabilityDescriptor]:
+        return [_ECHO]
+
+    async def handle_call(
+        self, context: ExtensionContext, call: CapabilityCall
+    ) -> dict[str, object]:
+        return {"text": call.payload["text"]}
+
+
+class _SlowProvider(_EchoProvider):
+    """Provider that never finishes within a short deadline."""
+
+    async def handle_call(
+        self, context: ExtensionContext, call: CapabilityCall
+    ) -> dict[str, object]:
+        await anyio.sleep(60)
+        return {"text": "late"}
+
+
+class _RaisingProvider(_EchoProvider):
+    """Provider whose handler raises."""
+
+    async def handle_call(
+        self, context: ExtensionContext, call: CapabilityCall
+    ) -> dict[str, object]:
+        raise RuntimeError("handler exploded")
+
+
+class _BadResultProvider(_EchoProvider):
+    """Provider whose result violates its own output schema."""
+
+    async def handle_call(
+        self, context: ExtensionContext, call: CapabilityCall
+    ) -> dict[str, object]:
+        return {"wrong_key": 42}
+
+
+def _build_api(provider: object | None) -> API:
+    command_sender, _ = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    _, event_receiver = channel[IndexedEvent]()
+    _, election_receiver = channel[ElectionMessage]()
+    return API(
+        NodeId("api-node"),
+        port=52415,
+        event_receiver=event_receiver,
+        command_sender=command_sender,
+        download_command_sender=download_sender,
+        election_receiver=election_receiver,
+        enable_event_log=False,
+        mount_dashboard=False,
+        telemetry_view=TelemetryView(),
+        extensions=LoadedExtensions([provider]) if provider is not None else None,  # pyright: ignore[reportArgumentType]
+    )
+
+
+def _call(**overrides: object) -> CapabilityCall:
+    fields: dict[str, object] = {
+        "call_id": "c-1",
+        "capability_id": "echo",
+        "version": "1.0.0",
+        "descriptor_revision": _ECHO_REVISION,
+        "caller_node": "caller",
+        "target_node": "api-node",
+        "payload": {"text": "hello"},
+    }
+    fields.update(overrides)
+    return CapabilityCall.model_validate(fields)
+
+
+async def _dispatch(api: API, call: CapabilityCall) -> CapabilityResult:
+    return await api._dispatch_capability_call(call)  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_call_round_trips_through_handler() -> None:
+    result = await _dispatch(_build_api(_EchoProvider()), _call())
+    assert result.ok and result.error is None
+    assert result.result == {"text": "hello"}
+    assert result.call_id == "c-1"
+
+
+async def test_unknown_capability_is_not_found() -> None:
+    result = await _dispatch(
+        _build_api(_EchoProvider()), _call(capability_id="nope")
+    )
+    assert not result.ok and result.error is not None
+    assert result.error.code == "not_found"
+
+
+async def test_wrong_version_is_version_mismatch() -> None:
+    result = await _dispatch(_build_api(_EchoProvider()), _call(version="2.0.0"))
+    assert not result.ok and result.error is not None
+    assert result.error.code == "version_mismatch"
+
+
+async def test_drifted_revision_is_revision_mismatch() -> None:
+    result = await _dispatch(
+        _build_api(_EchoProvider()), _call(descriptor_revision="deadbeef00000000")
+    )
+    assert not result.ok and result.error is not None
+    assert result.error.code == "revision_mismatch"
+
+
+async def test_payload_failing_input_schema_is_invalid_payload() -> None:
+    result = await _dispatch(
+        _build_api(_EchoProvider()), _call(payload={"text": 42})
+    )
+    assert not result.ok and result.error is not None
+    assert result.error.code == "invalid_payload"
+
+
+async def test_oversized_payload_is_rejected() -> None:
+    result = await _dispatch(
+        _build_api(_EchoProvider()), _call(payload={"text": "x" * 1_100_000})
+    )
+    assert not result.ok and result.error is not None
+    assert result.error.code == "payload_too_large"
+
+
+async def test_deadline_yields_typed_timeout() -> None:
+    result = await _dispatch(
+        _build_api(_SlowProvider()), _call(timeout_seconds=0.05)
+    )
+    assert not result.ok and result.error is not None
+    assert result.error.code == "timeout"
+
+
+async def test_raising_handler_yields_provider_error() -> None:
+    result = await _dispatch(_build_api(_RaisingProvider()), _call())
+    assert not result.ok and result.error is not None
+    assert result.error.code == "provider_error"
+    assert "handler exploded" in result.error.message
+
+
+async def test_result_failing_output_schema_is_invalid_result() -> None:
+    result = await _dispatch(_build_api(_BadResultProvider()), _call())
+    assert not result.ok and result.error is not None
+    assert result.error.code == "invalid_result"
+
+
+async def test_no_extensions_is_not_found() -> None:
+    result = await _dispatch(_build_api(None), _call())
+    assert not result.ok and result.error is not None
+    assert result.error.code == "not_found"
+
+
+async def test_concurrency_bound_rejects_with_overloaded() -> None:
+    api = _build_api(_SlowProvider())
+    results: list[CapabilityResult] = []
+
+    async def one(index: int) -> None:
+        results.append(
+            await _dispatch(api, _call(call_id=f"c-{index}", timeout_seconds=0.5))
+        )
+
+    async with anyio.create_task_group() as tg:
+        for index in range(10):
+            tg.start_soon(one, index)
+    codes = sorted(r.error.code for r in results if r.error is not None)
+    # 8 slots time out (slow provider); the 2 beyond the bound are rejected
+    # immediately as overloaded.
+    assert codes.count("overloaded") == 2
+    assert codes.count("timeout") == 8
+
+
+async def test_context_call_capability_local_fast_path() -> None:
+    # The caller-side verb with target == self dispatches in process through
+    # the same guards; a plugin can call a capability its own node serves.
+    api = _build_api(_EchoProvider())
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    result = await context.call_capability(
+        NodeId("api-node"), "echo", "1.0.0", _ECHO_REVISION, {"text": "loop"}
+    )
+    assert result.ok and result.result == {"text": "loop"}
+
+
+async def test_context_call_capability_unreachable_peer() -> None:
+    api = _build_api(_EchoProvider())
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    result = await context.call_capability(
+        NodeId("n-ghost"), "echo", "1.0.0", _ECHO_REVISION, {"text": "hi"}
+    )
+    assert not result.ok and result.error is not None
+    assert result.error.code == "unreachable"

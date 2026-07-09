@@ -163,9 +163,67 @@ for node in context.read_cluster():
 ```
 
 A complete reference provider lives at `examples/extensions/echo-provider/` in
-the repository. Invoking a capability (the generic call envelope) is the next
-slice of the provider surface; today's contract covers serving, advertising,
-withdrawing, and describing.
+the repository.
+
+## Calling a capability (`call_capability` / `handle_call`)
+
+The generic call verb completes the unary loop. On the provider side, an
+extension that also implements `handle_call` becomes callable:
+
+```python
+class MyExtension:
+    # ... capabilities() as above ...
+
+    async def handle_call(
+        self, context: ExtensionContext, call: CapabilityCall
+    ) -> dict[str, object]:
+        # call.payload has already been validated against your input_schema.
+        return {"text": call.payload["text"]}
+```
+
+On the caller side, any extension invokes a discovered capability through its
+context:
+
+```python
+descriptors = await context.describe_node(node.node_id)
+echo = next(d for d in descriptors if d.qualified_id == "echo@1.0.0")
+result = await context.call_capability(
+    node.node_id, echo.id, echo.version, descriptor_revision(echo),
+    {"text": "hello"},
+)
+if result.ok:
+    print(result.result)
+else:
+    print(result.error.code, result.error.message)  # typed, never parse prose
+```
+
+The call contract:
+
+- **Typed results, never exceptions.** Every failure arrives as a
+  machine-readable code on the result: `not_found`, `version_mismatch`,
+  `revision_mismatch` (the provider's descriptor drifted since you discovered
+  it; re-describe and retry), `invalid_payload`, `invalid_result`,
+  `payload_too_large`, `overloaded`, `timeout`, `provider_error`,
+  `unreachable`.
+- **Pinned contract.** A call carries the exact `id@version` plus the
+  descriptor revision digest from discovery, so discovery and invocation can
+  never silently disagree.
+- **Schema-validated both ways.** The payload is validated against the
+  descriptor's `input_schema` before your handler runs, and your result
+  against `output_schema` after. Validation never fetches remote schema
+  references.
+- **Bounded.** Calls have a deadline (default 30s), payloads and results are
+  capped at 1 MiB, and each node bounds concurrent in-flight provider calls;
+  excess calls are rejected as `overloaded` rather than queued. Handlers are
+  `async`: move CPU-heavy or blocking work off the event loop yourself (a
+  worker thread), or you will stall the API node the handler runs on.
+- **Direct and off the log.** Calls go node-to-node; the master is never in
+  the hot path and calls are never event-sourced. Calling your own node is an
+  in-process fast path with identical guards.
+
+Streaming capabilities (the `server_streaming` and richer I/O modes) are the
+next slice; a descriptor can declare them today but only unary calls are
+servable.
 
 ## Guarantees
 

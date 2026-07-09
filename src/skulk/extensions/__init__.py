@@ -7,6 +7,15 @@ contract and its invariants, and :mod:`skulk.extensions.loader` for
 discovery, version gating, and guarded dispatch.
 """
 
+from skulk.extensions.calls import (
+    DEFAULT_CALL_TIMEOUT_SECONDS,
+    MAX_CALL_PAYLOAD_BYTES,
+    CapabilityCall,
+    CapabilityError,
+    CapabilityErrorCode,
+    CapabilityResult,
+    call_failure,
+)
 from skulk.extensions.capabilities import (
     CapabilityDescriptor,
     CapabilityIoMode,
@@ -22,6 +31,8 @@ from skulk.extensions.telemetry import ClusterNodeView, snapshot_cluster
 from skulk.extensions.types import (
     AdvertiseCapability,
     BaseChatMiddleware,
+    CallCapability,
+    CapabilityCallHandler,
     CapabilityProvider,
     ChatMiddleware,
     ChatResponseSummary,
@@ -33,12 +44,21 @@ from skulk.extensions.types import (
     SupportsExtensionStartup,
     WithdrawCapability,
 )
+from skulk.extensions.validation import validate_against_schema
 
 __all__ = [
+    "DEFAULT_CALL_TIMEOUT_SECONDS",
     "ENTRY_POINT_GROUP",
+    "MAX_CALL_PAYLOAD_BYTES",
     "AdvertiseCapability",
     "BaseChatMiddleware",
+    "CallCapability",
+    "CapabilityCall",
+    "CapabilityCallHandler",
     "CapabilityDescriptor",
+    "CapabilityError",
+    "CapabilityErrorCode",
+    "CapabilityResult",
     "CapabilityIoMode",
     "CapabilityProvider",
     "ChatMiddleware",
@@ -52,8 +72,10 @@ __all__ = [
     "SkulkExtension",
     "SupportsExtensionStartup",
     "WithdrawCapability",
+    "call_failure",
     "descriptor_revision",
     "load_extensions",
     "resolve_skulk_version",
     "snapshot_cluster",
+    "validate_against_schema",
 ]

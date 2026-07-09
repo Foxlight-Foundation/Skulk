@@ -507,8 +507,14 @@ The contract is deliberately small (`src/skulk/extensions/`):
   `describe_node()` / `GET /v1/capabilities` (heavy, fetched). Providers also
   get an `on_start` startup hook, since a pure provider has no chat hook
   through which to reach the context. A reference provider lives at
-  `examples/extensions/echo-provider/`. The generic capability call (invoking
-  what a provider serves) is the next slice of this surface.
+  `examples/extensions/echo-provider/`. The generic capability call completes
+  the unary loop: a provider implementing `handle_call` is callable via
+  `call_capability(node, id, version, revision, payload)`. Calls are
+  node-addressed and direct (the master is never in the hot path; nothing is
+  event-sourced), pinned to the discovered descriptor revision, schema-validated
+  in both directions, and bounded (deadline, payload caps, per-node concurrency
+  bound), with every failure a typed machine-readable error. Streaming I/O modes
+  are the next slice.
 
 Three invariants shape the design. First, **a raising extension never breaks
 inference**: every extension call is guarded, an exception is logged loudly
