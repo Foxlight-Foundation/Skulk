@@ -33,6 +33,7 @@ from skulk.utils.info_gatherer.info_gatherer import (
     MacmonMetrics,
     MactopMetrics,
     MiscData,
+    NodeCapabilities,
     NodeDiskUsage,
     RdmaCtlStatus,
     StaticNodeInformation,
@@ -57,10 +58,14 @@ TELEMETRY_PLANE_INFO = (
     MactopMetrics,
     MacmonMetrics,
     LinuxGpuMetrics,
+    NodeCapabilities,
     NodeDiskUsage,
     MiscData,
     StaticNodeInformation,
     RdmaCtlStatus,
+    # Extension-advertised capability tags (fabric-citizenship): a plugin
+    # advertises what it offers so peers discover it, off the event log.
+    NodeCapabilities,
 )
 
 
@@ -91,6 +96,19 @@ class TelemetryView:
         self.node_disk: dict[NodeId, DiskUsage] = {}
         self.node_identities: dict[NodeId, NodeIdentity] = {}
         self.node_rdma_ctl: dict[NodeId, NodeRdmaCtlStatus] = {}
+        # Extension-advertised capability tags per node (fabric-citizenship).
+        # An extension on any node publishes what it offers (via the outbound
+        # `local_advertised_capabilities` set below); every node coalesces the
+        # readings here so a plugin can discover which peers offer which
+        # capability. Opaque free-form strings; Skulk core does not interpret them.
+        self.node_capabilities: dict[NodeId, frozenset[str]] = {}
+        # This node's OWN outbound capability set: the write half of the plane.
+        # It lives on the shared view (not in State) so the API-side extension
+        # surface can add to it and the worker-side gatherer can read it, without
+        # threading a new channel through Node construction. Mutated by
+        # `ExtensionContext.advertise_capability`; polled by the InfoGatherer's
+        # `_monitor_capabilities` and gossiped as `NodeCapabilities`.
+        self.local_advertised_capabilities: set[str] = set()
         # When this node last RECEIVED any telemetry from each peer. Telemetry
         # gossips last-write-wins every ~1s to every node, so this is a live,
         # cluster-wide liveness signal that (unlike State.last_seen) does not
@@ -116,7 +134,11 @@ class TelemetryView:
         self.node_disk.pop(node_id, None)
         self.node_identities.pop(node_id, None)
         self.node_rdma_ctl.pop(node_id, None)
+        self.node_capabilities.pop(node_id, None)
         self.node_last_telemetry.pop(node_id, None)
+        # local_advertised_capabilities is deliberately NOT pruned: it is this
+        # node's own outbound advertisement, not a peer reading, so a peer
+        # timing out must never clear what this node offers.
 
     def apply(self, message: NodeTelemetry) -> None:
         """Coalesce one telemetry message into the latest-value view."""
@@ -137,6 +159,8 @@ class TelemetryView:
             # AMD/Linux GPU collector: carries only the system profile (with its
             # accelerator block); node memory arrives separately via MemoryUsage.
             self.node_system[node_id] = info.system_profile
+        elif isinstance(info, NodeCapabilities):
+            self.node_capabilities[node_id] = info.capabilities
         elif isinstance(info, NodeDiskUsage):
             self.node_disk[node_id] = info.disk_usage
         elif isinstance(info, RdmaCtlStatus):

@@ -52,6 +52,7 @@ from skulk.utils.info_gatherer.info_gatherer import (
     MactopMetrics,
     MemoryUsage,
     MiscData,
+    NodeCapabilities,
     NodeConfig,
     NodeDiskUsage,
     NodeNetworkInterfaces,
@@ -410,6 +411,12 @@ def apply_node_gathered_info(event: NodeGatheredInfo, state: State) -> State:
             # TELEMETRY topic; a legacy event from an un-upgraded worker no-ops).
             pass
         case NodeConfig():
+            pass
+        case NodeCapabilities():
+            # Telemetry-plane only (fabric-citizenship): extension-advertised
+            # capability tags ride the TELEMETRY topic into the TelemetryView,
+            # never the event log. No-op here so the GatheredInfo match stays
+            # exhaustive; a stray log-path delivery is harmless.
             pass
         case MiscData():
             # Telemetry plane since #279 slice 3 (identity friendly-name).

@@ -36,6 +36,8 @@ def _context() -> ExtensionContext:
         node_id=NodeId("test-node"),
         skulk_version="1.3.1",
         embed_texts=_embed_stub,
+        read_cluster=lambda: (),
+        advertise_capability=lambda capability: None,  # noqa: ARG005
     )
 
 

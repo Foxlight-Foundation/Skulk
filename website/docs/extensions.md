@@ -51,6 +51,60 @@ the cluster's embedding serving (the equivalent of `POST /v1/embeddings`).
 `embed_texts` returns `None` when no embedding instance is available;
 extensions must degrade gracefully on `None`, never raise.
 
+### Reading the cluster (`read_cluster`)
+
+`ExtensionContext.read_cluster()` returns an immutable snapshot of the telemetry
+plane: one `ClusterNodeView` per node the local node currently sees, each with
+`node_id`, `friendly_name`, `backends`, `participation`, `skulk_version`,
+`accelerator_vendor`, `ram_total_bytes`, `last_telemetry` (its liveness signal),
+and `capabilities` (the tags peers have advertised; see below). This is how an
+extension discovers the cluster it belongs to instead of being blind to
+everything beyond the request in front of it.
+
+The call is cheap and side-effect free (an in-memory snapshot, no network I/O),
+so it is safe from an inline hook. It is a **read**: an extension can observe the
+cluster but never mutate telemetry. Every field beyond `node_id` may be `None`
+(or an empty tuple) when that reading has not yet arrived (telemetry is
+last-write-wins and partial), so treat missing values as "not known yet".
+
+```python
+for node in context.read_cluster():
+    if node.accelerator_vendor == "amd" and node.last_telemetry is not None:
+        ...  # e.g. prefer an AMD node for a GGUF-friendly task
+```
+
+### Advertising a capability (`advertise_capability`)
+
+`ExtensionContext.advertise_capability(tag)` is the write half of the telemetry
+plane: it publishes an opaque capability tag this node offers so peers discover
+it the same way native nodes advertise their backends. The tag then appears in
+every peer's `read_cluster()` snapshot under `ClusterNodeView.capabilities`.
+Tags are free-form strings owned by your extension (for example `"memory"` or
+`"embeddings:bge-m3"`); Skulk core neither interprets nor validates them.
+
+Advertising is additive and idempotent, so the natural place to call it is once,
+when the extension is constructed or on its first hook:
+
+```python
+context.advertise_capability("memory")
+# ... later, on any node in the cluster:
+peers_with_memory = [
+    node for node in context.read_cluster() if "memory" in node.capabilities
+]
+```
+
+Notes:
+
+- The tag is gossiped on the node's normal telemetry poll, so peers see it
+  within a second or two, not instantly. A node that advertised is discoverable
+  by nodes that join later (the plane re-gossips it).
+- Advertising is additive: there is no un-advertise in this release. A tag stops
+  being visible to peers only when the node leaves the cluster.
+- A node must run a worker to gossip its advertisement (the worker owns the
+  telemetry emit path). The mainstream node runs both an API and a worker, so
+  this is automatic; a rare API-only (`--no-worker`) node records the tag but
+  does not gossip it.
+
 ## Guarantees
 
 Three invariants shape the design, and Skulk's call sites enforce them:

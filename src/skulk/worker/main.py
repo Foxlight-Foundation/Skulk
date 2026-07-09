@@ -669,12 +669,38 @@ class Worker:
             )
         )
 
+    def _local_capabilities_provider(self) -> frozenset[str]:
+        """Snapshot the capabilities extensions have advertised on this node.
+
+        The outbound set lives on the shared :class:`TelemetryView` so the
+        API-side extension surface can mutate it (``advertise_capability``) and
+        this worker's info gatherer can read it, without threading a new channel
+        through :class:`Node` construction. Returns an immutable frozenset so the
+        gatherer cannot mutate the live set, and an empty set when no view is
+        wired (``--no-worker`` builds have no gatherer; a bare worker with no
+        view simply advertises nothing).
+
+        Returns:
+            The capability tags currently advertised by this node.
+        """
+        if self._telemetry_view is None:
+            return frozenset()
+        return frozenset(self._telemetry_view.local_advertised_capabilities)
+
     async def run(self):
         logger.info("Starting Worker")
         self._reconcile_staging_on_startup()
 
         info_send, info_recv = channel[GatheredInfo]()
-        info_gatherer: InfoGatherer = InfoGatherer(info_send)
+        info_gatherer: InfoGatherer = InfoGatherer(
+            info_send,
+            # Fabric-citizenship: the gatherer publishes whatever the API-side
+            # extension surface has advertised on the shared TelemetryView. The
+            # provider snapshots the outbound set each poll (empty -> nothing
+            # published), so a plugin advertising a capability rides the same
+            # telemetry emit path as native node readings.
+            capabilities_provider=self._local_capabilities_provider,
+        )
 
         try:
             async with self._tg as tg:

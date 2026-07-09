@@ -21,6 +21,7 @@ from skulk.utils.info_gatherer.info_gatherer import (
     LinuxGpuMetrics,
     MactopMetrics,
     MiscData,
+    NodeCapabilities,
     NodeDiskUsage,
     RdmaCtlStatus,
     StaticNodeInformation,
@@ -166,6 +167,63 @@ def test_view_merges_identity_from_two_readings() -> None:
     assert identity.chip_id == "M4"
 
 
+def test_node_capabilities_survive_topic_codec_round_trip() -> None:
+    # Extension-advertised capabilities gossip on the telemetry plane; the tag
+    # set (a frozenset) must round-trip through the strict codec or advertise
+    # is inert. The wire form is a JSON array; coercion restores the frozenset.
+    msg = NodeTelemetry(
+        node_id=NodeId("node-a"),
+        info=NodeCapabilities(capabilities=frozenset({"memory", "embeddings"})),
+    )
+    restored = TELEMETRY.deserialize(TELEMETRY.serialize(msg))
+    assert restored == msg
+    assert isinstance(restored.info, NodeCapabilities)
+    assert restored.info.capabilities == frozenset({"memory", "embeddings"})
+
+
+def test_node_capabilities_serialize_sorted() -> None:
+    # Serialization emits a sorted list so JSON encoding is deterministic and a
+    # frozenset (which JSON cannot encode) round-trips.
+    dumped = NodeCapabilities(
+        capabilities=frozenset({"c", "a", "b"})
+    ).model_dump(mode="json")
+    assert dumped == {"NodeCapabilities": {"capabilities": ["a", "b", "c"]}}
+
+
+def test_view_coalesces_capabilities_telemetry() -> None:
+    # A NodeCapabilities reading lands in view.node_capabilities, last-write-wins:
+    # the latest advertised set replaces the earlier one per node.
+    view = TelemetryView()
+    node = NodeId("node-a")
+    view.apply(
+        NodeTelemetry(node_id=node, info=NodeCapabilities(capabilities=frozenset({"memory"})))
+    )
+    assert view.node_capabilities[node] == frozenset({"memory"})
+    view.apply(
+        NodeTelemetry(
+            node_id=node,
+            info=NodeCapabilities(capabilities=frozenset({"memory", "search"})),
+        )
+    )
+    assert view.node_capabilities[node] == frozenset({"memory", "search"})
+    assert len(view.node_capabilities) == 1
+
+
+def test_prune_keeps_local_advertised_capabilities() -> None:
+    # prune() drops a peer's readings, but the node's OWN outbound advertisement
+    # set is not a peer reading — pruning a timed-out peer must never clear what
+    # this node offers.
+    view = TelemetryView()
+    peer = NodeId("node-b")
+    view.local_advertised_capabilities.add("memory")
+    view.apply(
+        NodeTelemetry(node_id=peer, info=NodeCapabilities(capabilities=frozenset({"search"})))
+    )
+    view.prune(peer)
+    assert peer not in view.node_capabilities
+    assert view.local_advertised_capabilities == {"memory"}
+
+
 def test_prune_drops_all_telemetry_for_a_node() -> None:
     # On NodeTimedOut the view must drop the node entirely (it has no natural
     # expiry); otherwise a dead node lingers as a ghost in /state and skews
@@ -206,6 +264,12 @@ def test_prune_drops_all_telemetry_for_a_node() -> None:
                 info=RdmaCtlStatus(enabled=False, interfaces_present=False),
             )
         )
+        view.apply(
+            NodeTelemetry(
+                node_id=node,
+                info=NodeCapabilities(capabilities=frozenset({"memory"})),
+            )
+        )
     view.prune(a)
     for m in (
         view.node_resources,
@@ -214,6 +278,7 @@ def test_prune_drops_all_telemetry_for_a_node() -> None:
         view.node_identities,
         view.node_disk,
         view.node_rdma_ctl,
+        view.node_capabilities,
     ):
         assert a not in m
         assert b in m  # only the pruned node is dropped
