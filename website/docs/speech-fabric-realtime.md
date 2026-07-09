@@ -9,7 +9,7 @@ sidebar_position: 31
 Skulk's first speech serving path is deliberately REST-shaped:
 
 - `POST /v1/audio/speech` turns text into an encoded audio response and can
-  stream chunked HTTP audio bytes with `stream=true`.
+  stream chunked HTTP MP3 bytes with `stream=true`.
 - `POST /v1/audio/transcriptions` turns an uploaded audio clip into text or
   transcript metadata.
 - The dashboard voice loop composes those endpoints with chat.
@@ -20,8 +20,8 @@ transforms, not dashboard-only helpers.
 
 ## Current Boundary
 
-The shipped speech runner is single-node. TTS can stream output chunks, while STT
-is still bounded and non-streaming. That is intentional:
+The shipped speech runner is single-node. TTS can stream MP3 output chunks,
+while STT is still bounded and non-streaming. That is intentional:
 
 - speech model placement is capability-gated by `mlx_audio` backend tags;
 - the API owns request validation, upload caps, and response formatting;

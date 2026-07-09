@@ -294,7 +294,7 @@ Speech serving is in a staged rollout. Phase 0 added `TextToSpeech`,
 `POST /v1/audio/speech`: the API validates a mounted TTS model, sends a
 `SpeechSynthesis` command through the master, the worker dispatches it to the
 single-node `mlx_audio` speech runner, and the runner emits `AudioChunk` output
-on the data plane. With `stream=true`, the API returns chunked HTTP audio bytes
+on the data plane. With `stream=true`, the API returns chunked HTTP MP3 bytes
 as those chunks arrive; without it, the API collects the chunks and returns one
 raw audio response. Non-streaming STT serving is exposed at
 `POST /v1/audio/transcriptions`: the API validates a mounted STT model, accepts a

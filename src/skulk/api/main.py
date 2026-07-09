@@ -366,6 +366,9 @@ _AUDIO_CONTENT_TYPES: Final[dict[AudioResponseFormat, str]] = {
     AudioResponseFormat.Ogg: "audio/ogg",
     AudioResponseFormat.Opus: "audio/opus",
 }
+_STREAMABLE_AUDIO_RESPONSE_FORMATS: Final[frozenset[AudioResponseFormat]] = frozenset(
+    {AudioResponseFormat.Mp3}
+)
 _MAX_AUDIO_UPLOAD_BYTES: Final[int] = 25 * 1024 * 1024
 _AUDIO_TRANSCRIPTION_FORMATS: Final[set[str]] = {
     "json",
@@ -6280,6 +6283,21 @@ class API:
         model_id, response_format = await self._validate_speech_synthesis_model(
             ModelId(request.model), request.response_format
         )
+        if request.stream and response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
+            supported = ", ".join(
+                audio_format.value
+                for audio_format in sorted(
+                    _STREAMABLE_AUDIO_RESPONSE_FORMATS,
+                    key=lambda audio_format: audio_format.value,
+                )
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"`stream=true` supports only {supported} responses for now; "
+                    f"requested {response_format.value}"
+                ),
+            )
         command = SpeechSynthesis(
             owner_node=self.node_id,
             task_params=SpeechSynthesisTaskParams(

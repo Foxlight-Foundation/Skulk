@@ -863,7 +863,7 @@ class AudioSpeechRequest(BaseModel):
     stream: bool = Field(
         default=False,
         description=(
-            "Whether to stream encoded audio bytes as they are produced by the "
+            "Whether to stream encoded MP3 bytes as they are produced by the "
             "mounted text-to-speech model."
         ),
     )

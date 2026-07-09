@@ -193,6 +193,44 @@ async def test_audio_speech_rejects_streaming_interval_without_stream_before_mod
 
 
 @pytest.mark.anyio
+async def test_audio_speech_rejects_non_mp3_streaming_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming TTS stays limited to response formats safe to concatenate."""
+
+    api = _build_api()
+    model_id = ModelId("mlx-community/kokoro-test")
+
+    async def _validate_model(
+        self: API, requested_model: ModelId, response_format: AudioResponseFormat | None
+    ) -> tuple[ModelId, AudioResponseFormat]:
+        assert self is api
+        assert requested_model == model_id
+        assert response_format == AudioResponseFormat.Wav
+        return model_id, AudioResponseFormat.Wav
+
+    async def _fail_if_called(*_args: object, **_kwargs: object) -> Never:
+        raise AssertionError("streaming request should fail before command send")
+
+    monkeypatch.setattr(API, "_validate_speech_synthesis_model", _validate_model)
+    monkeypatch.setattr(api, "_send", _fail_if_called)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.audio_speech(
+            AudioSpeechRequest(
+                model=str(model_id),
+                input="hello",
+                response_format=AudioResponseFormat.Wav,
+                stream=True,
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "mp3" in str(exc_info.value.detail)
+    assert "wav" in str(exc_info.value.detail)
+
+
+@pytest.mark.anyio
 async def test_audio_speech_rejects_reference_fields_before_model_validation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

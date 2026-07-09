@@ -169,6 +169,9 @@ def _result_audio_and_sample_rate(result: Any) -> tuple[Any | None, int | None]:
         sample_rate = result.get("sample_rate")
     elif isinstance(result, tuple) and len(result) >= 2:
         audio, sample_rate = result[0], result[1]
+    elif isinstance(result, np.ndarray):
+        audio = result
+        sample_rate = None
     else:
         audio = getattr(result, "audio", None)
         sample_rate = getattr(result, "sample_rate", None)
@@ -876,7 +879,10 @@ class Runner:
         filtered_kwargs = _filter_kwargs(generate, generate_kwargs)
 
         generated = generate(params.input_text, **filtered_kwargs)
-        if isinstance(generated, (str, bytes, dict)) or not isinstance(generated, Iterable):
+        if (
+            isinstance(generated, (str, bytes, dict, tuple, np.ndarray))
+            or not isinstance(generated, Iterable)
+        ):
             generated = (generated,)
         return generated
 
