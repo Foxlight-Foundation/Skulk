@@ -691,7 +691,9 @@ Behavior note:
 Fetches metadata and adds a custom model card to the cluster catalog. The
 `model_id` field is required. `gguf_file` is optional; when supplied it must be
 an exact repo-relative GGUF weight path and the card pins that quant instead of
-using Skulk's default GGUF preference.
+using Skulk's default GGUF preference. If the selected quant is split, Skulk
+stores its first shard as the backend entrypoint while downloading the full
+shard group.
 
 ### Per-node storage breakdown
 

@@ -1336,8 +1336,8 @@ class API:
             summary="Fetch and add a custom model card",
             description=(
                 "Add a custom model card to Skulk's model catalog so it becomes "
-                "searchable and launchable. An optional gguf_file pins one exact "
-                "weight file from a multi-quant GGUF repository."
+                "searchable and launchable. An optional gguf_file selects one exact "
+                "quant from a multi-quant GGUF repository."
             ),
         )(self.add_custom_model)
         self.app.delete(

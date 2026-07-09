@@ -712,8 +712,10 @@ class AddCustomModelParams(BaseModel):
     gguf_file: str | None = Field(
         default=None,
         description=(
-            "Exact repo-relative GGUF file to pin when adding a multi-quant "
-            "repository. Omit for non-GGUF repositories or default selection."
+            "Exact repo-relative GGUF file identifying the quant to select when "
+            "adding a multi-quant repository. Split weights are normalized to "
+            "their first shard for backend loading. Omit for non-GGUF "
+            "repositories or default selection."
         ),
     )
 

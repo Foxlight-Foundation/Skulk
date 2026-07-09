@@ -177,6 +177,22 @@ def test_requested_gguf_must_exist_in_repository() -> None:
         )
 
 
+def test_requested_sharded_gguf_uses_first_shard_as_entrypoint() -> None:
+    files = [
+        ("weights/model-IQ3_XXS-00001-of-00002.gguf", 100),
+        ("weights/model-IQ3_XXS-00002-of-00002.gguf", 120),
+        ("weights/model-Q4_K_M.gguf", 200),
+    ]
+
+    assert (
+        select_requested_gguf(
+            "weights/model-IQ3_XXS-00002-of-00002.gguf",
+            files,
+        )
+        == "weights/model-IQ3_XXS-00001-of-00002.gguf"
+    )
+
+
 async def test_fetch_gguf_card_reads_header_when_no_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

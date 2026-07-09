@@ -1235,14 +1235,15 @@ def select_requested_gguf(
     requested: str,
     gguf_files: "list[tuple[str, int]]",
 ) -> str:
-    """Return an exact requested GGUF path after verifying repository membership.
+    """Validate a requested GGUF path and return its loadable entrypoint.
 
     Args:
         requested: Repo-relative GGUF path supplied by the caller.
         gguf_files: Weight-file inventory returned by :func:`gguf_weight_siblings`.
 
     Returns:
-        The exact requested path from the repository inventory.
+        The requested path for a single-file quant, or the first file in the
+        requested shard group for split weights.
 
     Raises:
         ValueError: The requested path is not one of the repository's GGUF weights.
@@ -1250,7 +1251,16 @@ def select_requested_gguf(
     available = {name for name, _ in gguf_files}
     if requested not in available:
         raise ValueError(f"Requested GGUF file {requested!r} was not found in the repo")
-    return requested
+    requested_group = _gguf_shard_base(requested)
+    if requested_group is None:
+        return requested
+
+    # Backends open the first shard and discover the remaining files from it.
+    # Preserve the selected quant group while normalizing a pasted later shard
+    # to the same entrypoint used by automatic GGUF selection.
+    return min(
+        name for name in available if _gguf_shard_base(name) == requested_group
+    )
 
 
 # Glob for the multimodal projector a vision GGUF repo ships alongside the LM
