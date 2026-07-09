@@ -129,6 +129,31 @@ class CapabilityDescriptor(BaseModel):
         return value
 
     @model_validator(mode="after")
+    def _validate_schemas_are_json(self) -> "CapabilityDescriptor":
+        # Schema dicts are published verbatim over /v1/capabilities and hashed
+        # by descriptor_revision(); a non-JSON value inside (set, bytes, NaN)
+        # would surface later as a 500 on the discovery endpoint instead of a
+        # clean validation error at descriptor construction. Fail here.
+        candidates: dict[str, dict[str, object] | dict[str, str] | None] = {
+            "input_schema": self.input_schema,
+            "output_schema": self.output_schema,
+            "input_chunk_schema": self.input_chunk_schema,
+            "output_chunk_schema": self.output_chunk_schema,
+            "annotations": self.annotations,
+        }
+        for field_name, value in candidates.items():
+            if value is None:
+                continue
+            try:
+                json.dumps(value, allow_nan=False)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{field_name} must be JSON-serializable "
+                    f"(no sets, bytes, NaN/Infinity, or custom objects): {exc}"
+                ) from exc
+        return self
+
+    @model_validator(mode="after")
     def _validate_chunk_schemas_match_io_mode(self) -> "CapabilityDescriptor":
         # The chunk schemas ARE the streaming contract; a streaming mode
         # without them is undiscoverable, and chunk schemas on a unary call

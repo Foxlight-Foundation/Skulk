@@ -212,3 +212,13 @@ async def test_state_merge_surfaces_node_capabilities() -> None:
     payload = await api.get_cluster_state()
     # Only the live node appears; the dead node's tags are filtered out.
     assert payload["nodeCapabilities"] == {"n-peer": ["memory", "tts"]}
+
+
+async def test_list_node_capabilities_blank_node_id_means_local() -> None:
+    # A blank or whitespace-padded node_id describes this node rather than
+    # proxying to a literal empty peer id.
+    api = _build_api(TelemetryView(), extensions=LoadedExtensions([_ProviderExtension()]))
+    for raw in ("", "   "):
+        payload = await api.list_node_capabilities(node_id=raw)
+        assert payload["node_id"] == "api-node"
+        assert len(cast("list[object]", payload["capabilities"])) == 1

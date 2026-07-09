@@ -1628,10 +1628,10 @@ class API:
                 "This is the heavy half of capability discovery; the light "
                 "half is the capability tag gossiped on the telemetry plane "
                 "(surfaced per node as nodeCapabilities in GET /state). "
-                "Pass ?node_id=<peer> to describe a reachable peer instead "
-                "of this node (an empty list when the peer is unreachable). "
-                "An empty list otherwise means no provider extension is "
-                "installed."
+                "Pass the node_id query parameter to describe a reachable "
+                "peer instead of this node (an empty list when the peer is "
+                "unreachable). An empty list otherwise means no provider "
+                "extension is installed."
             ),
         )(self.list_node_capabilities)
         self.app.get(
@@ -2962,7 +2962,10 @@ class API:
             ``{"node_id": ..., "capabilities": [...], "revisions": {...}}``
             where ``revisions`` maps ``id@version`` to the revision digest.
         """
-        if node_id is None or node_id == str(self.node_id):
+        # A blank or whitespace-padded node_id means "this node", not a
+        # literal peer id that would always proxy to nothing.
+        requested = node_id.strip() if node_id is not None else None
+        if not requested or requested == str(self.node_id):
             descriptors = (
                 self._extensions.capability_descriptors
                 if self._extensions is not None
@@ -2970,7 +2973,7 @@ class API:
             )
             described: NodeId = self.node_id
         else:
-            described = NodeId(node_id)
+            described = NodeId(requested)
             descriptors = await self._describe_node_capabilities(described)
         return {
             "node_id": str(described),
@@ -3019,12 +3022,17 @@ class API:
             async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
                 response = await client.get(f"{base_url}/v1/capabilities")
                 response.raise_for_status()
-                payload = cast("dict[str, object]", response.json())
+                payload_raw: object = response.json()
         except (httpx.HTTPError, ValueError) as exc:
             logger.warning(
                 f"describe_node: peer {node_id} capabilities fetch failed: {exc}"
             )
             return ()
+        # A peer can return any JSON shape; a non-object payload degrades to
+        # "no capabilities" rather than violating the never-raises contract.
+        if not isinstance(payload_raw, dict):
+            return ()
+        payload = cast("dict[str, object]", payload_raw)
         raw_descriptors = payload.get("capabilities")
         if not isinstance(raw_descriptors, list):
             return ()

@@ -129,20 +129,22 @@ A descriptor carries:
   `client_streaming`, or `bidirectional`, with chunk schemas for the streaming
   modes.
 
-To become a provider, implement two extra methods on your extension:
+To become a provider, implement `capabilities()` on your extension; the
+`on_start` startup hook is optional and independent (any extension can use it):
 
 ```python
 class MyExtension:
     # ... name, skulk_requires, chat_middleware() as usual ...
 
     def capabilities(self) -> list[CapabilityDescriptor]:
+        # This method alone makes the extension a provider.
         return [MY_DESCRIPTOR]
 
     def on_start(self, context: ExtensionContext) -> None:
-        # Startup registration with the live context; runs once at node
-        # startup. Must be fast; heavy init belongs in background work you
-        # own. A pure provider has no chat hook, so this is how it reaches
-        # the context without waiting for a chat request.
+        # Optional: startup registration with the live context; runs once at
+        # node startup. Must be fast; heavy init belongs in background work
+        # you own. A pure provider has no chat hook, so this is how it
+        # reaches the context without waiting for a chat request.
         ...
 ```
 

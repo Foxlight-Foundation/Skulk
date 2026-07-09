@@ -99,3 +99,15 @@ def test_descriptor_round_trips_json() -> None:
     restored = CapabilityDescriptor.model_validate(descriptor.model_dump(mode="json"))
     assert restored == descriptor
     assert descriptor_revision(restored) == descriptor_revision(descriptor)
+
+
+def test_descriptor_rejects_non_json_schema_values() -> None:
+    # A set/bytes/NaN inside a schema would otherwise surface later as a 500
+    # on /v1/capabilities or a crash in descriptor_revision; it must fail at
+    # construction instead.
+    with pytest.raises(ValidationError):
+        _descriptor(input_schema={"enum": {"a", "b"}})  # set
+    with pytest.raises(ValidationError):
+        _descriptor(output_schema={"default": b"raw"})  # bytes
+    with pytest.raises(ValidationError):
+        _descriptor(input_schema={"maximum": float("nan")})  # NaN
