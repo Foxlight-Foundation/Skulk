@@ -6,6 +6,7 @@ from skulk.extensions.telemetry import ClusterNodeView, snapshot_cluster
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.profiling import (
     AcceleratorMetrics,
+    AcceleratorVendor,
     MemoryUsage,
     NodeIdentity,
     NodeResources,
@@ -14,7 +15,9 @@ from skulk.shared.types.profiling import (
 from skulk.shared.types.telemetry import TelemetryView
 
 
-def _full_node(view: TelemetryView, node_id: NodeId, name: str, vendor: str) -> None:
+def _full_node(
+    view: TelemetryView, node_id: NodeId, name: str, vendor: AcceleratorVendor
+) -> None:
     view.node_resources[node_id] = NodeResources(
         backends=frozenset({"mlx", "mlx-metal"}), participation="full"
     )
@@ -23,7 +26,7 @@ def _full_node(view: TelemetryView, node_id: NodeId, name: str, vendor: str) -> 
         ram_total=16_000_000_000, ram_available=8_000_000_000, swap_total=0, swap_available=0
     )
     view.node_system[node_id] = SystemPerformanceProfile(
-        accelerator=AcceleratorMetrics(vendor=vendor)  # type: ignore[arg-type]
+        accelerator=AcceleratorMetrics(vendor=vendor)
     )
     view.node_last_telemetry[node_id] = datetime(2026, 7, 9, 6, 0, tzinfo=timezone.utc)
 
@@ -77,6 +80,23 @@ def test_snapshot_tolerates_partial_telemetry() -> None:
     assert node.accelerator_vendor is None
     assert node.ram_total_bytes is None
     assert node.last_telemetry is None
+
+
+def test_snapshot_normalizes_partial_identity_sentinels_to_none() -> None:
+    """A half-populated NodeIdentity surfaces its unset "Unknown" fields as None.
+
+    NodeIdentity seeds absent subfields with the string "Unknown" during a merge
+    (for example a friendly-name reading arrives before the version reading), so
+    the snapshot must normalize those to None to keep the read_cluster contract
+    that absent readings are None, not a fake value.
+    """
+    view = TelemetryView()
+    # friendly_name known, skulk_version still at its "Unknown" default.
+    view.node_identities[NodeId("n-half")] = NodeIdentity(friendly_name="kite2")
+
+    node = snapshot_cluster(view)[0]
+    assert node.friendly_name == "kite2"
+    assert node.skulk_version is None  # normalized from "Unknown"
 
 
 def test_snapshot_empty_view() -> None:

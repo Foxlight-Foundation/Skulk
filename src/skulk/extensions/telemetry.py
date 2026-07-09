@@ -21,14 +21,25 @@ from __future__ import annotations
 from datetime import datetime
 from typing import final
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.telemetry import TelemetryView
 
+# Identity subfields default to this sentinel in ``NodeIdentity`` before their
+# reading has actually arrived. The snapshot normalizes it to ``None`` so an
+# extension can tell "not known yet" from a real value (the read_cluster
+# contract that absent readings are ``None``).
+_UNKNOWN = "Unknown"
+
+
+def _known(value: str | None) -> str | None:
+    """Return ``value``, or ``None`` if it is the not-yet-populated sentinel."""
+    return None if value is None or value == _UNKNOWN else value
+
 
 @final
-class ClusterNodeView(BaseModel, frozen=True):
+class ClusterNodeView(BaseModel):
     """Immutable snapshot of one node's telemetry, handed to extensions.
 
     Every field beyond ``node_id`` is optional because telemetry is
@@ -52,6 +63,11 @@ class ClusterNodeView(BaseModel, frozen=True):
         last_telemetry: When this node last received any telemetry from the
             peer (its liveness signal), or ``None``.
     """
+
+    # Strict + frozen: this is an extension-facing contract type, so reject any
+    # silent coercion and stay immutable. Not a wire type (never serialized over
+    # the network), so no camelCase aliasing.
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     node_id: NodeId
     friendly_name: str | None
@@ -94,10 +110,12 @@ def snapshot_cluster(view: TelemetryView) -> tuple[ClusterNodeView, ...]:
         snapshots.append(
             ClusterNodeView(
                 node_id=node_id,
-                friendly_name=identity.friendly_name if identity is not None else None,
+                # `NodeIdentity` seeds absent subfields with "Unknown" during a
+                # partial merge, so normalize those to None to keep the contract.
+                friendly_name=_known(identity.friendly_name) if identity is not None else None,
                 backends=tuple(sorted(resources.backends)) if resources is not None else (),
                 participation=resources.participation if resources is not None else None,
-                skulk_version=identity.skulk_version if identity is not None else None,
+                skulk_version=_known(identity.skulk_version) if identity is not None else None,
                 accelerator_vendor=accelerator.vendor if accelerator is not None else None,
                 ram_total_bytes=memory.ram_total.in_bytes if memory is not None else None,
                 last_telemetry=view.node_last_telemetry.get(node_id),
