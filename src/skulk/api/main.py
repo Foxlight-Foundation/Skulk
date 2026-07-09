@@ -6476,8 +6476,18 @@ class API:
                 with anyio.move_on_after(_STREAM_IDLE_TIMEOUT_SECONDS) as scope:
                     try:
                         chunk = await chunks.receive()
-                    except (EndOfStream, ClosedResourceError):
-                        break
+                    except (EndOfStream, ClosedResourceError) as exc:
+                        if not self._command_task_is_terminal(command_id):
+                            await self._cancel_audio_speech_command(command_id)
+                        detail = (
+                            "Speech synthesis stream closed before receiving "
+                            "a terminal chunk"
+                            if audio_parts
+                            else "No speech audio response received"
+                        )
+                        raise HTTPException(
+                            status_code=500, detail=detail
+                        ) from exc
                 if scope.cancelled_caught:
                     if self._command_task_is_terminal(command_id):
                         detail = (
@@ -6504,11 +6514,23 @@ class API:
                 response_format = chunk.format
                 if chunk.finish_reason is not None:
                     break
-        if not audio_parts or response_format is None:
+        if not audio_parts:
             raise HTTPException(
                 status_code=500, detail="No speech audio response received"
             )
         return b"".join(audio_parts), response_format
+
+    async def _cancel_audio_speech_command(self, command_id: CommandId) -> None:
+        """Cancel a speech synthesis command that cannot finish cleanly."""
+
+        self._cancelled_command_ids.add(command_id)
+        with anyio.CancelScope(shield=True):
+            await self.command_sender.send(
+                ForwarderCommand(
+                    origin=self._system_id,
+                    command=TaskCancelled(cancelled_command_id=command_id),
+                )
+            )
 
     async def _receive_initial_audio_speech_chunk(
         self,
@@ -6577,8 +6599,18 @@ class API:
                     with anyio.move_on_after(delay) as scope:
                         try:
                             chunk = await chunks.receive()
-                        except (EndOfStream, ClosedResourceError):
-                            break
+                        except (EndOfStream, ClosedResourceError) as exc:
+                            if self._command_task_is_terminal(command_id):
+                                if received_audio:
+                                    return
+                                raise RuntimeError(
+                                    "No speech audio response received"
+                                ) from exc
+                            await self._cancel_audio_speech_command(command_id)
+                            raise RuntimeError(
+                                "Speech stream closed before receiving "
+                                "a terminal chunk"
+                            ) from exc
                     if scope.cancelled_caught:
                         task_done = self._command_task_is_terminal(command_id)
                         logger.warning(
@@ -6593,16 +6625,7 @@ class API:
                             )
                         )
                         if not task_done:
-                            self._cancelled_command_ids.add(command_id)
-                            with anyio.CancelScope(shield=True):
-                                await self.command_sender.send(
-                                    ForwarderCommand(
-                                        origin=self._system_id,
-                                        command=TaskCancelled(
-                                            cancelled_command_id=command_id
-                                        ),
-                                    )
-                                )
+                            await self._cancel_audio_speech_command(command_id)
                         else:
                             return
                         raise RuntimeError(

@@ -31,6 +31,7 @@ from skulk.shared.types.commands import (
     ForwarderCommand,
     ForwarderDownloadCommand,
     SpeechSynthesis,
+    TaskCancelled,
 )
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import IndexedEvent
@@ -225,6 +226,19 @@ async def test_audio_speech_streams_audio_chunks_and_sends_command(
                     total_chunks=None,
                     format=AudioResponseFormat.Mp3,
                     sample_rate=24000,
+                    is_partial=True,
+                    finish_reason=None,
+                )
+            )
+            await api._audio_speech_queues[command.command_id].send(
+                AudioChunk(
+                    model=model_id,
+                    data="",
+                    chunk_index=2,
+                    total_chunks=None,
+                    format=AudioResponseFormat.Mp3,
+                    sample_rate=24000,
+                    is_partial=False,
                     finish_reason="stop",
                 )
             )
@@ -552,6 +566,43 @@ async def test_audio_speech_stream_finishes_cleanly_for_terminal_idle(
 
 
 @pytest.mark.anyio
+async def test_audio_speech_stream_errors_when_channel_closes_before_terminal() -> None:
+    """A closed data-plane stream before a terminal chunk must not look complete."""
+
+    api = _build_api()
+    cancel_sender, cancel_receiver = channel[ForwarderCommand]()
+    api.command_sender = cancel_sender
+    command_id = CommandId("speech-stream-closed-before-terminal")
+    sender, receiver = channel[AudioChunk | ErrorChunk]()
+    api._audio_speech_queues[command_id] = sender
+    await sender.aclose()
+    first_chunk = AudioChunk(
+        model=ModelId("mlx-community/fish-audio-s2-pro-8bit"),
+        data=base64.b64encode(b"partial").decode("ascii"),
+        chunk_index=0,
+        total_chunks=None,
+        format=AudioResponseFormat.Mp3,
+        sample_rate=44100,
+        is_partial=True,
+        finish_reason=None,
+    )
+    chunks: list[bytes] = []
+
+    with pytest.raises(RuntimeError) as exc_info:
+        async for chunk in api._stream_audio_speech_chunks(
+            command_id, receiver, first_chunk
+        ):
+            chunks.append(chunk)
+
+    assert chunks == [b"partial"]
+    assert "terminal chunk" in str(exc_info.value)
+    forwarded = await cancel_receiver.receive()
+    assert isinstance(forwarded.command, TaskCancelled)
+    assert forwarded.command.cancelled_command_id == command_id
+    assert command_id not in api._audio_speech_queues
+
+
+@pytest.mark.anyio
 async def test_audio_speech_rejects_streaming_interval_without_stream_before_model_validation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -758,6 +809,39 @@ async def test_audio_speech_collect_terminal_before_any_chunk_reports_no_audio(
 
     assert exc_info.value.status_code == 500
     assert "no audio response" in str(exc_info.value.detail)
+
+
+@pytest.mark.anyio
+async def test_audio_speech_collect_errors_when_channel_closes_before_terminal() -> None:
+    """Collected TTS responses require a terminal audio chunk."""
+
+    api = _build_api()
+    cancel_sender, cancel_receiver = channel[ForwarderCommand]()
+    api.command_sender = cancel_sender
+    command_id = CommandId("speech-collect-closed-before-terminal")
+    sender, receiver = channel[AudioChunk | ErrorChunk]()
+    await sender.send(
+        AudioChunk(
+            model=ModelId("mlx-community/fish-audio-s2-pro-8bit"),
+            data=base64.b64encode(b"partial").decode("ascii"),
+            chunk_index=0,
+            total_chunks=None,
+            format=AudioResponseFormat.Mp3,
+            sample_rate=44100,
+            is_partial=True,
+            finish_reason=None,
+        )
+    )
+    await sender.aclose()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api._collect_audio_speech_chunks(command_id, receiver)
+
+    assert exc_info.value.status_code == 500
+    assert "terminal chunk" in str(exc_info.value.detail)
+    forwarded = await cancel_receiver.receive()
+    assert isinstance(forwarded.command, TaskCancelled)
+    assert forwarded.command.cancelled_command_id == command_id
 
 
 @pytest.mark.anyio
