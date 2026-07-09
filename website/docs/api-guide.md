@@ -533,9 +533,9 @@ requests `mp3` instead of the model card's non-streaming default. Skulk returns
 `audio/mpeg` with chunked HTTP bytes. This is TTS output streaming, not a
 realtime session: the request text is still a complete bounded input,
 cancellation closes the command stream, and each chunk follows the mounted
-model's generation cadence. Cards that declare MP3 output but
-`supports_streaming = false` can still serve collected MP3 responses, but
-`stream=true` returns **400 Bad Request**.
+model's generation cadence. The bundled TTS cards currently advertise WAV output
+only; MP3 support should be enabled on a card only when the runtime can provide
+the required encoder dependency.
 
 The speech endpoint is still text-only. `streaming_interval` without
 `stream=true`, `reference_audio`, and `reference_text` return **400 Bad

@@ -6495,6 +6495,15 @@ class API:
                     status_code=500,
                     detail=f"Speech synthesis failed: {chunk.error_message}",
                 )
+            chunk_data = _decode_audio_chunk_data(chunk)
+            if chunk.finish_reason is not None and len(chunk_data) == 0:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        "Speech synthesis completed, but no audio response "
+                        "was received"
+                    ),
+                )
             return chunk
 
     async def _stream_audio_speech_chunks(
@@ -6504,11 +6513,16 @@ class API:
         first_chunk: AudioChunk | None = None,
     ) -> AsyncGenerator[bytes, None]:
         """Yield TTS audio bytes as chunks arrive from the data plane."""
-        received_audio = first_chunk is not None
+        received_audio = False
         try:
             if first_chunk is not None:
-                yield _decode_audio_chunk_data(first_chunk)
+                first_chunk_data = _decode_audio_chunk_data(first_chunk)
+                if first_chunk_data:
+                    received_audio = True
+                    yield first_chunk_data
                 if first_chunk.finish_reason is not None:
+                    if not received_audio:
+                        raise RuntimeError("No speech audio response received")
                     return
             with recv as chunks:
                 while True:
@@ -6553,9 +6567,13 @@ class API:
                         raise RuntimeError(
                             f"Speech synthesis failed: {chunk.error_message}"
                         )
-                    received_audio = True
-                    yield _decode_audio_chunk_data(chunk)
+                    chunk_data = _decode_audio_chunk_data(chunk)
+                    if chunk_data:
+                        received_audio = True
+                        yield chunk_data
                     if chunk.finish_reason is not None:
+                        if not received_audio:
+                            raise RuntimeError("No speech audio response received")
                         return
             if not received_audio:
                 raise RuntimeError("No speech audio response received")

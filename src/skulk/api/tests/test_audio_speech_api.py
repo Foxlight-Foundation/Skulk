@@ -390,6 +390,34 @@ async def test_audio_speech_stream_errors_when_terminal_before_first_chunk(
 
 
 @pytest.mark.anyio
+async def test_audio_speech_stream_rejects_empty_initial_terminal_chunk() -> None:
+    """A dropped real audio chunk plus terminal marker should not return 200."""
+
+    api = _build_api()
+    command_id = CommandId("speech-empty-initial-terminal")
+    sender, receiver = channel[AudioChunk | ErrorChunk]()
+    api._audio_speech_queues[command_id] = sender
+    await sender.send(
+        AudioChunk(
+            model=ModelId("mlx-community/fish-audio-s2-pro-8bit"),
+            data="",
+            chunk_index=0,
+            total_chunks=None,
+            format=AudioResponseFormat.Mp3,
+            sample_rate=44100,
+            is_partial=False,
+            finish_reason="stop",
+        )
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api._receive_initial_audio_speech_chunk(command_id, receiver)
+
+    assert exc_info.value.status_code == 500
+    assert "no audio response" in str(exc_info.value.detail)
+
+
+@pytest.mark.anyio
 async def test_audio_speech_stream_finishes_cleanly_for_terminal_idle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
