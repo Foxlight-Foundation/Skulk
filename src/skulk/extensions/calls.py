@@ -142,6 +142,8 @@ class CapabilityResult(BaseModel):
         # callers' control flow guesswork.
         if self.ok and self.error is not None:
             raise ValueError("ok=True must not carry an error")
+        if self.ok and self.result is None:
+            raise ValueError("ok=True must carry a result")
         if not self.ok and self.error is None:
             raise ValueError("ok=False must carry an error")
         if not self.ok and self.result is not None:

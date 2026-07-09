@@ -1227,11 +1227,14 @@ the `descriptor_revision` pinned at discovery, `caller_node`, `target_node`,
 `timeout_seconds`, and the opaque `payload`. The payload is validated against
 the descriptor's input schema before the provider runs, the result against
 its output schema after, and payloads are capped at 1 MiB in each direction.
-The response is always a typed result envelope (`call_id`, `ok`, `result`,
-`error`); failures arrive as machine-readable codes (`not_found`,
-`version_mismatch`, `revision_mismatch`, `invalid_payload`, `invalid_result`,
-`payload_too_large`, `overloaded`, `timeout`, `provider_error`) with HTTP 200,
-so callers switch on `error.code` rather than transport status. Extensions
+A syntactically valid envelope always gets HTTP 200 with a typed result
+(`call_id`, `ok`, `result`, `error`); failures arrive as machine-readable
+codes (`not_found`, `version_mismatch`, `revision_mismatch`,
+`invalid_payload`, `invalid_result`, `payload_too_large`, `overloaded`,
+`timeout`, `provider_error`), so callers switch on `error.code` rather than
+transport status. A body that does not parse as the envelope at all
+(malformed JSON, missing fields, out-of-range values) gets the standard 422,
+since there is no call id to correlate a typed result to. Extensions
 normally use this through their context's `call_capability` rather than
 calling the endpoint directly.
 
