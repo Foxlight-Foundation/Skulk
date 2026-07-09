@@ -3275,7 +3275,12 @@ class API:
             )
         if node_id == self.node_id:
             return await self._dispatch_capability_call(call)
-        base_url = await self._peer_api_url_for(node_id)
+        # The reachability lookup honors the call's deadline too: probing a
+        # stale or blackholed target must not stall a short-deadline call
+        # beyond what the caller asked for.
+        base_url: str | None = None
+        with anyio.move_on_after(call.timeout_seconds):
+            base_url = await self._peer_api_url_for(node_id)
         if base_url is None:
             return call_failure(
                 call.call_id, "unreachable", f"node {node_id} is not reachable"
