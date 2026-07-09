@@ -395,7 +395,7 @@ async def test_caller_budget_spans_lookup_and_provider(
     elapsed = anyio.current_time() - started
     assert not result.ok and result.error is not None
     assert result.error.code == "timeout"
-    assert "deadline exhausted" in result.error.message
+    assert "no budget remains" in result.error.message
     # The whole call stayed near the requested budget, not lookup + provider.
     assert elapsed < 1.5
 
