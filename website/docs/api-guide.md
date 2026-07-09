@@ -883,8 +883,13 @@ The dashboard uses `tags` for compact badges and `capabilities` for filtering
 and richer tooltips. The `audio` and `resolved_capabilities.*speech*` fields
 identify speech-capable models; `supports_speech_synthesis` models can serve
 non-streaming `/v1/audio/speech` when mounted, and `supports_transcription`
-models can serve non-streaming `/v1/audio/transcriptions`. Speech translation
-metadata remains reserved for later audio endpoints. The three `runtime.*_repo` fields name a model's
+models can serve non-streaming `/v1/audio/transcriptions`. The chat dashboard
+uses the same metadata to show TTS playback and STT microphone controls only
+for ready mounted speech models. Browser microphone capture is a browser
+security feature, so STT recording controls require a secure origin such as
+HTTPS or localhost even though the API endpoint itself is ordinary multipart
+HTTP. Speech translation metadata remains reserved for later audio endpoints.
+The three `runtime.*_repo` fields name a model's
 speculative-decoding companions (a draft model or an MTP-head sidecar). Those
 companion repos are downloaded and loaded automatically with their parent and
 are not independently placeable, so the dashboard marks any store entry matching

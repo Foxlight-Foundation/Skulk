@@ -52,6 +52,7 @@
   "chat.form.voiceErrors.microphoneDenied": "Microphone permission denied.",
   "chat.form.voiceErrors.microphoneUnavailable": "Microphone unavailable.",
   "chat.form.voiceErrors.recordingFailed": "Recording failed.",
+  "chat.form.voiceErrors.secureContextRequired": "Microphone requires HTTPS or localhost.",
   "chat.form.voiceErrors.transcriptionFailed": "Transcription failed.",
   "chat.form.voiceErrors.unsupportedRecording": "Browser audio recording is unavailable.",
   "chat.form.voiceName": "Voice",
