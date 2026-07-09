@@ -222,6 +222,45 @@ async def test_audio_speech_streaming_defaults_to_mp3(
 
 
 @pytest.mark.anyio
+async def test_audio_speech_stream_surfaces_initial_runner_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runner error before first audio should still become a normal HTTP error."""
+
+    api = _build_api()
+    model_id = ModelId("mlx-community/fish-audio-s2-pro-8bit")
+    sent_commands: list[SpeechSynthesis] = []
+
+    async def _validate_model(
+        self: API, requested_model: ModelId, response_format: AudioResponseFormat | None
+    ) -> tuple[ModelId, AudioResponseFormat]:
+        assert self is api
+        assert requested_model == model_id
+        assert response_format == AudioResponseFormat.Mp3
+        return model_id, AudioResponseFormat.Mp3
+
+    async def _send(command: object) -> None:
+        if isinstance(command, SpeechSynthesis):
+            sent_commands.append(command)
+            await api._audio_speech_queues[command.command_id].send(
+                ErrorChunk(model=model_id, error_message="voice not found")
+            )
+
+    monkeypatch.setattr(API, "_validate_speech_synthesis_model", _validate_model)
+    monkeypatch.setattr(api, "_send", _send)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.audio_speech(
+            AudioSpeechRequest(model=str(model_id), input="hello", stream=True)
+        )
+
+    assert exc_info.value.status_code == 500
+    assert "voice not found" in str(exc_info.value.detail)
+    assert len(sent_commands) == 1
+    assert sent_commands[0].command_id not in api._audio_speech_queues
+
+
+@pytest.mark.anyio
 async def test_audio_speech_stream_finishes_cleanly_for_terminal_idle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

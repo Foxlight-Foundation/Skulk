@@ -6337,8 +6337,38 @@ class API:
             raise
 
         if request.stream:
+            try:
+                first_chunk = await self._receive_initial_audio_speech_chunk(
+                    command_id, recv
+                )
+            except anyio.get_cancelled_exc_class():
+                cancel_command = TaskCancelled(cancelled_command_id=command_id)
+                self._cancelled_command_ids.add(command_id)
+                with anyio.CancelScope(shield=True):
+                    await self.command_sender.send(
+                        ForwarderCommand(
+                            origin=self._system_id, command=cancel_command
+                        )
+                    )
+                await self._finalize_command_stream(
+                    command_id,
+                    cast(
+                        dict[CommandId, Sender[object]],
+                        self._audio_speech_queues,
+                    ),
+                )
+                raise
+            except HTTPException:
+                await self._finalize_command_stream(
+                    command_id,
+                    cast(
+                        dict[CommandId, Sender[object]],
+                        self._audio_speech_queues,
+                    ),
+                )
+                raise
             return StreamingResponse(
-                self._stream_audio_speech_chunks(command_id, recv),
+                self._stream_audio_speech_chunks(command_id, recv, first_chunk),
                 media_type=_AUDIO_CONTENT_TYPES[response_format],
                 headers={
                     "Content-Disposition": (
@@ -6415,14 +6445,38 @@ class API:
             )
         return b"".join(audio_parts), response_format
 
+    async def _receive_initial_audio_speech_chunk(
+        self,
+        command_id: CommandId,
+        recv: Receiver[AudioChunk | ErrorChunk],
+    ) -> AudioChunk:
+        """Receive the first TTS stream chunk before response headers commit."""
+        try:
+            chunk = await recv.receive()
+        except (EndOfStream, ClosedResourceError) as exc:
+            raise HTTPException(
+                status_code=500, detail="No speech audio response received"
+            ) from exc
+        if isinstance(chunk, ErrorChunk):
+            raise HTTPException(
+                status_code=500,
+                detail=f"Speech synthesis failed: {chunk.error_message}",
+            )
+        return chunk
+
     async def _stream_audio_speech_chunks(
         self,
         command_id: CommandId,
         recv: Receiver[AudioChunk | ErrorChunk],
+        first_chunk: AudioChunk | None = None,
     ) -> AsyncGenerator[bytes, None]:
         """Yield TTS audio bytes as chunks arrive from the data plane."""
-        received_audio = False
+        received_audio = first_chunk is not None
         try:
+            if first_chunk is not None:
+                yield _decode_audio_chunk_data(first_chunk)
+                if first_chunk.finish_reason is not None:
+                    return
             with recv as chunks:
                 while True:
                     chunk: AudioChunk | ErrorChunk | None = None
