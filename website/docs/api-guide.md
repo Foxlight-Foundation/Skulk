@@ -518,7 +518,7 @@ Request fields:
 | `input` | string | Required text to synthesize |
 | `voice` | string or null | Optional model-specific voice name |
 | `speed` | number or null | Optional positive speaking speed multiplier |
-| `response_format` | string or null | Optional encoded output format. When omitted or set to `null`, Skulk uses the mounted model card default when declared and otherwise falls back to `mp3`; supported values are constrained by the model card when declared |
+| `response_format` | string or null | Optional encoded output format. When omitted or set to `null`, Skulk uses `mp3` for `stream=true`; otherwise it uses the mounted model card default when declared and falls back to `mp3`; supported values are constrained by the model card when declared |
 | `stream` | boolean | Optional. When `true`, Skulk returns a chunked HTTP response and yields encoded MP3 bytes as the speech runner emits them |
 | `streaming_interval` | number or null | Optional positive model-specific streaming cadence hint, accepted only with `stream=true` |
 | `instruct`, `lang_code` | string or null | Optional model-specific generation hints |
@@ -526,11 +526,12 @@ Request fields:
 
 The response body is raw audio bytes with a matching audio media type
 (`audio/mpeg`, `audio/wav`, `audio/flac`, `audio/ogg`, or `audio/opus`).
-For `stream=true`, the response format must currently resolve to `mp3`; Skulk
-returns `audio/mpeg` with chunked HTTP bytes. This is TTS output streaming, not
-a realtime session: the request text is still a complete bounded input,
-cancellation closes the command stream, and each chunk follows the mounted
-model's generation cadence.
+For `stream=true`, the response format must currently resolve to `mp3`; when a
+streaming request omits `response_format`, Skulk requests `mp3` instead of the
+model card's non-streaming default. Skulk returns `audio/mpeg` with chunked HTTP
+bytes. This is TTS output streaming, not a realtime session: the request text is
+still a complete bounded input, cancellation closes the command stream, and each
+chunk follows the mounted model's generation cadence.
 
 The speech endpoint is still text-only. `streaming_interval` without
 `stream=true`, `reference_audio`, and `reference_text` return **400 Bad

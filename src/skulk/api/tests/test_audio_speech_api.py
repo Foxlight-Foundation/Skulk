@@ -5,23 +5,35 @@ import base64
 from collections.abc import AsyncIterator
 from typing import Never, cast
 
+import anyio
 import pytest
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
+from skulk.api import main as api_main
 from skulk.api.main import API
 from skulk.api.types import AudioSpeechRequest
 from skulk.shared.election import ElectionMessage
 from skulk.shared.models.model_cards import AudioResponseFormat, ModelId
-from skulk.shared.types.chunks import AudioChunk
+from skulk.shared.types.audio import SpeechSynthesisTaskParams
+from skulk.shared.types.chunks import AudioChunk, ErrorChunk
 from skulk.shared.types.commands import (
     ForwarderCommand,
     ForwarderDownloadCommand,
     SpeechSynthesis,
 )
-from skulk.shared.types.common import NodeId
+from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import IndexedEvent
+from skulk.shared.types.state import State
+from skulk.shared.types.tasks import (
+    SpeechSynthesis as SpeechSynthesisTask,
+)
+from skulk.shared.types.tasks import (
+    TaskId,
+    TaskStatus,
+)
+from skulk.shared.types.worker.instances import InstanceId
 from skulk.utils.channels import channel
 
 
@@ -149,7 +161,6 @@ async def test_audio_speech_streams_audio_chunks_and_sends_command(
         AudioSpeechRequest(
             model=str(model_id),
             input="hello",
-            response_format=AudioResponseFormat.Mp3,
             stream=True,
             streaming_interval=0.25,
         )
@@ -165,6 +176,109 @@ async def test_audio_speech_streams_audio_chunks_and_sends_command(
     assert command.task_params.stream is True
     assert command.task_params.streaming_interval == 0.25
     assert command.command_id not in api._audio_speech_queues
+
+
+@pytest.mark.anyio
+async def test_audio_speech_streaming_defaults_to_mp3(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming TTS should request MP3 instead of the non-streaming card default."""
+
+    api = _build_api()
+    model_id = ModelId("mlx-community/fish-audio-s2-pro-8bit")
+
+    async def _validate_model(
+        self: API, requested_model: ModelId, response_format: AudioResponseFormat | None
+    ) -> tuple[ModelId, AudioResponseFormat]:
+        assert self is api
+        assert requested_model == model_id
+        assert response_format == AudioResponseFormat.Mp3
+        return model_id, AudioResponseFormat.Mp3
+
+    async def _send(command: object) -> None:
+        if isinstance(command, SpeechSynthesis):
+            await api._audio_speech_queues[command.command_id].send(
+                AudioChunk(
+                    model=model_id,
+                    data=base64.b64encode(b"mp3").decode("ascii"),
+                    chunk_index=0,
+                    total_chunks=None,
+                    format=AudioResponseFormat.Mp3,
+                    sample_rate=44100,
+                    finish_reason="stop",
+                )
+            )
+
+    monkeypatch.setattr(API, "_validate_speech_synthesis_model", _validate_model)
+    monkeypatch.setattr(api, "_send", _send)
+
+    response = await api.audio_speech(
+        AudioSpeechRequest(model=str(model_id), input="hello", stream=True)
+    )
+
+    assert isinstance(response, StreamingResponse)
+    body_iterator = cast(AsyncIterator[bytes], response.body_iterator)
+    assert b"".join([chunk async for chunk in body_iterator]) == b"mp3"
+
+
+@pytest.mark.anyio
+async def test_audio_speech_stream_finishes_cleanly_for_terminal_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal task with a dropped final audio chunk should finalize cleanly."""
+
+    api = _build_api()
+    finished_commands: list[object] = []
+    cancel_sender, cancel_receiver = channel[ForwarderCommand]()
+
+    async def _record_finished(command: object) -> None:
+        finished_commands.append(command)
+
+    api._send = _record_finished
+    api.command_sender = cancel_sender
+    monkeypatch.setattr(api_main, "_STREAM_IDLE_TIMEOUT_SECONDS", 0.01)
+    command_id = CommandId("speech-terminal-idle")
+    sender, receiver = channel[AudioChunk | ErrorChunk]()
+    api._audio_speech_queues[command_id] = sender
+    task = SpeechSynthesisTask(
+        task_id=TaskId("terminal-speech-task"),
+        instance_id=InstanceId("terminal-speech-instance"),
+        task_status=TaskStatus.Complete,
+        command_id=command_id,
+        task_params=SpeechSynthesisTaskParams(
+            model=ModelId("mlx-community/fish-audio-s2-pro-8bit"),
+            input_text="hello",
+            response_format=AudioResponseFormat.Mp3,
+        ),
+    )
+    api.state = State(tasks={task.task_id: task})
+    chunks: list[bytes] = []
+
+    async with anyio.create_task_group() as task_group:
+
+        async def _consume() -> None:
+            async for chunk in api._stream_audio_speech_chunks(command_id, receiver):
+                chunks.append(chunk)
+
+        task_group.start_soon(_consume)
+        await sender.send(
+            AudioChunk(
+                model=ModelId("mlx-community/fish-audio-s2-pro-8bit"),
+                data=base64.b64encode(b"partial").decode("ascii"),
+                chunk_index=0,
+                total_chunks=None,
+                format=AudioResponseFormat.Mp3,
+                sample_rate=44100,
+                is_partial=True,
+                finish_reason=None,
+            )
+        )
+
+    assert chunks == [b"partial"]
+    assert cancel_receiver.collect() == []
+    assert finished_commands
+    assert command_id not in api._cancelled_command_ids
+    assert command_id not in api._audio_speech_queues
 
 
 @pytest.mark.anyio

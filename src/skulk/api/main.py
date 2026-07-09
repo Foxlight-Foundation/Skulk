@@ -6280,8 +6280,13 @@ class API:
                 detail="`reference_text` is only supported with reference-audio TTS flows",
             )
 
+        requested_response_format = (
+            AudioResponseFormat.Mp3
+            if request.stream and request.response_format is None
+            else request.response_format
+        )
         model_id, response_format = await self._validate_speech_synthesis_model(
-            ModelId(request.model), request.response_format
+            ModelId(request.model), requested_response_format
         )
         if request.stream and response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
             supported = ", ".join(
@@ -6451,6 +6456,8 @@ class API:
                                         ),
                                     )
                                 )
+                        else:
+                            return
                         raise RuntimeError(
                             "Speech stream stalled before receiving a terminal chunk"
                         )
