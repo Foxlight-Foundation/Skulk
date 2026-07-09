@@ -3134,7 +3134,9 @@ class API:
                 f"provider did not finish within {call.timeout_seconds}s",
             )
         except Exception as exc:  # noqa: BLE001 - a raising handler must not 500 the node
-            logger.error(
+            # logger.exception keeps the traceback: debugging a misbehaving
+            # extension from the message alone is much harder in production.
+            logger.exception(
                 f"capability handler '{extension_name}' for {qualified_id} "
                 f"raised: {exc}"
             )
@@ -3150,6 +3152,15 @@ class API:
                 call.call_id,
                 "invalid_result",
                 f"provider returned {type(result_payload).__name__}, not an object",
+            )
+        if any(not isinstance(key, str) for key in result_payload):  # pyright: ignore[reportUnnecessaryIsInstance]
+            # json.dumps silently stringifies non-string keys (so the size
+            # check passes), but the strict result model rejects them; catch
+            # it here as a typed error instead of a 500.
+            return call_failure(
+                call.call_id,
+                "invalid_result",
+                "provider result has non-string keys",
             )
         try:
             result_bytes = len(

@@ -352,3 +352,20 @@ async def test_caller_side_out_of_range_timeout_is_typed() -> None:
     )
     assert not result.ok and result.error is not None
     assert result.error.code == "invalid_payload"
+
+
+class _IntKeyResultProvider(_EchoProvider):
+    """Provider whose result dict has a non-string key."""
+
+    async def handle_call(
+        self, context: ExtensionContext, call: CapabilityCall
+    ) -> dict[str, object]:
+        return {1: "x"}  # pyright: ignore[reportReturnType]
+
+
+async def test_non_string_result_keys_are_typed_invalid_result() -> None:
+    # json.dumps stringifies int keys (so the size check passes) but the
+    # strict result model rejects them; must be a typed error, not a 500.
+    result = await _dispatch(_build_api(_IntKeyResultProvider()), _call())
+    assert not result.ok and result.error is not None
+    assert result.error.code == "invalid_result"
