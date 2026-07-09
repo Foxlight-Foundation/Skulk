@@ -3,6 +3,7 @@
 
 import base64
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Never, cast
 
 import anyio
@@ -15,6 +16,7 @@ from skulk.api import main as api_main
 from skulk.api.main import API
 from skulk.api.types import AudioSpeechRequest
 from skulk.shared.election import ElectionMessage
+from skulk.shared.experimental import EXPERIMENTAL_MODE_ENV_VAR
 from skulk.shared.models.model_cards import (
     AudioCardConfig,
     AudioCardKind,
@@ -115,6 +117,13 @@ def _state_with_running_card(card: ModelCard) -> State:
             )
         }
     )
+
+
+def _write_tts_streaming_experiment_config(api: API, tmp_path: Path) -> None:
+    """Point the API at a temp config file with TTS streaming opted in."""
+
+    api._config_path = tmp_path / "skulk.yaml"
+    api._config_path.write_text("experiments:\n  tts_streaming: true\n")
 
 
 def test_audio_speech_request_accepts_audio_format_strings() -> None:
@@ -293,12 +302,77 @@ async def test_audio_speech_streaming_defaults_to_mp3(
 
 
 @pytest.mark.anyio
-async def test_audio_speech_rejects_streaming_when_card_disallows_it() -> None:
+async def test_audio_speech_rejects_streaming_without_experimental_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Streaming TTS stays inert until the node opts into experimental mode."""
+
+    api = _build_api()
+    card = _tts_card(supports_streaming=True)
+    api.state = _state_with_running_card(card)
+    _write_tts_streaming_experiment_config(api, tmp_path)
+    monkeypatch.delenv(EXPERIMENTAL_MODE_ENV_VAR, raising=False)
+
+    assert await api._validate_speech_synthesis_model(
+        card.model_id, AudioResponseFormat.Mp3
+    ) == (card.model_id, AudioResponseFormat.Mp3)
+    with pytest.raises(HTTPException) as exc_info:
+        await api._validate_speech_synthesis_model(
+            card.model_id,
+            AudioResponseFormat.Mp3,
+            stream=True,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "experimental" in str(exc_info.value.detail)
+    assert EXPERIMENTAL_MODE_ENV_VAR in str(exc_info.value.detail)
+
+    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
+    assert await api._validate_speech_synthesis_model(
+        card.model_id,
+        AudioResponseFormat.Mp3,
+        stream=True,
+    ) == (card.model_id, AudioResponseFormat.Mp3)
+
+
+@pytest.mark.anyio
+async def test_audio_speech_rejects_streaming_without_tts_experiment_toggle(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The generic experiment gate still needs the TTS-specific toggle."""
+
+    api = _build_api()
+    card = _tts_card(supports_streaming=True)
+    api.state = _state_with_running_card(card)
+    api._config_path = tmp_path / "skulk.yaml"
+    api._config_path.write_text("experiments:\n  tts_streaming: false\n")
+    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api._validate_speech_synthesis_model(
+            card.model_id,
+            AudioResponseFormat.Mp3,
+            stream=True,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "experiments.tts_streaming" in str(exc_info.value.detail)
+
+
+@pytest.mark.anyio
+async def test_audio_speech_rejects_streaming_when_card_disallows_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """A TTS card must explicitly opt in before stream=true is accepted."""
 
     api = _build_api()
     card = _tts_card(supports_streaming=False)
     api.state = _state_with_running_card(card)
+    _write_tts_streaming_experiment_config(api, tmp_path)
+    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
 
     assert await api._validate_speech_synthesis_model(
         card.model_id, AudioResponseFormat.Mp3

@@ -316,7 +316,7 @@ class AudioCardConfig(CamelCaseModel):
     response_formats: tuple[AudioResponseFormat, ...] = ()
     """Encoded audio formats this model can produce for TTS requests."""
     supports_streaming: bool | None = None
-    """Whether the model can stream partial speech/transcription output."""
+    """Whether a validated Skulk runtime path can stream partial speech or transcripts."""
     supports_realtime: bool | None = None
     """Whether the model exposes a realtime session interface."""
     supports_voice_listing: bool | None = None

@@ -12,6 +12,7 @@ from skulk.shared.election import ElectionMessage
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.events import IndexedEvent
+from skulk.store.config import load_skulk_config
 from skulk.utils.channels import channel
 
 
@@ -130,3 +131,29 @@ def test_update_config_rejects_non_object_config_field(tmp_path: Path) -> None:
 
     assert response.status_code == 422
     assert response.json()["error"]["message"] == "'config' field must be a JSON object."
+
+
+def test_update_config_preserves_existing_experiments_when_omitted(
+    tmp_path: Path,
+) -> None:
+    """Saving unrelated settings must not clear hidden experiment toggles."""
+
+    config_path = tmp_path / "skulk.yaml"
+    config_path.write_text(
+        "experiments:\n  tts_streaming: true\n",
+        encoding="utf-8",
+    )
+    api = _build_api()
+    object.__setattr__(api, "_config_path", config_path)
+    client = TestClient(api.app)
+
+    response = client.put(
+        "/config",
+        json={"config": {"inference": {"kv_cache_backend": "default"}}},
+    )
+
+    assert response.status_code == 200
+    config = load_skulk_config(config_path)
+    assert config is not None
+    assert config.experiments is not None
+    assert config.experiments.tts_streaming is True

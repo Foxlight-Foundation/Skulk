@@ -8,9 +8,11 @@ sidebar_position: 31
 
 Skulk's first speech serving path is deliberately REST-shaped:
 
-- `POST /v1/audio/speech` turns text into an encoded audio response and can
-  stream chunked HTTP MP3 bytes with `stream=true` when the mounted TTS card
-  explicitly declares `audio.supports_streaming = true`.
+- `POST /v1/audio/speech` turns text into an encoded audio response. Its
+  `stream=true` path is experimental and remains inert unless the node runs
+  with `SKULK_ENABLE_EXPERIMENTAL_MODE`, the cluster config enables
+  `experiments.tts_streaming`, and the mounted TTS card explicitly declares
+  `audio.supports_streaming = true`.
 - `POST /v1/audio/transcriptions` turns an uploaded audio clip into text or
   transcript metadata.
 - The dashboard voice loop composes those endpoints with chat.

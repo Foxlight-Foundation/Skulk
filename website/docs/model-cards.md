@@ -182,7 +182,8 @@ Declares speech serving metadata for TTS and STT models:
 - `response_formats`
   - encoded audio formats the model can produce, such as `mp3`, `wav`, `flac`, `ogg`, or `opus`
 - `supports_streaming`
-  - whether the model can stream partial speech or transcription output
+  - whether the model can stream partial speech or transcription output; keep
+    this false until the Skulk runtime has validated the model/backend path
 - `supports_realtime`
   - whether the model exposes a realtime audio session interface
 - `supports_voice_listing`
@@ -193,6 +194,10 @@ Declares speech serving metadata for TTS and STT models:
   - whether speech translation is supported
 - `sample_rates`
   - supported input or output sample rates in hertz
+
+For TTS streaming, `supports_streaming = true` is necessary but not sufficient:
+the node must also run with `SKULK_ENABLE_EXPERIMENTAL_MODE`, and cluster config
+must set `experiments.tts_streaming: true`.
 
 ### `[tooling]`
 
@@ -363,6 +368,7 @@ backend_preference = ["mlx_audio-metal", "mlx_audio"]
 kind = "tts"
 default_response_format = "mp3"
 response_formats = ["mp3", "wav"]
+# Set true only after the Skulk runtime validates this model/backend streaming path.
 supports_streaming = true
 supports_realtime = false
 supports_voice_listing = true

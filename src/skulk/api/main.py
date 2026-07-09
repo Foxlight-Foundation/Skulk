@@ -179,7 +179,10 @@ from skulk.shared.constants import (
     preferred_env_value,
 )
 from skulk.shared.election import ElectionMessage
-from skulk.shared.experimental import experimental_mode_enabled
+from skulk.shared.experimental import (
+    EXPERIMENTAL_MODE_ENV_VAR,
+    experimental_mode_enabled,
+)
 from skulk.shared.logging import InterceptLogger
 from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.model_cards import (
@@ -290,7 +293,11 @@ from skulk.shared.types.worker.instances import (
 from skulk.shared.types.worker.runners import RunnerId
 from skulk.shared.types.worker.shards import Sharding
 from skulk.shared.version import get_skulk_version, get_skulk_version_label
-from skulk.store.config import resolve_config_path, resolve_node_staging
+from skulk.store.config import (
+    load_skulk_config,
+    resolve_config_path,
+    resolve_node_staging,
+)
 from skulk.tools.web_search import default_browser_tool_provider
 from skulk.utils.banner import print_startup_banner
 from skulk.utils.channels import Receiver, Sender, channel
@@ -1336,8 +1343,9 @@ class API:
             description=(
                 "OpenAI-compatible text-to-speech endpoint. The requested model "
                 "must already be placed and running as a text-to-speech model. "
-                "Set stream=true to receive chunked audio bytes as the speech "
-                "runner emits them."
+                "The experimental stream=true path requires "
+                "SKULK_ENABLE_EXPERIMENTAL_MODE, experiments.tts_streaming=true, "
+                "and a mounted card that declares audio.supports_streaming=true."
             ),
         )(self.audio_speech)
         self.app.post(
@@ -2740,6 +2748,23 @@ class API:
                 status_code=400,
                 detail=f"Model {resolved} is not a text-to-speech model",
             )
+        if stream and not experimental_mode_enabled():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Streaming text-to-speech is experimental and requires "
+                    f"{EXPERIMENTAL_MODE_ENV_VAR}=1 until a mounted MLX speech "
+                    "model has passed streaming validation"
+                ),
+            )
+        if stream and not self._tts_streaming_experiment_enabled():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Streaming text-to-speech is experimental and requires "
+                    "experiments.tts_streaming=true in skulk.yaml"
+                ),
+            )
         if stream and (
             model_card.audio is None or model_card.audio.supports_streaming is not True
         ):
@@ -2778,6 +2803,23 @@ class API:
                 detail=f"No instance found for model {resolved}",
             )
         return resolved, resolved_response_format
+
+    def _tts_streaming_experiment_enabled(self) -> bool:
+        """Return whether the current config opts into experimental TTS streaming."""
+
+        try:
+            config = load_skulk_config(self._config_path)
+        except Exception as exc:
+            logger.warning(
+                "Failed to load config while checking TTS streaming experiment "
+                f"toggle; treating it as disabled: {exc}"
+            )
+            return False
+        return bool(
+            config is not None
+            and config.experiments is not None
+            and config.experiments.tts_streaming
+        )
 
     async def _validate_audio_transcription_model(self, model_id: ModelId) -> ModelId:
         """Validate a mounted speech-to-text model exists and is servable."""
@@ -5878,13 +5920,16 @@ class API:
                 # Preserve logging config when omitted from the request
                 if "logging" not in config_data and "logging" in existing:
                     config_data["logging"] = existing["logging"]
+                # Preserve experiment toggles when omitted from the request.
+                if "experiments" not in config_data and "experiments" in existing:
+                    config_data["experiments"] = existing["experiments"]
             except Exception:
                 pass
         # Validate by attempting to parse with Pydantic
         from skulk.store.config import SkulkConfig
 
         try:
-            SkulkConfig.model_validate(config_data)
+            parsed_config = SkulkConfig.model_validate(config_data)
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         config_yaml = yaml.safe_dump(
@@ -5893,6 +5938,7 @@ class API:
         # Write locally
         with self._config_path.open("w") as f:
             f.write(config_yaml)
+        self._skulk_config = parsed_config
         # Broadcast to all nodes via gossipsub — strip hf_token (secret).
         import copy
 

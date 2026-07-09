@@ -287,6 +287,24 @@ class ConnectivityConfig(FrozenModel):
 
 
 @final
+class ExperimentsConfig(FrozenModel):
+    """Opt-in switches for in-development features.
+
+    This section is meaningful only on nodes running with
+    ``SKULK_ENABLE_EXPERIMENTAL_MODE``. Each flag defaults to ``False`` so
+    released builds can carry unfinished work without exposing it by accident.
+
+    Attributes:
+        tts_streaming: Enables the experimental ``stream=true`` transport for
+            ``POST /v1/audio/speech``. The request path still requires a mounted
+            TTS model card that explicitly declares
+            ``audio.supports_streaming = true``.
+    """
+
+    tts_streaming: bool = False
+
+
+@final
 class SkulkConfig(FrozenModel):
     """Root configuration model for ``skulk.yaml``.
 
@@ -304,6 +322,9 @@ class SkulkConfig(FrozenModel):
         connectivity: Cluster connectivity settings.  ``None`` means all
             connectivity options use their defaults (mDNS + CLI bootstrap peers
             only).
+        experiments: Opt-in toggles for in-development features. These are
+            inert unless ``SKULK_ENABLE_EXPERIMENTAL_MODE`` is also enabled on
+            the node.
         hf_token: HuggingFace API token.  Stripped from ``GET /config``
             responses for security.
     """
@@ -313,6 +334,7 @@ class SkulkConfig(FrozenModel):
     logging: "LoggingConfig | None" = None
     tracing: "TracingConfig | None" = None
     connectivity: ConnectivityConfig | None = None
+    experiments: ExperimentsConfig | None = None
     hf_token: str | None = None
 
 

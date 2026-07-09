@@ -26,10 +26,15 @@ export interface LoggingConfig {
   ingest_url: string;
 }
 
+export interface ExperimentsConfig {
+  tts_streaming: boolean;
+}
+
 export interface FullConfig {
   model_store?: StoreConfig;
   inference?: InferenceConfig;
   logging?: LoggingConfig;
+  experiments?: ExperimentsConfig;
   hf_token?: string;
 }
 
