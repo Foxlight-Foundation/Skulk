@@ -431,9 +431,10 @@ export function ChatForm({
   const canSpeakDraft = speechReady && message.trim().length > 0 && !isRecording && !isTranscribing;
   const displayVoiceError = mediaError ?? voiceError;
   const showVoiceControls = transcriptionModels.length > 0 || speechModels.length > 0 || Boolean(displayVoiceError);
+  const startRecordingLabel = t('chat.form.startRecording', 'Start recording');
   const recordingButtonLabel = transcriptionReady && recordingUnavailableReason
-    ? recordingUnavailableReason
-    : t('chat.form.startRecording', 'Start recording');
+    ? `${startRecordingLabel}. ${recordingUnavailableReason}`
+    : startRecordingLabel;
 
   // Auto-resize textarea
   const resize = useCallback(() => {
