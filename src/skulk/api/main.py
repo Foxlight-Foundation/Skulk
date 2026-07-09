@@ -1626,8 +1626,12 @@ class API:
                 "human/LLM-readable description, JSON Schemas for input and "
                 "output, the call's I/O mode, and a content revision digest. "
                 "This is the heavy half of capability discovery; the light "
-                "half is the capability tag gossiped on the telemetry plane. "
-                "An empty list means no provider extension is installed."
+                "half is the capability tag gossiped on the telemetry plane "
+                "(surfaced per node as nodeCapabilities in GET /state). "
+                "Pass ?node_id=<peer> to describe a reachable peer instead "
+                "of this node (an empty list when the peer is unreachable). "
+                "An empty list otherwise means no provider extension is "
+                "installed."
             ),
         )(self.list_node_capabilities)
         self.app.get(
@@ -2496,6 +2500,14 @@ class API:
             for node_id, status in self._telemetry_view.node_rdma_ctl.items()
             if node_id in live
         }
+        # Extension-advertised capability tags (fabric-citizenship): the light
+        # discovery layer, made operator-visible. Full descriptors are fetched
+        # via GET /v1/capabilities, not carried here.
+        payload["nodeCapabilities"] = {
+            str(node_id): sorted(tags)
+            for node_id, tags in self._telemetry_view.node_capabilities.items()
+            if node_id in live and tags
+        }
         # Derived per-node health (#388): explain a node's problems (and the fix)
         # in the topology so the master's silent recovery of a wedged/failed node
         # is legible. Read-only derivation from the same state/telemetry above; no
@@ -2929,26 +2941,39 @@ class API:
         """
         self._telemetry_view.local_advertised_capabilities.discard(capability.strip())
 
-    async def list_node_capabilities(self) -> dict[str, object]:
-        """Serve ``GET /v1/capabilities``: this node's capability descriptors.
+    async def list_node_capabilities(
+        self, node_id: str | None = None
+    ) -> dict[str, object]:
+        """Serve ``GET /v1/capabilities``: a node's capability descriptors.
 
         The describe surface of capability discovery (fabric-citizenship
-        Phase 2a). Returns the node id, the descriptors served by this node's
-        provider extensions, and each descriptor's content revision digest so
-        callers can pin the exact shape they discovered. Peers consume this
-        through their extensions' ``describe_node``.
+        Phase 2a). Without ``node_id`` (or with this node's id), returns the
+        descriptors served by this node's provider extensions; with a peer's
+        ``node_id``, proxies the peer's describe surface (the same read-only
+        fan-out pattern the trace cluster browsing uses), returning an empty
+        list when the peer is unreachable. Each descriptor's content revision
+        digest is included so callers can pin the exact shape they discovered.
+        Extensions consume this through ``describe_node``.
+
+        Args:
+            node_id: Optional peer node to describe instead of this node.
 
         Returns:
             ``{"node_id": ..., "capabilities": [...], "revisions": {...}}``
             where ``revisions`` maps ``id@version`` to the revision digest.
         """
-        descriptors = (
-            self._extensions.capability_descriptors
-            if self._extensions is not None
-            else ()
-        )
+        if node_id is None or node_id == str(self.node_id):
+            descriptors = (
+                self._extensions.capability_descriptors
+                if self._extensions is not None
+                else ()
+            )
+            described: NodeId = self.node_id
+        else:
+            described = NodeId(node_id)
+            descriptors = await self._describe_node_capabilities(described)
         return {
-            "node_id": str(self.node_id),
+            "node_id": str(described),
             "capabilities": [
                 descriptor.model_dump(mode="json") for descriptor in descriptors
             ],

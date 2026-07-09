@@ -1198,17 +1198,21 @@ curl -OJ http://localhost:52415/v1/traces/cluster/<task_id>/raw
 
 ```
 GET /v1/capabilities
+GET /v1/capabilities?node_id=<id>
 ```
 
-Returns the self-describing capability descriptors served by this node's
-provider extensions (see [Extensions](extensions)). Each descriptor carries
-the capability `id`, semantic `version`, a human/LLM-readable description,
-JSON Schemas for input and output, the call's I/O mode, and the response maps
-each `id@version` to a content revision digest so callers can pin the exact
-shape they discovered. An empty list means no provider extension is installed
-on this node. Peers consume this endpoint through their extensions'
+Returns the self-describing capability descriptors served by a node's
+provider extensions (see [Extensions](extensions)). Without `node_id` it
+describes the node serving the request; with a peer's `node_id` it proxies
+that peer's describe surface (empty when the peer is unreachable). Each
+descriptor carries the capability `id`, semantic `version`, a human/LLM-readable
+description, JSON Schemas for input and output, the call's I/O mode, and the
+response maps each `id@version` to a content revision digest so callers can pin
+the exact shape they discovered. An empty list means no provider extension is
+installed on the described node. Extensions consume this through
 `describe_node`; the light discovery layer (which nodes offer which capability
-tag) rides the telemetry plane and appears in `GET /state`.
+tag) rides the telemetry plane and appears as `nodeCapabilities` in
+`GET /state`.
 
 ```bash
 curl http://localhost:52415/v1/capabilities

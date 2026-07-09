@@ -6,6 +6,7 @@ observable locally: a node advertising a capability sees it in its own
 `read_cluster` snapshot once the reading coalesces back into the view.
 """
 
+from datetime import datetime, timezone
 from typing import cast
 
 from skulk.api.main import API
@@ -180,3 +181,34 @@ def test_withdraw_capability_removes_tag() -> None:
     context.withdraw_capability("memory")
     context.withdraw_capability("never-advertised")
     assert view.local_advertised_capabilities == {"search"}
+
+
+async def test_list_node_capabilities_with_own_node_id_serves_local() -> None:
+    api = _build_api(TelemetryView(), extensions=LoadedExtensions([_ProviderExtension()]))
+    payload = await api.list_node_capabilities(node_id="api-node")
+    assert payload["node_id"] == "api-node"
+    assert len(cast("list[object]", payload["capabilities"])) == 1
+
+
+async def test_list_node_capabilities_unreachable_peer_is_empty() -> None:
+    api = _build_api(TelemetryView())
+    payload = await api.list_node_capabilities(node_id="n-ghost")
+    assert payload["node_id"] == "n-ghost"
+    assert payload["capabilities"] == []
+
+
+async def test_state_merge_surfaces_node_capabilities() -> None:
+    # The light discovery layer is operator-visible: GET /state carries a
+    # nodeCapabilities map for live nodes with a non-empty tag set (sorted).
+    view = TelemetryView()
+    api = _build_api(view)
+    peer = NodeId("n-peer")
+    dead = NodeId("n-dead")
+    view.node_capabilities[peer] = frozenset({"tts", "memory"})
+    view.node_capabilities[dead] = frozenset({"ghost"})
+    api.state = api.state.model_copy(
+        update={"last_seen": {peer: datetime.now(tz=timezone.utc)}}
+    )
+    payload = await api.get_cluster_state()
+    # Only the live node appears; the dead node's tags are filtered out.
+    assert payload["nodeCapabilities"] == {"n-peer": ["memory", "tts"]}
