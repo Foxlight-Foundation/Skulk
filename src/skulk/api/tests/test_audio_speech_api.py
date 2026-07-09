@@ -261,6 +261,37 @@ async def test_audio_speech_stream_surfaces_initial_runner_error(
 
 
 @pytest.mark.anyio
+async def test_audio_speech_stream_errors_when_terminal_before_first_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal task with no initial chunk should fail before headers commit."""
+
+    api = _build_api()
+    monkeypatch.setattr(api_main, "_STREAM_IDLE_TIMEOUT_SECONDS", 0.01)
+    command_id = CommandId("speech-terminal-before-first-chunk")
+    sender, receiver = channel[AudioChunk | ErrorChunk]()
+    api._audio_speech_queues[command_id] = sender
+    task = SpeechSynthesisTask(
+        task_id=TaskId("terminal-before-first-chunk-task"),
+        instance_id=InstanceId("terminal-before-first-chunk-instance"),
+        task_status=TaskStatus.Complete,
+        command_id=command_id,
+        task_params=SpeechSynthesisTaskParams(
+            model=ModelId("mlx-community/fish-audio-s2-pro-8bit"),
+            input_text="hello",
+            response_format=AudioResponseFormat.Mp3,
+        ),
+    )
+    api.state = State(tasks={task.task_id: task})
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api._receive_initial_audio_speech_chunk(command_id, receiver)
+
+    assert exc_info.value.status_code == 500
+    assert "no audio response" in str(exc_info.value.detail)
+
+
+@pytest.mark.anyio
 async def test_audio_speech_stream_finishes_cleanly_for_terminal_idle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -486,6 +517,37 @@ async def test_audio_speech_collects_audio_chunks_and_sends_command(
     assert command.task_params.voice == "af_heart"
     assert command.task_params.speed == 1.1
     assert command.command_id not in api._audio_speech_queues
+
+
+@pytest.mark.anyio
+async def test_audio_speech_collect_terminal_before_any_chunk_reports_no_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-streaming terminal task with no chunks should report no audio."""
+
+    api = _build_api()
+    monkeypatch.setattr(api_main, "_STREAM_IDLE_TIMEOUT_SECONDS", 0.01)
+    command_id = CommandId("speech-collect-terminal-before-first-chunk")
+    sender, receiver = channel[AudioChunk | ErrorChunk]()
+    api._audio_speech_queues[command_id] = sender
+    task = SpeechSynthesisTask(
+        task_id=TaskId("collect-terminal-before-first-chunk-task"),
+        instance_id=InstanceId("collect-terminal-before-first-chunk-instance"),
+        task_status=TaskStatus.Complete,
+        command_id=command_id,
+        task_params=SpeechSynthesisTaskParams(
+            model=ModelId("mlx-community/fish-audio-s2-pro-8bit"),
+            input_text="hello",
+            response_format=AudioResponseFormat.Mp3,
+        ),
+    )
+    api.state = State(tasks={task.task_id: task})
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api._collect_audio_speech_chunks(command_id, receiver)
+
+    assert exc_info.value.status_code == 500
+    assert "no audio response" in str(exc_info.value.detail)
 
 
 @pytest.mark.anyio

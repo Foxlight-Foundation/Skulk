@@ -6421,12 +6421,18 @@ class API:
                         break
                 if scope.cancelled_caught:
                     if self._command_task_is_terminal(command_id):
+                        detail = (
+                            "Speech synthesis completed, but the final response "
+                            "chunk was not received"
+                            if audio_parts
+                            else (
+                                "Speech synthesis completed, but no audio response "
+                                "was received"
+                            )
+                        )
                         raise HTTPException(
                             status_code=500,
-                            detail=(
-                                "Speech synthesis completed, but the final "
-                                "response chunk was not received"
-                            ),
+                            detail=detail,
                         )
                     continue
                 assert chunk is not None
@@ -6451,18 +6457,32 @@ class API:
         recv: Receiver[AudioChunk | ErrorChunk],
     ) -> AudioChunk:
         """Receive the first TTS stream chunk before response headers commit."""
-        try:
-            chunk = await recv.receive()
-        except (EndOfStream, ClosedResourceError) as exc:
-            raise HTTPException(
-                status_code=500, detail="No speech audio response received"
-            ) from exc
-        if isinstance(chunk, ErrorChunk):
-            raise HTTPException(
-                status_code=500,
-                detail=f"Speech synthesis failed: {chunk.error_message}",
-            )
-        return chunk
+        while True:
+            chunk: AudioChunk | ErrorChunk | None = None
+            with anyio.move_on_after(_STREAM_IDLE_TIMEOUT_SECONDS) as scope:
+                try:
+                    chunk = await recv.receive()
+                except (EndOfStream, ClosedResourceError) as exc:
+                    raise HTTPException(
+                        status_code=500, detail="No speech audio response received"
+                    ) from exc
+            if scope.cancelled_caught:
+                if self._command_task_is_terminal(command_id):
+                    raise HTTPException(
+                        status_code=500,
+                        detail=(
+                            "Speech synthesis completed, but no audio response "
+                            "was received"
+                        ),
+                    )
+                continue
+            assert chunk is not None
+            if isinstance(chunk, ErrorChunk):
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Speech synthesis failed: {chunk.error_message}",
+                )
+            return chunk
 
     async def _stream_audio_speech_chunks(
         self,
