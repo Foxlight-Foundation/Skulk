@@ -53,14 +53,28 @@ async def test_publish_bytes_drops_unknown_field_payload_without_raising():
     await router_v1.publish_bytes(valid_payload, origin=None)
 
 
-async def test_data_topic_publishes_locally_before_blocked_network_egress() -> None:
+def _data_chunk(sequence: int, owner_node: str) -> DataChunk:
+    return DataChunk(
+        command_id=CommandId("local-first-data"),
+        sequence=sequence,
+        owner_node=NodeId(owner_node),
+        chunk=TokenChunk(
+            model=ModelId("mlx-community/test"),
+            text=f"chunk-{sequence}",
+            token_id=sequence,
+            usage=None,
+        ),
+    )
+
+
+async def test_local_data_topic_does_not_wait_for_blocked_network_egress() -> None:
     """DATA chunks must reach local API receivers before network backpressure.
 
     Same-node serving publishes DATA through the same TopicRouter as cross-node
-    output. If the router awaits outbound DATA egress before local publish, a
-    blocked egress channel can hold every audio/token chunk and make a stream
-    appear as one late burst. The API's DATA consumer already dedupes the later
-    Zenoh self-loopback copy by sequence, so local-first DATA delivery is safe.
+    output. Local DATA does not need a network self-loopback copy because the
+    owning API node is already local. If the router awaits outbound DATA egress,
+    a blocked egress channel can hold subsequent audio/token chunks and make a
+    stream appear as one late burst.
     """
 
     networking_send, networking_recv = channel[tuple[str, str | None, bytes]](
@@ -68,22 +82,45 @@ async def test_data_topic_publishes_locally_before_blocked_network_egress() -> N
     )
     await networking_send.send(("occupied", None, b"held"))
 
-    router = TopicRouter[DataChunk](DATA, networking_send)
+    router = TopicRouter[DataChunk](
+        DATA, networking_send, local_routing_key="api-node"
+    )
     local_send, local_recv = channel[DataChunk]()
     router.senders.add(local_send)
     input_send = router.new_sender()
 
-    chunk = DataChunk(
-        command_id=CommandId("local-first-data"),
-        sequence=0,
-        owner_node=NodeId("api-node"),
-        chunk=TokenChunk(
-            model=ModelId("mlx-community/test"),
-            text="hello",
-            token_id=1,
-            usage=None,
-        ),
+    first_chunk = _data_chunk(sequence=0, owner_node="api-node")
+    second_chunk = _data_chunk(sequence=1, owner_node="api-node")
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(router.run)
+        await input_send.send(first_chunk)
+        await input_send.send(second_chunk)
+
+        with anyio.fail_after(0.5):
+            assert await local_recv.receive() == first_chunk
+            assert await local_recv.receive() == second_chunk
+
+        assert await networking_recv.receive() == ("occupied", None, b"held")
+        with anyio.move_on_after(0.1) as scope:
+            await networking_recv.receive()
+        assert scope.cancel_called
+        task_group.cancel_scope.cancel()
+
+
+async def test_remote_data_topic_still_egresses_to_owner_key() -> None:
+    """Cross-node DATA must still preserve ordered network delivery."""
+
+    networking_send, networking_recv = channel[tuple[str, str | None, bytes]]()
+
+    router = TopicRouter[DataChunk](
+        DATA, networking_send, local_routing_key="api-node"
     )
+    local_send, local_recv = channel[DataChunk]()
+    router.senders.add(local_send)
+    input_send = router.new_sender()
+
+    chunk = _data_chunk(sequence=0, owner_node="remote-node")
 
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(router.run)
@@ -91,11 +128,8 @@ async def test_data_topic_publishes_locally_before_blocked_network_egress() -> N
 
         with anyio.fail_after(0.5):
             assert await local_recv.receive() == chunk
-
-        assert await networking_recv.receive() == ("occupied", None, b"held")
-        with anyio.fail_after(0.5):
             topic, routing_key, payload = await networking_recv.receive()
         assert topic == DATA.topic
-        assert routing_key == "api-node"
+        assert routing_key == "remote-node"
         assert DATA.deserialize(payload) == chunk
         task_group.cancel_scope.cancel()

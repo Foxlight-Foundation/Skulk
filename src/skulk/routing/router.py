@@ -39,12 +39,14 @@ from .topics import CONNECTION_MESSAGES, DATA, PublishPolicy, TypedTopic
 # egress task inside zenoh_publish. With an unbounded channel the producer (the
 # rank-0 worker's per-token emit) would keep enqueueing chunks during a long
 # generation and grow memory without limit until the node OOMs. A bounded channel
-# instead backpressures the producer (TopicRouter._send_out awaits the send), so
-# generation throttles to subscriber speed. We backpressure rather than drop on
-# purpose: the Zenoh plane is Reliable+ordered, which is exactly what lets the
-# app-layer reorder buffer be skipped (#311), so dropping chunks here would break
-# that no-loss assumption and corrupt output. The buffer is sized to absorb
-# ordinary subscriber jitter without throttling steady-state streaming.
+# instead backpressures cross-node DATA producers (TopicRouter._send_out awaits
+# the send), so generation throttles to subscriber speed. Same-node DATA is
+# delivered locally without egress because the owning API node is already local.
+# We backpressure rather than drop cross-node chunks on purpose: the Zenoh plane
+# is Reliable+ordered, which is exactly what lets the app-layer reorder buffer be
+# skipped (#311), so dropping chunks here would break that no-loss assumption and
+# corrupt output. The buffer is sized to absorb ordinary subscriber jitter
+# without throttling steady-state streaming.
 _ZENOH_DATA_OUTBOUND_BUFFER = 2048
 
 
@@ -58,6 +60,7 @@ class TopicRouter[T: CamelCaseModel]:
         topic: TypedTopic[T],
         networking_sender: Sender[tuple[str, str | None, bytes]],
         max_buffer_size: float = inf,
+        local_routing_key: str | None = None,
     ):
         self.topic: TypedTopic[T] = topic
         self.senders: set[Sender[T]] = set()
@@ -68,6 +71,7 @@ class TopicRouter[T: CamelCaseModel]:
         self.networking_sender: Sender[tuple[str, str | None, bytes]] = (
             networking_sender
         )
+        self.local_routing_key = local_routing_key
 
     async def run(self):
         logger.debug(f"Topic Router {self.topic} ready to send")
@@ -82,6 +86,8 @@ class TopicRouter[T: CamelCaseModel]:
                     # Publish locally before any outbound backpressure can hold a
                     # same-node stream and collapse it into a late burst.
                     await self.publish(item, origin=None)
+                    if self._routes_to_local_node(item):
+                        continue
                     await self._send_out(item)
                     continue
                 # Check if we should send to network
@@ -147,6 +153,11 @@ class TopicRouter[T: CamelCaseModel]:
 
     def new_sender(self) -> Sender[T]:
         return self._sender.clone()
+
+    def _routes_to_local_node(self, item: T) -> bool:
+        if self.local_routing_key is None or self.topic.routing_key is None:
+            return False
+        return self.topic.routing_key(item) == self.local_routing_key
 
     async def _send_out(self, item: T):
         logger.trace(f"TopicRouter {self.topic.topic} sending {item}")
@@ -258,7 +269,8 @@ class Router:
                 self._tmp_networking_sender = None
             else:
                 send = self.networking_receiver.clone_sender()
-        router = TopicRouter[T](topic, send)
+        local_routing_key = self._node_id if topic.topic == DATA.topic else None
+        router = TopicRouter[T](topic, send, local_routing_key=local_routing_key)
         self.topic_routers[topic.topic] = cast(TopicRouter[CamelCaseModel], router)
         if self._tg.is_running():
             await self._networking_subscribe(topic.topic)
