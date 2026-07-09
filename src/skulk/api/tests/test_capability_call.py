@@ -5,7 +5,12 @@ through (the endpoint, the local fast path, and a future queryable transport
 all land here), so the guard matrix is tested against it directly.
 """
 
+from typing import TYPE_CHECKING
+
 import anyio
+
+if TYPE_CHECKING:
+    import pytest
 
 from skulk.api.main import API
 from skulk.extensions import (
@@ -369,3 +374,116 @@ async def test_non_string_result_keys_are_typed_invalid_result() -> None:
     result = await _dispatch(_build_api(_IntKeyResultProvider()), _call())
     assert not result.ok and result.error is not None
     assert result.error.code == "invalid_result"
+
+
+async def test_caller_budget_spans_lookup_and_provider(
+    monkeypatch: "pytest.MonkeyPatch",
+) -> None:
+    # #513: one budget clock. A lookup that eats (nearly) the whole deadline
+    # leaves no budget for the provider hop; the caller gets a typed timeout
+    # instead of waiting up to twice the requested deadline.
+    api = _build_api(_EchoProvider())
+
+    async def slow_lookup(node_id: NodeId) -> str:
+        # Finishes just inside the budget, leaving less than the 0.05s floor.
+        await anyio.sleep(0.27)
+        return "http://192.0.2.1:52415"  # TEST-NET, never reached
+
+    monkeypatch.setattr(api, "_peer_api_url_for", slow_lookup)
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    started = anyio.current_time()
+    result = await context.call_capability(
+        NodeId("n-peer"), "echo", "1.0.0", _ECHO_REVISION, {"text": "x"},
+        timeout_seconds=0.3,
+    )
+    elapsed = anyio.current_time() - started
+    assert not result.ok and result.error is not None
+    assert result.error.code == "timeout"
+    assert "no budget remains" in result.error.message
+    # The whole call stayed near the requested budget, not lookup + provider.
+    assert elapsed < 1.5
+
+
+async def test_caller_lookup_cancelled_at_deadline(
+    monkeypatch: "pytest.MonkeyPatch",
+) -> None:
+    # A blackholed lookup is cancelled at the deadline and degrades typed.
+    api = _build_api(_EchoProvider())
+
+    async def blackholed_lookup(node_id: NodeId) -> str | None:
+        await anyio.sleep(60)
+        return None
+
+    monkeypatch.setattr(api, "_peer_api_url_for", blackholed_lookup)
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    started = anyio.current_time()
+    result = await context.call_capability(
+        NodeId("n-peer"), "echo", "1.0.0", _ECHO_REVISION, {"text": "x"},
+        timeout_seconds=0.2,
+    )
+    elapsed = anyio.current_time() - started
+    assert not result.ok and result.error is not None
+    # Deadline exhaustion during resolution is a timeout, not a verdict that
+    # the node is unreachable.
+    assert result.error.code == "timeout"
+    assert elapsed < 2.0
+
+
+async def test_caller_invalid_timeout_fails_fast_on_remote_path() -> None:
+    # An out-of-range timeout must fail fast as a typed error BEFORE it
+    # becomes the reachability lookup budget on the remote path.
+    api = _build_api(_EchoProvider())
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    for bad in (0.0, -5.0, 9_999.0):
+        result = await context.call_capability(
+            NodeId("n-peer"), "echo", "1.0.0", _ECHO_REVISION, {"text": "x"},
+            timeout_seconds=bad,
+        )
+        assert not result.ok and result.error is not None
+        assert result.error.code == "invalid_payload"
+
+
+async def test_caller_non_numeric_timeout_is_typed() -> None:
+    # An untyped extension can pass a non-numeric timeout; the comparison must
+    # not raise TypeError out of call_capability.
+    api = _build_api(_EchoProvider())
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    result = await context.call_capability(
+        NodeId("n-peer"), "echo", "1.0.0", _ECHO_REVISION, {"text": "x"},
+        timeout_seconds="10",  # pyright: ignore[reportArgumentType]
+    )
+    assert not result.ok and result.error is not None
+    assert result.error.code == "invalid_payload"
+
+
+async def test_deeply_nested_payload_is_typed_invalid_payload() -> None:
+    # json.dumps raises RecursionError on very deep nesting; it must degrade
+    # to a typed error at every guard site, never escape as an exception.
+    # Depth far beyond any recursion limit so the failure is deterministic
+    # regardless of the current stack depth; model_construct bypasses
+    # pydantic's own recursion during test setup (the guard under test is the
+    # dispatch's, not the envelope validator's).
+    deep: dict[str, object] = {"leaf": 1}
+    for _ in range(50_000):
+        deep = {"nested": deep}
+    call = CapabilityCall.model_construct(
+        call_id="c-deep",
+        capability_id="echo",
+        version="1.0.0",
+        descriptor_revision=_ECHO_REVISION,
+        caller_node="caller",
+        target_node="api-node",
+        timeout_seconds=30.0,
+        payload=deep,
+    )
+    result = await _dispatch(_build_api(_EchoProvider()), call)
+    assert not result.ok and result.error is not None
+    assert result.error.code == "invalid_payload"
+
+    api = _build_api(_EchoProvider())
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    caller_result = await context.call_capability(
+        NodeId("n-peer"), "echo", "1.0.0", _ECHO_REVISION, deep
+    )
+    assert not caller_result.ok and caller_result.error is not None
+    assert caller_result.error.code == "invalid_payload"

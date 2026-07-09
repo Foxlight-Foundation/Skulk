@@ -165,6 +165,7 @@ from skulk.connectivity.tailscale import TailscaleStatus, query_tailscale_status
 from skulk.extensions import (
     DEFAULT_CALL_TIMEOUT_SECONDS,
     MAX_CALL_PAYLOAD_BYTES,
+    MAX_CALL_TIMEOUT_SECONDS,
     CapabilityCall,
     CapabilityDescriptor,
     CapabilityErrorCode,
@@ -3047,12 +3048,16 @@ class API:
         """Run one capability call against this node's providers, guarded.
 
         Guard order (each failure is a typed error, never an exception):
-        payload size cap; handler lookup (``not_found`` vs
-        ``version_mismatch``); descriptor revision pin; input-schema
-        validation; provider concurrency bound (``overloaded``); the caller's
-        deadline (``timeout``); handler exceptions (``provider_error``);
-        result size cap and output-schema validation (``invalid_result``).
-        The master is never involved and nothing here touches ``State``.
+        target-node addressing check; handler lookup (``not_found`` vs
+        ``version_mismatch``); descriptor revision pin; then, INSIDE the
+        provider concurrency bound (``overloaded``) and the caller's deadline
+        (``timeout``): payload size cap, input-schema validation, and the
+        handler itself (exceptions become ``provider_error``); finally result
+        shape, size cap, and output-schema validation (``invalid_result``).
+        Serialization and validation work counts against the bound and the
+        deadline (#513); cheap guards stay outside so trivially-rejectable
+        calls never consume a slot. The master is never involved and nothing
+        here touches ``State``.
         """
         if call.target_node != str(self.node_id):
             # A misrouted or misaddressed envelope must not execute here: the
@@ -3066,28 +3071,6 @@ class API:
         if self._extensions is None:
             return call_failure(
                 call.call_id, "not_found", "this node loads no extensions"
-            )
-        try:
-            payload_bytes = len(
-                json.dumps(
-                    call.payload, separators=(",", ":"), allow_nan=False
-                ).encode("utf-8")
-            )
-        except (TypeError, ValueError) as exc:
-            # A local fast-path caller can hand a payload the endpoint's JSON
-            # parsing would never produce (bytes, sets, NaN); typed error, not
-            # an exception (the never-raises contract).
-            return call_failure(
-                call.call_id,
-                "invalid_payload",
-                f"payload is not JSON-serializable: {exc}",
-            )
-        if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
-            return call_failure(
-                call.call_id,
-                "payload_too_large",
-                f"payload is {payload_bytes} bytes "
-                f"(limit {MAX_CALL_PAYLOAD_BYTES})",
             )
         qualified_id = f"{call.capability_id}@{call.version}"
         entry = self._extensions.call_handler(qualified_id)
@@ -3109,14 +3092,14 @@ class API:
                 f"descriptor revision is {current_revision}, caller pinned "
                 f"{call.descriptor_revision}; re-discover before calling",
             )
-        schema_error = validate_against_schema(
-            call.payload, descriptor.input_schema, what="payload"
-        )
-        if schema_error is not None:
-            return call_failure(call.call_id, "invalid_payload", schema_error)
         # Bounded concurrency: one slow provider must not accumulate unbounded
-        # in-flight calls on the API node. The event loop is single-threaded,
-        # so a plain counter is race-free here.
+        # in-flight calls on the API node, and (#513) the serialization and
+        # schema-validation work below counts against the bound and the
+        # deadline too, so a storm of large-but-invalid payloads cannot drive
+        # unbounded concurrent validation outside the guard. The event loop is
+        # single-threaded, so a plain counter is race-free here. Cheap guards
+        # (addressing, handler lookup, revision pin) stay outside the bound so
+        # trivially-rejectable calls never consume a slot.
         if self._active_capability_calls >= _MAX_CONCURRENT_CAPABILITY_CALLS:
             return call_failure(
                 call.call_id,
@@ -3127,24 +3110,58 @@ class API:
         self._active_capability_calls += 1
         try:
             with anyio.fail_after(call.timeout_seconds):
-                result_payload = await handler.handle_call(
-                    self._extension_context, call
+                try:
+                    payload_bytes = len(
+                        json.dumps(
+                            call.payload, separators=(",", ":"), allow_nan=False
+                        ).encode("utf-8")
+                    )
+                except (TypeError, ValueError, RecursionError, OverflowError) as exc:
+                    # A local fast-path caller can hand a payload the
+                    # endpoint's JSON parsing would never produce (bytes,
+                    # sets, NaN); typed error, not an exception.
+                    return call_failure(
+                        call.call_id,
+                        "invalid_payload",
+                        f"payload is not JSON-serializable: {exc}",
+                    )
+                if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
+                    return call_failure(
+                        call.call_id,
+                        "payload_too_large",
+                        f"payload is {payload_bytes} bytes "
+                        f"(limit {MAX_CALL_PAYLOAD_BYTES})",
+                    )
+                schema_error = validate_against_schema(
+                    call.payload, descriptor.input_schema, what="payload"
                 )
+                if schema_error is not None:
+                    return call_failure(
+                        call.call_id, "invalid_payload", schema_error
+                    )
+                try:
+                    result_payload = await handler.handle_call(
+                        self._extension_context, call
+                    )
+                except Exception as exc:  # noqa: BLE001 - a raising handler must not 500 the node
+                    # logger.exception keeps the traceback: debugging a
+                    # misbehaving extension from the message alone is much
+                    # harder in production.
+                    logger.exception(
+                        f"capability handler '{extension_name}' for "
+                        f"{qualified_id} raised: {exc}"
+                    )
+                    return call_failure(
+                        call.call_id,
+                        "provider_error",
+                        f"{type(exc).__name__}: {exc}",
+                    )
         except TimeoutError:
             return call_failure(
                 call.call_id,
                 "timeout",
-                f"provider did not finish within {call.timeout_seconds}s",
-            )
-        except Exception as exc:  # noqa: BLE001 - a raising handler must not 500 the node
-            # logger.exception keeps the traceback: debugging a misbehaving
-            # extension from the message alone is much harder in production.
-            logger.exception(
-                f"capability handler '{extension_name}' for {qualified_id} "
-                f"raised: {exc}"
-            )
-            return call_failure(
-                call.call_id, "provider_error", f"{type(exc).__name__}: {exc}"
+                f"call did not finish within {call.timeout_seconds}s "
+                f"(payload validation plus provider execution)",
             )
         finally:
             self._active_capability_calls -= 1
@@ -3171,7 +3188,7 @@ class API:
                     result_payload, separators=(",", ":"), allow_nan=False
                 ).encode("utf-8")
             )
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, RecursionError, OverflowError) as exc:
             # allow_nan=False also rejects NaN/Infinity here: json.dumps would
             # otherwise accept them but the HTTP response renderer refuses
             # non-finite JSON, turning the call into a 500 downstream.
@@ -3231,13 +3248,30 @@ class API:
             The typed result of the call.
         """
         call_id = str(uuid4())
+        requested_timeout = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else DEFAULT_CALL_TIMEOUT_SECONDS
+        )
+        if not isinstance(requested_timeout, (int, float)) or not (  # pyright: ignore[reportUnnecessaryIsInstance]
+            0 < requested_timeout <= MAX_CALL_TIMEOUT_SECONDS
+        ):
+            # Validate the timeout BEFORE it becomes the lookup budget: an
+            # out-of-range value must fail fast as a typed error, not stall
+            # the reachability probe or surface as a misleading unreachable.
+            return call_failure(
+                call_id,
+                "invalid_payload",
+                f"timeout_seconds must be in (0, {MAX_CALL_TIMEOUT_SECONDS}]; "
+                f"got {requested_timeout}",
+            )
         try:
             payload_bytes = len(
                 json.dumps(payload, separators=(",", ":"), allow_nan=False).encode(
                     "utf-8"
                 )
             )
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, RecursionError, OverflowError) as exc:
             return call_failure(
                 call_id,
                 "invalid_payload",
@@ -3252,6 +3286,10 @@ class API:
                 f"payload is {payload_bytes} bytes "
                 f"(limit {MAX_CALL_PAYLOAD_BYTES})",
             )
+
+        # Validate the FULL envelope before any network work: a violation from
+        # an untyped caller (non-string ids and the like) fails fast as a
+        # typed error instead of after a wasted reachability probe.
         try:
             call = CapabilityCall(
                 call_id=call_id,
@@ -3260,36 +3298,53 @@ class API:
                 descriptor_revision=descriptor_revision,
                 caller_node=str(self.node_id),
                 target_node=str(node_id),
-                timeout_seconds=(
-                    timeout_seconds
-                    if timeout_seconds is not None
-                    else DEFAULT_CALL_TIMEOUT_SECONDS
-                ),
+                timeout_seconds=requested_timeout,
                 payload=payload,
             )
         except ValidationError as exc:
-            # An out-of-range timeout (or any other envelope violation) is a
-            # typed error, never a raise out of call_capability.
             return call_failure(
                 call_id, "invalid_payload", f"invalid call envelope: {exc}"
             )
+
         if node_id == self.node_id:
             return await self._dispatch_capability_call(call)
-        # The reachability lookup honors the call's deadline too: probing a
-        # stale or blackholed target must not stall a short-deadline call
-        # beyond what the caller asked for.
+        # One budget clock spans the WHOLE remote call (#513): target
+        # resolution consumes from the same deadline the provider gets, so the
+        # caller can never wait materially longer than it asked for (the old
+        # shape allowed lookup + provider to each use the full budget).
+        started_at = anyio.current_time()
         base_url: str | None = None
-        with anyio.move_on_after(call.timeout_seconds):
+        with anyio.move_on_after(requested_timeout) as lookup_scope:
             base_url = await self._peer_api_url_for(node_id)
+        if lookup_scope.cancelled_caught:
+            # Deadline exhaustion while resolving is a timeout, not a verdict
+            # that the node is unreachable; the caller can retry with a larger
+            # budget where a true unreachable would not change.
+            return call_failure(
+                call_id,
+                "timeout",
+                f"deadline exhausted resolving target {node_id}",
+            )
         if base_url is None:
             return call_failure(
-                call.call_id, "unreachable", f"node {node_id} is not reachable"
+                call_id, "unreachable", f"node {node_id} is not reachable"
             )
-        # The HTTP deadline extends slightly past the provider's own deadline
-        # so a typed timeout from the provider wins over a transport timeout.
-        http_timeout = httpx.Timeout(
-            timeout=call.timeout_seconds + 5.0, connect=2.0
-        )
+        remaining = requested_timeout - (anyio.current_time() - started_at)
+        if remaining < 0.05:
+            return call_failure(
+                call_id,
+                "timeout",
+                f"target {node_id} resolved, but no budget remains for the "
+                f"call itself",
+            )
+        # Re-stamp the envelope with the remaining budget. model_copy skips
+        # validation, which is safe here: remaining is bounded by the already
+        # validated requested_timeout above and the 0.05s floor just checked.
+        call = call.model_copy(update={"timeout_seconds": remaining})
+        # The HTTP deadline extends slightly past the provider's remaining
+        # budget so a typed timeout from the provider wins over a transport
+        # timeout.
+        http_timeout = httpx.Timeout(timeout=remaining + 5.0, connect=2.0)
         try:
             async with httpx.AsyncClient(
                 timeout=http_timeout, verify=False

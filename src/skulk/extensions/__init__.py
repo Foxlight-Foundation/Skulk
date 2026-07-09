@@ -10,6 +10,7 @@ discovery, version gating, and guarded dispatch.
 from skulk.extensions.calls import (
     DEFAULT_CALL_TIMEOUT_SECONDS,
     MAX_CALL_PAYLOAD_BYTES,
+    MAX_CALL_TIMEOUT_SECONDS,
     CapabilityCall,
     CapabilityError,
     CapabilityErrorCode,
@@ -50,6 +51,7 @@ __all__ = [
     "DEFAULT_CALL_TIMEOUT_SECONDS",
     "ENTRY_POINT_GROUP",
     "MAX_CALL_PAYLOAD_BYTES",
+    "MAX_CALL_TIMEOUT_SECONDS",
     "AdvertiseCapability",
     "BaseChatMiddleware",
     "CallCapability",
