@@ -165,6 +165,7 @@ from skulk.connectivity.tailscale import TailscaleStatus, query_tailscale_status
 from skulk.extensions import (
     DEFAULT_CALL_TIMEOUT_SECONDS,
     MAX_CALL_PAYLOAD_BYTES,
+    MAX_CALL_TIMEOUT_SECONDS,
     CapabilityCall,
     CapabilityDescriptor,
     CapabilityErrorCode,
@@ -3247,6 +3248,16 @@ class API:
             if timeout_seconds is not None
             else DEFAULT_CALL_TIMEOUT_SECONDS
         )
+        if not 0 < requested_timeout <= MAX_CALL_TIMEOUT_SECONDS:
+            # Validate the timeout BEFORE it becomes the lookup budget: an
+            # out-of-range value must fail fast as a typed error, not stall
+            # the reachability probe or surface as a misleading unreachable.
+            return call_failure(
+                call_id,
+                "invalid_payload",
+                f"timeout_seconds must be in (0, {MAX_CALL_TIMEOUT_SECONDS}]; "
+                f"got {requested_timeout}",
+            )
         try:
             payload_bytes = len(
                 json.dumps(payload, separators=(",", ":"), allow_nan=False).encode(
@@ -3299,8 +3310,17 @@ class API:
         # shape allowed lookup + provider to each use the full budget).
         started_at = anyio.current_time()
         base_url: str | None = None
-        with anyio.move_on_after(requested_timeout):
+        with anyio.move_on_after(requested_timeout) as lookup_scope:
             base_url = await self._peer_api_url_for(node_id)
+        if lookup_scope.cancelled_caught:
+            # Deadline exhaustion while resolving is a timeout, not a verdict
+            # that the node is unreachable; the caller can retry with a larger
+            # budget where a true unreachable would not change.
+            return call_failure(
+                call_id,
+                "timeout",
+                f"deadline exhausted resolving target {node_id}",
+            )
         if base_url is None:
             return call_failure(
                 call_id, "unreachable", f"node {node_id} is not reachable"

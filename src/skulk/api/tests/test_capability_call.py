@@ -419,5 +419,21 @@ async def test_caller_lookup_cancelled_at_deadline(
     )
     elapsed = anyio.current_time() - started
     assert not result.ok and result.error is not None
-    assert result.error.code == "unreachable"
+    # Deadline exhaustion during resolution is a timeout, not a verdict that
+    # the node is unreachable.
+    assert result.error.code == "timeout"
     assert elapsed < 2.0
+
+
+async def test_caller_invalid_timeout_fails_fast_on_remote_path() -> None:
+    # An out-of-range timeout must fail fast as a typed error BEFORE it
+    # becomes the reachability lookup budget on the remote path.
+    api = _build_api(_EchoProvider())
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    for bad in (0.0, -5.0, 9_999.0):
+        result = await context.call_capability(
+            NodeId("n-peer"), "echo", "1.0.0", _ECHO_REVISION, {"text": "x"},
+            timeout_seconds=bad,
+        )
+        assert not result.ok and result.error is not None
+        assert result.error.code == "invalid_payload"
