@@ -15,6 +15,7 @@ from skulk.extensions.loader import (
 )
 from skulk.extensions.telemetry import ClusterNodeView, snapshot_cluster
 from skulk.extensions.types import (
+    AdvertiseCapability,
     BaseChatMiddleware,
     ChatMiddleware,
     ChatResponseSummary,
@@ -26,6 +27,7 @@ from skulk.extensions.types import (
 
 __all__ = [
     "ENTRY_POINT_GROUP",
+    "AdvertiseCapability",
     "BaseChatMiddleware",
     "ChatMiddleware",
     "ChatResponseSummary",

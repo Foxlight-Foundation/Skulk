@@ -61,6 +61,36 @@ def test_snapshot_is_stably_sorted_and_heterogeneous() -> None:
     assert [n.accelerator_vendor for n in snapshot] == ["apple", "amd"]
 
 
+def test_snapshot_surfaces_advertised_capabilities() -> None:
+    """Capability tags a peer advertised appear (sorted) in its snapshot."""
+    view = TelemetryView()
+    _full_node(view, NodeId("n-kite1"), "kite1", "apple")
+    view.node_capabilities[NodeId("n-kite1")] = frozenset({"search", "memory"})
+
+    node = snapshot_cluster(view)[0]
+    assert node.capabilities == ("memory", "search")  # sorted
+
+
+def test_snapshot_capabilities_default_empty() -> None:
+    """A node that advertised nothing snapshots to an empty capability tuple."""
+    view = TelemetryView()
+    _full_node(view, NodeId("n-kite1"), "kite1", "apple")
+
+    assert snapshot_cluster(view)[0].capabilities == ()
+
+
+def test_snapshot_includes_capability_only_node() -> None:
+    """A node seen only through a capability advertisement still appears."""
+    view = TelemetryView()
+    view.node_capabilities[NodeId("n-plugin")] = frozenset({"memory"})
+
+    snapshot = snapshot_cluster(view)
+    assert len(snapshot) == 1
+    assert snapshot[0].node_id == NodeId("n-plugin")
+    assert snapshot[0].capabilities == ("memory",)
+    assert snapshot[0].backends == ()
+
+
 def test_snapshot_tolerates_partial_telemetry() -> None:
     """A node seen through one reading only shows None for the absent fields."""
     view = TelemetryView()

@@ -57,6 +57,25 @@ class ReadClusterTelemetry(Protocol):
     def __call__(self) -> tuple[ClusterNodeView, ...]: ...
 
 
+class AdvertiseCapability(Protocol):
+    """Synchronous callable that advertises a capability on the telemetry plane.
+
+    The extension calls this to publish an opaque capability tag (for example
+    ``"memory"``) that peers then see in their
+    :attr:`ClusterNodeView.capabilities`. It is the *advertise* half of
+    telemetry-plane access: how a plugin announces what it offers, the same way
+    native nodes advertise their backends.
+
+    Advertising is additive and idempotent: re-advertising the same tag is a
+    no-op, and the tag keeps being gossiped (last-write-wins) until the node
+    leaves the cluster. Cheap and side-effect free beyond recording the tag (it
+    only mutates a local set; the gossip happens on the node's normal telemetry
+    poll), so it is safe to call from an inline hook (typically once at startup).
+    """
+
+    def __call__(self, capability: str) -> None: ...
+
+
 @final
 @dataclass(frozen=True)
 class ExtensionContext:
@@ -70,12 +89,16 @@ class ExtensionContext:
         read_cluster: The telemetry-plane read surface: returns an immutable
             per-node snapshot of the cluster (fabric-citizenship Phase 1). How a
             plugin discovers its peers and their health.
+        advertise_capability: The telemetry-plane advertise surface: publishes
+            an opaque capability tag this node offers so peers discover it via
+            their own ``read_cluster`` snapshots.
     """
 
     node_id: NodeId
     skulk_version: str
     embed_texts: EmbedTexts
     read_cluster: ReadClusterTelemetry
+    advertise_capability: AdvertiseCapability
 
 
 @final

@@ -947,6 +947,10 @@ class API:
             # the live view at call time. `self._telemetry_view` is assigned just
             # below, so the closure reads it lazily, never at construction.
             read_cluster=lambda: snapshot_cluster(self._telemetry_view),
+            # Telemetry-plane advertise access (fabric-citizenship Phase 1): record
+            # the tag on the shared view's outbound set; the worker's info gatherer
+            # gossips it on its next poll. Reads self._telemetry_view lazily too.
+            advertise_capability=self._advertise_capability,
         )
         # Data plane (#279 Phase 2): per-token output chunks arrive here direct
         # from the serving worker (DATA topic), not as ChunkGenerated events off
@@ -2780,6 +2784,32 @@ class API:
                 detail=f"No instance found for model {resolved}",
             )
         return resolved
+
+    def _advertise_capability(self, capability: str) -> None:
+        """Advertise a capability tag on this node's telemetry plane.
+
+        The telemetry-plane advertise surface extensions receive via their
+        ``ExtensionContext`` (fabric-citizenship Phase 1). Records the tag on the
+        shared ``TelemetryView`` outbound set; the worker's info gatherer gossips
+        it last-write-wins on its next poll, so peers see it in their own
+        ``read_cluster`` snapshots. Advertising is additive and idempotent.
+
+        Empty or whitespace-only tags are ignored (a defensive guard: a tag is a
+        discovery key, and a blank one would be meaningless gossip). A node that
+        runs no worker never emits (it has no gatherer), so the tag is recorded
+        but not gossiped there; the mainstream node runs both.
+
+        Args:
+            capability: The opaque capability tag to advertise (for example
+                ``"memory"``).
+        """
+        tag = capability.strip()
+        if not tag:
+            logger.warning(
+                "Extension advertised an empty capability tag; ignoring it"
+            )
+            return
+        self._telemetry_view.local_advertised_capabilities.add(tag)
 
     async def embed_texts(
         self,

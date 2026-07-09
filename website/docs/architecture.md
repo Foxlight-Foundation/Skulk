@@ -475,10 +475,14 @@ The contract is deliberately small (`src/skulk/extensions/`):
 - Each hook invocation receives an `ExtensionContext` carrying the node
   identity, the running Skulk version, programmatic access to the cluster's
   embedding serving (the in-process equivalent of `POST /v1/embeddings`), and
-  `read_cluster()`, the telemetry-plane read surface: an immutable per-node
-  snapshot of the cluster (backends, participation role, accelerator vendor,
-  version, liveness) so a plugin can discover the fabric it belongs to. This is
-  the first slice of first-class citizenship as plane access.
+  telemetry-plane access. `read_cluster()` is the read surface: an immutable
+  per-node snapshot of the cluster (backends, participation role, accelerator
+  vendor, version, liveness, advertised capabilities) so a plugin can discover
+  the fabric it belongs to. `advertise_capability(tag)` is the write surface: it
+  publishes an opaque capability tag this node offers onto the plane so peers
+  discover it the same way native nodes advertise their backends. Together these
+  are first-class citizenship expressed as plane access: a plugin both reads and
+  writes the telemetry plane.
 
 Three invariants shape the design. First, **a raising extension never breaks
 inference**: every extension call is guarded, an exception is logged loudly

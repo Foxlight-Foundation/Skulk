@@ -1,19 +1,25 @@
-"""Read access to the telemetry plane for extensions (fabric-citizenship Phase 1).
+"""Telemetry-plane access for extensions (fabric-citizenship Phase 1).
 
-First-class citizenship on the fabric means plane access. This module gives an
-extension the *read* half of the telemetry plane: an immutable, per-node snapshot
-of what the node currently sees (which peers exist, their backends, participation
-role, accelerator vendor, memory, version, and liveness). It is how a plugin
-discovers the cluster it is part of, rather than being blind to everything beyond
-the chat request in front of it.
+First-class citizenship on the fabric means plane access. This module carries an
+extension's telemetry-plane surface, both halves:
 
-The snapshot is deliberately a **flattened, immutable projection** of the live
-``TelemetryView`` maps, not the mutable view object itself: an extension can never
-mutate cluster telemetry, and the projection is a stable contract independent of
-the internal telemetry types. It is transport-agnostic (a view of the plane's
-materialized state, not of libp2p vs Zenoh). The *advertise* half (a plugin
-publishing its own capability onto the plane) is a separate, later slice because
-it is a wire-schema change.
+- **Read** (``snapshot_cluster`` / :class:`ClusterNodeView`): an immutable,
+  per-node snapshot of what the node currently sees (which peers exist, their
+  backends, participation role, accelerator vendor, memory, version, liveness,
+  and any capability tags peers advertise). It is how a plugin discovers the
+  cluster it is part of, rather than being blind to everything beyond the chat
+  request in front of it.
+- **Advertise** (``ExtensionContext.advertise_capability``, wired in the API):
+  a plugin publishes its own capability tag onto the plane so peers discover it,
+  the same way native nodes advertise their backends. The tag rides the ordinary
+  telemetry emit path (gossiped last-write-wins), surfacing in every peer's
+  ``ClusterNodeView.capabilities``.
+
+The read snapshot is deliberately a **flattened, immutable projection** of the
+live ``TelemetryView`` maps, not the mutable view object itself: an extension can
+never mutate cluster telemetry directly, and the projection is a stable contract
+independent of the internal telemetry types. It is transport-agnostic (a view of
+the plane's materialized state, not of libp2p vs Zenoh).
 """
 
 from __future__ import annotations
@@ -62,6 +68,10 @@ class ClusterNodeView(BaseModel):
         ram_total_bytes: Total RAM in bytes, or ``None``.
         last_telemetry: When this node last received any telemetry from the
             peer (its liveness signal), or ``None``.
+        capabilities: Extension-advertised capability tags the node offers
+            (sorted), for example ``("memory",)``; empty when the node
+            advertises nothing. These are opaque strings set by extensions on
+            the advertising node, not interpreted by Skulk core.
     """
 
     # Strict + frozen: this is an extension-facing contract type, so reject any
@@ -77,6 +87,7 @@ class ClusterNodeView(BaseModel):
     accelerator_vendor: str | None
     ram_total_bytes: int | None
     last_telemetry: datetime | None
+    capabilities: tuple[str, ...]
 
 
 def snapshot_cluster(view: TelemetryView) -> tuple[ClusterNodeView, ...]:
@@ -98,6 +109,7 @@ def snapshot_cluster(view: TelemetryView) -> tuple[ClusterNodeView, ...]:
     node_ids |= set(view.node_identities)
     node_ids |= set(view.node_memory)
     node_ids |= set(view.node_system)
+    node_ids |= set(view.node_capabilities)
     node_ids |= set(view.node_last_telemetry)
 
     snapshots: list[ClusterNodeView] = []
@@ -119,6 +131,7 @@ def snapshot_cluster(view: TelemetryView) -> tuple[ClusterNodeView, ...]:
                 accelerator_vendor=accelerator.vendor if accelerator is not None else None,
                 ram_total_bytes=memory.ram_total.in_bytes if memory is not None else None,
                 last_telemetry=view.node_last_telemetry.get(node_id),
+                capabilities=tuple(sorted(view.node_capabilities.get(node_id, frozenset()))),
             )
         )
     snapshots.sort(key=lambda snapshot: (snapshot.friendly_name or "", snapshot.node_id))
