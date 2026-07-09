@@ -1,0 +1,27 @@
+model_id = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-4bit"
+n_layers = 5
+hidden_size = 1024
+supports_tensor = false
+tasks = ["TextToSpeech"]
+family = "qwen3_tts"
+quantization = "4bit"
+base_model = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+capabilities = ["tts"]
+context_length = 65536
+
+[audio]
+kind = "tts"
+default_response_format = "wav"
+response_formats = ["wav", "mp3"]
+supports_streaming = true
+supports_realtime = false
+supports_voice_listing = false
+supports_reference_audio = false
+sample_rates = [24000]
+
+[placement]
+compatible_backends = ["mlx_audio", "mlx_audio-metal"]
+backend_preference = ["mlx_audio-metal", "mlx_audio"]
+
+[storage_size]
+in_bytes = 1711328624
