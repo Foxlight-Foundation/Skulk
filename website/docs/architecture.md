@@ -302,6 +302,11 @@ runner, and the runner emits terminal `TranscriptionChunk` output on the data
 plane. Streaming TTS/STT, voice/reference-audio management, speech translation,
 and realtime sessions remain later phases. The realtime/fabric follow-on is
 tracked in [Speech Fabric and Realtime Design](speech-fabric-realtime).
+The dashboard composes the shipped REST endpoints in chat: mounted TTS models
+can speak draft text, replay assistant messages, or auto-speak final assistant
+responses; mounted STT models can transcribe a browser-recorded clip into the
+draft box. Browser microphone capture uses `MediaRecorder`, so the mic control
+is available only from a secure browser context such as HTTPS or localhost.
 
 The llama.cpp runner serves GGUF models single-node and matches the MLX runner
 on the capabilities llama.cpp supports natively: per-token logprobs (with the
@@ -527,7 +532,8 @@ The dashboard's main surfaces:
 
 - **Topology**: spatial cluster view, node-by-node status
 - **Model Store**: search Hugging Face, place models, monitor downloads
-- **Chat**: simple chat client against the placed models
+- **Chat**: chat client against placed text models, with mounted TTS playback
+  and mounted STT microphone transcription when speech models are ready
 - **Observability panel**: right-side resizable dock for live cluster health, per-node diagnostics, trace browsing (work in progress)
 - **Settings**: cluster config (model store, KV cache backend, logging, tracing), plus a gated Experiments section on nodes running with `SKULK_ENABLE_EXPERIMENTAL_MODE`
 

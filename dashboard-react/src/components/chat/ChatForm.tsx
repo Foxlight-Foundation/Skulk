@@ -352,6 +352,10 @@ const BottomAccentLine = styled(AccentLine)`
   }
 `;
 
+function isLocalBrowserHostname(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+}
+
 /* ---- component ---- */
 
 export function ChatForm({
@@ -410,8 +414,21 @@ export function ChatForm({
   const inputPlaceholder = placeholder ?? t('chat.form.placeholder', 'Type a message...');
   const selectedTranscriptionId = selectedTranscriptionModelId ?? transcriptionModels[0]?.modelId ?? null;
   const selectedSpeechId = selectedSpeechModelId ?? speechModels[0]?.modelId ?? null;
+  const secureRecordingContext = typeof window === 'undefined'
+    || window.isSecureContext
+    || isLocalBrowserHostname(window.location.hostname);
+  const browserRecordingAvailable = secureRecordingContext
+    && typeof navigator !== 'undefined'
+    && Boolean(navigator.mediaDevices?.getUserMedia)
+    && typeof MediaRecorder !== 'undefined';
+  const recordingUnavailableReason = !secureRecordingContext
+    ? t('chat.form.voiceErrors.secureContextRequired', 'Microphone requires HTTPS or localhost.')
+    : !browserRecordingAvailable
+      ? t('chat.form.voiceErrors.unsupportedRecording', 'Browser audio recording is unavailable.')
+      : null;
   const speechReady = Boolean(selectedSpeechId && onSpeakText);
   const transcriptionReady = Boolean(selectedTranscriptionId && onTranscribeAudio);
+  const canRecordAudio = transcriptionReady && browserRecordingAvailable;
   const canSpeakDraft = speechReady && message.trim().length > 0 && !isRecording && !isTranscribing;
   const displayVoiceError = mediaError ?? voiceError;
   const showVoiceControls = transcriptionModels.length > 0 || speechModels.length > 0 || Boolean(displayVoiceError);
@@ -456,7 +473,15 @@ export function ChatForm({
 
   const startRecording = useCallback(async () => {
     if (!transcriptionReady || isLoading || isTranscribing) return;
-    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+    if (!secureRecordingContext) {
+      setMediaError(t('chat.form.voiceErrors.secureContextRequired', 'Microphone requires HTTPS or localhost.'));
+      return;
+    }
+    if (
+      typeof navigator === 'undefined'
+      || !navigator.mediaDevices?.getUserMedia
+      || typeof MediaRecorder === 'undefined'
+    ) {
       setMediaError(t('chat.form.voiceErrors.unsupportedRecording', 'Browser audio recording is unavailable.'));
       return;
     }
@@ -534,6 +559,7 @@ export function ChatForm({
     isLoading,
     isTranscribing,
     onTranscribeAudio,
+    secureRecordingContext,
     stopRecordingTimer,
     t,
     transcriptionReady,
@@ -770,10 +796,10 @@ export function ChatForm({
                 icon
                 type="button"
                 loading={isTranscribing}
-                disabled={!transcriptionReady || isLoading}
+                disabled={!canRecordAudio || isLoading}
                 onClick={startRecording}
-                aria-label={t('chat.form.startRecording', 'Start recording')}
-                title={t('chat.form.startRecording', 'Start recording')}
+                aria-label={recordingUnavailableReason ?? t('chat.form.startRecording', 'Start recording')}
+                title={recordingUnavailableReason ?? t('chat.form.startRecording', 'Start recording')}
               >
                 <FiMic size={16} />
               </VoiceIconBtn>

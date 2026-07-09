@@ -136,9 +136,12 @@ The resolver exposes that as `resolved_capabilities` fields:
 - `default_audio_response_format`
 - `audio_response_formats`
 
-These fields are metadata in the Phase 0 speech-serving work. They let clients
-and placement identify TTS/STT models before the `/v1/audio/*` serving routes
-and speech runners are enabled in later phases.
+These fields are now runtime-facing metadata. They let placement route speech
+cards to the `mlx_audio` runner, let `/v1/models` identify mounted TTS/STT
+models, and let the dashboard expose voice controls without guessing from model
+names. Mounted `supports_speech_synthesis` models serve non-streaming
+`/v1/audio/speech`; mounted `supports_transcription` models serve non-streaming
+`/v1/audio/transcriptions`.
 
 ## Fallback Behavior
 
