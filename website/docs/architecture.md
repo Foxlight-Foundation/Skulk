@@ -492,9 +492,23 @@ The contract is deliberately small (`src/skulk/extensions/`):
   vendor, version, liveness, advertised capabilities) so a plugin can discover
   the fabric it belongs to. `advertise_capability(tag)` is the write surface: it
   publishes an opaque capability tag this node offers onto the plane so peers
-  discover it the same way native nodes advertise their backends. Together these
-  are first-class citizenship expressed as plane access: a plugin both reads and
-  writes the telemetry plane.
+  discover it the same way native nodes advertise their backends
+  (`withdraw_capability(tag)` reverses it). Together these are first-class
+  citizenship expressed as plane access: a plugin both reads and writes the
+  telemetry plane.
+- An extension can also be a **provider**: a plugin that serves a capability of
+  its own. Because the set of future capabilities is open-ended, Skulk
+  standardizes the description, not the capabilities: a provider publishes one
+  `CapabilityDescriptor` per capability (id, semantic version, human/LLM-readable
+  description, JSON Schemas for input and output, and the call's I/O mode:
+  unary, server-streaming, client-streaming, or bidirectional). Discovery is
+  two-layered: the descriptor's id is auto-advertised as the node's telemetry
+  tag (cheap, gossiped), and the full descriptor travels on demand through
+  `describe_node()` / `GET /v1/capabilities` (heavy, fetched). Providers also
+  get an `on_start` startup hook, since a pure provider has no chat hook
+  through which to reach the context. A reference provider lives at
+  `examples/extensions/echo-provider/`. The generic capability call (invoking
+  what a provider serves) is the next slice of this surface.
 
 Three invariants shape the design. First, **a raising extension never breaks
 inference**: every extension call is guarded, an exception is logged loudly

@@ -98,12 +98,72 @@ Notes:
 - The tag is gossiped on the node's normal telemetry poll, so peers see it
   within a second or two, not instantly. A node that advertised is discoverable
   by nodes that join later (the plane re-gossips it).
-- Advertising is additive: there is no un-advertise in this release. A tag stops
-  being visible to peers only when the node leaves the cluster.
+- `withdraw_capability(tag)` is the counterpart: it stops advertising the tag
+  so callers stop selecting this node for it. When the last tag is withdrawn,
+  one final empty reading is published so peers clear their entry; a node's
+  tags also disappear when the node leaves the cluster.
 - A node must run a worker to gossip its advertisement (the worker owns the
   telemetry emit path). The mainstream node runs both an API and a worker, so
   this is automatic; a rare API-only (`--no-worker`) node records the tag but
   does not gossip it.
+
+## Serving a capability (providers)
+
+Beyond observing chat traffic, an extension can be a **provider**: a plugin
+that serves a capability of its own (a memory service, a speech backend,
+anything not yet imagined). Skulk cannot enumerate future capabilities, so it
+standardizes the *description* instead: a provider publishes one
+`CapabilityDescriptor` per capability, a fixed self-describing shape that tells
+any caller, human or LLM, how to call it.
+
+A descriptor carries:
+
+- `id` and `version`: the negotiation key (`echo@1.0.0`). The `id` doubles as
+  the telemetry discovery tag and is auto-advertised for you.
+- `title` and `description`: written for both humans and generative callers
+  (an LLM reads the description plus the schemas at runtime to call a
+  capability it has never seen, the tool-use model).
+- `input_schema` / `output_schema`: JSON Schemas for the call payload and
+  result.
+- `io_mode`: how the call moves data: `unary`, `server_streaming`,
+  `client_streaming`, or `bidirectional`, with chunk schemas for the streaming
+  modes.
+
+To become a provider, implement two extra methods on your extension:
+
+```python
+class MyExtension:
+    # ... name, skulk_requires, chat_middleware() as usual ...
+
+    def capabilities(self) -> list[CapabilityDescriptor]:
+        return [MY_DESCRIPTOR]
+
+    def on_start(self, context: ExtensionContext) -> None:
+        # Startup registration with the live context; runs once at node
+        # startup. Must be fast; heavy init belongs in background work you
+        # own. A pure provider has no chat hook, so this is how it reaches
+        # the context without waiting for a chat request.
+        ...
+```
+
+Discovery then has two layers, cheap and heavy:
+
+1. **Tag** (telemetry): peers see `"echo"` in `read_cluster()` capabilities.
+2. **Descriptor** (describe): `await context.describe_node(node_id)` fetches
+   the node's full descriptors; the same list is served over
+   `GET /v1/capabilities` on every node.
+
+```python
+for node in context.read_cluster():
+    if "echo" in node.capabilities:
+        descriptors = await context.describe_node(node.node_id)
+        # descriptors[0].input_schema tells you exactly what to send
+```
+
+A complete reference provider lives at `examples/extensions/echo-provider/` in
+the repository. Invoking a capability (the generic call envelope) is the next
+slice of the provider surface; today's contract covers serving, advertising,
+withdrawing, and describing.
 
 ## Guarantees
 

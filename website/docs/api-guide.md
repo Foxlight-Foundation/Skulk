@@ -140,6 +140,7 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `GET /v1/diagnostics/cluster/{node_id}`
 - `POST /v1/diagnostics/cluster/{node_id}/capture`
 - `POST /v1/diagnostics/cluster/{node_id}/runners/{runner_id}/cancel`
+- `GET /v1/capabilities`
 
 The node diagnostics bundle includes the node's own Tailscale state
 (`tailscale`: running flag, tailnet IP, hostname, MagicDNS name), probed on
@@ -1189,6 +1190,49 @@ Example:
 curl http://localhost:52415/v1/traces/cluster
 curl http://localhost:52415/v1/traces/cluster/<task_id>/stats
 curl -OJ http://localhost:52415/v1/traces/cluster/<task_id>/raw
+```
+
+## Extension Capabilities
+
+### List a node's served capabilities
+
+```
+GET /v1/capabilities
+```
+
+Returns the self-describing capability descriptors served by this node's
+provider extensions (see [Extensions](extensions)). Each descriptor carries
+the capability `id`, semantic `version`, a human/LLM-readable description,
+JSON Schemas for input and output, the call's I/O mode, and the response maps
+each `id@version` to a content revision digest so callers can pin the exact
+shape they discovered. An empty list means no provider extension is installed
+on this node. Peers consume this endpoint through their extensions'
+`describe_node`; the light discovery layer (which nodes offer which capability
+tag) rides the telemetry plane and appears in `GET /state`.
+
+```bash
+curl http://localhost:52415/v1/capabilities
+```
+
+```json
+{
+  "node_id": "12D3KooW...",
+  "capabilities": [
+    {
+      "id": "echo",
+      "version": "1.0.0",
+      "title": "Echo",
+      "description": "Returns the input text unchanged.",
+      "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}},
+      "output_schema": {"type": "object"},
+      "io_mode": "unary",
+      "input_chunk_schema": null,
+      "output_chunk_schema": null,
+      "annotations": null
+    }
+  ],
+  "revisions": {"echo@1.0.0": "5a1c9e327b6f4d08"}
+}
 ```
 
 ## Connectivity Endpoints

@@ -16,11 +16,14 @@ from loguru import logger
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
+from skulk.extensions.capabilities import CapabilityDescriptor
 from skulk.extensions.types import (
+    CapabilityProvider,
     ChatMiddleware,
     ChatResponseSummary,
     ExtensionContext,
     SkulkExtension,
+    SupportsExtensionStartup,
 )
 from skulk.shared.types.chunks import (
     ErrorChunk,
@@ -68,6 +71,9 @@ class LoadedExtensions:
         """
         self._names: list[str] = []
         self._chat_middlewares: list[tuple[str, ChatMiddleware]] = []
+        self._startup_hooks: list[tuple[str, SupportsExtensionStartup]] = []
+        self._capability_descriptors: list[CapabilityDescriptor] = []
+        seen_qualified_ids: set[str] = set()
         for extension in extensions:
             try:
                 name = str(extension.name)
@@ -85,6 +91,42 @@ class LoadedExtensions:
             self._names.append(name)
             if middleware is not None:
                 self._chat_middlewares.append((name, middleware))
+            # Provider facet (fabric-citizenship): collect this extension's
+            # capability descriptors. Structural check + guarded call so a
+            # non-provider extension or a raising capabilities() can never
+            # break loading.
+            if isinstance(extension, CapabilityProvider):
+                try:
+                    descriptors = list(extension.capabilities())
+                except Exception as exc:  # noqa: BLE001 - plugin must not crash startup
+                    logger.error(
+                        f"extension '{name}' capabilities() raised; loading it "
+                        f"without capabilities: {exc}"
+                    )
+                    descriptors = []
+                for descriptor in descriptors:
+                    if not isinstance(descriptor, CapabilityDescriptor):  # pyright: ignore[reportUnnecessaryIsInstance]
+                        logger.error(
+                            f"extension '{name}' returned a non-descriptor "
+                            f"capability entry; skipping it"
+                        )
+                        continue
+                    # One provider per id@version per node: a duplicate would
+                    # make describe/call ambiguous locally.
+                    if descriptor.qualified_id in seen_qualified_ids:
+                        logger.error(
+                            f"extension '{name}' capability "
+                            f"'{descriptor.qualified_id}' is already provided "
+                            f"by another extension on this node; skipping it"
+                        )
+                        continue
+                    seen_qualified_ids.add(descriptor.qualified_id)
+                    self._capability_descriptors.append(descriptor)
+            # Startup-hook facet: a pure provider has no chat hook through
+            # which to reach the context, so registration must not depend on
+            # a chat request arriving.
+            if isinstance(extension, SupportsExtensionStartup):
+                self._startup_hooks.append((name, extension))
 
     @property
     def names(self) -> list[str]:
@@ -95,6 +137,28 @@ class LoadedExtensions:
     def has_chat_middleware(self) -> bool:
         """Whether any loaded extension provides chat middleware."""
         return bool(self._chat_middlewares)
+
+    @property
+    def capability_descriptors(self) -> tuple[CapabilityDescriptor, ...]:
+        """All capability descriptors served by loaded provider extensions."""
+        return tuple(self._capability_descriptors)
+
+    def run_startup_hooks(self, context: ExtensionContext) -> None:
+        """Run every extension's ``on_start`` hook, each one guarded.
+
+        Called once when the node's extension surface comes up (the API wires
+        the context and invokes this). A raising hook is logged loudly and the
+        extension continues without its startup work; startup of the node is
+        never blocked by a broken plugin.
+        """
+        for name, extension in self._startup_hooks:
+            try:
+                extension.on_start(context)
+            except Exception as exc:  # noqa: BLE001 - extension must not break startup
+                logger.error(
+                    f"extension '{name}' on_start failed; continuing without "
+                    f"its startup work: {exc}"
+                )
 
     async def transform_chat_request(
         self,
