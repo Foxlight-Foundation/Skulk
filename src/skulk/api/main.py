@@ -3055,9 +3055,21 @@ class API:
             return call_failure(
                 call.call_id, "not_found", "this node loads no extensions"
             )
-        payload_bytes = len(
-            json.dumps(call.payload, separators=(",", ":")).encode("utf-8")
-        )
+        try:
+            payload_bytes = len(
+                json.dumps(
+                    call.payload, separators=(",", ":"), allow_nan=False
+                ).encode("utf-8")
+            )
+        except (TypeError, ValueError) as exc:
+            # A local fast-path caller can hand a payload the endpoint's JSON
+            # parsing would never produce (bytes, sets, NaN); typed error, not
+            # an exception (the never-raises contract).
+            return call_failure(
+                call.call_id,
+                "invalid_payload",
+                f"payload is not JSON-serializable: {exc}",
+            )
         if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
             return call_failure(
                 call.call_id,
@@ -3122,11 +3134,24 @@ class API:
             )
         finally:
             self._active_capability_calls -= 1
+        if not isinstance(result_payload, dict):  # pyright: ignore[reportUnnecessaryIsInstance]
+            # The handler protocol says dict, but a misbehaving plugin can
+            # return anything; the strict result model would raise on it.
+            return call_failure(
+                call.call_id,
+                "invalid_result",
+                f"provider returned {type(result_payload).__name__}, not an object",
+            )
         try:
             result_bytes = len(
-                json.dumps(result_payload, separators=(",", ":")).encode("utf-8")
+                json.dumps(
+                    result_payload, separators=(",", ":"), allow_nan=False
+                ).encode("utf-8")
             )
         except (TypeError, ValueError) as exc:
+            # allow_nan=False also rejects NaN/Infinity here: json.dumps would
+            # otherwise accept them but the HTTP response renderer refuses
+            # non-finite JSON, turning the call into a 500 downstream.
             return call_failure(
                 call.call_id,
                 "invalid_result",
@@ -3182,6 +3207,14 @@ class API:
         Returns:
             The typed result of the call.
         """
+        try:
+            json.dumps(payload, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            return call_failure(
+                "unsent",
+                "invalid_payload",
+                f"payload is not JSON-serializable: {exc}",
+            )
         call = CapabilityCall(
             call_id=str(uuid4()),
             capability_id=capability_id,

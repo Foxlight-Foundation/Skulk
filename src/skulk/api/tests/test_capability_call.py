@@ -236,3 +236,85 @@ async def test_context_call_capability_unreachable_peer() -> None:
     )
     assert not result.ok and result.error is not None
     assert result.error.code == "unreachable"
+
+
+class _NonDictResultProvider(_EchoProvider):
+    """Provider whose handler returns a non-dict (protocol violation)."""
+
+    async def handle_call(
+        self, context: ExtensionContext, call: CapabilityCall
+    ) -> dict[str, object]:
+        return "not a dict"  # pyright: ignore[reportReturnType]
+
+
+class _NanResultProvider(_EchoProvider):
+    """Provider whose numeric result carries a non-finite float."""
+
+    async def handle_call(
+        self, context: ExtensionContext, call: CapabilityCall
+    ) -> dict[str, object]:
+        return {"text": "x", "score": float("nan")}
+
+
+_STREAMING = CapabilityDescriptor(
+    id="tts-demo",
+    version="1.0.0",
+    title="TTS demo",
+    description="A streaming-only capability (not unary-callable).",
+    input_schema={"type": "object"},
+    io_mode="server_streaming",
+    output_chunk_schema={"type": "object"},
+)
+
+
+class _StreamingOnlyProvider(_EchoProvider):
+    """Provider whose only descriptor is a streaming mode."""
+
+    def capabilities(self) -> list[CapabilityDescriptor]:
+        return [_STREAMING]
+
+
+async def test_non_serializable_payload_is_typed_invalid_payload() -> None:
+    # A local fast-path caller can hand a payload JSON can't carry; the
+    # never-raises contract demands a typed error, not a TypeError.
+    result = await _dispatch(
+        _build_api(_EchoProvider()), _call(payload={"text": "x", "blob": b"raw"})
+    )
+    assert not result.ok and result.error is not None
+    assert result.error.code == "invalid_payload"
+
+
+async def test_non_dict_result_is_typed_invalid_result() -> None:
+    result = await _dispatch(_build_api(_NonDictResultProvider()), _call())
+    assert not result.ok and result.error is not None
+    assert result.error.code == "invalid_result"
+
+
+async def test_nan_result_is_typed_invalid_result() -> None:
+    # json.dumps accepts NaN by default but the HTTP response renderer refuses
+    # non-finite JSON; allow_nan=False catches it as a typed error instead.
+    result = await _dispatch(_build_api(_NanResultProvider()), _call())
+    assert not result.ok and result.error is not None
+    assert result.error.code == "invalid_result"
+
+
+async def test_streaming_descriptor_is_not_unary_callable() -> None:
+    api = _build_api(_StreamingOnlyProvider())
+    result = await _dispatch(
+        api, _call(capability_id="tts-demo", descriptor_revision="ignored")
+    )
+    assert not result.ok and result.error is not None
+    assert result.error.code == "not_found"
+    # ...but it is still discoverable (discovery-only descriptor).
+    assert api._extensions is not None  # pyright: ignore[reportPrivateUsage]
+    assert api._extensions.capability_descriptors == (_STREAMING,)  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_caller_side_rejects_non_serializable_payload_before_any_hop() -> None:
+    api = _build_api(_EchoProvider())
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    result = await context.call_capability(
+        NodeId("n-peer"), "echo", "1.0.0", _ECHO_REVISION, {"blob": b"raw"}
+    )
+    assert not result.ok and result.error is not None
+    assert result.error.code == "invalid_payload"

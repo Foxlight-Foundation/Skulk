@@ -132,7 +132,12 @@ class LoadedExtensions:
                     # handle_call serves this descriptor's unary calls. A
                     # descriptor without a handler is discovery-only (valid:
                     # for example a streaming-only capability before Phase 3).
-                    if isinstance(extension, CapabilityCallHandler):
+                    # Only unary descriptors register: routing a streaming
+                    # capability through the unary surface would serve it with
+                    # the wrong payload/result contract.
+                    if descriptor.io_mode == "unary" and isinstance(
+                        extension, CapabilityCallHandler
+                    ):
                         self._call_handlers[descriptor.qualified_id] = (
                             name,
                             extension,
