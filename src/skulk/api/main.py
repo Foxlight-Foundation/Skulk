@@ -3067,28 +3067,6 @@ class API:
             return call_failure(
                 call.call_id, "not_found", "this node loads no extensions"
             )
-        try:
-            payload_bytes = len(
-                json.dumps(
-                    call.payload, separators=(",", ":"), allow_nan=False
-                ).encode("utf-8")
-            )
-        except (TypeError, ValueError) as exc:
-            # A local fast-path caller can hand a payload the endpoint's JSON
-            # parsing would never produce (bytes, sets, NaN); typed error, not
-            # an exception (the never-raises contract).
-            return call_failure(
-                call.call_id,
-                "invalid_payload",
-                f"payload is not JSON-serializable: {exc}",
-            )
-        if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
-            return call_failure(
-                call.call_id,
-                "payload_too_large",
-                f"payload is {payload_bytes} bytes "
-                f"(limit {MAX_CALL_PAYLOAD_BYTES})",
-            )
         qualified_id = f"{call.capability_id}@{call.version}"
         entry = self._extensions.call_handler(qualified_id)
         if entry is None:
@@ -3109,14 +3087,14 @@ class API:
                 f"descriptor revision is {current_revision}, caller pinned "
                 f"{call.descriptor_revision}; re-discover before calling",
             )
-        schema_error = validate_against_schema(
-            call.payload, descriptor.input_schema, what="payload"
-        )
-        if schema_error is not None:
-            return call_failure(call.call_id, "invalid_payload", schema_error)
         # Bounded concurrency: one slow provider must not accumulate unbounded
-        # in-flight calls on the API node. The event loop is single-threaded,
-        # so a plain counter is race-free here.
+        # in-flight calls on the API node, and (#513) the serialization and
+        # schema-validation work below counts against the bound and the
+        # deadline too, so a storm of large-but-invalid payloads cannot drive
+        # unbounded concurrent validation outside the guard. The event loop is
+        # single-threaded, so a plain counter is race-free here. Cheap guards
+        # (addressing, handler lookup, revision pin) stay outside the bound so
+        # trivially-rejectable calls never consume a slot.
         if self._active_capability_calls >= _MAX_CONCURRENT_CAPABILITY_CALLS:
             return call_failure(
                 call.call_id,
@@ -3127,24 +3105,57 @@ class API:
         self._active_capability_calls += 1
         try:
             with anyio.fail_after(call.timeout_seconds):
-                result_payload = await handler.handle_call(
-                    self._extension_context, call
+                try:
+                    payload_bytes = len(
+                        json.dumps(
+                            call.payload, separators=(",", ":"), allow_nan=False
+                        ).encode("utf-8")
+                    )
+                except (TypeError, ValueError) as exc:
+                    # A local fast-path caller can hand a payload the
+                    # endpoint's JSON parsing would never produce (bytes,
+                    # sets, NaN); typed error, not an exception.
+                    return call_failure(
+                        call.call_id,
+                        "invalid_payload",
+                        f"payload is not JSON-serializable: {exc}",
+                    )
+                if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
+                    return call_failure(
+                        call.call_id,
+                        "payload_too_large",
+                        f"payload is {payload_bytes} bytes "
+                        f"(limit {MAX_CALL_PAYLOAD_BYTES})",
+                    )
+                schema_error = validate_against_schema(
+                    call.payload, descriptor.input_schema, what="payload"
                 )
+                if schema_error is not None:
+                    return call_failure(
+                        call.call_id, "invalid_payload", schema_error
+                    )
+                try:
+                    result_payload = await handler.handle_call(
+                        self._extension_context, call
+                    )
+                except Exception as exc:  # noqa: BLE001 - a raising handler must not 500 the node
+                    # logger.exception keeps the traceback: debugging a
+                    # misbehaving extension from the message alone is much
+                    # harder in production.
+                    logger.exception(
+                        f"capability handler '{extension_name}' for "
+                        f"{qualified_id} raised: {exc}"
+                    )
+                    return call_failure(
+                        call.call_id,
+                        "provider_error",
+                        f"{type(exc).__name__}: {exc}",
+                    )
         except TimeoutError:
             return call_failure(
                 call.call_id,
                 "timeout",
                 f"provider did not finish within {call.timeout_seconds}s",
-            )
-        except Exception as exc:  # noqa: BLE001 - a raising handler must not 500 the node
-            # logger.exception keeps the traceback: debugging a misbehaving
-            # extension from the message alone is much harder in production.
-            logger.exception(
-                f"capability handler '{extension_name}' for {qualified_id} "
-                f"raised: {exc}"
-            )
-            return call_failure(
-                call.call_id, "provider_error", f"{type(exc).__name__}: {exc}"
             )
         finally:
             self._active_capability_calls -= 1
@@ -3231,6 +3242,11 @@ class API:
             The typed result of the call.
         """
         call_id = str(uuid4())
+        requested_timeout = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else DEFAULT_CALL_TIMEOUT_SECONDS
+        )
         try:
             payload_bytes = len(
                 json.dumps(payload, separators=(",", ":"), allow_nan=False).encode(
@@ -3252,44 +3268,57 @@ class API:
                 f"payload is {payload_bytes} bytes "
                 f"(limit {MAX_CALL_PAYLOAD_BYTES})",
             )
-        try:
-            call = CapabilityCall(
-                call_id=call_id,
-                capability_id=capability_id,
-                version=version,
-                descriptor_revision=descriptor_revision,
-                caller_node=str(self.node_id),
-                target_node=str(node_id),
-                timeout_seconds=(
-                    timeout_seconds
-                    if timeout_seconds is not None
-                    else DEFAULT_CALL_TIMEOUT_SECONDS
-                ),
-                payload=payload,
-            )
-        except ValidationError as exc:
-            # An out-of-range timeout (or any other envelope violation) is a
-            # typed error, never a raise out of call_capability.
-            return call_failure(
-                call_id, "invalid_payload", f"invalid call envelope: {exc}"
-            )
+
+        def build_call(budget_seconds: float) -> CapabilityCall | CapabilityResult:
+            try:
+                return CapabilityCall(
+                    call_id=call_id,
+                    capability_id=capability_id,
+                    version=version,
+                    descriptor_revision=descriptor_revision,
+                    caller_node=str(self.node_id),
+                    target_node=str(node_id),
+                    timeout_seconds=budget_seconds,
+                    payload=payload,
+                )
+            except ValidationError as exc:
+                # An out-of-range timeout (or any other envelope violation) is
+                # a typed error, never a raise out of call_capability.
+                return call_failure(
+                    call_id, "invalid_payload", f"invalid call envelope: {exc}"
+                )
+
         if node_id == self.node_id:
-            return await self._dispatch_capability_call(call)
-        # The reachability lookup honors the call's deadline too: probing a
-        # stale or blackholed target must not stall a short-deadline call
-        # beyond what the caller asked for.
+            local_call = build_call(requested_timeout)
+            if isinstance(local_call, CapabilityResult):
+                return local_call
+            return await self._dispatch_capability_call(local_call)
+        # One budget clock spans the WHOLE remote call (#513): target
+        # resolution consumes from the same deadline the provider gets, so the
+        # caller can never wait materially longer than it asked for (the old
+        # shape allowed lookup + provider to each use the full budget).
+        started_at = anyio.current_time()
         base_url: str | None = None
-        with anyio.move_on_after(call.timeout_seconds):
+        with anyio.move_on_after(requested_timeout):
             base_url = await self._peer_api_url_for(node_id)
         if base_url is None:
             return call_failure(
-                call.call_id, "unreachable", f"node {node_id} is not reachable"
+                call_id, "unreachable", f"node {node_id} is not reachable"
             )
-        # The HTTP deadline extends slightly past the provider's own deadline
-        # so a typed timeout from the provider wins over a transport timeout.
-        http_timeout = httpx.Timeout(
-            timeout=call.timeout_seconds + 5.0, connect=2.0
-        )
+        remaining = requested_timeout - (anyio.current_time() - started_at)
+        if remaining < 0.05:
+            return call_failure(
+                call_id,
+                "timeout",
+                f"deadline exhausted resolving target {node_id}",
+            )
+        call = build_call(remaining)
+        if isinstance(call, CapabilityResult):
+            return call
+        # The HTTP deadline extends slightly past the provider's remaining
+        # budget so a typed timeout from the provider wins over a transport
+        # timeout.
+        http_timeout = httpx.Timeout(timeout=remaining + 5.0, connect=2.0)
         try:
             async with httpx.AsyncClient(
                 timeout=http_timeout, verify=False

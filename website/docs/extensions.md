@@ -212,9 +212,11 @@ The call contract:
   descriptor's `input_schema` before your handler runs, and your result
   against `output_schema` after. Validation never fetches remote schema
   references.
-- **Bounded.** Calls have a deadline (default 30s), payloads and results are
-  capped at 1 MiB, and each node bounds concurrent in-flight provider calls;
-  excess calls are rejected as `overloaded` rather than queued. Handlers are
+- **Bounded.** Calls have a deadline (default 30s) that spans the whole call,
+  including target resolution on the caller and payload validation on the
+  provider; payloads and results are capped at 1 MiB, and each node bounds
+  concurrent in-flight provider calls; excess calls are rejected as
+  `overloaded` rather than queued. Handlers are
   `async`: move CPU-heavy or blocking work off the event loop yourself (a
   worker thread), or you will stall the API node the handler runs on.
 - **Direct and off the log.** Calls go node-to-node; the master is never in

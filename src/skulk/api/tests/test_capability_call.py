@@ -6,6 +6,7 @@ all land here), so the guard matrix is tested against it directly.
 """
 
 import anyio
+import pytest
 
 from skulk.api.main import API
 from skulk.extensions import (
@@ -369,3 +370,54 @@ async def test_non_string_result_keys_are_typed_invalid_result() -> None:
     result = await _dispatch(_build_api(_IntKeyResultProvider()), _call())
     assert not result.ok and result.error is not None
     assert result.error.code == "invalid_result"
+
+
+async def test_caller_budget_spans_lookup_and_provider(
+    monkeypatch: "pytest.MonkeyPatch",
+) -> None:
+    # #513: one budget clock. A lookup that eats (nearly) the whole deadline
+    # leaves no budget for the provider hop; the caller gets a typed timeout
+    # instead of waiting up to twice the requested deadline.
+    api = _build_api(_EchoProvider())
+
+    async def slow_lookup(node_id: NodeId) -> str:
+        # Finishes just inside the budget, leaving less than the 0.05s floor.
+        await anyio.sleep(0.27)
+        return "http://192.0.2.1:52415"  # TEST-NET, never reached
+
+    monkeypatch.setattr(api, "_peer_api_url_for", slow_lookup)
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    started = anyio.current_time()
+    result = await context.call_capability(
+        NodeId("n-peer"), "echo", "1.0.0", _ECHO_REVISION, {"text": "x"},
+        timeout_seconds=0.3,
+    )
+    elapsed = anyio.current_time() - started
+    assert not result.ok and result.error is not None
+    assert result.error.code == "timeout"
+    assert "deadline exhausted" in result.error.message
+    # The whole call stayed near the requested budget, not lookup + provider.
+    assert elapsed < 1.5
+
+
+async def test_caller_lookup_cancelled_at_deadline(
+    monkeypatch: "pytest.MonkeyPatch",
+) -> None:
+    # A blackholed lookup is cancelled at the deadline and degrades typed.
+    api = _build_api(_EchoProvider())
+
+    async def blackholed_lookup(node_id: NodeId) -> str | None:
+        await anyio.sleep(60)
+        return None
+
+    monkeypatch.setattr(api, "_peer_api_url_for", blackholed_lookup)
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    started = anyio.current_time()
+    result = await context.call_capability(
+        NodeId("n-peer"), "echo", "1.0.0", _ECHO_REVISION, {"text": "x"},
+        timeout_seconds=0.2,
+    )
+    elapsed = anyio.current_time() - started
+    assert not result.ok and result.error is not None
+    assert result.error.code == "unreachable"
+    assert elapsed < 2.0
