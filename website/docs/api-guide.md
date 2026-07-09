@@ -661,7 +661,7 @@ This returns known model cards, not just running instances.
 
 ### Search Hugging Face
 
-**GET** `/models/search?query=...&limit=...`
+**GET** `/models/search?query=...&limit=...&mlx_only=...`
 
 ```bash
 curl "http://localhost:52415/models/search?query=qwen3&limit=5"
@@ -669,8 +669,29 @@ curl "http://localhost:52415/models/search?query=qwen3&limit=5"
 
 Behavior note:
 
-- Skulk searches `mlx-community` first.
-- If that returns nothing, it falls back to a broader Hugging Face search.
+- `mlx_only=true` restricts results to the `mlx-community` author; the default
+  searches all Hugging Face model repositories.
+- Ordinary text queries use Hugging Face repository search.
+- A query ending in `.gguf` also performs a bounded filename-aware fallback:
+  Skulk broadens the model-name prefix, inspects those candidate repositories'
+  manifests, and returns only exact filename matches. Exact matches carry a
+  `matched_file` repo-relative path so the dashboard can preserve that quant.
+
+### Add a Hugging Face model
+
+**POST** `/models/add`
+
+```json
+{
+  "model_id": "satgeze/Hy3-1M-GGUF",
+  "gguf_file": "hy3-1M-MTP-IQ3_XXS.gguf"
+}
+```
+
+Fetches metadata and adds a custom model card to the cluster catalog. The
+`model_id` field is required. `gguf_file` is optional; when supplied it must be
+an exact repo-relative GGUF weight path and the card pins that quant instead of
+using Skulk's default GGUF preference.
 
 ### Per-node storage breakdown
 
@@ -837,7 +858,9 @@ Use this when you want the store host to fetch and register a model.
 Optional JSON body `{"gguf_file": "<repo-relative path>"}` pins which GGUF quant
 the store fetches for a multi-quant GGUF repo (it downloads that file's shard
 group plus `config.json`). Omit the body to use the default quant preference.
-A pin naming a file not present in the repo falls back to the default.
+A pin naming a file not present in the repo falls back to the default at the
+store protocol layer; the `/models/add` card-building endpoint validates exact
+pins before requesting a download.
 
 ### Store download status
 

@@ -25,10 +25,10 @@ export interface ModelBrowserProps {
   existingModelIds?: Set<string>;
   canModelFit: (modelId: string) => boolean;
   getModelFitStatus: (modelId: string) => ModelFitStatus;
-  onSelect: (modelId: string) => void;
+  onSelect: (modelId: string, ggufFile?: string | null) => void;
   onToggleFavorite: (groupId: string) => void;
   onShowInfo?: (group: ModelGroup) => void;
-  onAddModel?: (modelId: string) => Promise<void>;
+  onAddModel?: (modelId: string, ggufFile?: string | null) => Promise<boolean>;
   downloadStatusMap?: Map<string, DownloadAvailability>;
   instanceStatuses?: Record<string, InstanceStatus>;
   mode?: PickerMode;
@@ -238,13 +238,19 @@ export function ModelBrowser({
                   key={m.id}
                   model={m}
                   isAdded={models.some((mod) => mod.id === m.id)}
-                  isInStore={existingModelIds.has(m.id)}
+                  isInStore={existingModelIds.has(m.id) && !m.matched_file}
                   isAdding={false}
                   onAdd={async () => {
-                    await onAddModel?.(m.id);
-                    onSelect(m.id);
+                    const added = await onAddModel?.(m.id, m.matched_file);
+                    if (added !== false) onSelect(m.id, m.matched_file);
                   }}
-                  onSelect={() => onSelect(m.id)}
+                  onSelect={async () => {
+                    if (m.matched_file) {
+                      const updated = await onAddModel?.(m.id, m.matched_file);
+                      if (updated === false) return;
+                    }
+                    onSelect(m.id, m.matched_file);
+                  }}
                 />
               ))}
             </>

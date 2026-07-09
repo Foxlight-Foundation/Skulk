@@ -700,10 +700,22 @@ class BenchChatCompletionRequest(ChatCompletionRequest):
 
 class AddCustomModelParams(BaseModel):
     model_config = ConfigDict(
-        json_schema_extra={"example": {"model_id": "mlx-community/my-custom-model"}}
+        json_schema_extra={
+            "example": {
+                "model_id": "bartowski/my-custom-model-GGUF",
+                "gguf_file": "my-custom-model-Q4_K_M.gguf",
+            }
+        }
     )
 
     model_id: ModelId
+    gguf_file: str | None = Field(
+        default=None,
+        description=(
+            "Exact repo-relative GGUF file to pin when adding a multi-quant "
+            "repository. Omit for non-GGUF repositories or default selection."
+        ),
+    )
 
 
 class HuggingFaceSearchResult(BaseModel):
@@ -713,6 +725,27 @@ class HuggingFaceSearchResult(BaseModel):
     likes: int = 0
     last_modified: str = ""
     tags: list[str] = Field(default_factory=list)
+    matched_file: str | None = Field(
+        default=None,
+        description=(
+            "Exact repo-relative GGUF path matched by a filename search, or null "
+            "for ordinary repository search results."
+        ),
+    )
+
+
+class StoreDownloadRequest(BaseModel):
+    """Optional file selection for a shared-store model download."""
+
+    model_config = ConfigDict(frozen=True, strict=True)
+
+    gguf_file: str | None = Field(
+        default=None,
+        description=(
+            "Exact repo-relative GGUF file whose shard group the store should "
+            "download. Omit to use the repository's default quant selection."
+        ),
+    )
 
 
 class PlaceInstanceParams(BaseModel):

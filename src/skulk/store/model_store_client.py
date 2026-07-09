@@ -477,22 +477,29 @@ class ModelStoreClient:
             logger.debug(f"ModelStoreClient: list_active_downloads failed: {exc}")
             return []
 
-    async def request_store_download(self, model_id: str) -> dict[str, object]:
-        """Request the store host start downloading a model. Non-blocking."""
+    async def request_store_download(
+        self,
+        model_id: str,
+        gguf_file: str | None = None,
+    ) -> dict[str, object]:
+        """Request a non-blocking store download, optionally pinning a GGUF."""
         url = _make_store_url(
             self._store_host,
             self._store_port,
             f"/models/{quote(model_id, safe='')}/download",
         )
         try:
-            async with (
-                create_http_session(timeout_profile="short") as session,
-                session.post(url) as resp,
-            ):
-                if resp.status not in (200, 201):
-                    return {"status": "error", "error": f"HTTP {resp.status}"}
-                data: object = await resp.json()
-                return data if isinstance(data, dict) else {"status": "unknown"}
+            async with create_http_session(timeout_profile="short") as session:
+                request = (
+                    session.post(url, json={"gguf_file": gguf_file})
+                    if gguf_file is not None
+                    else session.post(url)
+                )
+                async with request as resp:
+                    if resp.status not in (200, 201):
+                        return {"status": "error", "error": f"HTTP {resp.status}"}
+                    data: object = await resp.json()
+                    return data if isinstance(data, dict) else {"status": "unknown"}
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 

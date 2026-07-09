@@ -163,10 +163,14 @@ export function ModelSearchModal({
     }, 500);
   }, [mlxOnly]);
 
-  const handleSelect = useCallback(async (modelId: string) => {
+  const handleSelect = useCallback(async (modelId: string, ggufFile?: string | null) => {
     try {
       const res = await fetch(`/store/models/${encodeURIComponent(modelId)}/download`, {
         method: 'POST',
+        ...(ggufFile ? {
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ gguf_file: ggufFile }),
+        } : {}),
       });
       if (res.ok) {
         addToast({
@@ -186,12 +190,12 @@ export function ModelSearchModal({
     }
   }, [onDownloadStarted, t]);
 
-  const handleAddModel = useCallback(async (modelId: string) => {
+  const handleAddModel = useCallback(async (modelId: string, ggufFile?: string | null): Promise<boolean> => {
     try {
       const res = await fetch('/models/add', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model_id: modelId }),
+        body: JSON.stringify({ model_id: modelId, gguf_file: ggufFile ?? null }),
       });
       if (res.ok) {
         addToast({ type: 'success', message: t('modelSearch.toasts.addedModel', 'Added {modelId}', { modelId }) });
@@ -201,8 +205,13 @@ export function ModelSearchModal({
           const data = await listRes.json();
           setModels(data.data ?? []);
         }
+        return true;
       }
-    } catch { /* ignore */ }
+      addToast({ type: 'error', message: t('modelSearch.toasts.addModelFailed', 'Failed to add {modelId}', { modelId }) });
+    } catch {
+      addToast({ type: 'error', message: t('modelSearch.toasts.addModelFailed', 'Failed to add {modelId}', { modelId }) });
+    }
+    return false;
   }, [t]);
 
   const handleToggleMlxOnly = useCallback(() => {

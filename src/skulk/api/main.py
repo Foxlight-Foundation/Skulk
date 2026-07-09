@@ -65,6 +65,7 @@ from skulk.api.adapters.responses import (
     responses_request_to_text_generation,
 )
 from skulk.api.keepalive import with_sse_keepalive
+from skulk.api.model_search import search_hugging_face_models
 from skulk.api.node_health import compute_node_health
 from skulk.api.types import (
     AddCustomModelParams,
@@ -122,6 +123,7 @@ from skulk.api.types import (
     RuntimeCapabilitySection,
     StartDownloadParams,
     StartDownloadResponse,
+    StoreDownloadRequest,
     ToolCall,
     ToolingCapabilitySection,
     TraceCategoryStats,
@@ -1332,7 +1334,11 @@ class API:
             "/models/add",
             tags=["Models"],
             summary="Fetch and add a custom model card",
-            description="Add a custom model card to Skulk's model catalog so it becomes searchable and launchable through the API or dashboard.",
+            description=(
+                "Add a custom model card to Skulk's model catalog so it becomes "
+                "searchable and launchable. An optional gguf_file pins one exact "
+                "weight file from a multi-quant GGUF repository."
+            ),
         )(self.add_custom_model)
         self.app.delete(
             "/models/custom/{model_id:path}",
@@ -1346,7 +1352,9 @@ class API:
             summary="Search Hugging Face for models",
             description=(
                 "Search for models to add or launch. Pass mlx_only=true to restrict results "
-                "to mlx-community; omit or pass false to search all of Hugging Face."
+                "to mlx-community; omit or pass false to search all of Hugging Face. "
+                "Exact GGUF filename queries also inspect bounded candidate repository "
+                "manifests and return the matched repo-relative file path."
             ),
         )(self.search_models)
         self.app.post(
@@ -1793,7 +1801,10 @@ class API:
             "/store/models/{model_id:path}/download",
             tags=["Store"],
             summary="Request a store download",
-            description="Ask the shared model store to download and register a model by model ID.",
+            description=(
+                "Ask the shared model store to download and register a model by model ID. "
+                "An optional gguf_file request field pins one exact quant file."
+            ),
         )(self.request_store_download)
         self.app.get(
             "/store/models/{model_id:path}/download/status",
@@ -3022,7 +3033,7 @@ class API:
             async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
                 response = await client.get(f"{base_url}/v1/capabilities")
                 response.raise_for_status()
-                payload_raw: object = response.json()
+                payload_raw = cast("object", response.json())
         except (httpx.HTTPError, ValueError) as exc:
             logger.warning(
                 f"describe_node: peer {node_id} capabilities fetch failed: {exc}"
@@ -4074,9 +4085,12 @@ class API:
         return ModelList(data=[self._model_list_entry(card) for card in cards])
 
     async def add_custom_model(self, payload: AddCustomModelParams) -> ModelListModel:
-        """Fetch a model from HuggingFace and save as a custom model card, then sync across the cluster."""
+        """Fetch a Hugging Face model card, optionally pinning one GGUF file."""
         try:
-            card = await ModelCard.fetch_from_hf(payload.model_id)
+            card = await ModelCard.fetch_from_hf(
+                payload.model_id,
+                gguf_file=payload.gguf_file,
+            )
         except Exception as exc:
             raise HTTPException(
                 status_code=400, detail=f"Failed to fetch model: {exc}"
@@ -4111,29 +4125,12 @@ class API:
     async def search_models(
         self, query: str = "", limit: int = 20, mlx_only: bool = False
     ) -> list[HuggingFaceSearchResult]:
-        """Search HuggingFace Hub. When mlx_only=True, restricts to mlx-community."""
-        from huggingface_hub import ModelInfo, list_models
-
-        def _to_results(models: Iterable[ModelInfo]) -> list[HuggingFaceSearchResult]:
-            return [
-                HuggingFaceSearchResult(
-                    id=m.id,
-                    author=m.author or "",
-                    downloads=m.downloads or 0,
-                    likes=m.likes or 0,
-                    last_modified=str(m.last_modified or ""),
-                    tags=list(m.tags or []),
-                )
-                for m in models
-            ]
-
-        return _to_results(
-            list_models(
-                search=query or None,
-                author="mlx-community" if mlx_only else None,
-                sort="downloads",
-                limit=limit,
-            )
+        """Search Hugging Face repositories and exact GGUF filenames."""
+        return await to_thread.run_sync(
+            search_hugging_face_models,
+            query,
+            limit,
+            mlx_only,
         )
 
     async def run(self):
@@ -6342,10 +6339,18 @@ class API:
         downloads = await self._store_client.list_active_downloads()
         return JSONResponse({"downloads": downloads})
 
-    async def request_store_download(self, model_id: str) -> JSONResponse:
+    async def request_store_download(
+        self,
+        model_id: str,
+        payload: StoreDownloadRequest | None = None,
+    ) -> JSONResponse:
+        """Request a store download, optionally pinning an exact GGUF file."""
         if self._store_client is None:
             raise HTTPException(status_code=503, detail="Store not configured")
-        result = await self._store_client.request_store_download(model_id)
+        result = await self._store_client.request_store_download(
+            model_id,
+            gguf_file=payload.gguf_file if payload is not None else None,
+        )
         return JSONResponse(result)
 
     async def get_store_download_status(self, model_id: str) -> JSONResponse:

@@ -85,3 +85,19 @@ async def test_request_download_keeps_cached_complete_when_still_in_store(
     status = await store.request_download("org/present", "base-Q4_K_M.gguf", None)
 
     assert status.status == "complete"
+
+
+async def test_request_download_recovers_missing_requested_quant(
+    tmp_path: Path,
+) -> None:
+    store = ModelStore(tmp_path)
+    _register(store, "org/present", ["base-Q4_K_M.gguf", "config.json"])
+    _seed_complete(store, "org/present")
+
+    status = await store.request_download(
+        "org/present",
+        "base-IQ3_XXS.gguf",
+        None,
+    )
+
+    assert status.status in ("pending", "downloading")

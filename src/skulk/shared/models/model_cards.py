@@ -792,14 +792,30 @@ class ModelCard(CamelCaseModel):
         return mc
 
     @staticmethod
-    async def fetch_from_hf(model_id: ModelId) -> "ModelCard":
-        """Fetches storage size and number of layers for a Hugging Face model, returns Pydantic ModelMeta.
+    async def fetch_from_hf(
+        model_id: ModelId,
+        gguf_file: str | None = None,
+    ) -> "ModelCard":
+        """Build a model card from Hugging Face metadata.
 
         This is a pure fetch — it does NOT save to disk or update the cache.
         Persistence is handled by the event-sourcing layer (worker event handler).
 
         Detects GGUF repos (which `mlx-lm` cannot load) and builds a llama.cpp
-        card for them instead of the default MLX/safetensors card.
+        card for them instead of the default MLX/safetensors card. When
+        ``gguf_file`` is supplied, the resulting card pins that exact repository
+        file instead of applying the default quant preference.
+
+        Args:
+            model_id: Hugging Face repository identifier.
+            gguf_file: Optional exact repo-relative GGUF path to pin.
+
+        Returns:
+            A custom model card derived from repository metadata.
+
+        Raises:
+            ValueError: The requested GGUF path is not a weight file in the repo,
+                or a GGUF path is supplied for a non-GGUF repository.
         """
         # GGUF detection is a best-effort probe: it hits the HF model-info API,
         # which the safetensors path below does NOT require (it has its own retry
@@ -812,7 +828,15 @@ class ModelCard(CamelCaseModel):
             logger.debug(f"GGUF probe for {model_id} failed ({exc}); assuming non-GGUF")
             gguf_files = []
         if gguf_files:
-            return await ModelCard._fetch_gguf_from_hf(model_id, gguf_files)
+            return await ModelCard._fetch_gguf_from_hf(
+                model_id,
+                gguf_files,
+                gguf_file=gguf_file,
+            )
+        if gguf_file is not None:
+            raise ValueError(
+                f"Requested GGUF file {gguf_file!r}, but {model_id} has no GGUF weights"
+            )
 
         # TODO: failure if files do not exist
         config_data = await fetch_config_data(model_id)
@@ -835,7 +859,10 @@ class ModelCard(CamelCaseModel):
 
     @staticmethod
     async def _fetch_gguf_from_hf(
-        model_id: ModelId, gguf_files: "list[tuple[str, int]]"
+        model_id: ModelId,
+        gguf_files: "list[tuple[str, int]]",
+        *,
+        gguf_file: str | None = None,
     ) -> "ModelCard":
         """Build a llama.cpp model card for a GGUF repo.
 
@@ -849,7 +876,11 @@ class ModelCard(CamelCaseModel):
         Stamps the llama.cpp backend tags so placement routes the model only to
         nodes with a llama.cpp engine and prefers a GPU backend.
         """
-        selected = select_preferred_gguf(gguf_files)
+        selected = (
+            select_requested_gguf(gguf_file, gguf_files)
+            if gguf_file is not None
+            else select_preferred_gguf(gguf_files)
+        )
         selected_size = gguf_shard_group_size(selected, gguf_files)
 
         # Structural metadata comes from config.json, which most community GGUF
@@ -1198,6 +1229,28 @@ def select_preferred_gguf(gguf_files: "list[tuple[str, int]]") -> str:
         (name for name, _ in gguf_files),
         key=lambda name: (gguf_quant_rank(name), name.rsplit("/", 1)[-1]),
     )
+
+
+def select_requested_gguf(
+    requested: str,
+    gguf_files: "list[tuple[str, int]]",
+) -> str:
+    """Return an exact requested GGUF path after verifying repository membership.
+
+    Args:
+        requested: Repo-relative GGUF path supplied by the caller.
+        gguf_files: Weight-file inventory returned by :func:`gguf_weight_siblings`.
+
+    Returns:
+        The exact requested path from the repository inventory.
+
+    Raises:
+        ValueError: The requested path is not one of the repository's GGUF weights.
+    """
+    available = {name for name, _ in gguf_files}
+    if requested not in available:
+        raise ValueError(f"Requested GGUF file {requested!r} was not found in the repo")
+    return requested
 
 
 # Glob for the multimodal projector a vision GGUF repo ships alongside the LM
