@@ -8,7 +8,8 @@ sidebar_position: 31
 
 Skulk's first speech serving path is deliberately REST-shaped:
 
-- `POST /v1/audio/speech` turns text into an encoded audio response.
+- `POST /v1/audio/speech` turns text into an encoded audio response and can
+  stream chunked HTTP audio bytes with `stream=true`.
 - `POST /v1/audio/transcriptions` turns an uploaded audio clip into text or
   transcript metadata.
 - The dashboard voice loop composes those endpoints with chat.
@@ -19,13 +20,14 @@ transforms, not dashboard-only helpers.
 
 ## Current Boundary
 
-The shipped speech runner is single-node and non-streaming. That is intentional:
+The shipped speech runner is single-node. TTS can stream output chunks, while STT
+is still bounded and non-streaming. That is intentional:
 
 - speech model placement is capability-gated by `mlx_audio` backend tags;
 - the API owns request validation, upload caps, and response formatting;
 - the worker assembles bounded audio uploads before dispatching STT tasks;
-- the speech runner emits terminal `AudioChunk` or `TranscriptionChunk` output on
-  the data plane;
+- the speech runner emits `AudioChunk` output for TTS and terminal
+  `TranscriptionChunk` output for STT on the data plane;
 - browser microphone capture and playback stay in the dashboard layer.
 
 Realtime should not bypass those contracts. It adds session lifetime and partial

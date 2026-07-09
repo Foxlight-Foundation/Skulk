@@ -863,14 +863,14 @@ class AudioSpeechRequest(BaseModel):
     stream: bool = Field(
         default=False,
         description=(
-            "Whether to stream audio chunks. Phase 1 accepts only false while "
-            "the non-streaming path is validated."
+            "Whether to stream encoded audio bytes as they are produced by the "
+            "mounted text-to-speech model."
         ),
     )
     streaming_interval: float | None = Field(
         default=None,
         gt=0,
-        description="Requested streaming chunk interval in seconds when streaming lands.",
+        description="Requested streaming chunk interval in seconds for stream=true requests.",
     )
     instruct: str | None = Field(
         default=None,

@@ -28,6 +28,8 @@ class SpeechSynthesisTaskParams(BaseModel, frozen=True):
     max_tokens: int | None = None
     reference_audio: str | None = None
     reference_text: str | None = None
+    stream: bool = False
+    streaming_interval: float | None = Field(default=None, gt=0)
 
 
 class AudioTranscriptionTaskParams(BaseModel, frozen=True):

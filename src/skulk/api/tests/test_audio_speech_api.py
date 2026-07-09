@@ -2,10 +2,12 @@
 """API coverage for OpenAI-compatible text-to-speech serving."""
 
 import base64
+from collections.abc import AsyncIterator
 from typing import Never, cast
 
 import pytest
 from fastapi import HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
 from skulk.api.main import API
@@ -96,10 +98,80 @@ def test_audio_speech_route_is_documented_in_openapi() -> None:
 
 
 @pytest.mark.anyio
-async def test_audio_speech_rejects_streaming_before_model_validation(
+async def test_audio_speech_streams_audio_chunks_and_sends_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Phase 1 is explicitly non-streaming and should fail before card lookup."""
+    """A streaming TTS request should stream decoded audio chunks as they arrive."""
+
+    api = _build_api()
+    model_id = ModelId("mlx-community/kokoro-test")
+    sent_commands: list[SpeechSynthesis] = []
+
+    async def _validate_model(
+        self: API, requested_model: ModelId, response_format: AudioResponseFormat | None
+    ) -> tuple[ModelId, AudioResponseFormat]:
+        assert self is api
+        assert requested_model == model_id
+        assert response_format == AudioResponseFormat.Mp3
+        return model_id, AudioResponseFormat.Mp3
+
+    async def _send(command: object) -> None:
+        if isinstance(command, SpeechSynthesis):
+            sent_commands.append(command)
+            await api._audio_speech_queues[command.command_id].send(
+                AudioChunk(
+                    model=model_id,
+                    data=base64.b64encode(b"mp3-a").decode("ascii"),
+                    chunk_index=0,
+                    total_chunks=None,
+                    format=AudioResponseFormat.Mp3,
+                    sample_rate=24000,
+                    is_partial=True,
+                    finish_reason=None,
+                )
+            )
+            await api._audio_speech_queues[command.command_id].send(
+                AudioChunk(
+                    model=model_id,
+                    data=base64.b64encode(b"mp3-b").decode("ascii"),
+                    chunk_index=1,
+                    total_chunks=None,
+                    format=AudioResponseFormat.Mp3,
+                    sample_rate=24000,
+                    finish_reason="stop",
+                )
+            )
+
+    monkeypatch.setattr(API, "_validate_speech_synthesis_model", _validate_model)
+    monkeypatch.setattr(api, "_send", _send)
+
+    response = await api.audio_speech(
+        AudioSpeechRequest(
+            model=str(model_id),
+            input="hello",
+            response_format=AudioResponseFormat.Mp3,
+            stream=True,
+            streaming_interval=0.25,
+        )
+    )
+
+    assert isinstance(response, StreamingResponse)
+    assert response.media_type == "audio/mpeg"
+    body_iterator = cast(AsyncIterator[bytes], response.body_iterator)
+    body = b"".join([chunk async for chunk in body_iterator])
+    assert body == b"mp3-amp3-b"
+    assert len(sent_commands) == 1
+    command = sent_commands[0]
+    assert command.task_params.stream is True
+    assert command.task_params.streaming_interval == 0.25
+    assert command.command_id not in api._audio_speech_queues
+
+
+@pytest.mark.anyio
+async def test_audio_speech_rejects_streaming_interval_without_stream_before_model_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A streaming interval without stream=true is a malformed request."""
 
     async def _fail_if_called(*_args: object, **_kwargs: object) -> Never:
         raise AssertionError("speech model validation should not run")
@@ -112,12 +184,12 @@ async def test_audio_speech_rejects_streaming_before_model_validation(
             AudioSpeechRequest(
                 model="mlx-community/kokoro-test",
                 input="hello",
-                stream=True,
+                streaming_interval=0.25,
             )
         )
 
     assert exc_info.value.status_code == 400
-    assert "stream" in str(exc_info.value.detail)
+    assert "stream=true" in str(exc_info.value.detail)
 
 
 @pytest.mark.anyio
@@ -180,9 +252,20 @@ async def test_audio_speech_collects_audio_chunks_and_sends_command(
             await api._audio_speech_queues[command.command_id].send(
                 AudioChunk(
                     model=model_id,
-                    data=base64.b64encode(audio_bytes).decode("ascii"),
+                    data=base64.b64encode(audio_bytes[:4]).decode("ascii"),
                     chunk_index=0,
-                    total_chunks=1,
+                    total_chunks=2,
+                    format=AudioResponseFormat.Wav,
+                    sample_rate=24000,
+                    finish_reason=None,
+                )
+            )
+            await api._audio_speech_queues[command.command_id].send(
+                AudioChunk(
+                    model=model_id,
+                    data=base64.b64encode(audio_bytes[4:]).decode("ascii"),
+                    chunk_index=1,
+                    total_chunks=2,
                     format=AudioResponseFormat.Wav,
                     sample_rate=24000,
                     finish_reason="stop",

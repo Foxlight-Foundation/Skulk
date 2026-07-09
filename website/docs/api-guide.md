@@ -494,8 +494,8 @@ curl -X POST http://localhost:52415/v1/responses \
 
 **POST** `/v1/audio/speech`
 
-Generates non-streaming speech audio from a mounted text-to-speech model. The
-model must be placed and running, and its resolved capabilities must include
+Generates speech audio from a mounted text-to-speech model. The model must be
+placed and running, and its resolved capabilities must include
 `supports_speech_synthesis`.
 
 ```bash
@@ -519,16 +519,22 @@ Request fields:
 | `voice` | string or null | Optional model-specific voice name |
 | `speed` | number or null | Optional positive speaking speed multiplier |
 | `response_format` | string or null | Optional encoded output format. When omitted or set to `null`, Skulk uses the mounted model card default when declared and otherwise falls back to `mp3`; supported values are constrained by the model card when declared |
+| `stream` | boolean | Optional. When `true`, Skulk returns a chunked HTTP response and yields encoded audio bytes as the speech runner emits them |
+| `streaming_interval` | number or null | Optional positive model-specific streaming cadence hint, accepted only with `stream=true` |
 | `instruct`, `lang_code` | string or null | Optional model-specific generation hints |
 | `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number or integer | Optional model-specific sampling controls |
 
 The response body is raw audio bytes with a matching audio media type
 (`audio/mpeg`, `audio/wav`, `audio/flac`, `audio/ogg`, or `audio/opus`).
+For `stream=true`, the media type is the same and the body is delivered as
+chunked HTTP bytes. This is TTS output streaming, not a realtime session: the
+request text is still a complete bounded input, cancellation closes the command
+stream, and each chunk follows the mounted model's generation cadence.
 
-The speech endpoint is intentionally non-streaming and text-only. `stream=true`,
-`streaming_interval`, `reference_audio`, and `reference_text` return
-**400 Bad Request**. Speech translation, realtime sessions, voice listing, and
-managed reference-audio uploads are later phases.
+The speech endpoint is still text-only. `streaming_interval` without
+`stream=true`, `reference_audio`, and `reference_text` return **400 Bad
+Request**. Speech translation, realtime sessions, voice listing, and managed
+reference-audio uploads are later phases.
 
 ## OpenAI Audio Transcriptions API
 
@@ -573,7 +579,7 @@ The endpoint never accepts server-local file paths. The API reads the multipart
 upload, chunks the base64 payload through Skulk's command/input-chunk pipeline,
 and the worker writes a temporary local audio file only inside the serving
 runner process. `stream=true` returns **400 Bad Request** until streaming STT
-lands.
+lands through the realtime session path.
 
 ## Claude Messages API
 

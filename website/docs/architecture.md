@@ -290,17 +290,19 @@ would silently degrade, and the card needs no edit when the platform catches up.
 Speech serving is in a staged rollout. Phase 0 added `TextToSpeech`,
 `SpeechToText`, `SpeechTranslation`, the `[audio]` card section, and the
 `mlx_audio` backend tags (`mlx_audio`, `mlx_audio-metal`) when the upstream
-`mlx_audio` package imports on macOS. Non-streaming TTS serving is exposed at
+`mlx_audio` package imports on macOS. TTS serving is exposed at
 `POST /v1/audio/speech`: the API validates a mounted TTS model, sends a
 `SpeechSynthesis` command through the master, the worker dispatches it to the
 single-node `mlx_audio` speech runner, and the runner emits `AudioChunk` output
-on the data plane. Non-streaming STT serving is exposed at
+on the data plane. With `stream=true`, the API returns chunked HTTP audio bytes
+as those chunks arrive; without it, the API collects the chunks and returns one
+raw audio response. Non-streaming STT serving is exposed at
 `POST /v1/audio/transcriptions`: the API validates a mounted STT model, accepts a
 multipart audio upload, sends base64 `AudioInputChunk` events ahead of an
 `AudioTranscription` command, the worker assembles the upload for the speech
 runner, and the runner emits terminal `TranscriptionChunk` output on the data
-plane. Streaming TTS/STT, voice/reference-audio management, speech translation,
-and realtime sessions remain later phases. The realtime/fabric follow-on is
+plane. Streaming STT, voice/reference-audio management, speech translation, and
+realtime sessions remain later phases. The realtime/fabric follow-on is
 tracked in [Speech Fabric and Realtime Design](speech-fabric-realtime).
 The dashboard composes the shipped REST endpoints in chat: mounted TTS models
 can speak draft text, replay assistant messages, or auto-speak final assistant
