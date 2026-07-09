@@ -3272,8 +3272,7 @@ class API:
             )
         if node_id == self.node_id:
             return await self._dispatch_capability_call(call)
-        peer_urls = await self._reachable_peer_api_urls()
-        base_url = peer_urls.get(str(node_id))
+        base_url = await self._peer_api_url_for(node_id)
         if base_url is None:
             return call_failure(
                 call.call_id, "unreachable", f"node {node_id} is not reachable"
@@ -5148,6 +5147,25 @@ class API:
                 "source_nodes": list(source_nodes_by_id.values()),
             }
         )
+
+    async def _peer_api_url_for(self, node_id: NodeId) -> str | None:
+        """Resolve one peer's API base URL, stopping at the first hit.
+
+        The capability-call hot path must not wait for every peer probe to
+        finish (a stale peer's failed probe would delay an unrelated call);
+        the reachability generator yields as probes complete, so stop as soon
+        as the target answers.
+        """
+        target = str(node_id)
+        async for ip_address, probed_node_id in check_reachable(
+            self.state.topology,
+            self.node_id,
+            self.state.node_network,
+        ):
+            if str(probed_node_id) == target:
+                host = f"[{ip_address}]" if ":" in ip_address else ip_address
+                return f"http://{host}:52415"
+        return None
 
     async def _reachable_peer_api_urls(self) -> dict[str, str]:
         """Return reachable peer API base URLs keyed by node ID."""

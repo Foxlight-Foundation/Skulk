@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Ceiling on a call or result payload's serialized size. A capability call is
 # a control-sized exchange (a memory query, a synthesis request), not a media
@@ -134,6 +134,19 @@ class CapabilityResult(BaseModel):
     ok: bool
     result: dict[str, object] | None = None
     error: CapabilityError | None = None
+
+    @model_validator(mode="after")
+    def _validate_ok_result_error_pairing(self) -> "CapabilityResult":
+        # The documented invariant, enforced: an ambiguous envelope (ok=True
+        # with an error, ok=False without one, or both fields set) would make
+        # callers' control flow guesswork.
+        if self.ok and self.error is not None:
+            raise ValueError("ok=True must not carry an error")
+        if not self.ok and self.error is None:
+            raise ValueError("ok=False must carry an error")
+        if not self.ok and self.result is not None:
+            raise ValueError("ok=False must not carry a result")
+        return self
 
 
 def call_failure(
