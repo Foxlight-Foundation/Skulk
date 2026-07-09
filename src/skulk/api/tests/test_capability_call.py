@@ -454,3 +454,36 @@ async def test_caller_non_numeric_timeout_is_typed() -> None:
     )
     assert not result.ok and result.error is not None
     assert result.error.code == "invalid_payload"
+
+
+async def test_deeply_nested_payload_is_typed_invalid_payload() -> None:
+    # json.dumps raises RecursionError on very deep nesting; it must degrade
+    # to a typed error at every guard site, never escape as an exception.
+    # Depth far beyond any recursion limit so the failure is deterministic
+    # regardless of the current stack depth; model_construct bypasses
+    # pydantic's own recursion during test setup (the guard under test is the
+    # dispatch's, not the envelope validator's).
+    deep: dict[str, object] = {"leaf": 1}
+    for _ in range(50_000):
+        deep = {"nested": deep}
+    call = CapabilityCall.model_construct(
+        call_id="c-deep",
+        capability_id="echo",
+        version="1.0.0",
+        descriptor_revision=_ECHO_REVISION,
+        caller_node="caller",
+        target_node="api-node",
+        timeout_seconds=30.0,
+        payload=deep,
+    )
+    result = await _dispatch(_build_api(_EchoProvider()), call)
+    assert not result.ok and result.error is not None
+    assert result.error.code == "invalid_payload"
+
+    api = _build_api(_EchoProvider())
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    caller_result = await context.call_capability(
+        NodeId("n-peer"), "echo", "1.0.0", _ECHO_REVISION, deep
+    )
+    assert not caller_result.ok and caller_result.error is not None
+    assert caller_result.error.code == "invalid_payload"

@@ -3116,7 +3116,7 @@ class API:
                             call.payload, separators=(",", ":"), allow_nan=False
                         ).encode("utf-8")
                     )
-                except (TypeError, ValueError) as exc:
+                except (TypeError, ValueError, RecursionError, OverflowError) as exc:
                     # A local fast-path caller can hand a payload the
                     # endpoint's JSON parsing would never produce (bytes,
                     # sets, NaN); typed error, not an exception.
@@ -3188,7 +3188,7 @@ class API:
                     result_payload, separators=(",", ":"), allow_nan=False
                 ).encode("utf-8")
             )
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, RecursionError, OverflowError) as exc:
             # allow_nan=False also rejects NaN/Infinity here: json.dumps would
             # otherwise accept them but the HTTP response renderer refuses
             # non-finite JSON, turning the call into a 500 downstream.
@@ -3271,7 +3271,7 @@ class API:
                     "utf-8"
                 )
             )
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, RecursionError, OverflowError) as exc:
             return call_failure(
                 call_id,
                 "invalid_payload",
