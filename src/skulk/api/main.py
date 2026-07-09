@@ -3048,12 +3048,16 @@ class API:
         """Run one capability call against this node's providers, guarded.
 
         Guard order (each failure is a typed error, never an exception):
-        payload size cap; handler lookup (``not_found`` vs
-        ``version_mismatch``); descriptor revision pin; input-schema
-        validation; provider concurrency bound (``overloaded``); the caller's
-        deadline (``timeout``); handler exceptions (``provider_error``);
-        result size cap and output-schema validation (``invalid_result``).
-        The master is never involved and nothing here touches ``State``.
+        target-node addressing check; handler lookup (``not_found`` vs
+        ``version_mismatch``); descriptor revision pin; then, INSIDE the
+        provider concurrency bound (``overloaded``) and the caller's deadline
+        (``timeout``): payload size cap, input-schema validation, and the
+        handler itself (exceptions become ``provider_error``); finally result
+        shape, size cap, and output-schema validation (``invalid_result``).
+        Serialization and validation work counts against the bound and the
+        deadline (#513); cheap guards stay outside so trivially-rejectable
+        calls never consume a slot. The master is never involved and nothing
+        here touches ``State``.
         """
         if call.target_node != str(self.node_id):
             # A misrouted or misaddressed envelope must not execute here: the
@@ -3156,7 +3160,8 @@ class API:
             return call_failure(
                 call.call_id,
                 "timeout",
-                f"provider did not finish within {call.timeout_seconds}s",
+                f"call did not finish within {call.timeout_seconds}s "
+                f"(payload validation plus provider execution)",
             )
         finally:
             self._active_capability_calls -= 1
@@ -3248,7 +3253,9 @@ class API:
             if timeout_seconds is not None
             else DEFAULT_CALL_TIMEOUT_SECONDS
         )
-        if not 0 < requested_timeout <= MAX_CALL_TIMEOUT_SECONDS:
+        if not isinstance(requested_timeout, (int, float)) or not (  # pyright: ignore[reportUnnecessaryIsInstance]
+            0 < requested_timeout <= MAX_CALL_TIMEOUT_SECONDS
+        ):
             # Validate the timeout BEFORE it becomes the lookup budget: an
             # out-of-range value must fail fast as a typed error, not stall
             # the reachability probe or surface as a misleading unreachable.
@@ -3330,7 +3337,8 @@ class API:
             return call_failure(
                 call_id,
                 "timeout",
-                f"deadline exhausted resolving target {node_id}",
+                f"target {node_id} resolved, but no budget remains for the "
+                f"call itself",
             )
         call = build_call(remaining)
         if isinstance(call, CapabilityResult):

@@ -437,3 +437,16 @@ async def test_caller_invalid_timeout_fails_fast_on_remote_path() -> None:
         )
         assert not result.ok and result.error is not None
         assert result.error.code == "invalid_payload"
+
+
+async def test_caller_non_numeric_timeout_is_typed() -> None:
+    # An untyped extension can pass a non-numeric timeout; the comparison must
+    # not raise TypeError out of call_capability.
+    api = _build_api(_EchoProvider())
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    result = await context.call_capability(
+        NodeId("n-peer"), "echo", "1.0.0", _ECHO_REVISION, {"text": "x"},
+        timeout_seconds="10",  # pyright: ignore[reportArgumentType]
+    )
+    assert not result.ok and result.error is not None
+    assert result.error.code == "invalid_payload"
