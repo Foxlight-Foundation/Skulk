@@ -271,7 +271,10 @@ class AudioCapabilitySection(BaseModel):
     )
     supports_streaming: bool | None = Field(
         default=None,
-        description="Whether the model declares streaming speech support.",
+        description=(
+            "Whether the card declares streaming speech support after "
+            "runtime validation."
+        ),
     )
     supports_realtime: bool | None = Field(
         default=None,
@@ -863,14 +866,17 @@ class AudioSpeechRequest(BaseModel):
     stream: bool = Field(
         default=False,
         description=(
-            "Whether to stream audio chunks. Phase 1 accepts only false while "
-            "the non-streaming path is validated."
+            "Whether to stream encoded MP3 bytes as they are produced by the "
+            "mounted text-to-speech model. This experimental path is accepted "
+            "only when SKULK_ENABLE_EXPERIMENTAL_MODE is enabled, "
+            "experiments.tts_streaming=true is configured, and the mounted "
+            "model card declares audio.supports_streaming=true."
         ),
     )
     streaming_interval: float | None = Field(
         default=None,
         gt=0,
-        description="Requested streaming chunk interval in seconds when streaming lands.",
+        description="Requested streaming chunk interval in seconds for stream=true requests.",
     )
     instruct: str | None = Field(
         default=None,

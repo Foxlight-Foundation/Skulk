@@ -411,6 +411,179 @@ def test_speech_synthesis_emits_audio_chunk_and_active_status(
     assert chunk.finish_reason == "stop"
 
 
+def test_streaming_speech_synthesis_emits_partial_and_terminal_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming TTS should emit generated audio segments before final completion."""
+
+    class _StreamingSpeechModel:
+        sample_rate = 24000
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str | None, bool, float | None]] = []
+
+        def generate(
+            self,
+            text: str,
+            *,
+            voice: str | None = None,
+            stream: bool = False,
+            streaming_interval: float | None = None,
+        ) -> list[_FakeSpeechResult]:
+            self.calls.append((text, voice, stream, streaming_interval))
+            return [
+                _FakeSpeechResult(audio=[0.1]),
+                _FakeSpeechResult(audio=[0.2]),
+            ]
+
+    runner, sender = _make_runner()
+    model = _StreamingSpeechModel()
+    runner.model = model
+    runner.current_status = RunnerReady()
+    encoded_calls: list[list[float]] = []
+
+    def _fake_encode(
+        audio: np.ndarray,
+        sample_rate: int,
+        response_format: AudioResponseFormat,
+    ) -> bytes:
+        assert sample_rate == 24000
+        assert response_format == AudioResponseFormat.Mp3
+        encoded_calls.append(cast(list[float], audio.tolist()))
+        return f"mp3-{len(encoded_calls)}".encode("ascii")
+
+    monkeypatch.setattr(speech_runner, "_encode_audio", _fake_encode)
+
+    command_id = CommandId("speech-command-stream")
+    task = SpeechSynthesis(
+        instance_id=InstanceId("speech-instance-1"),
+        command_id=command_id,
+        task_params=SpeechSynthesisTaskParams(
+            model=ModelId("mlx-community/fish-test"),
+            input_text="hello streaming world",
+            response_format=AudioResponseFormat.Mp3,
+            voice="narrator",
+            stream=True,
+            streaming_interval=0.25,
+        ),
+    )
+    runner.task_receiver = cast("object", _OneShotReceiver([task]))  # pyright: ignore[reportAttributeAccessIssue]
+
+    runner.main()
+
+    assert model.calls == [("hello streaming world", "narrator", True, 0.25)]
+    assert encoded_calls == [[0.1], [0.2]]
+    generated = [
+        event.chunk
+        for event in sender.events
+        if isinstance(event, ChunkGenerated) and isinstance(event.chunk, AudioChunk)
+    ]
+    assert len(generated) == 3
+    assert base64.b64decode(generated[0].data.encode("ascii"), validate=True) == b"mp3-1"
+    assert generated[0].chunk_index == 0
+    assert generated[0].total_chunks is None
+    assert generated[0].is_partial is True
+    assert generated[0].finish_reason is None
+    assert base64.b64decode(generated[1].data.encode("ascii"), validate=True) == b"mp3-2"
+    assert generated[1].chunk_index == 1
+    assert generated[1].total_chunks is None
+    assert generated[1].is_partial is True
+    assert generated[1].finish_reason is None
+    assert base64.b64decode(generated[2].data.encode("ascii"), validate=True) == b""
+    assert generated[2].chunk_index == 2
+    assert generated[2].total_chunks is None
+    assert generated[2].is_partial is False
+    assert generated[2].finish_reason == "stop"
+
+
+def test_speech_synthesis_handles_single_tuple_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A direct ``(audio, sample_rate)`` model result is one TTS result."""
+
+    class _TupleSpeechModel:
+        def generate(self, text: str) -> tuple[list[float], int]:
+            assert text == "hello tuple"
+            return ([0.4, 0.5], 22050)
+
+    runner, _sender = _make_runner()
+    runner.model = _TupleSpeechModel()
+    runner.current_status = RunnerReady()
+    encoded_calls: list[tuple[list[float], int]] = []
+
+    def _fake_encode(
+        audio: np.ndarray,
+        sample_rate: int,
+        response_format: AudioResponseFormat,
+    ) -> bytes:
+        assert response_format == AudioResponseFormat.Mp3
+        encoded_calls.append((cast(list[float], audio.tolist()), sample_rate))
+        return b"tuple-audio"
+
+    monkeypatch.setattr(speech_runner, "_encode_audio", _fake_encode)
+
+    encoded, sample_rate = runner._run_tts(
+        SpeechSynthesis(
+            instance_id=InstanceId("speech-instance-1"),
+            command_id=CommandId("speech-command-tuple"),
+            task_params=SpeechSynthesisTaskParams(
+                model=ModelId("mlx-community/fish-test"),
+                input_text="hello tuple",
+                response_format=AudioResponseFormat.Mp3,
+            ),
+        )
+    )
+
+    assert encoded == b"tuple-audio"
+    assert sample_rate == 22050
+    assert encoded_calls == [([0.4, 0.5], 22050)]
+
+
+def test_speech_synthesis_handles_single_numpy_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A direct numpy audio array result uses the model sample-rate fallback."""
+
+    class _ArraySpeechModel:
+        sample_rate = 24000
+
+        def generate(self, text: str) -> np.ndarray:
+            assert text == "hello array"
+            return np.array([0.7, 0.8])
+
+    runner, _sender = _make_runner()
+    runner.model = _ArraySpeechModel()
+    runner.current_status = RunnerReady()
+    encoded_calls: list[tuple[list[float], int]] = []
+
+    def _fake_encode(
+        audio: np.ndarray,
+        sample_rate: int,
+        response_format: AudioResponseFormat,
+    ) -> bytes:
+        assert response_format == AudioResponseFormat.Mp3
+        encoded_calls.append((cast(list[float], audio.tolist()), sample_rate))
+        return b"array-audio"
+
+    monkeypatch.setattr(speech_runner, "_encode_audio", _fake_encode)
+
+    encoded, sample_rate = runner._run_tts(
+        SpeechSynthesis(
+            instance_id=InstanceId("speech-instance-1"),
+            command_id=CommandId("speech-command-array"),
+            task_params=SpeechSynthesisTaskParams(
+                model=ModelId("mlx-community/fish-test"),
+                input_text="hello array",
+                response_format=AudioResponseFormat.Mp3,
+            ),
+        )
+    )
+
+    assert encoded == b"array-audio"
+    assert sample_rate == 24000
+    assert encoded_calls == [([0.7, 0.8], 24000)]
+
+
 def test_speech_synthesis_uses_staged_voice_assets(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -139,9 +139,13 @@ The resolver exposes that as `resolved_capabilities` fields:
 These fields are now runtime-facing metadata. They let placement route speech
 cards to the `mlx_audio` runner, let `/v1/models` identify mounted TTS/STT
 models, and let the dashboard expose voice controls without guessing from model
-names. Mounted `supports_speech_synthesis` models serve non-streaming
-`/v1/audio/speech`; mounted `supports_transcription` models serve non-streaming
-`/v1/audio/transcriptions`.
+names. Mounted `supports_speech_synthesis` models serve `/v1/audio/speech`.
+When the node is running with `SKULK_ENABLE_EXPERIMENTAL_MODE`, the cluster
+config enables `experiments.tts_streaming`, and the card also declares
+`audio.supports_streaming = true`, clients can pass `stream=true` for chunked
+HTTP MP3 output; bundled cards keep that flag off until a real MLX model has
+passed streaming validation. Mounted `supports_transcription` models serve
+non-streaming `/v1/audio/transcriptions`.
 
 ## Fallback Behavior
 

@@ -67,6 +67,7 @@ from skulk.utils.channels import MpReceiver, MpSender
 from skulk.worker.runner.bootstrap import logger
 
 _DEFAULT_STAGED_TTS_VOICE = "af_heart"
+_AUDIO_BINARY_CHUNK_SIZE = max(1, (SKULK_MAX_CHUNK_SIZE // 4) * 3)
 
 
 @dataclass(frozen=True)
@@ -168,6 +169,9 @@ def _result_audio_and_sample_rate(result: Any) -> tuple[Any | None, int | None]:
         sample_rate = result.get("sample_rate")
     elif isinstance(result, tuple) and len(result) >= 2:
         audio, sample_rate = result[0], result[1]
+    elif isinstance(result, np.ndarray):
+        audio = result
+        sample_rate = None
     else:
         audio = getattr(result, "audio", None)
         sample_rate = getattr(result, "sample_rate", None)
@@ -183,6 +187,18 @@ def _encode_audio(
     buffer = io.BytesIO()
     audio_write(buffer, audio, sample_rate, format=response_format.value)
     return buffer.getvalue()
+
+
+def _base64_audio_parts(encoded_audio: bytes) -> list[str]:
+    """Split encoded audio bytes into independently decodable base64 chunks."""
+    if not encoded_audio:
+        raise ValueError("No audio generated")
+    return [
+        base64.b64encode(
+            encoded_audio[index : index + _AUDIO_BINARY_CHUNK_SIZE]
+        ).decode("ascii")
+        for index in range(0, len(encoded_audio), _AUDIO_BINARY_CHUNK_SIZE)
+    ]
 
 
 def _load_speech_model(local_path: Path, audio_kind: AudioCardKind | None) -> Any:
@@ -254,13 +270,7 @@ def _emit_audio_chunks(
     sample_rate: int,
 ) -> None:
     """Emit encoded audio bytes as terminal data-plane chunks."""
-    if not encoded_audio:
-        raise ValueError("No audio generated")
-    encoded_data = base64.b64encode(encoded_audio).decode("ascii")
-    data_chunks = [
-        encoded_data[index : index + SKULK_MAX_CHUNK_SIZE]
-        for index in range(0, len(encoded_data), SKULK_MAX_CHUNK_SIZE)
-    ]
+    data_chunks = _base64_audio_parts(encoded_audio)
     for chunk_index, chunk_data in enumerate(data_chunks):
         is_last = chunk_index == len(data_chunks) - 1
         event_sender.send(
@@ -277,6 +287,68 @@ def _emit_audio_chunks(
                 ),
             )
         )
+
+
+def _emit_streaming_audio_chunks(
+    *,
+    event_sender: MpSender[Event],
+    command_id: CommandId,
+    model_id: ModelId,
+    encoded_audio: bytes,
+    response_format: AudioResponseFormat,
+    sample_rate: int,
+    chunk_index: int,
+    is_final: bool,
+) -> int:
+    """Emit one streaming TTS segment as one or more audio data-plane chunks."""
+    data_chunks = _base64_audio_parts(encoded_audio)
+    next_index = chunk_index
+    for data_part_index, chunk_data in enumerate(data_chunks):
+        is_last_part = data_part_index == len(data_chunks) - 1
+        event_sender.send(
+            ChunkGenerated(
+                command_id=command_id,
+                chunk=AudioChunk(
+                    model=model_id,
+                    data=chunk_data,
+                    chunk_index=next_index,
+                    total_chunks=None,
+                    format=response_format,
+                    sample_rate=sample_rate,
+                    is_partial=not (is_final and is_last_part),
+                    finish_reason="stop" if is_final and is_last_part else None,
+                ),
+            )
+        )
+        next_index += 1
+    return next_index
+
+
+def _emit_streaming_terminal_audio_chunk(
+    *,
+    event_sender: MpSender[Event],
+    command_id: CommandId,
+    model_id: ModelId,
+    response_format: AudioResponseFormat,
+    sample_rate: int,
+    chunk_index: int,
+) -> None:
+    """Emit a zero-byte terminal marker after streamed TTS audio segments."""
+    event_sender.send(
+        ChunkGenerated(
+            command_id=command_id,
+            chunk=AudioChunk(
+                model=model_id,
+                data="",
+                chunk_index=chunk_index,
+                total_chunks=None,
+                format=response_format,
+                sample_rate=sample_rate,
+                is_partial=False,
+                finish_reason="stop",
+            ),
+        )
+    )
 
 
 def _emit_transcription_chunk(
@@ -590,7 +662,7 @@ class Runner:
         )
 
     def _synthesize(self, task: SpeechSynthesis) -> None:
-        """Run one non-streaming text-to-speech task and emit audio chunks."""
+        """Run one text-to-speech task and emit audio chunks."""
         self.update_status(RunnerRunning())
         self.acknowledge_task(task)
         assert self.model is not None
@@ -615,7 +687,12 @@ class Runner:
             with bind_trace_session(task.task_id), trace(
                 "tts_generate", self.shard_metadata.device_rank, "speech"
             ):
-                encoded_audio, sample_rate = self._run_tts(task)
+                if task.task_params.stream:
+                    self._stream_tts(task, model_id)
+                    encoded_audio: bytes | None = None
+                    sample_rate: int | None = None
+                else:
+                    encoded_audio, sample_rate = self._run_tts(task)
             if self._is_cancelled(task.task_id):
                 return
             if task.trace_enabled:
@@ -624,14 +701,15 @@ class Runner:
                     self.shard_metadata.device_rank,
                     task_id=task.task_id,
                 )
-            _emit_audio_chunks(
-                event_sender=self.event_sender,
-                command_id=task.command_id,
-                model_id=model_id,
-                encoded_audio=encoded_audio,
-                response_format=task.task_params.response_format,
-                sample_rate=sample_rate,
-            )
+            if encoded_audio is not None and sample_rate is not None:
+                _emit_audio_chunks(
+                    event_sender=self.event_sender,
+                    command_id=task.command_id,
+                    model_id=model_id,
+                    encoded_audio=encoded_audio,
+                    response_format=task.task_params.response_format,
+                    sample_rate=sample_rate,
+                )
         except Exception as exc:
             if task.trace_enabled:
                 record_trace_marker(
@@ -803,8 +881,8 @@ class Runner:
                 except OSError:
                     logger.warning(f"Failed to remove temporary speech upload {tmp_path}")
 
-    def _run_tts(self, task: SpeechSynthesis) -> tuple[bytes, int]:
-        """Generate and encode the complete TTS response."""
+    def _iter_tts_results(self, task: SpeechSynthesis, *, stream: bool) -> Iterable[Any]:
+        """Call the TTS model and normalize its result into an iterable."""
         assert self.model is not None
         params = task.task_params
         generate_kwargs = {
@@ -820,19 +898,29 @@ class Runner:
             "top_p": params.top_p,
             "top_k": params.top_k,
             "repetition_penalty": params.repetition_penalty,
-            "stream": False,
+            "stream": stream,
+            "streaming_interval": params.streaming_interval if stream else None,
             "max_tokens": params.max_tokens,
         }
         generate = self.model.generate
         filtered_kwargs = _filter_kwargs(generate, generate_kwargs)
 
         generated = generate(params.input_text, **filtered_kwargs)
-        if not isinstance(generated, Iterable):
+        if (
+            isinstance(generated, (str, bytes, dict, tuple, np.ndarray))
+            or not isinstance(generated, Iterable)
+        ):
             generated = (generated,)
+        return generated
+
+    def _run_tts(self, task: SpeechSynthesis) -> tuple[bytes, int]:
+        """Generate and encode the complete TTS response."""
+        assert self.model is not None
+        params = task.task_params
 
         audio_chunks: list[np.ndarray] = []
         sample_rate: int | None = None
-        for result in generated:
+        for result in self._iter_tts_results(task, stream=False):
             if self._is_cancelled(task.task_id):
                 break
             result_audio, result_sample_rate = _result_audio_and_sample_rate(result)
@@ -859,3 +947,54 @@ class Runner:
             else np.concatenate(audio_chunks)
         )
         return _encode_audio(audio, sample_rate, params.response_format), sample_rate
+
+    def _stream_tts(self, task: SpeechSynthesis, model_id: ModelId) -> None:
+        """Generate streaming TTS chunks and emit each encoded segment promptly."""
+        assert self.model is not None
+        params = task.task_params
+        chunk_index = 0
+        sample_rate: int | None = None
+
+        for result in self._iter_tts_results(task, stream=True):
+            if self._is_cancelled(task.task_id):
+                return
+            result_audio, result_sample_rate = _result_audio_and_sample_rate(result)
+            if result_audio is None:
+                continue
+            if result_sample_rate is None:
+                model_sample_rate = getattr(self.model, "sample_rate", None)
+                result_sample_rate = (
+                    model_sample_rate if isinstance(model_sample_rate, int) else None
+                )
+            if result_sample_rate is None:
+                raise ValueError("No audio sample rate returned")
+
+            encoded_audio = _encode_audio(
+                _to_numpy_audio(result_audio),
+                result_sample_rate,
+                params.response_format,
+            )
+            chunk_index = _emit_streaming_audio_chunks(
+                event_sender=self.event_sender,
+                command_id=task.command_id,
+                model_id=model_id,
+                encoded_audio=encoded_audio,
+                response_format=params.response_format,
+                sample_rate=result_sample_rate,
+                chunk_index=chunk_index,
+                is_final=False,
+            )
+            sample_rate = result_sample_rate
+
+        if self._is_cancelled(task.task_id):
+            return
+        if chunk_index == 0 or sample_rate is None:
+            raise ValueError("No audio generated")
+        _emit_streaming_terminal_audio_chunk(
+            event_sender=self.event_sender,
+            command_id=task.command_id,
+            model_id=model_id,
+            response_format=params.response_format,
+            sample_rate=sample_rate,
+            chunk_index=chunk_index,
+        )

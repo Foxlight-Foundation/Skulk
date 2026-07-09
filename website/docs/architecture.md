@@ -290,17 +290,24 @@ would silently degrade, and the card needs no edit when the platform catches up.
 Speech serving is in a staged rollout. Phase 0 added `TextToSpeech`,
 `SpeechToText`, `SpeechTranslation`, the `[audio]` card section, and the
 `mlx_audio` backend tags (`mlx_audio`, `mlx_audio-metal`) when the upstream
-`mlx_audio` package imports on macOS. Non-streaming TTS serving is exposed at
+`mlx_audio` package imports on macOS. TTS serving is exposed at
 `POST /v1/audio/speech`: the API validates a mounted TTS model, sends a
 `SpeechSynthesis` command through the master, the worker dispatches it to the
 single-node `mlx_audio` speech runner, and the runner emits `AudioChunk` output
-on the data plane. Non-streaming STT serving is exposed at
+on the data plane. TTS output streaming is still experimental: only nodes
+running with `SKULK_ENABLE_EXPERIMENTAL_MODE` and cluster config
+`experiments.tts_streaming: true` accept `stream=true`, and only for TTS cards
+that explicitly declare `audio.supports_streaming = true`; bundled cards keep
+that flag off until a real MLX model has passed streaming validation.
+Non-streaming requests use the default path where the API collects the chunks
+and returns one raw audio response. Non-streaming STT
+serving is exposed at
 `POST /v1/audio/transcriptions`: the API validates a mounted STT model, accepts a
 multipart audio upload, sends base64 `AudioInputChunk` events ahead of an
 `AudioTranscription` command, the worker assembles the upload for the speech
 runner, and the runner emits terminal `TranscriptionChunk` output on the data
-plane. Streaming TTS/STT, voice/reference-audio management, speech translation,
-and realtime sessions remain later phases. The realtime/fabric follow-on is
+plane. Streaming STT, voice/reference-audio management, speech translation, and
+realtime sessions remain later phases. The realtime/fabric follow-on is
 tracked in [Speech Fabric and Realtime Design](speech-fabric-realtime).
 The dashboard composes the shipped REST endpoints in chat: mounted TTS models
 can speak draft text, replay assistant messages, or auto-speak final assistant
@@ -514,6 +521,13 @@ its own toggle under the same section, so its UX is built alongside it. This is
 the fabric's discipline for shipping unfinished work safely, and it composes
 with extensions: an out-of-tree capability can ride the fabric as a plugin and
 still surface a gated toggle here.
+
+Current built-in experiment toggles live under the persisted `experiments`
+config section. `experiments.tts_streaming` enables the experimental
+`/v1/audio/speech` `stream=true` transport only on nodes that also run with
+`SKULK_ENABLE_EXPERIMENTAL_MODE`; the request still requires a mounted TTS card
+whose `audio.supports_streaming` flag has been set after model/backend
+validation.
 
 ## The dashboard
 

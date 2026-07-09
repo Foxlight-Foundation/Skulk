@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import styled, { keyframes } from 'styled-components';
-import { useConfig, type StoreConfig, type FullConfig, type LoggingConfig } from '../../hooks/useConfig';
+import { useConfig, type StoreConfig, type FullConfig, type LoggingConfig, type ExperimentsConfig } from '../../hooks/useConfig';
 import { Button } from '../common/Button';
 import { Field } from '../common/Field';
 import { InfoTooltip } from '../common/InfoTooltip';
@@ -29,6 +29,10 @@ const defaultStoreConfig = (): StoreConfig => ({
     node_cache_path: '~/.skulk/staging',
     cleanup_on_deactivate: true,
   },
+});
+
+const defaultExperimentsConfig = (): ExperimentsConfig => ({
+  tts_streaming: false,
 });
 
 /* ---- animations ---- */
@@ -245,6 +249,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const [loggingDraft, setLoggingDraft] = useState<LoggingConfig>({
     enabled: false, ingest_url: '',
   });
+  const [experimentsDraft, setExperimentsDraft] = useState<ExperimentsConfig>(defaultExperimentsConfig());
 
   // Fetch config when panel opens
   useEffect(() => {
@@ -263,6 +268,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
       enabled: fullConfig?.logging?.enabled ?? false,
       ingest_url: fullConfig?.logging?.ingest_url ?? '',
     });
+    setExperimentsDraft(fullConfig?.experiments ? { ...fullConfig.experiments } : defaultExperimentsConfig());
   }, [fullConfig, effective]);
 
   const modelStoreDraft = draft ?? defaultStoreConfig();
@@ -292,6 +298,9 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     updated.inference = { kv_cache_backend: kvBackend };
     // Include logging config
     updated.logging = { ...loggingDraft };
+    if (effective?.experimental_mode_enabled) {
+      updated.experiments = { ...experimentsDraft };
+    }
     // Only send hf_token when user entered a new one
     if (hfToken && hfToken !== '') updated.hf_token = hfToken;
     const ok = await saveFullConfig(updated);
@@ -307,7 +316,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     } else {
       addToast({ type: 'error', message: t('settings.toasts.saveFailed', 'Failed to save settings') });
     }
-  }, [draft, fullConfig, hfToken, kvBackend, loggingDraft, onClose, saveFullConfig, t]);
+  }, [draft, effective?.experimental_mode_enabled, experimentsDraft, fullConfig, hfToken, kvBackend, loggingDraft, onClose, saveFullConfig, t]);
 
   // ESC to close
   useEffect(() => {
@@ -614,8 +623,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
           {/* Experiments: only shown when the node runs with
               SKULK_ENABLE_EXPERIMENTAL_MODE. This is the fabric's staging
               area for in-development features: each such feature adds its own
-              toggle here so its UX is built alongside it. With no experimental
-              feature in this release, the section shows a placeholder. */}
+              toggle here so its UX is built alongside it. */}
           {effective?.experimental_mode_enabled && (
             <Fieldset>
               <Legend>
@@ -628,12 +636,29 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                   )}
                 />
               </Legend>
-              <HintText>
-                {t(
-                  'settings.experiments.none',
-                  'No experimental features are available in this release.',
-                )}
-              </HintText>
+              <Row>
+                <FieldLabel>
+                  {t('settings.experiments.ttsStreaming', 'TTS streaming')}
+                  <InfoTooltip
+                    content={t(
+                      'settings.experiments.ttsStreamingTooltip',
+                      'Enables the experimental stream=true path for /v1/audio/speech. Leave off until a mounted TTS model has passed streaming validation.',
+                    )}
+                  />
+                </FieldLabel>
+                <Toggle
+                  type="button"
+                  $on={experimentsDraft.tts_streaming}
+                  aria-pressed={experimentsDraft.tts_streaming}
+                  aria-label={t('settings.experiments.ttsStreaming', 'TTS streaming')}
+                  onClick={() =>
+                    setExperimentsDraft((prev) => ({
+                      ...prev,
+                      tts_streaming: !prev.tts_streaming,
+                    }))
+                  }
+                />
+              </Row>
             </Fieldset>
           )}
         </Body>

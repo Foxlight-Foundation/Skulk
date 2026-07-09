@@ -179,7 +179,10 @@ from skulk.shared.constants import (
     preferred_env_value,
 )
 from skulk.shared.election import ElectionMessage
-from skulk.shared.experimental import experimental_mode_enabled
+from skulk.shared.experimental import (
+    EXPERIMENTAL_MODE_ENV_VAR,
+    experimental_mode_enabled,
+)
 from skulk.shared.logging import InterceptLogger
 from skulk.shared.models.capabilities import resolve_model_capability_profile
 from skulk.shared.models.model_cards import (
@@ -290,7 +293,11 @@ from skulk.shared.types.worker.instances import (
 from skulk.shared.types.worker.runners import RunnerId
 from skulk.shared.types.worker.shards import Sharding
 from skulk.shared.version import get_skulk_version, get_skulk_version_label
-from skulk.store.config import resolve_config_path, resolve_node_staging
+from skulk.store.config import (
+    load_skulk_config,
+    resolve_config_path,
+    resolve_node_staging,
+)
 from skulk.tools.web_search import default_browser_tool_provider
 from skulk.utils.banner import print_startup_banner
 from skulk.utils.channels import Receiver, Sender, channel
@@ -366,6 +373,9 @@ _AUDIO_CONTENT_TYPES: Final[dict[AudioResponseFormat, str]] = {
     AudioResponseFormat.Ogg: "audio/ogg",
     AudioResponseFormat.Opus: "audio/opus",
 }
+_STREAMABLE_AUDIO_RESPONSE_FORMATS: Final[frozenset[AudioResponseFormat]] = frozenset(
+    {AudioResponseFormat.Mp3}
+)
 _MAX_AUDIO_UPLOAD_BYTES: Final[int] = 25 * 1024 * 1024
 _AUDIO_TRANSCRIPTION_FORMATS: Final[set[str]] = {
     "json",
@@ -447,6 +457,17 @@ def _chunk_base64_payload(encoded: str) -> list[str]:
         encoded[index : index + SKULK_MAX_CHUNK_SIZE]
         for index in range(0, len(encoded), SKULK_MAX_CHUNK_SIZE)
     ] or [""]
+
+
+def _decode_audio_chunk_data(chunk: AudioChunk) -> bytes:
+    """Decode one independently base64-encoded audio output chunk."""
+    try:
+        return base64.b64decode(chunk.data.encode("ascii"), validate=True)
+    except binascii.Error as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Speech runner returned invalid base64 audio",
+        ) from exc
 
 
 def _parse_timestamp_granularities(value: str | None) -> tuple[str, ...]:
@@ -1321,7 +1342,10 @@ class API:
             summary="Generate speech audio",
             description=(
                 "OpenAI-compatible text-to-speech endpoint. The requested model "
-                "must already be placed and running as a text-to-speech model."
+                "must already be placed and running as a text-to-speech model. "
+                "The experimental stream=true path requires "
+                "SKULK_ENABLE_EXPERIMENTAL_MODE, experiments.tts_streaming=true, "
+                "and a mounted card that declares audio.supports_streaming=true."
             ),
         )(self.audio_speech)
         self.app.post(
@@ -2708,7 +2732,11 @@ class API:
         return resolved
 
     async def _validate_speech_synthesis_model(
-        self, model_id: ModelId, response_format: AudioResponseFormat | None
+        self,
+        model_id: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
     ) -> tuple[ModelId, AudioResponseFormat]:
         """Validate a mounted TTS model and resolve the output audio format."""
 
@@ -2719,6 +2747,32 @@ class API:
             raise HTTPException(
                 status_code=400,
                 detail=f"Model {resolved} is not a text-to-speech model",
+            )
+        if stream and not experimental_mode_enabled():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Streaming text-to-speech is experimental and requires "
+                    f"{EXPERIMENTAL_MODE_ENV_VAR}=1 until a mounted MLX speech "
+                    "model has passed streaming validation"
+                ),
+            )
+        if stream and not self._tts_streaming_experiment_enabled():
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Streaming text-to-speech is experimental and requires "
+                    "experiments.tts_streaming=true in skulk.yaml"
+                ),
+            )
+        if stream and (
+            model_card.audio is None or model_card.audio.supports_streaming is not True
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Model {resolved} does not declare streaming speech support"
+                ),
             )
         resolved_response_format = (
             response_format
@@ -2749,6 +2803,23 @@ class API:
                 detail=f"No instance found for model {resolved}",
             )
         return resolved, resolved_response_format
+
+    def _tts_streaming_experiment_enabled(self) -> bool:
+        """Return whether the current config opts into experimental TTS streaming."""
+
+        try:
+            config = load_skulk_config(self._config_path)
+        except Exception as exc:
+            logger.warning(
+                "Failed to load config while checking TTS streaming experiment "
+                f"toggle; treating it as disabled: {exc}"
+            )
+            return False
+        return bool(
+            config is not None
+            and config.experiments is not None
+            and config.experiments.tts_streaming
+        )
 
     async def _validate_audio_transcription_model(self, model_id: ModelId) -> ModelId:
         """Validate a mounted speech-to-text model exists and is servable."""
@@ -5849,13 +5920,16 @@ class API:
                 # Preserve logging config when omitted from the request
                 if "logging" not in config_data and "logging" in existing:
                     config_data["logging"] = existing["logging"]
+                # Preserve experiment toggles when omitted from the request.
+                if "experiments" not in config_data and "experiments" in existing:
+                    config_data["experiments"] = existing["experiments"]
             except Exception:
                 pass
         # Validate by attempting to parse with Pydantic
         from skulk.store.config import SkulkConfig
 
         try:
-            SkulkConfig.model_validate(config_data)
+            parsed_config = SkulkConfig.model_validate(config_data)
         except Exception as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         config_yaml = yaml.safe_dump(
@@ -5864,6 +5938,7 @@ class API:
         # Write locally
         with self._config_path.open("w") as f:
             f.write(config_yaml)
+        self._skulk_config = parsed_config
         # Broadcast to all nodes via gossipsub — strip hf_token (secret).
         import copy
 
@@ -6243,18 +6318,11 @@ class API:
     async def audio_speech(self, request: AudioSpeechRequest) -> Response:
         """OpenAI-compatible text-to-speech endpoint."""
 
-        if request.stream:
+        if request.streaming_interval is not None and not request.stream:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "`stream=true` is not supported by Skulk's speech endpoint yet"
-                ),
-            )
-        if request.streaming_interval is not None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "`streaming_interval` is only supported when speech streaming lands"
+                    "`streaming_interval` is only supported with `stream=true`"
                 ),
             )
         if request.reference_audio is not None:
@@ -6271,9 +6339,29 @@ class API:
                 detail="`reference_text` is only supported with reference-audio TTS flows",
             )
 
-        model_id, response_format = await self._validate_speech_synthesis_model(
-            ModelId(request.model), request.response_format
+        requested_response_format = (
+            AudioResponseFormat.Mp3
+            if request.stream and request.response_format is None
+            else request.response_format
         )
+        model_id, response_format = await self._validate_speech_synthesis_model(
+            ModelId(request.model), requested_response_format, stream=request.stream
+        )
+        if request.stream and response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
+            supported = ", ".join(
+                audio_format.value
+                for audio_format in sorted(
+                    _STREAMABLE_AUDIO_RESPONSE_FORMATS,
+                    key=lambda audio_format: audio_format.value,
+                )
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"`stream=true` supports only {supported} responses for now; "
+                    f"requested {response_format.value}"
+                ),
+            )
         command = SpeechSynthesis(
             owner_node=self.node_id,
             task_params=SpeechSynthesisTaskParams(
@@ -6289,43 +6377,69 @@ class API:
                 top_k=request.top_k,
                 repetition_penalty=request.repetition_penalty,
                 max_tokens=request.max_tokens,
+                stream=request.stream,
+                streaming_interval=request.streaming_interval,
             ),
         )
         command_id = command.command_id
+        self._audio_speech_queues[command_id], recv = channel[AudioChunk | ErrorChunk]()
+        try:
+            await self._send(command)
+        except Exception:
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._audio_speech_queues,
+                ),
+            )
+            raise
+
+        if request.stream:
+            try:
+                first_chunk = await self._receive_initial_audio_speech_chunk(
+                    command_id, recv
+                )
+            except anyio.get_cancelled_exc_class():
+                cancel_command = TaskCancelled(cancelled_command_id=command_id)
+                self._cancelled_command_ids.add(command_id)
+                with anyio.CancelScope(shield=True):
+                    await self.command_sender.send(
+                        ForwarderCommand(
+                            origin=self._system_id, command=cancel_command
+                        )
+                    )
+                await self._finalize_command_stream(
+                    command_id,
+                    cast(
+                        dict[CommandId, Sender[object]],
+                        self._audio_speech_queues,
+                    ),
+                )
+                raise
+            except HTTPException:
+                await self._finalize_command_stream(
+                    command_id,
+                    cast(
+                        dict[CommandId, Sender[object]],
+                        self._audio_speech_queues,
+                    ),
+                )
+                raise
+            return StreamingResponse(
+                self._stream_audio_speech_chunks(command_id, recv, first_chunk),
+                media_type=_AUDIO_CONTENT_TYPES[response_format],
+                headers={
+                    "Content-Disposition": (
+                        f"attachment; filename=speech.{response_format.value}"
+                    )
+                },
+            )
 
         try:
-            self._audio_speech_queues[command_id], recv = channel[
-                AudioChunk | ErrorChunk
-            ]()
-
-            await self._send(command)
-
-            encoded_parts: list[str] = []
-            with recv as chunks:
-                async for chunk in chunks:
-                    if isinstance(chunk, ErrorChunk):
-                        raise HTTPException(
-                            status_code=500,
-                            detail=f"Speech synthesis failed: {chunk.error_message}",
-                        )
-                    encoded_parts.append(chunk.data)
-                    response_format = chunk.format
-                    if chunk.finish_reason is not None:
-                        break
-
-            if not encoded_parts:
-                raise HTTPException(
-                    status_code=500, detail="No speech audio response received"
-                )
-            try:
-                audio_bytes = base64.b64decode(
-                    "".join(encoded_parts).encode("ascii"), validate=True
-                )
-            except binascii.Error as exc:
-                raise HTTPException(
-                    status_code=500,
-                    detail="Speech runner returned invalid base64 audio",
-                ) from exc
+            audio_bytes, response_format = await self._collect_audio_speech_chunks(
+                command_id, recv
+            )
             return Response(
                 content=audio_bytes,
                 media_type=_AUDIO_CONTENT_TYPES[response_format],
@@ -6337,6 +6451,207 @@ class API:
             with anyio.CancelScope(shield=True):
                 await self.command_sender.send(
                     ForwarderCommand(origin=self._system_id, command=cancel_command)
+                )
+            raise
+        finally:
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._audio_speech_queues,
+                ),
+            )
+
+    async def _collect_audio_speech_chunks(
+        self,
+        command_id: CommandId,
+        recv: Receiver[AudioChunk | ErrorChunk],
+    ) -> tuple[bytes, AudioResponseFormat]:
+        """Collect a non-streaming TTS response with a terminal-task backstop."""
+        audio_parts: list[bytes] = []
+        response_format: AudioResponseFormat | None = None
+        with recv as chunks:
+            while True:
+                chunk: AudioChunk | ErrorChunk | None = None
+                with anyio.move_on_after(_STREAM_IDLE_TIMEOUT_SECONDS) as scope:
+                    try:
+                        chunk = await chunks.receive()
+                    except (EndOfStream, ClosedResourceError) as exc:
+                        if not self._command_task_is_terminal(command_id):
+                            await self._cancel_audio_speech_command(command_id)
+                        detail = (
+                            "Speech synthesis stream closed before receiving "
+                            "a terminal chunk"
+                            if audio_parts
+                            else "No speech audio response received"
+                        )
+                        raise HTTPException(
+                            status_code=500, detail=detail
+                        ) from exc
+                if scope.cancelled_caught:
+                    if self._command_task_is_terminal(command_id):
+                        detail = (
+                            "Speech synthesis completed, but the final response "
+                            "chunk was not received"
+                            if audio_parts
+                            else (
+                                "Speech synthesis completed, but no audio response "
+                                "was received"
+                            )
+                        )
+                        raise HTTPException(
+                            status_code=500,
+                            detail=detail,
+                        )
+                    continue
+                assert chunk is not None
+                if isinstance(chunk, ErrorChunk):
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Speech synthesis failed: {chunk.error_message}",
+                    )
+                audio_parts.append(_decode_audio_chunk_data(chunk))
+                response_format = chunk.format
+                if chunk.finish_reason is not None:
+                    break
+        if not audio_parts:
+            raise HTTPException(
+                status_code=500, detail="No speech audio response received"
+            )
+        return b"".join(audio_parts), response_format
+
+    async def _cancel_audio_speech_command(self, command_id: CommandId) -> None:
+        """Cancel a speech synthesis command that cannot finish cleanly."""
+
+        self._cancelled_command_ids.add(command_id)
+        with anyio.CancelScope(shield=True):
+            await self.command_sender.send(
+                ForwarderCommand(
+                    origin=self._system_id,
+                    command=TaskCancelled(cancelled_command_id=command_id),
+                )
+            )
+
+    async def _receive_initial_audio_speech_chunk(
+        self,
+        command_id: CommandId,
+        recv: Receiver[AudioChunk | ErrorChunk],
+    ) -> AudioChunk:
+        """Receive the first TTS stream chunk before response headers commit."""
+        while True:
+            chunk: AudioChunk | ErrorChunk | None = None
+            with anyio.move_on_after(_STREAM_IDLE_TIMEOUT_SECONDS) as scope:
+                try:
+                    chunk = await recv.receive()
+                except (EndOfStream, ClosedResourceError) as exc:
+                    raise HTTPException(
+                        status_code=500, detail="No speech audio response received"
+                    ) from exc
+            if scope.cancelled_caught:
+                if self._command_task_is_terminal(command_id):
+                    raise HTTPException(
+                        status_code=500,
+                        detail=(
+                            "Speech synthesis completed, but no audio response "
+                            "was received"
+                        ),
+                    )
+                continue
+            assert chunk is not None
+            if isinstance(chunk, ErrorChunk):
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Speech synthesis failed: {chunk.error_message}",
+                )
+            chunk_data = _decode_audio_chunk_data(chunk)
+            if chunk.finish_reason is not None and len(chunk_data) == 0:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        "Speech synthesis completed, but no audio response "
+                        "was received"
+                    ),
+                )
+            return chunk
+
+    async def _stream_audio_speech_chunks(
+        self,
+        command_id: CommandId,
+        recv: Receiver[AudioChunk | ErrorChunk],
+        first_chunk: AudioChunk | None = None,
+    ) -> AsyncGenerator[bytes, None]:
+        """Yield TTS audio bytes as chunks arrive from the data plane."""
+        received_audio = False
+        try:
+            if first_chunk is not None:
+                first_chunk_data = _decode_audio_chunk_data(first_chunk)
+                if first_chunk_data:
+                    received_audio = True
+                    yield first_chunk_data
+                if first_chunk.finish_reason is not None:
+                    if not received_audio:
+                        raise RuntimeError("No speech audio response received")
+                    return
+            with recv as chunks:
+                while True:
+                    chunk: AudioChunk | ErrorChunk | None = None
+                    delay = _STREAM_IDLE_TIMEOUT_SECONDS if received_audio else None
+                    with anyio.move_on_after(delay) as scope:
+                        try:
+                            chunk = await chunks.receive()
+                        except (EndOfStream, ClosedResourceError) as exc:
+                            if self._command_task_is_terminal(command_id):
+                                if received_audio:
+                                    return
+                                raise RuntimeError(
+                                    "No speech audio response received"
+                                ) from exc
+                            await self._cancel_audio_speech_command(command_id)
+                            raise RuntimeError(
+                                "Speech stream closed before receiving "
+                                "a terminal chunk"
+                            ) from exc
+                    if scope.cancelled_caught:
+                        task_done = self._command_task_is_terminal(command_id)
+                        logger.warning(
+                            f"Speech stream for command {command_id} idle for "
+                            f">{_STREAM_IDLE_TIMEOUT_SECONDS:g}s mid-stream; "
+                            + (
+                                "task already terminal — finishing (a final "
+                                "data-plane chunk was likely dropped)."
+                                if task_done
+                                else "task still active — cancelling (a data-plane "
+                                "chunk may have been dropped)."
+                            )
+                        )
+                        if not task_done:
+                            await self._cancel_audio_speech_command(command_id)
+                        else:
+                            return
+                        raise RuntimeError(
+                            "Speech stream stalled before receiving a terminal chunk"
+                        )
+                    assert chunk is not None
+                    if isinstance(chunk, ErrorChunk):
+                        raise RuntimeError(
+                            f"Speech synthesis failed: {chunk.error_message}"
+                        )
+                    chunk_data = _decode_audio_chunk_data(chunk)
+                    if chunk_data:
+                        received_audio = True
+                        yield chunk_data
+                    if chunk.finish_reason is not None:
+                        if not received_audio:
+                            raise RuntimeError("No speech audio response received")
+                        return
+            if not received_audio:
+                raise RuntimeError("No speech audio response received")
+        except anyio.get_cancelled_exc_class():
+            command = TaskCancelled(cancelled_command_id=command_id)
+            self._cancelled_command_ids.add(command_id)
+            with anyio.CancelScope(shield=True):
+                await self.command_sender.send(
+                    ForwarderCommand(origin=self._system_id, command=command)
                 )
             raise
         finally:

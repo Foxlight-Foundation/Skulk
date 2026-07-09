@@ -3,8 +3,10 @@ from pathlib import Path
 import pytest
 
 from skulk.store.config import (
+    ExperimentsConfig,
     ModelStoreConfig,
     NodeOverrideConfig,
+    SkulkConfig,
     StagingNodeConfig,
     hostname_aliases,
     load_skulk_config,
@@ -113,3 +115,25 @@ def test_load_skulk_config_fails_loud_on_legacy_exo_yaml(tmp_path: Path) -> None
     target = tmp_path / "skulk.yaml"
     with pytest.raises(FileNotFoundError, match="exo.yaml is no longer read"):
         load_skulk_config(target)
+
+
+def test_experiments_config_defaults_tts_streaming_off() -> None:
+    """Experimental feature toggles default off until explicitly opted in."""
+
+    config = SkulkConfig(experiments=ExperimentsConfig())
+
+    assert config.experiments is not None
+    assert config.experiments.tts_streaming is False
+
+
+def test_load_skulk_config_parses_tts_streaming_experiment(tmp_path: Path) -> None:
+    """The config file can opt into the experimental TTS streaming transport."""
+
+    target = tmp_path / "skulk.yaml"
+    target.write_text("experiments:\n  tts_streaming: true\n")
+
+    config = load_skulk_config(target)
+
+    assert config is not None
+    assert config.experiments is not None
+    assert config.experiments.tts_streaming is True

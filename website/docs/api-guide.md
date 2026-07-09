@@ -494,8 +494,8 @@ curl -X POST http://localhost:52415/v1/responses \
 
 **POST** `/v1/audio/speech`
 
-Generates non-streaming speech audio from a mounted text-to-speech model. The
-model must be placed and running, and its resolved capabilities must include
+Generates speech audio from a mounted text-to-speech model. The model must be
+placed and running, and its resolved capabilities must include
 `supports_speech_synthesis`.
 
 ```bash
@@ -518,17 +518,32 @@ Request fields:
 | `input` | string | Required text to synthesize |
 | `voice` | string or null | Optional model-specific voice name |
 | `speed` | number or null | Optional positive speaking speed multiplier |
-| `response_format` | string or null | Optional encoded output format. When omitted or set to `null`, Skulk uses the mounted model card default when declared and otherwise falls back to `mp3`; supported values are constrained by the model card when declared |
+| `response_format` | string or null | Optional encoded output format. When omitted or set to `null`, Skulk uses `mp3` for `stream=true`; otherwise it uses the mounted model card default when declared and falls back to `mp3`; supported values are constrained by the model card when declared |
+| `stream` | boolean | Optional. Experimental. When `true`, Skulk returns a chunked HTTP response and yields encoded MP3 bytes as the speech runner emits them; accepted only when `SKULK_ENABLE_EXPERIMENTAL_MODE` is enabled, `experiments.tts_streaming` is true, and the mounted TTS card explicitly declares `audio.supports_streaming = true` |
+| `streaming_interval` | number or null | Optional positive model-specific streaming cadence hint, accepted only with `stream=true` |
 | `instruct`, `lang_code` | string or null | Optional model-specific generation hints |
 | `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number or integer | Optional model-specific sampling controls |
 
 The response body is raw audio bytes with a matching audio media type
 (`audio/mpeg`, `audio/wav`, `audio/flac`, `audio/ogg`, or `audio/opus`).
+For `stream=true`, the node must be running with
+`SKULK_ENABLE_EXPERIMENTAL_MODE`, the cluster config must set
+`experiments.tts_streaming: true`, and the mounted TTS card must explicitly
+declare `audio.supports_streaming = true`. The response format must currently
+resolve to `mp3`; when a streaming request omits `response_format`, Skulk
+requests `mp3` instead of the model card's non-streaming default. Skulk returns
+`audio/mpeg` with chunked HTTP bytes. This is TTS output streaming, not a
+realtime session: the request text is still a complete bounded input,
+cancellation closes the command stream, and each chunk follows the mounted
+model's generation cadence. The bundled TTS cards currently advertise WAV output
+only and do not declare streaming support. MP3/streaming support should be
+enabled on a card only when the runtime can provide the required encoder
+dependency and the model has passed streaming validation.
 
-The speech endpoint is intentionally non-streaming and text-only. `stream=true`,
-`streaming_interval`, `reference_audio`, and `reference_text` return
-**400 Bad Request**. Speech translation, realtime sessions, voice listing, and
-managed reference-audio uploads are later phases.
+The speech endpoint is still text-only. `streaming_interval` without
+`stream=true`, `reference_audio`, and `reference_text` return **400 Bad
+Request**. Speech translation, realtime sessions, voice listing, and managed
+reference-audio uploads are later phases.
 
 ## OpenAI Audio Transcriptions API
 
@@ -573,7 +588,7 @@ The endpoint never accepts server-local file paths. The API reads the multipart
 upload, chunks the base64 payload through Skulk's command/input-chunk pipeline,
 and the worker writes a temporary local audio file only inside the serving
 runner process. `stream=true` returns **400 Bad Request** until streaming STT
-lands.
+lands through the realtime session path.
 
 ## Claude Messages API
 
@@ -910,6 +925,14 @@ The response also carries an `effective` block describing runtime-resolved value
 - `has_hf_token`: whether a HuggingFace token is configured (via the file or `HF_TOKEN`), without exposing the token
 - `experimental_mode_enabled`: whether this node runs with `SKULK_ENABLE_EXPERIMENTAL_MODE` set; the dashboard uses it to reveal the gated Experiments settings section
 
+The persisted `experiments` section holds per-feature opt-ins shown inside that
+gated dashboard section. Current fields:
+
+- `experiments.tts_streaming`: enables the experimental `/v1/audio/speech`
+  `stream=true` transport on nodes that also run with
+  `SKULK_ENABLE_EXPERIMENTAL_MODE`; keep this off until a mounted TTS model has
+  passed streaming validation.
+
 ### Update config
 
 **PUT** `/config`
@@ -918,6 +941,7 @@ Updates cluster-wide config. Important behavior:
 
 - if you omit `hf_token`, Skulk preserves the existing value
 - if you omit `logging`, Skulk preserves the existing logging config
+- if you omit `experiments`, Skulk preserves the existing experiment toggles
 - `hf_token` is not broadcast over gossipsub; it stays on the local node's `skulk.yaml`
 - logging changes (enable/disable) take effect immediately on all nodes
 - inference changes affect future launches
