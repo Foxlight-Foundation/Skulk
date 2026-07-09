@@ -111,3 +111,28 @@ def test_descriptor_rejects_non_json_schema_values() -> None:
         _descriptor(output_schema={"default": b"raw"})  # bytes
     with pytest.raises(ValidationError):
         _descriptor(input_schema={"maximum": float("nan")})  # NaN
+
+
+def test_capability_result_pairing_invariant() -> None:
+    from skulk.extensions.calls import CapabilityError, CapabilityResult
+
+    # ok=True requires a result and forbids an error; ok=False the inverse.
+    with pytest.raises(ValidationError):
+        CapabilityResult(call_id="c", ok=True, result=None)
+    with pytest.raises(ValidationError):
+        CapabilityResult(
+            call_id="c",
+            ok=True,
+            result={},
+            error=CapabilityError(code="timeout", message="x"),
+        )
+    with pytest.raises(ValidationError):
+        CapabilityResult(call_id="c", ok=False, error=None)
+    with pytest.raises(ValidationError):
+        CapabilityResult(
+            call_id="c",
+            ok=False,
+            result={},
+            error=CapabilityError(code="timeout", message="x"),
+        )
+    assert CapabilityResult(call_id="c", ok=True, result={}).ok

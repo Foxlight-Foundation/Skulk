@@ -17,7 +17,11 @@ phase; until then this extension is discovery-complete but not yet callable.
 
 from loguru import logger
 
-from skulk.extensions import CapabilityDescriptor, ExtensionContext
+from skulk.extensions import (
+    CapabilityCall,
+    CapabilityDescriptor,
+    ExtensionContext,
+)
 
 _ECHO_DESCRIPTOR = CapabilityDescriptor(
     id="echo",
@@ -62,6 +66,12 @@ class EchoProviderExtension:
     def capabilities(self) -> list[CapabilityDescriptor]:
         """The capabilities this extension serves."""
         return [_ECHO_DESCRIPTOR]
+
+    async def handle_call(
+        self, context: ExtensionContext, call: CapabilityCall
+    ) -> dict[str, object]:
+        """Serve one echo call: return the input text unchanged."""
+        return {"text": call.payload["text"]}
 
     def on_start(self, context: ExtensionContext) -> None:
         """Log the fabric this provider joined (startup registration hook)."""

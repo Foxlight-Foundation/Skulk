@@ -141,6 +141,7 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `POST /v1/diagnostics/cluster/{node_id}/capture`
 - `POST /v1/diagnostics/cluster/{node_id}/runners/{runner_id}/cancel`
 - `GET /v1/capabilities`
+- `POST /v1/capabilities/call`
 
 The node diagnostics bundle includes the node's own Tailscale state
 (`tailscale`: running flag, tailnet IP, hostname, MagicDNS name), probed on
@@ -1213,6 +1214,29 @@ installed on the described node. Extensions consume this through
 `describe_node`; the light discovery layer (which nodes offer which capability
 tag) rides the telemetry plane and appears as `nodeCapabilities` in
 `GET /state`.
+
+### Invoke a capability on this node
+
+```
+POST /v1/capabilities/call
+```
+
+Dispatch one unary capability call to this node's provider extensions. The
+body is the typed call envelope: `call_id`, `capability_id`, exact `version`,
+the `descriptor_revision` pinned at discovery, `caller_node`, `target_node`,
+`timeout_seconds`, and the opaque `payload`. The payload is validated against
+the descriptor's input schema before the provider runs, the result against
+its output schema after, and payloads are capped at 1 MiB in each direction.
+A syntactically valid envelope always gets HTTP 200 with a typed result
+(`call_id`, `ok`, `result`, `error`); failures arrive as machine-readable
+codes (`not_found`, `version_mismatch`, `revision_mismatch`,
+`invalid_payload`, `invalid_result`, `payload_too_large`, `overloaded`,
+`timeout`, `provider_error`), so callers switch on `error.code` rather than
+transport status. A body that does not parse as the envelope at all
+(malformed JSON, missing fields, out-of-range values) gets the standard 422,
+since there is no call id to correlate a typed result to. Extensions
+normally use this through their context's `call_capability` rather than
+calling the endpoint directly.
 
 ```bash
 curl http://localhost:52415/v1/capabilities

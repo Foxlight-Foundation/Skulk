@@ -18,6 +18,7 @@ from packaging.version import InvalidVersion, Version
 
 from skulk.extensions.capabilities import CapabilityDescriptor
 from skulk.extensions.types import (
+    CapabilityCallHandler,
     CapabilityProvider,
     ChatMiddleware,
     ChatResponseSummary,
@@ -73,6 +74,11 @@ class LoadedExtensions:
         self._chat_middlewares: list[tuple[str, ChatMiddleware]] = []
         self._startup_hooks: list[tuple[str, SupportsExtensionStartup]] = []
         self._capability_descriptors: list[CapabilityDescriptor] = []
+        # qualified_id -> (extension name, handler, descriptor) for providers
+        # that also serve unary calls (fabric-citizenship Phase 2b).
+        self._call_handlers: dict[
+            str, tuple[str, CapabilityCallHandler, CapabilityDescriptor]
+        ] = {}
         seen_qualified_ids: set[str] = set()
         for extension in extensions:
             try:
@@ -122,6 +128,21 @@ class LoadedExtensions:
                         continue
                     seen_qualified_ids.add(descriptor.qualified_id)
                     self._capability_descriptors.append(descriptor)
+                    # Call facet (Phase 2b): a provider that also implements
+                    # handle_call serves this descriptor's unary calls. A
+                    # descriptor without a handler is discovery-only (valid:
+                    # for example a streaming-only capability before Phase 3).
+                    # Only unary descriptors register: routing a streaming
+                    # capability through the unary surface would serve it with
+                    # the wrong payload/result contract.
+                    if descriptor.io_mode == "unary" and isinstance(
+                        extension, CapabilityCallHandler
+                    ):
+                        self._call_handlers[descriptor.qualified_id] = (
+                            name,
+                            extension,
+                            descriptor,
+                        )
             # Startup-hook facet: a pure provider has no chat hook through
             # which to reach the context, so registration must not depend on
             # a chat request arriving.
@@ -142,6 +163,23 @@ class LoadedExtensions:
     def capability_descriptors(self) -> tuple[CapabilityDescriptor, ...]:
         """All capability descriptors served by loaded provider extensions."""
         return tuple(self._capability_descriptors)
+
+    def call_handler(
+        self, qualified_id: str
+    ) -> tuple[str, CapabilityCallHandler, CapabilityDescriptor] | None:
+        """Look up the call handler serving ``id@version`` on this node.
+
+        Returns ``(extension name, handler, descriptor)``, or ``None`` when no
+        loaded provider serves unary calls for that capability (unknown id,
+        wrong version, or a discovery-only descriptor without a handler).
+        """
+        return self._call_handlers.get(qualified_id)
+
+    def handled_capability_ids(self) -> frozenset[str]:
+        """Capability ids (bare, unversioned) with at least one call handler."""
+        return frozenset(
+            entry[2].id for entry in self._call_handlers.values()
+        )
 
     def run_startup_hooks(self, context: ExtensionContext) -> None:
         """Run every extension's ``on_start`` hook, each one guarded.

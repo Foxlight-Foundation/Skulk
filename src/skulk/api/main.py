@@ -163,12 +163,19 @@ from skulk.api.types.openai_responses import (
 from skulk.connectivity.remote_access import RemoteAccessInfo, build_remote_access_info
 from skulk.connectivity.tailscale import TailscaleStatus, query_tailscale_status
 from skulk.extensions import (
+    DEFAULT_CALL_TIMEOUT_SECONDS,
+    MAX_CALL_PAYLOAD_BYTES,
+    CapabilityCall,
     CapabilityDescriptor,
+    CapabilityErrorCode,
+    CapabilityResult,
     ExtensionContext,
     LoadedExtensions,
+    call_failure,
     descriptor_revision,
     resolve_skulk_version,
     snapshot_cluster,
+    validate_against_schema,
 )
 from skulk.master.image_store import ImageStore
 from skulk.master.placement import PlacementInfoPendingError
@@ -374,6 +381,12 @@ _STREAM_IDLE_TIMEOUT_SECONDS = 120.0
 # and converting an undeliverable gap into (rare) minor loss rather than a hang.
 # Normal mesh reordering spans only a few chunks, far below this.
 _MAX_CHUNK_REORDER_BUFFER = 512
+
+# Concurrency bound for extension capability calls served by this node
+# (fabric-citizenship Phase 2b): one slow provider must not accumulate
+# unbounded in-flight calls on the API node. Calls beyond the bound are
+# rejected with the typed `overloaded` error rather than queued.
+_MAX_CONCURRENT_CAPABILITY_CALLS = 8
 _AUDIO_CONTENT_TYPES: Final[dict[AudioResponseFormat, str]] = {
     AudioResponseFormat.Mp3: "audio/mpeg",
     AudioResponseFormat.Wav: "audio/wav",
@@ -979,7 +992,14 @@ class API:
             # Capability discovery, heavy half (fabric-citizenship Phase 2a):
             # full descriptors on demand, local or via a reachable peer API.
             describe_node=self._describe_node_capabilities,
+            # The generic call verb (Phase 2b): node-addressed, master never in
+            # the hot path, typed results; local target is an in-process fast
+            # path with the same guards.
+            call_capability=self._call_capability,
         )
+        # In-flight extension capability calls served by this node; bounded by
+        # _MAX_CONCURRENT_CAPABILITY_CALLS (single-threaded loop => plain int).
+        self._active_capability_calls = 0
         # Data plane (#279 Phase 2): per-token output chunks arrive here direct
         # from the serving worker (DATA topic), not as ChunkGenerated events off
         # the master. Demuxed by command_id into the per-command stream queues.
@@ -1634,6 +1654,29 @@ class API:
                 "extension is installed."
             ),
         )(self.list_node_capabilities)
+        self.app.post(
+            "/v1/capabilities/call",
+            tags=["Extensions"],
+            summary="Invoke a capability served by this node",
+            description=(
+                "Dispatch one unary capability call to this node's provider "
+                "extensions (fabric-citizenship). The body is the typed call "
+                "envelope (call id, capability id and exact version, the "
+                "descriptor revision pinned at discovery, deadline, and the "
+                "opaque payload). The payload is validated against the "
+                "descriptor's input schema before the provider runs and the "
+                "result against its output schema after. A syntactically valid "
+                "envelope always gets HTTP 200 with a typed result: failures "
+                "arrive as machine-readable error codes (not_found, "
+                "version_mismatch, revision_mismatch, invalid_payload, "
+                "invalid_result, payload_too_large, overloaded, timeout, "
+                "provider_error) rather than transport errors. A body that "
+                "does not parse as the envelope at all (malformed JSON, "
+                "missing fields, out-of-range values) gets the standard 422, "
+                "since there is no call id to correlate a typed result to. Callers normally use this through their extension "
+                "context's call_capability rather than directly."
+            ),
+        )(self.serve_capability_call)
         self.app.get(
             "/v1/diagnostics/node",
             tags=["Diagnostics"],
@@ -2986,6 +3029,282 @@ class API:
             },
         }
 
+    async def serve_capability_call(self, call: CapabilityCall) -> CapabilityResult:
+        """Serve ``POST /v1/capabilities/call``: dispatch a call to a provider.
+
+        The provider-side entry of the generic capability call (fabric-
+        citizenship Phase 2b). The body is the typed call envelope; the
+        response is always a :class:`CapabilityResult` (HTTP 200 even for
+        typed failures, so callers switch on ``result.error.code`` rather than
+        transport status). All isolation guards live in
+        :meth:`_dispatch_capability_call`.
+        """
+        return await self._dispatch_capability_call(call)
+
+    async def _dispatch_capability_call(
+        self, call: CapabilityCall
+    ) -> CapabilityResult:
+        """Run one capability call against this node's providers, guarded.
+
+        Guard order (each failure is a typed error, never an exception):
+        payload size cap; handler lookup (``not_found`` vs
+        ``version_mismatch``); descriptor revision pin; input-schema
+        validation; provider concurrency bound (``overloaded``); the caller's
+        deadline (``timeout``); handler exceptions (``provider_error``);
+        result size cap and output-schema validation (``invalid_result``).
+        The master is never involved and nothing here touches ``State``.
+        """
+        if call.target_node != str(self.node_id):
+            # A misrouted or misaddressed envelope must not execute here: the
+            # call is node-addressed, and accepting it would make logs and
+            # auditing claim a different target than the one that served it.
+            return call_failure(
+                call.call_id,
+                "invalid_payload",
+                f"call addressed to {call.target_node}, served by {self.node_id}",
+            )
+        if self._extensions is None:
+            return call_failure(
+                call.call_id, "not_found", "this node loads no extensions"
+            )
+        try:
+            payload_bytes = len(
+                json.dumps(
+                    call.payload, separators=(",", ":"), allow_nan=False
+                ).encode("utf-8")
+            )
+        except (TypeError, ValueError) as exc:
+            # A local fast-path caller can hand a payload the endpoint's JSON
+            # parsing would never produce (bytes, sets, NaN); typed error, not
+            # an exception (the never-raises contract).
+            return call_failure(
+                call.call_id,
+                "invalid_payload",
+                f"payload is not JSON-serializable: {exc}",
+            )
+        if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
+            return call_failure(
+                call.call_id,
+                "payload_too_large",
+                f"payload is {payload_bytes} bytes "
+                f"(limit {MAX_CALL_PAYLOAD_BYTES})",
+            )
+        qualified_id = f"{call.capability_id}@{call.version}"
+        entry = self._extensions.call_handler(qualified_id)
+        if entry is None:
+            code: CapabilityErrorCode = (
+                "version_mismatch"
+                if call.capability_id in self._extensions.handled_capability_ids()
+                else "not_found"
+            )
+            return call_failure(
+                call.call_id, code, f"no callable capability {qualified_id!r}"
+            )
+        extension_name, handler, descriptor = entry
+        current_revision = descriptor_revision(descriptor)
+        if call.descriptor_revision != current_revision:
+            return call_failure(
+                call.call_id,
+                "revision_mismatch",
+                f"descriptor revision is {current_revision}, caller pinned "
+                f"{call.descriptor_revision}; re-discover before calling",
+            )
+        schema_error = validate_against_schema(
+            call.payload, descriptor.input_schema, what="payload"
+        )
+        if schema_error is not None:
+            return call_failure(call.call_id, "invalid_payload", schema_error)
+        # Bounded concurrency: one slow provider must not accumulate unbounded
+        # in-flight calls on the API node. The event loop is single-threaded,
+        # so a plain counter is race-free here.
+        if self._active_capability_calls >= _MAX_CONCURRENT_CAPABILITY_CALLS:
+            return call_failure(
+                call.call_id,
+                "overloaded",
+                f"provider concurrency bound "
+                f"({_MAX_CONCURRENT_CAPABILITY_CALLS}) reached",
+            )
+        self._active_capability_calls += 1
+        try:
+            with anyio.fail_after(call.timeout_seconds):
+                result_payload = await handler.handle_call(
+                    self._extension_context, call
+                )
+        except TimeoutError:
+            return call_failure(
+                call.call_id,
+                "timeout",
+                f"provider did not finish within {call.timeout_seconds}s",
+            )
+        except Exception as exc:  # noqa: BLE001 - a raising handler must not 500 the node
+            # logger.exception keeps the traceback: debugging a misbehaving
+            # extension from the message alone is much harder in production.
+            logger.exception(
+                f"capability handler '{extension_name}' for {qualified_id} "
+                f"raised: {exc}"
+            )
+            return call_failure(
+                call.call_id, "provider_error", f"{type(exc).__name__}: {exc}"
+            )
+        finally:
+            self._active_capability_calls -= 1
+        if not isinstance(result_payload, dict):  # pyright: ignore[reportUnnecessaryIsInstance]
+            # The handler protocol says dict, but a misbehaving plugin can
+            # return anything; the strict result model would raise on it.
+            return call_failure(
+                call.call_id,
+                "invalid_result",
+                f"provider returned {type(result_payload).__name__}, not an object",
+            )
+        if any(not isinstance(key, str) for key in result_payload):  # pyright: ignore[reportUnnecessaryIsInstance]
+            # json.dumps silently stringifies non-string keys (so the size
+            # check passes), but the strict result model rejects them; catch
+            # it here as a typed error instead of a 500.
+            return call_failure(
+                call.call_id,
+                "invalid_result",
+                "provider result has non-string keys",
+            )
+        try:
+            result_bytes = len(
+                json.dumps(
+                    result_payload, separators=(",", ":"), allow_nan=False
+                ).encode("utf-8")
+            )
+        except (TypeError, ValueError) as exc:
+            # allow_nan=False also rejects NaN/Infinity here: json.dumps would
+            # otherwise accept them but the HTTP response renderer refuses
+            # non-finite JSON, turning the call into a 500 downstream.
+            return call_failure(
+                call.call_id,
+                "invalid_result",
+                f"provider result is not JSON-serializable: {exc}",
+            )
+        if result_bytes > MAX_CALL_PAYLOAD_BYTES:
+            return call_failure(
+                call.call_id,
+                "payload_too_large",
+                f"result is {result_bytes} bytes "
+                f"(limit {MAX_CALL_PAYLOAD_BYTES})",
+            )
+        if descriptor.output_schema is not None:
+            schema_error = validate_against_schema(
+                result_payload, descriptor.output_schema, what="result"
+            )
+            if schema_error is not None:
+                return call_failure(call.call_id, "invalid_result", schema_error)
+        return CapabilityResult(call_id=call.call_id, ok=True, result=result_payload)
+
+    async def _call_capability(
+        self,
+        node_id: NodeId,
+        capability_id: str,
+        version: str,
+        descriptor_revision: str,
+        payload: dict[str, object],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> CapabilityResult:
+        """Invoke a capability on a provider node (the caller side of the verb).
+
+        Extensions receive this via ``ExtensionContext.call_capability``. The
+        local node is a fast path (in-process dispatch, same guards); a peer is
+        reached directly over its API (node-addressed; the master is never in
+        the hot path and calls are never event-sourced). Every failure mode
+        returns a typed :class:`CapabilityResult` error; this never raises.
+        Transport-abstract: the peer hop can move to a Zenoh queryable without
+        changing this contract.
+
+        Args:
+            node_id: The provider node to call.
+            capability_id: The capability's descriptor id.
+            version: The exact negotiated semantic version.
+            descriptor_revision: The revision digest discovered via
+                describe, pinning the contract shape. Shadows the module-level
+                digest helper inside this method (unused here) because the
+                caller protocol fixes the parameter name.
+            payload: The opaque call payload.
+            timeout_seconds: Deadline for the call (default
+                ``DEFAULT_CALL_TIMEOUT_SECONDS``).
+
+        Returns:
+            The typed result of the call.
+        """
+        call_id = str(uuid4())
+        try:
+            payload_bytes = len(
+                json.dumps(payload, separators=(",", ":"), allow_nan=False).encode(
+                    "utf-8"
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            return call_failure(
+                call_id,
+                "invalid_payload",
+                f"payload is not JSON-serializable: {exc}",
+            )
+        if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
+            # Enforce the cap before the POST ships an oversized body across
+            # the network just to be rejected on arrival.
+            return call_failure(
+                call_id,
+                "payload_too_large",
+                f"payload is {payload_bytes} bytes "
+                f"(limit {MAX_CALL_PAYLOAD_BYTES})",
+            )
+        try:
+            call = CapabilityCall(
+                call_id=call_id,
+                capability_id=capability_id,
+                version=version,
+                descriptor_revision=descriptor_revision,
+                caller_node=str(self.node_id),
+                target_node=str(node_id),
+                timeout_seconds=(
+                    timeout_seconds
+                    if timeout_seconds is not None
+                    else DEFAULT_CALL_TIMEOUT_SECONDS
+                ),
+                payload=payload,
+            )
+        except ValidationError as exc:
+            # An out-of-range timeout (or any other envelope violation) is a
+            # typed error, never a raise out of call_capability.
+            return call_failure(
+                call_id, "invalid_payload", f"invalid call envelope: {exc}"
+            )
+        if node_id == self.node_id:
+            return await self._dispatch_capability_call(call)
+        # The reachability lookup honors the call's deadline too: probing a
+        # stale or blackholed target must not stall a short-deadline call
+        # beyond what the caller asked for.
+        base_url: str | None = None
+        with anyio.move_on_after(call.timeout_seconds):
+            base_url = await self._peer_api_url_for(node_id)
+        if base_url is None:
+            return call_failure(
+                call.call_id, "unreachable", f"node {node_id} is not reachable"
+            )
+        # The HTTP deadline extends slightly past the provider's own deadline
+        # so a typed timeout from the provider wins over a transport timeout.
+        http_timeout = httpx.Timeout(
+            timeout=call.timeout_seconds + 5.0, connect=2.0
+        )
+        try:
+            async with httpx.AsyncClient(
+                timeout=http_timeout, verify=False
+            ) as client:
+                response = await client.post(
+                    f"{base_url}/v1/capabilities/call",
+                    json=call.model_dump(mode="json"),
+                )
+                response.raise_for_status()
+                return CapabilityResult.model_validate(response.json())
+        except (httpx.HTTPError, ValueError, ValidationError) as exc:
+            return call_failure(
+                call.call_id, "unreachable", f"call to {node_id} failed: {exc}"
+            )
+
     async def _describe_node_capabilities(
         self, node_id: NodeId
     ) -> tuple[CapabilityDescriptor, ...]:
@@ -3022,7 +3341,7 @@ class API:
             async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
                 response = await client.get(f"{base_url}/v1/capabilities")
                 response.raise_for_status()
-                payload_raw: object = response.json()
+                payload_raw = cast("object", response.json())
         except (httpx.HTTPError, ValueError) as exc:
             logger.warning(
                 f"describe_node: peer {node_id} capabilities fetch failed: {exc}"
@@ -4836,6 +5155,25 @@ class API:
                 "source_nodes": list(source_nodes_by_id.values()),
             }
         )
+
+    async def _peer_api_url_for(self, node_id: NodeId) -> str | None:
+        """Resolve one peer's API base URL, stopping at the first hit.
+
+        The capability-call hot path must not wait for every peer probe to
+        finish (a stale peer's failed probe would delay an unrelated call);
+        the reachability generator yields as probes complete, so stop as soon
+        as the target answers.
+        """
+        target = str(node_id)
+        async for ip_address, probed_node_id in check_reachable(
+            self.state.topology,
+            self.node_id,
+            self.state.node_network,
+        ):
+            if str(probed_node_id) == target:
+                host = f"[{ip_address}]" if ":" in ip_address else ip_address
+                return f"http://{host}:52415"
+        return None
 
     async def _reachable_peer_api_urls(self) -> dict[str, str]:
         """Return reachable peer API base URLs keyed by node ID."""

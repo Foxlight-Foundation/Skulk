@@ -26,6 +26,7 @@ from typing import Protocol, final, runtime_checkable
 
 from pydantic import BaseModel
 
+from skulk.extensions.calls import CapabilityCall, CapabilityResult
 from skulk.extensions.capabilities import CapabilityDescriptor
 from skulk.extensions.telemetry import ClusterNodeView
 from skulk.shared.types.common import ModelId, NodeId
@@ -126,6 +127,59 @@ class CapabilityProvider(Protocol):
 
 
 @runtime_checkable
+class CapabilityCallHandler(Protocol):
+    """Optional provider facet: the extension serves unary capability calls.
+
+    A provider implementing ``handle_call`` becomes callable: the node's call
+    surface routes an inbound :class:`~skulk.extensions.calls.CapabilityCall`
+    whose ``capability_id@version`` matches one of the provider's descriptors
+    to this method, AFTER the fabric has validated the payload against the
+    descriptor's ``input_schema`` and BEFORE the result is validated against
+    its ``output_schema``. The handler returns the raw result payload dict.
+
+    Isolation contract (enforced by the dispatch in :mod:`skulk.api.main`):
+    the call runs under the caller's deadline, inside the node's provider
+    concurrency bound, with payload size caps on both directions. A raising
+    handler becomes a typed ``provider_error`` for the caller and never
+    degrades the node. The handler is ``async``; CPU-heavy or blocking work
+    inside it must be moved off the event loop by the extension (for example
+    via a worker thread), or it will stall the API node it runs on.
+    """
+
+    async def handle_call(
+        self, context: "ExtensionContext", call: CapabilityCall
+    ) -> dict[str, object]:
+        """Serve one unary capability call, returning the result payload."""
+        ...
+
+
+class CallCapability(Protocol):
+    """Async callable that invokes a capability on a provider node.
+
+    The caller side of the generic call verb (fabric-citizenship Phase 2b):
+    address a node (discovered via ``read_cluster``/``describe_node``), name
+    the exact ``capability_id@version`` and the descriptor revision you
+    discovered, and pass the payload. Always returns a
+    :class:`~skulk.extensions.calls.CapabilityResult`; every failure mode
+    (unreachable node, drifted descriptor, invalid payload, provider error,
+    timeout) arrives as a typed error on the result, never as an exception.
+    Transport-abstract: the underlying hop may change without affecting
+    callers.
+    """
+
+    async def __call__(
+        self,
+        node_id: NodeId,
+        capability_id: str,
+        version: str,
+        descriptor_revision: str,
+        payload: dict[str, object],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> CapabilityResult: ...
+
+
+@runtime_checkable
 class SupportsExtensionStartup(Protocol):
     """Optional extension facet: a startup hook.
 
@@ -164,6 +218,8 @@ class ExtensionContext:
             stops advertising a tag so callers stop selecting this node for it.
         describe_node: The heavy half of discovery: fetches a node's full
             capability descriptors (schemas, I/O modes, versions) on demand.
+        call_capability: The generic call verb: invokes a capability on a
+            provider node with a typed result (fabric-citizenship Phase 2b).
     """
 
     node_id: NodeId
@@ -173,6 +229,7 @@ class ExtensionContext:
     advertise_capability: AdvertiseCapability
     withdraw_capability: WithdrawCapability
     describe_node: DescribeNode
+    call_capability: CallCapability
 
 
 @final

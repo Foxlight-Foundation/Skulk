@@ -9,9 +9,11 @@ import pytest
 from skulk.extensions import (
     BaseChatMiddleware,
     CapabilityDescriptor,
+    CapabilityResult,
     ChatResponseSummary,
     ExtensionContext,
     LoadedExtensions,
+    call_failure,
     load_extensions,
 )
 from skulk.extensions.loader import ChatStreamChunk
@@ -37,6 +39,19 @@ async def _describe_stub(node_id: NodeId) -> tuple[CapabilityDescriptor, ...]:
     return ()
 
 
+async def _call_stub(
+    node_id: NodeId,
+    capability_id: str,
+    version: str,
+    descriptor_revision: str,
+    payload: dict[str, object],
+    *,
+    timeout_seconds: float | None = None,
+) -> CapabilityResult:
+    """Unreachable call surface for tests."""
+    return call_failure("test-call", "unreachable", "no fabric in tests")
+
+
 def _context() -> ExtensionContext:
     return ExtensionContext(
         node_id=NodeId("test-node"),
@@ -46,6 +61,7 @@ def _context() -> ExtensionContext:
         advertise_capability=lambda capability: None,  # noqa: ARG005
         withdraw_capability=lambda capability: None,  # noqa: ARG005
         describe_node=_describe_stub,
+        call_capability=_call_stub,
     )
 
 
