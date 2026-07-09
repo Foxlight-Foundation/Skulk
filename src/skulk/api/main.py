@@ -3051,6 +3051,15 @@ class API:
         result size cap and output-schema validation (``invalid_result``).
         The master is never involved and nothing here touches ``State``.
         """
+        if call.target_node != str(self.node_id):
+            # A misrouted or misaddressed envelope must not execute here: the
+            # call is node-addressed, and accepting it would make logs and
+            # auditing claim a different target than the one that served it.
+            return call_failure(
+                call.call_id,
+                "invalid_payload",
+                f"call addressed to {call.target_node}, served by {self.node_id}",
+            )
         if self._extensions is None:
             return call_failure(
                 call.call_id, "not_found", "this node loads no extensions"
@@ -3207,28 +3216,49 @@ class API:
         Returns:
             The typed result of the call.
         """
+        call_id = str(uuid4())
         try:
-            json.dumps(payload, allow_nan=False)
+            payload_bytes = len(
+                json.dumps(payload, separators=(",", ":"), allow_nan=False).encode(
+                    "utf-8"
+                )
+            )
         except (TypeError, ValueError) as exc:
             return call_failure(
-                "unsent",
+                call_id,
                 "invalid_payload",
                 f"payload is not JSON-serializable: {exc}",
             )
-        call = CapabilityCall(
-            call_id=str(uuid4()),
-            capability_id=capability_id,
-            version=version,
-            descriptor_revision=descriptor_revision,
-            caller_node=str(self.node_id),
-            target_node=str(node_id),
-            timeout_seconds=(
-                timeout_seconds
-                if timeout_seconds is not None
-                else DEFAULT_CALL_TIMEOUT_SECONDS
-            ),
-            payload=payload,
-        )
+        if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
+            # Enforce the cap before the POST ships an oversized body across
+            # the network just to be rejected on arrival.
+            return call_failure(
+                call_id,
+                "payload_too_large",
+                f"payload is {payload_bytes} bytes "
+                f"(limit {MAX_CALL_PAYLOAD_BYTES})",
+            )
+        try:
+            call = CapabilityCall(
+                call_id=call_id,
+                capability_id=capability_id,
+                version=version,
+                descriptor_revision=descriptor_revision,
+                caller_node=str(self.node_id),
+                target_node=str(node_id),
+                timeout_seconds=(
+                    timeout_seconds
+                    if timeout_seconds is not None
+                    else DEFAULT_CALL_TIMEOUT_SECONDS
+                ),
+                payload=payload,
+            )
+        except ValidationError as exc:
+            # An out-of-range timeout (or any other envelope violation) is a
+            # typed error, never a raise out of call_capability.
+            return call_failure(
+                call_id, "invalid_payload", f"invalid call envelope: {exc}"
+            )
         if node_id == self.node_id:
             return await self._dispatch_capability_call(call)
         peer_urls = await self._reachable_peer_api_urls()

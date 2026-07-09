@@ -318,3 +318,37 @@ async def test_caller_side_rejects_non_serializable_payload_before_any_hop() -> 
     )
     assert not result.ok and result.error is not None
     assert result.error.code == "invalid_payload"
+
+
+async def test_dispatch_rejects_misaddressed_envelope() -> None:
+    # The call is node-addressed: an envelope claiming a different target must
+    # not execute here (honest logs, no misrouted execution).
+    result = await _dispatch(
+        _build_api(_EchoProvider()), _call(target_node="some-other-node")
+    )
+    assert not result.ok and result.error is not None
+    assert result.error.code == "invalid_payload"
+    assert "addressed to" in result.error.message
+
+
+async def test_caller_side_enforces_size_cap_before_posting() -> None:
+    api = _build_api(_EchoProvider())
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    result = await context.call_capability(
+        NodeId("n-peer"), "echo", "1.0.0", _ECHO_REVISION, {"text": "x" * 1_100_000}
+    )
+    assert not result.ok and result.error is not None
+    assert result.error.code == "payload_too_large"
+
+
+async def test_caller_side_out_of_range_timeout_is_typed() -> None:
+    # An envelope violation (timeout beyond the ceiling) is a typed error,
+    # never a ValidationError raised out of call_capability.
+    api = _build_api(_EchoProvider())
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    result = await context.call_capability(
+        NodeId("api-node"), "echo", "1.0.0", _ECHO_REVISION, {"text": "x"},
+        timeout_seconds=9_999.0,
+    )
+    assert not result.ok and result.error is not None
+    assert result.error.code == "invalid_payload"

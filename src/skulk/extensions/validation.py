@@ -41,7 +41,7 @@ def validate_against_schema(
     """
     try:
         validator = Draft202012Validator(schema)
-        error = next(validator.iter_errors(cast("Any", payload)), None)
+        error = next(validator.iter_errors(cast(Any, payload)), None)
     except SchemaError as exc:
         return f"{what} schema is not a valid JSON Schema: {exc.message}"
     except Exception as exc:  # noqa: BLE001 - unresolvable refs etc. must not raise
