@@ -49,11 +49,23 @@ class _UnusedInnerDownloader(ShardDownloader):
 class _RecordingStoreClient:
     def __init__(self) -> None:
         self.availability_checks = 0
+        self.download_requests: list[tuple[str, str | None]] = []
         self.stage_calls = 0
 
     async def is_model_available(self, model_id: str) -> bool:
         assert model_id == _MODEL_ID
         self.availability_checks += 1
+        return True
+
+    async def request_and_wait_for_download(
+        self,
+        model_id: str,
+        *,
+        pinned_gguf: str | None = None,
+        extra_pinned_gguf: list[str] | None = None,
+    ) -> bool:
+        assert not extra_pinned_gguf
+        self.download_requests.append((model_id, pinned_gguf))
         return True
 
     async def stage_shard(
@@ -119,5 +131,6 @@ async def test_different_staged_quant_is_replaced_from_store(tmp_path: Path) -> 
 
     assert path == staged
     assert store.availability_checks == 1
+    assert store.download_requests == [(_MODEL_ID, "model-IQ3_XXS.gguf")]
     assert store.stage_calls == 1
     assert (staged / "model-IQ3_XXS.gguf").is_file()

@@ -1124,13 +1124,12 @@ class ModelStoreDownloader(ShardDownloader):
         same_repo_drafts = _same_repo_draft_files(shard.model_card)
 
         if available:
-            if same_repo_drafts:
-                # A stale base-only store entry (registered before this card
-                # declared a same-repo draft) would stage without the draft and
-                # the served runner's --model-draft path would 404. Ensure the
-                # canonical entry carries the draft before staging; idempotent
-                # (a draft-complete entry returns immediately). The store host
-                # performs any needed HF fetch (workers never download directly).
+            if shard.model_card.gguf_file or same_repo_drafts:
+                # A canonical entry may hold a different GGUF quant or predate a
+                # same-repo draft declaration. Ensure the store has every file
+                # selected by this card before staging; the request is idempotent
+                # when the entry is already complete. Workers never fetch these
+                # files directly from Hugging Face.
                 await self._store_client.request_and_wait_for_download(
                     model_id,
                     pinned_gguf=shard.model_card.gguf_file,
