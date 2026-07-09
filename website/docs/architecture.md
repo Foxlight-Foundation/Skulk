@@ -294,9 +294,11 @@ Speech serving is in a staged rollout. Phase 0 added `TextToSpeech`,
 `POST /v1/audio/speech`: the API validates a mounted TTS model, sends a
 `SpeechSynthesis` command through the master, the worker dispatches it to the
 single-node `mlx_audio` speech runner, and the runner emits `AudioChunk` output
-on the data plane. With `stream=true`, the API returns chunked HTTP MP3 bytes
-as those chunks arrive; without it, the API collects the chunks and returns one
-raw audio response. Non-streaming STT serving is exposed at
+on the data plane. For TTS cards that explicitly declare
+`audio.supports_streaming = true`, `stream=true` returns chunked HTTP MP3 bytes
+as those chunks arrive; non-streaming requests use the default path where the
+API collects the chunks and returns one raw audio response. Non-streaming STT
+serving is exposed at
 `POST /v1/audio/transcriptions`: the API validates a mounted STT model, accepts a
 multipart audio upload, sends base64 `AudioInputChunk` events ahead of an
 `AudioTranscription` command, the worker assembles the upload for the speech

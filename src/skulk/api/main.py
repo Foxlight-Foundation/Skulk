@@ -2724,7 +2724,11 @@ class API:
         return resolved
 
     async def _validate_speech_synthesis_model(
-        self, model_id: ModelId, response_format: AudioResponseFormat | None
+        self,
+        model_id: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
     ) -> tuple[ModelId, AudioResponseFormat]:
         """Validate a mounted TTS model and resolve the output audio format."""
 
@@ -2735,6 +2739,15 @@ class API:
             raise HTTPException(
                 status_code=400,
                 detail=f"Model {resolved} is not a text-to-speech model",
+            )
+        if stream and (
+            model_card.audio is None or model_card.audio.supports_streaming is not True
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Model {resolved} does not declare streaming speech support"
+                ),
             )
         resolved_response_format = (
             response_format
@@ -6286,7 +6299,7 @@ class API:
             else request.response_format
         )
         model_id, response_format = await self._validate_speech_synthesis_model(
-            ModelId(request.model), requested_response_format
+            ModelId(request.model), requested_response_format, stream=request.stream
         )
         if request.stream and response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
             supported = ", ".join(

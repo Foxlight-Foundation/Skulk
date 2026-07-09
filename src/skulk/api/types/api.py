@@ -864,7 +864,8 @@ class AudioSpeechRequest(BaseModel):
         default=False,
         description=(
             "Whether to stream encoded MP3 bytes as they are produced by the "
-            "mounted text-to-speech model."
+            "mounted text-to-speech model. Accepted only when the mounted model "
+            "card declares audio.supports_streaming=true."
         ),
     )
     streaming_interval: float | None = Field(

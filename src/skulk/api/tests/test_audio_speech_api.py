@@ -15,7 +15,14 @@ from skulk.api import main as api_main
 from skulk.api.main import API
 from skulk.api.types import AudioSpeechRequest
 from skulk.shared.election import ElectionMessage
-from skulk.shared.models.model_cards import AudioResponseFormat, ModelId
+from skulk.shared.models.model_cards import (
+    AudioCardConfig,
+    AudioCardKind,
+    AudioResponseFormat,
+    ModelCard,
+    ModelId,
+    ModelTask,
+)
 from skulk.shared.types.audio import SpeechSynthesisTaskParams
 from skulk.shared.types.chunks import AudioChunk, ErrorChunk
 from skulk.shared.types.commands import (
@@ -25,6 +32,7 @@ from skulk.shared.types.commands import (
 )
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import IndexedEvent
+from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import (
     SpeechSynthesis as SpeechSynthesisTask,
@@ -33,7 +41,9 @@ from skulk.shared.types.tasks import (
     TaskId,
     TaskStatus,
 )
-from skulk.shared.types.worker.instances import InstanceId
+from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
+from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
+from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.channels import channel
 
 
@@ -53,6 +63,57 @@ def _build_api() -> API:
         election_receiver=election_receiver,
         enable_event_log=False,
         mount_dashboard=False,
+    )
+
+
+def _tts_card(*, supports_streaming: bool = True) -> ModelCard:
+    """Create a minimal TTS model card for speech API validation tests."""
+
+    return ModelCard(
+        model_id=ModelId("mlx-community/kokoro-test"),
+        storage_size=Memory.from_mb(100),
+        n_layers=1,
+        hidden_size=1024,
+        supports_tensor=False,
+        tasks=[ModelTask.TextToSpeech],
+        family="kokoro",
+        capabilities=["tts"],
+        audio=AudioCardConfig(
+            kind=AudioCardKind.TextToSpeech,
+            default_response_format=AudioResponseFormat.Wav,
+            response_formats=(AudioResponseFormat.Mp3, AudioResponseFormat.Wav),
+            supports_streaming=supports_streaming,
+        ),
+    )
+
+
+def _state_with_running_card(card: ModelCard) -> State:
+    """Build a minimal state containing one mounted speech model instance."""
+
+    runner_id = RunnerId("speech-runner")
+    node_id = NodeId("speech-node")
+    return State(
+        instances={
+            InstanceId("speech-instance"): MlxRingInstance(
+                instance_id=InstanceId("speech-instance"),
+                shard_assignments=ShardAssignments(
+                    model_id=card.model_id,
+                    runner_to_shard={
+                        runner_id: PipelineShardMetadata(
+                            model_card=card,
+                            device_rank=0,
+                            world_size=1,
+                            start_layer=0,
+                            end_layer=1,
+                            n_layers=1,
+                        )
+                    },
+                    node_to_runner={node_id: runner_id},
+                ),
+                hosts_by_node={node_id: []},
+                ephemeral_port=52415,
+            )
+        }
     )
 
 
@@ -120,11 +181,16 @@ async def test_audio_speech_streams_audio_chunks_and_sends_command(
     sent_commands: list[SpeechSynthesis] = []
 
     async def _validate_model(
-        self: API, requested_model: ModelId, response_format: AudioResponseFormat | None
+        self: API,
+        requested_model: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
     ) -> tuple[ModelId, AudioResponseFormat]:
         assert self is api
         assert requested_model == model_id
         assert response_format == AudioResponseFormat.Mp3
+        assert stream is True
         return model_id, AudioResponseFormat.Mp3
 
     async def _send(command: object) -> None:
@@ -188,11 +254,16 @@ async def test_audio_speech_streaming_defaults_to_mp3(
     model_id = ModelId("mlx-community/fish-audio-s2-pro-8bit")
 
     async def _validate_model(
-        self: API, requested_model: ModelId, response_format: AudioResponseFormat | None
+        self: API,
+        requested_model: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
     ) -> tuple[ModelId, AudioResponseFormat]:
         assert self is api
         assert requested_model == model_id
         assert response_format == AudioResponseFormat.Mp3
+        assert stream is True
         return model_id, AudioResponseFormat.Mp3
 
     async def _send(command: object) -> None:
@@ -222,6 +293,28 @@ async def test_audio_speech_streaming_defaults_to_mp3(
 
 
 @pytest.mark.anyio
+async def test_audio_speech_rejects_streaming_when_card_disallows_it() -> None:
+    """A TTS card must explicitly opt in before stream=true is accepted."""
+
+    api = _build_api()
+    card = _tts_card(supports_streaming=False)
+    api.state = _state_with_running_card(card)
+
+    assert await api._validate_speech_synthesis_model(
+        card.model_id, AudioResponseFormat.Mp3
+    ) == (card.model_id, AudioResponseFormat.Mp3)
+    with pytest.raises(HTTPException) as exc_info:
+        await api._validate_speech_synthesis_model(
+            card.model_id,
+            AudioResponseFormat.Mp3,
+            stream=True,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "does not declare streaming speech support" in str(exc_info.value.detail)
+
+
+@pytest.mark.anyio
 async def test_audio_speech_stream_surfaces_initial_runner_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -232,11 +325,16 @@ async def test_audio_speech_stream_surfaces_initial_runner_error(
     sent_commands: list[SpeechSynthesis] = []
 
     async def _validate_model(
-        self: API, requested_model: ModelId, response_format: AudioResponseFormat | None
+        self: API,
+        requested_model: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
     ) -> tuple[ModelId, AudioResponseFormat]:
         assert self is api
         assert requested_model == model_id
         assert response_format == AudioResponseFormat.Mp3
+        assert stream is True
         return model_id, AudioResponseFormat.Mp3
 
     async def _send(command: object) -> None:
@@ -386,11 +484,16 @@ async def test_audio_speech_rejects_non_mp3_streaming_format(
     model_id = ModelId("mlx-community/kokoro-test")
 
     async def _validate_model(
-        self: API, requested_model: ModelId, response_format: AudioResponseFormat | None
+        self: API,
+        requested_model: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
     ) -> tuple[ModelId, AudioResponseFormat]:
         assert self is api
         assert requested_model == model_id
         assert response_format == AudioResponseFormat.Wav
+        assert stream is True
         return model_id, AudioResponseFormat.Wav
 
     async def _fail_if_called(*_args: object, **_kwargs: object) -> Never:
@@ -461,11 +564,16 @@ async def test_audio_speech_collects_audio_chunks_and_sends_command(
     sent_commands: list[SpeechSynthesis] = []
 
     async def _validate_model(
-        self: API, requested_model: ModelId, response_format: AudioResponseFormat | None
+        self: API,
+        requested_model: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
     ) -> tuple[ModelId, AudioResponseFormat]:
         assert self is api
         assert requested_model == model_id
         assert response_format == AudioResponseFormat.Wav
+        assert stream is False
         return model_id, AudioResponseFormat.Wav
 
     async def _send(command: object) -> None:
@@ -562,11 +670,16 @@ async def test_audio_speech_uses_resolved_model_default_response_format(
     sent_commands: list[SpeechSynthesis] = []
 
     async def _validate_model(
-        self: API, requested_model: ModelId, response_format: AudioResponseFormat | None
+        self: API,
+        requested_model: ModelId,
+        response_format: AudioResponseFormat | None,
+        *,
+        stream: bool = False,
     ) -> tuple[ModelId, AudioResponseFormat]:
         assert self is api
         assert requested_model == model_id
         assert response_format is None
+        assert stream is False
         return model_id, AudioResponseFormat.Wav
 
     async def _send(command: object) -> None:

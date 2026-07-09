@@ -139,9 +139,10 @@ The resolver exposes that as `resolved_capabilities` fields:
 These fields are now runtime-facing metadata. They let placement route speech
 cards to the `mlx_audio` runner, let `/v1/models` identify mounted TTS/STT
 models, and let the dashboard expose voice controls without guessing from model
-names. Mounted `supports_speech_synthesis` models serve `/v1/audio/speech`,
-including chunked HTTP MP3 output when clients pass `stream=true`; mounted
-`supports_transcription` models serve non-streaming `/v1/audio/transcriptions`.
+names. Mounted `supports_speech_synthesis` models serve `/v1/audio/speech`.
+When the card also declares `audio.supports_streaming = true`, clients can pass
+`stream=true` for chunked HTTP MP3 output; mounted `supports_transcription`
+models serve non-streaming `/v1/audio/transcriptions`.
 
 ## Fallback Behavior
 
