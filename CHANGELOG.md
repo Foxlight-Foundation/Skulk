@@ -9,6 +9,16 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- **Extensions can read the cluster (`ExtensionContext.read_cluster()`).** A
+  plugin can now take an immutable, per-node snapshot of the telemetry plane:
+  each node's backends, participation role, accelerator vendor, Skulk version,
+  RAM, and liveness. This is how a plugin discovers the fabric it belongs to
+  instead of being blind to everything beyond the request in front of it, and it
+  is the first slice of first-class fabric citizenship expressed as plane access.
+  The call is a pure in-memory snapshot (no network I/O, no mutation), and every
+  field is `None` until that reading has arrived. Advertising a node's own
+  capability onto the plane is a later slice.
+
 - **A gated "Experiments" area for staging in-development features.** A node
   started with `SKULK_ENABLE_EXPERIMENTAL_MODE` set reveals an Experiments
   section in the dashboard Settings; without it, the section is hidden and any

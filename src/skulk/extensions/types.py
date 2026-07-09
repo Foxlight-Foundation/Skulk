@@ -25,6 +25,7 @@ from typing import Protocol, final
 
 from pydantic import BaseModel
 
+from skulk.extensions.telemetry import ClusterNodeView
 from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.text_generation import TextGenerationTaskParams
 
@@ -42,6 +43,20 @@ class EmbedTexts(Protocol):
     ) -> list[list[float]] | None: ...
 
 
+class ReadClusterTelemetry(Protocol):
+    """Synchronous callable returning a snapshot of the telemetry plane.
+
+    Each call returns an immutable, per-node projection of what this node
+    currently sees on the telemetry plane (peers, their backends, participation
+    role, accelerator vendor, version, and liveness). It is a read: an extension
+    can observe the cluster it belongs to but never mutate telemetry. Cheap and
+    side-effect free (an in-memory snapshot, no network I/O), so it is safe to
+    call from an inline hook.
+    """
+
+    def __call__(self) -> tuple[ClusterNodeView, ...]: ...
+
+
 @final
 @dataclass(frozen=True)
 class ExtensionContext:
@@ -52,11 +67,15 @@ class ExtensionContext:
         skulk_version: The installed Skulk version (PEP 440 string).
         embed_texts: Programmatic access to the cluster's embedding serving
             (the in-process equivalent of ``POST /v1/embeddings``).
+        read_cluster: The telemetry-plane read surface: returns an immutable
+            per-node snapshot of the cluster (fabric-citizenship Phase 1). How a
+            plugin discovers its peers and their health.
     """
 
     node_id: NodeId
     skulk_version: str
     embed_texts: EmbedTexts
+    read_cluster: ReadClusterTelemetry
 
 
 @final

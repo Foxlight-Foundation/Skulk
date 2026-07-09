@@ -51,6 +51,27 @@ the cluster's embedding serving (the equivalent of `POST /v1/embeddings`).
 `embed_texts` returns `None` when no embedding instance is available;
 extensions must degrade gracefully on `None`, never raise.
 
+### Reading the cluster (`read_cluster`)
+
+`ExtensionContext.read_cluster()` returns an immutable snapshot of the telemetry
+plane: one `ClusterNodeView` per node the local node currently sees, each with
+`node_id`, `friendly_name`, `backends`, `participation`, `skulk_version`,
+`accelerator_vendor`, `ram_total_bytes`, and `last_telemetry` (its liveness
+signal). This is how an extension discovers the cluster it belongs to instead of
+being blind to everything beyond the request in front of it.
+
+The call is cheap and side-effect free (an in-memory snapshot, no network I/O),
+so it is safe from an inline hook. It is a **read**: an extension can observe the
+cluster but never mutate telemetry. Every field beyond `node_id` may be `None`
+when that reading has not yet arrived (telemetry is last-write-wins and partial),
+so treat missing values as "not known yet".
+
+```python
+for node in context.read_cluster():
+    if node.accelerator_vendor == "amd" and node.last_telemetry is not None:
+        ...  # e.g. prefer an AMD node for a GGUF-friendly task
+```
+
 ## Guarantees
 
 Three invariants shape the design, and Skulk's call sites enforce them:

@@ -161,7 +161,12 @@ from skulk.api.types.openai_responses import (
 )
 from skulk.connectivity.remote_access import RemoteAccessInfo, build_remote_access_info
 from skulk.connectivity.tailscale import TailscaleStatus, query_tailscale_status
-from skulk.extensions import ExtensionContext, LoadedExtensions, resolve_skulk_version
+from skulk.extensions import (
+    ExtensionContext,
+    LoadedExtensions,
+    resolve_skulk_version,
+    snapshot_cluster,
+)
 from skulk.master.image_store import ImageStore
 from skulk.master.placement import PlacementInfoPendingError
 from skulk.master.placement import place_instance as get_instance_placements
@@ -938,6 +943,10 @@ class API:
             node_id=node_id,
             skulk_version=resolve_skulk_version(),
             embed_texts=self.embed_texts,
+            # Telemetry-plane read access (fabric-citizenship Phase 1): snapshot
+            # the live view at call time. `self._telemetry_view` is assigned just
+            # below, so the closure reads it lazily, never at construction.
+            read_cluster=lambda: snapshot_cluster(self._telemetry_view),
         )
         # Data plane (#279 Phase 2): per-token output chunks arrive here direct
         # from the serving worker (DATA topic), not as ChunkGenerated events off

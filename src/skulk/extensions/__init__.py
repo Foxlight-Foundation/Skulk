@@ -13,12 +13,14 @@ from skulk.extensions.loader import (
     load_extensions,
     resolve_skulk_version,
 )
+from skulk.extensions.telemetry import ClusterNodeView, snapshot_cluster
 from skulk.extensions.types import (
     BaseChatMiddleware,
     ChatMiddleware,
     ChatResponseSummary,
     EmbedTexts,
     ExtensionContext,
+    ReadClusterTelemetry,
     SkulkExtension,
 )
 
@@ -27,10 +29,13 @@ __all__ = [
     "BaseChatMiddleware",
     "ChatMiddleware",
     "ChatResponseSummary",
+    "ClusterNodeView",
     "EmbedTexts",
     "ExtensionContext",
     "LoadedExtensions",
+    "ReadClusterTelemetry",
     "SkulkExtension",
     "load_extensions",
     "resolve_skulk_version",
+    "snapshot_cluster",
 ]
