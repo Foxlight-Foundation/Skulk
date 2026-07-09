@@ -1,7 +1,12 @@
 """Tests for TopicRouter wire-format robustness."""
 
+import anyio
+
 from skulk.routing.router import TopicRouter
-from skulk.routing.topics import PublishPolicy, TypedTopic
+from skulk.routing.topics import DATA, PublishPolicy, TypedTopic
+from skulk.shared.models.model_cards import ModelId
+from skulk.shared.types.chunks import DataChunk, TokenChunk
+from skulk.shared.types.common import CommandId, NodeId
 from skulk.utils.channels import channel
 from skulk.utils.pydantic_ext import CamelCaseModel
 
@@ -46,3 +51,51 @@ async def test_publish_bytes_drops_unknown_field_payload_without_raising():
     # After dropping the bad message, the router must remain functional for
     # the next valid message.
     await router_v1.publish_bytes(valid_payload, origin=None)
+
+
+async def test_data_topic_publishes_locally_before_blocked_network_egress() -> None:
+    """DATA chunks must reach local API receivers before network backpressure.
+
+    Same-node serving publishes DATA through the same TopicRouter as cross-node
+    output. If the router awaits outbound DATA egress before local publish, a
+    blocked egress channel can hold every audio/token chunk and make a stream
+    appear as one late burst. The API's DATA consumer already dedupes the later
+    Zenoh self-loopback copy by sequence, so local-first DATA delivery is safe.
+    """
+
+    networking_send, networking_recv = channel[tuple[str, str | None, bytes]](
+        max_buffer_size=1
+    )
+    await networking_send.send(("occupied", None, b"held"))
+
+    router = TopicRouter[DataChunk](DATA, networking_send)
+    local_send, local_recv = channel[DataChunk]()
+    router.senders.add(local_send)
+    input_send = router.new_sender()
+
+    chunk = DataChunk(
+        command_id=CommandId("local-first-data"),
+        sequence=0,
+        owner_node=NodeId("api-node"),
+        chunk=TokenChunk(
+            model=ModelId("mlx-community/test"),
+            text="hello",
+            token_id=1,
+            usage=None,
+        ),
+    )
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(router.run)
+        await input_send.send(chunk)
+
+        with anyio.fail_after(0.5):
+            assert await local_recv.receive() == chunk
+
+        assert await networking_recv.receive() == ("occupied", None, b"held")
+        with anyio.fail_after(0.5):
+            topic, routing_key, payload = await networking_recv.receive()
+        assert topic == DATA.topic
+        assert routing_key == "api-node"
+        assert DATA.deserialize(payload) == chunk
+        task_group.cancel_scope.cancel()

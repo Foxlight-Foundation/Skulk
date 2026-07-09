@@ -73,6 +73,17 @@ class TopicRouter[T: CamelCaseModel]:
         logger.debug(f"Topic Router {self.topic} ready to send")
         with self.receiver as items:
             async for item in items:
+                if (
+                    self.topic.topic == DATA.topic
+                    and self.topic.publish_policy is PublishPolicy.Always
+                ):
+                    # DATA output is latency-sensitive and the local API consumer
+                    # already dedupes Zenoh self-loopback duplicates by sequence.
+                    # Publish locally before any outbound backpressure can hold a
+                    # same-node stream and collapse it into a late burst.
+                    await self.publish(item, origin=None)
+                    await self._send_out(item)
+                    continue
                 # Check if we should send to network
                 if (
                     len(self.senders) == 0
