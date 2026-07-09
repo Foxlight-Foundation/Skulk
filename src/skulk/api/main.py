@@ -3287,30 +3287,27 @@ class API:
                 f"(limit {MAX_CALL_PAYLOAD_BYTES})",
             )
 
-        def build_call(budget_seconds: float) -> CapabilityCall | CapabilityResult:
-            try:
-                return CapabilityCall(
-                    call_id=call_id,
-                    capability_id=capability_id,
-                    version=version,
-                    descriptor_revision=descriptor_revision,
-                    caller_node=str(self.node_id),
-                    target_node=str(node_id),
-                    timeout_seconds=budget_seconds,
-                    payload=payload,
-                )
-            except ValidationError as exc:
-                # An out-of-range timeout (or any other envelope violation) is
-                # a typed error, never a raise out of call_capability.
-                return call_failure(
-                    call_id, "invalid_payload", f"invalid call envelope: {exc}"
-                )
+        # Validate the FULL envelope before any network work: a violation from
+        # an untyped caller (non-string ids and the like) fails fast as a
+        # typed error instead of after a wasted reachability probe.
+        try:
+            call = CapabilityCall(
+                call_id=call_id,
+                capability_id=capability_id,
+                version=version,
+                descriptor_revision=descriptor_revision,
+                caller_node=str(self.node_id),
+                target_node=str(node_id),
+                timeout_seconds=requested_timeout,
+                payload=payload,
+            )
+        except ValidationError as exc:
+            return call_failure(
+                call_id, "invalid_payload", f"invalid call envelope: {exc}"
+            )
 
         if node_id == self.node_id:
-            local_call = build_call(requested_timeout)
-            if isinstance(local_call, CapabilityResult):
-                return local_call
-            return await self._dispatch_capability_call(local_call)
+            return await self._dispatch_capability_call(call)
         # One budget clock spans the WHOLE remote call (#513): target
         # resolution consumes from the same deadline the provider gets, so the
         # caller can never wait materially longer than it asked for (the old
@@ -3340,9 +3337,10 @@ class API:
                 f"target {node_id} resolved, but no budget remains for the "
                 f"call itself",
             )
-        call = build_call(remaining)
-        if isinstance(call, CapabilityResult):
-            return call
+        # Re-stamp the envelope with the remaining budget. model_copy skips
+        # validation, which is safe here: remaining is bounded by the already
+        # validated requested_timeout above and the 0.05s floor just checked.
+        call = call.model_copy(update={"timeout_seconds": remaining})
         # The HTTP deadline extends slightly past the provider's remaining
         # budget so a typed timeout from the provider wins over a transport
         # timeout.

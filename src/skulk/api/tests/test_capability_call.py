@@ -5,8 +5,12 @@ through (the endpoint, the local fast path, and a future queryable transport
 all land here), so the guard matrix is tested against it directly.
 """
 
+from typing import TYPE_CHECKING
+
 import anyio
-import pytest
+
+if TYPE_CHECKING:
+    import pytest
 
 from skulk.api.main import API
 from skulk.extensions import (
