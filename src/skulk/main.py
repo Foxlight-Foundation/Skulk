@@ -563,8 +563,10 @@ class Node:
                 data_plane_zenoh=_zenoh_on,
                 data_plane_egress_provider=router.data_plane_egress_diagnostics,
                 # Installed plugins (skulk.extensions entry points), discovered
-                # once per process; empty when none are installed.
+                # once per process. First-party provider facades are registered
+                # by the API and delegate to the existing core runtimes.
                 extensions=load_extensions(),
+                enable_builtin_providers=True,
             )
         else:
             api = None

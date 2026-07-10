@@ -432,6 +432,17 @@ def test_duplicate_qualified_ids_are_rejected() -> None:
     assert loaded.capability_descriptors == (_ECHO_DESCRIPTOR,)
 
 
+def test_builtin_extensions_take_precedence_over_external_duplicates() -> None:
+    external = LoadedExtensions([_ProviderExtension(name="external")])
+
+    combined = external.with_builtin_extensions(
+        [_ProviderExtension(name="builtin")]
+    )
+
+    assert combined.names == ["builtin", "external"]
+    assert combined.capability_descriptors == (_ECHO_DESCRIPTOR,)
+
+
 def test_raising_capabilities_loads_extension_without_them() -> None:
     loaded = LoadedExtensions([_RaisingProviderExtension()])
     assert loaded.names == ["stub"]

@@ -297,11 +297,19 @@ single-node `mlx_audio` speech runner, and the runner emits `AudioChunk` output
 on the data plane. TTS output streaming is still experimental: only nodes
 running with `SKULK_ENABLE_EXPERIMENTAL_MODE` and cluster config
 `experiments.tts_streaming: true` accept `stream=true`, and only for TTS cards
-that explicitly declare `audio.supports_streaming = true`; bundled cards keep
-that flag off until a real MLX model has passed streaming validation.
+that explicitly declare `audio.supports_streaming = true`. The bundled Qwen3
+TTS card declares MP3 streaming support after live validation; Fish Audio and
+the remaining bundled speech cards stay batch-only.
 Non-streaming requests use the default path where the API collects the chunks
-and returns one raw audio response. Non-streaming STT
-serving is exposed at
+and returns one raw audio response. Production API nodes also expose the
+first-party `tts@1.0.0` provider facade over this same core path. Generic calls
+open through the provider contract, become the existing `SpeechSynthesis`
+command, and return `AudioChunk` output as raw MP3 `InlineMediaAttachment`
+frames over `PROVIDER_DATA`. The descriptor remains available for contract
+discovery, while its telemetry tag is advertised only when the experiment
+gates and an eligible mounted model are present; dynamic admission rechecks the
+specific model before `started`, and cancellation reaches the core command.
+Non-streaming STT serving is exposed at
 `POST /v1/audio/transcriptions`: the API validates a mounted STT model, accepts a
 multipart audio upload, sends base64 `AudioInputChunk` events ahead of an
 `AudioTranscription` command, the worker assembles the upload for the speech
@@ -516,7 +524,9 @@ The contract is deliberately small (`src/skulk/extensions/`):
   bound), with every failure a typed machine-readable error. Server-streaming
   providers implement `handle_stream`; callers use
   `stream_capability(node, id, version, revision, payload)`. A control-sized
-  peer-API request performs opening admission, then `PROVIDER_DATA` carries the
+  peer-API request performs opening admission; an optional dynamic-admission
+  hook can reject changing backend/model conditions before `started`. Then
+  `PROVIDER_DATA` carries the
   output directly to the caller node (master and State remain outside the hot
   path). Skulk owns `started`, validates handler sequence and chunk schemas,
   requires one terminal, preserves raw inline media outside JSON, expires gaps,
@@ -524,6 +534,11 @@ The contract is deliberately small (`src/skulk/extensions/`):
   executable mode is unary-input/server-streaming-output for TTS-shaped calls;
   client-streaming/bidirectional STT remains discoverable but not executable
   until input-frame and half-close support lands.
+- Production API nodes prepend first-party providers to the guarded extension
+  registry. The first is `tts@1.0.0`, a facade over mounted core `mlx_audio`
+  serving rather than a duplicate runtime. First-party contracts take
+  deterministic precedence over external extensions claiming the same
+  `id@version`.
 
 Three invariants shape the design. First, **a raising extension never breaks
 inference**: every extension call is guarded, an exception is logged loudly

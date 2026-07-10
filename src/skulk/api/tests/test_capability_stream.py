@@ -12,6 +12,8 @@ from skulk.api.main import (
 from skulk.extensions import (
     CapabilityCall,
     CapabilityDescriptor,
+    CapabilityError,
+    CapabilityResult,
     CapabilityStreamFrame,
     ExtensionContext,
     InlineMediaAttachment,
@@ -109,6 +111,35 @@ class _InvalidChunkProvider(_TtsProvider):
             kind="chunk",
             payload={"format": "not-pcm"},
         )
+
+
+class _RejectingTtsProvider(_TtsProvider):
+    def __init__(self) -> None:
+        self.handler_called = False
+
+    async def admit_stream(
+        self,
+        context: ExtensionContext,
+        call: CapabilityCall,
+    ) -> CapabilityError | None:
+        return CapabilityError(
+            code="not_found",
+            message="no eligible model is mounted",
+        )
+
+    async def handle_stream(
+        self,
+        context: ExtensionContext,
+        call: CapabilityCall,
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        self.handler_called = True
+        if False:
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="completed",
+            )
 
 
 class _CancellableProvider(_TtsProvider):
@@ -359,6 +390,32 @@ async def test_invalid_provider_chunk_becomes_typed_failed_terminal() -> None:
     assert [frame.kind for frame in frames] == ["started", "failed"]
     assert frames[-1].error is not None
     assert frames[-1].error.code == "invalid_frame"
+
+
+async def test_dynamic_admission_rejection_emits_no_started_frame() -> None:
+    provider = _RejectingTtsProvider()
+    api = _build_api(provider)
+    call = CapabilityCall(
+        call_id="rejected-before-start",
+        capability_id="tts",
+        version="1.0.0",
+        descriptor_revision=_TTS_REVISION,
+        caller_node="api-node",
+        target_node="api-node",
+        timeout_seconds=2.0,
+        payload={"text": "hello"},
+    )
+
+    result: CapabilityResult | None = None
+    async with api._tg:  # pyright: ignore[reportPrivateUsage]
+        result = await api.serve_capability_stream(call)
+
+    assert result is not None
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code == "not_found"
+    assert provider.handler_called is False
+    assert api._active_capability_streams == {}  # pyright: ignore[reportPrivateUsage]
 
 
 def test_bidirectional_descriptor_remains_discoverable_but_not_executable() -> None:

@@ -26,7 +26,7 @@ from typing import Protocol, final, runtime_checkable
 
 from pydantic import BaseModel
 
-from skulk.extensions.calls import CapabilityCall, CapabilityResult
+from skulk.extensions.calls import CapabilityCall, CapabilityError, CapabilityResult
 from skulk.extensions.capabilities import CapabilityDescriptor
 from skulk.extensions.streams import CapabilityStreamFrame, CapabilityStreamSession
 from skulk.extensions.telemetry import ClusterNodeView
@@ -170,6 +170,26 @@ class CapabilityStreamHandler(Protocol):
         and finishes with exactly one ``completed``, ``failed``, or
         ``cancelled`` frame. Skulk validates identity, sequence, chunk schema,
         and terminal ownership before publishing any handler frame.
+        """
+
+        ...
+
+
+@runtime_checkable
+class CapabilityStreamAdmissionHandler(Protocol):
+    """Optional dynamic validation before a provider stream is admitted."""
+
+    async def admit_stream(
+        self,
+        context: "ExtensionContext",
+        call: CapabilityCall,
+    ) -> CapabilityError | None:
+        """Return a typed opening error, or ``None`` to emit ``started``.
+
+        The fabric already validates the static descriptor schema. This hook
+        covers dynamic requirements such as a mounted model or a healthy
+        external service. It runs inside the stream's concurrency and deadline
+        budget, before Skulk creates the active stream lifecycle.
         """
 
         ...

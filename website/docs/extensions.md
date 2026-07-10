@@ -301,6 +301,44 @@ and streaming, exactly one terminal, bounded reorder/gap handling, and explicit
 cancellation when the caller closes the iterator early. A raising or malformed
 handler fails only its own stream with a typed terminal.
 
+A streaming provider whose availability depends on live state can additionally
+implement `admit_stream(context, call)`. This dynamic admission hook runs after
+the descriptor schema check and inside the same concurrency/deadline budget,
+but before Skulk emits `started`. Return a typed `CapabilityError` to reject the
+opening request without creating a stream. Static requirements still belong in
+the descriptor schema; use admission only for conditions such as mounted-model
+availability or backend health.
+
+### Built-in mounted-model TTS provider
+
+Production Skulk nodes register a first-party `tts@1.0.0` provider facade. It
+does not load or run a second speech engine. Core Skulk remains authoritative
+for model cards, store staging, mounting, placement, runner lifecycle, and
+inference; the facade translates a generic provider call into the existing
+`SpeechSynthesisTaskParams` / `AudioChunk` path.
+
+The server-streaming input payload requires `model` and `text`. It optionally
+accepts `voice`, `streaming_interval`, `speed`, `instruct`, `lang_code`, and the
+speech sampling fields. Version 1 emits MP3 only. Each output `chunk` carries
+`model`, `format`, `chunk_index`, `is_partial`, and an optional `sample_rate` in
+the schema-validated payload, while the encoded MP3 bytes travel as a raw
+`InlineMediaAttachment` rather than base64 JSON.
+
+The descriptor is available through `GET /v1/capabilities`, but its telemetry
+tag is advertised only when all three runtime requirements are true:
+
+- `SKULK_ENABLE_EXPERIMENTAL_MODE` is enabled;
+- `experiments.tts_streaming: true` is configured; and
+- at least one mounted TTS card declares `audio.supports_streaming = true` and
+  MP3 output.
+
+The same requirements are rechecked during dynamic admission for the requested
+model. A failure returns a typed opening error before `started`; caller close,
+timeout, or transport failure cancels the underlying core synthesis command.
+An external extension cannot replace the reserved built-in `tts@1.0.0`
+contract; first-party providers take deterministic precedence when extension
+registries are combined.
+
 `client_streaming` and `bidirectional` descriptors remain discoverable but are
 not executable yet. Realtime STT follows with ordered input media frames and an
 explicit caller half-close; a provider must not advertise progressive output
@@ -320,8 +358,10 @@ Three invariants shape the design, and Skulk's call sites enforce them:
 2. **Extensions never own the response stream.** Skulk accumulates the
    response and hands observers a summary, so a buggy extension cannot
    corrupt, reorder, or stall token delivery.
-3. **No extension installed means Skulk unchanged.** All hooks are inert
-   when nothing is loaded.
+3. **No external extension installed means no external behavior.** External
+   hooks are inert when none are loaded. First-party provider facades are
+   registered explicitly by the production API and delegate to existing core
+   services rather than introducing an independently installed plugin runtime.
 
 ## A complete example
 
