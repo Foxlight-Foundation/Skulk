@@ -208,6 +208,55 @@ def _staged_vision_projector_missing(
     )
 
 
+def _staged_pinned_gguf_missing(shard: ShardMetadata, directory: Path) -> bool:
+    """Return whether a staged directory lacks the card-selected GGUF group.
+
+    The generic completeness probe accepts any complete GGUF quant in the
+    directory. A card can later select another quant from the same repository,
+    so staged-cache reuse must verify that exact file and, for split weights,
+    every sibling shard required by the backend entrypoint.
+
+    Args:
+        shard: Shard whose model card may pin a GGUF file.
+        directory: Canonical store or node-local staging directory to inspect.
+
+    Returns:
+        ``True`` when a selected GGUF path is unsafe, absent, or incomplete.
+    """
+    pinned = shard.model_card.gguf_file
+    if not pinned:
+        return False
+
+    relative_path = Path(pinned)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        return True
+    selected_path = directory.joinpath(*relative_path.parts)
+    if not selected_path.is_file():
+        return True
+
+    stem_parts = selected_path.stem.rsplit("-", 3)
+    if not (
+        len(stem_parts) == 4
+        and stem_parts[1].isdigit()
+        and stem_parts[2] == "of"
+        and stem_parts[3].isdigit()
+    ):
+        return False
+
+    base, index_token, _, total_token = stem_parts
+    total_shards = int(total_token)
+    return any(
+        not (
+            selected_path.parent
+            / (
+                f"{base}-{index:0{len(index_token)}d}-of-"
+                f"{total_token}.gguf"
+            )
+        ).is_file()
+        for index in range(1, total_shards + 1)
+    )
+
+
 def _same_repo_draft_files(card: "ModelCard") -> list[str]:
     """Repo-relative GGUFs that ride the base repo's store entry but aren't the base.
 
@@ -477,22 +526,29 @@ class ModelStoreClient:
             logger.debug(f"ModelStoreClient: list_active_downloads failed: {exc}")
             return []
 
-    async def request_store_download(self, model_id: str) -> dict[str, object]:
-        """Request the store host start downloading a model. Non-blocking."""
+    async def request_store_download(
+        self,
+        model_id: str,
+        gguf_file: str | None = None,
+    ) -> dict[str, object]:
+        """Request a non-blocking store download, optionally pinning a GGUF."""
         url = _make_store_url(
             self._store_host,
             self._store_port,
             f"/models/{quote(model_id, safe='')}/download",
         )
         try:
-            async with (
-                create_http_session(timeout_profile="short") as session,
-                session.post(url) as resp,
-            ):
-                if resp.status not in (200, 201):
-                    return {"status": "error", "error": f"HTTP {resp.status}"}
-                data: object = await resp.json()
-                return data if isinstance(data, dict) else {"status": "unknown"}
+            async with create_http_session(timeout_profile="short") as session:
+                request = (
+                    session.post(url, json={"gguf_file": gguf_file})
+                    if gguf_file is not None
+                    else session.post(url)
+                )
+                async with request as resp:
+                    if resp.status not in (200, 201):
+                        return {"status": "error", "error": f"HTTP {resp.status}"}
+                    data: object = await resp.json()
+                    return data if isinstance(data, dict) else {"status": "unknown"}
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 
@@ -1032,6 +1088,7 @@ class ModelStoreDownloader(ShardDownloader):
                 if (
                     direct_path.exists()
                     and _staged_directory_looks_complete(direct_path)
+                    and not _staged_pinned_gguf_missing(shard, direct_path)
                     and not _staged_vision_projector_missing(shard, direct_path)
                     and not _staged_same_repo_draft_missing(shard, direct_path)
                 ):
@@ -1053,6 +1110,7 @@ class ModelStoreDownloader(ShardDownloader):
         if (
             dest_path.exists()
             and _staged_directory_looks_complete(dest_path)
+            and not _staged_pinned_gguf_missing(shard, dest_path)
             and not _staged_vision_projector_missing(shard, dest_path)
             and not _staged_same_repo_draft_missing(shard, dest_path)
         ):
@@ -1066,13 +1124,12 @@ class ModelStoreDownloader(ShardDownloader):
         same_repo_drafts = _same_repo_draft_files(shard.model_card)
 
         if available:
-            if same_repo_drafts:
-                # A stale base-only store entry (registered before this card
-                # declared a same-repo draft) would stage without the draft and
-                # the served runner's --model-draft path would 404. Ensure the
-                # canonical entry carries the draft before staging; idempotent
-                # (a draft-complete entry returns immediately). The store host
-                # performs any needed HF fetch (workers never download directly).
+            if shard.model_card.gguf_file or same_repo_drafts:
+                # A canonical entry may hold a different GGUF quant or predate a
+                # same-repo draft declaration. Ensure the store has every file
+                # selected by this card before staging; the request is idempotent
+                # when the entry is already complete. Workers never fetch these
+                # files directly from Hugging Face.
                 await self._store_client.request_and_wait_for_download(
                     model_id,
                     pinned_gguf=shard.model_card.gguf_file,

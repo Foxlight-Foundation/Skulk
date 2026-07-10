@@ -52,6 +52,9 @@ const ModelName = styled.div`
 const Author = styled.div`
   font-size: ${({ theme }) => theme.fontSizes.label};
   color: ${({ theme }) => theme.colors.textMuted};
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 `;
 
 const StatBadge = styled.span`
@@ -91,7 +94,6 @@ export function HuggingFaceResultItem({
 }: HuggingFaceResultItemProps) {
   const { t } = useSkulkTranslation();
   const theme = useTheme() as Theme;
-  const CheckIcon = () => <FiCheck size={16} color={theme.colors.accent} strokeWidth={2.5} />;
   const shortName = model.id.startsWith('mlx-community/')
     ? model.id.replace('mlx-community/', '')
     : model.id;
@@ -126,6 +128,12 @@ export function HuggingFaceResultItem({
         <span>{formatCount(model.likes)}</span>
         <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.updated', 'Updated')}</span>
         <span>{new Date(model.last_modified).toLocaleDateString()}</span>
+        {model.matched_file && (
+          <>
+            <span style={{ color: theme.colors.textMuted }}>{t('huggingFaceResult.matchedFile', 'Matched file')}</span>
+            <span style={{ overflowWrap: 'anywhere' }}>{model.matched_file}</span>
+          </>
+        )}
       </div>
       {sizeTags.length > 0 && (
         <div style={{ marginTop: 8, borderTop: `1px solid ${theme.colors.borderLight}`, paddingTop: 6 }}>
@@ -146,7 +154,9 @@ export function HuggingFaceResultItem({
     <Row>
       <Info>
         <ModelName>{shortName}</ModelName>
-        <Author>{model.author}</Author>
+        <Author title={model.matched_file ?? model.author}>
+          {model.matched_file ?? model.author}
+        </Author>
       </Info>
 
       {/* Info tooltip */}
@@ -158,7 +168,7 @@ export function HuggingFaceResultItem({
 
       {/* Action */}
       {isInStore ? (
-        <AddedBadge><CheckIcon /> {t('huggingFaceResult.inStore', 'In Store')}</AddedBadge>
+        <AddedBadge><FiCheck size={16} color={theme.colors.accent} strokeWidth={2.5} /> {t('huggingFaceResult.inStore', 'In Store')}</AddedBadge>
       ) : isAdded ? (
         <SelectBtn variant="primary" size="sm" onClick={onSelect}>
           <StoreDownloadIcon /> {t('huggingFaceResult.download', 'Download')}

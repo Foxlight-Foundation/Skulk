@@ -13,6 +13,7 @@ from skulk.shared.models.model_cards import (
     ModelId,
     _gguf_shard_base,
     gguf_weight_siblings,
+    select_requested_gguf,
 )
 
 # --- GGUF binary header builders (for #327 header-parse tests) --------------
@@ -137,6 +138,59 @@ async def test_fetch_gguf_card_stamps_llama_cpp_backends(
     assert card.supports_tensor is False  # single-node engine
     assert card.n_layers == 32 and card.hidden_size == 4096
     assert card.storage_size.in_bytes == 100  # the single selected gguf
+
+
+async def test_fetch_gguf_card_honors_requested_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested = "model-IQ3_XXS.gguf"
+    monkeypatch.setattr(
+        model_cards,
+        "model_info",
+        _fake_model_info(["model-Q4_K_M.gguf", requested]),
+    )
+
+    async def _fake_config(_model_id: object) -> object:
+        return SimpleNamespace(
+            layer_count=32,
+            hidden_size=4096,
+            num_key_value_heads=8,
+            max_position_embeddings=8192,
+        )
+
+    monkeypatch.setattr(model_cards, "fetch_config_data", _fake_config)
+
+    card = await ModelCard.fetch_from_hf(
+        ModelId("some/multi-quant-repo"),
+        gguf_file=requested,
+    )
+
+    assert card.gguf_file == requested
+    assert card.quantization == "IQ3"
+
+
+def test_requested_gguf_must_exist_in_repository() -> None:
+    with pytest.raises(ValueError, match="was not found"):
+        select_requested_gguf(
+            "model-IQ3_XXS.gguf",
+            [("model-Q4_K_M.gguf", 100)],
+        )
+
+
+def test_requested_sharded_gguf_uses_first_shard_as_entrypoint() -> None:
+    files = [
+        ("weights/model-IQ3_XXS-00001-of-00002.gguf", 100),
+        ("weights/model-IQ3_XXS-00002-of-00002.gguf", 120),
+        ("weights/model-Q4_K_M.gguf", 200),
+    ]
+
+    assert (
+        select_requested_gguf(
+            "weights/model-IQ3_XXS-00002-of-00002.gguf",
+            files,
+        )
+        == "weights/model-IQ3_XXS-00001-of-00002.gguf"
+    )
 
 
 async def test_fetch_gguf_card_reads_header_when_no_config(

@@ -540,6 +540,10 @@ class ModelStore:
         # holding the download lock across network I/O would serialize unrelated
         # requests.
         missing_projector = await self.vision_entry_missing_projector(model_id)
+        missing_pinned_gguf = self.entry_missing_files(
+            model_id,
+            [pinned_gguf] if pinned_gguf is not None else [],
+        )
         missing_companion = self.entry_missing_files(model_id, extra_pinned_gguf or [])
         async with self._download_lock:
             existing = self._active_downloads.get(model_id)
@@ -562,6 +566,7 @@ class ModelStore:
                 # concurrent requests.
                 stale_complete = existing.status == "complete" and (
                     missing_projector
+                    or missing_pinned_gguf
                     or missing_companion
                     or not self.is_in_store(model_id)
                 )
@@ -572,6 +577,7 @@ class ModelStore:
             if (
                 self.is_in_store(model_id)
                 and not missing_projector
+                and not missing_pinned_gguf
                 and not missing_companion
             ):
                 return StoreDownloadStatus(
@@ -582,6 +588,12 @@ class ModelStore:
                     f"ModelStore: {model_id} is in the store but its entry is "
                     "missing the mmproj projector for a vision GGUF; "
                     "re-downloading to recover it (existing weights are reused)."
+                )
+            if missing_pinned_gguf:
+                logger.warning(
+                    f"ModelStore: {model_id} is in the store but its entry is "
+                    f"missing requested GGUF {pinned_gguf!r}; re-downloading to "
+                    "recover it (existing weights are reused)."
                 )
             if missing_companion:
                 logger.warning(

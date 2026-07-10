@@ -137,6 +137,8 @@ export interface HuggingFaceModel {
   likes: number;
   last_modified: string;
   tags: string[];
+  /** Exact repo-relative GGUF path matched by a filename search. */
+  matched_file?: string | null;
 }
 
 /** Progress snapshot for a download shown in the dashboard. */
