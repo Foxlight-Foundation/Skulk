@@ -228,6 +228,88 @@ def test_blocked_command_does_not_stall_another_command_for_same_owner() -> None
     anyio.run(_run)
 
 
+def test_matching_ids_on_data_topics_use_distinct_egress_queues() -> None:
+    """DATA and PROVIDER_DATA ids cannot terminate each other's queues."""
+
+    import anyio
+
+    from skulk.extensions import CapabilityStreamFrame
+    from skulk.routing.provider_streams import ProviderStreamPacket
+    from skulk.shared.types.chunks import DataChunk
+    from skulk.shared.types.common import CommandId, NodeId
+
+    class _BlockingDataZenoh:
+        def __init__(self) -> None:
+            self.data_started = anyio.Event()
+            self.release_data = anyio.Event()
+            self.provider_published = anyio.Event()
+
+        async def zenoh_publish(self, key: str, _data: bytes) -> None:
+            if key.startswith("data/"):
+                self.data_started.set()
+                await self.release_data.wait()
+            elif key.startswith("provider_data/"):
+                self.provider_published.set()
+
+    async def _run() -> None:
+        owner = NodeId("shared-owner")
+        shared_id = "same-stream-id"
+        data_frame = DataChunk(
+            command_id=CommandId(shared_id),
+            kind="completed",
+            sequence=0,
+            owner_node=owner,
+        )
+        provider_frame = ProviderStreamPacket(
+            owner_node=owner,
+            frame=CapabilityStreamFrame(
+                call_id=shared_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="completed",
+            ),
+        )
+        zenoh = _BlockingDataZenoh()
+        router = Router(
+            handle=cast(NetworkingHandle, object()),
+            zenoh=cast(ZenohHandle, cast(object, zenoh)),
+            node_id="self-node",
+        )
+        assert router._zenoh_out_send is not None  # pyright: ignore[reportPrivateUsage]
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                router._zenoh_networking_publish  # pyright: ignore[reportPrivateUsage]
+            )
+            await router._zenoh_out_send.send(  # pyright: ignore[reportPrivateUsage]
+                OutboundPacket(
+                    topic=DATA.topic,
+                    routing_key=str(owner),
+                    stream_key=shared_id,
+                    is_terminal=True,
+                    data=DATA.serialize(data_frame),
+                )
+            )
+            with anyio.fail_after(0.5):
+                await zenoh.data_started.wait()
+
+            await router._zenoh_out_send.send(  # pyright: ignore[reportPrivateUsage]
+                OutboundPacket(
+                    topic=PROVIDER_DATA.topic,
+                    routing_key=str(owner),
+                    stream_key=shared_id,
+                    is_terminal=True,
+                    data=PROVIDER_DATA.serialize(provider_frame),
+                )
+            )
+            with anyio.fail_after(0.5):
+                await zenoh.provider_published.wait()
+            zenoh.release_data.set()
+            task_group.cancel_scope.cancel()
+
+    anyio.run(_run)
+
+
 def test_stream_admission_limit_sends_terminal_rejection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

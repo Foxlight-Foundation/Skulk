@@ -536,10 +536,10 @@ class Router:
         failure is logged and dropped rather than allowed to tear the loop down.
         """
         assert self._zenoh is not None and self._zenoh_out_recv is not None
-        stream_senders: dict[tuple[str, str], Sender[OutboundPacket]] = {}
+        stream_senders: dict[tuple[str, str, str], Sender[OutboundPacket]] = {}
         owner_stream_counts: dict[str, int] = {}
-        rejected_streams: set[tuple[str, str]] = set()
-        rejected_stream_order: deque[tuple[str, str]] = deque()
+        rejected_streams: set[tuple[str, str, str]] = set()
+        rejected_stream_order: deque[tuple[str, str, str]] = deque()
         rejection_slots = Semaphore(_ZENOH_DATA_MAX_REJECTION_TASKS)
         async with TaskGroup() as task_group:
             with self._zenoh_out_recv as items:
@@ -563,7 +563,11 @@ class Router:
                         )
                         self._data_plane_egress_observer.record_dropped(owner)
                         continue
-                    stream = (owner, packet.stream_key)
+                    # DATA and PROVIDER_DATA share this bounded dispatcher, but
+                    # their independently generated ids occupy separate
+                    # protocol namespaces. Topic identity must therefore be
+                    # part of every queue and rejection key.
+                    stream = (packet.topic, owner, packet.stream_key)
                     if stream in rejected_streams:
                         self._data_plane_egress_observer.record_dropped(owner)
                         if packet.is_terminal:
@@ -736,15 +740,15 @@ class Router:
 
     async def _publish_zenoh_data_stream(
         self,
-        stream: tuple[str, str],
+        stream: tuple[str, str, str],
         receiver: Receiver[OutboundPacket],
-        stream_senders: dict[tuple[str, str], Sender[OutboundPacket]],
+        stream_senders: dict[tuple[str, str, str], Sender[OutboundPacket]],
         owner_stream_counts: dict[str, int],
     ) -> None:
         """Publish one command independently so blocked owners cannot stall peers."""
 
         assert self._zenoh is not None
-        owner, _command_id = stream
+        _topic, owner, _stream_id = stream
         try:
             with receiver as packets:
                 async for packet in packets:
