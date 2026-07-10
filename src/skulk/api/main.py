@@ -3530,6 +3530,15 @@ class API:
                     return call_failure(
                         call.call_id, "invalid_payload", schema_error
                     )
+
+                # Reserve before admission can yield so concurrent opens cannot
+                # race past the stream bound. Rejections release this provisional
+                # entry; successful dispatch hands ownership to the runner.
+                active = _ActiveProviderStream(
+                    caller_node=call.caller_node,
+                    cancel_requested=anyio.Event(),
+                )
+                self._active_capability_streams[call.call_id] = active
                 if isinstance(handler, CapabilityStreamAdmissionHandler):
                     try:
                         admission_error = await handler.admit_stream(
@@ -3540,12 +3549,14 @@ class API:
                         logger.opt(exception=exc).warning(
                             f"capability stream admission for {qualified_id} raised"
                         )
+                        self._active_capability_streams.pop(call.call_id, None)
                         return call_failure(
                             call.call_id,
                             "provider_error",
                             f"stream admission raised {type(exc).__name__}: {exc}",
                         )
                     if admission_error is not None:
+                        self._active_capability_streams.pop(call.call_id, None)
                         if not isinstance(admission_error, CapabilityError):  # pyright: ignore[reportUnnecessaryIsInstance]
                             return call_failure(
                                 call.call_id,
@@ -3557,7 +3568,11 @@ class API:
                             ok=False,
                             error=admission_error,
                         )
+        except anyio.get_cancelled_exc_class():
+            self._active_capability_streams.pop(call.call_id, None)
+            raise
         except TimeoutError:
+            self._active_capability_streams.pop(call.call_id, None)
             return call_failure(
                 call.call_id,
                 "timeout",
@@ -3566,17 +3581,13 @@ class API:
 
         remaining = call.timeout_seconds - (anyio.current_time() - started_at)
         if remaining <= 0:
+            self._active_capability_streams.pop(call.call_id, None)
             return call_failure(
                 call.call_id,
                 "timeout",
                 "provider stream deadline expired during admission",
             )
         admitted_call = call.model_copy(update={"timeout_seconds": remaining})
-        active = _ActiveProviderStream(
-            caller_node=call.caller_node,
-            cancel_requested=anyio.Event(),
-        )
-        self._active_capability_streams[call.call_id] = active
         try:
             self._tg.start_soon(
                 self._run_capability_stream,

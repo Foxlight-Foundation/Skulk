@@ -142,6 +142,21 @@ class _RejectingTtsProvider(_TtsProvider):
             )
 
 
+class _BlockingAdmissionTtsProvider(_TtsProvider):
+    def __init__(self) -> None:
+        self.admission_started = anyio.Event()
+        self.release_admission = anyio.Event()
+
+    async def admit_stream(
+        self,
+        context: ExtensionContext,
+        call: CapabilityCall,
+    ) -> CapabilityError | None:
+        self.admission_started.set()
+        await self.release_admission.wait()
+        return None
+
+
 class _CancellableProvider(_TtsProvider):
     def __init__(self) -> None:
         self.cancelled = anyio.Event()
@@ -416,6 +431,47 @@ async def test_dynamic_admission_rejection_emits_no_started_frame() -> None:
     assert result.error.code == "not_found"
     assert provider.handler_called is False
     assert api._active_capability_streams == {}  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_dynamic_admission_reserves_concurrency_slot_before_await(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("skulk.api.main._MAX_CONCURRENT_CAPABILITY_STREAMS", 1)
+    provider = _BlockingAdmissionTtsProvider()
+    api = _build_api(provider)
+
+    def call(call_id: str) -> CapabilityCall:
+        return CapabilityCall(
+            call_id=call_id,
+            capability_id="tts",
+            version="1.0.0",
+            descriptor_revision=_TTS_REVISION,
+            caller_node="api-node",
+            target_node="api-node",
+            timeout_seconds=2.0,
+            payload={"text": "hello"},
+        )
+
+    first_results: list[CapabilityResult] = []
+
+    async def open_first() -> None:
+        first_results.append(await api.serve_capability_stream(call("first")))
+
+    async with api._tg as task_group:  # pyright: ignore[reportPrivateUsage]
+        task_group.start_soon(open_first)
+        await provider.admission_started.wait()
+
+        second_result = await api.serve_capability_stream(call("second"))
+        assert second_result.ok is False
+        assert second_result.error is not None
+        assert second_result.error.code == "overloaded"
+        assert list(api._active_capability_streams) == ["first"]  # pyright: ignore[reportPrivateUsage]
+
+        provider.release_admission.set()
+        while not first_results:
+            await anyio.sleep(0)
+        assert first_results[0].ok is True
+        task_group.cancel_scope.cancel()
 
 
 def test_bidirectional_descriptor_remains_discoverable_but_not_executable() -> None:
