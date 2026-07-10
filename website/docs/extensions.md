@@ -15,9 +15,10 @@ entry point in the `skulk.extensions` group, version-checks it, and loads it.
 No configuration file, no registration API call: install the package and
 restart the node.
 
-This is a Python-side contract, not an HTTP API. Nothing here appears in the
-[HTTP API reference](api-guide.md); the public types live in
-`skulk.extensions` and are documented below.
+This is primarily a Python-side contract. Provider discovery and node-to-node
+call admission also have control-sized endpoints in the
+[HTTP API reference](api-guide.md), but extension authors normally use the
+typed surfaces exported from `skulk.extensions` and documented below.
 
 ## The contract
 
@@ -223,9 +224,87 @@ The call contract:
   the hot path and calls are never event-sourced. Calling your own node is an
   in-process fast path with identical guards.
 
-Streaming capabilities (the `server_streaming` and richer I/O modes) are the
-next slice; a descriptor can declare them today but only unary calls are
-servable.
+## Streaming a capability (`stream_capability` / `handle_stream`)
+
+The first executable streaming mode is `server_streaming`: one validated call
+payload followed by provider output. This is the shape needed by TTS. A
+provider implements `handle_stream` and begins at sequence one because Skulk
+owns the admission lifecycle and emits `started` at sequence zero:
+
+```python
+from collections.abc import AsyncIterator
+
+from skulk.extensions import (
+    CapabilityCall,
+    CapabilityStreamFrame,
+    ExtensionContext,
+    InlineMediaAttachment,
+)
+
+
+async def handle_stream(
+    self,
+    context: ExtensionContext,
+    call: CapabilityCall,
+) -> AsyncIterator[CapabilityStreamFrame]:
+    yield CapabilityStreamFrame(
+        call_id=call.call_id,
+        direction="provider_to_caller",
+        sequence=1,
+        kind="chunk",
+        payload={"format": "pcm_s16le"},
+        media=InlineMediaAttachment(
+            data=audio_frame,
+            media_type="audio/pcm",
+            codec="pcm_s16le",
+            sample_rate=24000,
+            channels=1,
+        ),
+    )
+    yield CapabilityStreamFrame(
+        call_id=call.call_id,
+        direction="provider_to_caller",
+        sequence=2,
+        kind="completed",
+    )
+```
+
+The caller opens the stream through its context and checks the typed admission
+result before consuming frames:
+
+```python
+session = await context.stream_capability(
+    node.node_id,
+    tts.id,
+    tts.version,
+    descriptor_revision(tts),
+    {"text": "Speak this sentence."},
+)
+if not session.open_result.ok:
+    print(session.open_result.error.code)
+else:
+    async for frame in session.frames:
+        if isinstance(frame.media, InlineMediaAttachment):
+            play(frame.media.data)
+```
+
+The opening request is control-sized and direct to the provider node. Output
+does not stream over HTTP: it uses the separate `PROVIDER_DATA` type family,
+off the master, State, and event log. Same-node output short-circuits locally;
+remote output uses bounded independent per-owner/per-call queues. Structured
+payloads are validated against `output_chunk_schema`; inline media remains raw
+bytes outside JSON and is capped at 1 MiB per frame. Use a staged
+`BlobMediaAttachment` for large immutable objects.
+
+Skulk enforces exact call identity and sequence, one deadline across admission
+and streaming, exactly one terminal, bounded reorder/gap handling, and explicit
+cancellation when the caller closes the iterator early. A raising or malformed
+handler fails only its own stream with a typed terminal.
+
+`client_streaming` and `bidirectional` descriptors remain discoverable but are
+not executable yet. Realtime STT follows with ordered input media frames and an
+explicit caller half-close; a provider must not advertise progressive output
+until its underlying model actually produces it.
 
 ## Guarantees
 

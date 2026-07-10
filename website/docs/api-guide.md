@@ -142,6 +142,8 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `POST /v1/diagnostics/cluster/{node_id}/runners/{runner_id}/cancel`
 - `GET /v1/capabilities`
 - `POST /v1/capabilities/call`
+- `POST /v1/capabilities/stream`
+- `POST /v1/capabilities/stream/cancel`
 
 The node diagnostics bundle includes the node's own Tailscale state
 (`tailscale`: running flag, tailnet IP, hostname, MagicDNS name), probed on
@@ -1268,6 +1270,50 @@ transport status. A body that does not parse as the envelope at all
 since there is no call id to correlate a typed result to. Extensions
 normally use this through their context's `call_capability` rather than
 calling the endpoint directly.
+
+### Open a server-streaming capability on this node
+
+```
+POST /v1/capabilities/stream
+```
+
+This is the control-sized node-to-node opening verb for a provider descriptor
+whose `io_mode` is `server_streaming`. The request body is the same pinned
+`CapabilityCall` envelope used by unary calls. Skulk checks target identity,
+handler/version/revision, the 1 MiB request limit, the descriptor's input
+schema, the per-node stream concurrency bound, and the single deadline budget.
+It then returns a typed `CapabilityResult`: `ok: true` with
+`{"admitted": true}` means the stream was admitted; a pre-admission rejection
+uses the same typed call errors as the unary endpoint and creates no stream.
+
+Output is **not** an HTTP response stream. After admission, the provider emits
+`started`, ordered `chunk` frames, and exactly one `completed`, `failed`, or
+`cancelled` terminal on the provider DATA topic. Structured frame metadata is
+JSON-schema validated against `output_chunk_schema`; realtime media is an
+optional raw binary attachment capped at 1 MiB per frame, while large immutable
+results use staged blob references. The topic is node-addressed to
+`caller_node`, short-circuits same-node calls, and uses the DATA plane's bounded
+per-owner/per-call Zenoh queues for remote calls. Extensions consume the whole
+flow through `ExtensionContext.stream_capability(...)`, which returns a
+`CapabilityStreamSession` containing the typed opening result and one output
+iterator.
+
+`client_streaming` and `bidirectional` descriptors remain discoverable but are
+not executable through this endpoint yet. Realtime STT input frames and
+half-close semantics are the next provider-stream phase.
+
+### Cancel an admitted capability stream
+
+```
+POST /v1/capabilities/stream/cancel
+```
+
+Accepts `call_id`, `caller_node`, `target_node`, and an optional cancellation
+message. Only the caller identity that opened the active stream can cancel it.
+Cancellation is idempotent: an active handler is cancelled and emits one typed
+`cancelled` terminal; an already-terminal or unknown call returns
+`{"cancelled": false}`. `stream_capability` sends this request automatically
+when its iterator closes before a terminal frame.
 
 ```bash
 curl http://localhost:52415/v1/capabilities

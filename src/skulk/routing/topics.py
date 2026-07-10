@@ -3,6 +3,11 @@ from dataclasses import dataclass
 from enum import Enum
 
 from skulk.routing.connection_message import ConnectionMessage
+from skulk.routing.provider_streams import (
+    ProviderStreamPacket,
+    decode_provider_stream_packet,
+    encode_provider_stream_packet,
+)
 from skulk.shared.election import ElectionMessage
 from skulk.shared.types.chunks import DataChunk
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
@@ -40,12 +45,19 @@ class TypedTopic[T: CamelCaseModel]:
     # cluster-wide fan-out. ``None`` (the default, and every topic on gossipsub)
     # keys by the bare topic, preserving broadcast semantics.
     routing_key: Callable[[T], str | None] | None = None
+    stream_key: Callable[[T], str | None] | None = None
+    is_terminal: Callable[[T], bool] | None = None
+    serializer: Callable[[T], bytes] | None = None
+    deserializer: Callable[[bytes], T] | None = None
 
-    @staticmethod
-    def serialize(t: T) -> bytes:
+    def serialize(self, t: T) -> bytes:
+        if self.serializer is not None:
+            return self.serializer(t)
         return t.model_dump_json().encode("utf-8")
 
     def deserialize(self, b: bytes) -> T:
+        if self.deserializer is not None:
+            return self.deserializer(b)
         return self.model_type.model_validate_json(b.decode("utf-8"))
 
 
@@ -83,5 +95,28 @@ def _data_owner_key(chunk: DataChunk) -> str | None:
 
 
 DATA = TypedTopic(
-    "data", PublishPolicy.Always, DataChunk, routing_key=_data_owner_key
+    "data",
+    PublishPolicy.Always,
+    DataChunk,
+    routing_key=_data_owner_key,
+    stream_key=lambda chunk: str(chunk.command_id),
+    is_terminal=lambda chunk: chunk.is_terminal,
+)
+
+
+def _provider_owner_key(packet: ProviderStreamPacket) -> str:
+    """Route provider output to the node that opened the stream."""
+
+    return str(packet.owner_node)
+
+
+PROVIDER_DATA = TypedTopic(
+    "provider_data",
+    PublishPolicy.Always,
+    ProviderStreamPacket,
+    routing_key=_provider_owner_key,
+    stream_key=lambda packet: packet.frame.call_id,
+    is_terminal=lambda packet: packet.frame.is_terminal,
+    serializer=encode_provider_stream_packet,
+    deserializer=decode_provider_stream_packet,
 )
