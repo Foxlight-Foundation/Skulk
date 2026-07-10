@@ -1,15 +1,19 @@
 """Provider DATA packet framing and transport-failure coverage."""
 
+import json
+
 import anyio
 import pytest
 
 from skulk.extensions import (
+    MAX_CALL_PAYLOAD_BYTES,
     CapabilityStreamFrame,
     InlineMediaAttachment,
 )
 from skulk.routing.provider_streams import (
     ProviderStreamPacket,
     decode_provider_stream_packet,
+    encode_provider_stream_packet,
     provider_stream_rejection_packets,
 )
 from skulk.routing.router import OutboundPacket, TopicRouter
@@ -54,6 +58,29 @@ def test_provider_topic_preserves_arbitrary_inline_media_bytes() -> None:
 def test_provider_packet_decoder_rejects_truncated_header() -> None:
     with pytest.raises(ValueError, match="truncated"):
         decode_provider_stream_packet((100).to_bytes(4, "big") + b"{}")
+
+
+def test_full_size_valid_payload_fits_outer_provider_envelope() -> None:
+    text = "x" * (MAX_CALL_PAYLOAD_BYTES - 32)
+    payload: dict[str, object] = {"text": text}
+    assert len(
+        json.dumps(payload, separators=(",", ":"), allow_nan=False).encode()
+    ) <= MAX_CALL_PAYLOAD_BYTES
+    packet = ProviderStreamPacket(
+        owner_node=NodeId("caller-node"),
+        frame=CapabilityStreamFrame(
+            call_id="large-payload",
+            direction="provider_to_caller",
+            sequence=1,
+            kind="chunk",
+            payload=payload,
+        ),
+    )
+
+    wire = encode_provider_stream_packet(packet)
+
+    assert len(wire) > MAX_CALL_PAYLOAD_BYTES
+    assert decode_provider_stream_packet(wire) == packet
 
 
 def test_provider_admission_rejection_is_started_then_failed() -> None:

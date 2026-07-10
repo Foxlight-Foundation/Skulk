@@ -7,6 +7,7 @@ from typing import cast
 
 from pydantic import ConfigDict
 
+from skulk.extensions.calls import MAX_CALL_PAYLOAD_BYTES
 from skulk.extensions.streams import (
     CapabilityStreamError,
     CapabilityStreamFrame,
@@ -17,7 +18,13 @@ from skulk.shared.types.common import NodeId
 from skulk.utils.pydantic_ext import CamelCaseModel
 
 _HEADER_LENGTH_BYTES = 4
-_MAX_PROVIDER_HEADER_BYTES = 1_048_576
+# A payload may consume its full public allowance before the frame and routing
+# envelopes are added. Reserve bounded metadata space so a valid payload does
+# not become an unencodable DATA packet at the transport boundary.
+_PROVIDER_HEADER_OVERHEAD_BYTES = 65_536
+_MAX_PROVIDER_HEADER_BYTES = (
+    MAX_CALL_PAYLOAD_BYTES + _PROVIDER_HEADER_OVERHEAD_BYTES
+)
 
 
 class ProviderStreamPacket(CamelCaseModel):
@@ -47,7 +54,10 @@ def encode_provider_stream_packet(packet: ProviderStreamPacket) -> bytes:
         allow_nan=False,
     ).encode("utf-8")
     if len(envelope) > _MAX_PROVIDER_HEADER_BYTES:
-        raise ValueError("provider stream packet header exceeds 1 MiB")
+        raise ValueError(
+            "provider stream packet header exceeds "
+            f"{_MAX_PROVIDER_HEADER_BYTES} bytes"
+        )
     return len(envelope).to_bytes(_HEADER_LENGTH_BYTES, "big") + envelope + (
         media or b""
     )
@@ -60,7 +70,10 @@ def decode_provider_stream_packet(wire: bytes) -> ProviderStreamPacket:
         raise ValueError("provider stream packet is missing its header length")
     header_length = int.from_bytes(wire[:_HEADER_LENGTH_BYTES], "big")
     if header_length > _MAX_PROVIDER_HEADER_BYTES:
-        raise ValueError("provider stream packet header exceeds 1 MiB")
+        raise ValueError(
+            "provider stream packet header exceeds "
+            f"{_MAX_PROVIDER_HEADER_BYTES} bytes"
+        )
     header_end = _HEADER_LENGTH_BYTES + header_length
     if header_end > len(wire):
         raise ValueError("provider stream packet header is truncated")

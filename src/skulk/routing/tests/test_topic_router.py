@@ -53,6 +53,37 @@ async def test_publish_bytes_drops_unknown_field_payload_without_raising():
     await router_v1.publish_bytes(valid_payload, origin=None)
 
 
+async def test_outbound_serialization_failure_does_not_stop_topic_router() -> None:
+    """One invalid outbound item cannot terminate all later topic egress."""
+
+    def serialize(item: _SchemaV1) -> bytes:
+        if item.name == "bad":
+            raise ValueError("synthetic serializer failure")
+        return item.model_dump_json().encode()
+
+    topic = TypedTopic(
+        "serializer_containment_test",
+        PublishPolicy.Always,
+        _SchemaV1,
+        serializer=serialize,
+    )
+    networking_send, networking_recv = channel[OutboundPacket](1)
+    router = TopicRouter[_SchemaV1](topic, networking_send)
+    input_send = router.new_sender()
+    outbound: OutboundPacket | None = None
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(router.run)
+        await input_send.send(_SchemaV1(name="bad"))
+        await input_send.send(_SchemaV1(name="good"))
+        with anyio.fail_after(0.5):
+            outbound = await networking_recv.receive()
+        task_group.cancel_scope.cancel()
+
+    assert outbound is not None
+    assert outbound.data == b'{"name":"good"}'
+
+
 def _data_chunk(sequence: int, owner_node: str) -> DataChunk:
     return DataChunk(
         command_id=CommandId("local-first-data"),

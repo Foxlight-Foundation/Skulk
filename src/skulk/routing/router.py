@@ -214,13 +214,28 @@ class TopicRouter[T: CamelCaseModel]:
             if self.topic.is_terminal is not None
             else False
         )
+        try:
+            serialized = self.topic.serialize(item)
+        except Exception as exception:  # noqa: BLE001 - wire boundary containment
+            # A malformed or unexpectedly large item must fail in isolation;
+            # terminating TopicRouter.run would drop every later message on
+            # the topic and turn one provider bug into a transport outage.
+            logger.opt(exception=exception).warning(
+                f"Dropping unserializable message on topic {self.topic.topic}"
+            )
+            if (
+                routing_key is not None
+                and self._data_plane_egress_observer is not None
+            ):
+                self._data_plane_egress_observer.record_dropped(routing_key)
+            return
         await self.networking_sender.send(
             OutboundPacket(
                 topic=str(self.topic.topic),
                 routing_key=routing_key,
                 stream_key=stream_key,
                 is_terminal=is_terminal,
-                data=self.topic.serialize(item),
+                data=serialized,
             )
         )
         if self.topic.routing_key is not None and self._data_plane_egress_observer is not None:
