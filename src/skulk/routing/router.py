@@ -580,6 +580,7 @@ class Router:
                                 packet,
                                 owner,
                                 rejection_slots,
+                                True,
                             )
                             continue
                         sender, receiver = channel[OutboundPacket](
@@ -607,6 +608,24 @@ class Router:
                         )
                         if packet.is_terminal:
                             sender.close()
+                            try:
+                                rejection_slots.acquire_nowait()
+                            except WouldBlock:
+                                await rejection_slots.acquire()
+                            task_group.start_soon(
+                                self._publish_zenoh_data_rejection,
+                                packet,
+                                owner,
+                                rejection_slots,
+                                False,
+                            )
+                        continue
+                    except ClosedResourceError:
+                        self._data_plane_egress_observer.record_dropped(owner)
+                        logger.warning(
+                            "Zenoh DATA command queue closed before a late frame; "
+                            "dropping it without affecting unrelated streams"
+                        )
                         continue
                     self._data_plane_egress_observer.record_enqueued(owner)
 
@@ -615,18 +634,24 @@ class Router:
         packet: OutboundPacket,
         owner: str,
         rejection_slots: Semaphore,
+        include_started: bool,
     ) -> None:
         """Tell one admitted API that router stream capacity rejected its call."""
 
         assert self._zenoh is not None
         original = DATA.deserialize(packet.data)
-        rejection_frames = (
-            DataChunk(
-                command_id=original.command_id,
-                kind="started",
-                sequence=0,
-                owner_node=original.owner_node,
-            ),
+        failed_sequence = 1 if include_started else original.sequence
+        rejection_frames: list[DataChunk] = []
+        if include_started:
+            rejection_frames.append(
+                DataChunk(
+                    command_id=original.command_id,
+                    kind="started",
+                    sequence=0,
+                    owner_node=original.owner_node,
+                )
+            )
+        rejection_frames.append(
             DataChunk(
                 command_id=original.command_id,
                 kind="failed",
@@ -637,9 +662,9 @@ class Router:
                         "stream capacity is exhausted"
                     ),
                 ),
-                sequence=1,
+                sequence=failed_sequence,
                 owner_node=original.owner_node,
-            ),
+            )
         )
         try:
             for frame in rejection_frames:
