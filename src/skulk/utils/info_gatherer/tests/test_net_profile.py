@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 
+import anyio
 import pytest
 
 from skulk.shared.topology import Topology
@@ -72,3 +73,69 @@ async def test_check_reachable_skips_loopback_and_unspecified_addresses(
         ("192.168.0.117", remote_node_id),
         ("fe80::20:315a:c2e5:286b%en0", remote_node_id),
     ]
+
+
+@pytest.mark.anyio
+async def test_first_reachable_ip_returns_before_slower_interface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    self_node_id = NodeId("self")
+    remote_node_id = NodeId("remote")
+    topology = Topology()
+    topology.add_node(self_node_id)
+    topology.add_node(remote_node_id)
+    node_network = {
+        remote_node_id: NodeNetworkInfo(
+            interfaces=[
+                NetworkInterfaceInfo(name="slow", ip_address="192.168.0.117"),
+                NetworkInterfaceInfo(name="fast", ip_address="192.168.0.118"),
+            ]
+        )
+    }
+
+    async def fake_check_reachability(
+        target_ip: str,
+        expected_node_id: NodeId,
+        out: dict[NodeId, set[str]],
+        _client: object,
+    ) -> None:
+        if target_ip.endswith("117"):
+            await anyio.sleep(10)
+        out.setdefault(expected_node_id, set()).add(target_ip)
+
+    monkeypatch.setattr(net_profile, "check_reachability", fake_check_reachability)
+
+    with anyio.fail_after(1.0):
+        result = await net_profile.first_reachable_ip(
+            topology,
+            self_node_id,
+            node_network,
+            remote_node_id,
+        )
+
+    assert result == "192.168.0.118"
+
+
+@pytest.mark.anyio
+async def test_first_reachable_ip_returns_none_when_target_has_no_valid_address(
+) -> None:
+    self_node_id = NodeId("self")
+    remote_node_id = NodeId("remote")
+    topology = Topology()
+    topology.add_node(self_node_id)
+    topology.add_node(remote_node_id)
+
+    result = await net_profile.first_reachable_ip(
+        topology,
+        self_node_id,
+        {
+            remote_node_id: NodeNetworkInfo(
+                interfaces=[
+                    NetworkInterfaceInfo(name="lo0", ip_address="127.0.0.1")
+                ]
+            )
+        },
+        remote_node_id,
+    )
+
+    assert result is None

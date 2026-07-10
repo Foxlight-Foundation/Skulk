@@ -345,7 +345,7 @@ from skulk.tools.web_search import default_browser_tool_provider
 from skulk.utils.banner import print_startup_banner
 from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.disk_event_log import DiskEventLog
-from skulk.utils.info_gatherer.net_profile import check_reachable
+from skulk.utils.info_gatherer.net_profile import check_reachable, first_reachable_ip
 from skulk.utils.power_sampler import PowerSampler
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.engines.mlx.constants import (
@@ -6213,20 +6213,21 @@ class API:
         """Resolve one peer's API base URL, stopping at the first hit.
 
         The capability-call hot path must not wait for every peer probe to
-        finish (a stale peer's failed probe would delay an unrelated call);
-        the reachability generator yields as probes complete, so stop as soon
-        as the target answers.
+        finish (a stale peer's failed probe would delay an unrelated call).
+        Probe only the requested node and cancel its remaining interface probes
+        as soon as one verified address answers.
         """
-        target = str(node_id)
-        async for ip_address, probed_node_id in check_reachable(
+
+        ip_address = await first_reachable_ip(
             self.state.topology,
             self.node_id,
             self.state.node_network,
-        ):
-            if str(probed_node_id) == target:
-                host = f"[{ip_address}]" if ":" in ip_address else ip_address
-                return f"http://{host}:52415"
-        return None
+            node_id,
+        )
+        if ip_address is None:
+            return None
+        host = f"[{ip_address}]" if ":" in ip_address else ip_address
+        return f"http://{host}:52415"
 
     async def _reachable_peer_api_urls(self) -> dict[str, str]:
         """Return reachable peer API base URLs keyed by node ID."""
