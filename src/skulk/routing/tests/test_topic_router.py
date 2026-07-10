@@ -2,7 +2,7 @@
 
 import anyio
 
-from skulk.routing.router import TopicRouter
+from skulk.routing.router import OutboundPacket, TopicRouter
 from skulk.routing.topics import DATA, PublishPolicy, TypedTopic
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.types.chunks import DataChunk, TokenChunk
@@ -38,7 +38,7 @@ async def test_publish_bytes_drops_unknown_field_payload_without_raising():
     the bad message is dropped silently and the router stays alive to process
     the next valid message.
     """
-    networking_send, _networking_recv = channel[tuple[str, str | None, bytes]]()
+    networking_send, _networking_recv = channel[OutboundPacket]()
     router_v1 = TopicRouter[_SchemaV1](_TOPIC_V1, networking_send)
 
     incompatible_payload = _TOPIC_V2.serialize(_SchemaV2(name="hi", extra=["x"]))
@@ -77,10 +77,17 @@ async def test_local_data_topic_does_not_wait_for_blocked_network_egress() -> No
     stream appear as one late burst.
     """
 
-    networking_send, networking_recv = channel[tuple[str, str | None, bytes]](
+    networking_send, networking_recv = channel[OutboundPacket](
         max_buffer_size=1
     )
-    await networking_send.send(("occupied", None, b"held"))
+    occupied = OutboundPacket(
+        topic="occupied",
+        routing_key=None,
+        stream_key=None,
+        is_terminal=False,
+        data=b"held",
+    )
+    await networking_send.send(occupied)
 
     router = TopicRouter[DataChunk](
         DATA, networking_send, local_routing_key="api-node"
@@ -101,7 +108,7 @@ async def test_local_data_topic_does_not_wait_for_blocked_network_egress() -> No
             assert await local_recv.receive() == first_chunk
             assert await local_recv.receive() == second_chunk
 
-        assert await networking_recv.receive() == ("occupied", None, b"held")
+        assert await networking_recv.receive() == occupied
         with anyio.move_on_after(0.1) as scope:
             await networking_recv.receive()
         assert scope.cancel_called
@@ -109,9 +116,9 @@ async def test_local_data_topic_does_not_wait_for_blocked_network_egress() -> No
 
 
 async def test_remote_data_topic_still_egresses_to_owner_key() -> None:
-    """Cross-node DATA must still preserve ordered network delivery."""
+    """Cross-node DATA egresses without dispatching on the producing API."""
 
-    networking_send, networking_recv = channel[tuple[str, str | None, bytes]]()
+    networking_send, networking_recv = channel[OutboundPacket]()
 
     router = TopicRouter[DataChunk](
         DATA, networking_send, local_routing_key="api-node"
@@ -127,9 +134,12 @@ async def test_remote_data_topic_still_egresses_to_owner_key() -> None:
         await input_send.send(chunk)
 
         with anyio.fail_after(0.5):
-            assert await local_recv.receive() == chunk
-            topic, routing_key, payload = await networking_recv.receive()
-        assert topic == DATA.topic
-        assert routing_key == "remote-node"
-        assert DATA.deserialize(payload) == chunk
+            packet = await networking_recv.receive()
+        with anyio.move_on_after(0.1) as scope:
+            await local_recv.receive()
+        assert scope.cancel_called
+        assert packet.topic == DATA.topic
+        assert packet.routing_key == "remote-node"
+        assert packet.stream_key == "local-first-data"
+        assert DATA.deserialize(packet.data) == chunk
         task_group.cancel_scope.cancel()

@@ -6,6 +6,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from skulk.api.data_plane import DataPlaneObserver
 from skulk.api.main import API
 from skulk.shared.types.common import CommandId
 from skulk.utils.channels import Sender
@@ -25,6 +26,10 @@ def _make_api() -> Any:
     api._cancelled_command_ids = set()  # pyright: ignore[reportPrivateUsage]
     api._chunk_reorder = {}  # pyright: ignore[reportPrivateUsage]
     api._data_dedup_cursor = {}  # pyright: ignore[reportPrivateUsage]
+    api._data_plane_observer = DataPlaneObserver(  # pyright: ignore[reportPrivateUsage]
+        transport="disabled",
+        reorder_buffer_enabled=True,
+    )
     api._send = AsyncMock()  # pyright: ignore[reportPrivateUsage]
     api._setup_exception_handlers()  # pyright: ignore[reportPrivateUsage]
     app.post("/v1/cancel/{command_id}")(api.cancel_command)

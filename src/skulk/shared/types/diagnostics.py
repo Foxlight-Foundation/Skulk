@@ -47,6 +47,7 @@ RunnerTaskCancelStatus = Literal[
     "already_cancelled",
     "already_completed",
 ]
+DataPlaneTransport = Literal["disabled", "gossipsub", "zenoh"]
 
 
 class MlxMemorySnapshot(CamelCaseModel):
@@ -563,6 +564,195 @@ class NodeTailscaleDiagnostics(CamelCaseModel):
     dns_name: str | None = Field(default=None, description="MagicDNS name when available.")
 
 
+class DataPlaneDiagnostics(CamelCaseModel):
+    """Bounded local metrics for serving-stream delivery and lifecycle health."""
+
+    transport: DataPlaneTransport = Field(
+        description="Configured DATA transport on this API node."
+    )
+    reorder_buffer_enabled: bool = Field(
+        description="Whether this API reorders DATA frames before dispatch."
+    )
+    active_streams: int = Field(
+        description="Streams accepted without a terminal frame yet."
+    )
+    frames_received: int = Field(
+        description="All DATA frames observed before deduplication."
+    )
+    frames_dispatched: int = Field(
+        description="Ordered, unique DATA frames accepted for live commands."
+    )
+    started_frames: int = Field(description="Accepted started lifecycle frames.")
+    chunk_frames: int = Field(description="Accepted non-terminal payload frames.")
+    completed_frames: int = Field(description="Accepted completed terminal frames.")
+    failed_frames: int = Field(description="Accepted failed terminal frames.")
+    cancelled_frames: int = Field(description="Accepted cancelled terminal frames.")
+    duplicate_frames: int = Field(
+        description="Frames dropped because their sequence was already observed."
+    )
+    out_of_order_frames: int = Field(
+        description="Frames received above the next expected sequence."
+    )
+    skipped_sequences: int = Field(
+        description="Missing sequence numbers skipped after a bounded reorder wait."
+    )
+    late_frames: int = Field(
+        description="Frames dropped because no live command queue remained."
+    )
+    missing_started_streams: int = Field(
+        description="Streams whose first accepted frame was not started."
+    )
+    missing_terminal_streams: int = Field(
+        description="Streams finalized locally without an accepted terminal frame."
+    )
+    idle_timeouts: int = Field(
+        description="API stream receives that exceeded the DATA idle deadline."
+    )
+    transport_failures: int = Field(
+        description="Streams failed locally after a DATA ordering or delivery gap."
+    )
+    first_byte_samples: int = Field(
+        description="Streams with a measured started-to-first-payload interval."
+    )
+    first_byte_seconds_last: float | None = Field(
+        default=None,
+        description="Most recently measured started-to-first-payload latency.",
+    )
+    first_byte_seconds_average: float | None = Field(
+        default=None,
+        description="Average started-to-first-payload latency for this process.",
+    )
+    first_byte_seconds_max: float | None = Field(
+        default=None,
+        description="Maximum started-to-first-payload latency for this process.",
+    )
+    stream_span_samples: int = Field(
+        description="Terminal streams with a measured first-payload-to-terminal span."
+    )
+    stream_span_seconds_last: float | None = Field(
+        default=None,
+        description="Most recently measured first-payload-to-terminal span.",
+    )
+    stream_span_seconds_average: float | None = Field(
+        default=None,
+        description="Average first-payload-to-terminal span for this process.",
+    )
+    stream_span_seconds_max: float | None = Field(
+        default=None,
+        description="Maximum first-payload-to-terminal span for this process.",
+    )
+    egress: "DataPlaneEgressDiagnostics" = Field(
+        description="Router-side DATA queue, publish, and isolation metrics."
+    )
+
+
+class DataPlaneOwnerDiagnostics(CamelCaseModel):
+    """Bounded egress pressure metrics for one remote DATA owner."""
+
+    queue_depth: int = Field(description="Frames currently queued for this owner.")
+    active_streams: int = Field(
+        description="Independent command egress queues active for this owner."
+    )
+    max_queue_depth: int = Field(
+        description="Highest aggregate queue depth observed for this owner."
+    )
+    frames_enqueued: int = Field(
+        description="Frames accepted into this owner's command queues."
+    )
+    frames_published: int = Field(
+        description="Frames successfully published for this owner."
+    )
+    frames_dropped: int = Field(
+        description="Frames rejected by this owner's bounded queues."
+    )
+    publish_failures: int = Field(
+        description="Publish exceptions or deadline expirations for this owner."
+    )
+
+
+class DataPlaneEgressDiagnostics(CamelCaseModel):
+    """Router-side DATA egress isolation and pressure metrics."""
+
+    active_stream_queues: int = Field(
+        description="Independent remote command queues currently active."
+    )
+    queue_depth: int = Field(
+        description="Frames currently queued across remote command streams."
+    )
+    max_queue_depth: int = Field(
+        description="Highest aggregate remote DATA queue depth observed."
+    )
+    local_short_circuits: int = Field(
+        description="Frames delivered locally without remote Zenoh egress."
+    )
+    remote_frames_enqueued: int = Field(
+        description="Remote frames accepted into bounded command queues."
+    )
+    remote_frames_published: int = Field(
+        description="Remote frames successfully published over Zenoh."
+    )
+    remote_frames_dropped: int = Field(
+        description="Remote frames dropped by queue or stream admission bounds."
+    )
+    remote_publish_failures: int = Field(
+        description="Remote publishes that raised or exceeded their deadline."
+    )
+    remote_bytes_published: int = Field(
+        description="Serialized DATA bytes successfully published over Zenoh."
+    )
+    enqueue_latency_samples: int = Field(
+        description="Remote frames with measured TopicRouter enqueue latency."
+    )
+    enqueue_latency_seconds_average: float | None = Field(
+        default=None,
+        description="Average TopicRouter-to-egress enqueue latency.",
+    )
+    enqueue_latency_seconds_max: float | None = Field(
+        default=None,
+        description="Maximum TopicRouter-to-egress enqueue latency.",
+    )
+    publish_latency_samples: int = Field(
+        description="Remote frames with measured Zenoh publish latency."
+    )
+    publish_latency_seconds_average: float | None = Field(
+        default=None,
+        description="Average successful or failed Zenoh publish latency.",
+    )
+    publish_latency_seconds_max: float | None = Field(
+        default=None,
+        description="Maximum successful or failed Zenoh publish latency.",
+    )
+    owners: dict[str, DataPlaneOwnerDiagnostics] = Field(
+        default_factory=dict,
+        description="Per-owner pressure counters keyed by opaque node id.",
+    )
+
+    @classmethod
+    def empty(cls) -> "DataPlaneEgressDiagnostics":
+        """Return a zeroed snapshot when no router metrics provider is wired."""
+
+        return cls(
+            active_stream_queues=0,
+            queue_depth=0,
+            max_queue_depth=0,
+            local_short_circuits=0,
+            remote_frames_enqueued=0,
+            remote_frames_published=0,
+            remote_frames_dropped=0,
+            remote_publish_failures=0,
+            remote_bytes_published=0,
+            enqueue_latency_samples=0,
+            enqueue_latency_seconds_average=None,
+            enqueue_latency_seconds_max=None,
+            publish_latency_samples=0,
+            publish_latency_seconds_average=None,
+            publish_latency_seconds_max=None,
+        )
+
+
+DataPlaneDiagnostics.model_rebuild()
+
+
 class NodeDiagnostics(CamelCaseModel):
     """Read-only diagnostic bundle for one Skulk node."""
 
@@ -584,6 +774,9 @@ class NodeDiagnostics(CamelCaseModel):
     placements: list[InstancePlacementDiagnostics] = Field(
         default_factory=list,
         description="Event-sourced placement analysis for current instances.",
+    )
+    data_plane: DataPlaneDiagnostics = Field(
+        description="Local DATA stream lifecycle, ordering, and timing metrics."
     )
     warnings: list[str] = Field(
         default_factory=list,

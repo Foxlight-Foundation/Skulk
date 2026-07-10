@@ -20,6 +20,7 @@ from skulk.extensions.capabilities import CapabilityDescriptor
 from skulk.extensions.types import (
     CapabilityCallHandler,
     CapabilityProvider,
+    CapabilityStreamHandler,
     ChatMiddleware,
     ChatResponseSummary,
     ExtensionContext,
@@ -78,6 +79,9 @@ class LoadedExtensions:
         # that also serve unary calls (fabric-citizenship Phase 2b).
         self._call_handlers: dict[
             str, tuple[str, CapabilityCallHandler, CapabilityDescriptor]
+        ] = {}
+        self._stream_handlers: dict[
+            str, tuple[str, CapabilityStreamHandler, CapabilityDescriptor]
         ] = {}
         seen_qualified_ids: set[str] = set()
         for extension in extensions:
@@ -143,6 +147,15 @@ class LoadedExtensions:
                             extension,
                             descriptor,
                         )
+                    if descriptor.io_mode in (
+                        "server_streaming",
+                        "bidirectional",
+                    ) and isinstance(extension, CapabilityStreamHandler):
+                        self._stream_handlers[descriptor.qualified_id] = (
+                            name,
+                            extension,
+                            descriptor,
+                        )
             # Startup-hook facet: a pure provider has no chat hook through
             # which to reach the context, so registration must not depend on
             # a chat request arriving.
@@ -180,6 +193,13 @@ class LoadedExtensions:
         return frozenset(
             entry[2].id for entry in self._call_handlers.values()
         )
+
+    def stream_handler(
+        self, qualified_id: str
+    ) -> tuple[str, CapabilityStreamHandler, CapabilityDescriptor] | None:
+        """Look up the streaming handler serving ``id@version`` on this node."""
+
+        return self._stream_handlers.get(qualified_id)
 
     def run_startup_hooks(self, context: ExtensionContext) -> None:
         """Run every extension's ``on_start`` hook, each one guarded.

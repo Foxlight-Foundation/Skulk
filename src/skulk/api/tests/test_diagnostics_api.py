@@ -441,6 +441,7 @@ def test_cluster_diagnostics_returns_local_and_peer_results(
             update={"node_id": "peer-node", "hostname": "peer-node.local"}
         ),
         resources=api._resource_diagnostics(),  # pyright: ignore[reportPrivateUsage]
+        data_plane=api._data_plane_observer.snapshot(),  # pyright: ignore[reportPrivateUsage]
     )
 
     def _build_async_client(*_args: object, **_kwargs: object) -> _FakeAsyncClient:
@@ -585,6 +586,7 @@ def test_cluster_timeline_merges_flight_recorders_by_wall_clock(
             update={"node_id": "peer-node", "hostname": "peer-node.local"}
         ),
         resources=api._resource_diagnostics(),  # pyright: ignore[reportPrivateUsage]
+        data_plane=api._data_plane_observer.snapshot(),  # pyright: ignore[reportPrivateUsage]
         supervisor_runners=[peer_runner],
     )
 
@@ -815,6 +817,7 @@ def test_capture_cluster_node_diagnostics_proxies_to_peer(
                 update={"node_id": "peer-node", "hostname": "peer-node.local"}
             ),
             resources=api._resource_diagnostics(),  # pyright: ignore[reportPrivateUsage]
+            data_plane=api._data_plane_observer.snapshot(),  # pyright: ignore[reportPrivateUsage]
         ),
         flight_recorder=[],
         process_samples=[],
