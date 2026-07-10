@@ -12,6 +12,8 @@ from skulk.api.main import (
 from skulk.extensions import (
     CapabilityCall,
     CapabilityDescriptor,
+    CapabilityError,
+    CapabilityResult,
     CapabilityStreamFrame,
     ExtensionContext,
     InlineMediaAttachment,
@@ -109,6 +111,50 @@ class _InvalidChunkProvider(_TtsProvider):
             kind="chunk",
             payload={"format": "not-pcm"},
         )
+
+
+class _RejectingTtsProvider(_TtsProvider):
+    def __init__(self) -> None:
+        self.handler_called = False
+
+    async def admit_stream(
+        self,
+        context: ExtensionContext,
+        call: CapabilityCall,
+    ) -> CapabilityError | None:
+        return CapabilityError(
+            code="not_found",
+            message="no eligible model is mounted",
+        )
+
+    async def handle_stream(
+        self,
+        context: ExtensionContext,
+        call: CapabilityCall,
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        self.handler_called = True
+        if False:
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="completed",
+            )
+
+
+class _BlockingAdmissionTtsProvider(_TtsProvider):
+    def __init__(self) -> None:
+        self.admission_started = anyio.Event()
+        self.release_admission = anyio.Event()
+
+    async def admit_stream(
+        self,
+        context: ExtensionContext,
+        call: CapabilityCall,
+    ) -> CapabilityError | None:
+        self.admission_started.set()
+        await self.release_admission.wait()
+        return None
 
 
 class _CancellableProvider(_TtsProvider):
@@ -361,6 +407,73 @@ async def test_invalid_provider_chunk_becomes_typed_failed_terminal() -> None:
     assert frames[-1].error.code == "invalid_frame"
 
 
+async def test_dynamic_admission_rejection_emits_no_started_frame() -> None:
+    provider = _RejectingTtsProvider()
+    api = _build_api(provider)
+    call = CapabilityCall(
+        call_id="rejected-before-start",
+        capability_id="tts",
+        version="1.0.0",
+        descriptor_revision=_TTS_REVISION,
+        caller_node="api-node",
+        target_node="api-node",
+        timeout_seconds=2.0,
+        payload={"text": "hello"},
+    )
+
+    result: CapabilityResult | None = None
+    async with api._tg:  # pyright: ignore[reportPrivateUsage]
+        result = await api.serve_capability_stream(call)
+
+    assert result is not None
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code == "not_found"
+    assert provider.handler_called is False
+    assert api._active_capability_streams == {}  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_dynamic_admission_reserves_concurrency_slot_before_await(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("skulk.api.main._MAX_CONCURRENT_CAPABILITY_STREAMS", 1)
+    provider = _BlockingAdmissionTtsProvider()
+    api = _build_api(provider)
+
+    def call(call_id: str) -> CapabilityCall:
+        return CapabilityCall(
+            call_id=call_id,
+            capability_id="tts",
+            version="1.0.0",
+            descriptor_revision=_TTS_REVISION,
+            caller_node="api-node",
+            target_node="api-node",
+            timeout_seconds=2.0,
+            payload={"text": "hello"},
+        )
+
+    first_results: list[CapabilityResult] = []
+
+    async def open_first() -> None:
+        first_results.append(await api.serve_capability_stream(call("first")))
+
+    async with api._tg as task_group:  # pyright: ignore[reportPrivateUsage]
+        task_group.start_soon(open_first)
+        await provider.admission_started.wait()
+
+        second_result = await api.serve_capability_stream(call("second"))
+        assert second_result.ok is False
+        assert second_result.error is not None
+        assert second_result.error.code == "overloaded"
+        assert list(api._active_capability_streams) == ["first"]  # pyright: ignore[reportPrivateUsage]
+
+        provider.release_admission.set()
+        while not first_results:
+            await anyio.sleep(0)
+        assert first_results[0].ok is True
+        task_group.cancel_scope.cancel()
+
+
 def test_bidirectional_descriptor_remains_discoverable_but_not_executable() -> None:
     loaded = LoadedExtensions([_BidirectionalProvider()])
 
@@ -390,6 +503,38 @@ async def test_early_caller_close_cancels_only_its_provider_stream() -> None:
         assert (await iterator.__anext__()).kind == "started"
         assert (await iterator.__anext__()).kind == "chunk"
         await session.frames.aclose()  # type: ignore[attr-defined]
+        with anyio.fail_after(1.0):
+            await provider.cancelled.wait()
+        task_group.cancel_scope.cancel()
+
+
+async def test_caller_stream_can_be_finalized_by_a_different_task() -> None:
+    """Async-generator finalization must not inherit an open deadline scope."""
+
+    provider = _CancellableProvider()
+    api = _build_api(provider)
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+
+    async with api._tg as task_group:  # pyright: ignore[reportPrivateUsage]
+        task_group.start_soon(
+            api._apply_provider_data  # pyright: ignore[reportPrivateUsage]
+        )
+        session = await context.stream_capability(
+            NodeId("api-node"),
+            "tts",
+            "1.0.0",
+            _TTS_REVISION,
+            {"text": "finalize me elsewhere"},
+            timeout_seconds=5.0,
+        )
+        assert session.open_result.ok is True
+        iterator = session.frames.__aiter__()
+        assert (await iterator.__anext__()).kind == "started"
+
+        async def close_from_child_task() -> None:
+            await session.frames.aclose()  # type: ignore[attr-defined]
+
+        task_group.start_soon(close_from_child_task)
         with anyio.fail_after(1.0):
             await provider.cancelled.wait()
         task_group.cancel_scope.cancel()

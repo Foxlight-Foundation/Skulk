@@ -15,6 +15,15 @@ from pydantic import ValidationError
 from skulk.api import main as api_main
 from skulk.api.main import API
 from skulk.api.types import AudioSpeechRequest
+from skulk.extensions import (
+    TTS_CAPABILITY_DESCRIPTOR,
+    CapabilityCall,
+    CapabilityStreamFrame,
+    CapabilityStreamSession,
+    InlineMediaAttachment,
+    descriptor_revision,
+)
+from skulk.routing.provider_streams import ProviderStreamPacket
 from skulk.shared.election import ElectionMessage
 from skulk.shared.experimental import EXPERIMENTAL_MODE_ENV_VAR
 from skulk.shared.models.model_cards import (
@@ -44,10 +53,11 @@ from skulk.shared.types.tasks import (
     TaskId,
     TaskStatus,
 )
+from skulk.shared.types.telemetry import TelemetryView
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
 from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
 from skulk.shared.types.worker.shards import PipelineShardMetadata
-from skulk.utils.channels import channel
+from skulk.utils.channels import Receiver, channel
 
 
 def _build_api() -> API:
@@ -66,6 +76,33 @@ def _build_api() -> API:
         election_receiver=election_receiver,
         enable_event_log=False,
         mount_dashboard=False,
+    )
+
+
+def _build_builtin_provider_api() -> tuple[API, Receiver[ForwarderCommand]]:
+    """Create an API with the first-party speech provider and local DATA loop."""
+
+    command_sender, command_receiver = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    _, event_receiver = channel[IndexedEvent]()
+    _, election_receiver = channel[ElectionMessage]()
+    provider_sender, provider_receiver = channel[ProviderStreamPacket](256)
+    return (
+        API(
+            NodeId("api-node"),
+            port=52415,
+            event_receiver=event_receiver,
+            command_sender=command_sender,
+            download_command_sender=download_sender,
+            election_receiver=election_receiver,
+            enable_event_log=False,
+            mount_dashboard=False,
+            telemetry_view=TelemetryView(),
+            provider_stream_sender=provider_sender,
+            provider_stream_receiver=provider_receiver,
+            enable_builtin_providers=True,
+        ),
+        command_receiver,
     )
 
 
@@ -178,6 +215,250 @@ def test_audio_speech_route_is_documented_in_openapi() -> None:
 
     assert operation["tags"] == ["Audio"]
     assert operation["summary"] == "Generate speech audio"
+
+
+def test_builtin_tts_capability_tracks_live_experimental_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Discovery should advertise TTS only while core can really stream it."""
+
+    api, _ = _build_builtin_provider_api()
+    card = _tts_card(supports_streaming=True)
+    assert api._telemetry_view.local_advertised_capabilities == set()
+    assert api._extensions is not None
+    assert TTS_CAPABILITY_DESCRIPTOR in api._extensions.capability_descriptors
+
+    api.state = _state_with_running_card(card)
+    _write_tts_streaming_experiment_config(api, tmp_path)
+    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
+    api._sync_builtin_speech_capability()
+    assert api._telemetry_view.local_advertised_capabilities == {"tts"}
+
+    api.state = State()
+    api._sync_builtin_speech_capability()
+    assert api._telemetry_view.local_advertised_capabilities == set()
+
+
+@pytest.mark.anyio
+async def test_builtin_tts_admission_rejects_unmounted_model_without_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Mounted-state admission should not perform a remote model-card lookup."""
+
+    api, _ = _build_builtin_provider_api()
+    card = _tts_card(supports_streaming=True)
+    api.state = _state_with_running_card(card)
+    _write_tts_streaming_experiment_config(api, tmp_path)
+    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
+
+    async def _unexpected_prepare(
+        _call: CapabilityCall,
+    ) -> SpeechSynthesisTaskParams:
+        raise AssertionError("unmounted model reached model-card preparation")
+
+    monkeypatch.setattr(api, "_prepare_builtin_tts_task", _unexpected_prepare)
+    error = await api._admit_builtin_tts_stream(
+        CapabilityCall(
+            call_id="unmounted-model",
+            capability_id="tts",
+            version="1.0.0",
+            descriptor_revision=descriptor_revision(TTS_CAPABILITY_DESCRIPTOR),
+            caller_node="api-node",
+            target_node="api-node",
+            timeout_seconds=2.0,
+            payload={"model": "mlx-community/not-mounted", "text": "hello"},
+        )
+    )
+
+    assert error is not None
+    assert error.code == "not_found"
+
+
+@pytest.mark.anyio
+async def test_builtin_tts_provider_streams_core_audio_over_provider_data(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The generic TTS facade should preserve core command and audio semantics."""
+
+    api, _ = _build_builtin_provider_api()
+    card = _tts_card(supports_streaming=True)
+    api.state = _state_with_running_card(card)
+    _write_tts_streaming_experiment_config(api, tmp_path)
+    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
+    api._sync_builtin_speech_capability()
+    sent_commands: list[SpeechSynthesis] = []
+
+    async def _send(command: object) -> None:
+        if not isinstance(command, SpeechSynthesis):
+            return
+        sent_commands.append(command)
+        sender = api._audio_speech_queues[command.command_id]
+        await sender.send(
+            AudioChunk(
+                model=card.model_id,
+                data=base64.b64encode(b"mp3-a").decode("ascii"),
+                chunk_index=0,
+                format=AudioResponseFormat.Mp3,
+                sample_rate=24000,
+                is_partial=True,
+            )
+        )
+        await sender.send(
+            AudioChunk(
+                model=card.model_id,
+                data=base64.b64encode(b"mp3-b").decode("ascii"),
+                chunk_index=1,
+                format=AudioResponseFormat.Mp3,
+                sample_rate=24000,
+                is_partial=True,
+            )
+        )
+        await sender.send(
+            AudioChunk(
+                model=card.model_id,
+                data="",
+                chunk_index=2,
+                format=AudioResponseFormat.Mp3,
+                sample_rate=24000,
+                finish_reason="stop",
+            )
+        )
+
+    monkeypatch.setattr(api, "_send", _send)
+
+    session: CapabilityStreamSession | None = None
+    frames: list[CapabilityStreamFrame] = []
+    async with api._tg as task_group:
+        task_group.start_soon(api._apply_provider_data)
+        session = await api._extension_context.stream_capability(
+            NodeId("api-node"),
+            "tts",
+            "1.0.0",
+            descriptor_revision(TTS_CAPABILITY_DESCRIPTOR),
+            {
+                "model": str(card.model_id),
+                "text": "hello from the fabric",
+                "streaming_interval": 0.25,
+            },
+            timeout_seconds=2.0,
+        )
+        frames = [frame async for frame in session.frames]
+        task_group.cancel_scope.cancel()
+
+    assert session is not None
+    assert session.open_result.ok is True
+    assert [frame.kind for frame in frames] == [
+        "started",
+        "chunk",
+        "chunk",
+        "completed",
+    ]
+    media = [frame.media for frame in frames if frame.media is not None]
+    assert all(isinstance(item, InlineMediaAttachment) for item in media)
+    assert b"".join(cast(InlineMediaAttachment, item).data for item in media) == (
+        b"mp3-amp3-b"
+    )
+    assert all(cast(InlineMediaAttachment, item).channels is None for item in media)
+    assert len(sent_commands) == 1
+    assert sent_commands[0].task_params.input_text == "hello from the fabric"
+    assert sent_commands[0].task_params.stream is True
+    assert sent_commands[0].task_params.streaming_interval == 0.25
+    assert sent_commands[0].command_id not in api._audio_speech_queues
+
+
+@pytest.mark.anyio
+async def test_builtin_tts_provider_rejects_before_started_when_gate_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A disabled experiment should fail opening without creating a lifecycle."""
+
+    api, _ = _build_builtin_provider_api()
+    card = _tts_card(supports_streaming=True)
+    api.state = _state_with_running_card(card)
+    api._config_path = tmp_path / "skulk.yaml"
+    api._config_path.write_text("experiments:\n  tts_streaming: false\n")
+    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
+
+    session: CapabilityStreamSession | None = None
+    frames: list[CapabilityStreamFrame] = []
+    async with api._tg:
+        session = await api._extension_context.stream_capability(
+            NodeId("api-node"),
+            "tts",
+            "1.0.0",
+            descriptor_revision(TTS_CAPABILITY_DESCRIPTOR),
+            {"model": str(card.model_id), "text": "hello"},
+            timeout_seconds=2.0,
+        )
+        frames = [frame async for frame in session.frames]
+
+    assert session is not None
+    assert session.open_result.ok is False
+    assert session.open_result.error is not None
+    assert session.open_result.error.code == "not_found"
+    assert frames == []
+    assert api._active_capability_streams == {}
+
+
+@pytest.mark.anyio
+async def test_builtin_tts_provider_cancellation_reaches_core_command(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Closing a Fabric TTS stream should cancel its core synthesis command."""
+
+    api, command_receiver = _build_builtin_provider_api()
+    card = _tts_card(supports_streaming=True)
+    api.state = _state_with_running_card(card)
+    _write_tts_streaming_experiment_config(api, tmp_path)
+    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
+    sent_commands: list[SpeechSynthesis] = []
+
+    async def _send(command: object) -> None:
+        if not isinstance(command, SpeechSynthesis):
+            return
+        sent_commands.append(command)
+        await api._audio_speech_queues[command.command_id].send(
+            AudioChunk(
+                model=card.model_id,
+                data=base64.b64encode(b"first").decode("ascii"),
+                chunk_index=0,
+                format=AudioResponseFormat.Mp3,
+                sample_rate=24000,
+                is_partial=True,
+            )
+        )
+
+    monkeypatch.setattr(api, "_send", _send)
+
+    forwarded: ForwarderCommand | None = None
+    async with api._tg as task_group:
+        task_group.start_soon(api._apply_provider_data)
+        session = await api._extension_context.stream_capability(
+            NodeId("api-node"),
+            "tts",
+            "1.0.0",
+            descriptor_revision(TTS_CAPABILITY_DESCRIPTOR),
+            {"model": str(card.model_id), "text": "cancel me"},
+            timeout_seconds=5.0,
+        )
+        iterator = session.frames.__aiter__()
+        assert (await iterator.__anext__()).kind == "started"
+        assert (await iterator.__anext__()).kind == "chunk"
+        await session.frames.aclose()  # type: ignore[attr-defined]
+        with anyio.fail_after(1.0):
+            forwarded = await command_receiver.receive()
+        task_group.cancel_scope.cancel()
+
+    assert len(sent_commands) == 1
+    assert forwarded is not None
+    assert isinstance(forwarded.command, TaskCancelled)
+    assert forwarded.command.cancelled_command_id == sent_commands[0].command_id
+    assert sent_commands[0].command_id not in api._audio_speech_queues
 
 
 @pytest.mark.anyio

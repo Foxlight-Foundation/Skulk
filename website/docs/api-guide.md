@@ -539,10 +539,11 @@ requests `mp3` instead of the model card's non-streaming default. Skulk returns
 `audio/mpeg` with chunked HTTP bytes. This is TTS output streaming, not a
 realtime session: the request text is still a complete bounded input,
 cancellation closes the command stream, and each chunk follows the mounted
-model's generation cadence. The bundled TTS cards currently advertise WAV output
-only and do not declare streaming support. MP3/streaming support should be
-enabled on a card only when the runtime can provide the required encoder
-dependency and the model has passed streaming validation.
+model's generation cadence. The bundled Qwen3 TTS card declares MP3 streaming
+support after live validation; Fish Audio and the other bundled speech cards
+remain non-streaming. MP3/streaming support is enabled card-by-card only when
+the runtime can provide the encoder and the model has passed streaming
+validation.
 
 The speech endpoint is still text-only. `streaming_interval` without
 `stream=true`, `reference_audio`, and `reference_text` return **400 Bad
@@ -1242,8 +1243,9 @@ that peer's describe surface (empty when the peer is unreachable). Each
 descriptor carries the capability `id`, semantic `version`, a human/LLM-readable
 description, JSON Schemas for input and output, the call's I/O mode, and the
 response maps each `id@version` to a content revision digest so callers can pin
-the exact shape they discovered. An empty list means no provider extension is
-installed on the described node. Extensions consume this through
+the exact shape they discovered. Production nodes also include first-party
+provider descriptors, currently the experimental mounted-model `tts@1.0.0`
+facade, so descriptor presence alone is not a liveness claim. Extensions consume this through
 `describe_node`; the light discovery layer (which nodes offer which capability
 tag) rides the telemetry plane and appears as `nodeCapabilities` in
 `GET /state`.
@@ -1282,6 +1284,9 @@ whose `io_mode` is `server_streaming`. The request body is the same pinned
 `CapabilityCall` envelope used by unary calls. Skulk checks target identity,
 handler/version/revision, the 1 MiB request limit, the descriptor's input
 schema, the per-node stream concurrency bound, and the single deadline budget.
+Providers may then perform dynamic admission, such as checking that a requested
+model is mounted and healthy, inside those same bounds and before lifecycle
+creation.
 It then returns a typed `CapabilityResult`: `ok: true` with
 `{"admitted": true}` means the stream was admitted; a pre-admission rejection
 uses the same typed call errors as the unary endpoint and creates no stream.
@@ -1314,6 +1319,36 @@ Cancellation is idempotent: an active handler is cancelled and emits one typed
 `cancelled` terminal; an already-terminal or unknown call returns
 `{"cancelled": false}`. `stream_capability` sends this request automatically
 when its iterator closes before a terminal frame.
+
+### Stream speech through the built-in TTS provider
+
+Production nodes describe a first-party `tts@1.0.0` server-streaming
+capability. It is a facade over core `mlx_audio` serving, not a second model
+runtime: the provider translates the generic call into the existing mounted
+model `SpeechSynthesis` command and translates `AudioChunk` output into raw
+binary provider media frames.
+
+Its payload accepts:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `model` | string | Required mounted TTS model id |
+| `text` | string | Required non-empty text to synthesize |
+| `response_format` | string | Optional; only `mp3` is accepted in version 1 |
+| `voice` | string | Optional model-specific voice |
+| `streaming_interval` | number | Optional positive generation cadence hint |
+| `speed`, `instruct`, `lang_code` | model-specific | Optional speech controls |
+| `temperature`, `top_p`, `top_k`, `repetition_penalty`, `max_tokens` | number | Optional model-specific sampling controls |
+
+Each `chunk` payload reports `model`, `format: "mp3"`, `chunk_index`,
+`is_partial`, and optional `sample_rate`; the MP3 bytes are carried beside it
+as an `InlineMediaAttachment` with `media_type: "audio/mpeg"`.
+
+The descriptor is always available for contract discovery, while the `tts`
+telemetry tag is advertised only when experimental mode,
+`experiments.tts_streaming`, and at least one eligible mounted model are all
+active. Dynamic admission rechecks the requested model before `started`. A
+caller cancellation propagates to the underlying synthesis command.
 
 ```bash
 curl http://localhost:52415/v1/capabilities

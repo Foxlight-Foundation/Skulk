@@ -28,6 +28,10 @@ from skulk.extensions.loader import (
     load_extensions,
     resolve_skulk_version,
 )
+from skulk.extensions.speech import (
+    TTS_CAPABILITY_DESCRIPTOR,
+    BuiltinSpeechProvider,
+)
 from skulk.extensions.streams import (
     MAX_INLINE_MEDIA_BYTES,
     BlobMediaAttachment,
@@ -51,6 +55,7 @@ from skulk.extensions.types import (
     CallCapability,
     CapabilityCallHandler,
     CapabilityProvider,
+    CapabilityStreamAdmissionHandler,
     CapabilityStreamHandler,
     ChatMiddleware,
     ChatResponseSummary,
@@ -74,6 +79,7 @@ __all__ = [
     "AdvertiseCapability",
     "BaseChatMiddleware",
     "BlobMediaAttachment",
+    "BuiltinSpeechProvider",
     "CallCapability",
     "CapabilityCall",
     "CapabilityCallHandler",
@@ -87,6 +93,7 @@ __all__ = [
     "CapabilityStreamErrorCode",
     "CapabilityStreamFrame",
     "CapabilityStreamCancel",
+    "CapabilityStreamAdmissionHandler",
     "CapabilityStreamHandler",
     "CapabilityStreamReceiveBatch",
     "CapabilityStreamReceiver",
@@ -103,6 +110,7 @@ __all__ = [
     "ReadClusterTelemetry",
     "SkulkExtension",
     "SupportsExtensionStartup",
+    "TTS_CAPABILITY_DESCRIPTOR",
     "StreamDirection",
     "StreamCapability",
     "WithdrawCapability",

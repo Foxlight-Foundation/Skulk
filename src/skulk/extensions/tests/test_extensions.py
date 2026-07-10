@@ -417,6 +417,23 @@ class _RaisingProviderExtension(_StubExtension):
         raise RuntimeError("on_start exploded")
 
 
+class _StatefulProviderExtension(_ProviderExtension):
+    """Provider whose discovery methods must run exactly once."""
+
+    def __init__(self) -> None:
+        super().__init__(name="stateful")
+        self.middleware_calls = 0
+        self.capability_calls = 0
+
+    def chat_middleware(self) -> None:
+        self.middleware_calls += 1
+        return None
+
+    def capabilities(self) -> list[CapabilityDescriptor]:
+        self.capability_calls += 1
+        return super().capabilities()
+
+
 def test_provider_descriptors_are_collected() -> None:
     loaded = LoadedExtensions([_ProviderExtension(), _StubExtension()])
     assert loaded.capability_descriptors == (_ECHO_DESCRIPTOR,)
@@ -430,6 +447,29 @@ def test_duplicate_qualified_ids_are_rejected() -> None:
         [_ProviderExtension(name="first"), _ProviderExtension(name="second")]
     )
     assert loaded.capability_descriptors == (_ECHO_DESCRIPTOR,)
+
+
+def test_builtin_extensions_take_precedence_over_external_duplicates() -> None:
+    external = LoadedExtensions([_ProviderExtension(name="external")])
+
+    combined = external.with_builtin_extensions(
+        [_ProviderExtension(name="builtin")]
+    )
+
+    assert combined.names == ["builtin", "external"]
+    assert combined.capability_descriptors == (_ECHO_DESCRIPTOR,)
+
+
+def test_builtin_composition_does_not_rediscover_external_extensions() -> None:
+    provider = _StatefulProviderExtension()
+    external = LoadedExtensions([provider])
+
+    combined = external.with_builtin_extensions([_StubExtension(name="builtin")])
+
+    assert provider.middleware_calls == 1
+    assert provider.capability_calls == 1
+    assert combined.names == ["builtin", "stateful"]
+    assert combined.capability_descriptors == (_ECHO_DESCRIPTOR,)
 
 
 def test_raising_capabilities_loads_extension_without_them() -> None:

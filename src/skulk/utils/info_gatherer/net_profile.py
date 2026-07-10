@@ -1,6 +1,7 @@
 import ipaddress
 from collections import defaultdict
 from collections.abc import AsyncGenerator, Mapping
+from contextlib import suppress
 
 import anyio
 import httpx
@@ -150,3 +151,67 @@ async def check_reachable(
         with recv:
             async for item in recv:
                 yield item
+
+
+async def first_reachable_ip(
+    topology: Topology,
+    self_node_id: NodeId,
+    node_network: Mapping[NodeId, NodeNetworkInfo],
+    target_node_id: NodeId,
+) -> str | None:
+    """Return the first verified API address for one target node.
+
+    Unlike :func:`check_reachable`, this helper owns and closes its probe task
+    group before returning. Callers can therefore stop at the first hit without
+    finalizing an async generator whose AnyIO cancel scope is still active.
+    """
+
+    if (
+        target_node_id == self_node_id
+        or target_node_id not in topology.list_nodes()
+        or target_node_id not in node_network
+    ):
+        return None
+    target_ips = [
+        interface.ip_address
+        for interface in node_network[target_node_id].interfaces
+        if _should_probe_remote_ip(interface.ip_address)
+    ]
+    if not target_ips:
+        return None
+
+    send, recv = channel[str]()
+    timeout = httpx.Timeout(timeout=5.0)
+    limits = httpx.Limits(
+        max_connections=100,
+        max_keepalive_connections=20,
+        keepalive_expiry=5,
+    )
+
+    async def _probe_first(
+        target_ip: str,
+        client: httpx.AsyncClient,
+        probe_sender: Sender[str],
+    ) -> None:
+        async with probe_sender:
+            out: defaultdict[NodeId, set[str]] = defaultdict(set)
+            await check_reachability(target_ip, target_node_id, out, client)
+            if target_node_id in out:
+                # Another interface may win and close the receiver before this
+                # probe publishes. That late result is intentionally disposable.
+                with suppress(anyio.BrokenResourceError, anyio.ClosedResourceError):
+                    await probe_sender.send(target_ip)
+
+    result: str | None = None
+    async with (
+        httpx.AsyncClient(timeout=timeout, limits=limits, verify=False) as client,
+        create_task_group() as task_group,
+    ):
+        for target_ip in target_ips:
+            task_group.start_soon(_probe_first, target_ip, client, send.clone())
+        send.close()
+        with recv, suppress(anyio.EndOfStream):
+            result = await recv.receive()
+        if result is not None:
+            task_group.cancel_scope.cancel()
+    return result

@@ -32,6 +32,10 @@ intentional:
 - the worker assembles bounded audio uploads before dispatching STT tasks;
 - the speech runner emits `AudioChunk` output for TTS and terminal
   `TranscriptionChunk` output for STT on the data plane;
+- production nodes expose a built-in `tts@1.0.0` server-streaming provider
+  facade over that same core TTS path. It emits raw MP3 media over
+  `PROVIDER_DATA`, advertises liveness only while eligible mounted capacity is
+  available, and propagates provider cancellation to the core command;
 - browser microphone capture and playback stay in the dashboard layer.
 
 Realtime should not bypass those contracts. It adds session lifetime and partial
@@ -40,15 +44,21 @@ guardrails, and data-plane ownership.
 
 ## Realtime STT Target
 
-The first realtime API target is an OpenAI-compatible subset:
+The first realtime transport target is the generic provider contract, followed
+by an OpenAI-compatible edge:
 
 ```text
-WS /v1/realtime
+CapabilityDescriptor(io_mode="client_streaming" or "bidirectional")
+then WS /v1/realtime
 ```
 
-The initial scope is realtime STT, not full duplex voice chat. A session accepts
-client audio frames, forwards them to one mounted STT runner session, and emits
-partial and final transcript events.
+The provider layer lands first so dashboard, SDK, agent, and future orchestration
+callers all use one speech capability rather than coupling the Fabric node to a
+WebSocket route. The initial scope is realtime STT, not full duplex voice chat.
+A session accepts ordered client audio frames, applies an explicit input
+half-close, forwards them to one mounted STT runner session, and emits partial
+and final transcript events only when the underlying model truthfully supports
+progressive transcription.
 
 ### Session Ownership
 
@@ -106,36 +116,36 @@ sequenceDiagram
 
 ## Fabric Transform Nodes
 
-Speech should become two typed transforms:
+Speech is becoming two typed provider capabilities:
 
 | Node | Input | Output |
 | --- | --- | --- |
 | `SpeechToTextNode` | `audio/*` frames or bounded clips | `text/plain`, optional language, segments, word timings |
 | `TextToSpeechNode` | `text/plain`, optional voice controls | `audio/*`, sample rate, duration, byte count |
 
-These nodes are not new physical processes at first. They are a fabric contract
-over existing placed speech models. The contract lets other workflows ask for a
-transform without knowing whether it was invoked by the dashboard, an extension,
-or a future planner-built chain.
+These nodes are not new physical processes at first. They are first-party
+provider facades over existing placed speech models. The TTS facade is the first
+implementation. The contract lets other workflows ask for a transform without
+knowing whether it was invoked by the dashboard, an extension, or a future
+planner-built chain.
 
 ### Transform Descriptor
 
-The common descriptor should include:
+The common descriptor is the shipped `CapabilityDescriptor`: id + semantic
+version, human/LLM-readable description, JSON Schemas, annotations, and an I/O
+mode (`unary`, `server_streaming`, `client_streaming`, or `bidirectional`). Calls
+pin the descriptor revision and carry caller/target identity plus one deadline.
+Binary audio rides raw `InlineMediaAttachment` frames or a managed
+`BlobMediaAttachment`; it never becomes a server-local file path or a large
+base64 field in the generic contract.
 
-- `transform_id`;
-- `input_media_type`;
-- `output_media_type`;
-- `model_id`;
-- `owner_node`;
-- `timeout_seconds`;
-- `priority`;
-- `privacy_policy`;
-- model-specific options such as language, voice, speed, response format, and
-  timestamp granularity.
+Current and planned speech contracts:
 
-The descriptor should avoid server-local file paths. Binary audio either rides a
-bounded chunk protocol or a managed blob reference with expiry and deletion
-semantics.
+| Capability | Mode | State |
+| --- | --- | --- |
+| `tts@1.0.0` | server streaming | Built-in facade implemented; experimental until fleet validation passes |
+| batch STT | unary | Planned; complete bounded audio or staged blob input |
+| realtime STT | client streaming / bidirectional | Planned after input frames and half-close land |
 
 ### Composition Examples
 
@@ -151,8 +161,10 @@ wait until transform costs, latency, and failure modes are measured.
 
 Realtime/fabric speech must preserve the existing plane split:
 
-- placement, session reservation, cancellation, and terminal status stay on the
-  control plane;
+- core model placement, runner lifecycle, and core task cancellation stay on
+  the control plane;
+- provider opening is node-addressed and direct; provider lifecycle/media uses
+  `PROVIDER_DATA`, never event-sourced State;
 - generated audio, partial transcripts, and final transcript chunks stay off the
   event log;
 - binary audio payloads must not be logged;
@@ -208,16 +220,19 @@ caller-provided filesystem paths.
 
 ## Implementation Backlog
 
-1. Add a realtime session model and command/task vocabulary without enabling a
-   public WebSocket route.
-2. Add speech transform descriptors and result summaries that can represent both
-   REST requests and future realtime sessions.
-3. Add diagnostics for active speech requests/sessions and queue depth.
-4. Add a bounded streaming input path for realtime audio frames.
-5. Add a runner-owned STT streaming-session adapter for models that expose
-   `create_streaming_session`.
-6. Add `WS /v1/realtime` behind capability checks and feature flags.
-7. Add dashboard or SDK smoke tests with synthetic microphone input.
+1. Validate the built-in `tts@1.0.0` facade locally and cross-node, including
+   progressive playback, cancellation, deadline, pressure, and terminal gates.
+2. Add caller-to-provider media frames and explicit input half-close for
+   `client_streaming` / `bidirectional` descriptors.
+3. Add a built-in realtime STT facade only for models whose runner can open a
+   true streaming session; batch-backed models must not advertise progressive
+   output.
+4. Add a batch STT unary facade using bounded inline media or staged blobs.
+5. Add speech-specific diagnostics for active requests/sessions, queue depth,
+   first audio/transcript latency, and cancellation reason.
+6. Add `WS /v1/realtime` as a compatibility edge over the provider contract,
+   behind capability checks and feature flags.
+7. Add dashboard and SDK smoke tests with synthetic microphone input.
 8. Add result-ledger speech metrics once the ledger schema can represent audio
    and transcript artifacts safely.
 

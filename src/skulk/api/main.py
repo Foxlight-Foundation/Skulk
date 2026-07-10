@@ -176,10 +176,14 @@ from skulk.extensions import (
     DEFAULT_CALL_TIMEOUT_SECONDS,
     MAX_CALL_PAYLOAD_BYTES,
     MAX_CALL_TIMEOUT_SECONDS,
+    TTS_CAPABILITY_DESCRIPTOR,
+    BuiltinSpeechProvider,
     CapabilityCall,
     CapabilityDescriptor,
+    CapabilityError,
     CapabilityErrorCode,
     CapabilityResult,
+    CapabilityStreamAdmissionHandler,
     CapabilityStreamCancel,
     CapabilityStreamError,
     CapabilityStreamErrorCode,
@@ -188,6 +192,7 @@ from skulk.extensions import (
     CapabilityStreamReceiver,
     CapabilityStreamSession,
     ExtensionContext,
+    InlineMediaAttachment,
     LoadedExtensions,
     call_failure,
     descriptor_revision,
@@ -306,6 +311,8 @@ from skulk.shared.types.diagnostics import (
 from skulk.shared.types.events import (
     Event,
     IndexedEvent,
+    InstanceCreated,
+    InstanceDeleted,
     StateSnapshotHydrated,
     TaskFailed,
     TaskStatusUpdated,
@@ -338,7 +345,7 @@ from skulk.tools.web_search import default_browser_tool_provider
 from skulk.utils.banner import print_startup_banner
 from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.disk_event_log import DiskEventLog
-from skulk.utils.info_gatherer.net_profile import check_reachable
+from skulk.utils.info_gatherer.net_profile import check_reachable, first_reachable_ip
 from skulk.utils.power_sampler import PowerSampler
 from skulk.utils.task_group import TaskGroup
 from skulk.worker.engines.mlx.constants import (
@@ -1021,12 +1028,27 @@ class API:
             Callable[[], DataPlaneEgressDiagnostics] | None
         ) = None,
         extensions: LoadedExtensions | None = None,
+        enable_builtin_providers: bool = False,
     ) -> None:
         self.state = State()
-        # Extensions (plugins) discovered at node startup. None or an empty
-        # set keeps every extension hook inert: no extension installed =
-        # Skulk unchanged.
-        self._extensions = extensions
+        # External extensions remain optional. Production nodes prepend
+        # first-party provider facades that expose core services through the
+        # same generic contracts without duplicating their runtimes.
+        self._builtin_speech_provider_enabled = enable_builtin_providers
+        if enable_builtin_providers:
+            loaded_extensions = extensions or LoadedExtensions([])
+            self._extensions: LoadedExtensions | None = (
+                loaded_extensions.with_builtin_extensions(
+                    (
+                        BuiltinSpeechProvider(
+                            admit_tts=self._admit_builtin_tts_stream,
+                            stream_tts=self._stream_builtin_tts,
+                        ),
+                    )
+                )
+            )
+        else:
+            self._extensions = extensions
         # (timestamp, result) of the last tailscale diagnostics probe; see
         # _tailscale_diagnostics for the TTL rationale.
         self._tailscale_diag_cache: tuple[float, NodeTailscaleDiagnostics | None] | None = None
@@ -2874,25 +2896,34 @@ class API:
         """
         for instance in self.state.instances.values():
             if instance.shard_assignments.model_id == model_id:
-                runner_to_shard = getattr(
-                    instance.shard_assignments, "runner_to_shard", None
-                )
-                if isinstance(runner_to_shard, dict):
-                    for shard in cast(dict[object, object], runner_to_shard).values():
-                        shard_model_card = cast(
-                            object, getattr(shard, "model_card", None)
-                        )
-                        if isinstance(shard_model_card, ModelCard):
-                            return shard_model_card
-                fallback_card = cast(
-                    object,
-                    getattr(instance.shard_assignments, "model_card", None),
-                )
-                if isinstance(fallback_card, ModelCard):
-                    # Older tests and any simplified in-memory stubs may attach the
-                    # card directly to shard_assignments instead of runner_to_shard.
-                    return fallback_card
+                card = self._model_card_for_instance(instance)
+                if card is not None:
+                    return card
         return await ModelCard.load(model_id)
+
+    @staticmethod
+    def _model_card_for_instance(instance: Instance) -> ModelCard | None:
+        """Return the replicated model card carried by one mounted instance."""
+
+        runner_to_shard = getattr(
+            instance.shard_assignments, "runner_to_shard", None
+        )
+        if isinstance(runner_to_shard, dict):
+            for shard in cast(dict[object, object], runner_to_shard).values():
+                shard_model_card = cast(
+                    object, getattr(shard, "model_card", None)
+                )
+                if isinstance(shard_model_card, ModelCard):
+                    return shard_model_card
+        fallback_card = cast(
+            object,
+            getattr(instance.shard_assignments, "model_card", None),
+        )
+        if isinstance(fallback_card, ModelCard):
+            # Older tests and simplified in-memory stubs may attach the card
+            # directly instead of through runner_to_shard.
+            return fallback_card
+        return None
 
     async def _validate_image_model(self, model: ModelId) -> ModelId:
         """Validate model exists and return resolved model ID.
@@ -3025,6 +3056,44 @@ class API:
             and config.experiments is not None
             and config.experiments.tts_streaming
         )
+
+    def _has_mounted_streaming_tts_model(self) -> bool:
+        """Return whether core serving currently exposes eligible TTS capacity."""
+
+        if (
+            not self._builtin_speech_provider_enabled
+            or not experimental_mode_enabled()
+            or not self._tts_streaming_experiment_enabled()
+        ):
+            return False
+        for instance in self.state.instances.values():
+            card = self._model_card_for_instance(instance)
+            if card is None or card.audio is None:
+                continue
+            profile = resolve_model_capability_profile(
+                card.model_id,
+                model_card=card,
+            )
+            if (
+                profile.supports_speech_synthesis
+                and card.audio.supports_streaming is True
+                and (
+                    not profile.audio_response_formats
+                    or AudioResponseFormat.Mp3 in profile.audio_response_formats
+                )
+            ):
+                return True
+        return False
+
+    def _sync_builtin_speech_capability(self) -> None:
+        """Advertise TTS only while the core runtime can truthfully serve it."""
+
+        if not self._builtin_speech_provider_enabled:
+            return
+        if self._has_mounted_streaming_tts_model():
+            self._advertise_capability(TTS_CAPABILITY_DESCRIPTOR.id)
+        else:
+            self._withdraw_capability(TTS_CAPABILITY_DESCRIPTOR.id)
 
     async def _validate_audio_transcription_model(self, model_id: ModelId) -> ModelId:
         """Validate a mounted speech-to-text model exists and is servable."""
@@ -3461,7 +3530,49 @@ class API:
                     return call_failure(
                         call.call_id, "invalid_payload", schema_error
                     )
+
+                # Reserve before admission can yield so concurrent opens cannot
+                # race past the stream bound. Rejections release this provisional
+                # entry; successful dispatch hands ownership to the runner.
+                active = _ActiveProviderStream(
+                    caller_node=call.caller_node,
+                    cancel_requested=anyio.Event(),
+                )
+                self._active_capability_streams[call.call_id] = active
+                if isinstance(handler, CapabilityStreamAdmissionHandler):
+                    try:
+                        admission_error = await handler.admit_stream(
+                            self._extension_context,
+                            call,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - provider boundary
+                        logger.opt(exception=exc).warning(
+                            f"capability stream admission for {qualified_id} raised"
+                        )
+                        self._active_capability_streams.pop(call.call_id, None)
+                        return call_failure(
+                            call.call_id,
+                            "provider_error",
+                            f"stream admission raised {type(exc).__name__}: {exc}",
+                        )
+                    if admission_error is not None:
+                        self._active_capability_streams.pop(call.call_id, None)
+                        if not isinstance(admission_error, CapabilityError):  # pyright: ignore[reportUnnecessaryIsInstance]
+                            return call_failure(
+                                call.call_id,
+                                "provider_error",
+                                "stream admission returned an invalid result",
+                            )
+                        return CapabilityResult(
+                            call_id=call.call_id,
+                            ok=False,
+                            error=admission_error,
+                        )
+        except anyio.get_cancelled_exc_class():
+            self._active_capability_streams.pop(call.call_id, None)
+            raise
         except TimeoutError:
+            self._active_capability_streams.pop(call.call_id, None)
             return call_failure(
                 call.call_id,
                 "timeout",
@@ -3470,17 +3581,13 @@ class API:
 
         remaining = call.timeout_seconds - (anyio.current_time() - started_at)
         if remaining <= 0:
+            self._active_capability_streams.pop(call.call_id, None)
             return call_failure(
                 call.call_id,
                 "timeout",
                 "provider stream deadline expired during admission",
             )
         admitted_call = call.model_copy(update={"timeout_seconds": remaining})
-        active = _ActiveProviderStream(
-            caller_node=call.caller_node,
-            cancel_requested=anyio.Event(),
-        )
-        self._active_capability_streams[call.call_id] = active
         try:
             self._tg.start_soon(
                 self._run_capability_stream,
@@ -3849,15 +3956,28 @@ class API:
         terminal_yielded = False
         last_yielded_sequence = -1
         try:
-            remaining = max(0.0, state.deadline_at - anyio.current_time())
-            with anyio.move_on_after(remaining) as deadline_scope:
-                with output_receiver as frames:
-                    async for frame in frames:
-                        yield frame
-                        last_yielded_sequence = frame.sequence
-                        if frame.is_terminal:
-                            terminal_yielded = True
-                            return
+            deadline_expired = False
+            with output_receiver as frames:
+                while True:
+                    remaining = max(0.0, state.deadline_at - anyio.current_time())
+                    frame: CapabilityStreamFrame | None = None
+                    with anyio.move_on_after(remaining) as deadline_scope:
+                        try:
+                            frame = await frames.receive()
+                        except (EndOfStream, ClosedResourceError):
+                            break
+                    if deadline_scope.cancelled_caught:
+                        deadline_expired = True
+                        break
+                    assert frame is not None
+                    last_yielded_sequence = frame.sequence
+                    if frame.is_terminal:
+                        terminal_yielded = True
+                    # A cancel scope must never span an async-generator yield:
+                    # finalization may resume the generator in a different task.
+                    yield frame
+                    if frame.is_terminal:
+                        return
             if state.transport_failure is not None:
                 state.cancel_provider = True
                 terminal = CapabilityStreamFrame(
@@ -3871,7 +3991,7 @@ class API:
                         message=state.transport_failure,
                     ),
                 )
-            elif deadline_scope.cancelled_caught:
+            elif deadline_expired:
                 state.cancel_provider = True
                 terminal = state.receiver.fail(
                     "timeout",
@@ -5326,6 +5446,12 @@ class API:
                     self._maybe_compact_event_log()
                 self.state = apply(self.state, i_event)
 
+                if isinstance(
+                    event,
+                    (InstanceCreated, InstanceDeleted, StateSnapshotHydrated),
+                ):
+                    self._sync_builtin_speech_capability()
+
                 # Prune telemetry for timed-out nodes from the API applier too,
                 # so a --no-worker node still tracks live membership (#279).
                 record_membership_from_event(self._telemetry_view, event)
@@ -6098,20 +6224,21 @@ class API:
         """Resolve one peer's API base URL, stopping at the first hit.
 
         The capability-call hot path must not wait for every peer probe to
-        finish (a stale peer's failed probe would delay an unrelated call);
-        the reachability generator yields as probes complete, so stop as soon
-        as the target answers.
+        finish (a stale peer's failed probe would delay an unrelated call).
+        Probe only the requested node and cancel its remaining interface probes
+        as soon as one verified address answers.
         """
-        target = str(node_id)
-        async for ip_address, probed_node_id in check_reachable(
+
+        ip_address = await first_reachable_ip(
             self.state.topology,
             self.node_id,
             self.state.node_network,
-        ):
-            if str(probed_node_id) == target:
-                host = f"[{ip_address}]" if ":" in ip_address else ip_address
-                return f"http://{host}:52415"
-        return None
+            node_id,
+        )
+        if ip_address is None:
+            return None
+        host = f"[{ip_address}]" if ":" in ip_address else ip_address
+        return f"http://{host}:52415"
 
     async def _reachable_peer_api_urls(self) -> dict[str, str]:
         """Return reachable peer API base URLs keyed by node ID."""
@@ -7427,6 +7554,7 @@ class API:
         with self._config_path.open("w") as f:
             f.write(config_yaml)
         self._skulk_config = parsed_config
+        self._sync_builtin_speech_capability()
         # Broadcast to all nodes via gossipsub — strip hf_token (secret).
         import copy
 
@@ -7811,6 +7939,211 @@ class API:
                 ),
             )
 
+    @staticmethod
+    def _speech_synthesis_task_params(
+        request: AudioSpeechRequest,
+        model_id: ModelId,
+        response_format: AudioResponseFormat,
+    ) -> SpeechSynthesisTaskParams:
+        """Translate a validated API/facade request into the core task contract."""
+
+        return SpeechSynthesisTaskParams(
+            model=model_id,
+            input_text=request.input,
+            response_format=response_format,
+            voice=request.voice,
+            speed=request.speed,
+            instruct=request.instruct,
+            lang_code=request.lang_code,
+            temperature=request.temperature,
+            top_p=request.top_p,
+            top_k=request.top_k,
+            repetition_penalty=request.repetition_penalty,
+            max_tokens=request.max_tokens,
+            stream=request.stream,
+            streaming_interval=request.streaming_interval,
+        )
+
+    async def _start_speech_synthesis(
+        self,
+        task_params: SpeechSynthesisTaskParams,
+    ) -> tuple[CommandId, Receiver[AudioChunk | ErrorChunk]]:
+        """Submit one core TTS command and register its DATA receive queue."""
+
+        command = SpeechSynthesis(
+            owner_node=self.node_id,
+            task_params=task_params,
+        )
+        command_id = command.command_id
+        self._audio_speech_queues[command_id], recv = channel[AudioChunk | ErrorChunk]()
+        try:
+            await self._send(command)
+        except Exception:
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._audio_speech_queues,
+                ),
+            )
+            raise
+        return command_id, recv
+
+    async def _prepare_builtin_tts_task(
+        self,
+        call: CapabilityCall,
+    ) -> SpeechSynthesisTaskParams:
+        """Validate one generic TTS payload against live core speech state."""
+
+        request_payload = dict(call.payload)
+        text = request_payload.pop("text", None)
+        if not isinstance(text, str) or not text:
+            raise HTTPException(
+                status_code=422,
+                detail="TTS provider payload requires non-empty text",
+            )
+        request_payload["input"] = text
+        request_payload["stream"] = True
+        request_payload.setdefault("response_format", AudioResponseFormat.Mp3.value)
+        request = AudioSpeechRequest.model_validate(request_payload)
+        model_id, response_format = await self._validate_speech_synthesis_model(
+            ModelId(request.model),
+            request.response_format,
+            stream=True,
+        )
+        if response_format not in _STREAMABLE_AUDIO_RESPONSE_FORMATS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "The TTS provider facade currently streams only mp3 audio; "
+                    f"resolved {response_format.value}"
+                ),
+            )
+        return self._speech_synthesis_task_params(
+            request,
+            model_id,
+            response_format,
+        )
+
+    async def _admit_builtin_tts_stream(
+        self,
+        call: CapabilityCall,
+    ) -> CapabilityError | None:
+        """Reject an unavailable or invalid mounted TTS request before start."""
+
+        if not self._has_mounted_streaming_tts_model():
+            return CapabilityError(
+                code="not_found",
+                message="no streaming TTS capacity is currently advertised",
+            )
+        requested_model = call.payload.get("model")
+        if not isinstance(requested_model, str) or not any(
+            instance.shard_assignments.model_id == ModelId(requested_model)
+            for instance in self.state.instances.values()
+        ):
+            return CapabilityError(
+                code="not_found",
+                message=f"no mounted TTS instance for model {requested_model!r}",
+            )
+        try:
+            await self._prepare_builtin_tts_task(call)
+        except ValidationError as exc:
+            return CapabilityError(code="invalid_payload", message=str(exc))
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                code: CapabilityErrorCode = "not_found"
+            elif exc.status_code in (400, 422):
+                code = "invalid_payload"
+            else:
+                code = "provider_error"
+            return CapabilityError(code=code, message=str(exc.detail))
+        return None
+
+    async def _stream_builtin_tts(
+        self,
+        call: CapabilityCall,
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        """Stream core ``AudioChunk`` output as generic binary media frames."""
+
+        try:
+            task_params = await self._prepare_builtin_tts_task(call)
+        except (ValidationError, HTTPException) as exc:
+            raise RuntimeError(f"TTS availability changed after admission: {exc}") from exc
+        command_id, recv = await self._start_speech_synthesis(task_params)
+        sequence = 1
+        received_audio = False
+        terminal_received = False
+        try:
+            with recv as chunks:
+                while True:
+                    chunk: AudioChunk | ErrorChunk | None = None
+                    with anyio.move_on_after(_STREAM_IDLE_TIMEOUT_SECONDS) as scope:
+                        try:
+                            chunk = await chunks.receive()
+                        except (EndOfStream, ClosedResourceError) as exc:
+                            raise RuntimeError(
+                                "Core TTS DATA stream closed without a terminal chunk"
+                            ) from exc
+                    if scope.cancelled_caught:
+                        self._data_plane_observer.record_idle_timeout()
+                        raise RuntimeError(
+                            "Core TTS DATA stream exceeded its idle deadline"
+                        )
+                    assert chunk is not None
+                    if isinstance(chunk, ErrorChunk):
+                        raise RuntimeError(
+                            f"Core speech synthesis failed: {chunk.error_message}"
+                        )
+                    audio_bytes = _decode_audio_chunk_data(chunk)
+                    if audio_bytes:
+                        received_audio = True
+                        payload: dict[str, object] = {
+                            "model": str(chunk.model),
+                            "format": chunk.format.value,
+                            "chunk_index": chunk.chunk_index,
+                            "is_partial": chunk.is_partial,
+                        }
+                        if chunk.sample_rate is not None:
+                            payload["sample_rate"] = chunk.sample_rate
+                        yield CapabilityStreamFrame(
+                            call_id=call.call_id,
+                            direction="provider_to_caller",
+                            sequence=sequence,
+                            kind="chunk",
+                            payload=payload,
+                            media=InlineMediaAttachment(
+                                data=audio_bytes,
+                                media_type=_AUDIO_CONTENT_TYPES[chunk.format],
+                                codec=chunk.format.value,
+                                sample_rate=chunk.sample_rate,
+                            ),
+                        )
+                        sequence += 1
+                    if chunk.finish_reason is not None:
+                        if not received_audio:
+                            raise RuntimeError("Core TTS produced no audio")
+                        terminal_received = True
+                        yield CapabilityStreamFrame(
+                            call_id=call.call_id,
+                            direction="provider_to_caller",
+                            sequence=sequence,
+                            kind="completed",
+                        )
+                        return
+        finally:
+            if (
+                not terminal_received
+                and not self._command_task_is_terminal(command_id)
+            ):
+                await self._cancel_audio_speech_command(command_id)
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._audio_speech_queues,
+                ),
+            )
+
     async def audio_speech(self, request: AudioSpeechRequest) -> Response:
         """OpenAI-compatible text-to-speech endpoint."""
 
@@ -7858,38 +8191,13 @@ class API:
                     f"requested {response_format.value}"
                 ),
             )
-        command = SpeechSynthesis(
-            owner_node=self.node_id,
-            task_params=SpeechSynthesisTaskParams(
-                model=model_id,
-                input_text=request.input,
-                response_format=response_format,
-                voice=request.voice,
-                speed=request.speed,
-                instruct=request.instruct,
-                lang_code=request.lang_code,
-                temperature=request.temperature,
-                top_p=request.top_p,
-                top_k=request.top_k,
-                repetition_penalty=request.repetition_penalty,
-                max_tokens=request.max_tokens,
-                stream=request.stream,
-                streaming_interval=request.streaming_interval,
-            ),
-        )
-        command_id = command.command_id
-        self._audio_speech_queues[command_id], recv = channel[AudioChunk | ErrorChunk]()
-        try:
-            await self._send(command)
-        except Exception:
-            await self._finalize_command_stream(
-                command_id,
-                cast(
-                    dict[CommandId, Sender[object]],
-                    self._audio_speech_queues,
-                ),
+        command_id, recv = await self._start_speech_synthesis(
+            self._speech_synthesis_task_params(
+                request,
+                model_id,
+                response_format,
             )
-            raise
+        )
 
         if request.stream:
             try:
