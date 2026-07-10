@@ -1050,7 +1050,13 @@ Behavior notes:
 
 - `GET /v1/diagnostics/node` returns the local node's runtime/config facts,
   resources, process tree, live runner-supervisor state, flight-recorder phase
-  state, and placement analysis.
+  state, placement analysis, and a `dataPlane` block. DATA diagnostics include
+  transport/reorder mode; active and terminal lifecycle counts; first-byte and
+  stream-span timing; duplicate, reordered, skipped, late, idle-timeout,
+  transport-failure, and missing-lifecycle counters; plus router egress queue
+  depth, independent command-queue count, per-owner pressure, drops, publish
+  failures, byte volume, and enqueue/publish latency. The dashboard Node tab
+  renders the operational subset and highlights non-zero failure counters.
 - `POST /v1/diagnostics/node/capture` collects an on-demand local diagnostic
   bundle. Body fields are `runnerId`, `taskId`, `includeProcessSamples`, and
   `sampleDurationSeconds`; all are optional. When a runner/task is provided,
@@ -1081,8 +1087,8 @@ Behavior notes:
 - Placement diagnostics explicitly include whether the current master is part of
   each model placement, which helps investigate hangs where the master is not
   one of the inference ranks.
-- The dashboard node-card bug icon uses these endpoints to open a live
-  diagnostics drawer for any reachable node.
+- The dashboard node inspect icon uses these endpoints to open live diagnostics
+  for any reachable node. DATA pressure appears in the `DATA Plane` section.
 - The diagnostics drawer prefers `Capture bundle` before cancellation so
   operators can collect phase, MLX memory, and process samples before changing
   the runner state.

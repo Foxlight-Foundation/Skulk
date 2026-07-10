@@ -219,6 +219,68 @@ export interface NodeTailscaleDiagnostics {
   dnsName?: string | null;
 }
 
+/** DATA egress pressure accumulated for one opaque remote owner id. */
+export interface DataPlaneOwnerDiagnostics {
+  queueDepth: number;
+  activeStreams: number;
+  maxQueueDepth: number;
+  framesEnqueued: number;
+  framesPublished: number;
+  framesDropped: number;
+  publishFailures: number;
+}
+
+/** Router-side queue isolation and remote publish metrics. */
+export interface DataPlaneEgressDiagnostics {
+  activeStreamQueues: number;
+  queueDepth: number;
+  maxQueueDepth: number;
+  localShortCircuits: number;
+  remoteFramesEnqueued: number;
+  remoteFramesPublished: number;
+  remoteFramesDropped: number;
+  remotePublishFailures: number;
+  remoteBytesPublished: number;
+  enqueueLatencySamples: number;
+  enqueueLatencySecondsAverage?: number | null;
+  enqueueLatencySecondsMax?: number | null;
+  publishLatencySamples: number;
+  publishLatencySecondsAverage?: number | null;
+  publishLatencySecondsMax?: number | null;
+  owners: Record<string, DataPlaneOwnerDiagnostics>;
+}
+
+/** API and router metrics for ordered DATA stream lifecycle health. */
+export interface DataPlaneDiagnostics {
+  transport: 'disabled' | 'gossipsub' | 'zenoh';
+  reorderBufferEnabled: boolean;
+  activeStreams: number;
+  framesReceived: number;
+  framesDispatched: number;
+  startedFrames: number;
+  chunkFrames: number;
+  completedFrames: number;
+  failedFrames: number;
+  cancelledFrames: number;
+  duplicateFrames: number;
+  outOfOrderFrames: number;
+  skippedSequences: number;
+  lateFrames: number;
+  missingStartedStreams: number;
+  missingTerminalStreams: number;
+  idleTimeouts: number;
+  transportFailures: number;
+  firstByteSamples: number;
+  firstByteSecondsLast?: number | null;
+  firstByteSecondsAverage?: number | null;
+  firstByteSecondsMax?: number | null;
+  streamSpanSamples: number;
+  streamSpanSecondsLast?: number | null;
+  streamSpanSecondsAverage?: number | null;
+  streamSpanSecondsMax?: number | null;
+  egress: DataPlaneEgressDiagnostics;
+}
+
 export interface NodeDiagnostics {
   generatedAt: string;
   runtime: DiagnosticsRuntime;
@@ -226,6 +288,7 @@ export interface NodeDiagnostics {
   processes: DiagnosticsProcess[];
   supervisorRunners: RunnerSupervisorDiagnostics[];
   placements: InstancePlacementDiagnostics[];
+  dataPlane: DataPlaneDiagnostics;
   warnings: string[];
   tailscale?: NodeTailscaleDiagnostics | null;
 }

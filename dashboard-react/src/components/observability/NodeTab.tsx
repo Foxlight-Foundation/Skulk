@@ -100,6 +100,13 @@ const Subtitle = styled.div`
   word-break: break-all;
 `;
 
+/** Format a DATA latency for compact operator scanning. */
+function formatSeconds(value: number | null | undefined): string {
+  if (value == null) return '—';
+  if (value < 1) return `${Math.round(value * 1000)} ms`;
+  return `${value.toFixed(2)} s`;
+}
+
 const EmptyHint = styled.div`
   padding: 24px 12px;
   font-family: ${({ theme }) => theme.fonts.body};
@@ -621,6 +628,52 @@ export function NodeTab({ nodeId }: NodeTabProps) {
                 <AcceleratorPanel accelerator={system.accelerator} />
               </Section>
             )}
+
+            <Section>
+              <SectionTitle>{t('observability.node.dataPlane', 'DATA Plane')}</SectionTitle>
+              <Row>
+                <Key>{t('observability.node.dataTransport', 'Transport')}</Key>
+                <Value>{diagnostics.dataPlane.transport} · {diagnostics.dataPlane.reorderBufferEnabled ? t('observability.node.reorderOn', 'reorder on') : t('observability.node.reorderOff', 'reorder off')}</Value>
+              </Row>
+              <Row>
+                <Key>{t('observability.node.activeStreams', 'Active streams')}</Key>
+                <Value>{diagnostics.dataPlane.activeStreams} · {diagnostics.dataPlane.egress.activeStreamQueues} {t('observability.node.remoteQueues', 'remote queues')}</Value>
+              </Row>
+              <Row>
+                <Key>{t('observability.node.frames', 'Frames')}</Key>
+                <Value>{diagnostics.dataPlane.framesDispatched} / {diagnostics.dataPlane.framesReceived} {t('observability.node.dispatchedReceived', 'dispatched / received')}</Value>
+              </Row>
+              <Row>
+                <Key>{t('observability.node.terminals', 'Terminals')}</Key>
+                <Value>{diagnostics.dataPlane.completedFrames} {t('observability.node.completedLower', 'completed')} · {diagnostics.dataPlane.failedFrames} {t('common.failed', 'failed')} · {diagnostics.dataPlane.cancelledFrames} {t('observability.node.cancelledLower', 'cancelled')}</Value>
+              </Row>
+              <Row>
+                <Key>{t('observability.node.deliveryAnomalies', 'Delivery anomalies')}</Key>
+                <Value $warn={diagnostics.dataPlane.duplicateFrames + diagnostics.dataPlane.outOfOrderFrames + diagnostics.dataPlane.skippedSequences + diagnostics.dataPlane.lateFrames > 0}>
+                  {diagnostics.dataPlane.duplicateFrames} {t('observability.node.duplicatesLower', 'duplicates')} · {diagnostics.dataPlane.outOfOrderFrames} {t('observability.node.reorderedLower', 'reordered')} · {diagnostics.dataPlane.skippedSequences} {t('observability.node.skippedLower', 'skipped')} · {diagnostics.dataPlane.lateFrames} {t('observability.node.lateLower', 'late')}
+                </Value>
+              </Row>
+              <Row>
+                <Key>{t('observability.node.lifecycleGaps', 'Lifecycle gaps')}</Key>
+                <Value $warn={diagnostics.dataPlane.missingStartedStreams + diagnostics.dataPlane.missingTerminalStreams + diagnostics.dataPlane.idleTimeouts + diagnostics.dataPlane.transportFailures > 0}>{diagnostics.dataPlane.missingStartedStreams} {t('observability.node.missingStart', 'missing start')} · {diagnostics.dataPlane.missingTerminalStreams} {t('observability.node.missingTerminal', 'missing terminal')} · {diagnostics.dataPlane.idleTimeouts} {t('observability.node.idleTimeouts', 'idle timeouts')} · {diagnostics.dataPlane.transportFailures} {t('observability.node.transportFailures', 'transport failures')}</Value>
+              </Row>
+              <Row>
+                <Key>{t('observability.node.firstByte', 'First byte')}</Key>
+                <Value>{formatSeconds(diagnostics.dataPlane.firstByteSecondsAverage)} {t('observability.node.averageLower', 'avg')} · {formatSeconds(diagnostics.dataPlane.firstByteSecondsMax)} {t('observability.node.maxLower', 'max')}</Value>
+              </Row>
+              <Row>
+                <Key>{t('observability.node.streamSpan', 'Stream span')}</Key>
+                <Value>{formatSeconds(diagnostics.dataPlane.streamSpanSecondsAverage)} {t('observability.node.averageLower', 'avg')} · {formatSeconds(diagnostics.dataPlane.streamSpanSecondsMax)} {t('observability.node.maxLower', 'max')}</Value>
+              </Row>
+              <Row>
+                <Key>{t('observability.node.egressQueue', 'Egress queue')}</Key>
+                <Value $warn={diagnostics.dataPlane.egress.remoteFramesDropped + diagnostics.dataPlane.egress.remotePublishFailures > 0}>{diagnostics.dataPlane.egress.queueDepth} {t('observability.node.currentLower', 'current')} · {diagnostics.dataPlane.egress.maxQueueDepth} {t('observability.node.peakLower', 'peak')}</Value>
+              </Row>
+              <Row>
+                <Key>{t('observability.node.egressOutcomes', 'Egress outcomes')}</Key>
+                <Value $warn={diagnostics.dataPlane.egress.remoteFramesDropped + diagnostics.dataPlane.egress.remotePublishFailures > 0}>{diagnostics.dataPlane.egress.remoteFramesPublished} {t('observability.node.publishedLower', 'published')} · {diagnostics.dataPlane.egress.remoteFramesDropped} {t('observability.node.droppedLower', 'dropped')} · {diagnostics.dataPlane.egress.remotePublishFailures} {t('observability.node.publishFailures', 'publish failures')}</Value>
+              </Row>
+            </Section>
 
             <Section>
               <SectionTitle>{t('observability.node.placements', 'Placements')}</SectionTitle>

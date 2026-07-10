@@ -1,5 +1,7 @@
+import time
 from collections.abc import Sequence
 from copy import copy
+from dataclasses import dataclass
 from itertools import count
 from math import inf
 from os import PathLike
@@ -9,6 +11,8 @@ from typing import cast
 from anyio import (
     BrokenResourceError,
     ClosedResourceError,
+    WouldBlock,
+    fail_after,
     get_cancelled_exc_class,
     move_on_after,
     sleep_forever,
@@ -27,27 +31,40 @@ from skulk_pyo3_bindings import (
 )
 
 from skulk.shared.constants import SKULK_NODE_ID_KEYPAIR
+from skulk.shared.types.chunks import DataChunk
+from skulk.shared.types.diagnostics import DataPlaneEgressDiagnostics
 from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.pydantic_ext import CamelCaseModel
 from skulk.utils.task_group import TaskGroup
 
 from .connection_message import ConnectionMessage
+from .data_plane import DataPlaneEgressObserver
 from .topics import CONNECTION_MESSAGES, DATA, PublishPolicy, TypedTopic
 
-# Bound on the Zenoh DATA-plane outbound channel (#312 review). The Zenoh
-# publisher uses CongestionControl::Block, so a stuck/slow subscriber parks the
-# egress task inside zenoh_publish. With an unbounded channel the producer (the
-# rank-0 worker's per-token emit) would keep enqueueing chunks during a long
-# generation and grow memory without limit until the node OOMs. A bounded channel
-# instead backpressures cross-node DATA producers (TopicRouter._send_out awaits
-# the send), so generation throttles to subscriber speed. Same-node DATA is
-# delivered locally without egress because the owning API node is already local.
-# We backpressure rather than drop cross-node chunks on purpose: the Zenoh plane
-# is Reliable+ordered, which is exactly what lets the app-layer reorder buffer be
-# skipped (#311), so dropping chunks here would break that no-loss assumption and
-# corrupt output. The buffer is sized to absorb ordinary subscriber jitter
-# without throttling steady-state streaming.
+# Bound on the fast ingress into per-command Zenoh DATA workers. The dispatcher
+# does no network awaits, so this absorbs scheduling jitter without coupling
+# TopicRouter to one remote publish. The command queues below own sustained
+# pressure and fail only their stream when full.
 _ZENOH_DATA_OUTBOUND_BUFFER = 2048
+# Each command gets an independent queue and publish task. A slow or missing
+# owner can fill only that command's bounded queue; it cannot stall unrelated
+# local or remote streams. Stream and owner caps bound the total task/memory
+# footprint under adversarial admission.
+_ZENOH_DATA_STREAM_BUFFER = 256
+_ZENOH_DATA_MAX_STREAMS_PER_OWNER = 64
+_ZENOH_DATA_MAX_ACTIVE_STREAMS = 1024
+_ZENOH_DATA_PUBLISH_TIMEOUT_SECONDS = 5.0
+
+
+@dataclass(frozen=True, slots=True)
+class OutboundPacket:
+    """One serialized topic message awaiting network egress."""
+
+    topic: str
+    routing_key: str | None
+    stream_key: str | None
+    is_terminal: bool
+    data: bytes
 
 
 # A significant current limitation of the TopicRouter is that it is not capable
@@ -58,9 +75,10 @@ class TopicRouter[T: CamelCaseModel]:
     def __init__(
         self,
         topic: TypedTopic[T],
-        networking_sender: Sender[tuple[str, str | None, bytes]],
+        networking_sender: Sender[OutboundPacket],
         max_buffer_size: float = inf,
         local_routing_key: str | None = None,
+        data_plane_egress_observer: DataPlaneEgressObserver | None = None,
     ):
         self.topic: TypedTopic[T] = topic
         self.senders: set[Sender[T]] = set()
@@ -68,10 +86,9 @@ class TopicRouter[T: CamelCaseModel]:
         send, recv = channel[T]()
         self.receiver: Receiver[T] = recv
         self._sender: Sender[T] = send
-        self.networking_sender: Sender[tuple[str, str | None, bytes]] = (
-            networking_sender
-        )
+        self.networking_sender = networking_sender
         self.local_routing_key = local_routing_key
+        self._data_plane_egress_observer = data_plane_egress_observer
 
     async def run(self):
         logger.debug(f"Topic Router {self.topic} ready to send")
@@ -87,6 +104,8 @@ class TopicRouter[T: CamelCaseModel]:
                     # same-node stream and collapse it into a late burst.
                     await self.publish(item, origin=None)
                     if self._routes_to_local_node(item):
+                        if self._data_plane_egress_observer is not None:
+                            self._data_plane_egress_observer.record_local_short_circuit()
                         continue
                     await self._send_out(item)
                     continue
@@ -168,9 +187,21 @@ class TopicRouter[T: CamelCaseModel]:
             if self.topic.routing_key is not None
             else None
         )
+        started_at = time.monotonic()
+        stream_key = str(item.command_id) if isinstance(item, DataChunk) else None
         await self.networking_sender.send(
-            (str(self.topic.topic), routing_key, self.topic.serialize(item))
+            OutboundPacket(
+                topic=str(self.topic.topic),
+                routing_key=routing_key,
+                stream_key=stream_key,
+                is_terminal=isinstance(item, DataChunk) and item.is_terminal,
+                data=self.topic.serialize(item),
+            )
         )
+        if isinstance(item, DataChunk) and self._data_plane_egress_observer is not None:
+            self._data_plane_egress_observer.record_enqueue_latency(
+                time.monotonic() - started_at
+            )
 
 
 class Router:
@@ -213,8 +244,8 @@ class Router:
         node_id: str = "",
     ):
         self.topic_routers: dict[str, TopicRouter[CamelCaseModel]] = {}
-        send, recv = channel[tuple[str, str | None, bytes]]()
-        self.networking_receiver: Receiver[tuple[str, str | None, bytes]] = recv
+        send, recv = channel[OutboundPacket]()
+        self.networking_receiver: Receiver[OutboundPacket] = recv
         self._net: NetworkingHandle = handle
         # Optional Zenoh transport for the data plane; None keeps everything on
         # gossipsub (default, until the flag is proven in production).
@@ -231,9 +262,7 @@ class Router:
                 "is enabled (it is the data/<node_id> subscription key)."
             )
         self._node_id: str = node_id
-        self._tmp_networking_sender: Sender[tuple[str, str | None, bytes]] | None = (
-            send
-        )
+        self._tmp_networking_sender: Sender[OutboundPacket] | None = send
         # Dedicated outbound channel for the Zenoh DATA plane (#309): the DATA
         # path publishes with CongestionControl::Block, so a stuck/slow
         # subscriber can stall its egress. Draining it on its OWN loop (not the
@@ -242,12 +271,11 @@ class Router:
         # review) so a stalled subscriber backpressures the producer instead of
         # growing memory without limit and OOMing the node. Only created when
         # Zenoh is on.
-        self._zenoh_out_send: Sender[tuple[str, str | None, bytes]] | None = None
-        self._zenoh_out_recv: Receiver[tuple[str, str | None, bytes]] | None = None
+        self._zenoh_out_send: Sender[OutboundPacket] | None = None
+        self._zenoh_out_recv: Receiver[OutboundPacket] | None = None
+        self._data_plane_egress_observer = DataPlaneEgressObserver()
         if zenoh is not None:
-            zsend, zrecv = channel[tuple[str, str | None, bytes]](
-                _ZENOH_DATA_OUTBOUND_BUFFER
-            )
+            zsend, zrecv = channel[OutboundPacket](_ZENOH_DATA_OUTBOUND_BUFFER)
             self._zenoh_out_send = zsend
             self._zenoh_out_recv = zrecv
         self._id_count = count()
@@ -270,7 +298,16 @@ class Router:
             else:
                 send = self.networking_receiver.clone_sender()
         local_routing_key = self._node_id if topic.topic == DATA.topic else None
-        router = TopicRouter[T](topic, send, local_routing_key=local_routing_key)
+        router = TopicRouter[T](
+            topic,
+            send,
+            local_routing_key=local_routing_key,
+            data_plane_egress_observer=(
+                self._data_plane_egress_observer
+                if topic.topic == DATA.topic
+                else None
+            ),
+        )
         self.topic_routers[topic.topic] = cast(TopicRouter[CamelCaseModel], router)
         if self._tg.is_running():
             await self._networking_subscribe(topic.topic)
@@ -337,6 +374,11 @@ class Router:
     async def shutdown(self):
         logger.debug("Shutting down Router")
         self._tg.cancel_tasks()
+
+    def data_plane_egress_diagnostics(self) -> DataPlaneEgressDiagnostics:
+        """Return process-local DATA egress pressure and isolation metrics."""
+
+        return self._data_plane_egress_observer.snapshot()
 
     async def _networking_subscribe(self, topic: str):
         if self.uses_zenoh(topic):
@@ -434,21 +476,26 @@ class Router:
         # never reaches this shared loop (#309). routing_key is gossipsub-irrelevant
         # (bare-topic broadcast).
         with self.networking_receiver as networked_items:
-            async for topic, _routing_key, data in networked_items:
+            async for packet in networked_items:
                 try:
-                    logger.trace(f"Sending message on {topic} with payload {data}")
-                    if len(data) > 1024 * 1024:
+                    logger.trace(
+                        f"Sending message on {packet.topic} with payload {packet.data}"
+                    )
+                    if len(packet.data) > 1024 * 1024:
                         logger.warning(
                             "Sending overlarge payload, network performance may be temporarily degraded"
                         )
-                    await self._net.gossipsub_publish(topic, data)
+                    await self._net.gossipsub_publish(packet.topic, packet.data)
                 except NoPeersSubscribedToTopicError:
                     pass
                 except AllQueuesFullError:
-                    logger.warning(f"All peer queues full, dropping message on {topic}")
+                    logger.warning(
+                        f"All peer queues full, dropping message on {packet.topic}"
+                    )
                 except MessageTooLargeError:
                     logger.warning(
-                        f"Message too large for gossipsub on {topic} ({len(data)} bytes), dropping"
+                        f"Message too large for gossipsub on {packet.topic} "
+                        f"({len(packet.data)} bytes), dropping"
                     )
 
     async def _zenoh_networking_publish(self):
@@ -460,31 +507,121 @@ class Router:
         failure is logged and dropped rather than allowed to tear the loop down.
         """
         assert self._zenoh is not None and self._zenoh_out_recv is not None
-        with self._zenoh_out_recv as items:
-            async for topic, routing_key, data in items:
+        stream_senders: dict[tuple[str, str], Sender[OutboundPacket]] = {}
+        owner_stream_counts: dict[str, int] = {}
+        async with TaskGroup() as task_group:
+            with self._zenoh_out_recv as items:
+                async for packet in items:
                 # Nodes subscribe only to data/<own_node_id>, never the bare
                 # topic, so a keyless message reaches no subscriber. Every serving
                 # task carries owner_node (#279 Phase 2), so this should not
                 # happen - warn loudly rather than drop silently (#310 review).
-                if not routing_key:
-                    logger.warning(
-                        f"Zenoh DATA publish on {topic} has no routing key "
-                        f"(owner_node unset); no node subscribes to the bare topic, "
-                        f"so this output would be lost. Dropping a chunk of "
-                        f"{len(data)} bytes."
-                    )
-                    continue
-                try:
-                    await self._zenoh.zenoh_publish(f"{topic}/{routing_key}", data)
-                except get_cancelled_exc_class():
-                    # Honor shutdown: never let the best-effort drop below swallow
-                    # task cancellation and keep this loop alive (#312 review).
-                    raise
-                except Exception as exception:
-                    logger.opt(exception=exception).warning(
-                        f"Zenoh DATA publish on {topic}/{routing_key} failed; "
-                        f"dropping chunk (best-effort data plane)"
-                    )
+                    if not packet.routing_key:
+                        logger.warning(
+                            f"Zenoh DATA publish on {packet.topic} has no routing key "
+                            f"(owner_node unset); no node subscribes to the bare topic, "
+                            f"so this output would be lost. Dropping a chunk of "
+                            f"{len(packet.data)} bytes."
+                        )
+                        continue
+                    owner = packet.routing_key
+                    if packet.stream_key is None:
+                        logger.warning(
+                            "Zenoh DATA frame has no command stream key; dropping it"
+                        )
+                        self._data_plane_egress_observer.record_dropped(owner)
+                        continue
+                    stream = (owner, packet.stream_key)
+                    sender = stream_senders.get(stream)
+                    if sender is None:
+                        if (
+                            len(stream_senders) >= _ZENOH_DATA_MAX_ACTIVE_STREAMS
+                            or owner_stream_counts.get(owner, 0)
+                            >= _ZENOH_DATA_MAX_STREAMS_PER_OWNER
+                        ):
+                            self._data_plane_egress_observer.record_dropped(owner)
+                            logger.warning(
+                                "Zenoh DATA stream admission full for owner; "
+                                "dropping command frame"
+                            )
+                            continue
+                        sender, receiver = channel[OutboundPacket](
+                            _ZENOH_DATA_STREAM_BUFFER
+                        )
+                        stream_senders[stream] = sender
+                        owner_stream_counts[owner] = (
+                            owner_stream_counts.get(owner, 0) + 1
+                        )
+                        self._data_plane_egress_observer.record_stream_opened(owner)
+                        task_group.start_soon(
+                            self._publish_zenoh_data_stream,
+                            stream,
+                            receiver,
+                            stream_senders,
+                            owner_stream_counts,
+                        )
+                    try:
+                        sender.send_nowait(packet)
+                    except WouldBlock:
+                        self._data_plane_egress_observer.record_dropped(owner)
+                        logger.warning(
+                            "Zenoh DATA command queue full; dropping frame so "
+                            "unrelated streams remain progressive"
+                        )
+                        if packet.is_terminal:
+                            sender.close()
+                        continue
+                    self._data_plane_egress_observer.record_enqueued(owner)
+
+    async def _publish_zenoh_data_stream(
+        self,
+        stream: tuple[str, str],
+        receiver: Receiver[OutboundPacket],
+        stream_senders: dict[tuple[str, str], Sender[OutboundPacket]],
+        owner_stream_counts: dict[str, int],
+    ) -> None:
+        """Publish one command independently so blocked owners cannot stall peers."""
+
+        assert self._zenoh is not None
+        owner, _command_id = stream
+        try:
+            with receiver as packets:
+                async for packet in packets:
+                    self._data_plane_egress_observer.record_dequeued(owner)
+                    started_at = time.monotonic()
+                    try:
+                        with fail_after(_ZENOH_DATA_PUBLISH_TIMEOUT_SECONDS):
+                            await self._zenoh.zenoh_publish(
+                                f"{packet.topic}/{owner}", packet.data
+                            )
+                    except get_cancelled_exc_class():
+                        raise
+                    except Exception as exception:
+                        self._data_plane_egress_observer.record_publish_failure(
+                            owner, time.monotonic() - started_at
+                        )
+                        logger.opt(exception=exception).warning(
+                            "Zenoh DATA command publish failed; dropping frame "
+                            "without blocking unrelated streams"
+                        )
+                    else:
+                        self._data_plane_egress_observer.record_published(
+                            owner,
+                            len(packet.data),
+                            time.monotonic() - started_at,
+                        )
+                    if packet.is_terminal:
+                        return
+        finally:
+            sender = stream_senders.pop(stream, None)
+            if sender is not None:
+                sender.close()
+            owner_stream_counts[owner] = max(
+                0, owner_stream_counts.get(owner, 1) - 1
+            )
+            if owner_stream_counts[owner] == 0:
+                owner_stream_counts.pop(owner, None)
+            self._data_plane_egress_observer.record_stream_closed(owner)
 
 
 def get_node_id_keypair(

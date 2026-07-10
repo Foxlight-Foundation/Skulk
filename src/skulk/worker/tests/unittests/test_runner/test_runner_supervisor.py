@@ -158,12 +158,12 @@ async def test_teardown_reaps_runner_process_under_cancellation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_emit_stamps_sequence_and_clears_counter_on_terminal_chunk() -> None:
-    """Each DataChunk gets a per-command sequence; the counter clears on finish.
+async def test_emit_stamps_explicit_lifecycle_and_sequence() -> None:
+    """Each DataChunk gets an explicit lifecycle kind and ordered sequence.
 
-    #279 Phase 2b: the API reorders by this sequence. #301 review: the
-    per-command counter must be dropped on the terminal chunk so a long-lived
-    runner doesn't accumulate one entry per command served.
+    Sequence zero is the lifecycle start; payload and terminal frames follow in
+    generation order. Producer state stays available until terminal task status
+    so a status-only terminal path can still close the stream.
     """
     from skulk.shared.types.chunks import DataChunk
     from skulk.shared.types.events import ChunkGenerated
@@ -210,27 +210,35 @@ async def test_emit_stamps_sequence_and_clears_counter_on_terminal_chunk() -> No
     await supervisor._emit(  # pyright: ignore[reportPrivateUsage]
         ChunkGenerated(command_id=cmd, chunk=chunk("b", None))
     )
-    assert supervisor._chunk_sequence[cmd] == 2  # pyright: ignore[reportPrivateUsage]
+    assert supervisor._chunk_sequence[cmd] == 3  # pyright: ignore[reportPrivateUsage]
     await supervisor._emit(  # pyright: ignore[reportPrivateUsage]
         ChunkGenerated(command_id=cmd, chunk=chunk("c", "stop"))
     )
-    # terminal chunk clears the per-command counter
-    assert cmd not in supervisor._chunk_sequence  # pyright: ignore[reportPrivateUsage]
+    assert supervisor._chunk_sequence[cmd] == 4  # pyright: ignore[reportPrivateUsage]
+    assert cmd in supervisor._stream_terminal  # pyright: ignore[reportPrivateUsage]
 
-    seqs = [data_recv.receive_nowait().sequence for _ in range(3)]
-    assert seqs == [0, 1, 2]
+    frames = [data_recv.receive_nowait() for _ in range(4)]
+    assert [frame.sequence for frame in frames] == [0, 1, 2, 3]
+    assert [frame.kind for frame in frames] == [
+        "started",
+        "chunk",
+        "chunk",
+        "completed",
+    ]
+    assert frames[0].chunk is None
+    assert isinstance(frames[-1].chunk, TokenChunk)
     data_sender.close()
     event_sender.close()
 
 
 @pytest.mark.asyncio
-async def test_emit_stamps_owner_node_and_clears_it_on_terminal_chunk() -> None:
+async def test_emit_stamps_owner_node_on_every_lifecycle_frame() -> None:
     """_emit addresses each DataChunk to the command's owning API node.
 
     #279 Phase 2: the owner is recorded when the serving task starts and stamped
     onto every output chunk so the Zenoh data plane keys to data/<owner_node>.
-    The owner mapping clears on the terminal chunk alongside the sequence
-    counter, so a long-lived runner does not accumulate one entry per command.
+    The owner remains until terminal task status so a status-only terminal frame
+    can still be addressed to the same API node.
     """
     from skulk.shared.types.chunks import DataChunk
     from skulk.shared.types.events import ChunkGenerated
@@ -281,11 +289,11 @@ async def test_emit_stamps_owner_node_and_clears_it_on_terminal_chunk() -> None:
     await supervisor._emit(  # pyright: ignore[reportPrivateUsage]
         ChunkGenerated(command_id=cmd, chunk=chunk("b", "stop"))
     )
-    # The owner mapping clears on the terminal chunk.
-    assert cmd not in supervisor._command_owner  # pyright: ignore[reportPrivateUsage]
+    assert supervisor._command_owner[cmd] == owner  # pyright: ignore[reportPrivateUsage]
 
-    owners = [data_recv.receive_nowait().owner_node for _ in range(2)]
-    assert owners == [owner, owner]
+    frames = [data_recv.receive_nowait() for _ in range(3)]
+    assert [frame.owner_node for frame in frames] == [owner, owner, owner]
+    assert [frame.kind for frame in frames] == ["started", "chunk", "completed"]
     data_sender.close()
     event_sender.close()
 
@@ -353,7 +361,10 @@ async def test_check_runner_emits_error_chunk_for_inflight_text_generation() -> 
 async def test_start_task_records_speech_owner_and_terminal_status_clears_it() -> None:
     """Speech output keeps the command owner needed for Zenoh DATA routing."""
 
+    from skulk.shared.types.chunks import DataChunk
+
     event_sender, event_receiver = channel[Event]()
+    data_sender, data_receiver = channel[DataChunk]()
     task_sender, task_receiver = mp_channel[Task]()
     cancel_sender, _ = mp_channel[TaskId]()
     ev_send, ev_recv = mp_channel[Event]()
@@ -375,6 +386,7 @@ async def test_start_task_records_speech_owner_and_terminal_status_clears_it() -
         _task_sender=task_sender,
         _event_sender=event_sender,
         _cancel_sender=cancel_sender,
+        _data_sender=data_sender,
     )
     supervisor.status = RunnerRunning()
 
@@ -416,11 +428,18 @@ async def test_start_task_records_speech_owner_and_terminal_status_clears_it() -
             assert isinstance(forwarded_status, TaskStatusUpdated)
             assert forwarded_status.task_id == task.task_id
             assert command_id not in supervisor._command_owner  # pyright: ignore[reportPrivateUsage]
+            assert command_id not in supervisor._chunk_sequence  # pyright: ignore[reportPrivateUsage]
             assert task.task_id not in supervisor.in_progress
+
+            frames = [data_receiver.receive_nowait() for _ in range(2)]
+            assert [frame.sequence for frame in frames] == [0, 1]
+            assert [frame.kind for frame in frames] == ["started", "completed"]
+            assert all(frame.owner_node == owner for frame in frames)
 
             tg.cancel_scope.cancel()
 
     ev_send.close()
+    data_sender.close()
     event_sender.close()
 
 

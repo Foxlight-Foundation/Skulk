@@ -64,6 +64,7 @@ from skulk.api.adapters.responses import (
     generate_responses_stream,
     responses_request_to_text_generation,
 )
+from skulk.api.data_plane import DataPlaneObserver
 from skulk.api.keepalive import with_sse_keepalive
 from skulk.api.model_search import search_hugging_face_models
 from skulk.api.node_health import compute_node_health
@@ -268,6 +269,8 @@ from skulk.shared.types.diagnostics import (
     ClusterTimelineEntry,
     ClusterTimelineRunner,
     ClusterTimelineUnreachable,
+    DataPlaneEgressDiagnostics,
+    DataPlaneTransport,
     DiagnosticCaptureRequest,
     DiagnosticCaptureResponse,
     DiagnosticProcessSample,
@@ -643,7 +646,7 @@ class _ChunkReorderState:
     """Per-command reorder cursor for the data plane (#279 Phase 2b)."""
 
     next_seq: int = 0
-    pending: dict[int, GenerationChunk] = field(default_factory=dict)
+    pending: dict[int, DataChunk] = field(default_factory=dict)
     # Monotonic time the current head-of-line gap was first observed (chunks
     # buffered above next_seq that couldn't drain). None when there is no gap.
     # `gap_at` is the next_seq the timer started waiting on, so later chunks
@@ -969,6 +972,9 @@ class API:
         telemetry_view: "TelemetryView | None" = None,
         data_receiver: "Receiver[DataChunk] | None" = None,
         data_plane_zenoh: bool = False,
+        data_plane_egress_provider: (
+            Callable[[], DataPlaneEgressDiagnostics] | None
+        ) = None,
         extensions: LoadedExtensions | None = None,
     ) -> None:
         self.state = State()
@@ -1166,6 +1172,17 @@ class API:
             # Default by transport: gossipsub reorders (buffer on), Zenoh is
             # per-publisher FIFO (buffer off).
             self._reorder_buffer_enabled = not data_plane_zenoh
+        if data_receiver is None:
+            data_plane_transport: DataPlaneTransport = "disabled"
+        elif data_plane_zenoh:
+            data_plane_transport = "zenoh"
+        else:
+            data_plane_transport = "gossipsub"
+        self._data_plane_observer = DataPlaneObserver(
+            transport=data_plane_transport,
+            reorder_buffer_enabled=self._reorder_buffer_enabled,
+        )
+        self._data_plane_egress_provider = data_plane_egress_provider
         self._image_store = ImageStore(SKULK_IMAGE_CACHE_DIR)
         self._tg: TaskGroup = TaskGroup()
 
@@ -2291,6 +2308,7 @@ class API:
         # of leaking state.
         self._chunk_reorder.pop(command_id, None)
         self._data_dedup_cursor.pop(command_id, None)
+        self._data_plane_observer.finalize(command_id)
 
     async def _token_chunk_stream(
         self, command_id: CommandId
@@ -2332,6 +2350,7 @@ class API:
                         except (EndOfStream, ClosedResourceError):
                             return  # producer closed normally
                     if scope.cancelled_caught:
+                        self._data_plane_observer.record_idle_timeout()
                         # Mid-stream stall: the receive went idle for longer than
                         # the inter-token bound. Two distinct causes, disambiguated
                         # by the master's task status (#298 review):
@@ -4642,10 +4661,9 @@ class API:
             )
         with self._data_receiver as data_chunks:
             async for data in data_chunks:
+                self._data_plane_observer.record_received()
                 if self._reorder_buffer_enabled:
-                    await self._reorder_and_dispatch(
-                        data.command_id, data.sequence, data.chunk
-                    )
+                    await self._reorder_and_dispatch(data)
                 elif self._command_has_queue(data.command_id):
                     # Buffer off: dispatch in arrival order (the transport orders
                     # per command), but still dedupe by sequence so a same-node
@@ -4654,9 +4672,23 @@ class API:
                     # _command_has_queue above.
                     cursor = self._data_dedup_cursor.get(data.command_id, 0)
                     if data.sequence < cursor:
+                        self._data_plane_observer.record_duplicate()
                         continue  # duplicate (local publish + Zenoh loopback)
+                    if data.sequence > cursor:
+                        self._data_plane_observer.record_out_of_order()
+                        self._data_plane_observer.record_skipped_sequences(
+                            data.sequence - cursor
+                        )
+                        await self._fail_data_stream_transport(
+                            data.command_id,
+                            f"DATA sequence gap: expected {cursor}, received "
+                            f"{data.sequence}",
+                        )
+                        continue
                     self._data_dedup_cursor[data.command_id] = data.sequence + 1
-                    await self._dispatch_generation_chunk(data.command_id, data.chunk)
+                    await self._dispatch_data_frame(data)
+                else:
+                    self._data_plane_observer.record_late()
 
     def _command_has_queue(self, command_id: CommandId) -> bool:
         return (
@@ -4667,10 +4699,8 @@ class API:
             or command_id in self._audio_transcription_queues
         )
 
-    async def _reorder_and_dispatch(
-        self, command_id: CommandId, sequence: int, chunk: GenerationChunk
-    ) -> None:
-        """Reorder a command's data-plane chunks by sequence, then dispatch.
+    async def _reorder_and_dispatch(self, frame: DataChunk) -> None:
+        """Reorder one command's data-plane frames by sequence, then dispatch.
 
         The DATA gossip topic has no total order (it replaced the master event
         ``idx`` that did), so a multi-node producer's per-token chunks can arrive
@@ -4678,30 +4708,44 @@ class API:
         output. We hold each command's chunks in a small per-command buffer and
         release them strictly in ``sequence`` order. Late duplicates (below the
         cursor) are dropped; if the buffer exceeds ``_MAX_CHUNK_REORDER_BUFFER``
-        (a genuinely dropped sequence on the best-effort topic) we skip past the
-        gap rather than stall. State is only created while the command has a live
+        (a genuinely dropped sequence on the best-effort topic) we fail the
+        affected stream rather than return incomplete output. State is only
+        created while the command has a live
         stream queue, so a chunk arriving after the stream finalized is dropped
         without leaking a buffer (the queue and buffer are cleared together).
         """
+        command_id = frame.command_id
         if not self._command_has_queue(command_id):
+            self._data_plane_observer.record_late()
             return  # client gone / stream finalized: drop late chunk, no buffer
         state = self._chunk_reorder.setdefault(command_id, _ChunkReorderState())
-        if sequence < state.next_seq:
+        if frame.sequence < state.next_seq or frame.sequence in state.pending:
+            self._data_plane_observer.record_duplicate()
             return  # already delivered (duplicate / late re-send)
-        state.pending[sequence] = chunk
+        if frame.sequence > state.next_seq:
+            self._data_plane_observer.record_out_of_order()
+        state.pending[frame.sequence] = frame
         await self._drain_in_order(command_id, state)
-        # Emergency size cap: if the buffer runs away (a dropped sequence the
-        # later chunks keep piling up behind), skip the gap and keep draining.
-        # Looped so several gaps in one burst are all cleared in this call.
-        while len(state.pending) > _MAX_CHUNK_REORDER_BUFFER:
+        # Emergency size cap: if the buffer runs away behind a dropped sequence,
+        # fail the affected stream rather than returning incomplete output.
+        if len(state.pending) > _MAX_CHUNK_REORDER_BUFFER:
             skipped_to = min(state.pending)
             logger.warning(
                 f"Data-plane reorder buffer for command {command_id} exceeded "
                 f"{_MAX_CHUNK_REORDER_BUFFER}; a chunk was likely dropped on the "
-                f"best-effort DATA topic. Skipping seq {state.next_seq}..{skipped_to - 1}."
+                f"best-effort DATA topic. Failing at seq {state.next_seq} "
+                f"before buffered seq {skipped_to}."
             )
-            state.next_seq = skipped_to
-            await self._drain_in_order(command_id, state)
+            self._data_plane_observer.record_skipped_sequences(
+                skipped_to - state.next_seq
+            )
+            await self._fail_data_stream_transport(
+                command_id,
+                f"DATA reorder window exceeded waiting for sequence "
+                f"{state.next_seq}",
+            )
+            self._chunk_reorder.pop(command_id, None)
+            return
         self._mark_reorder_gap(state)
 
     @staticmethod
@@ -4729,24 +4773,24 @@ class API:
         while state.next_seq in state.pending:
             ready = state.pending.pop(state.next_seq)
             state.next_seq += 1
-            await self._dispatch_generation_chunk(command_id, ready)
+            await self._dispatch_data_frame(ready)
 
     async def _sweep_reorder_buffers(self) -> None:
-        """Release reorder gaps stuck waiting for a sequence dropped on the topic.
+        """Fail reorder gaps stuck waiting for a sequence dropped on the topic.
 
         A genuine mesh reorder resolves in milliseconds; a gap older than
         ``_REORDER_GAP_FLUSH_SECONDS`` means the missing sequence was dropped on
-        the best-effort DATA topic. Skipping ahead to the lowest buffered
-        sequence releases the held chunks (so the stream yields and its idle
-        backstop can arm) instead of hanging forever — the case the size cap
-        misses when no later chunk arrives to trigger it (#279 Phase 2b review).
+        the best-effort DATA topic. The affected command receives an explicit
+        transport error and cancellation instead of hanging or returning a
+        partial response. This covers the case the size cap misses when no later
+        chunk arrives to trigger it (#279 Phase 2b review).
         """
         while True:
             await anyio.sleep(1.0)
             await self._flush_stale_reorder_gaps(time.monotonic())
 
     async def _flush_stale_reorder_gaps(self, now: float) -> None:
-        """One sweep pass: release reorder gaps older than the flush window."""
+        """One sweep pass: fail reorder gaps older than the flush window."""
         for command_id, state in list(self._chunk_reorder.items()):
             if (
                 state.pending
@@ -4758,11 +4802,68 @@ class API:
                     f"Data-plane reorder gap for command {command_id} unfilled "
                     f"for >{_REORDER_GAP_FLUSH_SECONDS:g}s (seq "
                     f"{state.next_seq}..{skipped_to - 1} dropped on the "
-                    "best-effort DATA topic); releasing buffered chunks."
+                    "best-effort DATA topic); failing the affected stream."
                 )
-                state.next_seq = skipped_to
-                await self._drain_in_order(command_id, state)
-                self._mark_reorder_gap(state)
+                self._data_plane_observer.record_skipped_sequences(
+                    skipped_to - state.next_seq
+                )
+                await self._fail_data_stream_transport(
+                    command_id,
+                    f"DATA sequence gap at {state.next_seq} did not resolve "
+                    f"within {_REORDER_GAP_FLUSH_SECONDS:g}s",
+                )
+                self._chunk_reorder.pop(command_id, None)
+
+    async def _fail_data_stream_transport(
+        self,
+        command_id: CommandId,
+        detail: str,
+    ) -> None:
+        """Synthesize one terminal error for an unrecoverable DATA delivery gap."""
+
+        if not self._command_has_queue(command_id):
+            return
+        self._data_plane_observer.record_transport_failure(command_id)
+        logger.warning(f"Failing command {command_id} after {detail}")
+        if not self._command_task_is_terminal(command_id):
+            self._cancelled_command_ids.add(command_id)
+            with anyio.CancelScope(shield=True):
+                await self.command_sender.send(
+                    ForwarderCommand(
+                        origin=self._system_id,
+                        command=TaskCancelled(cancelled_command_id=command_id),
+                    )
+                )
+        await self._dispatch_generation_chunk(
+            command_id,
+            ErrorChunk(
+                model=ModelId("unknown"),
+                error_message=f"Data-plane transport failure: {detail}",
+            ),
+        )
+        self._close_command_queue(command_id)
+
+    async def _dispatch_data_frame(self, frame: DataChunk) -> None:
+        """Observe and route one ordered lifecycle frame for a live command."""
+
+        self._data_plane_observer.record_dispatched(frame)
+        if frame.chunk is not None:
+            await self._dispatch_generation_chunk(frame.command_id, frame.chunk)
+        if frame.is_terminal:
+            self._close_command_queue(frame.command_id)
+
+    def _close_command_queue(self, command_id: CommandId) -> None:
+        """Close the endpoint queue after an explicit terminal lifecycle frame."""
+
+        for queue_map in (
+            self._text_generation_queues,
+            self._image_generation_queues,
+            self._embedding_queues,
+            self._audio_speech_queues,
+            self._audio_transcription_queues,
+        ):
+            if queue := queue_map.get(command_id):
+                queue.close()
 
     async def _dispatch_generation_chunk(
         self, command_id: CommandId, chunk: GenerationChunk
@@ -5769,6 +5870,11 @@ class API:
             processes=self._collect_process_diagnostics(supervisor_runners),
             supervisor_runners=supervisor_runners,
             placements=placements,
+            data_plane=self._data_plane_observer.snapshot(
+                self._data_plane_egress_provider()
+                if self._data_plane_egress_provider is not None
+                else None
+            ),
             warnings=sorted(warnings),
             tailscale=tailscale,
         )
@@ -7217,6 +7323,7 @@ class API:
                                 "a terminal chunk"
                             ) from exc
                     if scope.cancelled_caught:
+                        self._data_plane_observer.record_idle_timeout()
                         task_done = self._command_task_is_terminal(command_id)
                         logger.warning(
                             f"Speech stream for command {command_id} idle for "

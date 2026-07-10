@@ -12,6 +12,7 @@ from skulk_pyo3_bindings import NetworkingHandle, ZenohHandle
 
 from skulk.routing.router import (
     _ZENOH_DATA_OUTBOUND_BUFFER,  # pyright: ignore[reportPrivateUsage]
+    OutboundPacket,
     Router,
 )
 from skulk.routing.topics import COMMANDS, DATA, GLOBAL_EVENTS
@@ -136,10 +137,90 @@ def test_zenoh_publish_keys_by_owner_and_subscribe_keys_by_self() -> None:
         # shared control-plane loop, so feed its channel and drain it.
         assert router._zenoh_out_send is not None  # pyright: ignore[reportPrivateUsage]
         send = router._zenoh_out_send.clone()  # pyright: ignore[reportPrivateUsage]
-        await send.send((topic, routing_key, payload))
+        await send.send(
+            OutboundPacket(
+                topic=topic,
+                routing_key=routing_key,
+                stream_key="c",
+                is_terminal=True,
+                data=payload,
+            )
+        )
         send.close()
         with anyio.move_on_after(1):
             await router._zenoh_networking_publish()  # pyright: ignore[reportPrivateUsage]
         assert zenoh.published == [("data/owner-9", payload)]
+
+    anyio.run(_run)
+
+
+def test_blocked_command_does_not_stall_another_command_for_same_owner() -> None:
+    """Per-command egress workers isolate streams behind one slow owner."""
+
+    import anyio
+
+    from skulk.routing.router import OutboundPacket
+    from skulk.shared.types.chunks import DataChunk
+    from skulk.shared.types.common import CommandId, NodeId
+
+    class _CommandBlockingZenoh:
+        def __init__(self) -> None:
+            self.slow_started = anyio.Event()
+            self.release_slow = anyio.Event()
+            self.fast_published = anyio.Event()
+
+        async def zenoh_publish(self, _key: str, data: bytes) -> None:
+            frame = DATA.deserialize(data)
+            if frame.command_id == CommandId("slow-command"):
+                self.slow_started.set()
+                await self.release_slow.wait()
+            else:
+                self.fast_published.set()
+
+    def _terminal_packet(command_id: str) -> OutboundPacket:
+        frame = DataChunk(
+            command_id=CommandId(command_id),
+            kind="completed",
+            sequence=0,
+            owner_node=NodeId("shared-owner"),
+        )
+        return OutboundPacket(
+            topic=DATA.topic,
+            routing_key="shared-owner",
+            stream_key=command_id,
+            is_terminal=True,
+            data=DATA.serialize(frame),
+        )
+
+    async def _run() -> None:
+        zenoh = _CommandBlockingZenoh()
+        router = Router(
+            handle=cast(NetworkingHandle, object()),
+            zenoh=cast(ZenohHandle, cast(object, zenoh)),
+            node_id="self-node",
+        )
+        assert router._zenoh_out_send is not None  # pyright: ignore[reportPrivateUsage]
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                router._zenoh_networking_publish  # pyright: ignore[reportPrivateUsage]
+            )
+            await router._zenoh_out_send.send(  # pyright: ignore[reportPrivateUsage]
+                _terminal_packet("slow-command")
+            )
+            with anyio.fail_after(0.5):
+                await zenoh.slow_started.wait()
+
+            await router._zenoh_out_send.send(  # pyright: ignore[reportPrivateUsage]
+                _terminal_packet("fast-command")
+            )
+            with anyio.fail_after(0.5):
+                await zenoh.fast_published.wait()
+
+            diagnostics = router.data_plane_egress_diagnostics()
+            assert diagnostics.remote_frames_published == 1
+            assert diagnostics.active_stream_queues == 1
+            zenoh.release_slow.set()
+            task_group.cancel_scope.cancel()
 
     anyio.run(_run)

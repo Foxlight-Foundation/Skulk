@@ -15,7 +15,13 @@ from anyio import (
 )
 from loguru import logger
 
-from skulk.shared.types.chunks import DataChunk, EmbeddingChunk, ErrorChunk
+from skulk.shared.models.model_cards import ModelId
+from skulk.shared.types.chunks import (
+    DataChunk,
+    EmbeddingChunk,
+    ErrorChunk,
+    GenerationChunk,
+)
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.diagnostics import (
     MlxMemorySnapshot,
@@ -35,6 +41,7 @@ from skulk.shared.types.events import (
     TaskDeleted,
     TaskStatusUpdated,
 )
+from skulk.shared.types.streaming import StreamFrameKind, is_terminal_stream_frame_kind
 from skulk.shared.types.tasks import (
     CANCEL_ALL_TASKS,
     AudioTranscription,
@@ -75,6 +82,18 @@ _TERMINAL_TASK_STATUSES = {
     TaskStatus.Failed,
     TaskStatus.TimedOut,
 }
+
+
+def _stream_frame_kind(chunk: GenerationChunk) -> StreamFrameKind:
+    """Classify one runner payload within the explicit stream lifecycle."""
+
+    if isinstance(chunk, ErrorChunk):
+        return "failed"
+    if isinstance(chunk, EmbeddingChunk):
+        return "completed"
+    if getattr(chunk, "finish_reason", None) is not None:
+        return "completed"
+    return "chunk"
 
 
 def _now_utc_iso() -> str:
@@ -134,6 +153,11 @@ class RunnerSupervisor:
     # _forward_events reads the runner's events in generation order, so the
     # counter assigned here is the true order.
     _chunk_sequence: dict[CommandId, int] = field(default_factory=dict, init=False)
+    # Commands for which the explicit lifecycle start/terminal frames have been
+    # emitted. These remain bounded to in-flight commands and are cleared with
+    # sequence/owner state on terminal task status.
+    _stream_started: set[CommandId] = field(default_factory=set, init=False)
+    _stream_terminal: set[CommandId] = field(default_factory=set, init=False)
     # The owning API node for each in-flight serving command (#279 Phase 2).
     # Populated when a serving task is submitted (the master carries the owning
     # API node onto the task), read in _emit to stamp each DataChunk so the Zenoh
@@ -256,29 +280,88 @@ class RunnerSupervisor:
         the event sender when no data sender is wired (tests / no DATA topic).
         """
         if isinstance(event, ChunkGenerated) and self._data_sender is not None:
-            seq = self._chunk_sequence.get(event.command_id, 0)
-            await self._data_sender.send(
-                DataChunk(
-                    command_id=event.command_id,
-                    chunk=event.chunk,
-                    sequence=seq,
-                    owner_node=self._command_owner.get(event.command_id),
-                )
+            if event.command_id not in self._stream_started:
+                await self._send_data_frame(event.command_id, "started")
+            await self._send_data_frame(
+                event.command_id,
+                _stream_frame_kind(event.chunk),
+                event.chunk,
             )
-            # Drop the per-command counter on the terminal chunk so a long-lived
-            # runner doesn't accumulate one entry per command served (#301 review).
-            # EmbeddingChunk is single-shot (no finish_reason) but also terminal.
-            chunk_finished = (
-                getattr(event.chunk, "finish_reason", None) is not None
-                or isinstance(event.chunk, EmbeddingChunk)
-            )
-            if chunk_finished:
-                self._chunk_sequence.pop(event.command_id, None)
-                self._command_owner.pop(event.command_id, None)
-            else:
-                self._chunk_sequence[event.command_id] = seq + 1
         else:
             await self._event_sender.send(event)
+
+    async def _send_data_frame(
+        self,
+        command_id: CommandId,
+        kind: StreamFrameKind,
+        chunk: GenerationChunk | None = None,
+    ) -> None:
+        """Send one sequenced lifecycle frame to the command's owning API."""
+
+        assert self._data_sender is not None
+        sequence = self._chunk_sequence.get(command_id, 0)
+        await self._data_sender.send(
+            DataChunk(
+                command_id=command_id,
+                kind=kind,
+                chunk=chunk,
+                sequence=sequence,
+                owner_node=self._command_owner.get(command_id),
+            )
+        )
+        self._chunk_sequence[command_id] = sequence + 1
+        if kind == "started":
+            self._stream_started.add(command_id)
+        if is_terminal_stream_frame_kind(kind):
+            self._stream_terminal.add(command_id)
+
+    async def _finish_data_stream(self, task: Task, status: TaskStatus) -> None:
+        """Emit a terminal lifecycle frame when task status closes the stream."""
+
+        if self._data_sender is None or not isinstance(
+            task,
+            (
+                TextGeneration,
+                ImageGeneration,
+                ImageEdits,
+                TextEmbedding,
+                SpeechSynthesis,
+                AudioTranscription,
+            ),
+        ):
+            return
+        command_id = task.command_id
+        if command_id in self._stream_terminal:
+            return
+        if command_id not in self._stream_started:
+            await self._send_data_frame(command_id, "started")
+        if status == TaskStatus.Complete:
+            await self._send_data_frame(command_id, "completed")
+            return
+        kind: StreamFrameKind = (
+            "cancelled" if status == TaskStatus.Cancelled else "failed"
+        )
+        message = {
+            TaskStatus.Cancelled: "Runner task was cancelled",
+            TaskStatus.Failed: "Runner task failed before completing the command",
+            TaskStatus.TimedOut: "Runner task timed out before completing the command",
+        }[status]
+        await self._send_data_frame(
+            command_id,
+            kind,
+            ErrorChunk(
+                model=ModelId(task.task_params.model),
+                error_message=message,
+            ),
+        )
+
+    def _clear_data_stream(self, command_id: CommandId) -> None:
+        """Release all bounded producer state for one terminal command."""
+
+        self._chunk_sequence.pop(command_id, None)
+        self._command_owner.pop(command_id, None)
+        self._stream_started.discard(command_id)
+        self._stream_terminal.discard(command_id)
 
     async def run(self):
         self._record_milestone("process_start_requested")
@@ -482,13 +565,9 @@ class RunnerSupervisor:
                                 RunnerShuttingDown,
                             ),
                         )
-                        # Drop the per-command data-plane sequence counter on any
-                        # terminal task status, covering commands that end without
-                        # a finish_reason chunk: image generation (ImageChunk has
-                        # no finish_reason) and cancellations/failures that arrive
-                        # as terminal TaskStatusUpdated bypassing _emit (#301
-                        # review). Done before popping in_progress, which holds the
-                        # task->command_id mapping.
+                        # Emit an explicit terminal frame before dropping the
+                        # task->command mapping. This covers no-payload completion,
+                        # cancellation, failure, and timeout paths.
                         ending_task = self.in_progress.get(event.task_id)
                         if isinstance(
                             ending_task,
@@ -501,8 +580,10 @@ class RunnerSupervisor:
                                 AudioTranscription,
                             ),
                         ):
-                            self._chunk_sequence.pop(ending_task.command_id, None)
-                            self._command_owner.pop(ending_task.command_id, None)
+                            await self._finish_data_stream(
+                                ending_task, event.task_status
+                            )
+                            self._clear_data_stream(ending_task.command_id)
                         self.in_progress.pop(event.task_id, None)
                         if event.task_status == TaskStatus.Complete:
                             self.completed.add(event.task_id)
@@ -586,7 +667,17 @@ class RunnerSupervisor:
         logger.opt(exception=e).error(f"Runner terminated with {cause}")
 
         for task in self.in_progress.values():
-            if isinstance(task, (TextGeneration, ImageGeneration, ImageEdits)):
+            if isinstance(
+                task,
+                (
+                    TextGeneration,
+                    ImageGeneration,
+                    ImageEdits,
+                    TextEmbedding,
+                    SpeechSynthesis,
+                    AudioTranscription,
+                ),
+            ):
                 with anyio.CancelScope(shield=True):
                     await self._emit(
                         ChunkGenerated(
@@ -600,6 +691,7 @@ class RunnerSupervisor:
                             ),
                         )
                     )
+                self._clear_data_stream(task.command_id)
 
         try:
             self.status = RunnerFailed(error_message=f"Terminated ({cause})")

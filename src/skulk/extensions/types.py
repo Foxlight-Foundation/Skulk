@@ -20,7 +20,7 @@ Design invariants (enforced by the call sites in :mod:`skulk.api.main` and
   loaded-extension list is empty.
 """
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Protocol, final, runtime_checkable
 
@@ -28,6 +28,7 @@ from pydantic import BaseModel
 
 from skulk.extensions.calls import CapabilityCall, CapabilityResult
 from skulk.extensions.capabilities import CapabilityDescriptor
+from skulk.extensions.streams import CapabilityStreamFrame
 from skulk.extensions.telemetry import ClusterNodeView
 from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.text_generation import TextGenerationTaskParams
@@ -150,6 +151,20 @@ class CapabilityCallHandler(Protocol):
         self, context: "ExtensionContext", call: CapabilityCall
     ) -> dict[str, object]:
         """Serve one unary capability call, returning the result payload."""
+        ...
+
+
+@runtime_checkable
+class CapabilityStreamHandler(Protocol):
+    """Optional provider facet for server or bidirectional output streams."""
+
+    def handle_stream(
+        self,
+        context: "ExtensionContext",
+        call: CapabilityCall,
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        """Serve one admitted provider call as ordered lifecycle frames."""
+
         ...
 
 

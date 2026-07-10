@@ -558,6 +558,7 @@ class Node:
                 telemetry_view=telemetry_view,
                 data_receiver=router.receiver(topics.DATA),
                 data_plane_zenoh=_zenoh_on,
+                data_plane_egress_provider=router.data_plane_egress_diagnostics,
                 # Installed plugins (skulk.extensions entry points), discovered
                 # once per process; empty when none are installed.
                 extensions=load_extensions(),
