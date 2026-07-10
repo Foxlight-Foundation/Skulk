@@ -6,6 +6,7 @@ import pytest
 from skulk.shared.topology import Topology
 from skulk.shared.types.common import NodeId
 from skulk.shared.types.profiling import NetworkInterfaceInfo, NodeNetworkInfo
+from skulk.utils.channels import Sender
 from skulk.utils.info_gatherer import net_profile
 
 
@@ -114,6 +115,56 @@ async def test_first_reachable_ip_returns_before_slower_interface(
         )
 
     assert result == "192.168.0.118"
+
+
+@pytest.mark.anyio
+async def test_first_reachable_ip_ignores_discarded_interface_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    self_node_id = NodeId("self")
+    remote_node_id = NodeId("remote")
+    topology = Topology()
+    topology.add_node(self_node_id)
+    topology.add_node(remote_node_id)
+    node_network = {
+        remote_node_id: NodeNetworkInfo(
+            interfaces=[
+                NetworkInterfaceInfo(name="first", ip_address="192.168.0.117"),
+                NetworkInterfaceInfo(name="second", ip_address="192.168.0.118"),
+            ]
+        )
+    }
+
+    async def fake_check_reachability(
+        target_ip: str,
+        expected_node_id: NodeId,
+        out: dict[NodeId, set[str]],
+        _client: object,
+    ) -> None:
+        out.setdefault(expected_node_id, set()).add(target_ip)
+
+    send_count = 0
+
+    async def fail_discarded_send(sender: Sender[str], item: str) -> None:
+        nonlocal send_count
+        await anyio.sleep(0)
+        send_count += 1
+        if send_count > 1:
+            raise anyio.BrokenResourceError
+        sender.send_nowait(item)
+
+    monkeypatch.setattr(net_profile, "check_reachability", fake_check_reachability)
+    monkeypatch.setattr(Sender, "send", fail_discarded_send)
+
+    result = await net_profile.first_reachable_ip(
+        topology,
+        self_node_id,
+        node_network,
+        remote_node_id,
+    )
+
+    assert result == "192.168.0.117"
+    assert send_count == 2
 
 
 @pytest.mark.anyio

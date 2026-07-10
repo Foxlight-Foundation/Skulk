@@ -197,7 +197,10 @@ async def first_reachable_ip(
             out: defaultdict[NodeId, set[str]] = defaultdict(set)
             await check_reachability(target_ip, target_node_id, out, client)
             if target_node_id in out:
-                await probe_sender.send(target_ip)
+                # Another interface may win and close the receiver before this
+                # probe publishes. That late result is intentionally disposable.
+                with suppress(anyio.BrokenResourceError, anyio.ClosedResourceError):
+                    await probe_sender.send(target_ip)
 
     result: str | None = None
     async with (
