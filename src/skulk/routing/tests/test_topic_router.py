@@ -116,7 +116,7 @@ async def test_local_data_topic_does_not_wait_for_blocked_network_egress() -> No
 
 
 async def test_remote_data_topic_still_egresses_to_owner_key() -> None:
-    """Cross-node DATA must still preserve ordered network delivery."""
+    """Cross-node DATA egresses without dispatching on the producing API."""
 
     networking_send, networking_recv = channel[OutboundPacket]()
 
@@ -134,8 +134,10 @@ async def test_remote_data_topic_still_egresses_to_owner_key() -> None:
         await input_send.send(chunk)
 
         with anyio.fail_after(0.5):
-            assert await local_recv.receive() == chunk
             packet = await networking_recv.receive()
+        with anyio.move_on_after(0.1) as scope:
+            await local_recv.receive()
+        assert scope.cancel_called
         assert packet.topic == DATA.topic
         assert packet.routing_key == "remote-node"
         assert packet.stream_key == "local-first-data"

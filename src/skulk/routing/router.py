@@ -98,15 +98,16 @@ class TopicRouter[T: CamelCaseModel]:
                     self.topic.topic == DATA.topic
                     and self.topic.publish_policy is PublishPolicy.Always
                 ):
-                    # DATA output is latency-sensitive and the local API consumer
-                    # already dedupes Zenoh self-loopback duplicates by sequence.
-                    # Publish locally before any outbound backpressure can hold a
-                    # same-node stream and collapse it into a late burst.
-                    await self.publish(item, origin=None)
                     if self._routes_to_local_node(item):
+                        # Same-node output reaches its owning API directly and
+                        # never waits for or duplicates through network egress.
+                        await self.publish(item, origin=None)
                         if self._data_plane_egress_observer is not None:
                             self._data_plane_egress_observer.record_local_short_circuit()
                         continue
+                    # A remote owner's API is the only local consumer for this
+                    # frame. Publishing it on the producer would waste decode
+                    # work and classify every frame as late in diagnostics.
                     await self._send_out(item)
                     continue
                 # Check if we should send to network
