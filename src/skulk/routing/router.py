@@ -681,52 +681,50 @@ class Router:
         """Tell one admitted API that router stream capacity rejected its call."""
 
         assert self._zenoh is not None
-        if packet.topic == DATA.topic:
-            rejection_topic = cast(TypedTopic[CamelCaseModel], DATA)
-        elif packet.topic == PROVIDER_DATA.topic:
-            rejection_topic = cast(TypedTopic[CamelCaseModel], PROVIDER_DATA)
-        else:
-            rejection_slots.release()
-            return
-        original = rejection_topic.deserialize(packet.data)
-        if isinstance(original, DataChunk):
-            failed_sequence = 1 if include_started else original.sequence
-            rejection_frames: list[CamelCaseModel] = []
-            if include_started:
+        try:
+            if packet.topic == DATA.topic:
+                rejection_topic = cast(TypedTopic[CamelCaseModel], DATA)
+            elif packet.topic == PROVIDER_DATA.topic:
+                rejection_topic = cast(TypedTopic[CamelCaseModel], PROVIDER_DATA)
+            else:
+                return
+            original = rejection_topic.deserialize(packet.data)
+            if isinstance(original, DataChunk):
+                failed_sequence = 1 if include_started else original.sequence
+                rejection_frames: list[CamelCaseModel] = []
+                if include_started:
+                    rejection_frames.append(
+                        DataChunk(
+                            command_id=original.command_id,
+                            kind="started",
+                            sequence=0,
+                            owner_node=original.owner_node,
+                        )
+                    )
                 rejection_frames.append(
                     DataChunk(
                         command_id=original.command_id,
-                        kind="started",
-                        sequence=0,
+                        kind="failed",
+                        chunk=ErrorChunk(
+                            model=ModelId("unknown"),
+                            error_message=(
+                                "DATA transport rejected the command because remote "
+                                "stream capacity is exhausted"
+                            ),
+                        ),
+                        sequence=failed_sequence,
                         owner_node=original.owner_node,
                     )
                 )
-            rejection_frames.append(
-                DataChunk(
-                    command_id=original.command_id,
-                    kind="failed",
-                    chunk=ErrorChunk(
-                        model=ModelId("unknown"),
-                        error_message=(
-                            "DATA transport rejected the command because remote "
-                            "stream capacity is exhausted"
-                        ),
-                    ),
-                    sequence=failed_sequence,
-                    owner_node=original.owner_node,
+            elif isinstance(original, ProviderStreamPacket):
+                rejection_frames = list(
+                    provider_stream_rejection_packets(
+                        original,
+                        include_started=include_started,
+                    )
                 )
-            )
-        elif isinstance(original, ProviderStreamPacket):
-            rejection_frames = list(
-                provider_stream_rejection_packets(
-                    original,
-                    include_started=include_started,
-                )
-            )
-        else:
-            rejection_slots.release()
-            return
-        try:
+            else:
+                return
             for frame in rejection_frames:
                 data = rejection_topic.serialize(frame)
                 started_at = time.monotonic()
@@ -750,6 +748,13 @@ class Router:
                         len(data),
                         time.monotonic() - started_at,
                     )
+        except Exception as exception:  # noqa: BLE001 - rejection isolation
+            # Rejection is a best-effort terminal for one stream. Malformed
+            # input or a serializer bug must neither leak the bounded slot nor
+            # fail the DATA publisher task group.
+            logger.opt(exception=exception).warning(
+                "Dropping malformed Zenoh DATA admission rejection"
+            )
         finally:
             rejection_slots.release()
 

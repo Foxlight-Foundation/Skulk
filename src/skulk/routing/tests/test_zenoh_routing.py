@@ -374,6 +374,46 @@ def test_stream_admission_limit_sends_terminal_rejection(
     anyio.run(_run)
 
 
+def test_malformed_rejections_release_bounded_task_slots() -> None:
+    """Bad rejection frames cannot leak slots or fail later rejections."""
+
+    import anyio
+    from anyio import Semaphore
+
+    class _UnusedZenoh:
+        async def zenoh_publish(self, _key: str, _data: bytes) -> None:
+            raise AssertionError("malformed rejection must not publish")
+
+    async def _run() -> None:
+        router = Router(
+            handle=cast(NetworkingHandle, object()),
+            zenoh=cast(ZenohHandle, cast(object, _UnusedZenoh())),
+            node_id="self-node",
+        )
+        slots = Semaphore(1)
+        malformed = OutboundPacket(
+            topic=PROVIDER_DATA.topic,
+            routing_key="remote-owner",
+            stream_key="malformed-call",
+            is_terminal=False,
+            data=b"not-a-provider-packet",
+        )
+
+        for _ in range(3):
+            slots.acquire_nowait()
+            await router._publish_zenoh_data_rejection(  # pyright: ignore[reportPrivateUsage]
+                malformed,
+                "remote-owner",
+                slots,
+                True,
+            )
+
+        slots.acquire_nowait()
+        slots.release()
+
+    anyio.run(_run)
+
+
 def test_full_stream_queue_replaces_terminal_and_ignores_closed_sender(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
