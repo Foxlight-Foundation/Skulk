@@ -3,6 +3,7 @@
 import pytest
 
 from skulk.extensions.streams import (
+    MAX_INLINE_MEDIA_BYTES,
     BlobMediaAttachment,
     CapabilityStreamError,
     CapabilityStreamFrame,
@@ -102,6 +103,11 @@ def test_frame_validation_enforces_lifecycle_and_binary_boundary() -> None:
             sequence=1,
             kind="chunk",
             payload={"audio": b"binary-belongs-in-media"},
+        )
+    with pytest.raises(ValueError, match="at most 1048576 bytes"):
+        InlineMediaAttachment(
+            data=b"x" * (MAX_INLINE_MEDIA_BYTES + 1),
+            media_type="audio/pcm",
         )
 
 

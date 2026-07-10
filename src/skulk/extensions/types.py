@@ -28,7 +28,7 @@ from pydantic import BaseModel
 
 from skulk.extensions.calls import CapabilityCall, CapabilityResult
 from skulk.extensions.capabilities import CapabilityDescriptor
-from skulk.extensions.streams import CapabilityStreamFrame
+from skulk.extensions.streams import CapabilityStreamFrame, CapabilityStreamSession
 from skulk.extensions.telemetry import ClusterNodeView
 from skulk.shared.types.common import ModelId, NodeId
 from skulk.shared.types.text_generation import TextGenerationTaskParams
@@ -163,8 +163,32 @@ class CapabilityStreamHandler(Protocol):
         context: "ExtensionContext",
         call: CapabilityCall,
     ) -> AsyncIterator[CapabilityStreamFrame]:
-        """Serve one admitted provider call as ordered lifecycle frames."""
+        """Yield ordered chunks and one terminal for an admitted provider call.
 
+        Skulk emits ``started`` at sequence zero after admission. The handler
+        therefore begins at sequence one, yields zero or more ``chunk`` frames,
+        and finishes with exactly one ``completed``, ``failed``, or
+        ``cancelled`` frame. Skulk validates identity, sequence, chunk schema,
+        and terminal ownership before publishing any handler frame.
+        """
+
+        ...
+
+
+class StreamCapability(Protocol):
+    """Async callable opening a server-streaming provider capability."""
+
+    async def __call__(
+        self,
+        node_id: NodeId,
+        capability_id: str,
+        version: str,
+        descriptor_revision: str,
+        payload: dict[str, object],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> CapabilityStreamSession:
+        """Open a provider stream and return its typed result plus frames."""
         ...
 
 
@@ -235,6 +259,8 @@ class ExtensionContext:
             capability descriptors (schemas, I/O modes, versions) on demand.
         call_capability: The generic call verb: invokes a capability on a
             provider node with a typed result (fabric-citizenship Phase 2b).
+        stream_capability: Open a server-streaming capability whose output
+            travels on the provider DATA topic (fabric-citizenship Phase 3).
     """
 
     node_id: NodeId
@@ -245,6 +271,7 @@ class ExtensionContext:
     withdraw_capability: WithdrawCapability
     describe_node: DescribeNode
     call_capability: CallCapability
+    stream_capability: StreamCapability
 
 
 @final

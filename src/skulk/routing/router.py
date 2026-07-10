@@ -42,7 +42,17 @@ from skulk.utils.task_group import TaskGroup
 
 from .connection_message import ConnectionMessage
 from .data_plane import DataPlaneEgressObserver
-from .topics import CONNECTION_MESSAGES, DATA, PublishPolicy, TypedTopic
+from .provider_streams import (
+    ProviderStreamPacket,
+    provider_stream_rejection_packets,
+)
+from .topics import (
+    CONNECTION_MESSAGES,
+    DATA,
+    PROVIDER_DATA,
+    PublishPolicy,
+    TypedTopic,
+)
 
 # Bound on the fast ingress into per-command Zenoh DATA workers. The dispatcher
 # does no network awaits, so this absorbs scheduling jitter without coupling
@@ -100,7 +110,7 @@ class TopicRouter[T: CamelCaseModel]:
         with self.receiver as items:
             async for item in items:
                 if (
-                    self.topic.topic == DATA.topic
+                    self.topic.routing_key is not None
                     and self.topic.publish_policy is PublishPolicy.Always
                 ):
                     if self._routes_to_local_node(item):
@@ -168,7 +178,7 @@ class TopicRouter[T: CamelCaseModel]:
         # down the loop is not.
         try:
             item = self.topic.deserialize(data)
-        except ValidationError as exception:
+        except (ValidationError, ValueError, UnicodeDecodeError) as exception:
             logger.opt(exception=exception).warning(
                 f"Dropping malformed or schema-incompatible message on topic "
                 f"{self.topic.topic} from {origin}"
@@ -194,17 +204,26 @@ class TopicRouter[T: CamelCaseModel]:
             else None
         )
         started_at = time.monotonic()
-        stream_key = str(item.command_id) if isinstance(item, DataChunk) else None
+        stream_key = (
+            self.topic.stream_key(item)
+            if self.topic.stream_key is not None
+            else None
+        )
+        is_terminal = (
+            self.topic.is_terminal(item)
+            if self.topic.is_terminal is not None
+            else False
+        )
         await self.networking_sender.send(
             OutboundPacket(
                 topic=str(self.topic.topic),
                 routing_key=routing_key,
                 stream_key=stream_key,
-                is_terminal=isinstance(item, DataChunk) and item.is_terminal,
+                is_terminal=is_terminal,
                 data=self.topic.serialize(item),
             )
         )
-        if isinstance(item, DataChunk) and self._data_plane_egress_observer is not None:
+        if self.topic.routing_key is not None and self._data_plane_egress_observer is not None:
             self._data_plane_egress_observer.record_enqueue_latency(
                 time.monotonic() - started_at
             )
@@ -288,8 +307,12 @@ class Router:
         self._tg: TaskGroup = TaskGroup()
 
     def uses_zenoh(self, topic: str) -> bool:
-        """Whether ``topic`` is routed over the Zenoh data plane (DATA only)."""
-        return self._zenoh is not None and topic == DATA.topic
+        """Whether ``topic`` is routed over the Zenoh data plane."""
+
+        return self._zenoh is not None and topic in (
+            DATA.topic,
+            PROVIDER_DATA.topic,
+        )
 
     async def register_topic[T: CamelCaseModel](self, topic: TypedTopic[T]):
         if self.uses_zenoh(topic.topic):
@@ -303,14 +326,14 @@ class Router:
                 self._tmp_networking_sender = None
             else:
                 send = self.networking_receiver.clone_sender()
-        local_routing_key = self._node_id if topic.topic == DATA.topic else None
+        local_routing_key = self._node_id if topic.routing_key is not None else None
         router = TopicRouter[T](
             topic,
             send,
             local_routing_key=local_routing_key,
             data_plane_egress_observer=(
                 self._data_plane_egress_observer
-                if topic.topic == DATA.topic
+                if topic.routing_key is not None
                 else None
             ),
         )
@@ -639,36 +662,54 @@ class Router:
         """Tell one admitted API that router stream capacity rejected its call."""
 
         assert self._zenoh is not None
-        original = DATA.deserialize(packet.data)
-        failed_sequence = 1 if include_started else original.sequence
-        rejection_frames: list[DataChunk] = []
-        if include_started:
+        if packet.topic == DATA.topic:
+            rejection_topic = cast(TypedTopic[CamelCaseModel], DATA)
+        elif packet.topic == PROVIDER_DATA.topic:
+            rejection_topic = cast(TypedTopic[CamelCaseModel], PROVIDER_DATA)
+        else:
+            rejection_slots.release()
+            return
+        original = rejection_topic.deserialize(packet.data)
+        if isinstance(original, DataChunk):
+            failed_sequence = 1 if include_started else original.sequence
+            rejection_frames: list[CamelCaseModel] = []
+            if include_started:
+                rejection_frames.append(
+                    DataChunk(
+                        command_id=original.command_id,
+                        kind="started",
+                        sequence=0,
+                        owner_node=original.owner_node,
+                    )
+                )
             rejection_frames.append(
                 DataChunk(
                     command_id=original.command_id,
-                    kind="started",
-                    sequence=0,
+                    kind="failed",
+                    chunk=ErrorChunk(
+                        model=ModelId("unknown"),
+                        error_message=(
+                            "DATA transport rejected the command because remote "
+                            "stream capacity is exhausted"
+                        ),
+                    ),
+                    sequence=failed_sequence,
                     owner_node=original.owner_node,
                 )
             )
-        rejection_frames.append(
-            DataChunk(
-                command_id=original.command_id,
-                kind="failed",
-                chunk=ErrorChunk(
-                    model=ModelId("unknown"),
-                    error_message=(
-                        "DATA transport rejected the command because remote "
-                        "stream capacity is exhausted"
-                    ),
-                ),
-                sequence=failed_sequence,
-                owner_node=original.owner_node,
+        elif isinstance(original, ProviderStreamPacket):
+            rejection_frames = list(
+                provider_stream_rejection_packets(
+                    original,
+                    include_started=include_started,
+                )
             )
-        )
+        else:
+            rejection_slots.release()
+            return
         try:
             for frame in rejection_frames:
-                data = DATA.serialize(frame)
+                data = rejection_topic.serialize(frame)
                 started_at = time.monotonic()
                 try:
                     with fail_after(_ZENOH_DATA_PUBLISH_TIMEOUT_SECONDS):

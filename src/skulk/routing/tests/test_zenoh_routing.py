@@ -16,7 +16,7 @@ from skulk.routing.router import (
     OutboundPacket,
     Router,
 )
-from skulk.routing.topics import COMMANDS, DATA, GLOBAL_EVENTS
+from skulk.routing.topics import COMMANDS, DATA, GLOBAL_EVENTS, PROVIDER_DATA
 
 
 def _router(*, zenoh: bool) -> Router:
@@ -31,6 +31,7 @@ def _router(*, zenoh: bool) -> Router:
 def test_data_routes_over_zenoh_when_enabled() -> None:
     router = _router(zenoh=True)
     assert router.uses_zenoh(DATA.topic) is True
+    assert router.uses_zenoh(PROVIDER_DATA.topic) is True
     # Control/telemetry/election planes stay on gossipsub even with zenoh on.
     assert router.uses_zenoh(COMMANDS.topic) is False
     assert router.uses_zenoh(GLOBAL_EVENTS.topic) is False

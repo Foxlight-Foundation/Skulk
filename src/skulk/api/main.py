@@ -10,7 +10,14 @@ import random
 import shutil
 import socket
 import time
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Sequence,
+)
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -173,6 +180,13 @@ from skulk.extensions import (
     CapabilityDescriptor,
     CapabilityErrorCode,
     CapabilityResult,
+    CapabilityStreamCancel,
+    CapabilityStreamError,
+    CapabilityStreamErrorCode,
+    CapabilityStreamFrame,
+    CapabilityStreamHandler,
+    CapabilityStreamReceiver,
+    CapabilityStreamSession,
     ExtensionContext,
     LoadedExtensions,
     call_failure,
@@ -185,6 +199,7 @@ from skulk.master.image_store import ImageStore
 from skulk.master.placement import PlacementInfoPendingError
 from skulk.master.placement import place_instance as get_instance_placements
 from skulk.master.placement_utils import usable_vram_by_node
+from skulk.routing.provider_streams import ProviderStreamPacket
 from skulk.shared.apply import apply
 from skulk.shared.constants import (
     DASHBOARD_DIR,
@@ -393,6 +408,11 @@ _MAX_CHUNK_REORDER_BUFFER = 512
 # unbounded in-flight calls on the API node. Calls beyond the bound are
 # rejected with the typed `overloaded` error rather than queued.
 _MAX_CONCURRENT_CAPABILITY_CALLS = 8
+# Provider streams hold their admission slot until a terminal frame, unlike a
+# unary call whose slot is released with its result. Keep the same initial cap
+# so an extension cannot create unbounded handler tasks or DATA queues.
+_MAX_CONCURRENT_CAPABILITY_STREAMS = 8
+_PROVIDER_STREAM_RECEIVE_BUFFER = 256
 _AUDIO_CONTENT_TYPES: Final[dict[AudioResponseFormat, str]] = {
     AudioResponseFormat.Mp3: "audio/mpeg",
     AudioResponseFormat.Wav: "audio/wav",
@@ -654,6 +674,26 @@ class _ChunkReorderState:
     # resets it; a stuck one ages to the flush window).
     gap_since: float | None = None
     gap_at: int | None = None
+
+
+@dataclass
+class _ProviderStreamReceiveState:
+    """Caller-side queue and lifecycle state for one provider stream."""
+
+    output_sender: Sender[CapabilityStreamFrame]
+    receiver: CapabilityStreamReceiver
+    target_node: NodeId
+    deadline_at: float
+
+
+@dataclass
+class _ActiveProviderStream:
+    """Provider-side cancellation state for one admitted handler."""
+
+    caller_node: str
+    cancel_requested: anyio.Event
+    cancel_message: str = "caller cancelled the provider stream"
+    cancel_scope: anyio.CancelScope | None = None
 
 
 # Task statuses for which the runner has stopped producing — a mid-stream idle
@@ -971,6 +1011,8 @@ class API:
         mount_dashboard: bool = True,
         telemetry_view: "TelemetryView | None" = None,
         data_receiver: "Receiver[DataChunk] | None" = None,
+        provider_stream_sender: "Sender[ProviderStreamPacket] | None" = None,
+        provider_stream_receiver: "Receiver[ProviderStreamPacket] | None" = None,
         data_plane_zenoh: bool = False,
         data_plane_egress_provider: (
             Callable[[], DataPlaneEgressDiagnostics] | None
@@ -1005,10 +1047,19 @@ class API:
             # the hot path, typed results; local target is an in-process fast
             # path with the same guards.
             call_capability=self._call_capability,
+            # Phase 3 server output travels on the provider DATA topic. The
+            # extension-facing callable remains transport-abstract.
+            stream_capability=self._stream_capability,
         )
         # In-flight extension capability calls served by this node; bounded by
         # _MAX_CONCURRENT_CAPABILITY_CALLS (single-threaded loop => plain int).
         self._active_capability_calls = 0
+        self._active_capability_streams: dict[str, _ActiveProviderStream] = {}
+        self._provider_stream_sender = provider_stream_sender
+        self._provider_stream_receiver = provider_stream_receiver
+        self._provider_stream_receivers: dict[
+            str, _ProviderStreamReceiveState
+        ] = {}
         # Data plane (#279 Phase 2): per-token output chunks arrive here direct
         # from the serving worker (DATA topic), not as ChunkGenerated events off
         # the master. Demuxed by command_id into the per-command stream queues.
@@ -1703,6 +1754,27 @@ class API:
                 "context's call_capability rather than directly."
             ),
         )(self.serve_capability_call)
+        self.app.post(
+            "/v1/capabilities/stream",
+            tags=["Extensions"],
+            summary="Open a capability stream on this node",
+            description=(
+                "Validate and admit one server-streaming provider call. This "
+                "control-sized request returns a typed opening result; output "
+                "frames travel separately on the provider DATA plane with "
+                "ordered lifecycle headers and optional raw media attachments."
+            ),
+        )(self.serve_capability_stream)
+        self.app.post(
+            "/v1/capabilities/stream/cancel",
+            tags=["Extensions"],
+            summary="Cancel an admitted capability stream",
+            description=(
+                "Request explicit cancellation of one admitted provider "
+                "stream. The provider emits one cancelled terminal frame when "
+                "the stream is still active; repeated cancellation is idempotent."
+            ),
+        )(self.cancel_capability_stream)
         self.app.get(
             "/v1/diagnostics/node",
             tags=["Diagnostics"],
@@ -3242,6 +3314,602 @@ class API:
                 return call_failure(call.call_id, "invalid_result", schema_error)
         return CapabilityResult(call_id=call.call_id, ok=True, result=result_payload)
 
+    async def serve_capability_stream(
+        self, call: CapabilityCall
+    ) -> CapabilityResult:
+        """Admit one server-output provider stream on this node.
+
+        The response covers only opening validation and admission. Once
+        admitted, lifecycle frames travel on ``PROVIDER_DATA`` to the caller
+        named by the envelope; no media bytes are carried by this HTTP request.
+        """
+
+        return await self._dispatch_capability_stream(call)
+
+    async def cancel_capability_stream(
+        self, request: CapabilityStreamCancel
+    ) -> CapabilityResult:
+        """Cancel one admitted provider stream idempotently."""
+
+        if request.target_node != str(self.node_id):
+            return call_failure(
+                request.call_id,
+                "invalid_payload",
+                f"cancellation addressed to {request.target_node}, served by "
+                f"{self.node_id}",
+            )
+        active = self._active_capability_streams.get(request.call_id)
+        if active is None:
+            return CapabilityResult(
+                call_id=request.call_id,
+                ok=True,
+                result={"cancelled": False},
+            )
+        if active.caller_node != request.caller_node:
+            return call_failure(
+                request.call_id,
+                "invalid_payload",
+                "only the caller that opened a provider stream may cancel it",
+            )
+        active.cancel_message = request.message
+        active.cancel_requested.set()
+        if active.cancel_scope is not None:
+            active.cancel_scope.cancel()
+        return CapabilityResult(
+            call_id=request.call_id,
+            ok=True,
+            result={"cancelled": True},
+        )
+
+    async def _dispatch_capability_stream(
+        self, call: CapabilityCall
+    ) -> CapabilityResult:
+        """Validate, admit, and start one guarded provider stream."""
+
+        started_at = anyio.current_time()
+        if call.target_node != str(self.node_id):
+            return call_failure(
+                call.call_id,
+                "invalid_payload",
+                f"call addressed to {call.target_node}, served by {self.node_id}",
+            )
+        if self._extensions is None:
+            return call_failure(
+                call.call_id, "not_found", "this node loads no extensions"
+            )
+        qualified_id = f"{call.capability_id}@{call.version}"
+        entry = self._extensions.stream_handler(qualified_id)
+        if entry is None:
+            code: CapabilityErrorCode = (
+                "version_mismatch"
+                if call.capability_id
+                in self._extensions.handled_stream_capability_ids()
+                else "not_found"
+            )
+            return call_failure(
+                call.call_id,
+                code,
+                f"no streaming capability {qualified_id!r}",
+            )
+        extension_name, handler, descriptor = entry
+        current_revision = descriptor_revision(descriptor)
+        if call.descriptor_revision != current_revision:
+            return call_failure(
+                call.call_id,
+                "revision_mismatch",
+                f"descriptor revision is {current_revision}, caller pinned "
+                f"{call.descriptor_revision}; re-discover before streaming",
+            )
+        if self._provider_stream_sender is None or not self._tg.is_running():
+            return call_failure(
+                call.call_id,
+                "unreachable",
+                "provider DATA transport is not running on this node",
+            )
+        if call.call_id in self._active_capability_streams:
+            return call_failure(
+                call.call_id,
+                "invalid_payload",
+                "call_id already names an active provider stream",
+            )
+        if (
+            len(self._active_capability_streams)
+            >= _MAX_CONCURRENT_CAPABILITY_STREAMS
+        ):
+            return call_failure(
+                call.call_id,
+                "overloaded",
+                f"provider stream concurrency bound "
+                f"({_MAX_CONCURRENT_CAPABILITY_STREAMS}) reached",
+            )
+
+        try:
+            with anyio.fail_after(call.timeout_seconds):
+                try:
+                    payload_bytes = len(
+                        json.dumps(
+                            call.payload,
+                            separators=(",", ":"),
+                            allow_nan=False,
+                        ).encode("utf-8")
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                    RecursionError,
+                    OverflowError,
+                ) as exc:
+                    return call_failure(
+                        call.call_id,
+                        "invalid_payload",
+                        f"payload is not JSON-serializable: {exc}",
+                    )
+                if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
+                    return call_failure(
+                        call.call_id,
+                        "payload_too_large",
+                        f"payload is {payload_bytes} bytes "
+                        f"(limit {MAX_CALL_PAYLOAD_BYTES})",
+                    )
+                schema_error = validate_against_schema(
+                    call.payload, descriptor.input_schema, what="payload"
+                )
+                if schema_error is not None:
+                    return call_failure(
+                        call.call_id, "invalid_payload", schema_error
+                    )
+        except TimeoutError:
+            return call_failure(
+                call.call_id,
+                "timeout",
+                "provider stream deadline expired during admission",
+            )
+
+        remaining = call.timeout_seconds - (anyio.current_time() - started_at)
+        if remaining <= 0:
+            return call_failure(
+                call.call_id,
+                "timeout",
+                "provider stream deadline expired during admission",
+            )
+        admitted_call = call.model_copy(update={"timeout_seconds": remaining})
+        active = _ActiveProviderStream(
+            caller_node=call.caller_node,
+            cancel_requested=anyio.Event(),
+        )
+        self._active_capability_streams[call.call_id] = active
+        try:
+            self._tg.start_soon(
+                self._run_capability_stream,
+                admitted_call,
+                extension_name,
+                handler,
+                descriptor,
+                active,
+            )
+        except RuntimeError as exc:
+            self._active_capability_streams.pop(call.call_id, None)
+            return call_failure(
+                call.call_id,
+                "unreachable",
+                f"provider stream runtime could not start: {exc}",
+            )
+        return CapabilityResult(
+            call_id=call.call_id,
+            ok=True,
+            result={"admitted": True},
+        )
+
+    async def _run_capability_stream(
+        self,
+        call: CapabilityCall,
+        extension_name: str,
+        handler: CapabilityStreamHandler,
+        descriptor: CapabilityDescriptor,
+        active: _ActiveProviderStream,
+    ) -> None:
+        """Execute one admitted handler and enforce its output contract."""
+
+        next_sequence = 0
+        terminal_sent = False
+
+        async def emit(frame: CapabilityStreamFrame) -> None:
+            if self._provider_stream_sender is None:
+                raise ClosedResourceError
+            await self._provider_stream_sender.send(
+                ProviderStreamPacket(
+                    owner_node=NodeId(call.caller_node),
+                    frame=frame,
+                )
+            )
+
+        async def fail(code: CapabilityStreamErrorCode, message: str) -> None:
+            nonlocal next_sequence, terminal_sent
+            if terminal_sent:
+                return
+            await emit(
+                CapabilityStreamFrame(
+                    call_id=call.call_id,
+                    direction="provider_to_caller",
+                    sequence=next_sequence,
+                    kind="failed",
+                    synthetic=True,
+                    error=CapabilityStreamError(
+                        code=code,
+                        message=message,
+                    ),
+                )
+            )
+            next_sequence += 1
+            terminal_sent = True
+
+        try:
+            with anyio.CancelScope() as cancel_scope:
+                active.cancel_scope = cancel_scope
+                if active.cancel_requested.is_set():
+                    cancel_scope.cancel()
+                try:
+                    with anyio.fail_after(call.timeout_seconds):
+                        await emit(
+                            CapabilityStreamFrame(
+                                call_id=call.call_id,
+                                direction="provider_to_caller",
+                                sequence=0,
+                                kind="started",
+                            )
+                        )
+                        next_sequence = 1
+                        stream = handler.handle_stream(
+                            self._extension_context, call
+                        )
+                        async for frame in stream:
+                            if not isinstance(frame, CapabilityStreamFrame):  # pyright: ignore[reportUnnecessaryIsInstance]
+                                await fail(
+                                    "invalid_frame",
+                                    f"provider yielded {type(frame).__name__}, "
+                                    "not CapabilityStreamFrame",
+                                )
+                                break
+                            if (
+                                frame.call_id != call.call_id
+                                or frame.direction != "provider_to_caller"
+                                or frame.sequence != next_sequence
+                                or frame.kind == "started"
+                            ):
+                                await fail(
+                                    "invalid_frame",
+                                    "provider yielded a frame with invalid "
+                                    "identity, direction, sequence, or lifecycle",
+                                )
+                                break
+                            if frame.kind == "chunk" or (
+                                frame.kind == "completed"
+                                and (frame.payload is not None or frame.media is not None)
+                            ):
+                                payload = frame.payload or {}
+                                try:
+                                    payload_bytes = len(
+                                        json.dumps(
+                                            payload,
+                                            separators=(",", ":"),
+                                            allow_nan=False,
+                                        ).encode("utf-8")
+                                    )
+                                except (
+                                    TypeError,
+                                    ValueError,
+                                    RecursionError,
+                                    OverflowError,
+                                ) as exc:
+                                    await fail(
+                                        "invalid_frame",
+                                        f"provider chunk payload is not JSON: {exc}",
+                                    )
+                                    break
+                                if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
+                                    await fail(
+                                        "invalid_frame",
+                                        "provider chunk payload exceeds 1 MiB",
+                                    )
+                                    break
+                                assert descriptor.output_chunk_schema is not None
+                                schema_error = validate_against_schema(
+                                    payload,
+                                    descriptor.output_chunk_schema,
+                                    what="output chunk",
+                                )
+                                if schema_error is not None:
+                                    await fail("invalid_frame", schema_error)
+                                    break
+                            await emit(frame)
+                            next_sequence += 1
+                            if frame.is_terminal:
+                                terminal_sent = True
+                                break
+                        if not terminal_sent:
+                            await fail(
+                                "provider_error",
+                                "provider stream ended without a terminal frame",
+                            )
+                except TimeoutError:
+                    with anyio.CancelScope(shield=True):
+                        await fail(
+                            "timeout",
+                            "provider stream exceeded its single deadline budget",
+                        )
+                except anyio.get_cancelled_exc_class():
+                    if not active.cancel_requested.is_set():
+                        raise
+            if active.cancel_requested.is_set() and not terminal_sent:
+                with anyio.CancelScope(shield=True):
+                    await emit(
+                        CapabilityStreamFrame(
+                            call_id=call.call_id,
+                            direction="provider_to_caller",
+                            sequence=next_sequence,
+                            kind="cancelled",
+                            synthetic=True,
+                            error=CapabilityStreamError(
+                                code="cancelled",
+                                message=active.cancel_message,
+                            ),
+                        )
+                    )
+                    terminal_sent = True
+        except (BrokenResourceError, ClosedResourceError):
+            logger.warning(
+                f"provider DATA transport closed during {call.call_id}"
+            )
+        except Exception as exc:  # noqa: BLE001 - plugin/transport must not escape
+            logger.exception(
+                f"capability stream handler '{extension_name}' for "
+                f"{descriptor.qualified_id} raised: {exc}"
+            )
+            if not terminal_sent:
+                with anyio.CancelScope(shield=True):
+                    with contextlib.suppress(
+                        BrokenResourceError, ClosedResourceError
+                    ):
+                        await fail(
+                            "provider_error",
+                            f"{type(exc).__name__}: {exc}",
+                        )
+        finally:
+            current = self._active_capability_streams.get(call.call_id)
+            if current is active:
+                self._active_capability_streams.pop(call.call_id, None)
+
+    async def _stream_capability(
+        self,
+        node_id: NodeId,
+        capability_id: str,
+        version: str,
+        descriptor_revision: str,
+        payload: dict[str, object],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> CapabilityStreamSession:
+        """Open a provider stream and receive output over ``PROVIDER_DATA``."""
+
+        call_id = str(uuid4())
+        requested_timeout = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else DEFAULT_CALL_TIMEOUT_SECONDS
+        )
+
+        def failed(code: CapabilityErrorCode, message: str) -> CapabilityStreamSession:
+            return CapabilityStreamSession(
+                open_result=call_failure(call_id, code, message),
+                frames=self._empty_capability_stream(),
+            )
+
+        if not isinstance(requested_timeout, (int, float)) or not (  # pyright: ignore[reportUnnecessaryIsInstance]
+            0 < requested_timeout <= MAX_CALL_TIMEOUT_SECONDS
+        ):
+            return failed(
+                "invalid_payload",
+                f"timeout_seconds must be in (0, {MAX_CALL_TIMEOUT_SECONDS}]",
+            )
+        try:
+            payload_bytes = len(
+                json.dumps(
+                    payload, separators=(",", ":"), allow_nan=False
+                ).encode("utf-8")
+            )
+        except (TypeError, ValueError, RecursionError, OverflowError) as exc:
+            return failed(
+                "invalid_payload", f"payload is not JSON-serializable: {exc}"
+            )
+        if payload_bytes > MAX_CALL_PAYLOAD_BYTES:
+            return failed(
+                "payload_too_large",
+                f"payload is {payload_bytes} bytes "
+                f"(limit {MAX_CALL_PAYLOAD_BYTES})",
+            )
+        try:
+            call = CapabilityCall(
+                call_id=call_id,
+                capability_id=capability_id,
+                version=version,
+                descriptor_revision=descriptor_revision,
+                caller_node=str(self.node_id),
+                target_node=str(node_id),
+                timeout_seconds=requested_timeout,
+                payload=payload,
+            )
+        except ValidationError as exc:
+            return failed(
+                "invalid_payload", f"invalid stream call envelope: {exc}"
+            )
+        if self._provider_stream_receiver is None:
+            return failed(
+                "unreachable",
+                "provider DATA receive transport is not running on this node",
+            )
+
+        output_sender, output_receiver = channel[CapabilityStreamFrame](
+            _PROVIDER_STREAM_RECEIVE_BUFFER
+        )
+        started_at = anyio.current_time()
+        deadline_at = started_at + requested_timeout
+        receive_state = _ProviderStreamReceiveState(
+            output_sender=output_sender,
+            receiver=CapabilityStreamReceiver(
+                call_id=call_id,
+                direction="provider_to_caller",
+                gap_timeout_seconds=5.0,
+                idle_timeout_seconds=requested_timeout,
+            ),
+            target_node=node_id,
+            deadline_at=deadline_at,
+        )
+        self._provider_stream_receivers[call_id] = receive_state
+
+        if node_id == self.node_id:
+            opened = await self._dispatch_capability_stream(call)
+        else:
+            base_url: str | None = None
+            with anyio.move_on_after(requested_timeout) as lookup_scope:
+                base_url = await self._peer_api_url_for(node_id)
+            if lookup_scope.cancelled_caught:
+                opened = call_failure(
+                    call_id,
+                    "timeout",
+                    f"deadline exhausted resolving target {node_id}",
+                )
+            elif base_url is None:
+                opened = call_failure(
+                    call_id, "unreachable", f"node {node_id} is not reachable"
+                )
+            else:
+                remaining = deadline_at - anyio.current_time()
+                if remaining < 0.05:
+                    opened = call_failure(
+                        call_id,
+                        "timeout",
+                        f"target {node_id} resolved, but no stream budget remains",
+                    )
+                else:
+                    remote_call = call.model_copy(
+                        update={"timeout_seconds": remaining}
+                    )
+                    try:
+                        async with httpx.AsyncClient(
+                            timeout=httpx.Timeout(
+                                timeout=remaining + 5.0,
+                                connect=2.0,
+                            ),
+                            verify=False,
+                        ) as client:
+                            response = await client.post(
+                                f"{base_url}/v1/capabilities/stream",
+                                json=remote_call.model_dump(mode="json"),
+                            )
+                            response.raise_for_status()
+                            opened = CapabilityResult.model_validate(response.json())
+                    except (httpx.HTTPError, ValueError, ValidationError) as exc:
+                        opened = call_failure(
+                            call_id,
+                            "unreachable",
+                            f"stream open to {node_id} failed: {exc}",
+                        )
+
+        if not opened.ok:
+            self._provider_stream_receivers.pop(call_id, None)
+            output_sender.close()
+            output_receiver.close()
+            return CapabilityStreamSession(
+                open_result=opened,
+                frames=self._empty_capability_stream(),
+            )
+        return CapabilityStreamSession(
+            open_result=opened,
+            frames=self._consume_capability_stream(
+                call,
+                receive_state,
+                output_receiver,
+            ),
+        )
+
+    async def _consume_capability_stream(
+        self,
+        call: CapabilityCall,
+        state: _ProviderStreamReceiveState,
+        output_receiver: Receiver[CapabilityStreamFrame],
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        """Yield one caller stream and cancel its provider on early close."""
+
+        terminal_yielded = False
+        try:
+            remaining = max(0.0, state.deadline_at - anyio.current_time())
+            with anyio.move_on_after(remaining) as deadline_scope:
+                with output_receiver as frames:
+                    async for frame in frames:
+                        yield frame
+                        if frame.is_terminal:
+                            terminal_yielded = True
+                            return
+            if deadline_scope.cancelled_caught:
+                terminal = state.receiver.fail(
+                    "timeout",
+                    "provider stream exceeded its single deadline budget",
+                )
+            else:
+                terminal = state.receiver.terminal or state.receiver.fail(
+                    "transport_error",
+                    "provider DATA stream closed without a terminal frame",
+                )
+            if terminal is not None:
+                terminal_yielded = True
+                yield terminal
+        finally:
+            self._provider_stream_receivers.pop(call.call_id, None)
+            state.output_sender.close()
+            output_receiver.close()
+            if not terminal_yielded:
+                await self._cancel_remote_capability_stream(call)
+
+    async def _cancel_remote_capability_stream(self, call: CapabilityCall) -> None:
+        """Best-effort explicit cancellation for an early-closing caller."""
+
+        request = CapabilityStreamCancel(
+            call_id=call.call_id,
+            caller_node=call.caller_node,
+            target_node=call.target_node,
+        )
+        if call.target_node == str(self.node_id):
+            await self.cancel_capability_stream(request)
+            return
+        with anyio.move_on_after(2.0):
+            base_url = await self._peer_api_url_for(NodeId(call.target_node))
+            if base_url is None:
+                return
+            try:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(timeout=2.0, connect=1.0),
+                    verify=False,
+                ) as client:
+                    await client.post(
+                        f"{base_url}/v1/capabilities/stream/cancel",
+                        json=request.model_dump(mode="json"),
+                    )
+            except httpx.HTTPError:
+                return
+
+    async def _empty_capability_stream(
+        self,
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        """Return an empty iterator for a stream that failed before admission."""
+
+        if False:
+            yield CapabilityStreamFrame(
+                call_id="unreachable",
+                direction="provider_to_caller",
+                sequence=0,
+                kind="started",
+            )
+
     async def _call_capability(
         self,
         node_id: NodeId,
@@ -4538,6 +5206,8 @@ class API:
                 # subscription is session-independent, so (unlike _apply_state)
                 # it is NOT re-spawned by reset().
                 tg.start_soon(self._apply_data)
+                tg.start_soon(self._apply_provider_data)
+                tg.start_soon(self._sweep_provider_stream_receivers)
                 # Releases reorder gaps stuck on a chunk dropped by the
                 # best-effort DATA topic (#279 Phase 2b); lifetime-scoped like
                 # _apply_data. Only meaningful while the reorder buffer is on;
@@ -4689,6 +5359,69 @@ class API:
                     await self._dispatch_data_frame(data)
                 else:
                     self._data_plane_observer.record_late()
+
+    async def _apply_provider_data(self) -> None:
+        """Demultiplex provider DATA frames into isolated caller queues."""
+
+        if self._provider_stream_receiver is None:
+            return
+        with self._provider_stream_receiver as packets:
+            async for packet in packets:
+                if packet.owner_node != self.node_id:
+                    # The gossipsub fallback broadcasts provider DATA; only the
+                    # addressed owner may consume it. Zenoh filters by key.
+                    continue
+                call_id = packet.frame.call_id
+                state = self._provider_stream_receivers.get(call_id)
+                if state is None:
+                    continue
+                batch = state.receiver.accept(
+                    packet.frame,
+                    observed_at=anyio.current_time(),
+                )
+                queue_failed = False
+                for frame in batch.ready:
+                    try:
+                        state.output_sender.send_nowait(frame)
+                    except WouldBlock:
+                        state.receiver.fail(
+                            "transport_error",
+                            "caller provider stream queue exceeded its bound",
+                        )
+                        queue_failed = True
+                        break
+                    except (BrokenResourceError, ClosedResourceError):
+                        queue_failed = True
+                        break
+                if batch.synthesized_terminal is not None:
+                    with contextlib.suppress(
+                        WouldBlock, BrokenResourceError, ClosedResourceError
+                    ):
+                        state.output_sender.send_nowait(
+                            batch.synthesized_terminal
+                        )
+                    queue_failed = True
+                if queue_failed or state.receiver.terminal is not None:
+                    self._provider_stream_receivers.pop(call_id, None)
+                    state.output_sender.close()
+
+    async def _sweep_provider_stream_receivers(self) -> None:
+        """Expire provider sequence gaps without waiting for the call deadline."""
+
+        while True:
+            await anyio.sleep(0.5)
+            observed_at = anyio.current_time()
+            for call_id, state in list(self._provider_stream_receivers.items()):
+                batch = state.receiver.expire(observed_at=observed_at)
+                terminal = batch.synthesized_terminal
+                if terminal is None:
+                    continue
+                with contextlib.suppress(
+                    WouldBlock, BrokenResourceError, ClosedResourceError
+                ):
+                    state.output_sender.send_nowait(terminal)
+                self._provider_stream_receivers.pop(call_id, None)
+                state.output_sender.close()
 
     def _command_has_queue(self, command_id: CommandId) -> bool:
         return (

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, cast, final
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from skulk.extensions.calls import CapabilityResult
 from skulk.shared.types.streaming import StreamFrameKind
 
 StreamDirection = Literal["caller_to_provider", "provider_to_caller"]
@@ -25,6 +27,8 @@ CapabilityStreamErrorCode = Literal[
 """Machine-readable terminal failure classes for provider streams."""
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+MAX_INLINE_MEDIA_BYTES = 1_048_576
+"""Largest realtime media attachment accepted in one provider frame."""
 
 
 class CapabilityStreamError(BaseModel):
@@ -42,7 +46,7 @@ class InlineMediaAttachment(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 
     kind: Literal["inline"] = "inline"
-    data: bytes
+    data: bytes = Field(max_length=MAX_INLINE_MEDIA_BYTES)
     media_type: str
     codec: str | None = None
     sample_rate: int | None = Field(default=None, gt=0)
@@ -114,13 +118,22 @@ class CapabilityStreamFrame(BaseModel):
                 raise ValueError(
                     "failed provider stream frame requires a non-cancel error"
                 )
-        elif self.error is None or self.error.code != "cancelled":
-            raise ValueError("cancelled provider stream frame requires cancelled error")
+            if self.payload is not None or self.media is not None:
+                raise ValueError("failed provider stream frame carries no payload")
+        else:
+            if self.error is None or self.error.code != "cancelled":
+                raise ValueError(
+                    "cancelled provider stream frame requires cancelled error"
+                )
+            if self.payload is not None or self.media is not None:
+                raise ValueError(
+                    "cancelled provider stream frame carries no payload"
+                )
 
         if self.payload is not None:
             try:
                 json.dumps(self.payload, allow_nan=False)
-            except (TypeError, ValueError) as exc:
+            except (TypeError, ValueError, RecursionError, OverflowError) as exc:
                 raise ValueError(
                     "provider stream payload must be JSON-serializable; use media "
                     "attachments for bytes"
@@ -132,6 +145,26 @@ class CapabilityStreamFrame(BaseModel):
         """Whether this frame closes its call direction."""
 
         return self.kind in ("completed", "failed", "cancelled")
+
+
+class CapabilityStreamCancel(BaseModel):
+    """Control-sized request to cancel one admitted provider stream."""
+
+    model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
+
+    call_id: str
+    caller_node: str
+    target_node: str
+    message: str = "caller stopped consuming the provider stream"
+
+
+@final
+@dataclass(frozen=True)
+class CapabilityStreamSession:
+    """Opening result plus the one-shot output iterator for a provider stream."""
+
+    open_result: CapabilityResult
+    frames: AsyncIterator[CapabilityStreamFrame]
 
 
 def encode_capability_stream_frame(
@@ -349,6 +382,17 @@ class CapabilityStreamReceiver:
         self._gap_sequence = None
         self._gap_since = None
         return terminal
+
+    def fail(
+        self,
+        code: CapabilityStreamErrorCode,
+        message: str,
+    ) -> CapabilityStreamFrame | None:
+        """Close locally with one idempotent synthesized failed frame."""
+
+        if self._terminal is not None:
+            return None
+        return self._synthesize_failure(code, message)
 
     def _synthesize_failure(
         self,

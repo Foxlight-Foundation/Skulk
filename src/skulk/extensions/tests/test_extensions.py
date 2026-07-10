@@ -1,7 +1,7 @@
 """Tests for extension discovery, version gating, and guarded dispatch."""
 
 import asyncio
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from importlib.metadata import EntryPoint
 
 import pytest
@@ -10,6 +10,8 @@ from skulk.extensions import (
     BaseChatMiddleware,
     CapabilityDescriptor,
     CapabilityResult,
+    CapabilityStreamFrame,
+    CapabilityStreamSession,
     ChatResponseSummary,
     ExtensionContext,
     LoadedExtensions,
@@ -52,6 +54,35 @@ async def _call_stub(
     return call_failure("test-call", "unreachable", "no fabric in tests")
 
 
+async def _empty_stream() -> AsyncIterator[CapabilityStreamFrame]:
+    if False:
+        yield CapabilityStreamFrame(
+            call_id="unused",
+            direction="provider_to_caller",
+            sequence=0,
+            kind="started",
+        )
+
+
+async def _stream_stub(
+    node_id: NodeId,
+    capability_id: str,
+    version: str,
+    descriptor_revision: str,
+    payload: dict[str, object],
+    *,
+    timeout_seconds: float | None = None,
+) -> CapabilityStreamSession:
+    """Unreachable streaming surface for tests."""
+
+    return CapabilityStreamSession(
+        open_result=call_failure(
+            "test-stream", "unreachable", "no fabric in tests"
+        ),
+        frames=_empty_stream(),
+    )
+
+
 def _context() -> ExtensionContext:
     return ExtensionContext(
         node_id=NodeId("test-node"),
@@ -62,6 +93,7 @@ def _context() -> ExtensionContext:
         withdraw_capability=lambda capability: None,  # noqa: ARG005
         describe_node=_describe_stub,
         call_capability=_call_stub,
+        stream_capability=_stream_stub,
     )
 
 

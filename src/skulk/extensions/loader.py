@@ -147,10 +147,13 @@ class LoadedExtensions:
                             extension,
                             descriptor,
                         )
-                    if descriptor.io_mode in (
-                        "server_streaming",
-                        "bidirectional",
-                    ) and isinstance(extension, CapabilityStreamHandler):
+                    # Phase 3's first executable mode is unary input with
+                    # server-streaming output (TTS). Bidirectional descriptors
+                    # remain discoverable but do not register until caller-side
+                    # input frames and half-close semantics land.
+                    if descriptor.io_mode == "server_streaming" and isinstance(
+                        extension, CapabilityStreamHandler
+                    ):
                         self._stream_handlers[descriptor.qualified_id] = (
                             name,
                             extension,
@@ -200,6 +203,13 @@ class LoadedExtensions:
         """Look up the streaming handler serving ``id@version`` on this node."""
 
         return self._stream_handlers.get(qualified_id)
+
+    def handled_stream_capability_ids(self) -> frozenset[str]:
+        """Bare capability ids with a server-output stream handler."""
+
+        return frozenset(
+            entry[2].id for entry in self._stream_handlers.values()
+        )
 
     def run_startup_hooks(self, context: ExtensionContext) -> None:
         """Run every extension's ``on_start`` hook, each one guarded.

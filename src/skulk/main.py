@@ -457,6 +457,7 @@ class Node:
         await router.register_topic(topics.STATE_SYNC_MESSAGES)
         await router.register_topic(topics.TELEMETRY)
         await router.register_topic(topics.DATA)
+        await router.register_topic(topics.PROVIDER_DATA)
         telemetry_view = TelemetryView()
         event_router = EventRouter(
             node_id,
@@ -557,6 +558,8 @@ class Node:
                 store_client=store_client,
                 telemetry_view=telemetry_view,
                 data_receiver=router.receiver(topics.DATA),
+                provider_stream_sender=router.sender(topics.PROVIDER_DATA),
+                provider_stream_receiver=router.receiver(topics.PROVIDER_DATA),
                 data_plane_zenoh=_zenoh_on,
                 data_plane_egress_provider=router.data_plane_egress_diagnostics,
                 # Installed plugins (skulk.extensions entry points), discovered
