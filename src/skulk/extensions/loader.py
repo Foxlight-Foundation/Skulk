@@ -174,12 +174,38 @@ class LoadedExtensions:
 
         Built-ins are prepended so their reserved ``id@version`` contracts win
         deterministically over an external extension attempting to publish the
-        same qualified capability. Startup hooks have not run yet when the API
-        calls this method, so rebuilding the guarded registry is side-effect
-        free.
+        same qualified capability. Existing extension facets are copied from
+        this registry rather than discovered again because middleware and
+        capability factories may be stateful.
         """
 
-        return LoadedExtensions((*extensions, *self._extension_instances))
+        combined = LoadedExtensions(extensions)
+        combined._extension_instances.extend(self._extension_instances)
+        combined._names.extend(self._names)
+        combined._chat_middlewares.extend(self._chat_middlewares)
+        combined._startup_hooks.extend(self._startup_hooks)
+
+        seen_qualified_ids = {
+            descriptor.qualified_id
+            for descriptor in combined._capability_descriptors
+        }
+        for descriptor in self._capability_descriptors:
+            qualified_id = descriptor.qualified_id
+            if qualified_id in seen_qualified_ids:
+                logger.error(
+                    f"external capability '{qualified_id}' is reserved by a "
+                    "first-party provider on this node; skipping it"
+                )
+                continue
+            seen_qualified_ids.add(qualified_id)
+            combined._capability_descriptors.append(descriptor)
+            call_handler = self._call_handlers.get(qualified_id)
+            if call_handler is not None:
+                combined._call_handlers[qualified_id] = call_handler
+            stream_handler = self._stream_handlers.get(qualified_id)
+            if stream_handler is not None:
+                combined._stream_handlers[qualified_id] = stream_handler
+        return combined
 
     @property
     def names(self) -> list[str]:
