@@ -1,4 +1,5 @@
 import time
+from collections import deque
 from collections.abc import Sequence
 from copy import copy
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from typing import cast
 from anyio import (
     BrokenResourceError,
     ClosedResourceError,
+    Semaphore,
     WouldBlock,
     fail_after,
     get_cancelled_exc_class,
@@ -31,7 +33,8 @@ from skulk_pyo3_bindings import (
 )
 
 from skulk.shared.constants import SKULK_NODE_ID_KEYPAIR
-from skulk.shared.types.chunks import DataChunk
+from skulk.shared.models.model_cards import ModelId
+from skulk.shared.types.chunks import DataChunk, ErrorChunk
 from skulk.shared.types.diagnostics import DataPlaneEgressDiagnostics
 from skulk.utils.channels import Receiver, Sender, channel
 from skulk.utils.pydantic_ext import CamelCaseModel
@@ -53,6 +56,8 @@ _ZENOH_DATA_OUTBOUND_BUFFER = 2048
 _ZENOH_DATA_STREAM_BUFFER = 256
 _ZENOH_DATA_MAX_STREAMS_PER_OWNER = 64
 _ZENOH_DATA_MAX_ACTIVE_STREAMS = 1024
+_ZENOH_DATA_MAX_REJECTION_TASKS = 1024
+_ZENOH_DATA_REJECTED_STREAM_TOMBSTONES = 4096
 _ZENOH_DATA_PUBLISH_TIMEOUT_SECONDS = 5.0
 
 
@@ -510,6 +515,9 @@ class Router:
         assert self._zenoh is not None and self._zenoh_out_recv is not None
         stream_senders: dict[tuple[str, str], Sender[OutboundPacket]] = {}
         owner_stream_counts: dict[str, int] = {}
+        rejected_streams: set[tuple[str, str]] = set()
+        rejected_stream_order: deque[tuple[str, str]] = deque()
+        rejection_slots = Semaphore(_ZENOH_DATA_MAX_REJECTION_TASKS)
         async with TaskGroup() as task_group:
             with self._zenoh_out_recv as items:
                 async for packet in items:
@@ -533,6 +541,11 @@ class Router:
                         self._data_plane_egress_observer.record_dropped(owner)
                         continue
                     stream = (owner, packet.stream_key)
+                    if stream in rejected_streams:
+                        self._data_plane_egress_observer.record_dropped(owner)
+                        if packet.is_terminal:
+                            rejected_streams.discard(stream)
+                        continue
                     sender = stream_senders.get(stream)
                     if sender is None:
                         if (
@@ -541,9 +554,32 @@ class Router:
                             >= _ZENOH_DATA_MAX_STREAMS_PER_OWNER
                         ):
                             self._data_plane_egress_observer.record_dropped(owner)
+                            rejected_streams.add(stream)
+                            rejected_stream_order.append(stream)
+                            while (
+                                len(rejected_stream_order)
+                                > _ZENOH_DATA_REJECTED_STREAM_TOMBSTONES
+                            ):
+                                rejected_streams.discard(
+                                    rejected_stream_order.popleft()
+                                )
                             logger.warning(
                                 "Zenoh DATA stream admission full for owner; "
-                                "dropping command frame"
+                                "rejecting the affected command"
+                            )
+                            try:
+                                rejection_slots.acquire_nowait()
+                            except WouldBlock:
+                                # The rejection path is itself bounded. Global
+                                # backpressure applies only after a second full
+                                # stream-cap worth of rejections is already in
+                                # flight, rather than creating unbounded tasks.
+                                await rejection_slots.acquire()
+                            task_group.start_soon(
+                                self._publish_zenoh_data_rejection,
+                                packet,
+                                owner,
+                                rejection_slots,
                             )
                             continue
                         sender, receiver = channel[OutboundPacket](
@@ -573,6 +609,64 @@ class Router:
                             sender.close()
                         continue
                     self._data_plane_egress_observer.record_enqueued(owner)
+
+    async def _publish_zenoh_data_rejection(
+        self,
+        packet: OutboundPacket,
+        owner: str,
+        rejection_slots: Semaphore,
+    ) -> None:
+        """Tell one admitted API that router stream capacity rejected its call."""
+
+        assert self._zenoh is not None
+        original = DATA.deserialize(packet.data)
+        rejection_frames = (
+            DataChunk(
+                command_id=original.command_id,
+                kind="started",
+                sequence=0,
+                owner_node=original.owner_node,
+            ),
+            DataChunk(
+                command_id=original.command_id,
+                kind="failed",
+                chunk=ErrorChunk(
+                    model=ModelId("unknown"),
+                    error_message=(
+                        "DATA transport rejected the command because remote "
+                        "stream capacity is exhausted"
+                    ),
+                ),
+                sequence=1,
+                owner_node=original.owner_node,
+            ),
+        )
+        try:
+            for frame in rejection_frames:
+                data = DATA.serialize(frame)
+                started_at = time.monotonic()
+                try:
+                    with fail_after(_ZENOH_DATA_PUBLISH_TIMEOUT_SECONDS):
+                        await self._zenoh.zenoh_publish(
+                            f"{packet.topic}/{owner}", data
+                        )
+                except get_cancelled_exc_class():
+                    raise
+                except Exception as exception:
+                    self._data_plane_egress_observer.record_publish_failure(
+                        owner, time.monotonic() - started_at
+                    )
+                    logger.opt(exception=exception).warning(
+                        "Zenoh DATA admission rejection publish failed"
+                    )
+                else:
+                    self._data_plane_egress_observer.record_published(
+                        owner,
+                        len(data),
+                        time.monotonic() - started_at,
+                    )
+        finally:
+            rejection_slots.release()
 
     async def _publish_zenoh_data_stream(
         self,

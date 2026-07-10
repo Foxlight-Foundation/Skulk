@@ -8,6 +8,7 @@ opening a network session.
 
 from typing import cast
 
+import pytest
 from skulk_pyo3_bindings import NetworkingHandle, ZenohHandle
 
 from skulk.routing.router import (
@@ -222,5 +223,69 @@ def test_blocked_command_does_not_stall_another_command_for_same_owner() -> None
             assert diagnostics.active_stream_queues == 1
             zenoh.release_slow.set()
             task_group.cancel_scope.cancel()
+
+    anyio.run(_run)
+
+
+def test_stream_admission_limit_sends_terminal_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An over-cap command must fail at its API instead of hanging forever."""
+
+    import anyio
+
+    import skulk.routing.router as router_module
+    from skulk.shared.types.chunks import DataChunk, ErrorChunk
+    from skulk.shared.types.common import CommandId, NodeId
+
+    monkeypatch.setattr(router_module, "_ZENOH_DATA_MAX_STREAMS_PER_OWNER", 0)
+
+    class _RecordingZenoh:
+        def __init__(self) -> None:
+            self.frames: list[DataChunk] = []
+            self.complete = anyio.Event()
+
+        async def zenoh_publish(self, _key: str, data: bytes) -> None:
+            self.frames.append(DATA.deserialize(data))
+            if len(self.frames) == 2:
+                self.complete.set()
+
+    async def _run() -> None:
+        zenoh = _RecordingZenoh()
+        router = Router(
+            handle=cast(NetworkingHandle, object()),
+            zenoh=cast(ZenohHandle, cast(object, zenoh)),
+            node_id="self-node",
+        )
+        assert router._zenoh_out_send is not None  # pyright: ignore[reportPrivateUsage]
+        started = DataChunk(
+            command_id=CommandId("rejected-command"),
+            kind="started",
+            sequence=0,
+            owner_node=NodeId("remote-owner"),
+        )
+        packet = OutboundPacket(
+            topic=DATA.topic,
+            routing_key="remote-owner",
+            stream_key="rejected-command",
+            is_terminal=False,
+            data=DATA.serialize(started),
+        )
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                router._zenoh_networking_publish  # pyright: ignore[reportPrivateUsage]
+            )
+            await router._zenoh_out_send.send(packet)  # pyright: ignore[reportPrivateUsage]
+            with anyio.fail_after(0.5):
+                await zenoh.complete.wait()
+            task_group.cancel_scope.cancel()
+
+        assert [frame.kind for frame in zenoh.frames] == ["started", "failed"]
+        assert [frame.sequence for frame in zenoh.frames] == [0, 1]
+        assert isinstance(zenoh.frames[1].chunk, ErrorChunk)
+        diagnostics = router.data_plane_egress_diagnostics()
+        assert diagnostics.remote_frames_dropped == 1
+        assert diagnostics.remote_frames_published == 2
 
     anyio.run(_run)
