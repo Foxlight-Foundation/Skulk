@@ -684,6 +684,8 @@ class _ProviderStreamReceiveState:
     receiver: CapabilityStreamReceiver
     target_node: NodeId
     deadline_at: float
+    transport_failure: str | None = None
+    cancel_provider: bool = False
 
 
 @dataclass
@@ -3841,16 +3843,32 @@ class API:
         """Yield one caller stream and cancel its provider on early close."""
 
         terminal_yielded = False
+        last_yielded_sequence = -1
         try:
             remaining = max(0.0, state.deadline_at - anyio.current_time())
             with anyio.move_on_after(remaining) as deadline_scope:
                 with output_receiver as frames:
                     async for frame in frames:
                         yield frame
+                        last_yielded_sequence = frame.sequence
                         if frame.is_terminal:
                             terminal_yielded = True
                             return
-            if deadline_scope.cancelled_caught:
+            if state.transport_failure is not None:
+                state.cancel_provider = True
+                terminal = CapabilityStreamFrame(
+                    call_id=call.call_id,
+                    direction="provider_to_caller",
+                    sequence=last_yielded_sequence + 1,
+                    kind="failed",
+                    synthetic=True,
+                    error=CapabilityStreamError(
+                        code="transport_error",
+                        message=state.transport_failure,
+                    ),
+                )
+            elif deadline_scope.cancelled_caught:
+                state.cancel_provider = True
                 terminal = state.receiver.fail(
                     "timeout",
                     "provider stream exceeded its single deadline budget",
@@ -3860,6 +3878,8 @@ class API:
                     "transport_error",
                     "provider DATA stream closed without a terminal frame",
                 )
+                if terminal is not None:
+                    state.cancel_provider = True
             if terminal is not None:
                 terminal_yielded = True
                 yield terminal
@@ -3867,7 +3887,7 @@ class API:
             self._provider_stream_receivers.pop(call.call_id, None)
             state.output_sender.close()
             output_receiver.close()
-            if not terminal_yielded:
+            if not terminal_yielded or state.cancel_provider:
                 await self._cancel_remote_capability_stream(call)
 
     async def _cancel_remote_capability_stream(self, call: CapabilityCall) -> None:
@@ -5384,16 +5404,21 @@ class API:
                     try:
                         state.output_sender.send_nowait(frame)
                     except WouldBlock:
-                        state.receiver.fail(
-                            "transport_error",
-                            "caller provider stream queue exceeded its bound",
+                        state.transport_failure = (
+                            "caller provider stream queue exceeded its bound"
                         )
+                        state.cancel_provider = True
                         queue_failed = True
                         break
                     except (BrokenResourceError, ClosedResourceError):
+                        state.transport_failure = (
+                            "caller provider stream queue closed before delivery"
+                        )
+                        state.cancel_provider = True
                         queue_failed = True
                         break
                 if batch.synthesized_terminal is not None:
+                    state.cancel_provider = True
                     with contextlib.suppress(
                         WouldBlock, BrokenResourceError, ClosedResourceError
                     ):
@@ -5416,6 +5441,7 @@ class API:
                 terminal = batch.synthesized_terminal
                 if terminal is None:
                     continue
+                state.cancel_provider = True
                 with contextlib.suppress(
                     WouldBlock, BrokenResourceError, ClosedResourceError
                 ):

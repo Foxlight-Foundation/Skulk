@@ -130,6 +130,28 @@ class _CancellableProvider(_TtsProvider):
             self.cancelled.set()
 
 
+class _BurstProvider(_TtsProvider):
+    async def handle_stream(
+        self,
+        context: ExtensionContext,
+        call: CapabilityCall,
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        for sequence in range(1, 302):
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=sequence,
+                kind="chunk",
+                payload={"format": "pcm_s16le"},
+            )
+        yield CapabilityStreamFrame(
+            call_id=call.call_id,
+            direction="provider_to_caller",
+            sequence=302,
+            kind="completed",
+        )
+
+
 class _BidirectionalProvider(_TtsProvider):
     def capabilities(self) -> list[CapabilityDescriptor]:
         return [_BIDIRECTIONAL]
@@ -343,3 +365,35 @@ async def test_early_caller_close_cancels_only_its_provider_stream() -> None:
         with anyio.fail_after(1.0):
             await provider.cancelled.wait()
         task_group.cancel_scope.cancel()
+
+
+async def test_caller_queue_overflow_cannot_report_truncated_stream_complete() -> None:
+    api = _build_api(_BurstProvider())
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+    opened = False
+    frames: list[CapabilityStreamFrame] = []
+
+    async with api._tg as task_group:  # pyright: ignore[reportPrivateUsage]
+        task_group.start_soon(
+            api._apply_provider_data  # pyright: ignore[reportPrivateUsage]
+        )
+        session = await context.stream_capability(
+            NodeId("api-node"),
+            "tts",
+            "1.0.0",
+            _TTS_REVISION,
+            {"text": "overflow the bounded caller queue"},
+            timeout_seconds=5.0,
+        )
+        opened = session.open_result.ok
+        await anyio.sleep(0.1)
+        frames = [frame async for frame in session.frames]
+        task_group.cancel_scope.cancel()
+
+    assert opened is True
+    assert frames[0].kind == "started"
+    assert frames[-1].kind == "failed"
+    assert frames[-1].error is not None
+    assert frames[-1].error.code == "transport_error"
+    assert all(frame.kind != "completed" for frame in frames)
+    assert [frame.sequence for frame in frames] == list(range(len(frames)))
