@@ -682,10 +682,11 @@ class _ProviderStreamReceiveState:
 
     output_sender: Sender[CapabilityStreamFrame]
     receiver: CapabilityStreamReceiver
-    target_node: NodeId
+    call: CapabilityCall
     deadline_at: float
     transport_failure: str | None = None
     cancel_provider: bool = False
+    cancellation_scheduled: bool = False
 
 
 @dataclass
@@ -3547,9 +3548,6 @@ class API:
 
         try:
             with anyio.CancelScope() as cancel_scope:
-                active.cancel_scope = cancel_scope
-                if active.cancel_requested.is_set():
-                    cancel_scope.cancel()
                 try:
                     with anyio.fail_after(call.timeout_seconds):
                         await emit(
@@ -3561,6 +3559,12 @@ class API:
                             )
                         )
                         next_sequence = 1
+                        # Cancellation cannot preempt the lifecycle opener. A
+                        # request racing admission is recorded on the event and
+                        # applied only after sequence zero is on the DATA plane.
+                        active.cancel_scope = cancel_scope
+                        if active.cancel_requested.is_set():
+                            cancel_scope.cancel()
                         stream = handler.handle_stream(
                             self._extension_context, call
                         )
@@ -3763,7 +3767,7 @@ class API:
                 gap_timeout_seconds=5.0,
                 idle_timeout_seconds=requested_timeout,
             ),
-            target_node=node_id,
+            call=call,
             deadline_at=deadline_at,
         )
         self._provider_stream_receivers[call_id] = receive_state
@@ -3887,8 +3891,28 @@ class API:
             self._provider_stream_receivers.pop(call.call_id, None)
             state.output_sender.close()
             output_receiver.close()
-            if not terminal_yielded or state.cancel_provider:
+            if (
+                not terminal_yielded or state.cancel_provider
+            ) and not state.cancellation_scheduled:
                 await self._cancel_remote_capability_stream(call)
+
+    def _schedule_provider_stream_cancellation(
+        self, state: _ProviderStreamReceiveState
+    ) -> None:
+        """Cancel a failed caller stream without waiting for its consumer."""
+
+        state.cancel_provider = True
+        if state.cancellation_scheduled:
+            return
+        state.cancellation_scheduled = True
+        try:
+            self._tg.start_soon(
+                self._cancel_remote_capability_stream,
+                state.call,
+            )
+        except RuntimeError:
+            # API teardown may close the task group while DATA is draining.
+            state.cancellation_scheduled = False
 
     async def _cancel_remote_capability_stream(self, call: CapabilityCall) -> None:
         """Best-effort explicit cancellation for an early-closing caller."""
@@ -5418,7 +5442,7 @@ class API:
                         queue_failed = True
                         break
                 if batch.synthesized_terminal is not None:
-                    state.cancel_provider = True
+                    self._schedule_provider_stream_cancellation(state)
                     with contextlib.suppress(
                         WouldBlock, BrokenResourceError, ClosedResourceError
                     ):
@@ -5427,6 +5451,8 @@ class API:
                         )
                     queue_failed = True
                 if queue_failed or state.receiver.terminal is not None:
+                    if queue_failed:
+                        self._schedule_provider_stream_cancellation(state)
                     self._provider_stream_receivers.pop(call_id, None)
                     state.output_sender.close()
 
@@ -5441,7 +5467,7 @@ class API:
                 terminal = batch.synthesized_terminal
                 if terminal is None:
                     continue
-                state.cancel_provider = True
+                self._schedule_provider_stream_cancellation(state)
                 with contextlib.suppress(
                     WouldBlock, BrokenResourceError, ClosedResourceError
                 ):

@@ -5,7 +5,10 @@ from collections.abc import AsyncIterator
 import anyio
 import pytest
 
-from skulk.api.main import API
+from skulk.api.main import (
+    API,
+    _ActiveProviderStream,  # pyright: ignore[reportPrivateUsage]
+)
 from skulk.extensions import (
     CapabilityCall,
     CapabilityDescriptor,
@@ -150,6 +153,31 @@ class _BurstProvider(_TtsProvider):
             sequence=302,
             kind="completed",
         )
+
+
+class _FloodProvider(_TtsProvider):
+    def __init__(self) -> None:
+        self.cancelled = anyio.Event()
+
+    async def handle_stream(
+        self,
+        context: ExtensionContext,
+        call: CapabilityCall,
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        sequence = 1
+        try:
+            while True:
+                yield CapabilityStreamFrame(
+                    call_id=call.call_id,
+                    direction="provider_to_caller",
+                    sequence=sequence,
+                    kind="chunk",
+                    payload={"format": "pcm_s16le"},
+                )
+                sequence += 1
+                await anyio.sleep(0)
+        finally:
+            self.cancelled.set()
 
 
 class _BidirectionalProvider(_TtsProvider):
@@ -367,6 +395,40 @@ async def test_early_caller_close_cancels_only_its_provider_stream() -> None:
         task_group.cancel_scope.cancel()
 
 
+async def test_cancel_racing_admission_still_emits_started_first() -> None:
+    api = _build_api(_TtsProvider())
+    call = CapabilityCall(
+        call_id="cancel-before-start",
+        capability_id="tts",
+        version="1.0.0",
+        descriptor_revision=_TTS_REVISION,
+        caller_node="api-node",
+        target_node="api-node",
+        timeout_seconds=2.0,
+        payload={"text": "cancel immediately"},
+    )
+    cancel_requested = anyio.Event()
+    cancel_requested.set()
+    active = _ActiveProviderStream(
+        caller_node="api-node",
+        cancel_requested=cancel_requested,
+    )
+
+    await api._run_capability_stream(  # pyright: ignore[reportPrivateUsage]
+        call,
+        "tts-test",
+        _TtsProvider(),
+        _TTS,
+        active,
+    )
+    assert api._provider_stream_receiver is not None  # pyright: ignore[reportPrivateUsage]
+    first = await api._provider_stream_receiver.receive()  # pyright: ignore[reportPrivateUsage]
+    second = await api._provider_stream_receiver.receive()  # pyright: ignore[reportPrivateUsage]
+
+    assert [first.frame.kind, second.frame.kind] == ["started", "cancelled"]
+    assert [first.frame.sequence, second.frame.sequence] == [0, 1]
+
+
 async def test_caller_queue_overflow_cannot_report_truncated_stream_complete() -> None:
     api = _build_api(_BurstProvider())
     context = api._extension_context  # pyright: ignore[reportPrivateUsage]
@@ -397,3 +459,27 @@ async def test_caller_queue_overflow_cannot_report_truncated_stream_complete() -
     assert frames[-1].error.code == "transport_error"
     assert all(frame.kind != "completed" for frame in frames)
     assert [frame.sequence for frame in frames] == list(range(len(frames)))
+
+
+async def test_non_consuming_caller_overflow_cancels_provider_immediately() -> None:
+    provider = _FloodProvider()
+    api = _build_api(provider)
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+
+    async with api._tg as task_group:  # pyright: ignore[reportPrivateUsage]
+        task_group.start_soon(
+            api._apply_provider_data  # pyright: ignore[reportPrivateUsage]
+        )
+        session = await context.stream_capability(
+            NodeId("api-node"),
+            "tts",
+            "1.0.0",
+            _TTS_REVISION,
+            {"text": "do not consume this stream"},
+            timeout_seconds=5.0,
+        )
+        assert session.open_result.ok is True
+        with anyio.fail_after(1.0):
+            await provider.cancelled.wait()
+        await session.frames.aclose()  # type: ignore[attr-defined]
+        task_group.cancel_scope.cancel()
