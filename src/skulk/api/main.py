@@ -3945,15 +3945,28 @@ class API:
         terminal_yielded = False
         last_yielded_sequence = -1
         try:
-            remaining = max(0.0, state.deadline_at - anyio.current_time())
-            with anyio.move_on_after(remaining) as deadline_scope:
-                with output_receiver as frames:
-                    async for frame in frames:
-                        yield frame
-                        last_yielded_sequence = frame.sequence
-                        if frame.is_terminal:
-                            terminal_yielded = True
-                            return
+            deadline_expired = False
+            with output_receiver as frames:
+                while True:
+                    remaining = max(0.0, state.deadline_at - anyio.current_time())
+                    frame: CapabilityStreamFrame | None = None
+                    with anyio.move_on_after(remaining) as deadline_scope:
+                        try:
+                            frame = await frames.receive()
+                        except (EndOfStream, ClosedResourceError):
+                            break
+                    if deadline_scope.cancelled_caught:
+                        deadline_expired = True
+                        break
+                    assert frame is not None
+                    last_yielded_sequence = frame.sequence
+                    if frame.is_terminal:
+                        terminal_yielded = True
+                    # A cancel scope must never span an async-generator yield:
+                    # finalization may resume the generator in a different task.
+                    yield frame
+                    if frame.is_terminal:
+                        return
             if state.transport_failure is not None:
                 state.cancel_provider = True
                 terminal = CapabilityStreamFrame(
@@ -3967,7 +3980,7 @@ class API:
                         message=state.transport_failure,
                     ),
                 )
-            elif deadline_scope.cancelled_caught:
+            elif deadline_expired:
                 state.cancel_provider = True
                 terminal = state.receiver.fail(
                     "timeout",

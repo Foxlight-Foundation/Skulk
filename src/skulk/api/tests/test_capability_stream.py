@@ -452,6 +452,38 @@ async def test_early_caller_close_cancels_only_its_provider_stream() -> None:
         task_group.cancel_scope.cancel()
 
 
+async def test_caller_stream_can_be_finalized_by_a_different_task() -> None:
+    """Async-generator finalization must not inherit an open deadline scope."""
+
+    provider = _CancellableProvider()
+    api = _build_api(provider)
+    context = api._extension_context  # pyright: ignore[reportPrivateUsage]
+
+    async with api._tg as task_group:  # pyright: ignore[reportPrivateUsage]
+        task_group.start_soon(
+            api._apply_provider_data  # pyright: ignore[reportPrivateUsage]
+        )
+        session = await context.stream_capability(
+            NodeId("api-node"),
+            "tts",
+            "1.0.0",
+            _TTS_REVISION,
+            {"text": "finalize me elsewhere"},
+            timeout_seconds=5.0,
+        )
+        assert session.open_result.ok is True
+        iterator = session.frames.__aiter__()
+        assert (await iterator.__anext__()).kind == "started"
+
+        async def close_from_child_task() -> None:
+            await session.frames.aclose()  # type: ignore[attr-defined]
+
+        task_group.start_soon(close_from_child_task)
+        with anyio.fail_after(1.0):
+            await provider.cancelled.wait()
+        task_group.cancel_scope.cancel()
+
+
 async def test_cancel_racing_admission_still_emits_started_first() -> None:
     api = _build_api(_TtsProvider())
     call = CapabilityCall(
