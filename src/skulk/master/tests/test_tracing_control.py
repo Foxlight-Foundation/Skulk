@@ -445,6 +445,7 @@ async def test_realtime_stt_master_reserves_before_task_event_round_trip() -> No
 
     assert isinstance(first_event, TaskCreated)
     assert isinstance(second_created, TaskCreated)
+    assert second_created.task.task_status is TaskStatus.Failed
     assert isinstance(second_failed, TaskFailed)
     assert second_failed.task_id == second_created.task_id
     assert second_failed.error_type == "instance_busy"

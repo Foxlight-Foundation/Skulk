@@ -952,7 +952,11 @@ class Master:
                                         command_id=command.command_id,
                                         owner_node=command.owner_node,
                                         instance_id=command.target_instance_id,
-                                        task_status=TaskStatus.Pending,
+                                        task_status=(
+                                            TaskStatus.Failed
+                                            if instance_busy
+                                            else TaskStatus.Pending
+                                        ),
                                         task_params=command.task_params,
                                         # Realtime STT does not emit trace
                                         # sessions yet. Do not register ranks
