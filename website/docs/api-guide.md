@@ -1362,8 +1362,10 @@ caller cancellation propagates to the underlying synthesis command.
 Production nodes also describe a first-party `stt.realtime@1.0.0`
 bidirectional capability. The capability is experimental and is advertised
 only when experimental mode, `experiments.stt_realtime`, and eligible mounted
-capacity are all active. In this first phase the API and mounted speech runner
-must be on the same node; remote serving-node input routing remains a follow-up.
+capacity are all active. The owning API may differ from the speech runner node:
+same-node input short-circuits locally, while remote input requires the
+node-addressed Zenoh data plane. Remote capacity is not advertised when Zenoh
+is unavailable.
 
 The opening payload accepts:
 
@@ -1382,12 +1384,13 @@ Provider output `chunk` frames contain `model`, transcript `text`, and
 `is_partial: true`; the `completed` payload contains the accumulated final text
 with `is_partial: false`.
 
-Admission pins a `RealtimeAudioTranscription` task to the selected local model
-instance. Audio bypasses event-sourced State and is bounded through local
-API-to-worker and worker-to-runner channels; only transcript output uses the
-existing core DATA lifecycle. The mounted upstream model must expose a true
-`create_streaming_session` interface. Batch STT cards are never promoted to
-realtime by buffering a complete recording.
+Admission pins a `RealtimeAudioTranscription` task to one selected single-host
+model instance, and the master reserves that instance against concurrent
+admission. Audio bypasses event-sourced State and travels through bounded raw
+PCM packets to the serving worker plus a bounded worker-to-runner channel; only
+transcript output uses the existing core DATA lifecycle. The mounted upstream
+model must expose a true `create_streaming_session` interface. Batch STT cards
+are never promoted to realtime by buffering a complete recording.
 
 ```bash
 curl http://localhost:52415/v1/capabilities

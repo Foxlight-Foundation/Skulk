@@ -8,6 +8,11 @@ from skulk.routing.provider_streams import (
     decode_provider_stream_packet,
     encode_provider_stream_packet,
 )
+from skulk.routing.realtime_audio import (
+    RealtimeAudioPacket,
+    decode_realtime_audio_packet,
+    encode_realtime_audio_packet,
+)
 from skulk.shared.election import ElectionMessage
 from skulk.shared.types.chunks import DataChunk
 from skulk.shared.types.commands import ForwarderCommand, ForwarderDownloadCommand
@@ -121,4 +126,16 @@ PROVIDER_DATA = TypedTopic(
     is_terminal=lambda packet: packet.frame.is_terminal,
     serializer=encode_provider_stream_packet,
     deserializer=decode_provider_stream_packet,
+)
+
+
+REALTIME_AUDIO = TypedTopic(
+    "realtime_audio",
+    PublishPolicy.Always,
+    RealtimeAudioPacket,
+    routing_key=lambda packet: str(packet.target_node),
+    stream_key=lambda packet: str(packet.command_id),
+    is_terminal=lambda packet: packet.is_terminal,
+    serializer=encode_realtime_audio_packet,
+    deserializer=decode_realtime_audio_packet,
 )

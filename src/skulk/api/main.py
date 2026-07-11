@@ -208,6 +208,7 @@ from skulk.master.placement import PlacementInfoPendingError
 from skulk.master.placement import place_instance as get_instance_placements
 from skulk.master.placement_utils import usable_vram_by_node
 from skulk.routing.provider_streams import ProviderStreamPacket
+from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.shared.apply import apply
 from skulk.shared.constants import (
     DASHBOARD_DIR,
@@ -1039,6 +1040,8 @@ class API:
         provider_stream_sender: "Sender[ProviderStreamPacket] | None" = None,
         provider_stream_receiver: "Receiver[ProviderStreamPacket] | None" = None,
         realtime_audio_sender: "Sender[RealtimeAudioInputFrame] | None" = None,
+        realtime_audio_packet_sender: "Sender[RealtimeAudioPacket] | None" = None,
+        realtime_audio_packet_receiver: "Receiver[RealtimeAudioPacket] | None" = None,
         data_plane_zenoh: bool = False,
         data_plane_egress_provider: (
             Callable[[], DataPlaneEgressDiagnostics] | None
@@ -1103,6 +1106,9 @@ class API:
         self._provider_stream_sender = provider_stream_sender
         self._provider_stream_receiver = provider_stream_receiver
         self._realtime_audio_sender = realtime_audio_sender
+        self._realtime_audio_packet_sender = realtime_audio_packet_sender
+        self._realtime_audio_packet_receiver = realtime_audio_packet_receiver
+        self._data_plane_zenoh = data_plane_zenoh
         self._provider_stream_receivers: dict[
             str, _ProviderStreamReceiveState
         ] = {}
@@ -3127,24 +3133,23 @@ class API:
                 return True
         return False
 
-    def _local_realtime_stt_instance(
+    def _realtime_stt_instance(
         self, model_id: ModelId | None = None
-    ) -> tuple[InstanceId, ModelCard] | None:
-        """Return eligible realtime STT capacity owned by this API node."""
+    ) -> tuple[InstanceId, ModelCard, NodeId] | None:
+        """Return eligible cluster realtime STT capacity and its hosting node."""
 
         if (
             not self._builtin_speech_provider_enabled
-            or self._realtime_audio_sender is None
+            or (
+                self._realtime_audio_sender is None
+                and self._realtime_audio_packet_sender is None
+            )
             or not experimental_mode_enabled()
             or not self._stt_realtime_experiment_enabled()
         ):
             return None
+        candidates: list[tuple[bool, str, str, InstanceId, ModelCard, NodeId]] = []
         for instance_id, instance in self.state.instances.items():
-            runner_id = instance.shard_assignments.node_to_runner.get(self.node_id)
-            if runner_id is None or not isinstance(
-                self.state.runners.get(runner_id), (RunnerReady, RunnerRunning)
-            ):
-                continue
             if (
                 model_id is not None
                 and instance.shard_assignments.model_id != model_id
@@ -3162,13 +3167,45 @@ class API:
                 and card.audio.supports_streaming is True
                 and card.audio.supports_realtime is True
             ):
-                return instance_id, card
-        return None
+                for target_node, runner_id in (
+                    instance.shard_assignments.node_to_runner.items()
+                ):
+                    if not isinstance(
+                        self.state.runners.get(runner_id),
+                        (RunnerReady, RunnerRunning),
+                    ):
+                        continue
+                    is_remote = target_node != self.node_id
+                    if is_remote and (
+                        not self._data_plane_zenoh
+                        or self._realtime_audio_packet_sender is None
+                    ):
+                        continue
+                    if (
+                        not is_remote
+                        and self._realtime_audio_sender is None
+                        and self._realtime_audio_packet_sender is None
+                    ):
+                        continue
+                    candidates.append(
+                        (
+                            is_remote,
+                            str(instance_id),
+                            str(target_node),
+                            instance_id,
+                            card,
+                            target_node,
+                        )
+                    )
+        if not candidates:
+            return None
+        _, _, _, instance_id, card, target_node = min(candidates)
+        return instance_id, card, target_node
 
-    def _has_mounted_realtime_stt_model(self) -> bool:
-        """Return whether this node owns true realtime STT capacity."""
+    def _has_realtime_stt_model(self) -> bool:
+        """Return whether this API can reach true realtime STT capacity."""
 
-        return self._local_realtime_stt_instance() is not None
+        return self._realtime_stt_instance() is not None
 
     def _sync_builtin_speech_capability(self) -> None:
         """Advertise speech facades only while core capacity can serve them."""
@@ -3179,7 +3216,7 @@ class API:
             self._advertise_capability(TTS_CAPABILITY_DESCRIPTOR.id)
         else:
             self._withdraw_capability(TTS_CAPABILITY_DESCRIPTOR.id)
-        if self._has_mounted_realtime_stt_model():
+        if self._has_realtime_stt_model():
             self._advertise_capability(REALTIME_STT_CAPABILITY_DESCRIPTOR.id)
         else:
             self._withdraw_capability(REALTIME_STT_CAPABILITY_DESCRIPTOR.id)
@@ -5667,6 +5704,7 @@ class API:
                 # it is NOT re-spawned by reset().
                 tg.start_soon(self._apply_data)
                 tg.start_soon(self._apply_provider_data)
+                tg.start_soon(self._apply_realtime_audio_transport)
                 tg.start_soon(self._sweep_provider_stream_receivers)
                 # Releases reorder gaps stuck on a chunk dropped by the
                 # best-effort DATA topic (#279 Phase 2b); lifetime-scoped like
@@ -5887,6 +5925,32 @@ class API:
                     if state.input_stream is not None:
                         self._schedule_provider_input_close(state.input_stream)
                     state.output_sender.close()
+
+    async def _apply_realtime_audio_transport(self) -> None:
+        """Fail source commands when remote PCM transport rejects a stream."""
+
+        if self._realtime_audio_packet_receiver is None:
+            return
+        with self._realtime_audio_packet_receiver as packets:
+            async for packet in packets:
+                if (
+                    packet.target_node != self.node_id
+                    or packet.kind != "transport_failed"
+                    or packet.command_id
+                    not in self._realtime_audio_transcription_commands
+                ):
+                    continue
+                await self._dispatch_generation_chunk(
+                    packet.command_id,
+                    ErrorChunk(
+                        model=ModelId("unknown"),
+                        error_message=(
+                            packet.error_message
+                            or "realtime audio transport failed"
+                        ),
+                    ),
+                )
+                await self._cancel_audio_transcription_command(packet.command_id)
 
     def _apply_provider_input_frame(self, frame: CapabilityStreamFrame) -> None:
         """Validate and queue one caller frame for its active provider handler."""
@@ -8641,23 +8705,23 @@ class API:
     async def _prepare_builtin_realtime_stt_task(
         self,
         call: CapabilityCall,
-    ) -> tuple[RealtimeAudioTranscriptionTaskParams, InstanceId]:
-        """Validate one realtime STT call against local mounted capacity."""
+    ) -> tuple[RealtimeAudioTranscriptionTaskParams, InstanceId, NodeId]:
+        """Validate one realtime STT call against mounted cluster capacity."""
 
         payload = dict(call.payload)
         sample_rate = payload.pop("sample_rate", None)
         params = RealtimeAudioTranscriptionTaskParams.model_validate(
             {**payload, "input_sample_rate": sample_rate}
         )
-        local = self._local_realtime_stt_instance(params.model)
-        if local is None:
+        selected = self._realtime_stt_instance(params.model)
+        if selected is None:
             raise HTTPException(
                 status_code=404,
                 detail=(
-                    f"No local realtime STT instance for model {params.model}"
+                    f"No reachable realtime STT instance for model {params.model}"
                 ),
             )
-        instance_id, _ = local
+        instance_id, _, target_node = selected
         if any(
             active.reserved_instance_id == instance_id
             for active_call_id, active in self._active_capability_streams.items()
@@ -8676,21 +8740,21 @@ class API:
                 status_code=409,
                 detail="The realtime STT runner is already serving another task",
             )
-        return params, instance_id
+        return params, instance_id, target_node
 
     async def _admit_builtin_realtime_stt_stream(
         self,
         call: CapabilityCall,
     ) -> CapabilityError | None:
-        """Reject realtime STT before start unless local capacity is truthful."""
+        """Reject realtime STT before start unless reachable capacity is truthful."""
 
-        if not self._has_mounted_realtime_stt_model():
+        if not self._has_realtime_stt_model():
             return CapabilityError(
                 code="not_found",
-                message="no local realtime STT capacity is currently advertised",
+                message="no reachable realtime STT capacity is currently advertised",
             )
         try:
-            _, instance_id = await self._prepare_builtin_realtime_stt_task(call)
+            _, instance_id, _ = await self._prepare_builtin_realtime_stt_task(call)
         except ValidationError as exc:
             return CapabilityError(code="invalid_payload", message=str(exc))
         except HTTPException as exc:
@@ -8762,17 +8826,40 @@ class API:
             )
         )
 
+    async def _send_realtime_audio_input(
+        self,
+        target_node: NodeId,
+        frame: RealtimeAudioInputFrame,
+    ) -> None:
+        """Send one PCM frame through the local fast path or remote DATA path."""
+
+        if self._realtime_audio_packet_sender is not None:
+            await self._realtime_audio_packet_sender.send(
+                RealtimeAudioPacket(
+                    source_node=self.node_id,
+                    target_node=target_node,
+                    command_id=frame.command_id,
+                    sequence=frame.sequence,
+                    kind=frame.kind,
+                    data=frame.data,
+                )
+            )
+            return
+        if target_node == self.node_id and self._realtime_audio_sender is not None:
+            await self._realtime_audio_sender.send(frame)
+            return
+        raise RuntimeError("realtime audio worker ingress is unavailable")
+
     async def _pump_builtin_realtime_stt_input(
         self,
         *,
         command_id: CommandId,
         params: RealtimeAudioTranscriptionTaskParams,
+        target_node: NodeId,
         input_frames: AsyncIterator[CapabilityStreamFrame],
     ) -> None:
-        """Translate validated provider frames into local runner PCM ingress."""
+        """Translate provider frames into local or remote worker PCM ingress."""
 
-        if self._realtime_audio_sender is None:
-            raise RuntimeError("realtime audio worker ingress is unavailable")
         terminal_sent = False
         async for frame in input_frames:
             if frame.kind == "started":
@@ -8796,7 +8883,8 @@ class API:
                         "realtime STT frame metadata must match the negotiated "
                         "mono pcm_s16le sample rate"
                     )
-                await self._realtime_audio_sender.send(
+                await self._send_realtime_audio_input(
+                    target_node,
                     RealtimeAudioInputFrame(
                         command_id=command_id,
                         sequence=frame.sequence,
@@ -8809,7 +8897,8 @@ class API:
                 detail = frame.error.message if frame.error is not None else "unknown"
                 raise RuntimeError(f"caller input stream failed: {detail}")
             kind = "completed" if frame.kind == "completed" else "cancelled"
-            await self._realtime_audio_sender.send(
+            await self._send_realtime_audio_input(
+                target_node,
                 RealtimeAudioInputFrame(
                     command_id=command_id,
                     sequence=frame.sequence,
@@ -8829,7 +8918,9 @@ class API:
         """Bridge provider PCM input to a true incremental core STT session."""
 
         try:
-            params, instance_id = await self._prepare_builtin_realtime_stt_task(call)
+            params, instance_id, target_node = (
+                await self._prepare_builtin_realtime_stt_task(call)
+            )
         except (ValidationError, HTTPException) as exc:
             raise RuntimeError(
                 f"realtime STT availability changed after admission: {exc}"
@@ -8846,6 +8937,7 @@ class API:
                     await self._pump_builtin_realtime_stt_input(
                         command_id=command_id,
                         params=params,
+                        target_node=target_node,
                         input_frames=input_frames,
                     )
                 except anyio.get_cancelled_exc_class():

@@ -46,10 +46,12 @@ from .provider_streams import (
     ProviderStreamPacket,
     provider_stream_rejection_packets,
 )
+from .realtime_audio import RealtimeAudioPacket
 from .topics import (
     CONNECTION_MESSAGES,
     DATA,
     PROVIDER_DATA,
+    REALTIME_AUDIO,
     PublishPolicy,
     TypedTopic,
 )
@@ -327,6 +329,7 @@ class Router:
         return self._zenoh is not None and topic in (
             DATA.topic,
             PROVIDER_DATA.topic,
+            REALTIME_AUDIO.topic,
         )
 
     async def register_topic[T: CamelCaseModel](self, topic: TypedTopic[T]):
@@ -578,7 +581,7 @@ class Router:
                         )
                         self._data_plane_egress_observer.record_dropped(owner)
                         continue
-                    # DATA and PROVIDER_DATA share this bounded dispatcher, but
+                    # Data-plane topics share this bounded dispatcher, but
                     # their independently generated ids occupy separate
                     # protocol namespaces. Topic identity must therefore be
                     # part of every queue and rejection key.
@@ -686,6 +689,8 @@ class Router:
                 rejection_topic = cast(TypedTopic[CamelCaseModel], DATA)
             elif packet.topic == PROVIDER_DATA.topic:
                 rejection_topic = cast(TypedTopic[CamelCaseModel], PROVIDER_DATA)
+            elif packet.topic == REALTIME_AUDIO.topic:
+                rejection_topic = cast(TypedTopic[CamelCaseModel], REALTIME_AUDIO)
             else:
                 return
             original = rejection_topic.deserialize(packet.data)
@@ -723,15 +728,29 @@ class Router:
                         include_started=include_started,
                     )
                 )
+            elif isinstance(original, RealtimeAudioPacket):
+                rejection_frames = [
+                    original.transport_failure(
+                        "realtime audio transport rejected the command because "
+                        "remote stream capacity is exhausted"
+                    )
+                ]
             else:
                 return
             for frame in rejection_frames:
                 data = rejection_topic.serialize(frame)
+                rejection_owner = (
+                    rejection_topic.routing_key(frame)
+                    if rejection_topic.routing_key is not None
+                    else owner
+                )
+                if rejection_owner is None:
+                    continue
                 started_at = time.monotonic()
                 try:
                     with fail_after(_ZENOH_DATA_PUBLISH_TIMEOUT_SECONDS):
                         await self._zenoh.zenoh_publish(
-                            f"{packet.topic}/{owner}", data
+                            f"{packet.topic}/{rejection_owner}", data
                         )
                 except get_cancelled_exc_class():
                     raise

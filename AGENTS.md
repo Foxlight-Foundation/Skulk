@@ -122,12 +122,15 @@ A model card's `placement.compatible_backends` selects which engine serves it
   `complete()` half-closes input without ending provider output.
   Mounted STT models serve non-streaming `/v1/audio/transcriptions`. The
   experimental `stt.realtime@1.0.0` bidirectional provider accepts mono PCM16
-  frames only on an API node that also owns the mounted runner, pins a
-  `RealtimeAudioTranscription` task to that instance, and feeds a true upstream
-  streaming session over bounded local API-worker-runner IPC. It advertises
-  only with experimental mode, `experiments.stt_realtime`, and a card declaring
-  both streaming and realtime support. Remote runner ingress, WebSocket edge,
-  and speech translation remain later phases.
+  frames on any API node with reachable mounted capacity, pins a
+  `RealtimeAudioTranscription` task to one single-host instance, and feeds a
+  true upstream streaming session through bounded ingress. Same-node input
+  short-circuits locally; remote input uses node-addressed binary
+  `REALTIME_AUDIO` packets over Zenoh and is not advertised when Zenoh is
+  unavailable. PCM never enters State or the event log. It advertises only with
+  experimental mode, `experiments.stt_realtime`, and a card declaring both
+  streaming and realtime support. The WebSocket edge and speech translation
+  remain later phases.
 - **`llama_cpp`**: in-process `llama-cpp-python` for GGUF on GPU/Linux nodes.
   Single-node.
 - **`llama_server`**: served-backend engine; the worker launches an external

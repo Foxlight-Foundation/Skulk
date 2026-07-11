@@ -1,6 +1,7 @@
 import anyio
 import pytest
 
+from skulk.routing.realtime_audio import RealtimeAudioPacket
 from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.commands import (
     ForwarderCommand,
@@ -100,6 +101,87 @@ async def test_realtime_audio_janitor_expires_undispatched_input(
     event_sender.close()
     command_sender.close()
     download_sender.close()
+
+
+@pytest.mark.asyncio
+async def test_remote_realtime_audio_packet_enters_shared_pending_buffer() -> None:
+    """A node-addressed remote packet follows the existing bounded ingress path."""
+
+    indexed_event_sender, indexed_event_receiver = channel[IndexedEvent]()
+    event_sender, _ = channel[Event]()
+    command_sender, _ = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    packet_sender, packet_receiver = channel[RealtimeAudioPacket](4)
+    worker = Worker(
+        node_id=NodeId("worker-node"),
+        event_receiver=indexed_event_receiver,
+        event_sender=event_sender,
+        command_sender=command_sender,
+        download_command_sender=download_sender,
+        realtime_audio_packet_receiver=packet_receiver,
+    )
+    command_id = CommandId("remote-command")
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(worker._realtime_audio_packet_ingress)  # pyright: ignore[reportPrivateUsage]
+        await packet_sender.send(
+            RealtimeAudioPacket(
+                source_node=NodeId("api-node"),
+                target_node=NodeId("worker-node"),
+                command_id=command_id,
+                sequence=1,
+                kind="chunk",
+                data=b"\x00\x00",
+            )
+        )
+        while command_id not in worker._realtime_audio_pending:  # pyright: ignore[reportPrivateUsage]
+            await anyio.sleep(0)
+        task_group.cancel_scope.cancel()
+
+    pending = worker._realtime_audio_pending[command_id]  # pyright: ignore[reportPrivateUsage]
+    assert len(pending) == 1
+    assert pending[0].sequence == 1
+    assert pending[0].data == b"\x00\x00"
+    indexed_event_sender.close()
+    event_sender.close()
+    command_sender.close()
+    download_sender.close()
+
+
+@pytest.mark.asyncio
+async def test_remote_realtime_audio_packet_for_other_node_is_ignored() -> None:
+    """Broadcast fallback delivery cannot make a worker consume another target."""
+
+    _, indexed_event_receiver = channel[IndexedEvent]()
+    event_sender, _ = channel[Event]()
+    command_sender, _ = channel[ForwarderCommand]()
+    download_sender, _ = channel[ForwarderDownloadCommand]()
+    packet_sender, packet_receiver = channel[RealtimeAudioPacket](4)
+    worker = Worker(
+        node_id=NodeId("worker-node"),
+        event_receiver=indexed_event_receiver,
+        event_sender=event_sender,
+        command_sender=command_sender,
+        download_command_sender=download_sender,
+        realtime_audio_packet_receiver=packet_receiver,
+    )
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(worker._realtime_audio_packet_ingress)  # pyright: ignore[reportPrivateUsage]
+        await packet_sender.send(
+            RealtimeAudioPacket(
+                source_node=NodeId("api-node"),
+                target_node=NodeId("different-worker"),
+                command_id=CommandId("wrong-target"),
+                sequence=1,
+                kind="chunk",
+                data=b"\x00\x00",
+            )
+        )
+        await anyio.sleep(0)
+        task_group.cancel_scope.cancel()
+
+    assert worker._realtime_audio_pending == {}  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.asyncio

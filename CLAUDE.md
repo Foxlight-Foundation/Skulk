@@ -122,12 +122,15 @@ A model card's `placement.compatible_backends` selects which engine serves it
   `PROVIDER_DATA` and dynamic telemetry/admission tied to mounted capacity.
   Mounted STT models serve non-streaming `/v1/audio/transcriptions`. The
   experimental `stt.realtime@1.0.0` bidirectional provider accepts mono PCM16
-  frames only on an API node that also owns the mounted runner, pins a
-  `RealtimeAudioTranscription` task to that instance, and feeds a true upstream
-  streaming session over bounded local API-worker-runner IPC. It advertises
-  only with experimental mode, `experiments.stt_realtime`, and a card declaring
-  both streaming and realtime support. Remote runner ingress, WebSocket edge,
-  and speech translation remain later phases.
+  frames on any API node with reachable mounted capacity, pins a
+  `RealtimeAudioTranscription` task to one single-host instance, and feeds a
+  true upstream streaming session through bounded ingress. Same-node input
+  short-circuits locally; remote input uses node-addressed binary
+  `REALTIME_AUDIO` packets over Zenoh and is not advertised when Zenoh is
+  unavailable. PCM never enters State or the event log. It advertises only with
+  experimental mode, `experiments.stt_realtime`, and a card declaring both
+  streaming and realtime support. The WebSocket edge and speech translation
+  remain later phases.
 - **`llama_cpp`** (`worker/runner/llama_cpp/`): in-process `llama-cpp-python` for
   GGUF on GPU/Linux nodes (Vulkan/ROCm/CUDA). Single-node.
 - **`llama_server`** (`worker/runner/llama_server/`): served-backend engine; the
@@ -146,6 +149,7 @@ Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `STATE_SYNC_MESSAGES`: Followers request the current session snapshot before replaying the retained tail
 - `DATA`: Generated token/image/embedding/transcription/audio output, off the event log and master hot path. `DataChunk` carries `{command_id, kind, chunk?, sequence, owner_node}` with an explicit `started -> chunk* -> completed|failed|cancelled` lifecycle. `RunnerSupervisor` emits start and exactly one terminal; `API._apply_data` orders/deduplicates frames and converts unresolved gaps into terminal transport errors plus producer cancellation. Zenoh keys by `data/<owner_node>` and short-circuits same-node output. Remote egress uses bounded independent per-command workers with owner/process admission caps and a five-second publish deadline, so a slow or missing owner cannot stall another local or remote stream; saturation fails only the affected stream rather than silently returning incomplete output. `NodeDiagnostics.data_plane` and the dashboard expose lifecycle, first-byte/span, ordering, queue, drop, and publish metrics. Existing OpenAI audio edges retain base64/JSON; provider streaming uses `extensions/streams.py` JSON headers plus raw inline media or staged blob references. This is a wire change: deploy same-version fleets only.
 - `PROVIDER_DATA`: Extension-provider media in its own type family, off the event log/master/State. `ProviderStreamPacket` routes each direction to its receiving node; wire framing is a bounded length-prefixed JSON lifecycle header plus optional raw media bytes (1 MiB inline cap) or a staged blob reference. It shares DATA's same-node short circuit and dedicated Zenoh loop, with bounded queues keyed by owner/call/direction, admission caps, publish deadline, rejection behavior, and egress diagnostics. `ExtensionContext.stream_capability` opens through a control-sized peer API request and returns output frames plus a caller input sink for client-streaming/bidirectional modes. Both directions enforce `started -> chunk* -> terminal`; caller `complete()` half-closes input without ending provider output. Same-version fleet required.
+- `REALTIME_AUDIO`: Built-in realtime STT PCM ingress, off the event log/master/State. `RealtimeAudioPacket` carries a bounded JSON lifecycle header plus raw PCM bytes from the owning API node to the selected single-host speech worker. It shares the Zenoh scheduler's bounded independent command queues and same-node short circuit; transport rejection is source-routed so only the affected provider call fails. Remote capability is unavailable without Zenoh. Same-version fleet required.
 - `ELECTION_MESSAGES`: Election protocol messages
 - `CONNECTION_MESSAGES`: libp2p connection updates
 - `TELEMETRY`: Workers gossip `NodeTelemetry` (last-write-wins node readings — `NodeResources`: participation role + backends; `node_memory` + `node_system` since slice 2; `node_identities` + `node_disk` + `node_rdma_ctl` since slice 3) into an in-memory `TelemetryView`, NOT the event log. Control/telemetry/data plane separation (#279); read by the planner for placement and merged into `GET /state` for the dashboard. Those maps live here, not in `State`. The context-admission ceiling is stamped onto the instance at placement time (`context_token_limit`) since telemetry is unordered. NOTE: the **connectivity** readings (`node_network`, `node_thunderbolt`, `node_thunderbolt_bridge`, and the derived `thunderbolt_bridge_cycles`) deliberately STAY on the control plane: `apply()` builds the RDMA topology graph and TB-bridge cycles from them and the planner reads `node_network` for host selection, so they must be ordered, not LWW telemetry (#279 slice 3 scoping). `TELEMETRY_PLANE_INFO` in `telemetry.py` is the source of truth for which `GatheredInfo` variants ride telemetry. `node_system` (`SystemPerformanceProfile`) carries a collector-agnostic `accelerator` block (`AcceleratorMetrics`: vendor/name/utilization_ratio/vram/power/temp/clock, `None` when unmeasured) filled at the collector boundary: mactop on Apple, and a new AMD/Linux passive-sysfs collector (`LinuxGpuMetrics`, `utils/info_gatherer/linux_gpu.py`) so non-Mac GPU nodes are not a telemetry blind spot.

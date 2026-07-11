@@ -16,7 +16,13 @@ from skulk.routing.router import (
     OutboundPacket,
     Router,
 )
-from skulk.routing.topics import COMMANDS, DATA, GLOBAL_EVENTS, PROVIDER_DATA
+from skulk.routing.topics import (
+    COMMANDS,
+    DATA,
+    GLOBAL_EVENTS,
+    PROVIDER_DATA,
+    REALTIME_AUDIO,
+)
 
 
 def _router(*, zenoh: bool) -> Router:
@@ -32,6 +38,7 @@ def test_data_routes_over_zenoh_when_enabled() -> None:
     router = _router(zenoh=True)
     assert router.uses_zenoh(DATA.topic) is True
     assert router.uses_zenoh(PROVIDER_DATA.topic) is True
+    assert router.uses_zenoh(REALTIME_AUDIO.topic) is True
     # Control/telemetry/election planes stay on gossipsub even with zenoh on.
     assert router.uses_zenoh(COMMANDS.topic) is False
     assert router.uses_zenoh(GLOBAL_EVENTS.topic) is False
@@ -229,7 +236,7 @@ def test_blocked_command_does_not_stall_another_command_for_same_owner() -> None
 
 
 def test_matching_ids_on_data_topics_use_distinct_egress_queues() -> None:
-    """DATA and PROVIDER_DATA ids cannot terminate each other's queues."""
+    """Matching ids on distinct data topics cannot share egress queues."""
 
     import anyio
 
@@ -410,6 +417,62 @@ def test_malformed_rejections_release_bounded_task_slots() -> None:
 
         slots.acquire_nowait()
         slots.release()
+
+    anyio.run(_run)
+
+
+def test_realtime_audio_admission_rejection_routes_back_to_source() -> None:
+    """Ingress pressure must fail the source API, not publish to the worker."""
+
+    import anyio
+    from anyio import Semaphore
+
+    from skulk.routing.realtime_audio import RealtimeAudioPacket
+    from skulk.shared.types.common import CommandId, NodeId
+
+    class _RecordingZenoh:
+        def __init__(self) -> None:
+            self.key = ""
+            self.packet: RealtimeAudioPacket | None = None
+
+        async def zenoh_publish(self, key: str, data: bytes) -> None:
+            self.key = key
+            self.packet = REALTIME_AUDIO.deserialize(data)
+
+    async def _run() -> None:
+        zenoh = _RecordingZenoh()
+        router = Router(
+            handle=cast(NetworkingHandle, object()),
+            zenoh=cast(ZenohHandle, cast(object, zenoh)),
+            node_id="api-node",
+        )
+        original = RealtimeAudioPacket(
+            source_node=NodeId("api-node"),
+            target_node=NodeId("worker-node"),
+            command_id=CommandId("remote-command"),
+            sequence=1,
+            kind="chunk",
+            data=b"\x00\x00",
+        )
+        slots = Semaphore(1)
+        slots.acquire_nowait()
+        await router._publish_zenoh_data_rejection(  # pyright: ignore[reportPrivateUsage]
+            OutboundPacket(
+                topic=REALTIME_AUDIO.topic,
+                routing_key="worker-node",
+                stream_key="remote-command",
+                is_terminal=False,
+                data=REALTIME_AUDIO.serialize(original),
+            ),
+            "worker-node",
+            slots,
+            True,
+        )
+
+        assert zenoh.key == "realtime_audio/api-node"
+        assert zenoh.packet is not None
+        assert zenoh.packet.kind == "transport_failed"
+        assert zenoh.packet.target_node == NodeId("api-node")
 
     anyio.run(_run)
 
