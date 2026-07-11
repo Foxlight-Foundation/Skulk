@@ -416,6 +416,28 @@ def _audio_input_cleanup_command_id(
     return None
 
 
+def _realtime_input_cleanup_command_id(
+    event: Event,
+    previous_tasks: Mapping[TaskId, Task],
+    current_tasks: Mapping[TaskId, Task],
+) -> CommandId | None:
+    """Return the realtime STT command whose live input route can close."""
+
+    task: Task | None = None
+    if isinstance(event, TaskDeleted):
+        task = previous_tasks.get(event.task_id)
+    elif isinstance(event, TaskStatusUpdated) and event.task_status in {
+        TaskStatus.Cancelled,
+        TaskStatus.Complete,
+        TaskStatus.Failed,
+        TaskStatus.TimedOut,
+    }:
+        task = current_tasks.get(event.task_id) or previous_tasks.get(event.task_id)
+    if isinstance(task, RealtimeAudioTranscription):
+        return task.command_id
+    return None
+
+
 def _log_image_transport(message: str) -> None:
     """Emit image transport logs only at INFO when explicitly requested.
 
@@ -792,6 +814,14 @@ class Worker:
             expired = self._realtime_finished_order.popleft()
             self._realtime_finished_commands.discard(expired)
 
+    def _finish_realtime_command(self, command_id: CommandId) -> None:
+        """Release one realtime input route only after task termination."""
+
+        self._realtime_runner_by_command.pop(command_id, None)
+        self._realtime_audio_pending.pop(command_id, None)
+        self._realtime_audio_pending_bytes.pop(command_id, None)
+        self._mark_realtime_command_finished(command_id)
+
     async def _forward_info(self, recv: Receiver[GatheredInfo]):
         # Connectivity readings (network interfaces, thunderbolt) ride the ordered
         # event log. They rarely change, but were emitted every poll, so on a
@@ -890,6 +920,13 @@ class Worker:
                 ) is not None:
                     self.input_audio_chunk_buffer.pop(cleanup_cmd_id, None)
                     self.input_audio_chunk_counts.pop(cleanup_cmd_id, None)
+
+                if (
+                    realtime_cleanup_cmd_id := _realtime_input_cleanup_command_id(
+                        event, previous_tasks, self.state.tasks
+                    )
+                ) is not None:
+                    self._finish_realtime_command(realtime_cleanup_cmd_id)
 
                 if isinstance(event, CustomModelCardAdded):
                     try:
@@ -1351,11 +1388,11 @@ class Worker:
                     for frame in pending:
                         await runner.send_realtime_audio(frame)
                     await runner.start_task(task)
-                finally:
-                    self._realtime_runner_by_command.pop(command_id, None)
-                    self._realtime_audio_pending.pop(command_id, None)
-                    self._realtime_audio_pending_bytes.pop(command_id, None)
-                    self._mark_realtime_command_finished(command_id)
+                except BaseException:
+                    self._finish_realtime_command(command_id)
+                    raise
+                if task.task_id not in runner.in_progress:
+                    self._finish_realtime_command(command_id)
                 return
             await runner.start_task(task)
 
