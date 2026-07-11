@@ -180,4 +180,23 @@ describe('RealtimeTranscriptionSocket', () => {
     expect(onError).toHaveBeenCalledOnce();
     expect(socket.closeCode).toBe(1011);
   });
+
+  it('cancels an in-flight transcription commit', async () => {
+    const socket = new FakeWebSocket();
+    const client = new RealtimeTranscriptionSocket({
+      modelId: 'org/realtime-stt',
+      location: { protocol: 'http:', host: 'localhost' },
+      socketFactory: () => socket as unknown as WebSocket,
+    });
+
+    const connected = client.connect();
+    socket.serverEvent({ type: 'session.created' });
+    await connected;
+
+    const result = client.commit();
+    client.cancel();
+
+    await expect(result).rejects.toThrow('Realtime transcription was cancelled.');
+    expect(socket.closeCode).toBe(1000);
+  });
 });

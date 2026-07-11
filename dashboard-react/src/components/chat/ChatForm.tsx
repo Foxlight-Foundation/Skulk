@@ -416,6 +416,7 @@ export function ChatForm({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const realtimeSocketRef = useRef<RealtimeTranscriptionSocket | null>(null);
+  const realtimeCommitSocketRef = useRef<RealtimeTranscriptionSocket | null>(null);
   const realtimeCaptureRef = useRef<RealtimePcmCapture | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingCancelledRef = useRef(false);
@@ -570,7 +571,10 @@ export function ChatForm({
               const messageText = error instanceof Error
                 ? error.message
                 : t('chat.form.voiceErrors.recordingFailed', 'Recording failed.');
-              if (realtimeSocketRef.current === socket) {
+              if (
+                componentMountedRef.current
+                && realtimeSocketRef.current === socket
+              ) {
                 realtimeSocketRef.current = null;
                 realtimeCaptureRef.current = null;
                 mediaStreamRef.current = null;
@@ -579,8 +583,8 @@ export function ChatForm({
                 setRecordingSeconds(0);
                 stream.getTracks().forEach((track) => track.stop());
                 void capture?.stop();
+                setMediaError(messageText);
               }
-              setMediaError(messageText);
               socket.cancel();
             }
           });
@@ -704,22 +708,32 @@ export function ChatForm({
       stopRecordingTimer();
       setIsRecording(false);
       setRecordingSeconds(0);
+      if (!cancelled) realtimeCommitSocketRef.current = realtimeSocket;
       void (async () => {
         await realtimeCapture?.stop();
         if (cancelled) {
           realtimeSocket.cancel();
           return;
         }
+        if (!componentMountedRef.current) {
+          realtimeCommitSocketRef.current = null;
+          realtimeSocket.cancel();
+          return;
+        }
         setIsTranscribing(true);
         try {
-          appendTranscript(await realtimeSocket.commit());
+          const transcript = await realtimeSocket.commit();
+          if (componentMountedRef.current) appendTranscript(transcript);
         } catch (error) {
           const messageText = error instanceof Error
             ? error.message
             : t('chat.form.voiceErrors.transcriptionFailed', 'Transcription failed.');
-          setMediaError(messageText);
+          if (componentMountedRef.current) setMediaError(messageText);
         } finally {
-          setIsTranscribing(false);
+          if (realtimeCommitSocketRef.current === realtimeSocket) {
+            realtimeCommitSocketRef.current = null;
+          }
+          if (componentMountedRef.current) setIsTranscribing(false);
         }
       })();
       return;
@@ -743,12 +757,15 @@ export function ChatForm({
       recordingStartingRef.current = false;
       const mediaStream = mediaStreamRef.current;
       const realtimeSocket = realtimeSocketRef.current;
+      const realtimeCommitSocket = realtimeCommitSocketRef.current;
       const realtimeCapture = realtimeCaptureRef.current;
       mediaStreamRef.current = null;
       realtimeSocketRef.current = null;
+      realtimeCommitSocketRef.current = null;
       realtimeCaptureRef.current = null;
       mediaStream?.getTracks().forEach((track) => track.stop());
       realtimeSocket?.cancel();
+      realtimeCommitSocket?.cancel();
       void realtimeCapture?.stop();
     };
   }, [stopRecordingTimer]);
