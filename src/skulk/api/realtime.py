@@ -72,11 +72,57 @@ class TranscriptionSessionConfig(_RealtimeModel):
 
 
 class TranscriptionSessionUpdate(_RealtimeModel):
-    """Client request to confirm the effective transcription session."""
+    """Legacy client request to confirm the effective transcription session."""
 
     type: Literal["transcription_session.update"]
     event_id: str | None = Field(default=None, max_length=256)
     session: TranscriptionSessionConfig
+
+
+class RealtimePcmAudioFormat(_RealtimeModel):
+    """Current Realtime API PCM input-format declaration."""
+
+    type: Literal["audio/pcm"]
+    rate: Literal[24000]
+
+
+class RealtimeInputTranscriptionConfig(_RealtimeModel):
+    """Current Realtime API transcription selection accepted by Skulk."""
+
+    model: str = Field(min_length=1, max_length=512)
+    language: str | None = Field(default=None, max_length=64)
+    delay: Literal["medium"] | None = None
+
+
+class RealtimeAudioInputConfig(_RealtimeModel):
+    """Current Realtime API input-audio configuration subset."""
+
+    format: RealtimePcmAudioFormat | None = None
+    transcription: RealtimeInputTranscriptionConfig
+    turn_detection: None = None
+    noise_reduction: None = None
+
+
+class RealtimeAudioConfig(_RealtimeModel):
+    """Current Realtime API audio configuration subset."""
+
+    input: RealtimeAudioInputConfig
+
+
+class RealtimeTranscriptionSessionConfig(_RealtimeModel):
+    """Current Realtime transcription-session configuration subset."""
+
+    type: Literal["transcription"]
+    audio: RealtimeAudioConfig
+    include: tuple[()] = ()
+
+
+class RealtimeSessionUpdate(_RealtimeModel):
+    """Current OpenAI Realtime transcription session update."""
+
+    type: Literal["session.update"]
+    event_id: str | None = Field(default=None, max_length=256)
+    session: RealtimeTranscriptionSessionConfig
 
 
 class InputAudioBufferAppend(_RealtimeModel):
@@ -103,6 +149,7 @@ class InputAudioBufferClear(_RealtimeModel):
 
 RealtimeClientEvent = Annotated[
     TranscriptionSessionUpdate
+    | RealtimeSessionUpdate
     | InputAudioBufferAppend
     | InputAudioBufferCommit
     | InputAudioBufferClear,
@@ -206,7 +253,7 @@ class RealtimeTranscriptionBridge:
         await self._send_json(
             {
                 "event_id": self._event_id(),
-                "type": "transcription_session.created",
+                "type": "session.created",
                 "session": self._session_payload(),
             }
         )
@@ -268,8 +315,13 @@ class RealtimeTranscriptionBridge:
                 await self._close(1008)
                 return
 
-            if isinstance(event, TranscriptionSessionUpdate):
-                if not self._session_update_matches(event.session):
+            if isinstance(event, (TranscriptionSessionUpdate, RealtimeSessionUpdate)):
+                update_matches = (
+                    self._session_update_matches(event.session)
+                    if isinstance(event, TranscriptionSessionUpdate)
+                    else self._realtime_session_update_matches(event.session)
+                )
+                if not update_matches:
                     await self._send_error(
                         code="unsupported_session_update",
                         message=(
@@ -284,7 +336,11 @@ class RealtimeTranscriptionBridge:
                 await self._send_json(
                     {
                         "event_id": self._event_id(),
-                        "type": "transcription_session.updated",
+                        "type": (
+                            "transcription_session.updated"
+                            if isinstance(event, TranscriptionSessionUpdate)
+                            else "session.updated"
+                        ),
                         "session": self._session_payload(),
                     }
                 )
@@ -534,18 +590,44 @@ class RealtimeTranscriptionBridge:
             and not update.include
         )
 
+    def _realtime_session_update_matches(
+        self,
+        update: RealtimeTranscriptionSessionConfig,
+    ) -> bool:
+        input_config = update.audio.input
+        return (
+            update.type == "transcription"
+            and input_config.transcription.model == self._model
+            and input_config.transcription.language is None
+            and input_config.transcription.delay in (None, "medium")
+            and (
+                input_config.format is None
+                or (
+                    input_config.format.type == "audio/pcm"
+                    and input_config.format.rate == _PCM_SAMPLE_RATE
+                )
+            )
+            and input_config.turn_detection is None
+            and input_config.noise_reduction is None
+            and not update.include
+        )
+
     def _session_payload(self) -> dict[str, object]:
         return {
             "id": self._session_id,
-            "object": "realtime.transcription_session",
-            "input_audio_format": "pcm16",
-            "input_audio_transcription": {
-                "model": self._model,
-                "language": None,
-                "prompt": "",
+            "type": "transcription",
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": _PCM_SAMPLE_RATE},
+                    "transcription": {
+                        "model": self._model,
+                        "language": None,
+                        "delay": "medium",
+                    },
+                    "turn_detection": None,
+                    "noise_reduction": None,
+                },
             },
-            "turn_detection": None,
-            "input_audio_noise_reduction": None,
             "include": [],
         }
 

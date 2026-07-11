@@ -1465,8 +1465,9 @@ The wire contract implements a bounded subset of OpenAI Realtime transcription:
 
 | Direction | Event | Behavior |
 |---|---|---|
-| server to client | `transcription_session.created` | Reports the selected model and fixed PCM16 session configuration. |
-| client to server | `transcription_session.update` | Confirms the effective configuration; attempts to change model/codec or enable VAD, noise reduction, prompts, language hints, or extra fields are rejected. |
+| server to client | `session.created` | Reports a `type: transcription` session with the selected model and fixed PCM input configuration. |
+| client to server | `session.update` | Confirms the current nested `audio.input` configuration; attempts to change model/codec or enable VAD, noise reduction, language hints, or extra fields are rejected. |
+| server to client | `session.updated` | Confirms an accepted current session update. |
 | client to server | `input_audio_buffer.append` | Appends one base64 PCM16 frame and immediately forwards its decoded bytes as binary Fabric media. |
 | client to server | `input_audio_buffer.commit` | Half-closes the single utterance and triggers final provider drain. Empty or duplicate commits are rejected. |
 | server to client | `input_audio_buffer.committed` | Confirms the input half-close. |
@@ -1490,6 +1491,11 @@ Provider capacity failures close with retryable WebSocket code `1013`; client
 protocol/policy violations use `1003`, `1008`, or `1009`; internal provider
 failures use `1011`. Disconnecting before a terminal event cancels the provider
 input and output directions.
+
+For compatibility with clients written against the earlier transcription beta,
+the edge also accepts `transcription_session.update` with
+`input_audio_format`, `input_audio_transcription`, `turn_detection`, and
+`input_audio_noise_reduction`, replying with `transcription_session.updated`.
 
 ```bash
 curl http://localhost:52415/v1/capabilities

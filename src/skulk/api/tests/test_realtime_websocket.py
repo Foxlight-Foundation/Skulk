@@ -178,28 +178,37 @@ def test_realtime_websocket_translates_pcm_and_transcript_lifecycle() -> None:
         headers={"origin": "http://testserver"},
     ) as websocket:
         created = _receive_json(websocket)
-        assert created["type"] == "transcription_session.created"
+        assert created["type"] == "session.created"
         created_session = _mapping(created["session"])
-        created_transcription = _mapping(created_session["input_audio_transcription"])
-        assert created_session["input_audio_format"] == "pcm16"
+        created_audio = _mapping(created_session["audio"])
+        created_input = _mapping(created_audio["input"])
+        created_format = _mapping(created_input["format"])
+        created_transcription = _mapping(created_input["transcription"])
+        assert created_session["type"] == "transcription"
+        assert created_format == {"type": "audio/pcm", "rate": 24_000}
         assert created_transcription["model"] == (
             "org/realtime-stt"
         )
 
         websocket.send_json(
             {
-                "type": "transcription_session.update",
+                "type": "session.update",
                 "event_id": "update-1",
                 "session": {
-                    "input_audio_format": "pcm16",
-                    "input_audio_transcription": {"model": "org/realtime-stt"},
-                    "turn_detection": None,
-                    "input_audio_noise_reduction": None,
+                    "type": "transcription",
+                    "audio": {
+                        "input": {
+                            "format": {"type": "audio/pcm", "rate": 24_000},
+                            "transcription": {"model": "org/realtime-stt"},
+                            "turn_detection": None,
+                            "noise_reduction": None,
+                        }
+                    },
                     "include": [],
                 },
             }
         )
-        assert _receive_json(websocket)["type"] == "transcription_session.updated"
+        assert _receive_json(websocket)["type"] == "session.updated"
         websocket.send_json(
             {
                 "type": "input_audio_buffer.append",
@@ -235,7 +244,7 @@ def test_realtime_websocket_rejects_invalid_audio_without_forwarding() -> None:
     client = TestClient(api.app)
 
     with client.websocket_connect("/v1/realtime?model=org%2Frealtime-stt") as websocket:
-        assert _receive_json(websocket)["type"] == "transcription_session.created"
+        assert _receive_json(websocket)["type"] == "session.created"
         websocket.send_json(
             {"type": "input_audio_buffer.append", "event_id": "bad", "audio": "%%%"}
         )
@@ -261,7 +270,7 @@ def test_realtime_websocket_rejects_binary_compatibility_events() -> None:
     client = TestClient(api.app)
 
     with client.websocket_connect("/v1/realtime?model=org%2Frealtime-stt") as websocket:
-        assert _receive_json(websocket)["type"] == "transcription_session.created"
+        assert _receive_json(websocket)["type"] == "session.created"
         websocket.send_bytes(b"\x00\x01")
         error = _receive_json(websocket)
         assert _mapping(error["error"])["code"] == "unsupported_frame"
@@ -281,7 +290,7 @@ def test_realtime_websocket_rejects_unimplemented_vad_configuration() -> None:
     client = TestClient(api.app)
 
     with client.websocket_connect("/v1/realtime?model=org%2Frealtime-stt") as websocket:
-        assert _receive_json(websocket)["type"] == "transcription_session.created"
+        assert _receive_json(websocket)["type"] == "session.created"
         websocket.send_json(
             {
                 "type": "transcription_session.update",
@@ -404,7 +413,7 @@ def test_realtime_websocket_surfaces_provider_failure_before_commit() -> None:
     client = TestClient(api.app)
 
     with client.websocket_connect("/v1/realtime?model=org%2Frealtime-stt") as websocket:
-        assert _receive_json(websocket)["type"] == "transcription_session.created"
+        assert _receive_json(websocket)["type"] == "session.created"
         failed = _receive_json(websocket)
         assert failed["type"] == "conversation.item.input_audio_transcription.failed"
         assert _mapping(failed["error"])["code"] == "transport_error"
@@ -477,7 +486,7 @@ def test_realtime_websocket_drains_partial_output_before_commit() -> None:
     client = TestClient(api.app)
 
     with client.websocket_connect("/v1/realtime?model=org%2Frealtime-stt") as websocket:
-        assert _receive_json(websocket)["type"] == "transcription_session.created"
+        assert _receive_json(websocket)["type"] == "session.created"
         assert partials_drained.wait(timeout=1.0)
         websocket.send_json(
             {
@@ -545,7 +554,7 @@ def test_realtime_websocket_surfaces_provider_input_transport_failure() -> None:
     client = TestClient(api.app)
 
     with client.websocket_connect("/v1/realtime?model=org%2Frealtime-stt") as websocket:
-        assert _receive_json(websocket)["type"] == "transcription_session.created"
+        assert _receive_json(websocket)["type"] == "session.created"
         websocket.send_json(
             {
                 "type": "input_audio_buffer.append",
@@ -607,7 +616,7 @@ def test_realtime_websocket_disconnect_cancels_provider_input() -> None:
     client = TestClient(api.app)
 
     with client.websocket_connect("/v1/realtime?model=org%2Frealtime-stt") as websocket:
-        assert _receive_json(websocket)["type"] == "transcription_session.created"
+        assert _receive_json(websocket)["type"] == "session.created"
 
     assert output_cancelled.is_set()
     assert [frame.kind for frame in input_frames] == ["started", "cancelled"]
