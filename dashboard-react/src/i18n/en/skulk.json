@@ -674,5 +674,8 @@
   "settings.telemetry.diagnostics": "Crash diagnostics",
   "settings.telemetry.diagnosticsTooltip": "Separate consent for scrubbed crash reports, kept privately for 90 days. Enabling telemetry never enables this.",
   "settings.telemetry.installId": "Install id (your deletion key): ",
-  "settings.telemetry.previewHint": "Inspect exactly what would be sent at GET /v1/telemetry/preview."
+  "settings.telemetry.previewHint": "Inspect exactly what would be sent at GET /v1/telemetry/preview.",
+  "settings.telemetry.rotate": "Rotate id",
+  "settings.telemetry.clear": "Clear id",
+  "settings.telemetry.rotateHint": "Rotating or clearing disowns previously sent samples; a cleared id regenerates on save while consent is enabled."
 }

@@ -382,7 +382,8 @@ class TelemetryConfig(FrozenModel):
             diagnostics (scrubbed tracebacks to a private store; not yet
             collected in this version). Enabling telemetry never enables
             this.
-        install_id: Random UUID generated when consent is first enabled.
+        install_id: Random UUID generated when either consent is first
+            enabled (client-side, or backfilled server-side on save).
             The anonymous rate-limit/dedup key AND the deletion capability:
             it never appears on the public site, so presenting it to the
             ingest API proves ownership. Rotatable and clearable from the

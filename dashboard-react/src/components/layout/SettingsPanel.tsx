@@ -140,6 +140,20 @@ const FieldLabel = styled.span`
   white-space: nowrap;
 `;
 
+const SecondaryButton = styled.button`
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  background: transparent;
+  color: inherit;
+
+  &:hover {
+    border-color: ${({ theme }) => theme.colors.borderStrong};
+  }
+`;
+
 const Toggle = styled.button<{ $on: boolean }>`
   all: unset;
   cursor: pointer;
@@ -700,10 +714,34 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                 />
               </Row>
               {telemetryDraft.install_id && (
-                <HintText>
-                  {t('settings.telemetry.installId', 'Install id (your deletion key): ')}
-                  {telemetryDraft.install_id}
-                </HintText>
+                <>
+                  <HintText>
+                    {t('settings.telemetry.installId', 'Install id (your deletion key): ')}
+                    {telemetryDraft.install_id}
+                  </HintText>
+                  <Row>
+                    <SecondaryButton
+                      type="button"
+                      onClick={() =>
+                        setTelemetryDraft(prev => prev && { ...prev, install_id: generateInstallId() })
+                      }
+                    >
+                      {t('settings.telemetry.rotate', 'Rotate id')}
+                    </SecondaryButton>
+                    <SecondaryButton
+                      type="button"
+                      onClick={() => setTelemetryDraft(prev => prev && { ...prev, install_id: '' })}
+                    >
+                      {t('settings.telemetry.clear', 'Clear id')}
+                    </SecondaryButton>
+                  </Row>
+                  <HintText>
+                    {t(
+                      'settings.telemetry.rotateHint',
+                      'Rotating or clearing disowns previously sent samples; a cleared id regenerates on save while consent is enabled.',
+                    )}
+                  </HintText>
+                </>
               )}
               <HintText>
                 {t(

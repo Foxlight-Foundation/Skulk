@@ -281,7 +281,9 @@ class FieldTelemetryCollector:
         return TelemetryPreview(
             enabled=self.enabled,
             consent=config.consent if config is not None else "unasked",
-            pending=[_sample_json(s) for s in self._pending],
+            # Snapshot before iterating: harmless today (asyncio, no await
+            # inside), cheap insurance against future threaded callers.
+            pending=[_sample_json(s) for s in tuple(self._pending)],
             dropped_since_start=self._dropped,
             install_id=config.install_id if config is not None else "",
             ingest_url=config.ingest_url if config is not None else "",
