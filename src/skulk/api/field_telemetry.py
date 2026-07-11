@@ -32,10 +32,10 @@ from typing import TYPE_CHECKING, TypedDict, TypeVar, cast, final
 import anyio
 import httpx
 from loguru import logger
-from pydantic import BaseModel
 
 from skulk.shared.types.profiling import SystemPerformanceProfile
 from skulk.shared.version import get_skulk_version
+from skulk.utils.pydantic_ext import FrozenModel
 
 if TYPE_CHECKING:
     from skulk.store.config import TelemetryConfig
@@ -91,7 +91,7 @@ def hardware_class(
 
 
 @final
-class TelemetrySample(BaseModel, frozen=True):
+class TelemetrySample(FrozenModel):
     """One wire-contract sample (snake_case fields match the ingest API).
 
     Attributes:
@@ -215,16 +215,18 @@ class FieldTelemetryCollector:
         """Record one completed (or failed) generation. No-op without consent."""
         if not self.enabled:
             return
-        snapshot_size = len(self._hardware_provider())
+        # One snapshot serves both the classes and the count, so they can
+        # never disagree and the provider runs once per sample.
+        snapshot = self._hardware_provider()
         self._append(
             TelemetrySample(
                 kind="generation",
                 at=_now_iso(),
                 model_id=model_id,
-                hardware=tuple(sorted(set(self._current_classes()))),
+                hardware=tuple(sorted(set(self._classes_of(snapshot)))),
                 # Placement size when the caller knows it; otherwise the
                 # visible cluster size (an honest upper bound, never zero).
-                node_count=node_count if node_count is not None else (snapshot_size or None),
+                node_count=node_count if node_count is not None else (len(snapshot) or None),
                 ttft_s=ttft_s,
                 decode_tps=decode_tps,
                 prompt_tokens=prompt_tokens,
@@ -233,8 +235,11 @@ class FieldTelemetryCollector:
             )
         )
 
-    def _current_classes(self) -> Iterable[str]:
-        for profile, ram in self._hardware_provider().values():
+    def _classes_of(
+        self,
+        snapshot: dict[str, tuple[SystemPerformanceProfile | None, int | None]],
+    ) -> Iterable[str]:
+        for profile, ram in snapshot.values():
             accelerator = profile.accelerator if profile is not None else None
             yield hardware_class(
                 accelerator.vendor if accelerator is not None else None,
