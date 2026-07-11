@@ -304,7 +304,7 @@ async def test_tap_skips_aborted_streams() -> None:
 def test_sample_model_is_frozen() -> None:
     sample = TelemetrySample(kind="generation", at="2026-07-11T00:00:00Z")
     with pytest.raises(Exception):  # noqa: B017 - pydantic frozen raises ValidationError
-        object.__setattr__(sample, "kind", "other")
+        sample.kind = "other"
 
 
 def test_config_update_preserves_omitted_telemetry() -> None:
