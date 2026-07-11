@@ -182,6 +182,7 @@ from skulk.extensions import (
     MAX_CALL_PAYLOAD_BYTES,
     MAX_CALL_TIMEOUT_SECONDS,
     REALTIME_STT_CAPABILITY_DESCRIPTOR,
+    STT_CAPABILITY_DESCRIPTOR,
     TTS_CAPABILITY_DESCRIPTOR,
     BuiltinSpeechProvider,
     CapabilityCall,
@@ -484,6 +485,10 @@ _AUDIO_UPLOAD_CONTENT_TYPES: Final[set[str]] = {
     "audio/x-m4a",
     "audio/x-wav",
 }
+
+
+class _BuiltinSttInputCancelledError(Exception):
+    """Signal caller input cancellation without converting it to provider failure."""
 
 
 def _normalize_upload_content_type(content_type: str | None) -> str | None:
@@ -1073,6 +1078,8 @@ class API:
                         BuiltinSpeechProvider(
                             admit_tts=self._admit_builtin_tts_stream,
                             stream_tts=self._stream_builtin_tts,
+                            admit_stt=self._admit_builtin_stt_stream,
+                            stream_stt=self._stream_builtin_stt,
                             admit_realtime_stt=(
                                 self._admit_builtin_realtime_stt_stream
                             ),
@@ -3267,6 +3274,45 @@ class API:
 
         return self._realtime_stt_instance() is not None
 
+    def _has_mounted_stt_model(self, model_id: ModelId | None = None) -> bool:
+        """Return whether a ready mounted runner can serve the requested STT."""
+
+        if not self._builtin_speech_provider_enabled:
+            return False
+
+        def instance_is_ready(instance: Instance) -> bool:
+            if len(instance.shard_assignments.node_to_runner) != 1:
+                return False
+            card = self._model_card_for_instance(instance)
+            if card is None:
+                return False
+            profile = resolve_model_capability_profile(card.model_id, model_card=card)
+            if not profile.supports_transcription:
+                return False
+            placement_runners = tuple(
+                instance.shard_assignments.node_to_runner.values()
+            )
+            return bool(placement_runners) and all(
+                isinstance(
+                    self.state.runners.get(runner_id), (RunnerReady, RunnerRunning)
+                )
+                for runner_id in placement_runners
+            )
+
+        if model_id is None:
+            return any(instance_is_ready(instance) for instance in self.state.instances.values())
+        matching_instances = tuple(
+            instance
+            for instance in self.state.instances.values()
+            if instance.shard_assignments.model_id == model_id
+        )
+        # AudioTranscription is not instance-pinned: the master may choose any
+        # mounted instance of the model. Admission is truthful only if every
+        # candidate it could choose is ready at this snapshot.
+        return bool(matching_instances) and all(
+            instance_is_ready(instance) for instance in matching_instances
+        )
+
     def _sync_builtin_speech_capability(self) -> None:
         """Advertise speech facades only while core capacity can serve them."""
 
@@ -3276,6 +3322,10 @@ class API:
             self._advertise_capability(TTS_CAPABILITY_DESCRIPTOR.id)
         else:
             self._withdraw_capability(TTS_CAPABILITY_DESCRIPTOR.id)
+        if self._has_mounted_stt_model():
+            self._advertise_capability(STT_CAPABILITY_DESCRIPTOR.id)
+        else:
+            self._withdraw_capability(STT_CAPABILITY_DESCRIPTOR.id)
         if self._has_realtime_stt_model():
             self._advertise_capability(REALTIME_STT_CAPABILITY_DESCRIPTOR.id)
         else:
@@ -8812,6 +8862,232 @@ class API:
                 ),
             )
 
+    async def _prepare_builtin_stt_task(
+        self,
+        call: CapabilityCall,
+    ) -> AudioTranscriptionTaskParams:
+        """Validate batch STT metadata against mounted core speech state."""
+
+        payload = dict(call.payload)
+        model = payload.pop("model", None)
+        if not isinstance(model, str) or not model:
+            raise HTTPException(
+                status_code=422,
+                detail="STT provider payload requires a non-empty model",
+            )
+        model_id = await self._validate_audio_transcription_model(ModelId(model))
+        filename = payload.get("filename")
+        content_type = _normalize_upload_content_type(
+            cast(str | None, payload.get("content_type"))
+        )
+        suffix = Path(filename if isinstance(filename, str) else "").suffix.lower()
+        if (
+            content_type is not None
+            and content_type not in _AUDIO_UPLOAD_CONTENT_TYPES
+            and suffix not in _AUDIO_UPLOAD_EXTENSIONS
+        ):
+            raise HTTPException(
+                status_code=415,
+                detail=f"Unsupported audio input content type: {content_type}",
+            )
+        payload["content_type"] = content_type
+        return AudioTranscriptionTaskParams.model_validate(
+            {
+                **payload,
+                "model": model_id,
+                "audio_sha256": "0" * 64,
+            }
+        )
+
+    async def _admit_builtin_stt_stream(
+        self,
+        call: CapabilityCall,
+    ) -> CapabilityError | None:
+        """Reject batch STT before start unless mounted capacity is available."""
+
+        if not self._has_mounted_stt_model():
+            return CapabilityError(
+                code="not_found",
+                message="no batch STT capacity is currently advertised",
+            )
+        try:
+            task_params = await self._prepare_builtin_stt_task(call)
+        except ValidationError as exc:
+            return CapabilityError(code="invalid_payload", message=str(exc))
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                code: CapabilityErrorCode = "not_found"
+            elif exc.status_code in (400, 415, 422):
+                code = "invalid_payload"
+            else:
+                code = "provider_error"
+            return CapabilityError(code=code, message=str(exc.detail))
+        if not self._has_mounted_stt_model(task_params.model):
+            return CapabilityError(
+                code="overloaded",
+                message=(
+                    f"no ready batch STT runner for requested model "
+                    f"{task_params.model}"
+                ),
+            )
+        return None
+
+    async def _collect_builtin_stt_audio(
+        self,
+        input_frames: AsyncIterator[CapabilityStreamFrame],
+    ) -> tuple[bytes, str]:
+        """Collect one bounded encoded clip from ordered provider media frames."""
+
+        audio_parts: list[bytes] = []
+        total_bytes = 0
+        completed = False
+        media_type: str | None = None
+        async for frame in input_frames:
+            if frame.kind == "started":
+                continue
+            if frame.kind == "chunk":
+                if not isinstance(frame.media, InlineMediaAttachment):
+                    raise ValueError(
+                        "batch STT requires inline binary media attachments; "
+                        "managed blob resolution is not available yet"
+                    )
+                frame_media_type = _normalize_upload_content_type(
+                    frame.media.media_type
+                )
+                if frame_media_type not in _AUDIO_UPLOAD_CONTENT_TYPES:
+                    raise ValueError(
+                        f"unsupported batch STT media type: {frame_media_type}"
+                    )
+                if media_type is None:
+                    media_type = frame_media_type
+                elif media_type != frame_media_type:
+                    raise ValueError(
+                        "batch STT media frames must use one consistent media type"
+                    )
+                total_bytes += len(frame.media.data)
+                if total_bytes > _MAX_AUDIO_UPLOAD_BYTES:
+                    raise ValueError(
+                        f"batch STT audio exceeds {_MAX_AUDIO_UPLOAD_BYTES} bytes"
+                    )
+                audio_parts.append(frame.media.data)
+                continue
+            if frame.kind == "completed":
+                completed = True
+                break
+            if frame.kind == "cancelled":
+                detail = (
+                    frame.error.message
+                    if frame.error is not None
+                    else "caller cancelled batch STT input"
+                )
+                raise _BuiltinSttInputCancelledError(detail)
+            detail = frame.error.message if frame.error is not None else frame.kind
+            raise RuntimeError(f"batch STT input terminated: {detail}")
+        if not completed:
+            raise RuntimeError("batch STT input ended without half-close")
+        audio_bytes = b"".join(audio_parts)
+        if not audio_bytes:
+            raise ValueError("batch STT audio input is empty")
+        assert media_type is not None
+        return audio_bytes, media_type
+
+    async def _stream_builtin_stt(
+        self,
+        call: CapabilityCall,
+        input_frames: AsyncIterator[CapabilityStreamFrame],
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        """Transcribe one bounded provider media input after input half-close."""
+
+        try:
+            task_params = await self._prepare_builtin_stt_task(call)
+        except (ValidationError, HTTPException) as exc:
+            raise RuntimeError(
+                f"batch STT availability changed after admission: {exc}"
+            ) from exc
+        try:
+            audio_bytes, media_type = await self._collect_builtin_stt_audio(
+                input_frames
+            )
+        except _BuiltinSttInputCancelledError as exc:
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="cancelled",
+                error=CapabilityStreamError(code="cancelled", message=str(exc)),
+            )
+            return
+        except ValueError as exc:
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="failed",
+                error=CapabilityStreamError(
+                    code="invalid_frame",
+                    message=str(exc),
+                ),
+            )
+            return
+        if (
+            task_params.content_type is not None
+            and task_params.content_type != media_type
+        ):
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="failed",
+                error=CapabilityStreamError(
+                    code="invalid_frame",
+                    message=(
+                        "batch STT attachment media type does not match opening "
+                        "content_type"
+                    ),
+                ),
+            )
+            return
+        if not self._has_mounted_stt_model(task_params.model):
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="failed",
+                error=CapabilityStreamError(
+                    code="unreachable",
+                    message=(
+                        "batch STT capacity changed while receiving input; "
+                        "retry after the requested model is ready"
+                    ),
+                ),
+            )
+            return
+        task_params = task_params.model_copy(update={"content_type": media_type})
+        chunks = await self._execute_audio_transcription(task_params, audio_bytes)
+        text = "".join(chunk.text for chunk in chunks).strip()
+        language = next(
+            (chunk.language for chunk in chunks if chunk.language is not None),
+            None,
+        )
+        segments: list[dict[str, str | int | float | bool | None]] = []
+        for chunk in chunks:
+            segments.extend(chunk.segments)
+        payload: dict[str, object] = {
+            "model": str(task_params.model),
+            "text": text,
+        }
+        if language is not None:
+            payload["language"] = language
+        if segments:
+            payload["segments"] = segments
+        yield CapabilityStreamFrame(
+            call_id=call.call_id,
+            direction="provider_to_caller",
+            sequence=1,
+            kind="completed",
+            payload=payload,
+        )
+
     async def _prepare_builtin_realtime_stt_task(
         self,
         call: CapabilityCall,
@@ -9574,20 +9850,14 @@ class API:
 
         _validate_audio_upload_metadata(file)
         audio_bytes = await _read_audio_upload(file)
-        audio_sha256 = hashlib.sha256(audio_bytes).hexdigest()
-        encoded_audio = base64.b64encode(audio_bytes).decode("ascii")
-        audio_chunks = _chunk_base64_payload(encoded_audio)
         model_id = await self._validate_audio_transcription_model(ModelId(model))
         normalized_content_type = _normalize_upload_content_type(file.content_type)
-
-        command = AudioTranscription(
-            owner_node=self.node_id,
-            task_params=AudioTranscriptionTaskParams(
+        transcript_chunks = await self._execute_audio_transcription(
+            AudioTranscriptionTaskParams(
                 model=model_id,
                 filename=file.filename,
                 content_type=normalized_content_type,
-                total_input_chunks=len(audio_chunks),
-                audio_sha256=audio_sha256,
+                audio_sha256=hashlib.sha256(audio_bytes).hexdigest(),
                 language=language,
                 prompt=prompt,
                 temperature=temperature,
@@ -9602,49 +9872,69 @@ class API:
                     timestamp_granularities
                 ),
             ),
+            audio_bytes,
         )
-        command_id = command.command_id
+        return _build_audio_transcription_response(response_format, transcript_chunks)
 
+    async def _execute_audio_transcription(
+        self,
+        task_params: AudioTranscriptionTaskParams,
+        audio_bytes: bytes,
+    ) -> list[TranscriptionChunk]:
+        """Run the shared bounded batch STT command path for REST and Fabric."""
+
+        audio_sha256 = hashlib.sha256(audio_bytes).hexdigest()
+        audio_chunks = _chunk_base64_payload(
+            base64.b64encode(audio_bytes).decode("ascii")
+        )
+        # Keep REST and Fabric on one authoritative batch runner path. The
+        # event-sourced input hop is legacy and documented as retained data;
+        # replacing it requires a worker-addressed immutable-media service.
+        params = task_params.model_copy(
+            update={
+                "total_input_chunks": len(audio_chunks),
+                "audio_sha256": audio_sha256,
+            }
+        )
+        command = AudioTranscription(owner_node=self.node_id, task_params=params)
+        command_id = command.command_id
         try:
             self._audio_transcription_queues[command_id], recv = channel[
                 TranscriptionChunk | ErrorChunk
             ]()
-
             for chunk_index, chunk_data in enumerate(audio_chunks):
                 await self._send(
                     SendInputChunk(
                         chunk=AudioInputChunk(
-                            model=model_id,
+                            model=params.model,
                             command_id=command_id,
                             data=chunk_data,
                             chunk_index=chunk_index,
                             total_chunks=len(audio_chunks),
-                            filename=file.filename,
-                            content_type=normalized_content_type,
+                            filename=params.filename,
+                            content_type=params.content_type,
                             audio_sha256=audio_sha256,
                         )
                     )
                 )
             await self._send(command)
-
             transcript_chunks = await self._collect_transcription_chunks(
                 command_id, recv
             )
-
             if not transcript_chunks:
                 raise HTTPException(
-                    status_code=500, detail="No speech transcription response received"
+                    status_code=500,
+                    detail="No speech transcription response received",
                 )
-            return _build_audio_transcription_response(
-                response_format, transcript_chunks
-            )
-
+            return transcript_chunks
         except anyio.get_cancelled_exc_class():
-            cancel_command = TaskCancelled(cancelled_command_id=command_id)
             self._cancelled_command_ids.add(command_id)
             with anyio.CancelScope(shield=True):
                 await self.command_sender.send(
-                    ForwarderCommand(origin=self._system_id, command=cancel_command)
+                    ForwarderCommand(
+                        origin=self._system_id,
+                        command=TaskCancelled(cancelled_command_id=command_id),
+                    )
                 )
             raise
         finally:

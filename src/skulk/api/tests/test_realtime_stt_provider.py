@@ -193,7 +193,10 @@ def test_realtime_stt_discovery_requires_truthful_local_capacity(
 
     api._sync_builtin_speech_capability()
 
-    assert api._telemetry_view.local_advertised_capabilities == {"stt.realtime"}
+    assert api._telemetry_view.local_advertised_capabilities == {
+        "stt",
+        "stt.realtime",
+    }
     assert api._extensions is not None
     assert (
         REALTIME_STT_CAPABILITY_DESCRIPTOR
@@ -202,7 +205,7 @@ def test_realtime_stt_discovery_requires_truthful_local_capacity(
 
     api.state = _local_state(_realtime_card(supports_realtime=False))
     api._sync_builtin_speech_capability()
-    assert api._telemetry_view.local_advertised_capabilities == set()
+    assert api._telemetry_view.local_advertised_capabilities == {"stt"}
 
     api.state = _local_state(
         _realtime_card(), runner_status=RunnerLoading(layers_loaded=0, total_layers=1)
@@ -226,7 +229,7 @@ def test_remote_realtime_stt_requires_private_unicast_transport(
 
     api._sync_builtin_speech_capability()
 
-    assert api._telemetry_view.local_advertised_capabilities == set()
+    assert api._telemetry_view.local_advertised_capabilities == {"stt"}
 
 @pytest.mark.anyio
 async def test_runner_ready_event_resynchronizes_realtime_stt_advertisement(
@@ -263,7 +266,10 @@ async def test_runner_ready_event_resynchronizes_realtime_stt_advertisement(
             await anyio.sleep(0)
         task_group.cancel_scope.cancel()
 
-    assert api._telemetry_view.local_advertised_capabilities == {"stt.realtime"}
+    assert api._telemetry_view.local_advertised_capabilities == {
+        "stt",
+        "stt.realtime",
+    }
 
 
 def test_realtime_stt_discovery_rejects_multi_host_instance(
@@ -325,7 +331,10 @@ async def test_node_timeout_withdraws_remote_realtime_stt_advertisement(
     monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
     _enable_realtime(api, tmp_path)
     api._sync_builtin_speech_capability()
-    assert api._telemetry_view.local_advertised_capabilities == {"stt.realtime"}
+    assert api._telemetry_view.local_advertised_capabilities == {
+        "stt",
+        "stt.realtime",
+    }
     event_sender = api.event_receiver.clone_sender()
 
     async with anyio.create_task_group() as task_group:
