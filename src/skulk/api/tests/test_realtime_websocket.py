@@ -362,6 +362,27 @@ def test_realtime_websocket_surfaces_provider_admission_failure() -> None:
             assert exc.code == 1013
 
 
+def test_realtime_websocket_surfaces_unexpected_provider_open_failure() -> None:
+    """An opener exception becomes a typed error and internal-error close."""
+
+    api = _build_api()
+
+    async def open_session(model: str, sample_rate: int) -> CapabilityStreamSession:
+        del model, sample_rate
+        raise OSError("simulated provider transport failure")
+
+    api._open_realtime_transcription_session = open_session
+    client = TestClient(api.app)
+
+    with client.websocket_connect("/v1/realtime?model=org%2Frealtime-stt") as websocket:
+        error = _receive_json(websocket)
+        assert error["type"] == "error"
+        assert _mapping(error["error"])["code"] == "provider_open_error"
+        with pytest.raises(WebSocketDisconnect) as disconnect:
+            _receive_json(websocket)
+        assert disconnect.value.code == 1011
+
+
 def test_realtime_websocket_surfaces_provider_failure_before_commit() -> None:
     """Runner loss is reported immediately even while client input remains open."""
 
@@ -417,6 +438,59 @@ def test_realtime_websocket_surfaces_provider_failure_before_commit() -> None:
         failed = _receive_json(websocket)
         assert failed["type"] == "conversation.item.input_audio_transcription.failed"
         assert _mapping(failed["error"])["code"] == "transport_error"
+        with pytest.raises(WebSocketDisconnect) as disconnect:
+            _receive_json(websocket)
+        assert disconnect.value.code == 1011
+
+    assert [frame.kind for frame in input_frames] == ["started", "cancelled"]
+
+
+def test_realtime_websocket_surfaces_unexpected_provider_output_failure() -> None:
+    """An iterator exception becomes a typed terminal failure and close."""
+
+    api = _build_api()
+    input_frames: list[CapabilityStreamFrame] = []
+
+    async def open_session(model: str, sample_rate: int) -> CapabilityStreamSession:
+        del model, sample_rate
+
+        async def send_input(frame: CapabilityStreamFrame) -> None:
+            input_frames.append(frame)
+
+        input_stream = CapabilityStreamInput(
+            call_id="output-exception",
+            deadline_at=anyio.current_time() + 10.0,
+            send_frame=send_input,
+        )
+        await input_stream.start()
+
+        async def output_frames() -> AsyncIterator[CapabilityStreamFrame]:
+            yield CapabilityStreamFrame(
+                call_id="output-exception",
+                direction="provider_to_caller",
+                sequence=0,
+                kind="started",
+            )
+            raise OSError("simulated provider iterator failure")
+
+        return CapabilityStreamSession(
+            open_result=CapabilityResult(
+                call_id="output-exception",
+                ok=True,
+                result={"admitted": True},
+            ),
+            frames=output_frames(),
+            input=input_stream,
+        )
+
+    api._open_realtime_transcription_session = open_session
+    client = TestClient(api.app)
+
+    with client.websocket_connect("/v1/realtime?model=org%2Frealtime-stt") as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        failed = _receive_json(websocket)
+        assert failed["type"] == "conversation.item.input_audio_transcription.failed"
+        assert _mapping(failed["error"])["code"] == "provider_output_error"
         with pytest.raises(WebSocketDisconnect) as disconnect:
             _receive_json(websocket)
         assert disconnect.value.code == 1011

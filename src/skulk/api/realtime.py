@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import anyio
 from fastapi import WebSocket, WebSocketDisconnect
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from skulk.extensions import (
@@ -225,7 +226,17 @@ class RealtimeTranscriptionBridge:
             await self._websocket.close(code=1008, reason="cross-origin WebSocket denied")
             return
         await self._websocket.accept()
-        session = await self._open_session(self._model, _PCM_SAMPLE_RATE)
+        try:
+            session = await self._open_session(self._model, _PCM_SAMPLE_RATE)
+        except Exception as exc:
+            logger.opt(exception=exc).warning(
+                "Realtime transcription provider session failed to open"
+            )
+            await self._send_internal_error(
+                code="provider_open_error",
+                message="realtime transcription provider session could not be opened",
+            )
+            return
         if not session.open_result.ok:
             error = session.open_result.error
             await self._send_error(
@@ -554,8 +565,14 @@ class RealtimeTranscriptionBridge:
                     await self._close(1011 if frame.kind == "failed" else 1000)
                 cancel_scope.cancel()
                 return
-        except (WebSocketDisconnect, RuntimeError):
+        except WebSocketDisconnect:
             cancel_scope.cancel()
+            return
+        except Exception as exc:
+            logger.opt(exception=exc).warning(
+                "Realtime transcription provider output stream failed"
+            )
+            await self._send_internal_transcription_failure(cancel_scope)
             return
         if not terminal:
             await self._send_transcription_failed(
@@ -652,6 +669,38 @@ class RealtimeTranscriptionBridge:
                 },
             }
         )
+
+    async def _send_internal_error(self, *, code: str, message: str) -> None:
+        try:
+            await self._send_error(code=code, message=message)
+            await self._close(1011)
+        except (
+            WebSocketDisconnect,
+            RuntimeError,
+            anyio.BrokenResourceError,
+            anyio.ClosedResourceError,
+        ):
+            return
+
+    async def _send_internal_transcription_failure(
+        self,
+        cancel_scope: anyio.CancelScope,
+    ) -> None:
+        try:
+            await self._send_transcription_failed(
+                code="provider_output_error",
+                message="realtime transcription provider output failed unexpectedly",
+            )
+            await self._close(1011)
+        except (
+            WebSocketDisconnect,
+            RuntimeError,
+            anyio.BrokenResourceError,
+            anyio.ClosedResourceError,
+        ):
+            pass
+        finally:
+            cancel_scope.cancel()
 
     async def _send_error(
         self,
