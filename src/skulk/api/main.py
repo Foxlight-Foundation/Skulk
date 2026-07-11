@@ -176,6 +176,7 @@ from skulk.extensions import (
     DEFAULT_CALL_TIMEOUT_SECONDS,
     MAX_CALL_PAYLOAD_BYTES,
     MAX_CALL_TIMEOUT_SECONDS,
+    REALTIME_STT_CAPABILITY_DESCRIPTOR,
     TTS_CAPABILITY_DESCRIPTOR,
     BuiltinSpeechProvider,
     CapabilityCall,
@@ -243,6 +244,8 @@ from skulk.shared.tracing import (
 )
 from skulk.shared.types.audio import (
     AudioTranscriptionTaskParams,
+    RealtimeAudioInputFrame,
+    RealtimeAudioTranscriptionTaskParams,
     SpeechSynthesisTaskParams,
 )
 from skulk.shared.types.chunks import (
@@ -274,6 +277,7 @@ from skulk.shared.types.commands import (
     ImageEdits,
     ImageGeneration,
     PlaceInstance,
+    RealtimeAudioTranscription,
     SendInputChunk,
     SetTracingEnabled,
     SpeechSynthesis,
@@ -1031,6 +1035,7 @@ class API:
         data_receiver: "Receiver[DataChunk] | None" = None,
         provider_stream_sender: "Sender[ProviderStreamPacket] | None" = None,
         provider_stream_receiver: "Receiver[ProviderStreamPacket] | None" = None,
+        realtime_audio_sender: "Sender[RealtimeAudioInputFrame] | None" = None,
         data_plane_zenoh: bool = False,
         data_plane_egress_provider: (
             Callable[[], DataPlaneEgressDiagnostics] | None
@@ -1051,6 +1056,10 @@ class API:
                         BuiltinSpeechProvider(
                             admit_tts=self._admit_builtin_tts_stream,
                             stream_tts=self._stream_builtin_tts,
+                            admit_realtime_stt=(
+                                self._admit_builtin_realtime_stt_stream
+                            ),
+                            stream_realtime_stt=self._stream_builtin_realtime_stt,
                         ),
                     )
                 )
@@ -1090,6 +1099,7 @@ class API:
         self._active_capability_streams: dict[str, _ActiveProviderStream] = {}
         self._provider_stream_sender = provider_stream_sender
         self._provider_stream_receiver = provider_stream_receiver
+        self._realtime_audio_sender = realtime_audio_sender
         self._provider_stream_receivers: dict[
             str, _ProviderStreamReceiveState
         ] = {}
@@ -3066,6 +3076,23 @@ class API:
             and config.experiments.tts_streaming
         )
 
+    def _stt_realtime_experiment_enabled(self) -> bool:
+        """Return whether config opts into true realtime STT sessions."""
+
+        try:
+            config = load_skulk_config(self._config_path)
+        except Exception as exc:
+            logger.warning(
+                "Failed to load config while checking realtime STT experiment "
+                f"toggle; treating it as disabled: {exc}"
+            )
+            return False
+        return bool(
+            config is not None
+            and config.experiments is not None
+            and config.experiments.stt_realtime
+        )
+
     def _has_mounted_streaming_tts_model(self) -> bool:
         """Return whether core serving currently exposes eligible TTS capacity."""
 
@@ -3094,8 +3121,48 @@ class API:
                 return True
         return False
 
+    def _local_realtime_stt_instance(
+        self, model_id: ModelId | None = None
+    ) -> tuple[InstanceId, ModelCard] | None:
+        """Return eligible realtime STT capacity owned by this API node."""
+
+        if (
+            not self._builtin_speech_provider_enabled
+            or self._realtime_audio_sender is None
+            or not experimental_mode_enabled()
+            or not self._stt_realtime_experiment_enabled()
+        ):
+            return None
+        for instance_id, instance in self.state.instances.items():
+            if self.node_id not in instance.shard_assignments.node_to_runner:
+                continue
+            if (
+                model_id is not None
+                and instance.shard_assignments.model_id != model_id
+            ):
+                continue
+            card = self._model_card_for_instance(instance)
+            if card is None or card.audio is None:
+                continue
+            profile = resolve_model_capability_profile(
+                card.model_id,
+                model_card=card,
+            )
+            if (
+                profile.supports_transcription
+                and card.audio.supports_streaming is True
+                and card.audio.supports_realtime is True
+            ):
+                return instance_id, card
+        return None
+
+    def _has_mounted_realtime_stt_model(self) -> bool:
+        """Return whether this node owns true realtime STT capacity."""
+
+        return self._local_realtime_stt_instance() is not None
+
     def _sync_builtin_speech_capability(self) -> None:
-        """Advertise TTS only while the core runtime can truthfully serve it."""
+        """Advertise speech facades only while core capacity can serve them."""
 
         if not self._builtin_speech_provider_enabled:
             return
@@ -3103,6 +3170,10 @@ class API:
             self._advertise_capability(TTS_CAPABILITY_DESCRIPTOR.id)
         else:
             self._withdraw_capability(TTS_CAPABILITY_DESCRIPTOR.id)
+        if self._has_mounted_realtime_stt_model():
+            self._advertise_capability(REALTIME_STT_CAPABILITY_DESCRIPTOR.id)
+        else:
+            self._withdraw_capability(REALTIME_STT_CAPABILITY_DESCRIPTOR.id)
 
     async def _validate_audio_transcription_model(self, model_id: ModelId) -> ModelId:
         """Validate a mounted speech-to-text model exists and is servable."""
@@ -6225,6 +6296,7 @@ class API:
                 task_types.TextEmbedding,
                 task_types.SpeechSynthesis,
                 task_types.AudioTranscription,
+                task_types.RealtimeAudioTranscription,
             ),
         ):
             return
@@ -6673,6 +6745,7 @@ class API:
                 task_types.TextEmbedding,
                 task_types.SpeechSynthesis,
                 task_types.AudioTranscription,
+                task_types.RealtimeAudioTranscription,
             ),
         ):
             return str(task.command_id)
@@ -6693,6 +6766,7 @@ class API:
                 task_types.TextEmbedding,
                 task_types.SpeechSynthesis,
                 task_types.AudioTranscription,
+                task_types.RealtimeAudioTranscription,
             ),
         ):
             return str(task.task_params.model)
@@ -8518,6 +8592,285 @@ class API:
                     self._audio_speech_queues,
                 ),
             )
+
+    async def _prepare_builtin_realtime_stt_task(
+        self,
+        call: CapabilityCall,
+    ) -> tuple[RealtimeAudioTranscriptionTaskParams, InstanceId]:
+        """Validate one realtime STT call against local mounted capacity."""
+
+        payload = dict(call.payload)
+        sample_rate = payload.pop("sample_rate", None)
+        params = RealtimeAudioTranscriptionTaskParams.model_validate(
+            {**payload, "input_sample_rate": sample_rate}
+        )
+        local = self._local_realtime_stt_instance(params.model)
+        if local is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"No local realtime STT instance for model {params.model}"
+                ),
+            )
+        instance_id, _ = local
+        if any(
+            task.instance_id == instance_id
+            and task.task_status not in _TERMINAL_TASK_STATUSES
+            for task in self.state.tasks.values()
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="The realtime STT runner is already serving another task",
+            )
+        return params, instance_id
+
+    async def _admit_builtin_realtime_stt_stream(
+        self,
+        call: CapabilityCall,
+    ) -> CapabilityError | None:
+        """Reject realtime STT before start unless local capacity is truthful."""
+
+        if not self._has_mounted_realtime_stt_model():
+            return CapabilityError(
+                code="not_found",
+                message="no local realtime STT capacity is currently advertised",
+            )
+        try:
+            await self._prepare_builtin_realtime_stt_task(call)
+        except ValidationError as exc:
+            return CapabilityError(code="invalid_payload", message=str(exc))
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                code: CapabilityErrorCode = "not_found"
+            elif exc.status_code == 409:
+                code = "overloaded"
+            elif exc.status_code in (400, 422):
+                code = "invalid_payload"
+            else:
+                code = "provider_error"
+            return CapabilityError(code=code, message=str(exc.detail))
+        return None
+
+    async def _start_realtime_audio_transcription(
+        self,
+        params: RealtimeAudioTranscriptionTaskParams,
+        instance_id: InstanceId,
+    ) -> tuple[
+        CommandId,
+        Sender[TranscriptionChunk | ErrorChunk],
+        Receiver[TranscriptionChunk | ErrorChunk],
+    ]:
+        """Submit one pinned realtime STT command and register its output."""
+
+        command = RealtimeAudioTranscription(
+            owner_node=self.node_id,
+            target_instance_id=instance_id,
+            task_params=params,
+        )
+        command_id = command.command_id
+        output_sender, output_receiver = channel[TranscriptionChunk | ErrorChunk]()
+        self._audio_transcription_queues[command_id] = output_sender
+        try:
+            await self._send(command)
+        except Exception:
+            await self._finalize_command_stream(
+                command_id,
+                cast(
+                    dict[CommandId, Sender[object]],
+                    self._audio_transcription_queues,
+                ),
+            )
+            raise
+        return command_id, output_sender, output_receiver
+
+    async def _cancel_audio_transcription_command(
+        self, command_id: CommandId
+    ) -> None:
+        """Cancel one core STT command while preserving cleanup ordering."""
+
+        if command_id in self._cancelled_command_ids:
+            return
+        self._cancelled_command_ids.add(command_id)
+        await self.command_sender.send(
+            ForwarderCommand(
+                origin=self._system_id,
+                command=TaskCancelled(cancelled_command_id=command_id),
+            )
+        )
+
+    async def _pump_builtin_realtime_stt_input(
+        self,
+        *,
+        command_id: CommandId,
+        params: RealtimeAudioTranscriptionTaskParams,
+        input_frames: AsyncIterator[CapabilityStreamFrame],
+    ) -> None:
+        """Translate validated provider frames into local runner PCM ingress."""
+
+        if self._realtime_audio_sender is None:
+            raise RuntimeError("realtime audio worker ingress is unavailable")
+        terminal_sent = False
+        async for frame in input_frames:
+            if frame.kind == "started":
+                continue
+            if frame.kind == "chunk":
+                media = frame.media
+                payload = frame.payload or {}
+                if not isinstance(media, InlineMediaAttachment):
+                    raise ValueError(
+                        "realtime STT requires inline PCM media attachments"
+                    )
+                if (
+                    media.codec != "pcm_s16le"
+                    or media.channels != 1
+                    or media.sample_rate != params.input_sample_rate
+                    or payload.get("format") != "pcm_s16le"
+                    or payload.get("channels") != 1
+                    or payload.get("sample_rate") != params.input_sample_rate
+                ):
+                    raise ValueError(
+                        "realtime STT frame metadata must match the negotiated "
+                        "mono pcm_s16le sample rate"
+                    )
+                await self._realtime_audio_sender.send(
+                    RealtimeAudioInputFrame(
+                        command_id=command_id,
+                        sequence=frame.sequence,
+                        kind="chunk",
+                        data=media.data,
+                    )
+                )
+                continue
+            kind = "completed" if frame.kind == "completed" else "cancelled"
+            await self._realtime_audio_sender.send(
+                RealtimeAudioInputFrame(
+                    command_id=command_id,
+                    sequence=frame.sequence,
+                    kind=kind,
+                )
+            )
+            terminal_sent = True
+            return
+        if not terminal_sent:
+            raise RuntimeError("realtime STT input ended without a terminal frame")
+
+    async def _stream_builtin_realtime_stt(
+        self,
+        call: CapabilityCall,
+        input_frames: AsyncIterator[CapabilityStreamFrame],
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        """Bridge provider PCM input to a true incremental core STT session."""
+
+        try:
+            params, instance_id = await self._prepare_builtin_realtime_stt_task(call)
+        except (ValidationError, HTTPException) as exc:
+            raise RuntimeError(
+                f"realtime STT availability changed after admission: {exc}"
+            ) from exc
+        command_id, output_sender, output_receiver = (
+            await self._start_realtime_audio_transcription(params, instance_id)
+        )
+        input_cancel_scope = anyio.CancelScope()
+        input_done = anyio.Event()
+
+        async def pump_input() -> None:
+            with input_cancel_scope:
+                try:
+                    await self._pump_builtin_realtime_stt_input(
+                        command_id=command_id,
+                        params=params,
+                        input_frames=input_frames,
+                    )
+                except anyio.get_cancelled_exc_class():
+                    raise
+                except Exception as exc:
+                    with contextlib.suppress(
+                        BrokenResourceError, ClosedResourceError
+                    ):
+                        await output_sender.send(
+                            ErrorChunk(
+                                model=params.model,
+                                error_message=f"Realtime STT input failed: {exc}",
+                            )
+                        )
+                    with anyio.CancelScope(shield=True):
+                        await self._cancel_audio_transcription_command(command_id)
+                finally:
+                    input_done.set()
+
+        try:
+            self._tg.start_soon(pump_input)
+        except RuntimeError as exc:
+            await self._cancel_audio_transcription_command(command_id)
+            raise RuntimeError("realtime STT input pump could not start") from exc
+
+        sequence = 1
+        terminal_received = False
+        try:
+            with output_receiver as chunks:
+                while True:
+                    chunk: TranscriptionChunk | ErrorChunk | None = None
+                    with anyio.move_on_after(_STREAM_IDLE_TIMEOUT_SECONDS) as scope:
+                        try:
+                            chunk = await chunks.receive()
+                        except (EndOfStream, ClosedResourceError) as exc:
+                            raise RuntimeError(
+                                "Core realtime STT DATA stream closed without "
+                                "a terminal chunk"
+                            ) from exc
+                    if scope.cancelled_caught:
+                        raise RuntimeError(
+                            "Core realtime STT DATA stream exceeded its idle deadline"
+                        )
+                    assert chunk is not None
+                    if isinstance(chunk, ErrorChunk):
+                        raise RuntimeError(
+                            f"Core realtime transcription failed: "
+                            f"{chunk.error_message}"
+                        )
+                    if chunk.finish_reason is not None:
+                        terminal_received = True
+                        yield CapabilityStreamFrame(
+                            call_id=call.call_id,
+                            direction="provider_to_caller",
+                            sequence=sequence,
+                            kind="completed",
+                            payload={
+                                "model": str(chunk.model),
+                                "text": chunk.text,
+                                "is_partial": False,
+                            },
+                        )
+                        return
+                    yield CapabilityStreamFrame(
+                        call_id=call.call_id,
+                        direction="provider_to_caller",
+                        sequence=sequence,
+                        kind="chunk",
+                        payload={
+                            "model": str(chunk.model),
+                            "text": chunk.text,
+                            "is_partial": True,
+                        },
+                    )
+                    sequence += 1
+        finally:
+            input_cancel_scope.cancel()
+            with anyio.CancelScope(shield=True):
+                with anyio.move_on_after(1.0):
+                    await input_done.wait()
+                if (
+                    not terminal_received
+                    and not self._command_task_is_terminal(command_id)
+                ):
+                    await self._cancel_audio_transcription_command(command_id)
+                await self._finalize_command_stream(
+                    command_id,
+                    cast(
+                        dict[CommandId, Sender[object]],
+                        self._audio_transcription_queues,
+                    ),
+                )
 
     async def audio_speech(self, request: AudioSpeechRequest) -> Response:
         """OpenAI-compatible text-to-speech endpoint."""

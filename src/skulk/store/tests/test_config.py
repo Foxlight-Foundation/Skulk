@@ -117,23 +117,29 @@ def test_load_skulk_config_fails_loud_on_legacy_exo_yaml(tmp_path: Path) -> None
         load_skulk_config(target)
 
 
-def test_experiments_config_defaults_tts_streaming_off() -> None:
+def test_experiments_config_defaults_speech_streaming_off() -> None:
     """Experimental feature toggles default off until explicitly opted in."""
 
     config = SkulkConfig(experiments=ExperimentsConfig())
 
     assert config.experiments is not None
     assert config.experiments.tts_streaming is False
+    assert config.experiments.stt_realtime is False
 
 
-def test_load_skulk_config_parses_tts_streaming_experiment(tmp_path: Path) -> None:
-    """The config file can opt into the experimental TTS streaming transport."""
+def test_load_skulk_config_parses_speech_streaming_experiments(
+    tmp_path: Path,
+) -> None:
+    """The config file can opt into each experimental speech transport."""
 
     target = tmp_path / "skulk.yaml"
-    target.write_text("experiments:\n  tts_streaming: true\n")
+    target.write_text(
+        "experiments:\n  tts_streaming: true\n  stt_realtime: true\n"
+    )
 
     config = load_skulk_config(target)
 
     assert config is not None
     assert config.experiments is not None
     assert config.experiments.tts_streaming is True
+    assert config.experiments.stt_realtime is True

@@ -14,6 +14,7 @@ from skulk.shared.models.model_cards import (
     RuntimeCapabilityCardConfig,
     card_serves_speech,
 )
+from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.diagnostics import (
     RunnerDiagnosticContext,
     RunnerDiagnosticUpdate,
@@ -432,6 +433,7 @@ def entrypoint(
     diagnostic_sender: MpSender[RunnerDiagnosticUpdate],
     task_receiver: MpReceiver[Task],
     cancel_receiver: MpReceiver[TaskId],
+    realtime_audio_receiver: MpReceiver[RealtimeAudioInputFrame],
     _logger: "loguru.Logger",
     context_token_limit: int | None = None,
 ) -> None:
@@ -503,7 +505,11 @@ def entrypoint(
             from skulk.worker.runner.speech.runner import Runner as SpeechRunner
 
             runner = SpeechRunner(
-                bound_instance, event_sender, task_receiver, cancel_receiver
+                bound_instance,
+                event_sender,
+                task_receiver,
+                cancel_receiver,
+                realtime_audio_receiver,
             )
             runner.main()
         elif isinstance(bound_instance.bound_shard, RpcDonorShardMetadata):

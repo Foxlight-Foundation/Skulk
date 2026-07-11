@@ -16,6 +16,8 @@ from anyio import WouldBlock
 from skulk.shared.models.model_cards import AudioCardKind, AudioResponseFormat, ModelId
 from skulk.shared.types.audio import (
     AudioTranscriptionTaskParams,
+    RealtimeAudioInputFrame,
+    RealtimeAudioTranscriptionTaskParams,
     SpeechSynthesisTaskParams,
 )
 from skulk.shared.types.chunks import AudioChunk, TranscriptionChunk
@@ -27,7 +29,12 @@ from skulk.shared.types.events import (
     TaskAcknowledged,
     TaskStatusUpdated,
 )
-from skulk.shared.types.tasks import AudioTranscription, SpeechSynthesis, TaskStatus
+from skulk.shared.types.tasks import (
+    AudioTranscription,
+    RealtimeAudioTranscription,
+    SpeechSynthesis,
+    TaskStatus,
+)
 from skulk.shared.types.worker.instances import BoundInstance, InstanceId
 from skulk.shared.types.worker.runners import (
     RunnerId,
@@ -71,6 +78,57 @@ class _EmptyCancelReceiver:
 
     def receive_nowait(self) -> object:
         raise WouldBlock
+
+
+class _RealtimeFrameReceiver:
+    """Blocking-receiver stand-in for one realtime task."""
+
+    def __init__(self, frames: list[RealtimeAudioInputFrame]) -> None:
+        self.frames = frames
+
+    def receive_timeout(self, _timeout: float) -> RealtimeAudioInputFrame:
+        if not self.frames:
+            raise WouldBlock
+        return self.frames.pop(0)
+
+
+class _FakeRealtimeSession:
+    input_sample_rate = 16000
+
+    def __init__(self) -> None:
+        self.done = False
+        self.closed = False
+        self.fed: list[np.ndarray] = []
+        self._emitted_open_delta = False
+
+    def feed(self, samples: np.ndarray) -> None:
+        self.fed.append(samples)
+
+    def step(self, *, max_decode_tokens: int) -> list[str]:
+        if not self.closed and not self._emitted_open_delta:
+            assert max_decode_tokens == 8
+            self._emitted_open_delta = True
+            return ["hel"]
+        if self.closed and not self.done:
+            assert max_decode_tokens == 16
+            self.done = True
+            return ["lo"]
+        return []
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeRealtimeModel:
+    def __init__(self) -> None:
+        self.session = _FakeRealtimeSession()
+        self.calls: list[tuple[float, int]] = []
+
+    def create_streaming_session(
+        self, *, temperature: float, transcription_delay_ms: int
+    ) -> _FakeRealtimeSession:
+        self.calls.append((temperature, transcription_delay_ms))
+        return self.session
 
 
 @dataclass
@@ -669,6 +727,64 @@ def test_audio_transcription_emits_terminal_transcription_chunk() -> None:
     assert chunk.language == "en"
     assert chunk.segments[0]["start"] == 0.0
     assert chunk.finish_reason == "stop"
+
+
+def test_realtime_transcription_emits_partial_and_final_chunks() -> None:
+    """A true streaming session should receive PCM and emit ordered deltas."""
+
+    runner, sender = _make_runner()
+    model = _FakeRealtimeModel()
+    runner.model = model
+    runner.current_status = RunnerReady()
+    command_id = CommandId("realtime-transcription-command")
+    task = RealtimeAudioTranscription(
+        instance_id=InstanceId("speech-instance-1"),
+        command_id=command_id,
+        owner_node=NodeId("api-node"),
+        task_params=RealtimeAudioTranscriptionTaskParams(
+            model=ModelId("mlx-community/voxtral-realtime-test"),
+            input_sample_rate=16000,
+            temperature=0.0,
+            transcription_delay_ms=480,
+        ),
+    )
+    pcm = np.asarray([0, 16384, -16384], dtype=np.int16).tobytes()
+    runner.realtime_audio_receiver = cast(  # pyright: ignore[reportAttributeAccessIssue]
+        "object",
+        _RealtimeFrameReceiver(
+            [
+                RealtimeAudioInputFrame(
+                    command_id=command_id,
+                    sequence=1,
+                    kind="chunk",
+                    data=pcm,
+                ),
+                RealtimeAudioInputFrame(
+                    command_id=command_id,
+                    sequence=2,
+                    kind="completed",
+                ),
+            ]
+        ),
+    )
+    runner.task_receiver = cast("object", _OneShotReceiver([task]))  # pyright: ignore[reportAttributeAccessIssue]
+
+    runner.main()
+
+    assert model.calls == [(0.0, 480)]
+    assert len(model.session.fed) == 1
+    assert np.allclose(model.session.fed[0], [0.0, 0.5, -0.5])
+    chunks = [
+        event.chunk
+        for event in sender.events
+        if isinstance(event, ChunkGenerated)
+        and isinstance(event.chunk, TranscriptionChunk)
+    ]
+    assert [(chunk.text, chunk.is_partial, chunk.finish_reason) for chunk in chunks] == [
+        ("hel", True, None),
+        ("lo", True, None),
+        ("hello", False, "stop"),
+    ]
 
 
 def test_audio_transcription_maps_whisper_aliases_without_decode_leak() -> None:

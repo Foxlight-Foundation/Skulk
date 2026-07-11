@@ -40,6 +40,7 @@ from skulk.shared.types.commands import (
     ImageEdits,
     ImageGeneration,
     PlaceInstance,
+    RealtimeAudioTranscription,
     RefuseInstancePlacement,
     RequestEventLog,
     SendInputChunk,
@@ -87,6 +88,9 @@ from skulk.shared.types.tasks import (
 )
 from skulk.shared.types.tasks import (
     ImageGeneration as ImageGenerationTask,
+)
+from skulk.shared.types.tasks import (
+    RealtimeAudioTranscription as RealtimeAudioTranscriptionTask,
 )
 from skulk.shared.types.tasks import (
     SpeechSynthesis as SpeechSynthesisTask,
@@ -153,6 +157,7 @@ _COMMAND_TASK_TYPES = (
     TextEmbeddingTask,
     SpeechSynthesisTask,
     AudioTranscriptionTask,
+    RealtimeAudioTranscriptionTask,
 )
 
 
@@ -904,6 +909,46 @@ class Master:
                             self._configure_expected_trace_ranks(
                                 task_id,
                                 selected_instance_id,
+                                trace_enabled=trace_enabled,
+                            )
+                        case RealtimeAudioTranscription():
+                            instance = self.state.instances.get(
+                                command.target_instance_id
+                            )
+                            if instance is None:
+                                raise ValueError(
+                                    "No target instance found for realtime STT "
+                                    f"command {command.command_id}"
+                                )
+                            if (
+                                instance.shard_assignments.model_id
+                                != command.task_params.model
+                            ):
+                                raise ValueError(
+                                    "Realtime STT target instance model does not "
+                                    f"match {command.task_params.model}"
+                                )
+
+                            task_id = TaskId()
+                            trace_enabled = self.state.tracing_enabled
+                            generated_events.append(
+                                TaskCreated(
+                                    task_id=task_id,
+                                    task=RealtimeAudioTranscriptionTask(
+                                        task_id=task_id,
+                                        command_id=command.command_id,
+                                        owner_node=command.owner_node,
+                                        instance_id=command.target_instance_id,
+                                        task_status=TaskStatus.Pending,
+                                        task_params=command.task_params,
+                                        trace_enabled=trace_enabled,
+                                    ),
+                                )
+                            )
+                            self.command_task_mapping[command.command_id] = task_id
+                            self._configure_expected_trace_ranks(
+                                task_id,
+                                command.target_instance_id,
                                 trace_enabled=trace_enabled,
                             )
                         case SetTracingEnabled():

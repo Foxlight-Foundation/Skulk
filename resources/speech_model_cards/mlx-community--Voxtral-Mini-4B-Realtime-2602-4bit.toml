@@ -1,0 +1,24 @@
+model_id = "mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit"
+n_layers = 58
+hidden_size = 3072
+supports_tensor = false
+tasks = ["SpeechToText"]
+family = "voxtral_realtime"
+quantization = "4bit"
+base_model = "mistralai/Voxtral-Mini-4B-Realtime-2602"
+capabilities = ["stt"]
+context_length = 0
+
+[audio]
+kind = "stt"
+supports_streaming = true
+supports_realtime = true
+supports_translation = false
+sample_rates = [16000]
+
+[placement]
+compatible_backends = ["mlx_audio", "mlx_audio-metal"]
+backend_preference = ["mlx_audio-metal", "mlx_audio"]
+
+[storage_size]
+in_bytes = 3148708474

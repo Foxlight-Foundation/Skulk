@@ -314,9 +314,17 @@ Non-streaming STT serving is exposed at
 multipart audio upload, sends base64 `AudioInputChunk` events ahead of an
 `AudioTranscription` command, the worker assembles the upload for the speech
 runner, and the runner emits terminal `TranscriptionChunk` output on the data
-plane. Streaming STT, voice/reference-audio management, speech translation, and
-realtime sessions remain later phases. The realtime/fabric follow-on is
-tracked in [Speech Fabric and Realtime Design](speech-fabric-realtime).
+plane. The experimental `stt.realtime@1.0.0` provider adds a truthful
+bidirectional path for cards backed by an upstream incremental session. In its
+first phase, the API must be on the same node as the mounted runner: admission
+pins `RealtimeAudioTranscription` to that instance, bounded local channels move
+mono PCM16 from API to worker to runner without event sourcing it, and partial
+plus final `TranscriptionChunk` output returns through DATA. The provider is
+inert unless global experimental mode and `experiments.stt_realtime` are on and
+the card declares both streaming and realtime support. Remote serving-node
+ingress, WebSocket compatibility, dashboard live microphone streaming,
+voice/reference-audio management, and speech translation remain later phases.
+See [Speech Fabric and Realtime Design](speech-fabric-realtime).
 The dashboard composes the shipped REST endpoints in chat: mounted TTS models
 can speak draft text, replay assistant messages, or auto-speak final assistant
 responses; mounted STT models can transcribe a browser-recorded clip into the
@@ -534,13 +542,15 @@ The contract is deliberately small (`src/skulk/extensions/`):
   `CapabilityStreamInput.complete()` is caller input half-close: it terminates
   only `caller_to_provider`, leaving provider output active. Remote pressure is
   isolated by owner, call, and direction. The transport now executes
-  server-streaming, client-streaming, and bidirectional descriptors; the first
-  built-in client consumer is the planned realtime STT facade.
+  server-streaming, client-streaming, and bidirectional descriptors. The first
+  built-in bidirectional consumer is `stt.realtime@1.0.0`: it admits only a
+  truthful, locally hosted streaming STT model and keeps caller PCM off State
+  and the event log through bounded local ingress channels.
 - Production API nodes prepend first-party providers to the guarded extension
-  registry. The first is `tts@1.0.0`, a facade over mounted core `mlx_audio`
-  serving rather than a duplicate runtime. First-party contracts take
-  deterministic precedence over external extensions claiming the same
-  `id@version`.
+  registry. They include `tts@1.0.0`, a facade over mounted core `mlx_audio`
+  serving rather than a duplicate runtime, and experimental
+  `stt.realtime@1.0.0`. First-party contracts take deterministic precedence
+  over external extensions claiming the same `id@version`.
 
 Three invariants shape the design. First, **a raising extension never breaks
 inference**: every extension call is guarded, an exception is logged loudly

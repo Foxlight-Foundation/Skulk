@@ -1,13 +1,9 @@
 # pyright: reportAny=false, reportMissingTypeStubs=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false
-"""Single-node speech runner backed by upstream ``mlx_audio``.
-
-Supports non-streaming text-to-speech and speech-to-text. Realtime session
-handling intentionally lands in a later phase so the first audio routes keep one
-stable request/response contract.
-"""
+"""Single-node speech runner backed by upstream ``mlx_audio``."""
 
 import base64
 import binascii
+import contextlib
 import hashlib
 import inspect
 import io
@@ -20,7 +16,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
-from anyio import WouldBlock
+from anyio import ClosedResourceError, EndOfStream, WouldBlock
 
 from skulk.shared.constants import SKULK_MAX_CHUNK_SIZE
 from skulk.shared.models.model_cards import AudioCardKind, AudioResponseFormat
@@ -31,7 +27,10 @@ from skulk.shared.tracing import (
     record_trace_marker,
     trace,
 )
-from skulk.shared.types.audio import AudioTranscriptionTaskParams
+from skulk.shared.types.audio import (
+    AudioTranscriptionTaskParams,
+    RealtimeAudioInputFrame,
+)
 from skulk.shared.types.chunks import AudioChunk, ErrorChunk, TranscriptionChunk
 from skulk.shared.types.common import CommandId, ModelId
 from skulk.shared.types.events import (
@@ -47,6 +46,7 @@ from skulk.shared.types.tasks import (
     CANCEL_ALL_TASKS,
     AudioTranscription,
     LoadModel,
+    RealtimeAudioTranscription,
     Shutdown,
     SpeechSynthesis,
     Task,
@@ -375,6 +375,48 @@ def _emit_transcription_chunk(
     )
 
 
+def _emit_partial_transcription_chunk(
+    *,
+    event_sender: MpSender[Event],
+    command_id: CommandId,
+    model_id: ModelId,
+    text: str,
+) -> None:
+    """Emit one non-terminal delta from a true realtime STT session."""
+
+    event_sender.send(
+        ChunkGenerated(
+            command_id=command_id,
+            chunk=TranscriptionChunk(
+                model=model_id,
+                text=text,
+                is_partial=True,
+            ),
+        )
+    )
+
+
+def _resample_pcm16(
+    data: bytes, *, from_rate: int, to_rate: int
+) -> np.ndarray:
+    """Decode mono PCM16 and linearly resample to the model session rate."""
+
+    pcm16 = np.frombuffer(data, dtype=np.int16)
+    samples = pcm16.astype(np.float32) / 32768.0
+    if from_rate == to_rate or samples.size == 0:
+        return samples
+    output_size = int(round(samples.size * to_rate / from_rate))
+    if output_size <= 1:
+        return samples[:output_size].astype(np.float32, copy=False)
+    source = np.linspace(
+        0.0, 1.0, num=samples.size, endpoint=False, dtype=np.float64
+    )
+    target = np.linspace(
+        0.0, 1.0, num=output_size, endpoint=False, dtype=np.float64
+    )
+    return np.interp(target, source, samples).astype(np.float32)
+
+
 def _transcription_text(result: Any) -> str:
     """Extract transcript text from common ``mlx_audio`` STT result shapes."""
     if isinstance(result, str):
@@ -540,10 +582,12 @@ class Runner:
         event_sender: MpSender[Event],
         task_receiver: MpReceiver[Task],
         cancel_receiver: MpReceiver[TaskId],
+        realtime_audio_receiver: MpReceiver[RealtimeAudioInputFrame] | None = None,
     ) -> None:
         self.event_sender = event_sender
         self.task_receiver = task_receiver
         self.cancel_receiver = cancel_receiver
+        self.realtime_audio_receiver = realtime_audio_receiver
         self.bound_instance = bound_instance
 
         self.instance, self.runner_id, self.shard_metadata = (
@@ -563,6 +607,9 @@ class Runner:
         self.local_model_path: Path | None = None
         self.current_status: RunnerStatus = RunnerIdle()
         self.seen = set[TaskId]()
+        self._pending_realtime_audio: dict[
+            CommandId, list[RealtimeAudioInputFrame]
+        ] = {}
         self.update_status(RunnerIdle())
 
     def update_status(self, status: RunnerStatus) -> None:
@@ -627,6 +674,10 @@ class Runner:
                 self._synthesize(task)
             case AudioTranscription() if isinstance(self.current_status, RunnerReady):
                 self._transcribe(task)
+            case RealtimeAudioTranscription() if isinstance(
+                self.current_status, RunnerReady
+            ):
+                self._transcribe_realtime(task)
             case Shutdown():
                 logger.info("speech runner shutting down")
                 self.update_status(RunnerShuttingDown())
@@ -841,6 +892,150 @@ class Runner:
                         ],
                     )
                 )
+            self.current_status = RunnerReady()
+
+    def _receive_realtime_frame(
+        self,
+        command_id: CommandId,
+    ) -> RealtimeAudioInputFrame | None:
+        """Receive the next frame for one command while preserving other calls."""
+
+        pending = self._pending_realtime_audio.get(command_id)
+        if pending:
+            frame = pending.pop(0)
+            if not pending:
+                self._pending_realtime_audio.pop(command_id, None)
+            return frame
+        try:
+            if self.realtime_audio_receiver is None:
+                raise RuntimeError("speech runner has no realtime audio IPC receiver")
+            frame = self.realtime_audio_receiver.receive_timeout(0.1)
+        except WouldBlock:
+            return None
+        except (ClosedResourceError, EndOfStream) as exc:
+            raise RuntimeError("realtime audio IPC closed during session") from exc
+        if frame.command_id == command_id:
+            return frame
+        self._pending_realtime_audio.setdefault(frame.command_id, []).append(frame)
+        return None
+
+    def _transcribe_realtime(self, task: RealtimeAudioTranscription) -> None:
+        """Feed PCM frames into an upstream incremental streaming session."""
+
+        self.update_status(RunnerRunning())
+        self.acknowledge_task(task)
+        assert self.model is not None
+        model_id = self.shard_metadata.model_card.model_id
+        create_session = getattr(self.model, "create_streaming_session", None)
+        if not callable(create_session):
+            self.event_sender.send(
+                ChunkGenerated(
+                    command_id=task.command_id,
+                    chunk=ErrorChunk(
+                        model=model_id,
+                        error_message=(
+                            "mounted STT model does not expose "
+                            "create_streaming_session"
+                        ),
+                    ),
+                )
+            )
+            self.current_status = RunnerReady()
+            return
+
+        params = task.task_params
+        session_kwargs = _filter_kwargs(
+            create_session,
+            {
+                "temperature": params.temperature,
+                "transcription_delay_ms": params.transcription_delay_ms,
+            },
+        )
+        session: Any = None
+        full_text: list[str] = []
+        expected_sequence = 1
+        completed = False
+        try:
+            session = create_session(**session_kwargs)
+            input_sample_rate = int(session.input_sample_rate)
+            while True:
+                if self._is_cancelled(task.task_id):
+                    return
+                frame = self._receive_realtime_frame(task.command_id)
+                if frame is None:
+                    continue
+                if frame.sequence != expected_sequence:
+                    raise RuntimeError(
+                        "realtime audio sequence mismatch: expected "
+                        f"{expected_sequence}, received {frame.sequence}"
+                    )
+                expected_sequence += 1
+                if frame.kind == "cancelled":
+                    self.cancelled_tasks.add(task.task_id)
+                    return
+                if frame.kind == "completed":
+                    session.close()
+                    for _ in range(4096):
+                        deltas = session.step(max_decode_tokens=16)
+                        for delta in deltas:
+                            text = str(delta)
+                            if not text:
+                                continue
+                            full_text.append(text)
+                            _emit_partial_transcription_chunk(
+                                event_sender=self.event_sender,
+                                command_id=task.command_id,
+                                model_id=model_id,
+                                text=text,
+                            )
+                        if bool(session.done):
+                            completed = True
+                            break
+                        if self._is_cancelled(task.task_id):
+                            return
+                    if not completed:
+                        raise RuntimeError(
+                            "realtime STT session did not finish after input close"
+                        )
+                    _emit_transcription_chunk(
+                        event_sender=self.event_sender,
+                        command_id=task.command_id,
+                        model_id=model_id,
+                        text="".join(full_text),
+                        language=None,
+                        segments=[],
+                    )
+                    return
+
+                samples = _resample_pcm16(
+                    frame.data,
+                    from_rate=params.input_sample_rate,
+                    to_rate=input_sample_rate,
+                )
+                session.feed(samples)
+                for delta in session.step(max_decode_tokens=8):
+                    text = str(delta)
+                    if not text:
+                        continue
+                    full_text.append(text)
+                    _emit_partial_transcription_chunk(
+                        event_sender=self.event_sender,
+                        command_id=task.command_id,
+                        model_id=model_id,
+                        text=text,
+                    )
+        except Exception as exc:
+            logger.opt(exception=exc).warning("realtime speech transcription failed")
+            self.event_sender.send(
+                ChunkGenerated(
+                    command_id=task.command_id,
+                    chunk=ErrorChunk(model=model_id, error_message=str(exc)),
+                )
+            )
+        finally:
+            if session is not None and not completed:
+                with contextlib.suppress(Exception):
+                    session.close()
             self.current_status = RunnerReady()
 
     def _run_stt(

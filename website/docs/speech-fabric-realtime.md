@@ -15,6 +15,9 @@ Skulk's first speech serving path is deliberately REST-shaped:
   `audio.supports_streaming = true`.
 - `POST /v1/audio/transcriptions` turns an uploaded audio clip into text or
   transcript metadata.
+- `stt.realtime@1.0.0` is an experimental bidirectional provider for truthful
+  incremental STT models. It currently requires the API and mounted runner on
+  one node and accepts mono PCM16 frames.
 - The dashboard voice loop composes those endpoints with chat.
 
 This page records the next architectural step. Realtime speech and fabric speech
@@ -24,8 +27,9 @@ transforms, not dashboard-only helpers.
 ## Current Boundary
 
 The shipped speech runner is single-node. TTS cards can opt in to streamed MP3
-output chunks, while STT is still bounded and non-streaming. That is
-intentional:
+output chunks. Batch STT remains bounded and non-streaming, while the first
+experimental realtime STT path now uses an upstream incremental session. Its
+current local-only scope is intentional:
 
 - speech model placement is capability-gated by `mlx_audio` backend tags;
 - the API owns request validation, upload caps, and response formatting;
@@ -36,6 +40,10 @@ intentional:
   facade over that same core TTS path. It emits raw MP3 media over
   `PROVIDER_DATA`, advertises liveness only while eligible mounted capacity is
   available, and propagates provider cancellation to the core command;
+- eligible local nodes expose a built-in `stt.realtime@1.0.0` bidirectional
+  provider. It pins one realtime task to the selected local instance and moves
+  ordered PCM frames through bounded API-worker-runner channels without putting
+  audio in State or the event log;
 - browser microphone capture and playback stay in the dashboard layer.
 
 Realtime should not bypass those contracts. It adds session lifetime and partial
@@ -99,12 +107,14 @@ sequenceDiagram
     Worker->>Runner: close streaming session
 ```
 
-### Required Decisions Before Shipping
+### Current Contract And Remaining Decisions
 
-- **Audio format negotiation:** define accepted browser formats, sample rates,
-  channel counts, and whether the API performs resampling or refuses mismatches.
-- **Backpressure:** define the maximum queued audio duration per session and the
-  behavior when clients send faster than the runner can consume.
+- **Audio format negotiation:** version 1 accepts mono signed little-endian
+  PCM16 at 8-96 kHz and resamples to the upstream session rate. Browser encoded
+  formats and codec negotiation remain follow-ups.
+- **Backpressure:** local API and worker/runner channels are bounded; the worker
+  also caps pre-dispatch input at 256 frames or 16 MiB and cancels overflow.
+  Audio-duration diagnostics and remote pressure behavior remain follow-ups.
 - **VAD ownership:** decide whether voice activity detection lives inside the STT
   model session, a dedicated VAD runner, or an API-side preprocessor.
 - **Cancellation:** a WebSocket close must release the runner session and any
@@ -145,7 +155,7 @@ Current and planned speech contracts:
 | --- | --- | --- |
 | `tts@1.0.0` | server streaming | Built-in facade implemented; experimental until fleet validation passes |
 | batch STT | unary | Planned; complete bounded audio or staged blob input |
-| realtime STT | client streaming / bidirectional | Transport ready; built-in facade planned |
+| `stt.realtime@1.0.0` | bidirectional | Built-in local facade implemented behind experiment and truthful-card gates |
 
 ### Composition Examples
 
@@ -225,16 +235,18 @@ caller-provided filesystem paths.
    pressure, and terminal gates.
 2. **Complete:** caller-to-provider media frames and explicit input half-close
    for `client_streaming` / `bidirectional` descriptors.
-3. Add a built-in realtime STT facade only for models whose runner can open a
-   true streaming session; batch-backed models must not advertise progressive
-   output.
+3. **Complete:** add a built-in realtime STT facade only for models whose runner
+   can open a true streaming session; batch-backed models do not advertise
+   progressive output. The first implementation is same-node only.
 4. Add a batch STT unary facade using bounded inline media or staged blobs.
 5. Add speech-specific diagnostics for active requests/sessions, queue depth,
    first audio/transcript latency, and cancellation reason.
-6. Add `WS /v1/realtime` as a compatibility edge over the provider contract,
+6. Add remote serving-node realtime audio ingress with the same bounded,
+   no-event-retention semantics as the local path.
+7. Add `WS /v1/realtime` as a compatibility edge over the provider contract,
    behind capability checks and feature flags.
-7. Add dashboard and SDK smoke tests with synthetic microphone input.
-8. Add result-ledger speech metrics once the ledger schema can represent audio
+8. Add dashboard and SDK smoke tests with synthetic microphone input.
+9. Add result-ledger speech metrics once the ledger schema can represent audio
    and transcript artifacts safely.
 
 ## Acceptance Gate

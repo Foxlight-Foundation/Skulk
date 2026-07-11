@@ -37,6 +37,7 @@ from skulk.shared.logging import (
     logger_setup,
 )
 from skulk.shared.session_carryover import seed_state_for_new_session
+from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.commands import ForwarderDownloadCommand, SyncConfig
 from skulk.shared.types.common import NodeId, SessionId, SystemId
 from skulk.shared.types.state_sync import StateSyncMessage
@@ -459,6 +460,9 @@ class Node:
         await router.register_topic(topics.DATA)
         await router.register_topic(topics.PROVIDER_DATA)
         telemetry_view = TelemetryView()
+        realtime_audio_sender, realtime_audio_receiver = channel[
+            RealtimeAudioInputFrame
+        ](64)
         event_router = EventRouter(
             node_id,
             session_id,
@@ -560,6 +564,9 @@ class Node:
                 data_receiver=router.receiver(topics.DATA),
                 provider_stream_sender=router.sender(topics.PROVIDER_DATA),
                 provider_stream_receiver=router.receiver(topics.PROVIDER_DATA),
+                realtime_audio_sender=(
+                    None if args.no_worker else realtime_audio_sender
+                ),
                 data_plane_zenoh=_zenoh_on,
                 data_plane_egress_provider=router.data_plane_egress_diagnostics,
                 # Installed plugins (skulk.extensions entry points), discovered
@@ -592,6 +599,7 @@ class Node:
                 telemetry_sender=router.sender(topics.TELEMETRY),
                 telemetry_view=telemetry_view,
                 data_sender=router.sender(topics.DATA),
+                realtime_audio_receiver=realtime_audio_receiver,
                 store_client=worker_store_client,
                 staging_config=worker_staging_cfg,
             )

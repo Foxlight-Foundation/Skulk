@@ -16,6 +16,7 @@ from anyio import (
 from loguru import logger
 
 from skulk.shared.models.model_cards import ModelId
+from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.chunks import (
     DataChunk,
     EmbeddingChunk,
@@ -47,6 +48,7 @@ from skulk.shared.types.tasks import (
     AudioTranscription,
     ImageEdits,
     ImageGeneration,
+    RealtimeAudioTranscription,
     SpeechSynthesis,
     Task,
     TaskId,
@@ -132,6 +134,7 @@ class RunnerSupervisor:
     _task_sender: MpSender[Task]
     _event_sender: Sender[Event]
     _cancel_sender: MpSender[TaskId]
+    _realtime_audio_sender: MpSender[RealtimeAudioInputFrame] | None = None
     # Data plane (#279 Phase 2): generation output chunks (ChunkGenerated) are
     # diverted here and streamed direct to the owning API node instead of the
     # event log. None falls back to the event path (tests / a node with no DATA
@@ -238,6 +241,9 @@ class RunnerSupervisor:
         diag_send, diag_recv = mp_channel[RunnerDiagnosticUpdate](max_buffer_size=256)
         task_sender, task_recv = mp_channel[Task]()
         cancel_sender, cancel_recv = mp_channel[TaskId]()
+        realtime_audio_sender, realtime_audio_recv = mp_channel[
+            RealtimeAudioInputFrame
+        ](max_buffer_size=256)
 
         runner_process = mp.Process(
             target=entrypoint,
@@ -247,6 +253,7 @@ class RunnerSupervisor:
                 diag_send,
                 task_recv,
                 cancel_recv,
+                realtime_audio_recv,
                 logger,
                 context_token_limit,
             ),
@@ -264,6 +271,7 @@ class RunnerSupervisor:
             _diag_recv=diag_recv,
             _task_sender=task_sender,
             _cancel_sender=cancel_sender,
+            _realtime_audio_sender=realtime_audio_sender,
             _event_sender=event_sender,
             _data_sender=data_sender,
         )
@@ -327,6 +335,7 @@ class RunnerSupervisor:
                 TextEmbedding,
                 SpeechSynthesis,
                 AudioTranscription,
+                RealtimeAudioTranscription,
             ),
         ):
             return
@@ -400,6 +409,9 @@ class RunnerSupervisor:
                 with contextlib.suppress(ClosedResourceError):
                     self._task_sender.close()
                 with contextlib.suppress(ClosedResourceError):
+                    if self._realtime_audio_sender is not None:
+                        self._realtime_audio_sender.close()
+                with contextlib.suppress(ClosedResourceError):
                     self._event_sender.close()
                 with contextlib.suppress(ClosedResourceError):
                     self._cancel_sender.send(CANCEL_ALL_TASKS)
@@ -469,6 +481,7 @@ class RunnerSupervisor:
                     TextEmbedding,
                     SpeechSynthesis,
                     AudioTranscription,
+                    RealtimeAudioTranscription,
                 ),
             )
             and task.owner_node is not None
@@ -490,6 +503,13 @@ class RunnerSupervisor:
             )
             return
         await event.wait()
+
+    async def send_realtime_audio(self, frame: RealtimeAudioInputFrame) -> None:
+        """Forward one bounded PCM frame to this runner process."""
+
+        if self._realtime_audio_sender is None:
+            raise RuntimeError("runner has no realtime audio IPC sender")
+        await self._realtime_audio_sender.send_async(frame)
 
     async def cancel_task(self, task_id: TaskId):
         if task_id in self.completed:

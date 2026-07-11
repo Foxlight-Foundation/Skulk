@@ -8,6 +8,7 @@ from skulk.api.types import (
 )
 from skulk.shared.types.audio import (
     AudioTranscriptionTaskParams,
+    RealtimeAudioTranscriptionTaskParams,
     SpeechSynthesisTaskParams,
 )
 from skulk.shared.types.common import CommandId, Id, NodeId
@@ -133,6 +134,18 @@ class AudioTranscription(BaseTask):  # emitted by Master
     error_message: str | None = Field(default=None)
 
 
+class RealtimeAudioTranscription(BaseTask):  # emitted by Master
+    """True incremental STT task fed through local non-event media ingress."""
+
+    command_id: CommandId
+    owner_node: NodeId
+    task_params: RealtimeAudioTranscriptionTaskParams
+    trace_enabled: bool = False
+
+    error_type: str | None = Field(default=None)
+    error_message: str | None = Field(default=None)
+
+
 class Shutdown(BaseTask):  # emitted by Worker
     runner_id: RunnerId
 
@@ -150,5 +163,6 @@ Task = (
     | TextEmbedding
     | SpeechSynthesis
     | AudioTranscription
+    | RealtimeAudioTranscription
     | Shutdown
 )

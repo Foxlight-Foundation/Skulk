@@ -7,6 +7,7 @@ from skulk.api.types import (
 from skulk.shared.models.model_cards import ModelCard, ModelId
 from skulk.shared.types.audio import (
     AudioTranscriptionTaskParams,
+    RealtimeAudioTranscriptionTaskParams,
     SpeechSynthesisTaskParams,
 )
 from skulk.shared.types.chunks import InputChunk
@@ -63,6 +64,14 @@ class AudioTranscription(BaseCommand):
 
     task_params: AudioTranscriptionTaskParams
     owner_node: NodeId | None = None
+
+
+class RealtimeAudioTranscription(BaseCommand):
+    """Open a true incremental STT session on one mounted local instance."""
+
+    task_params: RealtimeAudioTranscriptionTaskParams
+    target_instance_id: InstanceId
+    owner_node: NodeId
 
 
 class SetTracingEnabled(BaseCommand):
@@ -206,6 +215,7 @@ Command = (
     | TextEmbedding
     | SpeechSynthesis
     | AudioTranscription
+    | RealtimeAudioTranscription
     | SetTracingEnabled
     | PlaceInstance
     | CreateInstance

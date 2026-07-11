@@ -140,7 +140,7 @@ def test_update_config_preserves_existing_experiments_when_omitted(
 
     config_path = tmp_path / "skulk.yaml"
     config_path.write_text(
-        "experiments:\n  tts_streaming: true\n",
+        "experiments:\n  tts_streaming: true\n  stt_realtime: true\n",
         encoding="utf-8",
     )
     api = _build_api()
@@ -157,3 +157,4 @@ def test_update_config_preserves_existing_experiments_when_omitted(
     assert config is not None
     assert config.experiments is not None
     assert config.experiments.tts_streaming is True
+    assert config.experiments.stt_realtime is True

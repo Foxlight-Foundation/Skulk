@@ -1,4 +1,4 @@
-"""First-party provider facade for mounted Skulk speech synthesis models."""
+"""First-party provider facades for mounted Skulk speech models."""
 
 from __future__ import annotations
 
@@ -65,8 +65,82 @@ TTS_CAPABILITY_DESCRIPTOR = CapabilityDescriptor(
 )
 """Generic provider descriptor for Skulk's mounted-model TTS facade."""
 
+REALTIME_STT_CAPABILITY_DESCRIPTOR = CapabilityDescriptor(
+    id="stt.realtime",
+    version="1.0.0",
+    title="Realtime speech to text",
+    description=(
+        "Transcribe ordered mono PCM16 audio frames with a mounted Skulk "
+        "model that exposes a true incremental streaming session."
+    ),
+    input_schema={
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "model": {"type": "string", "minLength": 1},
+            "sample_rate": {"type": "integer", "minimum": 8000, "maximum": 96000},
+            "temperature": {"type": "number"},
+            "transcription_delay_ms": {
+                "type": "integer",
+                "minimum": 80,
+                "maximum": 2400,
+                "multipleOf": 80,
+            },
+        },
+        "required": ["model", "sample_rate"],
+        "additionalProperties": False,
+    },
+    output_schema={
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "model": {"type": "string"},
+            "text": {"type": "string"},
+            "is_partial": {"const": False},
+        },
+        "required": ["model", "text", "is_partial"],
+        "additionalProperties": False,
+    },
+    io_mode="bidirectional",
+    input_chunk_schema={
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "format": {"const": "pcm_s16le"},
+            "sample_rate": {"type": "integer", "minimum": 8000, "maximum": 96000},
+            "channels": {"const": 1},
+        },
+        "required": ["format", "sample_rate", "channels"],
+        "additionalProperties": False,
+    },
+    output_chunk_schema={
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "model": {"type": "string"},
+            "text": {"type": "string"},
+            "is_partial": {"const": True},
+        },
+        "required": ["model", "text", "is_partial"],
+        "additionalProperties": False,
+    },
+    annotations={
+        "modality": "audio",
+        "latency": "realtime",
+        "runtime": "mlx_audio",
+        "stability": "experimental",
+        "input_codec": "pcm_s16le",
+    },
+)
+"""Provider descriptor for true incremental mounted-model STT sessions."""
+
 TtsAdmission = Callable[[CapabilityCall], Awaitable[CapabilityError | None]]
 TtsStream = Callable[[CapabilityCall], AsyncIterator[CapabilityStreamFrame]]
+RealtimeSttAdmission = Callable[[CapabilityCall], Awaitable[CapabilityError | None]]
+RealtimeSttStream = Callable[
+    [CapabilityCall, AsyncIterator[CapabilityStreamFrame]],
+    AsyncIterator[CapabilityStreamFrame],
+]
 
 
 @final
@@ -76,11 +150,20 @@ class BuiltinSpeechProvider:
     name = "skulk-builtin-speech"
     skulk_requires = ">=0"
 
-    def __init__(self, *, admit_tts: TtsAdmission, stream_tts: TtsStream) -> None:
+    def __init__(
+        self,
+        *,
+        admit_tts: TtsAdmission,
+        stream_tts: TtsStream,
+        admit_realtime_stt: RealtimeSttAdmission,
+        stream_realtime_stt: RealtimeSttStream,
+    ) -> None:
         """Create the facade around API-owned admission and stream adapters."""
 
         self._admit_tts = admit_tts
         self._stream_tts = stream_tts
+        self._admit_realtime_stt = admit_realtime_stt
+        self._stream_realtime_stt = stream_realtime_stt
 
     def chat_middleware(self) -> None:
         """Return no chat middleware; this provider is a fabric service."""
@@ -90,12 +173,13 @@ class BuiltinSpeechProvider:
     def capabilities(self) -> Sequence[CapabilityDescriptor]:
         """Describe the first-party server-streaming TTS capability."""
 
-        return (TTS_CAPABILITY_DESCRIPTOR,)
+        return (TTS_CAPABILITY_DESCRIPTOR, REALTIME_STT_CAPABILITY_DESCRIPTOR)
 
     def on_start(self, context: ExtensionContext) -> None:
         """Keep discovery withdrawn until an eligible model is mounted."""
 
         context.withdraw_capability(TTS_CAPABILITY_DESCRIPTOR.id)
+        context.withdraw_capability(REALTIME_STT_CAPABILITY_DESCRIPTOR.id)
 
     async def admit_stream(
         self,
@@ -105,7 +189,14 @@ class BuiltinSpeechProvider:
         """Validate dynamic mounted-model requirements before ``started``."""
 
         del context
-        return await self._admit_tts(call)
+        if call.capability_id == TTS_CAPABILITY_DESCRIPTOR.id:
+            return await self._admit_tts(call)
+        if call.capability_id == REALTIME_STT_CAPABILITY_DESCRIPTOR.id:
+            return await self._admit_realtime_stt(call)
+        return CapabilityError(
+            code="not_found",
+            message=f"unsupported built-in speech capability {call.capability_id!r}",
+        )
 
     def handle_stream(
         self,
@@ -116,3 +207,14 @@ class BuiltinSpeechProvider:
 
         del context
         return self._stream_tts(call)
+
+    def handle_input_stream(
+        self,
+        context: ExtensionContext,
+        call: CapabilityCall,
+        input_frames: AsyncIterator[CapabilityStreamFrame],
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        """Translate provider PCM frames into a core realtime STT session."""
+
+        del context
+        return self._stream_realtime_stt(call, input_frames)

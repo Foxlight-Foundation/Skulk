@@ -1,9 +1,11 @@
-"""Canonical internal types for speech-serving task parameters."""
+"""Canonical internal types for speech-serving task parameters and media."""
 
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
 
 from skulk.shared.models.model_cards import AudioResponseFormat
-from skulk.shared.types.common import ModelId
+from skulk.shared.types.common import CommandId, ModelId
 
 
 class SpeechSynthesisTaskParams(BaseModel, frozen=True):
@@ -57,3 +59,43 @@ class AudioTranscriptionTaskParams(BaseModel, frozen=True):
     text: str | None = None
     word_timestamps: bool = False
     timestamp_granularities: tuple[str, ...] = ()
+
+
+class RealtimeAudioTranscriptionTaskParams(BaseModel, frozen=True):
+    """Parameters for one true incremental STT runner session.
+
+    The model card and provider admission establish that the mounted runner
+    implements the upstream ``create_streaming_session`` protocol. Audio bytes
+    arrive separately through :class:`RealtimeAudioInputFrame` so they never
+    enter commands, State, or the event log.
+    """
+
+    model: ModelId
+    input_sample_rate: int = Field(ge=8000, le=96000)
+    temperature: float = 0.0
+    transcription_delay_ms: int = Field(default=480, ge=80, le=2400)
+
+    @model_validator(mode="after")
+    def _validate_delay_step(self) -> "RealtimeAudioTranscriptionTaskParams":
+        if self.transcription_delay_ms % 80 != 0:
+            raise ValueError("transcription_delay_ms must be a multiple of 80")
+        return self
+
+
+class RealtimeAudioInputFrame(BaseModel, frozen=True):
+    """One bounded PCM frame or terminal sent from the API to a local worker."""
+
+    command_id: CommandId
+    sequence: int = Field(ge=0)
+    kind: Literal["chunk", "completed", "cancelled"]
+    data: bytes = b""
+
+    @model_validator(mode="after")
+    def _validate_payload(self) -> "RealtimeAudioInputFrame":
+        if self.kind == "chunk" and not self.data:
+            raise ValueError("realtime audio chunk must carry PCM bytes")
+        if self.kind != "chunk" and self.data:
+            raise ValueError("realtime audio terminal must not carry bytes")
+        if len(self.data) % 2 != 0:
+            raise ValueError("pcm_s16le audio must contain complete 16-bit samples")
+        return self

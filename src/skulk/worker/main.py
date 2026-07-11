@@ -2,7 +2,7 @@ import base64
 import hashlib
 import io
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Container, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +27,7 @@ from skulk.shared.models.model_cards import (
     add_to_card_cache,
     delete_custom_card,
 )
+from skulk.shared.types.audio import RealtimeAudioInputFrame
 from skulk.shared.types.chunks import AudioInputChunk, DataChunk, InputImageChunk
 from skulk.shared.types.commands import (
     DeleteInstance,
@@ -34,6 +35,7 @@ from skulk.shared.types.commands import (
     ForwarderDownloadCommand,
     RefuseInstancePlacement,
     StartDownload,
+    TaskCancelled,
 )
 from skulk.shared.types.common import CommandId, NodeId, SystemId
 from skulk.shared.types.diagnostics import (
@@ -66,6 +68,7 @@ from skulk.shared.types.tasks import (
     DownloadModel,
     ImageEdits,
     LoadModel,
+    RealtimeAudioTranscription,
     Shutdown,
     StartWarmup,
     Task,
@@ -142,6 +145,10 @@ the master already admitted into a refusal on a sub-GB jitter, observed as a
 margin absorbs that jitter (the 30% pad means actual resident still fits) while
 a *gross* shortfall (a node that genuinely loaded another model since admission)
 still refuses, preserving the leak-on-OOM guard (#290/#239)."""
+
+_REALTIME_AUDIO_PENDING_FRAMES = 256
+_REALTIME_AUDIO_PENDING_BYTES = 16 * 1024 * 1024
+_REALTIME_FINISHED_COMMANDS = 1024
 
 
 _RUNNER_FIRST_REPORT_DEADLINE_SECONDS = 120.0
@@ -494,6 +501,7 @@ class Worker:
         telemetry_sender: Sender[NodeTelemetry] | None = None,
         telemetry_view: TelemetryView | None = None,
         data_sender: Sender[DataChunk] | None = None,
+        realtime_audio_receiver: Receiver[RealtimeAudioInputFrame] | None = None,
         store_client: ModelStoreClient | None = None,
         staging_config: StagingNodeConfig | None = None,
     ):
@@ -508,6 +516,7 @@ class Worker:
         # event log. Threaded into each RunnerSupervisor. None falls back to the
         # event path (no DATA topic wired / tests).
         self._data_sender = data_sender
+        self._realtime_audio_receiver = realtime_audio_receiver
         # Shared, Node-owned telemetry view (#279). The worker prunes a node's
         # telemetry here when it sees NodeTimedOut, because the worker runs on
         # EVERY node regardless of role - so a --no-api node (or a --no-api
@@ -544,6 +553,13 @@ class Worker:
         self.input_chunk_counts: dict[CommandId, int] = {}
         self.input_audio_chunk_buffer: dict[CommandId, dict[int, AudioInputChunk]] = {}
         self.input_audio_chunk_counts: dict[CommandId, int] = {}
+        self._realtime_audio_pending: dict[
+            CommandId, list[RealtimeAudioInputFrame]
+        ] = {}
+        self._realtime_audio_pending_bytes: dict[CommandId, int] = {}
+        self._realtime_runner_by_command: dict[CommandId, RunnerSupervisor] = {}
+        self._realtime_finished_order: deque[CommandId] = deque()
+        self._realtime_finished_commands: set[CommandId] = set()
         self.image_cache: dict[str, str] = {}
 
         self._download_backoff: KeyedBackoff[ModelId] = KeyedBackoff(base=0.5, cap=10.0)
@@ -709,6 +725,8 @@ class Worker:
                 tg.start_soon(self.plan_step)
                 tg.start_soon(self._event_applier)
                 tg.start_soon(self._poll_connection_updates)
+                if self._realtime_audio_receiver is not None:
+                    tg.start_soon(self._realtime_audio_ingress)
         finally:
             # Actual shutdown code - waits for all tasks to complete before executing.
             logger.info("Stopping Worker")
@@ -718,6 +736,61 @@ class Worker:
             for runner in self.runners.values():
                 runner.shutdown()
             self._stopped.set()
+
+    async def _realtime_audio_ingress(self) -> None:
+        """Route bounded non-event PCM frames to the selected local runner."""
+
+        assert self._realtime_audio_receiver is not None
+        with self._realtime_audio_receiver as frames:
+            async for frame in frames:
+                if frame.command_id in self._realtime_finished_commands:
+                    continue
+                runner = self._realtime_runner_by_command.get(frame.command_id)
+                if runner is not None:
+                    await runner.send_realtime_audio(frame)
+                    continue
+                pending = self._realtime_audio_pending.setdefault(
+                    frame.command_id, []
+                )
+                pending_bytes = self._realtime_audio_pending_bytes.get(
+                    frame.command_id, 0
+                )
+                if (
+                    len(pending) >= _REALTIME_AUDIO_PENDING_FRAMES
+                    or pending_bytes + len(frame.data)
+                    > _REALTIME_AUDIO_PENDING_BYTES
+                ):
+                    self._realtime_audio_pending.pop(frame.command_id, None)
+                    self._realtime_audio_pending_bytes.pop(frame.command_id, None)
+                    logger.warning(
+                        "Realtime STT input exceeded the pre-dispatch bound "
+                        f"for command {frame.command_id}; cancelling"
+                    )
+                    await self.command_sender.send(
+                        ForwarderCommand(
+                            origin=self._system_id,
+                            command=TaskCancelled(
+                                cancelled_command_id=frame.command_id
+                            ),
+                        )
+                    )
+                    self._mark_realtime_command_finished(frame.command_id)
+                    continue
+                pending.append(frame)
+                self._realtime_audio_pending_bytes[frame.command_id] = (
+                    pending_bytes + len(frame.data)
+                )
+
+    def _mark_realtime_command_finished(self, command_id: CommandId) -> None:
+        """Bound the late-frame tombstones retained by the worker."""
+
+        if command_id in self._realtime_finished_commands:
+            return
+        self._realtime_finished_commands.add(command_id)
+        self._realtime_finished_order.append(command_id)
+        while len(self._realtime_finished_order) > _REALTIME_FINISHED_COMMANDS:
+            expired = self._realtime_finished_order.popleft()
+            self._realtime_finished_commands.discard(expired)
 
     async def _forward_info(self, recv: Receiver[GatheredInfo]):
         # Connectivity readings (network interfaces, thunderbolt) ride the ordered
@@ -1268,7 +1341,23 @@ class Worker:
                 f"device_rank={shard.device_rank if shard is not None else 'unknown'}, "
                 f"world_size={shard.world_size if shard is not None else 'unknown'})"
             )
-            await self.runners[runner_id].start_task(task)
+            runner = self.runners[runner_id]
+            if isinstance(task, RealtimeAudioTranscription):
+                command_id = task.command_id
+                self._realtime_runner_by_command[command_id] = runner
+                pending = self._realtime_audio_pending.pop(command_id, [])
+                self._realtime_audio_pending_bytes.pop(command_id, None)
+                try:
+                    for frame in pending:
+                        await runner.send_realtime_audio(frame)
+                    await runner.start_task(task)
+                finally:
+                    self._realtime_runner_by_command.pop(command_id, None)
+                    self._realtime_audio_pending.pop(command_id, None)
+                    self._realtime_audio_pending_bytes.pop(command_id, None)
+                    self._mark_realtime_command_finished(command_id)
+                return
+            await runner.start_task(task)
 
     def _create_supervisor(self, task: CreateRunner) -> RunnerSupervisor:
         """Creates and stores a new AssignedRunner with initial downloading status."""

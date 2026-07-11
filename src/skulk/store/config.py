@@ -299,9 +299,13 @@ class ExperimentsConfig(FrozenModel):
             ``POST /v1/audio/speech``. The request path still requires a mounted
             TTS model card that explicitly declares
             ``audio.supports_streaming = true``.
+        stt_realtime: Enables the experimental bidirectional provider facade
+            for mounted STT cards that explicitly declare both
+            ``audio.supports_streaming`` and ``audio.supports_realtime``.
     """
 
     tts_streaming: bool = False
+    stt_realtime: bool = False
 
 
 @final

@@ -29,6 +29,7 @@ from skulk.extensions.loader import (
     resolve_skulk_version,
 )
 from skulk.extensions.speech import (
+    REALTIME_STT_CAPABILITY_DESCRIPTOR,
     TTS_CAPABILITY_DESCRIPTOR,
     BuiltinSpeechProvider,
 )
@@ -112,6 +113,7 @@ __all__ = [
     "LoadedExtensions",
     "MediaAttachment",
     "ReadClusterTelemetry",
+    "REALTIME_STT_CAPABILITY_DESCRIPTOR",
     "SkulkExtension",
     "SupportsExtensionStartup",
     "TTS_CAPABILITY_DESCRIPTOR",

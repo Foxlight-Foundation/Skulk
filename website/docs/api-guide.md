@@ -962,6 +962,11 @@ gated dashboard section. Current fields:
   `stream=true` transport on nodes that also run with
   `SKULK_ENABLE_EXPERIMENTAL_MODE`; keep this off until a mounted TTS model has
   passed streaming validation.
+- `experiments.stt_realtime`: enables the experimental `stt.realtime@1.0.0`
+  bidirectional provider on nodes that also run with
+  `SKULK_ENABLE_EXPERIMENTAL_MODE`. The node must locally host an eligible STT
+  runner whose card declares both `audio.supports_streaming = true` and
+  `audio.supports_realtime = true`.
 
 ### Update config
 
@@ -1351,6 +1356,38 @@ telemetry tag is advertised only when experimental mode,
 `experiments.tts_streaming`, and at least one eligible mounted model are all
 active. Dynamic admission rechecks the requested model before `started`. A
 caller cancellation propagates to the underlying synthesis command.
+
+### Transcribe realtime PCM through the built-in STT provider
+
+Production nodes also describe a first-party `stt.realtime@1.0.0`
+bidirectional capability. The capability is experimental and is advertised
+only when experimental mode, `experiments.stt_realtime`, and eligible mounted
+capacity are all active. In this first phase the API and mounted speech runner
+must be on the same node; remote serving-node input routing remains a follow-up.
+
+The opening payload accepts:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `model` | string | Required mounted realtime STT model id |
+| `sample_rate` | integer | Input PCM sample rate from 8000 through 96000 Hz |
+| `temperature` | number | Optional decode temperature; defaults to `0` |
+| `transcription_delay_ms` | integer | Optional upstream cadence from 80 through 2400 ms, in 80 ms steps; defaults to `480` |
+
+Each caller `chunk` must carry an `InlineMediaAttachment` containing mono,
+signed little-endian 16-bit PCM. Its payload and attachment metadata must agree
+on `format: "pcm_s16le"`, `sample_rate`, and `channels: 1`. The input sink's
+`complete()` method half-closes audio input and lets final decoding finish.
+Provider output `chunk` frames contain `model`, transcript `text`, and
+`is_partial: true`; the `completed` payload contains the accumulated final text
+with `is_partial: false`.
+
+Admission pins a `RealtimeAudioTranscription` task to the selected local model
+instance. Audio bypasses event-sourced State and is bounded through local
+API-to-worker and worker-to-runner channels; only transcript output uses the
+existing core DATA lifecycle. The mounted upstream model must expose a true
+`create_streaming_session` interface. Batch STT cards are never promoted to
+realtime by buffering a complete recording.
 
 ```bash
 curl http://localhost:52415/v1/capabilities
