@@ -113,6 +113,9 @@ const Button = styled.button<{ $primary?: boolean }>`
 
 /** UUID even on non-secure origins (LAN HTTP dashboards lack crypto.randomUUID). */
 export function generateInstallId(): string {
+  // Without Web Crypto entirely, return empty: the API backfills an id
+  // server-side whenever consent is enabled without one.
+  if (typeof crypto === 'undefined' || typeof crypto.getRandomValues !== 'function') return '';
   if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   bytes[6] = (bytes[6] & 0x0f) | 0x40;

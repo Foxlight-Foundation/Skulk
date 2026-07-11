@@ -8006,6 +8006,18 @@ class API:
         )
         if telemetry_section is not None and not telemetry_section.get("consented_version"):
             telemetry_section["consented_version"] = get_skulk_version()
+        # Backfill the install id server-side: consent without an id would
+        # leave the collector permanently disabled (and a browser without
+        # Web Crypto cannot generate one).
+        if (
+            telemetry_section is not None
+            and not telemetry_section.get("install_id")
+            and (
+                telemetry_section.get("consent") == "enabled"
+                or telemetry_section.get("diagnostics_consent") == "enabled"
+            )
+        ):
+            telemetry_section["install_id"] = str(uuid4())
         # Validate by attempting to parse with Pydantic
         from skulk.store.config import SkulkConfig
 
