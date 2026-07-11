@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import styled, { keyframes } from 'styled-components';
-import { useConfig, type StoreConfig, type FullConfig, type LoggingConfig, type ExperimentsConfig } from '../../hooks/useConfig';
+import { useConfig, type StoreConfig, type FullConfig, type LoggingConfig, type ExperimentsConfig, type TelemetryConfig } from '../../hooks/useConfig';
 import { Button } from '../common/Button';
 import { Field } from '../common/Field';
 import { InfoTooltip } from '../common/InfoTooltip';
@@ -246,6 +246,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const [draft, setDraft] = useState<StoreConfig | null>(null);
   const [kvBackend, setKvBackend] = useState('default');
   const [hfToken, setHfToken] = useState('');
+  const [telemetryDraft, setTelemetryDraft] = useState<TelemetryConfig | null>(null);
   const [loggingDraft, setLoggingDraft] = useState<LoggingConfig>({
     enabled: false, ingest_url: '',
   });
@@ -268,6 +269,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
       enabled: fullConfig?.logging?.enabled ?? false,
       ingest_url: fullConfig?.logging?.ingest_url ?? '',
     });
+    setTelemetryDraft(fullConfig?.telemetry ?? null);
     setExperimentsDraft(fullConfig?.experiments ? { ...fullConfig.experiments } : defaultExperimentsConfig());
   }, [fullConfig, effective]);
 
@@ -298,6 +300,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     updated.inference = { kv_cache_backend: kvBackend };
     // Include logging config
     updated.logging = { ...loggingDraft };
+    if (telemetryDraft) updated.telemetry = { ...telemetryDraft };
     if (effective?.experimental_mode_enabled) {
       updated.experiments = { ...experimentsDraft };
     }
@@ -316,7 +319,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     } else {
       addToast({ type: 'error', message: t('settings.toasts.saveFailed', 'Failed to save settings') });
     }
-  }, [draft, effective?.experimental_mode_enabled, experimentsDraft, fullConfig, hfToken, kvBackend, loggingDraft, onClose, saveFullConfig, t]);
+  }, [draft, effective?.experimental_mode_enabled, experimentsDraft, fullConfig, hfToken, kvBackend, loggingDraft, telemetryDraft, onClose, saveFullConfig, t]);
 
   // ESC to close
   useEffect(() => {
@@ -619,6 +622,77 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               </>
             )}
           </Fieldset>
+
+          {/* Field telemetry: consent lives in skulk.yaml (survives restarts,
+              synced like other settings). Both switches stay permanently
+              available here; the first-run modal only acquires the initial
+              choice. */}
+          {telemetryDraft && telemetryDraft.consent !== 'unasked' && (
+            <Fieldset>
+              <Legend>{t('settings.telemetry.legend', 'Telemetry')}</Legend>
+              <Row>
+                <FieldLabel>
+                  {t('settings.telemetry.perf', 'Performance telemetry')}
+                  <InfoTooltip
+                    filled
+                    content={t(
+                      'settings.telemetry.perfTooltip',
+                      'Anonymous performance and reliability samples (model id, hardware class, timing, token counts, failure classes). Never prompts, outputs, or machine identity. Public only as aggregates.',
+                    )}
+                  />
+                </FieldLabel>
+                <Toggle
+                  $on={telemetryDraft.consent === 'enabled'}
+                  onClick={() =>
+                    setTelemetryDraft(prev =>
+                      prev && {
+                        ...prev,
+                        consent: prev.consent === 'enabled' ? 'disabled' : 'enabled',
+                        install_id: prev.install_id || crypto.randomUUID(),
+                      },
+                    )
+                  }
+                />
+              </Row>
+              <Row>
+                <FieldLabel>
+                  {t('settings.telemetry.diagnostics', 'Crash diagnostics')}
+                  <InfoTooltip
+                    filled
+                    content={t(
+                      'settings.telemetry.diagnosticsTooltip',
+                      'Separate consent for scrubbed crash reports, kept privately for 90 days. Enabling telemetry never enables this.',
+                    )}
+                  />
+                </FieldLabel>
+                <Toggle
+                  $on={telemetryDraft.diagnostics_consent === 'enabled'}
+                  onClick={() =>
+                    setTelemetryDraft(prev =>
+                      prev && {
+                        ...prev,
+                        diagnostics_consent:
+                          prev.diagnostics_consent === 'enabled' ? 'disabled' : 'enabled',
+                        install_id: prev.install_id || crypto.randomUUID(),
+                      },
+                    )
+                  }
+                />
+              </Row>
+              {telemetryDraft.install_id && (
+                <HintText>
+                  {t('settings.telemetry.installId', 'Install id (your deletion key): ')}
+                  {telemetryDraft.install_id}
+                </HintText>
+              )}
+              <HintText>
+                {t(
+                  'settings.telemetry.previewHint',
+                  'Inspect exactly what would be sent at GET /v1/telemetry/preview.',
+                )}
+              </HintText>
+            </Fieldset>
+          )}
 
           {/* Experiments: only shown when the node runs with
               SKULK_ENABLE_EXPERIMENTAL_MODE. This is the fabric's staging

@@ -1122,6 +1122,30 @@ curl -X POST http://localhost:52415/v1/diagnostics/cluster/<node_id>/runners/<ru
   -d '{"taskId":"<task_id>"}'
 ```
 
+### Field telemetry
+
+- `GET /v1/telemetry/preview`
+
+**GET** `/v1/telemetry/preview`
+
+Returns the field-telemetry consent state and the exact pending sample batch
+that would next be sent to the ingest service, so operators can inspect
+precisely what leaves the cluster before or after opting in. Collection is
+opt-in (dashboard consent flow; `telemetry:` in `skulk.yaml`) and
+content-free: samples carry model ids, canonical hardware classes, timing,
+token counts, and failure-class enums only. No parameters.
+
+```json
+{
+  "enabled": false,
+  "consent": "unasked",
+  "pending": [],
+  "dropped_since_start": 0,
+  "install_id": "",
+  "ingest_url": "https://..."
+}
+```
+
 ### Traces
 
 - `GET /v1/tracing`

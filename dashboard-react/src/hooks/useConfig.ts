@@ -11,6 +11,8 @@ export type {
   StoreConfig,
   InferenceConfig,
   LoggingConfig,
+  TelemetryConfig,
+  TelemetryConsent,
   ExperimentsConfig,
   FullConfig,
   EffectiveConfig,
