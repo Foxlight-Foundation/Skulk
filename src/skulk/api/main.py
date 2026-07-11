@@ -8020,6 +8020,8 @@ class API:
         with self._config_path.open("w") as f:
             f.write(config_yaml)
         self._skulk_config = parsed_config
+        # A consent change must apply immediately, not after the TTL.
+        self._telemetry_config_cached_until = 0.0
         self._sync_builtin_speech_capability()
         # Broadcast to all nodes via gossipsub — strip hf_token (secret).
         import copy

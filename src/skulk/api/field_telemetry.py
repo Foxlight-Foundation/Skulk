@@ -319,9 +319,11 @@ class FieldTelemetryCollector:
         return True
 
     def _requeue(self, batch: list[TelemetrySample]) -> None:
-        for sample in reversed(batch):
+        for index, sample in enumerate(reversed(batch)):
             if len(self._pending) == _MAX_PENDING_SAMPLES:
-                self._dropped += 1
+                # Every sample that no longer fits is a drop, not just the
+                # first one encountered.
+                self._dropped += len(batch) - index
                 break
             self._pending.appendleft(sample)
 
