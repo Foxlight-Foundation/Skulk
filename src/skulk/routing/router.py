@@ -1,6 +1,6 @@
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from copy import copy
 from dataclasses import dataclass
 from itertools import count
@@ -644,6 +644,7 @@ class Router:
                             receiver,
                             stream_senders,
                             owner_stream_counts,
+                            reject_stream,
                         )
                     try:
                         sender.send_nowait(packet)
@@ -751,10 +752,17 @@ class Router:
                     continue
                 started_at = time.monotonic()
                 try:
-                    with fail_after(_ZENOH_DATA_PUBLISH_TIMEOUT_SECONDS):
-                        await self._zenoh.zenoh_publish(
-                            f"{packet.topic}/{rejection_owner}", data
-                        )
+                    rejection_router = self.topic_routers.get(packet.topic)
+                    if (
+                        rejection_owner == self._node_id
+                        and rejection_router is not None
+                    ):
+                        await rejection_router.publish_bytes(data, None)
+                    else:
+                        with fail_after(_ZENOH_DATA_PUBLISH_TIMEOUT_SECONDS):
+                            await self._zenoh.zenoh_publish(
+                                f"{packet.topic}/{rejection_owner}", data
+                            )
                 except get_cancelled_exc_class():
                     raise
                 except Exception as exception:
@@ -786,6 +794,7 @@ class Router:
         receiver: Receiver[OutboundPacket],
         stream_senders: dict[tuple[str, str, str], Sender[OutboundPacket]],
         owner_stream_counts: dict[str, int],
+        reject_stream: Callable[[tuple[str, str, str]], None],
     ) -> None:
         """Publish one command independently so blocked owners cannot stall peers."""
 
@@ -811,6 +820,17 @@ class Router:
                             "Zenoh DATA command publish failed; dropping frame "
                             "without blocking unrelated streams"
                         )
+                        if packet.topic == REALTIME_AUDIO.topic:
+                            reject_stream(stream)
+                            rejection_slot = Semaphore(1)
+                            rejection_slot.acquire_nowait()
+                            await self._publish_zenoh_data_rejection(
+                                packet,
+                                owner,
+                                rejection_slot,
+                                False,
+                            )
+                            return
                     else:
                         self._data_plane_egress_observer.record_published(
                             owner,

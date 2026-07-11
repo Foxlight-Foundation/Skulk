@@ -8846,8 +8846,15 @@ class API:
         """Send one PCM frame through the local fast path or remote DATA path."""
 
         if target_node == self.node_id and self._realtime_audio_sender is not None:
-            await self._realtime_audio_sender.send(frame)
-            return
+            try:
+                await self._realtime_audio_sender.send(frame)
+            except (BrokenResourceError, ClosedResourceError):
+                # Worker recreation closes the original receive end while the
+                # API survives. Fall through to the node-local packet topic,
+                # whose receiver is rewired on every Worker construction.
+                self._realtime_audio_sender = None
+            else:
+                return
         if self._realtime_audio_packet_sender is not None:
             await self._realtime_audio_packet_sender.send(
                 RealtimeAudioPacket(

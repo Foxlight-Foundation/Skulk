@@ -399,6 +399,28 @@ async def test_same_node_realtime_audio_uses_bounded_local_ingress() -> None:
 
 
 @pytest.mark.anyio
+async def test_same_node_realtime_audio_falls_back_after_worker_reset() -> None:
+    """A closed old worker channel falls back to the recreated packet ingress."""
+
+    api, realtime_receiver, _ = _build_api()
+    packet_sender, packet_receiver = channel[RealtimeAudioPacket](4)
+    api._realtime_audio_packet_sender = packet_sender
+    realtime_receiver.close()
+    frame = RealtimeAudioInputFrame(
+        command_id=CommandId("same-node-reset-ingress"),
+        sequence=1,
+        kind="chunk",
+        data=b"\x00\x00",
+    )
+
+    await api._send_realtime_audio_input(NodeId("api-node"), frame)
+
+    packet = await packet_receiver.receive()
+    assert packet.target_node == NodeId("api-node")
+    assert packet.to_input_frame() == frame
+
+
+@pytest.mark.anyio
 async def test_realtime_stt_provider_forwards_pcm_and_streams_transcript(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
