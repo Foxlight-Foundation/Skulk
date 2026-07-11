@@ -256,17 +256,21 @@ Map the final score to the review severity:
   or a narrower edge case. Note it for follow-up, but do not fix it in the
   current PR unless explicitly requested.
 - **2 — Low**: `2.5 >= score > 1.7`. Nice-to-have improvement, minor refactor,
-  cosmetic inconsistency, or speculative concern. Ignore for the current PR.
+  cosmetic inconsistency, or speculative concern. Do not fix in the current PR.
 - **1 — Informational / Nitpick**: `score <= 1.7`. Style preference, wording,
-  or clearly non-blocking observation. Ignore.
+  or clearly non-blocking observation. Do not fix in the current PR.
 
-Only fix comments rated 4 or 5. Do not iterate on minor wording, style, or speculative improvements from automated reviewers (e.g., Copilot). Time spent on low-severity feedback is time not spent on real work.
+Only fix comments rated 4 or 5. Do not iterate on minor wording, style, or
+speculative improvements from automated reviewers (e.g., Copilot). For every
+comment rated 1–3, reply with the severity-based rationale for not changing the
+current PR, note any follow-up when appropriate, and resolve the thread. Time
+spent implementing low-severity feedback is time not spent on real work.
 
 ### PR Review Loop
 
 Foxlight PRs are never opened as drafts. After opening or updating a PR, keep it
 ready for review, check for merge conflicts and failing checks, and continue
-watching review/check state until no unresolved severity 4 or 5 comments remain.
+watching review/check state until no unresolved review threads remain.
 If a branch is not ready for review, do not open the PR yet.
 
 PR descriptions, review replies, and validation notes must not include private
@@ -278,18 +282,24 @@ and behavior exercised) and keep raw environment details in private logs or
 notes.
 
 When working an open pull request, use this review loop until no unresolved
-severity 4 or 5 comments remain:
+review threads remain:
 
 1. Inspect the PR for new review comments, unresolved threads, and failing checks.
 2. Evaluate each comment using the severity rubric above.
-3. Ignore severity 1–2 comments.
-4. Note severity 3 comments for future work, but do not fix them in the current PR.
+3. For severity 1–2 comments, do not change code; reply with the severity and
+   concise rationale, then resolve the thread.
+4. For severity 3 comments, note any appropriate follow-up, reply with the
+   severity and rationale for deferring it, then resolve the thread.
 5. Fix severity 4–5 comments with the smallest correct change.
 6. Add or update focused tests for every correctness fix on a critical path.
 7. Run focused validation before replying on the PR.
-8. Reply on each addressed thread with the concrete fix or rationale.
-9. Resolve only threads that are actually addressed by code and validation.
-10. Repeat until there are no unresolved severity 4–5 comments, or stop and escalate if the fix becomes ambiguous, validation fails, or the required change would sprawl beyond the PR scope.
+8. For every fixed comment, reply with the concrete fix and validation, then
+   resolve the thread.
+9. Never merge with unresolved review threads, including comments intentionally
+   declined because of severity.
+10. Repeat until there are no unresolved review threads, or stop and escalate if
+    a severity 4–5 fix becomes ambiguous, validation fails, or the required
+    change would sprawl beyond the PR scope.
 
 ### Before Every Commit
 
