@@ -134,7 +134,10 @@ log "uv: $(uv --version)"
 # Installed into the Skulk venv when --with-skulk-env runs below; also into
 # the system python so `--check` and ad-hoc diagnostics work either way.
 log "installing NVML binding (nvidia-ml-py)"
-python3 -m pip install --quiet --break-system-packages nvidia-ml-py 2>/dev/null \
+# Plain install first (works on old pips and root pods); the PEP 668 flag
+# only on pips that refuse (they are new enough to know it); --user last.
+python3 -m pip install --quiet nvidia-ml-py 2>/dev/null \
+  || python3 -m pip install --quiet --break-system-packages nvidia-ml-py 2>/dev/null \
   || $SUDO python3 -m pip install --quiet --break-system-packages nvidia-ml-py 2>/dev/null \
   || python3 -m pip install --quiet --user nvidia-ml-py
 
