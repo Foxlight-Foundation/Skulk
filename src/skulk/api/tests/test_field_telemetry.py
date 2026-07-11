@@ -11,6 +11,7 @@ from skulk.api.field_telemetry import (
     FieldTelemetryCollector,
     TelemetrySample,
     hardware_class,
+    prepare_telemetry_config_update,
     tap_generation_stream,
 )
 from skulk.shared.types.profiling import AcceleratorMetrics, SystemPerformanceProfile
@@ -303,4 +304,48 @@ async def test_tap_skips_aborted_streams() -> None:
 def test_sample_model_is_frozen() -> None:
     sample = TelemetrySample(kind="generation", at="2026-07-11T00:00:00Z")
     with pytest.raises(Exception):  # noqa: B017 - pydantic frozen raises ValidationError
-        sample.kind = "other"  # type: ignore[misc]
+        object.__setattr__(sample, "kind", "other")
+
+
+def test_config_update_preserves_omitted_telemetry() -> None:
+    config: dict[str, object] = {"logging": {"enabled": False}}
+    existing: dict[str, object] = {"telemetry": {"consent": "enabled", "install_id": "x"}}
+    prepare_telemetry_config_update(config, existing)
+    section = config["telemetry"]
+    assert isinstance(section, dict)
+    # Preserved AND normalized: the carried-forward decided consent gains a
+    # version stamp exactly as if it had been sent explicitly.
+    assert section["consent"] == "enabled"
+    assert section["install_id"] == "x"
+    assert section["consented_version"]
+
+
+def test_config_update_never_stamps_version_while_unasked() -> None:
+    config: dict[str, object] = {
+        "telemetry": {"consent": "unasked", "diagnostics_consent": "unasked"}
+    }
+    prepare_telemetry_config_update(config, None)
+    section = config["telemetry"]
+    assert isinstance(section, dict)
+    assert "consented_version" not in section
+    assert "install_id" not in section
+
+
+def test_config_update_stamps_version_and_backfills_id_once_decided() -> None:
+    config: dict[str, object] = {
+        "telemetry": {"consent": "enabled", "diagnostics_consent": "disabled", "install_id": ""}
+    }
+    prepare_telemetry_config_update(config, None)
+    section = config["telemetry"]
+    assert isinstance(section, dict)
+    assert section["consented_version"]  # stamped from the running Skulk
+    assert section["install_id"]  # backfilled UUID
+
+    # Disabled-only decisions stamp the version but never mint an id.
+    config2: dict[str, object] = {
+        "telemetry": {"consent": "disabled", "diagnostics_consent": "disabled"}
+    }
+    prepare_telemetry_config_update(config2, None)
+    section2 = cast("dict[str, object]", config2["telemetry"])
+    assert section2["consented_version"]
+    assert not section2.get("install_id")

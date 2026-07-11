@@ -28,6 +28,7 @@ import time
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable
 from typing import TYPE_CHECKING, TypedDict, TypeVar, cast, final
+from uuid import uuid4
 
 import anyio
 import httpx
@@ -142,6 +143,43 @@ class TelemetryPreview(TypedDict):
     dropped_since_start: int
     install_id: str
     ingest_url: str
+
+
+def prepare_telemetry_config_update(
+    config_data: dict[str, object],
+    existing: dict[str, object] | None,
+) -> None:
+    """Normalize the telemetry section of a config save, in place.
+
+    Applied by ``PUT /config``: preserves the existing section when a partial
+    save omits it (consent must never be silently wiped or granted), stamps
+    ``consented_version`` from the running Skulk ONLY once a consent decision
+    exists (both fields ``unasked`` means no decision has been made), and
+    backfills a server-generated ``install_id`` whenever either consent is
+    enabled without one (consent must never be silently inert, and a browser
+    without Web Crypto cannot generate an id).
+    """
+    if (
+        "telemetry" not in config_data
+        and existing is not None
+        and "telemetry" in existing
+    ):
+        config_data["telemetry"] = existing["telemetry"]
+    raw_section = config_data.get("telemetry")
+    if not isinstance(raw_section, dict):
+        return
+    section = cast("dict[str, object]", raw_section)
+    decided = (
+        section.get("consent", "unasked") != "unasked"
+        or section.get("diagnostics_consent", "unasked") != "unasked"
+    )
+    if decided and not section.get("consented_version"):
+        section["consented_version"] = get_skulk_version()
+    if not section.get("install_id") and (
+        section.get("consent") == "enabled"
+        or section.get("diagnostics_consent") == "enabled"
+    ):
+        section["install_id"] = str(uuid4())
 
 
 def _now_iso() -> str:

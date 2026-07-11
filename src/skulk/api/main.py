@@ -74,6 +74,7 @@ from skulk.api.adapters.responses import (
 from skulk.api.data_plane import DataPlaneObserver
 from skulk.api.field_telemetry import (
     FieldTelemetryCollector,
+    prepare_telemetry_config_update,
     tap_generation_stream,
 )
 from skulk.api.keepalive import with_sse_keepalive
@@ -7991,33 +7992,18 @@ class API:
                 # Preserve experiment toggles when omitted from the request.
                 if "experiments" not in config_data and "experiments" in existing:
                     config_data["experiments"] = existing["experiments"]
-                # Preserve telemetry consent when omitted: a partial save
-                # from any client must never silently revoke or grant it.
-                if "telemetry" not in config_data and "telemetry" in existing:
-                    config_data["telemetry"] = existing["telemetry"]
             except Exception:
                 pass
-        # Stamp the consenting Skulk version server-side (the dashboard does
-        # not know it); a future material change to collection re-asks by
-        # comparing this stamp.
-        telemetry_section = cast(
-            "dict[str, object] | None",
-            config_data.get("telemetry") if isinstance(config_data.get("telemetry"), dict) else None,
-        )
-        if telemetry_section is not None and not telemetry_section.get("consented_version"):
-            telemetry_section["consented_version"] = get_skulk_version()
-        # Backfill the install id server-side: consent without an id would
-        # leave the collector permanently disabled (and a browser without
-        # Web Crypto cannot generate one).
-        if (
-            telemetry_section is not None
-            and not telemetry_section.get("install_id")
-            and (
-                telemetry_section.get("consent") == "enabled"
-                or telemetry_section.get("diagnostics_consent") == "enabled"
-            )
-        ):
-            telemetry_section["install_id"] = str(uuid4())
+        # Telemetry section normalization (preserve on partial saves, stamp
+        # consented_version only once decided, backfill install_id): pure
+        # logic lives in field_telemetry.prepare_telemetry_config_update.
+        existing_for_telemetry: dict[str, object] | None = None
+        if self._config_path.exists():
+            try:
+                existing_for_telemetry = _load_yaml_object(self._config_path)
+            except Exception:  # noqa: BLE001 - preservation is best-effort
+                existing_for_telemetry = None
+        prepare_telemetry_config_update(config_data, existing_for_telemetry)
         # Validate by attempting to parse with Pydantic
         from skulk.store.config import SkulkConfig
 
