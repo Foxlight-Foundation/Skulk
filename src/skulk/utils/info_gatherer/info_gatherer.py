@@ -46,7 +46,6 @@ from .linux_gpu import (
 )
 from .mactop import MacmonMetrics, MactopMetrics
 from .nvidia_gpu import (
-    NvmlLike,
     has_nvidia_gpu,
     load_nvml,
 )
@@ -866,13 +865,14 @@ class InfoGatherer:
             await anyio.sleep(self.disk_poll_interval)
 
     async def _monitor_gpu_linux(self):
-        """Publish normalized AMD/Linux GPU telemetry from passive sysfs reads.
+        """Publish normalized Linux GPU telemetry (AMD sysfs, then NVIDIA NVML).
 
-        Resolves the amdgpu device once; if none is present (no GPU, or a driver
-        that does not expose ``gpu_busy_percent``) the node simply reports no
-        accelerator, which the dashboard renders as "not reported". Reads are
-        passive sysfs, never a GPU-colliding poll (see ``linux_gpu.py`` and the
-        macmon crash mechanism it avoids).
+        Resolves the accelerator once: the amdgpu sysfs device when present,
+        otherwise NVML device 0 (rented CUDA nodes). If neither exists the
+        node simply reports no accelerator, which the dashboard renders as
+        "not reported". All reads are passive (sysfs files or NVML queries),
+        never a GPU-colliding poll (see ``linux_gpu.py`` and the macmon crash
+        mechanism it avoids).
         """
         if self.gpu_linux_poll_interval is None:
             return
@@ -894,11 +894,11 @@ class InfoGatherer:
         while True:
             try:
                 with fail_after(5):
-                    profile = (
-                        read_system_profile(device)
-                        if device is not None
-                        else read_nvidia_system_profile(cast("NvmlLike", nvml))
-                    )
+                    if device is not None:
+                        profile = read_system_profile(device)
+                    else:
+                        assert nvml is not None  # guaranteed by the setup above
+                        profile = read_nvidia_system_profile(nvml)
                     await self.info_sender.send(LinuxGpuMetrics(system_profile=profile))
             except (ClosedResourceError, BrokenResourceError):
                 # Consumer gone (worker shutdown/replacement): a stop signal,

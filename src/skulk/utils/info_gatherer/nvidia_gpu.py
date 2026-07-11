@@ -62,6 +62,7 @@ def load_nvml() -> NvmlLike | None:
     try:
         import pynvml  # pyright: ignore[reportMissingImports]
     except ImportError:
+        logger.debug("pynvml not installed; no NVIDIA telemetry on this node")
         return None
     nvml = _as_nvml(pynvml)
     try:
@@ -161,14 +162,24 @@ def read_accelerator_metrics(nvml: NvmlLike) -> AcceleratorMetrics:
 
 
 def read_system_profile(nvml: NvmlLike) -> SystemPerformanceProfile:
-    """Wrap the accelerator metrics in the profile shape the fabric gossips.
+    """Build the node's system profile from NVML device 0.
 
-    ``gpu_usage`` mirrors ``utilization_ratio`` for dashboard parity with the
-    other collectors; CPU fields stay zero (the generic system collector owns
-    them), matching the AMD collector's division of labor.
+    Fills BOTH the normalized ``accelerator`` block and the legacy scalar
+    fields (``gpu_usage`` PERCENT 0-100, ``temp``, ``sys_power``) from the
+    same readings, mirroring the AMD collector, so Mac-shaped readers (the
+    topology GPU bar, the power sampler) show real values. CPU fields stay
+    zero: the generic system collector owns them.
     """
     accelerator = read_accelerator_metrics(nvml)
     return SystemPerformanceProfile(
-        gpu_usage=accelerator.utilization_ratio or 0.0,
+        gpu_usage=(accelerator.utilization_ratio * 100)
+        if accelerator.utilization_ratio is not None
+        else 0.0,
+        temp=accelerator.temperature_celsius
+        if accelerator.temperature_celsius is not None
+        else 0.0,
+        sys_power=accelerator.power_watts
+        if accelerator.power_watts is not None
+        else 0.0,
         accelerator=accelerator,
     )

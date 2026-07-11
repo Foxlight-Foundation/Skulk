@@ -53,7 +53,9 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --with-llama-server) WITH_LLAMA_SERVER=1 ;;
     --with-skulk-env) WITH_SKULK_ENV=1 ;;
-    --llama-cpp-dir) LLAMA_CPP_DIR="$2"; shift ;;
+    --llama-cpp-dir)
+      [ $# -ge 2 ] || fail "--llama-cpp-dir requires a directory argument"
+      LLAMA_CPP_DIR="$2"; shift ;;
     --check) CHECK_ONLY=1 ;;
     -h|--help) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "unknown option: $1" ;;
@@ -74,14 +76,18 @@ fi
 
 if [ "$CHECK_ONLY" -eq 1 ]; then
   log "check mode: verifying stack"
-  command -v uv >/dev/null 2>&1 && log "uv: $(uv --version)" || warn "uv missing"
+  MISSING=0
+  command -v uv >/dev/null 2>&1 && log "uv: $(uv --version)" || { warn "uv missing"; MISSING=1; }
   python3 -c "import pynvml, sys; pynvml.nvmlInit(); print('NVML OK')" 2>/dev/null \
-    && log "NVML binding OK" || warn "pynvml missing or NVML init failed"
+    && log "NVML binding OK" || { warn "pynvml missing or NVML init failed"; MISSING=1; }
   python3 -c "import llama_cpp; print('llama_cpp', llama_cpp.__version__)" 2>/dev/null \
-    && log "llama-cpp-python present" || warn "llama-cpp-python missing"
+    && log "llama-cpp-python present" || { warn "llama-cpp-python missing"; MISSING=1; }
   [ -x "${LLAMA_CPP_DIR}/build/bin/llama-server" ] \
     && log "llama-server present at ${LLAMA_CPP_DIR}/build/bin/llama-server" \
-    || warn "llama-server not built (only needed for native MTP / RPC pooling)"
+    || warn "llama-server not built (only needed for native MTP / RPC pooling; not an error)"
+  # Required pieces missing = nonzero exit so automation can gate on --check.
+  [ "$MISSING" -eq 0 ] || fail "required pieces missing (see warnings above)"
+  log "check passed"
   exit 0
 fi
 
@@ -89,7 +95,7 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 log "installing build toolchain"
 apt-get update -qq
-apt-get install -y -qq build-essential cmake git curl pkg-config python3-dev >/dev/null
+apt-get install -y -qq build-essential cmake git curl pkg-config python3-dev python3-pip >/dev/null
 
 # ---- 3. uv -------------------------------------------------------------------
 if ! command -v uv >/dev/null 2>&1; then

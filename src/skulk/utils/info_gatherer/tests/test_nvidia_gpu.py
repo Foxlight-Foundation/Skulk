@@ -110,12 +110,19 @@ def test_all_queries_failing_still_yields_a_vendor_stamped_profile() -> None:
     assert metrics.vram_total_bytes is None
 
 
-def test_system_profile_mirrors_utilization() -> None:
+def test_system_profile_fills_legacy_scalars_in_codebase_units() -> None:
     profile = read_system_profile(_FakeNvml())
     assert profile.accelerator is not None
-    assert profile.gpu_usage == 0.62
-    profile_degraded = read_system_profile(_FakeNvml(broken={"utilization"}))
-    assert profile_degraded.gpu_usage == 0.0
+    # gpu_usage is a 0-100 PERCENT across the codebase (mactop, linux_gpu).
+    assert profile.gpu_usage == 62.0
+    assert profile.temp == 63.0
+    assert profile.sys_power == 285.0
+    degraded = read_system_profile(
+        _FakeNvml(broken={"utilization", "temperature", "power"})
+    )
+    assert degraded.gpu_usage == 0.0
+    assert degraded.temp == 0.0
+    assert degraded.sys_power == 0.0
 
 
 def test_has_nvidia_gpu() -> None:
