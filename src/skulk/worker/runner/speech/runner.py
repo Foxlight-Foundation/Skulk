@@ -607,9 +607,6 @@ class Runner:
         self.local_model_path: Path | None = None
         self.current_status: RunnerStatus = RunnerIdle()
         self.seen = set[TaskId]()
-        self._pending_realtime_audio: dict[
-            CommandId, list[RealtimeAudioInputFrame]
-        ] = {}
         self.update_status(RunnerIdle())
 
     def update_status(self, status: RunnerStatus) -> None:
@@ -898,14 +895,7 @@ class Runner:
         self,
         command_id: CommandId,
     ) -> RealtimeAudioInputFrame | None:
-        """Receive the next frame for one command while preserving other calls."""
-
-        pending = self._pending_realtime_audio.get(command_id)
-        if pending:
-            frame = pending.pop(0)
-            if not pending:
-                self._pending_realtime_audio.pop(command_id, None)
-            return frame
+        """Receive the next frame for the runner's single active STT call."""
         try:
             if self.realtime_audio_receiver is None:
                 raise RuntimeError("speech runner has no realtime audio IPC receiver")
@@ -916,7 +906,13 @@ class Runner:
             raise RuntimeError("realtime audio IPC closed during session") from exc
         if frame.command_id == command_id:
             return frame
-        self._pending_realtime_audio.setdefault(frame.command_id, []).append(frame)
+        # Admission permits only one realtime call per serving runner. Retaining
+        # a stale frame from a cancelled/previous command would have no future
+        # consumer and could amplify IPC backpressure across later sessions.
+        logger.debug(
+            "Dropping realtime audio frame for inactive command "
+            f"{frame.command_id} while serving {command_id}"
+        )
         return None
 
     def _transcribe_realtime(self, task: RealtimeAudioTranscription) -> None:

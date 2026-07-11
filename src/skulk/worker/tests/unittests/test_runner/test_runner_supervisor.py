@@ -301,7 +301,7 @@ async def test_emit_stamps_owner_node_on_every_lifecycle_frame() -> None:
 
 
 @pytest.mark.asyncio
-async def test_check_runner_emits_error_chunk_for_inflight_text_generation() -> None:
+async def test_check_runner_emits_errors_for_inflight_generation_and_realtime() -> None:
     event_sender, event_receiver = channel[Event]()
     task_sender, _ = mp_channel[Task]()
     cancel_sender, _ = mp_channel[TaskId]()
@@ -339,17 +339,38 @@ async def test_check_runner_emits_error_chunk_for_inflight_text_generation() -> 
         ),
     )
     supervisor.in_progress[task.task_id] = task
+    realtime_command_id = CommandId("cmd-realtime")
+    realtime_task = RealtimeAudioTranscription(
+        task_id=TaskId("task-realtime"),
+        instance_id=bound_instance.instance.instance_id,
+        command_id=realtime_command_id,
+        owner_node=NodeId("api-node"),
+        task_params=RealtimeAudioTranscriptionTaskParams(
+            model=bound_instance.bound_shard.model_card.model_id,
+            input_sample_rate=16000,
+        ),
+    )
+    supervisor.in_progress[realtime_task.task_id] = realtime_task
     supervisor.shutdown = lambda: None
 
     await supervisor._check_runner(RuntimeError("boom"))  # pyright: ignore[reportPrivateUsage]
 
     got_chunk = await event_receiver.receive()
+    got_realtime_chunk = await event_receiver.receive()
     got_status = await event_receiver.receive()
 
     assert isinstance(got_chunk, ChunkGenerated)
     assert got_chunk.command_id == command_id
     assert isinstance(got_chunk.chunk, ErrorChunk)
     assert "Runner shutdown before completing command" in got_chunk.chunk.error_message
+
+    assert isinstance(got_realtime_chunk, ChunkGenerated)
+    assert got_realtime_chunk.command_id == realtime_command_id
+    assert isinstance(got_realtime_chunk.chunk, ErrorChunk)
+    assert (
+        "Runner shutdown before completing command"
+        in got_realtime_chunk.chunk.error_message
+    )
 
     assert isinstance(got_status, RunnerStatusUpdated)
     assert isinstance(got_status.runner_status, RunnerFailed)

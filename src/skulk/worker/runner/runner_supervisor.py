@@ -697,6 +697,7 @@ class RunnerSupervisor:
                     TextEmbedding,
                     SpeechSynthesis,
                     AudioTranscription,
+                    RealtimeAudioTranscription,
                 ),
             ):
                 with anyio.CancelScope(shield=True):

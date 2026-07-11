@@ -239,3 +239,50 @@ async def test_realtime_stt_provider_forwards_pcm_and_streams_transcript(
         "text": "hello world",
         "is_partial": False,
     }
+
+
+@pytest.mark.anyio
+async def test_realtime_stt_admission_reserves_local_instance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Concurrent opens cannot race before TaskCreated reaches API state."""
+
+    api, _ = _build_api()
+    card = _realtime_card()
+    api.state = _local_state(card)
+    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
+    _enable_realtime(api, tmp_path)
+    api._sync_builtin_speech_capability()
+
+    async def send(_command: object) -> None:
+        return None
+
+    monkeypatch.setattr(api, "_send", send)
+    async with api._tg as task_group:
+        task_group.start_soon(api._apply_provider_data)
+        first = await api._extension_context.stream_capability(
+            NodeId("api-node"),
+            REALTIME_STT_CAPABILITY_DESCRIPTOR.id,
+            REALTIME_STT_CAPABILITY_DESCRIPTOR.version,
+            descriptor_revision(REALTIME_STT_CAPABILITY_DESCRIPTOR),
+            {"model": str(card.model_id), "sample_rate": 16000},
+            timeout_seconds=2.0,
+        )
+        second = await api._extension_context.stream_capability(
+            NodeId("api-node"),
+            REALTIME_STT_CAPABILITY_DESCRIPTOR.id,
+            REALTIME_STT_CAPABILITY_DESCRIPTOR.version,
+            descriptor_revision(REALTIME_STT_CAPABILITY_DESCRIPTOR),
+            {"model": str(card.model_id), "sample_rate": 16000},
+            timeout_seconds=2.0,
+        )
+
+        assert first.open_result.ok is True
+        assert first.input is not None
+        assert second.open_result.ok is False
+        assert second.open_result.error is not None
+        assert second.open_result.error.code == "overloaded"
+        await first.input.cancel("test complete")
+        _ = [frame async for frame in first.frames]
+        task_group.cancel_scope.cancel()

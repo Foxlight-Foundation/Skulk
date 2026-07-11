@@ -716,6 +716,7 @@ class _ActiveProviderStream:
     input_receiver: Receiver[CapabilityStreamFrame] | None = None
     input_lifecycle: CapabilityStreamReceiver | None = None
     input_failure: CapabilityStreamError | None = None
+    reserved_instance_id: InstanceId | None = None
 
 
 # Task statuses for which the runner has stopped producing — a mid-stream idle
@@ -8614,6 +8615,15 @@ class API:
             )
         instance_id, _ = local
         if any(
+            active.reserved_instance_id == instance_id
+            for active_call_id, active in self._active_capability_streams.items()
+            if active_call_id != call.call_id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="The realtime STT runner is already reserved by another stream",
+            )
+        if any(
             task.instance_id == instance_id
             and task.task_status not in _TERMINAL_TASK_STATUSES
             for task in self.state.tasks.values()
@@ -8636,7 +8646,7 @@ class API:
                 message="no local realtime STT capacity is currently advertised",
             )
         try:
-            await self._prepare_builtin_realtime_stt_task(call)
+            _, instance_id = await self._prepare_builtin_realtime_stt_task(call)
         except ValidationError as exc:
             return CapabilityError(code="invalid_payload", message=str(exc))
         except HTTPException as exc:
@@ -8649,6 +8659,13 @@ class API:
             else:
                 code = "provider_error"
             return CapabilityError(code=code, message=str(exc.detail))
+        active = self._active_capability_streams.get(call.call_id)
+        if active is None:
+            return CapabilityError(
+                code="provider_error",
+                message="realtime STT admission lost its stream reservation",
+            )
+        active.reserved_instance_id = instance_id
         return None
 
     async def _start_realtime_audio_transcription(
