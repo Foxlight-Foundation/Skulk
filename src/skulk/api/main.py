@@ -9047,6 +9047,21 @@ class API:
                 ),
             )
             return
+        if not self._has_mounted_stt_model(task_params.model):
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="failed",
+                error=CapabilityStreamError(
+                    code="unreachable",
+                    message=(
+                        "batch STT capacity changed while receiving input; "
+                        "retry after the requested model is ready"
+                    ),
+                ),
+            )
+            return
         task_params = task_params.model_copy(update={"content_type": media_type})
         chunks = await self._execute_audio_transcription(task_params, audio_bytes)
         text = "".join(chunk.text for chunk in chunks).strip()

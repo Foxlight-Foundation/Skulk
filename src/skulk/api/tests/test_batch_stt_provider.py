@@ -316,6 +316,49 @@ async def test_batch_stt_empty_input_emits_invalid_frame_terminal() -> None:
 
 
 @pytest.mark.anyio
+async def test_batch_stt_rechecks_capacity_after_input_half_close() -> None:
+    api = _build_api()
+    card = _stt_card()
+    ready = _state(card)
+    api.state = ready
+    api._sync_builtin_speech_capability()
+    frames: list[CapabilityStreamFrame] = []
+
+    async with api._tg as task_group:
+        task_group.start_soon(api._apply_provider_data)
+        session = await api._extension_context.stream_capability(
+            NodeId("api-node"),
+            STT_CAPABILITY_DESCRIPTOR.id,
+            STT_CAPABILITY_DESCRIPTOR.version,
+            descriptor_revision(STT_CAPABILITY_DESCRIPTOR),
+            {"model": str(card.model_id)},
+            timeout_seconds=2.0,
+        )
+        assert session.open_result.ok is True
+        assert session.input is not None
+        await session.input.send_chunk(
+            media=InlineMediaAttachment(data=b"audio", media_type="audio/wav")
+        )
+        loading = _state(
+            card,
+            runner_status=RunnerLoading(layers_loaded=0, total_layers=1),
+            suffix="-loading-after-open",
+        )
+        api.state = State(
+            instances={**ready.instances, **loading.instances},
+            runners={**ready.runners, **loading.runners},
+        )
+        await session.input.complete()
+        frames = [frame async for frame in session.frames]
+        task_group.cancel_scope.cancel()
+
+    assert [frame.kind for frame in frames] == ["started", "failed"]
+    assert frames[-1].error is not None
+    assert frames[-1].error.code == "unreachable"
+    assert "capacity changed" in frames[-1].error.message
+
+
+@pytest.mark.anyio
 async def test_batch_stt_provider_rejects_oversized_input(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
