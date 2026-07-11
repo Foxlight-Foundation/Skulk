@@ -3,6 +3,7 @@ import {
   RealtimeTranscriptionSocket,
   StreamingLinearResampler,
   realtimeTranscriptionUrl,
+  selectTranscriptionCaptureMode,
 } from './realtimeTranscription';
 
 class FakeWebSocket extends EventTarget {
@@ -32,6 +33,20 @@ describe('realtimeTranscriptionUrl', () => {
       protocol: 'https:',
       host: 'skulk.example:52415',
     })).toBe('wss://skulk.example:52415/v1/realtime?model=org%2Fmodel%20alpha');
+  });
+});
+
+describe('selectTranscriptionCaptureMode', () => {
+  it('prefers realtime capture when the service and browser support it', () => {
+    expect(selectTranscriptionCaptureMode(true, true, true)).toBe('realtime');
+  });
+
+  it('falls back to batch capture when realtime browser APIs are unavailable', () => {
+    expect(selectTranscriptionCaptureMode(true, false, true)).toBe('batch');
+  });
+
+  it('reports no capture path when neither implementation is available', () => {
+    expect(selectTranscriptionCaptureMode(true, false, false)).toBeNull();
   });
 });
 

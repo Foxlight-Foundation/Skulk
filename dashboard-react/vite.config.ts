@@ -39,7 +39,10 @@ export default defineConfig({
       '/download': 'http://localhost:52415',
       '/models': 'http://localhost:52415',
       '/place_instance': 'http://localhost:52415',
-      '/v1': 'http://localhost:52415',
+      '/v1': {
+        target: 'http://localhost:52415',
+        ws: true,
+      },
       '/instance': 'http://localhost:52415',
     },
   },

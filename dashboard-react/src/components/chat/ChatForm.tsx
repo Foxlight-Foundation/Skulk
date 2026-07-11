@@ -9,6 +9,7 @@ import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
   RealtimePcmCapture,
   RealtimeTranscriptionSocket,
+  selectTranscriptionCaptureMode,
 } from '../../audio/realtimeTranscription';
 
 export interface ChatFormProps {
@@ -439,10 +440,15 @@ export function ChatForm({
     && typeof AudioContext !== 'undefined'
     && typeof AudioWorkletNode !== 'undefined';
   const batchCaptureAvailable = microphoneAvailable
-    && typeof MediaRecorder !== 'undefined';
-  const browserRecordingAvailable = useRealtimeTranscription
-    ? realtimeCaptureAvailable
-    : batchCaptureAvailable;
+    && typeof MediaRecorder !== 'undefined'
+    && Boolean(onTranscribeAudio);
+  const captureMode = selectTranscriptionCaptureMode(
+    useRealtimeTranscription,
+    realtimeCaptureAvailable,
+    batchCaptureAvailable,
+  );
+  const browserRecordingAvailable = captureMode !== null;
+  const useRealtimeCapture = captureMode === 'realtime';
   const recordingUnavailableReason = !secureRecordingContext
     ? t('chat.form.voiceErrors.secureContextRequired', 'Microphone requires HTTPS or localhost.')
     : !browserRecordingAvailable
@@ -450,12 +456,12 @@ export function ChatForm({
       : null;
   const speechReady = Boolean(selectedSpeechId && onSpeakText);
   const transcriptionReady = Boolean(
-    selectedTranscriptionId && (useRealtimeTranscription || onTranscribeAudio),
+    selectedTranscriptionId && browserRecordingAvailable,
   );
   const canSpeakDraft = speechReady && message.trim().length > 0 && !isRecording && !isTranscribing;
   const displayVoiceError = mediaError ?? voiceError;
   const showVoiceControls = transcriptionModels.length > 0 || speechModels.length > 0 || Boolean(displayVoiceError);
-  const startRecordingLabel = useRealtimeTranscription
+  const startRecordingLabel = useRealtimeCapture
     ? t('chat.form.startRealtimeTranscription', 'Start realtime transcription')
     : t('chat.form.startRecording', 'Start recording');
   const recordingButtonLabel = transcriptionReady && recordingUnavailableReason
@@ -509,9 +515,7 @@ export function ChatForm({
     if (
       typeof navigator === 'undefined'
       || !navigator.mediaDevices?.getUserMedia
-      || (useRealtimeTranscription
-        ? typeof AudioContext === 'undefined' || typeof AudioWorkletNode === 'undefined'
-        : typeof MediaRecorder === 'undefined')
+      || captureMode === null
     ) {
       setMediaError(t('chat.form.voiceErrors.unsupportedRecording', 'Browser audio recording is unavailable.'));
       return;
@@ -520,7 +524,7 @@ export function ChatForm({
     try {
       setMediaError(null);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      if (useRealtimeTranscription && selectedTranscriptionId) {
+      if (useRealtimeCapture && selectedTranscriptionId) {
         let capture: RealtimePcmCapture | null = null;
         const socket = new RealtimeTranscriptionSocket({
           modelId: selectedTranscriptionId,
@@ -652,7 +656,8 @@ export function ChatForm({
     stopRecordingTimer,
     t,
     transcriptionReady,
-    useRealtimeTranscription,
+    captureMode,
+    useRealtimeCapture,
   ]);
 
   const stopRecording = useCallback((cancelled: boolean) => {

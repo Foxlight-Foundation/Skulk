@@ -5,6 +5,7 @@ const CONNECT_TIMEOUT_MS = 10_000;
 const TRANSCRIPTION_TIMEOUT_MS = 300_000;
 
 type WebSocketFactory = (url: string) => WebSocket;
+export type TranscriptionCaptureMode = 'realtime' | 'batch' | null;
 
 interface RealtimeServerError {
   message?: unknown;
@@ -15,6 +16,17 @@ interface RealtimeServerEvent {
   transcript?: unknown;
   delta?: unknown;
   error?: RealtimeServerError;
+}
+
+/** Select the best available browser capture path for the mounted STT model. */
+export function selectTranscriptionCaptureMode(
+  realtimeRequested: boolean,
+  realtimeCaptureAvailable: boolean,
+  batchCaptureAvailable: boolean,
+): TranscriptionCaptureMode {
+  if (realtimeRequested && realtimeCaptureAvailable) return 'realtime';
+  if (batchCaptureAvailable) return 'batch';
+  return null;
 }
 
 /** Build the same-origin realtime endpoint URL for a mounted STT model. */
