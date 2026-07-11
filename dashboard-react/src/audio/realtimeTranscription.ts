@@ -368,3 +368,13 @@ export class RealtimePcmCapture {
     await this.context.close().catch(() => undefined);
   }
 }
+
+/** Keep a newly started capture only while its realtime session still owns it. */
+export async function finalizeRealtimeCaptureStartup(
+  capture: Pick<RealtimePcmCapture, 'stop'>,
+  sessionIsCurrent: boolean,
+): Promise<boolean> {
+  if (sessionIsCurrent) return true;
+  await capture.stop();
+  return false;
+}

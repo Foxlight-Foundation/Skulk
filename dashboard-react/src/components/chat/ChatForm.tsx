@@ -7,6 +7,7 @@ import { ChatAttachments } from './ChatAttachments';
 import { Button } from '../common/Button';
 import { useSkulkTranslation } from '../../i18n/tolgee';
 import {
+  finalizeRealtimeCaptureStartup,
   RealtimePcmCapture,
   RealtimeTranscriptionSocket,
   selectTranscriptionCaptureMode,
@@ -570,15 +571,23 @@ export function ChatForm({
               if (realtimeSocketRef.current === socket) {
                 realtimeSocketRef.current = null;
                 realtimeCaptureRef.current = null;
+                mediaStreamRef.current = null;
                 stopRecordingTimer();
                 setIsRecording(false);
                 setRecordingSeconds(0);
+                stream.getTracks().forEach((track) => track.stop());
                 void capture?.stop();
               }
               setMediaError(messageText);
               socket.cancel();
             }
           });
+          if (!await finalizeRealtimeCaptureStartup(
+            capture,
+            realtimeSocketRef.current === socket,
+          )) {
+            return;
+          }
         } catch (error) {
           realtimeSocketRef.current = null;
           mediaStreamRef.current = null;

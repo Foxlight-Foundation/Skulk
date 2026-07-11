@@ -1,10 +1,27 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  finalizeRealtimeCaptureStartup,
   RealtimeTranscriptionSocket,
   StreamingLinearResampler,
   realtimeTranscriptionUrl,
   selectTranscriptionCaptureMode,
 } from './realtimeTranscription';
+
+describe('finalizeRealtimeCaptureStartup', () => {
+  it('stops a capture that finishes after its session lost ownership', async () => {
+    const stop = vi.fn().mockResolvedValue(undefined);
+
+    await expect(finalizeRealtimeCaptureStartup({ stop }, false)).resolves.toBe(false);
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a capture owned by the current session', async () => {
+    const stop = vi.fn().mockResolvedValue(undefined);
+
+    await expect(finalizeRealtimeCaptureStartup({ stop }, true)).resolves.toBe(true);
+    expect(stop).not.toHaveBeenCalled();
+  });
+});
 
 class FakeWebSocket extends EventTarget {
   readyState = 1;
