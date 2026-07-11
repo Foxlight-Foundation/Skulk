@@ -314,7 +314,16 @@ Non-streaming STT serving is exposed at
 multipart audio upload, sends base64 `AudioInputChunk` events ahead of an
 `AudioTranscription` command, the worker assembles the upload for the speech
 runner, and the runner emits terminal `TranscriptionChunk` output on the data
-plane. The experimental `stt.realtime@1.0.0` provider adds a truthful
+plane. The built-in `stt@1.0.0` provider exposes the same batch inference path
+as a Fabric transform. Its opening metadata stays control-sized while one or
+more raw encoded-audio `InlineMediaAttachment` frames travel over
+`PROVIDER_DATA`; caller input half-close starts inference and one completed
+frame returns the final transcript. It advertises only with ready mounted STT
+capacity and does not claim progressive output. The legacy core hop from the
+owning API to the selected worker still uses bounded event-sourced
+`AudioInputChunk` values; replacing that hop is required before batch uploads
+can claim no-retention semantics. The experimental `stt.realtime@1.0.0`
+provider adds a truthful
 bidirectional path for cards backed by an upstream incremental session.
 Admission pins `RealtimeAudioTranscription` to one ready single-host instance.
 Bounded `REALTIME_AUDIO` packets move mono PCM16 from the owning API to that

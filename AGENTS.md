@@ -120,7 +120,11 @@ A model card's `placement.compatible_backends` selects which engine serves it
   The provider topic also carries negotiated caller media for client-streaming
   and bidirectional capabilities, isolated by owner/call/direction; caller
   `complete()` half-closes input without ending provider output.
-  Mounted STT models serve non-streaming `/v1/audio/transcriptions`. The
+  Mounted STT models serve non-streaming `/v1/audio/transcriptions`. Ready
+  mounted capacity also advertises the built-in `stt@1.0.0` batch transform:
+  callers send bounded encoded audio as binary provider frames, half-close
+  input, and receive one final transcript. Its core command path is shared
+  with the REST endpoint. The
   experimental `stt.realtime@1.0.0` bidirectional provider accepts mono PCM16
   frames on any API node with reachable mounted capacity, pins a
   `RealtimeAudioTranscription` task to one single-host instance, and feeds a

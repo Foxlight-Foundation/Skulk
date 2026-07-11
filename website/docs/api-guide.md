@@ -1381,6 +1381,28 @@ telemetry tag is advertised only when experimental mode,
 active. Dynamic admission rechecks the requested model before `started`. A
 caller cancellation propagates to the underlying synthesis command.
 
+### Transcribe a bounded clip through the built-in STT provider
+
+Production nodes describe a first-party `stt@1.0.0` client-streaming
+capability and advertise its `stt` telemetry tag while a ready, single-host STT
+runner is mounted. The operation is batch inference: client streaming is used
+only so encoded audio remains binary provider media instead of base64 in the
+unary JSON envelope.
+
+The opening payload requires `model` and optionally accepts `filename`,
+`content_type`, `language`, `prompt`, `temperature`, `max_tokens`,
+`chunk_duration`, `frame_threshold`, `context`, `prefill_step_size`, `text`,
+`word_timestamps`, and `timestamp_granularities`. Send the complete clip as one
+or more ordered `InlineMediaAttachment` values, each at most 1 MiB and at most
+25 MiB in aggregate, then call the input sink's `complete()` method. Empty,
+oversized, cancelled, or non-inline input fails only that provider call.
+
+After input half-close, Skulk runs the existing mounted-model
+`AudioTranscription` path. The provider emits no partial transcript chunks; its
+single `completed` payload contains `model`, `text`, and optional `language`
+and `segments`. Managed blob references are not accepted until Skulk has a
+general immutable blob service.
+
 ### Transcribe realtime PCM through the built-in STT provider
 
 Production nodes also describe a first-party `stt.realtime@1.0.0`

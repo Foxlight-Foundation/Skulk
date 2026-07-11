@@ -65,6 +65,69 @@ TTS_CAPABILITY_DESCRIPTOR = CapabilityDescriptor(
 )
 """Generic provider descriptor for Skulk's mounted-model TTS facade."""
 
+STT_CAPABILITY_DESCRIPTOR = CapabilityDescriptor(
+    id="stt",
+    version="1.0.0",
+    title="Speech to text",
+    description=(
+        "Transcribe a bounded encoded audio clip with a mounted Skulk "
+        "speech-to-text model. Audio is supplied as ordered binary input "
+        "frames and inference begins after input half-close."
+    ),
+    input_schema={
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "model": {"type": "string", "minLength": 1},
+            "filename": {"type": "string", "minLength": 1},
+            "content_type": {"type": "string", "minLength": 1},
+            "language": {"type": "string", "minLength": 1},
+            "prompt": {"type": "string"},
+            "temperature": {"type": "number"},
+            "max_tokens": {"type": "integer", "minimum": 1},
+            "chunk_duration": {"type": "number", "exclusiveMinimum": 0},
+            "frame_threshold": {"type": "integer", "minimum": 1},
+            "context": {"type": "string"},
+            "prefill_step_size": {"type": "integer", "minimum": 1},
+            "text": {"type": "string"},
+            "word_timestamps": {"type": "boolean"},
+            "timestamp_granularities": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+            },
+        },
+        "required": ["model"],
+        "additionalProperties": False,
+    },
+    output_schema={
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+            "model": {"type": "string"},
+            "text": {"type": "string"},
+            "language": {"type": "string"},
+            "segments": {"type": "array", "items": {"type": "object"}},
+        },
+        "required": ["model", "text"],
+        "additionalProperties": False,
+    },
+    io_mode="client_streaming",
+    input_chunk_schema={
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": False,
+    },
+    annotations={
+        "modality": "audio",
+        "latency": "batch",
+        "runtime": "mlx_audio",
+        "stability": "beta",
+        "input_media": "inline",
+        "max_input_bytes": str(25 * 1024 * 1024),
+    },
+)
+"""Provider descriptor for bounded, non-realtime mounted-model STT."""
+
 REALTIME_STT_CAPABILITY_DESCRIPTOR = CapabilityDescriptor(
     id="stt.realtime",
     version="1.0.0",
@@ -141,6 +204,11 @@ RealtimeSttStream = Callable[
     [CapabilityCall, AsyncIterator[CapabilityStreamFrame]],
     AsyncIterator[CapabilityStreamFrame],
 ]
+BatchSttAdmission = Callable[[CapabilityCall], Awaitable[CapabilityError | None]]
+BatchSttStream = Callable[
+    [CapabilityCall, AsyncIterator[CapabilityStreamFrame]],
+    AsyncIterator[CapabilityStreamFrame],
+]
 
 
 @final
@@ -155,6 +223,8 @@ class BuiltinSpeechProvider:
         *,
         admit_tts: TtsAdmission,
         stream_tts: TtsStream,
+        admit_stt: BatchSttAdmission,
+        stream_stt: BatchSttStream,
         admit_realtime_stt: RealtimeSttAdmission,
         stream_realtime_stt: RealtimeSttStream,
     ) -> None:
@@ -162,6 +232,8 @@ class BuiltinSpeechProvider:
 
         self._admit_tts = admit_tts
         self._stream_tts = stream_tts
+        self._admit_stt = admit_stt
+        self._stream_stt = stream_stt
         self._admit_realtime_stt = admit_realtime_stt
         self._stream_realtime_stt = stream_realtime_stt
 
@@ -173,12 +245,17 @@ class BuiltinSpeechProvider:
     def capabilities(self) -> Sequence[CapabilityDescriptor]:
         """Describe the first-party server-streaming TTS capability."""
 
-        return (TTS_CAPABILITY_DESCRIPTOR, REALTIME_STT_CAPABILITY_DESCRIPTOR)
+        return (
+            TTS_CAPABILITY_DESCRIPTOR,
+            STT_CAPABILITY_DESCRIPTOR,
+            REALTIME_STT_CAPABILITY_DESCRIPTOR,
+        )
 
     def on_start(self, context: ExtensionContext) -> None:
         """Keep discovery withdrawn until an eligible model is mounted."""
 
         context.withdraw_capability(TTS_CAPABILITY_DESCRIPTOR.id)
+        context.withdraw_capability(STT_CAPABILITY_DESCRIPTOR.id)
         context.withdraw_capability(REALTIME_STT_CAPABILITY_DESCRIPTOR.id)
 
     async def admit_stream(
@@ -191,6 +268,8 @@ class BuiltinSpeechProvider:
         del context
         if call.capability_id == TTS_CAPABILITY_DESCRIPTOR.id:
             return await self._admit_tts(call)
+        if call.capability_id == STT_CAPABILITY_DESCRIPTOR.id:
+            return await self._admit_stt(call)
         if call.capability_id == REALTIME_STT_CAPABILITY_DESCRIPTOR.id:
             return await self._admit_realtime_stt(call)
         return CapabilityError(
@@ -217,4 +296,6 @@ class BuiltinSpeechProvider:
         """Translate provider PCM frames into a core realtime STT session."""
 
         del context
+        if call.capability_id == STT_CAPABILITY_DESCRIPTOR.id:
+            return self._stream_stt(call, input_frames)
         return self._stream_realtime_stt(call, input_frames)

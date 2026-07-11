@@ -377,9 +377,24 @@ An external extension cannot replace the reserved built-in `tts@1.0.0`
 contract; first-party providers take deterministic precedence when extension
 registries are combined.
 
-The transport now supports realtime STT's ordered input media and explicit
-half-close. The built-in STT facade remains the next consumer; it must not
-advertise progressive output until its underlying model actually produces it.
+### Built-in mounted-model batch STT provider
+
+Production nodes also reserve `stt@1.0.0`, a bounded batch transform over the
+existing `AudioTranscription` command and speech runner. The descriptor uses
+`client_streaming` transport even though inference is batch: arbitrary encoded
+audio is binary media, not a control-sized unary JSON payload. Callers open with
+the mounted `model` plus optional filename, content type, language, prompt, and
+model-specific decode controls; send one or more ordered
+`InlineMediaAttachment` frames; then call `complete()` to half-close input.
+Inference begins only after that half-close and returns one `completed` payload
+with `model`, `text`, and optional `language` and `segments`.
+
+The aggregate clip limit is 25 MiB and each provider frame retains the shared
+1 MiB media limit. The `stt` telemetry tag is advertised only while a ready,
+single-host mounted STT runner exists. This contract does not claim progressive
+transcription; that remains exclusive to truthful `stt.realtime@1.0.0` models.
+Managed `BlobMediaAttachment` resolution is not advertised yet because Skulk
+does not have a general immutable blob service.
 
 ## Guarantees
 

@@ -15,9 +15,11 @@ Skulk's first speech serving path is deliberately REST-shaped:
   `audio.supports_streaming = true`.
 - `POST /v1/audio/transcriptions` turns an uploaded audio clip into text or
   transcript metadata.
+- `stt@1.0.0` accepts bounded encoded-audio provider frames, begins batch
+  transcription on input half-close, and returns one final transcript.
 - `stt.realtime@1.0.0` is an experimental bidirectional provider for truthful
-  incremental STT models. It currently requires the API and mounted runner on
-  one node and accepts mono PCM16 frames.
+  incremental STT models. It accepts mono PCM16 on any API node and uses
+  node-addressed Zenoh ingress when the mounted runner is remote.
 - The dashboard voice loop composes those endpoints with chat.
 
 This page records the next architectural step. Realtime speech and fabric speech
@@ -157,7 +159,7 @@ Current and planned speech contracts:
 | Capability | Mode | State |
 | --- | --- | --- |
 | `tts@1.0.0` | server streaming | Built-in facade implemented; experimental until fleet validation passes |
-| batch STT | unary | Planned; complete bounded audio or staged blob input |
+| `stt@1.0.0` | client streaming transport, batch inference | Implemented for bounded inline encoded audio; managed blobs remain later |
 | `stt.realtime@1.0.0` | bidirectional | Built-in local facade implemented behind experiment and truthful-card gates |
 
 ### Composition Examples
@@ -243,7 +245,10 @@ caller-provided filesystem paths.
 3. **Complete:** add a built-in realtime STT facade only for models whose runner
    can open a true streaming session; batch-backed models do not advertise
    progressive output.
-4. Add a batch STT unary facade using bounded inline media or staged blobs.
+4. **Complete for bounded inline media:** add the `stt@1.0.0` batch facade.
+   Binary audio uses client-streaming transport plus input half-close rather
+   than the JSON-only unary call envelope. Managed blob resolution remains a
+   follow-up requiring a general immutable blob service.
 5. Add speech-specific diagnostics for active requests/sessions, queue depth,
    first audio/transcript latency, and cancellation reason.
 6. **Complete:** add remote serving-node realtime audio ingress with bounded,
