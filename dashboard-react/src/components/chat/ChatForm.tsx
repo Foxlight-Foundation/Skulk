@@ -497,8 +497,10 @@ export function ChatForm({
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
     mediaRecorderRef.current = null;
-    setIsRecording(false);
-    setRecordingSeconds(0);
+    if (componentMountedRef.current) {
+      setIsRecording(false);
+      setRecordingSeconds(0);
+    }
   }, [stopRecordingTimer]);
 
   const appendTranscript = useCallback((transcript: string) => {
@@ -584,6 +586,7 @@ export function ChatForm({
           });
           if (!await finalizeRealtimeCaptureStartup(
             capture,
+            componentMountedRef.current,
             realtimeSocketRef.current === socket,
           )) {
             return;
@@ -665,6 +668,7 @@ export function ChatForm({
       }, 250);
     } catch (error) {
       cleanupRecordingResources();
+      if (!componentMountedRef.current) return;
       const messageText = error instanceof DOMException && error.name === 'NotAllowedError'
         ? t('chat.form.voiceErrors.microphoneDenied', 'Microphone permission denied.')
         : error instanceof Error
@@ -737,9 +741,15 @@ export function ChatForm({
       componentMountedRef.current = false;
       stopRecordingTimer();
       recordingStartingRef.current = false;
-      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
-      realtimeSocketRef.current?.cancel();
-      void realtimeCaptureRef.current?.stop();
+      const mediaStream = mediaStreamRef.current;
+      const realtimeSocket = realtimeSocketRef.current;
+      const realtimeCapture = realtimeCaptureRef.current;
+      mediaStreamRef.current = null;
+      realtimeSocketRef.current = null;
+      realtimeCaptureRef.current = null;
+      mediaStream?.getTracks().forEach((track) => track.stop());
+      realtimeSocket?.cancel();
+      void realtimeCapture?.stop();
     };
   }, [stopRecordingTimer]);
 

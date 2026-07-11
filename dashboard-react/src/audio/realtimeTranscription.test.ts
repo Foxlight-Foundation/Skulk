@@ -11,14 +11,21 @@ describe('finalizeRealtimeCaptureStartup', () => {
   it('stops a capture that finishes after its session lost ownership', async () => {
     const stop = vi.fn().mockResolvedValue(undefined);
 
-    await expect(finalizeRealtimeCaptureStartup({ stop }, false)).resolves.toBe(false);
+    await expect(finalizeRealtimeCaptureStartup({ stop }, true, false)).resolves.toBe(false);
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it('stops a capture that finishes after its component unmounts', async () => {
+    const stop = vi.fn().mockResolvedValue(undefined);
+
+    await expect(finalizeRealtimeCaptureStartup({ stop }, false, true)).resolves.toBe(false);
     expect(stop).toHaveBeenCalledOnce();
   });
 
   it('keeps a capture owned by the current session', async () => {
     const stop = vi.fn().mockResolvedValue(undefined);
 
-    await expect(finalizeRealtimeCaptureStartup({ stop }, true)).resolves.toBe(true);
+    await expect(finalizeRealtimeCaptureStartup({ stop }, true, true)).resolves.toBe(true);
     expect(stop).not.toHaveBeenCalled();
   });
 });
