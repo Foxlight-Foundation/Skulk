@@ -426,6 +426,7 @@ _MAX_CONCURRENT_CAPABILITY_CALLS = 8
 # so an extension cannot create unbounded handler tasks or DATA queues.
 _MAX_CONCURRENT_CAPABILITY_STREAMS = 8
 _PROVIDER_STREAM_RECEIVE_BUFFER = 256
+_REALTIME_STT_OUTPUT_BUFFER = 256
 _AUDIO_CONTENT_TYPES: Final[dict[AudioResponseFormat, str]] = {
     AudioResponseFormat.Mp3: "audio/mpeg",
     AudioResponseFormat.Wav: "audio/wav",
@@ -1227,6 +1228,7 @@ class API:
         self._audio_transcription_queues: dict[
             CommandId, Sender[TranscriptionChunk | ErrorChunk]
         ] = {}
+        self._realtime_audio_transcription_commands: set[CommandId] = set()
         self._cancelled_command_ids: set[CommandId] = set()
         # Per-command data-plane reorder buffers (#279 Phase 2b). The DATA gossip
         # topic has no total order (unlike the master event idx it replaced), so
@@ -1319,6 +1321,7 @@ class API:
         self._embedding_queues = {}
         self._audio_speech_queues = {}
         self._audio_transcription_queues = {}
+        self._realtime_audio_transcription_commands = set()
         self._cancelled_command_ids = set()
         self.unpause(result_clock, master_node_id=master_node_id)
         self.event_receiver.close()
@@ -2417,6 +2420,7 @@ class API:
 
         should_send_finished = command_id not in self._cancelled_command_ids
         self._cancelled_command_ids.discard(command_id)
+        self._realtime_audio_transcription_commands.discard(command_id)
         if should_send_finished:
             await self._send(TaskFinished(finished_command_id=command_id))
         queue_map.pop(command_id, None)
@@ -6270,6 +6274,20 @@ class API:
                 self._audio_speech_queues.pop(command_id, None)
         if queue := self._audio_transcription_queues.get(command_id, None):
             assert isinstance(chunk, (TranscriptionChunk, ErrorChunk))
+            if command_id in self._realtime_audio_transcription_commands:
+                try:
+                    queue.send_nowait(chunk)
+                except WouldBlock:
+                    logger.warning(
+                        "Realtime STT output exceeded its bounded API queue; "
+                        f"cancelling command {command_id}"
+                    )
+                    queue.close()
+                    self._audio_transcription_queues.pop(command_id, None)
+                    await self._cancel_audio_transcription_command(command_id)
+                except (BrokenResourceError, ClosedResourceError):
+                    self._audio_transcription_queues.pop(command_id, None)
+                return
             try:
                 await queue.send(chunk)
             except (BrokenResourceError, ClosedResourceError):
@@ -8685,8 +8703,11 @@ class API:
             task_params=params,
         )
         command_id = command.command_id
-        output_sender, output_receiver = channel[TranscriptionChunk | ErrorChunk]()
+        output_sender, output_receiver = channel[TranscriptionChunk | ErrorChunk](
+            _REALTIME_STT_OUTPUT_BUFFER
+        )
         self._audio_transcription_queues[command_id] = output_sender
+        self._realtime_audio_transcription_commands.add(command_id)
         try:
             await self._send(command)
         except Exception:

@@ -930,7 +930,6 @@ class Master:
                                 )
 
                             task_id = TaskId()
-                            trace_enabled = self.state.tracing_enabled
                             generated_events.append(
                                 TaskCreated(
                                     task_id=task_id,
@@ -941,16 +940,14 @@ class Master:
                                         instance_id=command.target_instance_id,
                                         task_status=TaskStatus.Pending,
                                         task_params=command.task_params,
-                                        trace_enabled=trace_enabled,
+                                        # Realtime STT does not emit trace
+                                        # sessions yet. Do not register ranks
+                                        # that can never report completion.
+                                        trace_enabled=False,
                                     ),
                                 )
                             )
                             self.command_task_mapping[command.command_id] = task_id
-                            self._configure_expected_trace_ranks(
-                                task_id,
-                                command.target_instance_id,
-                                trace_enabled=trace_enabled,
-                            )
                         case SetTracingEnabled():
                             generated_events.append(
                                 TracingStateChanged(enabled=command.enabled)

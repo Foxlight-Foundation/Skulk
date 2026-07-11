@@ -23,13 +23,13 @@ from skulk.shared.models.model_cards import (
     ModelTask,
 )
 from skulk.shared.types.audio import RealtimeAudioInputFrame
-from skulk.shared.types.chunks import TranscriptionChunk
+from skulk.shared.types.chunks import ErrorChunk, TranscriptionChunk
 from skulk.shared.types.commands import (
     ForwarderCommand,
     ForwarderDownloadCommand,
     RealtimeAudioTranscription,
 )
-from skulk.shared.types.common import NodeId
+from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import IndexedEvent
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
@@ -169,6 +169,7 @@ async def test_realtime_stt_provider_forwards_pcm_and_streams_transcript(
                 continue
             command = commands[0]
             output = api._audio_transcription_queues[command.command_id]
+            assert output.statistics().max_buffer_size == 256
             await output.send(
                 TranscriptionChunk(
                     model=card.model_id,
@@ -286,3 +287,33 @@ async def test_realtime_stt_admission_reserves_local_instance(
         await first.input.cancel("test complete")
         _ = [frame async for frame in first.frames]
         task_group.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_realtime_stt_output_overflow_cancels_only_its_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow realtime consumer cannot block DATA or grow without bound."""
+
+    api, _ = _build_api()
+    command_id = CommandId("realtime-output-overflow")
+    sender, _ = channel[TranscriptionChunk | ErrorChunk](1)
+    api._audio_transcription_queues[command_id] = sender
+    api._realtime_audio_transcription_commands.add(command_id)
+    cancelled: list[CommandId] = []
+
+    async def cancel(target: CommandId) -> None:
+        cancelled.append(target)
+
+    monkeypatch.setattr(api, "_cancel_audio_transcription_command", cancel)
+    chunk = TranscriptionChunk(
+        model=ModelId("mlx-community/voxtral-realtime-test"),
+        text="partial",
+        is_partial=True,
+    )
+
+    await api._dispatch_generation_chunk(command_id, chunk)
+    await api._dispatch_generation_chunk(command_id, chunk)
+
+    assert cancelled == [command_id]
+    assert command_id not in api._audio_transcription_queues

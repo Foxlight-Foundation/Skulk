@@ -323,8 +323,8 @@ async def test_master_new_transcription_tasks_inherit_cluster_tracing_state() ->
 
 
 @pytest.mark.asyncio
-async def test_master_pins_realtime_transcription_to_requested_instance() -> None:
-    """Realtime STT must use the locally admitted instance without re-placement."""
+async def test_master_pins_realtime_transcription_without_trace_expectation() -> None:
+    """Realtime STT pins locally without leaking unsupported trace ranks."""
 
     master, node_id, command_sender, event_receiver = _build_master()
     instance = _single_node_transcription_instance(node_id)
@@ -359,5 +359,6 @@ async def test_master_pins_realtime_transcription_to_requested_instance() -> Non
     assert event.task.instance_id == instance.instance_id
     assert event.task.owner_node == NodeId("api-node")
     assert event.task.task_params == command.task_params
-    assert event.task.trace_enabled is True
+    assert event.task.trace_enabled is False
     assert master.command_task_mapping[command.command_id] == event.task_id
+    assert event.task_id not in master._expected_ranks  # pyright: ignore[reportPrivateUsage]

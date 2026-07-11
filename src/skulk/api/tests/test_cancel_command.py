@@ -23,6 +23,7 @@ def _make_api() -> Any:
     api._embedding_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._audio_speech_queues = {}  # pyright: ignore[reportPrivateUsage]
     api._audio_transcription_queues = {}  # pyright: ignore[reportPrivateUsage]
+    api._realtime_audio_transcription_commands = set()  # pyright: ignore[reportPrivateUsage]
     api._cancelled_command_ids = set()  # pyright: ignore[reportPrivateUsage]
     api._chunk_reorder = {}  # pyright: ignore[reportPrivateUsage]
     api._data_dedup_cursor = {}  # pyright: ignore[reportPrivateUsage]
