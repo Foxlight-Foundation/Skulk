@@ -332,8 +332,12 @@ bounded local channel completes the worker-to-runner hop. PCM is never event
 sourced; partial plus final `TranscriptionChunk` output returns through DATA.
 Remote capacity is not advertised when Zenoh is unavailable. The provider is
 inert unless global experimental mode and `experiments.stt_realtime` are on and
-the card declares both streaming and realtime support. WebSocket compatibility,
-dashboard live microphone streaming,
+the card declares both streaming and realtime support. The transcription-only
+`WS /v1/realtime` compatibility edge adapts OpenAI-style base64 24 kHz PCM16
+append/commit events onto this same binary provider path, emits transcript
+delta/final events, enforces same-origin browsers and bounded messages, and
+cancels the provider on disconnect. It is one utterance per socket and does not
+claim VAD, conversation, or speech-to-speech behavior. Dashboard live microphone streaming,
 voice/reference-audio management, and speech translation remain later phases.
 See [Speech Fabric and Realtime Design](speech-fabric-realtime).
 The dashboard composes the shipped REST endpoints in chat: mounted TTS models

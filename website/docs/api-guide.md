@@ -80,6 +80,7 @@ If this fails with `404 No instance found for model ...`, the placement is not r
 - `POST /v1/responses`
 - `POST /v1/audio/speech`
 - `POST /v1/audio/transcriptions`
+- `WS /v1/realtime`
 - `POST /v1/messages`
 - `POST /ollama/api/chat`
 - `POST /ollama/api/generate`
@@ -1443,6 +1444,52 @@ PCM packets to the serving worker plus a bounded worker-to-runner channel; only
 transcript output uses the existing core DATA lifecycle. The mounted upstream
 model must expose a true `create_streaming_session` interface. Batch STT cards
 are never promoted to realtime by buffering a complete recording.
+
+### Realtime transcription WebSocket compatibility edge
+
+```
+WS /v1/realtime?model=<mounted-realtime-stt-model>
+```
+
+This transcription-only WebSocket is an API-edge adapter over the same
+`stt.realtime@1.0.0` provider described above. It does not own model placement,
+runner sessions, or a second speech implementation. The API node accepting the
+socket owns the provider call, which may select a speech runner on another node.
+The same experimental-mode, `experiments.stt_realtime`, truthful-card, runner
+readiness, and Zenoh remote-capacity gates apply. OpenAPI does not model
+WebSocket operations, so this manual section is the normative edge contract;
+the underlying provider opening remains represented by the documented HTTP
+capability endpoints.
+
+The wire contract implements a bounded subset of OpenAI Realtime transcription:
+
+| Direction | Event | Behavior |
+|---|---|---|
+| server to client | `transcription_session.created` | Reports the selected model and fixed PCM16 session configuration. |
+| client to server | `transcription_session.update` | Confirms the effective configuration; attempts to change model/codec or enable VAD, noise reduction, prompts, language hints, or extra fields are rejected. |
+| client to server | `input_audio_buffer.append` | Appends one base64 PCM16 frame and immediately forwards its decoded bytes as binary Fabric media. |
+| client to server | `input_audio_buffer.commit` | Half-closes the single utterance and triggers final provider drain. Empty or duplicate commits are rejected. |
+| server to client | `input_audio_buffer.committed` | Confirms the input half-close. |
+| server to client | `conversation.item.input_audio_transcription.delta` | Carries one provider transcript delta after commit. |
+| server to client | `conversation.item.input_audio_transcription.completed` | Carries the accumulated final transcript and closes the socket normally. |
+| server to client | `conversation.item.input_audio_transcription.failed` | Carries a provider/transport/cancellation terminal failure. |
+| server to client | `error` | Reports invalid or unsupported client events before a policy/error close. |
+
+Version 1 accepts JSON text WebSocket messages and base64-encoded mono,
+signed little-endian PCM16 at 24 kHz. A decoded audio frame is capped at 1 MiB,
+the encoded WebSocket event at 2 MiB, and one session at 64 MiB of decoded
+audio. `input_audio_buffer.clear` is deliberately unsupported because the API
+forwards audio incrementally and retains no replay buffer that could safely
+retract already-delivered media. Browser connections must be same-origin; SDK
+clients without an `Origin` header remain supported.
+
+The first version is one committed utterance per socket. It does not implement
+server VAD, noise reduction, G.711, multi-turn conversation state, ephemeral
+session-token creation, response generation, or full-duplex speech-to-speech.
+Provider capacity failures close with retryable WebSocket code `1013`; client
+protocol/policy violations use `1003`, `1008`, or `1009`; internal provider
+failures use `1011`. Disconnecting before a terminal event cancels the provider
+input and output directions.
 
 ```bash
 curl http://localhost:52415/v1/capabilities
