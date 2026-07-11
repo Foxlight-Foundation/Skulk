@@ -206,6 +206,32 @@ async def test_batch_stt_admission_requires_requested_model_runner_ready() -> No
         runner_status=RunnerLoading(layers_loaded=0, total_layers=1),
         suffix="-loading",
     )
+    loading_instance_id, loading_instance = next(iter(loading.instances.items()))
+    placement_runner_id, placement_shard = next(
+        iter(loading_instance.shard_assignments.runner_to_shard.items())
+    )
+    auxiliary_runner_id = RunnerId("speech-runner-loading-auxiliary")
+    loading_assignments = loading_instance.shard_assignments.model_copy(
+        update={
+            "runner_to_shard": {
+                placement_runner_id: placement_shard,
+                auxiliary_runner_id: placement_shard,
+            }
+        }
+    )
+    loading = loading.model_copy(
+        update={
+            "instances": {
+                loading_instance_id: loading_instance.model_copy(
+                    update={"shard_assignments": loading_assignments}
+                )
+            },
+            "runners": {
+                **loading.runners,
+                auxiliary_runner_id: RunnerReady(),
+            },
+        }
+    )
     api.state = State(
         instances={**ready.instances, **loading.instances},
         runners={**ready.runners, **loading.runners},

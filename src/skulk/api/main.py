@@ -3293,9 +3293,14 @@ class API:
             profile = resolve_model_capability_profile(card.model_id, model_card=card)
             if not profile.supports_transcription:
                 continue
-            if any(
-                isinstance(self.state.runners.get(runner_id), (RunnerReady, RunnerRunning))
-                for runner_id in instance.shard_assignments.runner_to_shard
+            placement_runners = tuple(
+                instance.shard_assignments.node_to_runner.values()
+            )
+            if placement_runners and all(
+                isinstance(
+                    self.state.runners.get(runner_id), (RunnerReady, RunnerRunning)
+                )
+                for runner_id in placement_runners
             ):
                 return True
         return False
