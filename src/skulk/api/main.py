@@ -339,7 +339,7 @@ from skulk.shared.types.worker.instances import (
     InstanceMeta,
     instance_meta_of,
 )
-from skulk.shared.types.worker.runners import RunnerId
+from skulk.shared.types.worker.runners import RunnerId, RunnerReady, RunnerRunning
 from skulk.shared.types.worker.shards import Sharding
 from skulk.shared.version import get_skulk_version, get_skulk_version_label
 from skulk.store.config import (
@@ -3139,7 +3139,10 @@ class API:
         ):
             return None
         for instance_id, instance in self.state.instances.items():
-            if self.node_id not in instance.shard_assignments.node_to_runner:
+            runner_id = instance.shard_assignments.node_to_runner.get(self.node_id)
+            if runner_id is None or not isinstance(
+                self.state.runners.get(runner_id), (RunnerReady, RunnerRunning)
+            ):
                 continue
             if (
                 model_id is not None
@@ -8791,6 +8794,9 @@ class API:
                     )
                 )
                 continue
+            if frame.kind == "failed":
+                detail = frame.error.message if frame.error is not None else "unknown"
+                raise RuntimeError(f"caller input stream failed: {detail}")
             kind = "completed" if frame.kind == "completed" else "cancelled"
             await self._realtime_audio_sender.send(
                 RealtimeAudioInputFrame(
@@ -8874,6 +8880,7 @@ class API:
                         )
                     assert chunk is not None
                     if isinstance(chunk, ErrorChunk):
+                        terminal_received = True
                         raise RuntimeError(
                             f"Core realtime transcription failed: "
                             f"{chunk.error_message}"

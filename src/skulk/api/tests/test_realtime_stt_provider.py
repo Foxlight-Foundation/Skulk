@@ -1,6 +1,7 @@
 # pyright: reportPrivateUsage=false
 """Built-in realtime STT provider facade coverage."""
 
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from skulk.api.main import API
 from skulk.extensions import (
     REALTIME_STT_CAPABILITY_DESCRIPTOR,
+    CapabilityStreamError,
     CapabilityStreamFrame,
     InlineMediaAttachment,
     descriptor_revision,
@@ -22,12 +24,17 @@ from skulk.shared.models.model_cards import (
     ModelId,
     ModelTask,
 )
-from skulk.shared.types.audio import RealtimeAudioInputFrame
+from skulk.shared.types.audio import (
+    RealtimeAudioInputFrame,
+    RealtimeAudioTranscriptionTaskParams,
+)
 from skulk.shared.types.chunks import ErrorChunk, TranscriptionChunk
 from skulk.shared.types.commands import (
     ForwarderCommand,
     ForwarderDownloadCommand,
     RealtimeAudioTranscription,
+    TaskCancelled,
+    TaskFinished,
 )
 from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import IndexedEvent
@@ -35,7 +42,13 @@ from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.telemetry import TelemetryView
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
-from skulk.shared.types.worker.runners import RunnerId, ShardAssignments
+from skulk.shared.types.worker.runners import (
+    RunnerId,
+    RunnerLoading,
+    RunnerReady,
+    RunnerStatus,
+    ShardAssignments,
+)
 from skulk.shared.types.worker.shards import PipelineShardMetadata
 from skulk.utils.channels import Receiver, channel
 
@@ -59,7 +72,9 @@ def _realtime_card(*, supports_realtime: bool = True) -> ModelCard:
     )
 
 
-def _local_state(card: ModelCard) -> State:
+def _local_state(
+    card: ModelCard, *, runner_status: RunnerStatus | None = None
+) -> State:
     runner_id = RunnerId("speech-runner")
     node_id = NodeId("api-node")
     instance_id = InstanceId("speech-instance")
@@ -84,7 +99,8 @@ def _local_state(card: ModelCard) -> State:
                 hosts_by_node={node_id: []},
                 ephemeral_port=52415,
             )
-        }
+        },
+        runners={runner_id: runner_status or RunnerReady()},
     )
 
 
@@ -141,6 +157,47 @@ def test_realtime_stt_discovery_requires_truthful_local_capacity(
     api.state = _local_state(_realtime_card(supports_realtime=False))
     api._sync_builtin_speech_capability()
     assert api._telemetry_view.local_advertised_capabilities == set()
+
+    api.state = _local_state(
+        _realtime_card(), runner_status=RunnerLoading(layers_loaded=0, total_layers=1)
+    )
+    api._sync_builtin_speech_capability()
+    assert api._telemetry_view.local_advertised_capabilities == set()
+
+
+@pytest.mark.anyio
+async def test_realtime_stt_failed_input_preserves_failure_semantics() -> None:
+    """A failed caller stream must not be rewritten as normal cancellation."""
+
+    api, realtime_receiver = _build_api()
+    command_id = CommandId("failed-input")
+
+    async def input_frames() -> AsyncIterator[CapabilityStreamFrame]:
+        yield CapabilityStreamFrame(
+            call_id="failed-input-call",
+            direction="caller_to_provider",
+            sequence=0,
+            kind="started",
+        )
+        yield CapabilityStreamFrame(
+            call_id="failed-input-call",
+            direction="caller_to_provider",
+            sequence=1,
+            kind="failed",
+            error=CapabilityStreamError(code="timeout", message="input timed out"),
+        )
+
+    with pytest.raises(RuntimeError, match="input timed out"):
+        await api._pump_builtin_realtime_stt_input(
+            command_id=command_id,
+            params=RealtimeAudioTranscriptionTaskParams(
+                model=ModelId("mlx-community/voxtral-realtime-test"),
+                input_sample_rate=16000,
+            ),
+            input_frames=input_frames(),
+        )
+
+    assert realtime_receiver.collect() == []
 
 
 @pytest.mark.anyio
@@ -287,6 +344,62 @@ async def test_realtime_stt_admission_reserves_local_instance(
         await first.input.cancel("test complete")
         _ = [frame async for frame in first.frames]
         task_group.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_realtime_stt_runner_error_finishes_command_without_cancelling(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A terminal runner error must use natural command finalization."""
+
+    api, realtime_receiver = _build_api()
+    card = _realtime_card()
+    api.state = _local_state(card)
+    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
+    _enable_realtime(api, tmp_path)
+    api._sync_builtin_speech_capability()
+    commands: list[object] = []
+
+    async def send(command: object) -> None:
+        commands.append(command)
+
+    async def emulate_worker() -> None:
+        while True:
+            frame = await realtime_receiver.receive()
+            if frame.kind != "completed":
+                continue
+            started = next(
+                command
+                for command in commands
+                if isinstance(command, RealtimeAudioTranscription)
+            )
+            await api._audio_transcription_queues[started.command_id].send(
+                ErrorChunk(model=card.model_id, error_message="decode failed")
+            )
+            return
+
+    monkeypatch.setattr(api, "_send", send)
+    frames: list[CapabilityStreamFrame] = []
+    async with api._tg as task_group:
+        task_group.start_soon(api._apply_provider_data)
+        task_group.start_soon(emulate_worker)
+        session = await api._extension_context.stream_capability(
+            NodeId("api-node"),
+            REALTIME_STT_CAPABILITY_DESCRIPTOR.id,
+            REALTIME_STT_CAPABILITY_DESCRIPTOR.version,
+            descriptor_revision(REALTIME_STT_CAPABILITY_DESCRIPTOR),
+            {"model": str(card.model_id), "sample_rate": 16000},
+            timeout_seconds=2.0,
+        )
+        assert session.input is not None
+        await session.input.complete()
+        frames = [frame async for frame in session.frames]
+        task_group.cancel_scope.cancel()
+
+    assert frames[-1].kind == "failed"
+    assert any(isinstance(command, TaskFinished) for command in commands)
+    assert not any(isinstance(command, TaskCancelled) for command in commands)
 
 
 @pytest.mark.anyio
