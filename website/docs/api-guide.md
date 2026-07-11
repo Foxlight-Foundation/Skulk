@@ -1479,7 +1479,9 @@ The wire contract implements a bounded subset of OpenAI Realtime transcription:
 Version 1 accepts JSON text WebSocket messages and base64-encoded mono,
 signed little-endian PCM16 at 24 kHz. A decoded audio frame is capped at 1 MiB,
 the encoded WebSocket event at 2 MiB, and one session at 64 MiB of decoded
-audio. `input_audio_buffer.clear` is deliberately unsupported because the API
+audio. Provider transcript text is capped at 1 MiB per event and in the
+pre-commit buffer; overflow emits a typed transcription failure and closes the
+socket with `1011`. `input_audio_buffer.clear` is deliberately unsupported because the API
 forwards audio incrementally and retains no replay buffer that could safely
 retract already-delivered media. Browser connections must be same-origin; SDK
 clients without an `Origin` header remain supported.

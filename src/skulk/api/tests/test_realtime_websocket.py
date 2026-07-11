@@ -13,6 +13,7 @@ from starlette.testclient import WebSocketTestSession
 from starlette.websockets import WebSocketDisconnect
 
 from skulk.api.main import API
+from skulk.api.realtime import _MAX_TRANSCRIPT_TEXT_BYTES
 from skulk.extensions import (
     CapabilityResult,
     CapabilityStreamError,
@@ -496,6 +497,74 @@ def test_realtime_websocket_surfaces_unexpected_provider_output_failure() -> Non
         assert disconnect.value.code == 1011
 
     assert [frame.kind for frame in input_frames] == ["started", "cancelled"]
+
+
+def test_realtime_websocket_rejects_oversized_final_transcript() -> None:
+    """A final transcript cannot exceed the bounded server-event payload."""
+
+    api = _build_api()
+    input_completed = Event()
+
+    async def open_session(model: str, sample_rate: int) -> CapabilityStreamSession:
+        del model, sample_rate
+
+        async def send_input(frame: CapabilityStreamFrame) -> None:
+            if frame.kind == "completed":
+                input_completed.set()
+
+        input_stream = CapabilityStreamInput(
+            call_id="oversized-output",
+            deadline_at=anyio.current_time() + 10.0,
+            send_frame=send_input,
+        )
+        await input_stream.start()
+
+        async def output_frames() -> AsyncIterator[CapabilityStreamFrame]:
+            yield CapabilityStreamFrame(
+                call_id="oversized-output",
+                direction="provider_to_caller",
+                sequence=0,
+                kind="started",
+            )
+            while not input_completed.is_set():
+                await anyio.sleep(0)
+            yield CapabilityStreamFrame(
+                call_id="oversized-output",
+                direction="provider_to_caller",
+                sequence=1,
+                kind="completed",
+                payload={"text": "x" * (_MAX_TRANSCRIPT_TEXT_BYTES + 1)},
+            )
+
+        return CapabilityStreamSession(
+            open_result=CapabilityResult(
+                call_id="oversized-output",
+                ok=True,
+                result={"admitted": True},
+            ),
+            frames=output_frames(),
+            input=input_stream,
+        )
+
+    api._open_realtime_transcription_session = open_session
+    client = TestClient(api.app)
+
+    with client.websocket_connect("/v1/realtime?model=org%2Frealtime-stt") as websocket:
+        assert _receive_json(websocket)["type"] == "session.created"
+        websocket.send_json(
+            {
+                "type": "input_audio_buffer.append",
+                "audio": base64.b64encode(b"\x01\x00").decode("ascii"),
+            }
+        )
+        websocket.send_json({"type": "input_audio_buffer.commit"})
+        assert _receive_json(websocket)["type"] == "input_audio_buffer.committed"
+        failed = _receive_json(websocket)
+        assert failed["type"] == "conversation.item.input_audio_transcription.failed"
+        assert _mapping(failed["error"])["code"] == "provider_output_too_large"
+        with pytest.raises(WebSocketDisconnect) as disconnect:
+            _receive_json(websocket)
+        assert disconnect.value.code == 1011
 
 
 def test_realtime_websocket_drains_partial_output_before_commit() -> None:

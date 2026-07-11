@@ -21,7 +21,7 @@ from skulk.extensions import (
 
 _PCM_SAMPLE_RATE = 24_000
 _MAX_SESSION_AUDIO_BYTES = 64 * 1024 * 1024
-_MAX_PENDING_TRANSCRIPT_BYTES = 1024 * 1024
+_MAX_TRANSCRIPT_TEXT_BYTES = 1024 * 1024
 REALTIME_WEBSOCKET_MAX_MESSAGE_BYTES = 2 * MAX_INLINE_MEDIA_BYTES
 """Maximum encoded JSON event size accepted by the WebSocket edge."""
 
@@ -502,19 +502,14 @@ class RealtimeTranscriptionBridge:
                     continue
                 if frame.kind == "chunk":
                     text = self._frame_text(frame)
+                    text_bytes = len(text.encode("utf-8"))
+                    if text_bytes > _MAX_TRANSCRIPT_TEXT_BYTES:
+                        await self._fail_oversized_transcript(cancel_scope)
+                        return
                     if not self._commit_announced.is_set():
-                        pending_delta_bytes += len(text.encode("utf-8"))
-                        if pending_delta_bytes > _MAX_PENDING_TRANSCRIPT_BYTES:
-                            await self._send_transcription_failed(
-                                code="provider_output_too_large",
-                                message=(
-                                    "provider produced more than "
-                                    f"{_MAX_PENDING_TRANSCRIPT_BYTES} bytes of "
-                                    "transcript before input commit"
-                                ),
-                            )
-                            await self._close(1011)
-                            cancel_scope.cancel()
+                        pending_delta_bytes += text_bytes
+                        if pending_delta_bytes > _MAX_TRANSCRIPT_TEXT_BYTES:
+                            await self._fail_oversized_transcript(cancel_scope)
                             return
                         pending_deltas.append(text)
                         continue
@@ -534,6 +529,10 @@ class RealtimeTranscriptionBridge:
                     continue
                 terminal = True
                 if frame.kind == "completed":
+                    transcript = self._frame_text(frame)
+                    if len(transcript.encode("utf-8")) > _MAX_TRANSCRIPT_TEXT_BYTES:
+                        await self._fail_oversized_transcript(cancel_scope)
+                        return
                     await self._commit_announced.wait()
                     await self._send_transcript_deltas(pending_deltas)
                     await self._send_json(
@@ -544,7 +543,7 @@ class RealtimeTranscriptionBridge:
                             ),
                             "item_id": self._item_id,
                             "content_index": 0,
-                            "transcript": self._frame_text(frame),
+                            "transcript": transcript,
                         }
                     )
                     await self._close(1000)
@@ -701,6 +700,20 @@ class RealtimeTranscriptionBridge:
             pass
         finally:
             cancel_scope.cancel()
+
+    async def _fail_oversized_transcript(
+        self,
+        cancel_scope: anyio.CancelScope,
+    ) -> None:
+        await self._send_transcription_failed(
+            code="provider_output_too_large",
+            message=(
+                "provider transcript exceeds the bounded text limit of "
+                f"{_MAX_TRANSCRIPT_TEXT_BYTES} bytes"
+            ),
+        )
+        await self._close(1011)
+        cancel_scope.cancel()
 
     async def _send_error(
         self,
