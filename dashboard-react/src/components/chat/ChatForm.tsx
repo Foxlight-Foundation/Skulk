@@ -404,6 +404,7 @@ export function ChatForm({
   const [message, setMessage] = useState('');
   const [files, setFiles] = useState<ChatUploadedFile[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [isStartingRecording, setIsStartingRecording] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
@@ -417,6 +418,8 @@ export function ChatForm({
   const realtimeCaptureRef = useRef<RealtimePcmCapture | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingCancelledRef = useRef(false);
+  const recordingStartingRef = useRef(false);
+  const componentMountedRef = useRef(true);
   const recordingStartedAtRef = useRef(0);
   const recordingTimerRef = useRef<number | null>(null);
 
@@ -458,7 +461,8 @@ export function ChatForm({
   const transcriptionReady = Boolean(
     selectedTranscriptionId && browserRecordingAvailable,
   );
-  const canSpeakDraft = speechReady && message.trim().length > 0 && !isRecording && !isTranscribing;
+  const canSpeakDraft = speechReady && message.trim().length > 0
+    && !isStartingRecording && !isRecording && !isTranscribing;
   const displayVoiceError = mediaError ?? voiceError;
   const showVoiceControls = transcriptionModels.length > 0 || speechModels.length > 0 || Boolean(displayVoiceError);
   const startRecordingLabel = useRealtimeCapture
@@ -507,7 +511,12 @@ export function ChatForm({
   }, []);
 
   const startRecording = useCallback(async () => {
-    if (!transcriptionReady || isLoading || isTranscribing) return;
+    if (
+      !transcriptionReady
+      || isLoading
+      || isTranscribing
+      || recordingStartingRef.current
+    ) return;
     if (!secureRecordingContext) {
       setMediaError(t('chat.form.voiceErrors.secureContextRequired', 'Microphone requires HTTPS or localhost.'));
       return;
@@ -521,9 +530,16 @@ export function ChatForm({
       return;
     }
 
+    recordingStartingRef.current = true;
+    setIsStartingRecording(true);
     try {
       setMediaError(null);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!componentMountedRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      mediaStreamRef.current = stream;
       if (useRealtimeCapture && selectedTranscriptionId) {
         let capture: RealtimePcmCapture | null = null;
         const socket = new RealtimeTranscriptionSocket({
@@ -532,6 +548,7 @@ export function ChatForm({
             if (realtimeSocketRef.current !== socket) return;
             realtimeSocketRef.current = null;
             realtimeCaptureRef.current = null;
+            mediaStreamRef.current = null;
             stopRecordingTimer();
             setIsRecording(false);
             setRecordingSeconds(0);
@@ -564,6 +581,7 @@ export function ChatForm({
           });
         } catch (error) {
           realtimeSocketRef.current = null;
+          mediaStreamRef.current = null;
           socket.cancel();
           stream.getTracks().forEach((track) => track.stop());
           throw error;
@@ -644,6 +662,9 @@ export function ChatForm({
           ? error.message
           : t('chat.form.voiceErrors.microphoneUnavailable', 'Microphone unavailable.');
       setMediaError(messageText);
+    } finally {
+      recordingStartingRef.current = false;
+      if (componentMountedRef.current) setIsStartingRecording(false);
     }
   }, [
     appendTranscript,
@@ -666,6 +687,7 @@ export function ChatForm({
       const realtimeCapture = realtimeCaptureRef.current;
       realtimeSocketRef.current = null;
       realtimeCaptureRef.current = null;
+      mediaStreamRef.current = null;
       stopRecordingTimer();
       setIsRecording(false);
       setRecordingSeconds(0);
@@ -701,8 +723,11 @@ export function ChatForm({
   }, [appendTranscript, cleanupRecordingResources, stopRecordingTimer, t]);
 
   useEffect(() => {
+    componentMountedRef.current = true;
     return () => {
+      componentMountedRef.current = false;
       stopRecordingTimer();
+      recordingStartingRef.current = false;
       mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
       realtimeSocketRef.current?.cancel();
       void realtimeCaptureRef.current?.stop();
@@ -874,7 +899,7 @@ export function ChatForm({
             <VoiceLabel>{t('chat.form.sttLabel', 'STT')}</VoiceLabel>
             <VoiceSelect
               value={selectedTranscriptionId ?? ''}
-              disabled={transcriptionModels.length === 0 || isRecording || isTranscribing}
+              disabled={transcriptionModels.length === 0 || isStartingRecording || isRecording || isTranscribing}
               onChange={(event) => onSelectTranscriptionModel?.(event.target.value || null)}
               aria-label={t('chat.form.selectTranscriptionModel', 'Select transcription model')}
             >
@@ -921,8 +946,8 @@ export function ChatForm({
                 size="sm"
                 icon
                 type="button"
-                loading={isTranscribing}
-                disabled={!transcriptionReady || isLoading}
+                loading={isStartingRecording || isTranscribing}
+                disabled={!transcriptionReady || isLoading || isStartingRecording}
                 onClick={startRecording}
                 aria-label={recordingButtonLabel}
                 title={recordingButtonLabel}

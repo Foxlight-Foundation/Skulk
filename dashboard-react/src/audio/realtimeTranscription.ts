@@ -309,13 +309,25 @@ export class RealtimeTranscriptionSocket {
 
 /** Own the browser Web Audio graph that forwards mono microphone samples. */
 export class RealtimePcmCapture {
+  private readonly stream: MediaStream;
+  private readonly context: AudioContext;
+  private readonly source: MediaStreamAudioSourceNode;
+  private readonly capture: AudioWorkletNode;
+  private readonly mute: GainNode;
+
   private constructor(
-    private readonly stream: MediaStream,
-    private readonly context: AudioContext,
-    private readonly source: MediaStreamAudioSourceNode,
-    private readonly capture: AudioWorkletNode,
-    private readonly mute: GainNode,
-  ) {}
+    stream: MediaStream,
+    context: AudioContext,
+    source: MediaStreamAudioSourceNode,
+    capture: AudioWorkletNode,
+    mute: GainNode,
+  ) {
+    this.stream = stream;
+    this.context = context;
+    this.source = source;
+    this.capture = capture;
+    this.mute = mute;
+  }
 
   /** Open a 128-frame AudioWorklet capture graph for an existing microphone. */
   static async start(
