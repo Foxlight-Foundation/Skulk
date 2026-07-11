@@ -559,6 +559,16 @@ class Router:
         rejected_streams: set[tuple[str, str, str]] = set()
         rejected_stream_order: deque[tuple[str, str, str]] = deque()
         rejection_slots = Semaphore(_ZENOH_DATA_MAX_REJECTION_TASKS)
+
+        def reject_stream(stream: tuple[str, str, str]) -> None:
+            rejected_streams.add(stream)
+            rejected_stream_order.append(stream)
+            while (
+                len(rejected_stream_order)
+                > _ZENOH_DATA_REJECTED_STREAM_TOMBSTONES
+            ):
+                rejected_streams.discard(rejected_stream_order.popleft())
+
         async with TaskGroup() as task_group:
             with self._zenoh_out_recv as items:
                 async for packet in items:
@@ -599,15 +609,7 @@ class Router:
                             >= _ZENOH_DATA_MAX_STREAMS_PER_OWNER
                         ):
                             self._data_plane_egress_observer.record_dropped(owner)
-                            rejected_streams.add(stream)
-                            rejected_stream_order.append(stream)
-                            while (
-                                len(rejected_stream_order)
-                                > _ZENOH_DATA_REJECTED_STREAM_TOMBSTONES
-                            ):
-                                rejected_streams.discard(
-                                    rejected_stream_order.popleft()
-                                )
+                            reject_stream(stream)
                             logger.warning(
                                 "Zenoh DATA stream admission full for owner; "
                                 "rejecting the affected command"
@@ -651,8 +653,9 @@ class Router:
                             "Zenoh DATA command queue full; dropping frame so "
                             "unrelated streams remain progressive"
                         )
-                        if packet.is_terminal:
+                        if packet.is_terminal or packet.topic == REALTIME_AUDIO.topic:
                             sender.close()
+                            reject_stream(stream)
                             try:
                                 rejection_slots.acquire_nowait()
                             except WouldBlock:

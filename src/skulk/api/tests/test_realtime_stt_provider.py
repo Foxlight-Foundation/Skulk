@@ -245,6 +245,7 @@ async def test_runner_ready_event_resynchronizes_realtime_stt_advertisement(
     _enable_realtime(api, tmp_path)
     api._sync_builtin_speech_capability()
     assert api._telemetry_view.local_advertised_capabilities == set()
+
     runner_id = next(iter(state.runners))
 
     async with anyio.create_task_group() as task_group:
@@ -263,6 +264,52 @@ async def test_runner_ready_event_resynchronizes_realtime_stt_advertisement(
         task_group.cancel_scope.cancel()
 
     assert api._telemetry_view.local_advertised_capabilities == {"stt.realtime"}
+
+
+def test_realtime_stt_discovery_rejects_multi_host_instance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """API admission must match the master's single-host speech invariant."""
+
+    api, _, _ = _build_api()
+    state = _local_state(_realtime_card())
+    instance_id, instance = next(iter(state.instances.items()))
+    first_runner, shard = next(
+        iter(instance.shard_assignments.runner_to_shard.items())
+    )
+    second_runner = RunnerId("speech-runner-two")
+    assignments = instance.shard_assignments.model_copy(
+        update={
+            "runner_to_shard": {
+                first_runner: shard,
+                second_runner: shard,
+            },
+            "node_to_runner": {
+                NodeId("api-node"): first_runner,
+                NodeId("worker-node"): second_runner,
+            },
+        }
+    )
+    api.state = state.model_copy(
+        update={
+            "instances": {
+                instance_id: instance.model_copy(
+                    update={"shard_assignments": assignments}
+                )
+            },
+            "runners": {
+                first_runner: RunnerReady(),
+                second_runner: RunnerReady(),
+            },
+        }
+    )
+    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
+    _enable_realtime(api, tmp_path)
+
+    api._sync_builtin_speech_capability()
+
+    assert api._telemetry_view.local_advertised_capabilities == set()
 
 
 @pytest.mark.anyio

@@ -6,7 +6,7 @@ flag is off, stay on libp2p gossipsub. These tests pin that decision without
 opening a network session.
 """
 
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 from skulk_pyo3_bindings import NetworkingHandle, ZenohHandle
@@ -473,6 +473,87 @@ def test_realtime_audio_admission_rejection_routes_back_to_source() -> None:
         assert zenoh.packet is not None
         assert zenoh.packet.kind == "transport_failed"
         assert zenoh.packet.target_node == NodeId("api-node")
+
+    anyio.run(_run)
+
+
+def test_realtime_audio_chunk_overflow_fails_source_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dropped PCM chunk must fail rather than silently truncate input."""
+
+    import anyio
+
+    import skulk.routing.router as router_module
+    from skulk.routing.realtime_audio import RealtimeAudioPacket
+    from skulk.shared.types.common import CommandId, NodeId
+
+    monkeypatch.setattr(router_module, "_ZENOH_DATA_STREAM_BUFFER", 1)
+
+    class _BlockingZenoh:
+        def __init__(self) -> None:
+            self.first_chunk_started = anyio.Event()
+            self.release_first_chunk = anyio.Event()
+            self.failure_published = anyio.Event()
+            self.packets: list[RealtimeAudioPacket] = []
+
+        async def zenoh_publish(self, _key: str, data: bytes) -> None:
+            packet = REALTIME_AUDIO.deserialize(data)
+            self.packets.append(packet)
+            if packet.kind == "chunk" and not self.first_chunk_started.is_set():
+                self.first_chunk_started.set()
+                await self.release_first_chunk.wait()
+            elif packet.kind == "transport_failed":
+                self.failure_published.set()
+
+    def packet(
+        sequence: int,
+        kind: Literal["chunk", "completed"] = "chunk",
+    ) -> OutboundPacket:
+        frame = RealtimeAudioPacket(
+            source_node=NodeId("api-node"),
+            target_node=NodeId("worker-node"),
+            command_id=CommandId("overflow-command"),
+            sequence=sequence,
+            kind=kind,
+            data=b"\x00\x00" if kind == "chunk" else b"",
+        )
+        return OutboundPacket(
+            topic=REALTIME_AUDIO.topic,
+            routing_key="worker-node",
+            stream_key="overflow-command",
+            is_terminal=frame.is_terminal,
+            data=REALTIME_AUDIO.serialize(frame),
+        )
+
+    async def _run() -> None:
+        zenoh = _BlockingZenoh()
+        router = Router(
+            handle=cast(NetworkingHandle, object()),
+            zenoh=cast(ZenohHandle, cast(object, zenoh)),
+            node_id="api-node",
+        )
+        assert router._zenoh_out_send is not None  # pyright: ignore[reportPrivateUsage]
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                router._zenoh_networking_publish  # pyright: ignore[reportPrivateUsage]
+            )
+            await router._zenoh_out_send.send(packet(1))  # pyright: ignore[reportPrivateUsage]
+            with anyio.fail_after(0.5):
+                await zenoh.first_chunk_started.wait()
+            await router._zenoh_out_send.send(packet(2))  # pyright: ignore[reportPrivateUsage]
+            await router._zenoh_out_send.send(packet(3))  # pyright: ignore[reportPrivateUsage]
+            with anyio.fail_after(0.5):
+                await zenoh.failure_published.wait()
+            await router._zenoh_out_send.send(packet(4, "completed"))  # pyright: ignore[reportPrivateUsage]
+            zenoh.release_first_chunk.set()
+            task_group.cancel_scope.cancel()
+
+        failures = [item for item in zenoh.packets if item.kind == "transport_failed"]
+        assert len(failures) == 1
+        assert failures[0].target_node == NodeId("api-node")
+        assert router.data_plane_egress_diagnostics().remote_frames_dropped >= 1
 
     anyio.run(_run)
 

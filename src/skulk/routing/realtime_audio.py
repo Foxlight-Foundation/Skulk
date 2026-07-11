@@ -17,7 +17,7 @@ _MAX_HEADER_BYTES = 16_384
 
 
 class RealtimeAudioPacket(CamelCaseModel):
-    """One binary PCM frame or transport failure addressed to a worker node."""
+    """One node-addressed PCM frame or source-routed transport failure."""
 
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid")
 

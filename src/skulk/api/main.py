@@ -3154,6 +3154,8 @@ class API:
             return None
         candidates: list[tuple[bool, str, str, InstanceId, ModelCard, NodeId]] = []
         for instance_id, instance in self.state.instances.items():
+            if len(instance.shard_assignments.node_to_runner) != 1:
+                continue
             if require_idle and (
                 any(
                     active.reserved_instance_id == instance_id
