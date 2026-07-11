@@ -399,13 +399,26 @@ async def _collect_local_stream(
 
 
 async def test_local_provider_stream_preserves_lifecycle_and_binary_media() -> None:
-    opened, frames = await _collect_local_stream(_build_api(_TtsProvider()))
+    api = _build_api(_TtsProvider())
+    opened, frames = await _collect_local_stream(api)
 
     assert opened is True
     assert [frame.kind for frame in frames] == ["started", "chunk", "completed"]
     assert [frame.sequence for frame in frames] == [0, 1, 2]
     assert isinstance(frames[1].media, InlineMediaAttachment)
     assert frames[1].media.data == b"\x00\xff\x80\x7f"
+    diagnostics = api._provider_observer.snapshot(  # pyright: ignore[reportPrivateUsage]
+        active_unary_calls=0,
+        stream_slots_in_use=0,
+        unary_concurrency_limit=8,
+        stream_concurrency_limit=8,
+    )
+    tts = diagnostics.capabilities["tts@1.0.0"]
+    assert tts.admitted_streams == 1
+    assert tts.output_frames == 3
+    assert tts.output_media_bytes == 4
+    assert tts.completed_streams == 1
+    assert tts.missing_terminal_streams == 0
 
 
 async def test_mixed_provider_uses_descriptor_io_mode_for_handler() -> None:
@@ -888,6 +901,13 @@ async def test_dynamic_admission_rejection_emits_no_started_frame() -> None:
     assert result.error.code == "not_found"
     assert provider.handler_called is False
     assert api._active_capability_streams == {}  # pyright: ignore[reportPrivateUsage]
+    diagnostics = api._provider_observer.snapshot(  # pyright: ignore[reportPrivateUsage]
+        active_unary_calls=0,
+        stream_slots_in_use=0,
+        unary_concurrency_limit=8,
+        stream_concurrency_limit=8,
+    )
+    assert diagnostics.capabilities["tts@1.0.0"].rejected_streams == 1
 
 
 async def test_dynamic_admission_reserves_concurrency_slot_before_await(

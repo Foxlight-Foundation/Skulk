@@ -216,6 +216,16 @@ Track speech transforms separately from text/image generation:
 These fields should feed diagnostics first and the results ledger once the
 ledger has a speech result schema.
 
+The first diagnostics slice now exposes active provider calls, stream admission
+and overload pressure, caller-input queue depth, input/output frame and inline
+media byte volume, admission-to-first-output latency, total stream lifetime,
+terminal outcomes, cancellation requests, and missing terminals. These are
+available in `NodeDiagnostics.provider`, both aggregated and grouped by
+qualified speech capability. Audio duration, real-time factor, sample-format
+breakdowns, transcript partial/final counts, detailed cancellation reasons, and
+runner memory attribution still require speech-runner instrumentation and the
+results-ledger schema; they are not inferred from byte counts.
+
 ## Privacy And Retention
 
 The target policy for realtime/fabric speech is no payload retention by default:
@@ -249,8 +259,10 @@ caller-provided filesystem paths.
    Binary audio uses client-streaming transport plus input half-close rather
    than the JSON-only unary call envelope. Managed blob resolution remains a
    follow-up requiring a general immutable blob service.
-5. Add speech-specific diagnostics for active requests/sessions, queue depth,
-   first audio/transcript latency, and cancellation reason.
+5. **Partial:** add provider diagnostics for active requests/sessions, admission
+   pressure, queue depth, media bytes, first audio/transcript latency, terminal
+   outcomes, and cancellation requests. Detailed cancellation reasons and
+   audio-duration/real-time-factor metrics remain runner/result-ledger work.
 6. **Complete:** add remote serving-node realtime audio ingress with bounded,
    no-event-retention semantics, a same-node short circuit, Zenoh-only remote
    delivery, source-routed transport failure, and master-side instance

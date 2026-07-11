@@ -120,6 +120,9 @@ A model card's `placement.compatible_backends` selects which engine serves it
   The provider topic also carries negotiated caller media for client-streaming
   and bidirectional capabilities, isolated by owner/call/direction; caller
   `complete()` half-closes input without ending provider output.
+  `NodeDiagnostics.provider` exposes bounded per-capability admission,
+  caller-input queue, media-volume, first-output, terminal, and cancellation
+  metrics without retaining payloads or completed call IDs.
   Mounted STT models serve non-streaming `/v1/audio/transcriptions`. Ready
   mounted capacity also advertises the built-in `stt@1.0.0` batch transform:
   callers send bounded encoded audio as binary provider frames, half-close

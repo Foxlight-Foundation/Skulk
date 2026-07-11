@@ -473,6 +473,9 @@ def test_realtime_audio_admission_rejection_routes_back_to_source() -> None:
         assert zenoh.packet is not None
         assert zenoh.packet.kind == "transport_failed"
         assert zenoh.packet.target_node == NodeId("api-node")
+        diagnostics = router.data_plane_egress_diagnostics()
+        assert diagnostics.owners["api-node"].frames_published == 1
+        assert "worker-node" not in diagnostics.owners
 
     anyio.run(_run)
 

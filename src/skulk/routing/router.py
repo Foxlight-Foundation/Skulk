@@ -767,14 +767,14 @@ class Router:
                     raise
                 except Exception as exception:
                     self._data_plane_egress_observer.record_publish_failure(
-                        owner, time.monotonic() - started_at
+                        rejection_owner, time.monotonic() - started_at
                     )
                     logger.opt(exception=exception).warning(
                         "Zenoh DATA admission rejection publish failed"
                     )
                 else:
                     self._data_plane_egress_observer.record_published(
-                        owner,
+                        rejection_owner,
                         len(data),
                         time.monotonic() - started_at,
                     )
