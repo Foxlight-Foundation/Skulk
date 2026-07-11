@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import io
+import sys
 import time
 from collections import defaultdict, deque
 from collections.abc import Container, Mapping
@@ -267,6 +268,11 @@ def _local_usable_vram() -> Memory | None:
     the system-RAM path. The master is the backend authority that decides a shard
     belongs on this GPU node in the first place.
     """
+    # Both collectors are Linux-only; bail before any import attempt so
+    # macOS shard-fit checks never pay repeated pynvml import probes.
+    if sys.platform != "linux":
+        return None
+
     from skulk.utils.info_gatherer.linux_gpu import (
         find_amd_gpu_device,
         read_accelerator_metrics,
