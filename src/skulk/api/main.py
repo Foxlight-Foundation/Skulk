@@ -6325,6 +6325,18 @@ class API:
             model=ModelId(task.task_params.model),
             error_message=error_message,
         )
+        if isinstance(task, task_types.RealtimeAudioTranscription):
+            queue = self._audio_transcription_queues.get(task.command_id)
+            if queue is not None:
+                try:
+                    queue.send_nowait(error_chunk)
+                except WouldBlock:
+                    queue.close()
+                    self._audio_transcription_queues.pop(task.command_id, None)
+                    await self._cancel_audio_transcription_command(task.command_id)
+                except (BrokenResourceError, ClosedResourceError):
+                    self._audio_transcription_queues.pop(task.command_id, None)
+            return
         for queue_map in (
             self._text_generation_queues,
             self._image_generation_queues,

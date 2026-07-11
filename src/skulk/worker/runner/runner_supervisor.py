@@ -509,7 +509,10 @@ class RunnerSupervisor:
 
         if self._realtime_audio_sender is None:
             raise RuntimeError("runner has no realtime audio IPC sender")
-        await self._realtime_audio_sender.send_async(frame)
+        try:
+            await self._realtime_audio_sender.send_async(frame)
+        except ClosedResourceError as exc:
+            await self._check_runner(exc)
 
     async def cancel_task(self, task_id: TaskId):
         if task_id in self.completed:

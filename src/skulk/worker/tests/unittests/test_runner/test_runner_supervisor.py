@@ -8,6 +8,7 @@ from anyio import to_thread
 from skulk.shared.models.model_cards import ModelId
 from skulk.shared.types.audio import (
     AudioTranscriptionTaskParams,
+    RealtimeAudioInputFrame,
     RealtimeAudioTranscriptionTaskParams,
     SpeechSynthesisTaskParams,
 )
@@ -378,6 +379,55 @@ async def test_check_runner_emits_errors_for_inflight_generation_and_realtime() 
     event_sender.close()
     with anyio.move_on_after(0.1):
         await event_receiver.aclose()
+
+
+@pytest.mark.asyncio
+async def test_realtime_audio_closed_ipc_invokes_runner_failure_handling() -> None:
+    """A closed audio pipe must not escape into the worker task group."""
+
+    event_sender, _ = channel[Event]()
+    task_sender, _ = mp_channel[Task]()
+    cancel_sender, _ = mp_channel[TaskId]()
+    realtime_sender, _ = mp_channel[RealtimeAudioInputFrame]()
+    realtime_sender.close()
+    _, ev_recv = mp_channel[Event]()
+    _, diag_recv = mp_channel[RunnerDiagnosticUpdate]()
+    bound_instance = get_bound_mlx_ring_instance(
+        instance_id=InstanceId("instance-a"),
+        model_id=ModelId("mlx-community/Llama-3.2-1B-Instruct-4bit"),
+        runner_id=RunnerId("runner-a"),
+        node_id=NodeId("node-a"),
+    )
+    supervisor = RunnerSupervisor(
+        shard_metadata=bound_instance.bound_shard,
+        bound_instance=bound_instance,
+        runner_process=cast("mp.Process", cast(object, _DeadProcess())),
+        initialize_timeout=400,
+        _ev_recv=ev_recv,
+        _diag_recv=diag_recv,
+        _task_sender=task_sender,
+        _event_sender=event_sender,
+        _cancel_sender=cancel_sender,
+        _realtime_audio_sender=realtime_sender,
+    )
+    failures: list[Exception] = []
+
+    async def check_runner(e: Exception) -> None:
+        failures.append(e)
+
+    supervisor._check_runner = check_runner  # pyright: ignore[reportPrivateUsage]
+    await supervisor.send_realtime_audio(
+        RealtimeAudioInputFrame(
+            command_id=CommandId("realtime-command"),
+            sequence=0,
+            kind="chunk",
+            data=b"\x00\x00",
+        )
+    )
+
+    assert len(failures) == 1
+    assert isinstance(failures[0], anyio.ClosedResourceError)
+    event_sender.close()
 
 
 @pytest.mark.asyncio

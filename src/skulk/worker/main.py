@@ -148,6 +148,7 @@ still refuses, preserving the leak-on-OOM guard (#290/#239)."""
 
 _REALTIME_AUDIO_PENDING_FRAMES = 256
 _REALTIME_AUDIO_PENDING_BYTES = 16 * 1024 * 1024
+_REALTIME_AUDIO_PENDING_TTL_SECONDS = 30.0
 _REALTIME_FINISHED_COMMANDS = 1024
 
 
@@ -579,6 +580,7 @@ class Worker:
             CommandId, list[RealtimeAudioInputFrame]
         ] = {}
         self._realtime_audio_pending_bytes: dict[CommandId, int] = {}
+        self._realtime_audio_pending_since: dict[CommandId, float] = {}
         self._realtime_runner_by_command: dict[CommandId, RunnerSupervisor] = {}
         self._realtime_finished_order: deque[CommandId] = deque()
         self._realtime_finished_commands: set[CommandId] = set()
@@ -749,6 +751,7 @@ class Worker:
                 tg.start_soon(self._poll_connection_updates)
                 if self._realtime_audio_receiver is not None:
                     tg.start_soon(self._realtime_audio_ingress)
+                    tg.start_soon(self._realtime_audio_janitor)
         finally:
             # Actual shutdown code - waits for all tasks to complete before executing.
             logger.info("Stopping Worker")
@@ -776,6 +779,9 @@ class Worker:
                 pending = self._realtime_audio_pending.setdefault(
                     frame.command_id, []
                 )
+                self._realtime_audio_pending_since.setdefault(
+                    frame.command_id, time.monotonic()
+                )
                 pending_bytes = self._realtime_audio_pending_bytes.get(
                     frame.command_id, 0
                 )
@@ -786,6 +792,7 @@ class Worker:
                 ):
                     self._realtime_audio_pending.pop(frame.command_id, None)
                     self._realtime_audio_pending_bytes.pop(frame.command_id, None)
+                    self._realtime_audio_pending_since.pop(frame.command_id, None)
                     logger.warning(
                         "Realtime STT input exceeded the pre-dispatch bound "
                         f"for command {frame.command_id}; cancelling"
@@ -805,6 +812,31 @@ class Worker:
                     pending_bytes + len(frame.data)
                 )
 
+    async def _realtime_audio_janitor(self) -> None:
+        """Cancel and release pre-dispatch audio that never acquires a task."""
+
+        while True:
+            await anyio.sleep(5)
+            cutoff = time.monotonic() - _REALTIME_AUDIO_PENDING_TTL_SECONDS
+            expired = [
+                command_id
+                for command_id, started_at in self._realtime_audio_pending_since.items()
+                if started_at <= cutoff
+                and command_id not in self._realtime_runner_by_command
+            ]
+            for command_id in expired:
+                logger.warning(
+                    "Realtime STT input expired before task dispatch for "
+                    f"command {command_id}; cancelling"
+                )
+                self._finish_realtime_command(command_id)
+                await self.command_sender.send(
+                    ForwarderCommand(
+                        origin=self._system_id,
+                        command=TaskCancelled(cancelled_command_id=command_id),
+                    )
+                )
+
     def _mark_realtime_command_finished(self, command_id: CommandId) -> None:
         """Bound the late-frame tombstones retained by the worker."""
 
@@ -822,6 +854,7 @@ class Worker:
         self._realtime_runner_by_command.pop(command_id, None)
         self._realtime_audio_pending.pop(command_id, None)
         self._realtime_audio_pending_bytes.pop(command_id, None)
+        self._realtime_audio_pending_since.pop(command_id, None)
         self._mark_realtime_command_finished(command_id)
 
     async def _forward_info(self, recv: Receiver[GatheredInfo]):
@@ -1393,6 +1426,7 @@ class Worker:
                     while command_id not in self._realtime_finished_commands:
                         pending = self._realtime_audio_pending.pop(command_id, [])
                         self._realtime_audio_pending_bytes.pop(command_id, None)
+                        self._realtime_audio_pending_since.pop(command_id, None)
                         if not pending:
                             self._realtime_runner_by_command[command_id] = runner
                             break
