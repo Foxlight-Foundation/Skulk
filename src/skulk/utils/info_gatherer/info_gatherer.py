@@ -45,6 +45,12 @@ from .linux_gpu import (
     read_system_profile,
 )
 from .mactop import MacmonMetrics, MactopMetrics
+from .nvidia_gpu import (
+    NvmlLike,
+    has_nvidia_gpu,
+    load_nvml,
+)
+from .nvidia_gpu import read_system_profile as read_nvidia_system_profile
 from .system_info import (
     get_friendly_name,
     get_model_and_chip,
@@ -871,19 +877,29 @@ class InfoGatherer:
         if self.gpu_linux_poll_interval is None:
             return
         device = find_amd_gpu_device()
+        nvml = None
         if device is None:
-            logger.info(
-                "no AMD GPU sysfs device (gpu_busy_percent) found; skipping GPU "
-                "telemetry on this node"
-            )
-            return
-        logger.info(f"reporting GPU telemetry from {device}")
+            # No AMD sysfs device: try NVML for an NVIDIA accelerator (rented
+            # CUDA nodes). Same passive-reads-only rule, same profile shape.
+            nvml = load_nvml()
+            if nvml is None or not has_nvidia_gpu(nvml):
+                logger.info(
+                    "no AMD GPU sysfs device and no NVML device found; skipping "
+                    "GPU telemetry on this node"
+                )
+                return
+            logger.info("reporting GPU telemetry from NVML device 0")
+        else:
+            logger.info(f"reporting GPU telemetry from {device}")
         while True:
             try:
                 with fail_after(5):
-                    await self.info_sender.send(
-                        LinuxGpuMetrics(system_profile=read_system_profile(device))
+                    profile = (
+                        read_system_profile(device)
+                        if device is not None
+                        else read_nvidia_system_profile(cast("NvmlLike", nvml))
                     )
+                    await self.info_sender.send(LinuxGpuMetrics(system_profile=profile))
             except (ClosedResourceError, BrokenResourceError):
                 # Consumer gone (worker shutdown/replacement): a stop signal,
                 # not a gathering fault; must escape this per-iteration

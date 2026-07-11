@@ -584,6 +584,20 @@ mixed-version clusters, and the fix is the same (upgrade the fleet and its
 extensions together). `SKULK_EXTENSIONS_DISABLE=1` is a node-local kill
 switch that skips discovery entirely.
 
+## NVIDIA / CUDA nodes
+
+NVIDIA GPUs join a cluster the same way AMD Strix nodes do: through the
+llama.cpp engines. The node declares `SKULK_LLAMA_CPP_BACKENDS=cuda` (the
+build is cross-checked so a CPU-only wheel can never masquerade as a GPU
+node), telemetry comes from a passive NVML collector that fills the same
+normalized accelerator profile as the Apple and AMD collectors, and
+placement admission uses that telemetry identically. A one-shot install
+recipe at `deployment/cuda/install-deps.sh` takes a machine with the NVIDIA
+driver present (rented GPU pods ship it) to a serving node: build
+toolchain, the CUDA llama-cpp-python build, the NVML binding, and
+optionally the CUDA `llama-server` for native speculative decoding and the
+RPC donor daemon for multi-node GGUF pooling.
+
 ## Field telemetry (opt-in)
 
 Skulk can report anonymous performance and reliability samples to Foxlight's
