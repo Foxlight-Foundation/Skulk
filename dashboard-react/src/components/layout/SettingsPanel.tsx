@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import styled, { keyframes } from 'styled-components';
+import { generateInstallId } from './TelemetryConsentModal';
 import { useConfig, type StoreConfig, type FullConfig, type LoggingConfig, type ExperimentsConfig, type TelemetryConfig } from '../../hooks/useConfig';
 import { Button } from '../common/Button';
 import { Field } from '../common/Field';
@@ -667,7 +668,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                       prev && {
                         ...prev,
                         consent: prev.consent === 'enabled' ? 'disabled' : 'enabled',
-                        install_id: prev.install_id || crypto.randomUUID(),
+                        install_id: prev.install_id || generateInstallId(),
                       },
                     )
                   }
@@ -692,7 +693,7 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                         ...prev,
                         diagnostics_consent:
                           prev.diagnostics_consent === 'enabled' ? 'disabled' : 'enabled',
-                        install_id: prev.install_id || crypto.randomUUID(),
+                        install_id: prev.install_id || generateInstallId(),
                       },
                     )
                   }

@@ -7991,8 +7991,21 @@ class API:
                 # Preserve experiment toggles when omitted from the request.
                 if "experiments" not in config_data and "experiments" in existing:
                     config_data["experiments"] = existing["experiments"]
+                # Preserve telemetry consent when omitted: a partial save
+                # from any client must never silently revoke or grant it.
+                if "telemetry" not in config_data and "telemetry" in existing:
+                    config_data["telemetry"] = existing["telemetry"]
             except Exception:
                 pass
+        # Stamp the consenting Skulk version server-side (the dashboard does
+        # not know it); a future material change to collection re-asks by
+        # comparing this stamp.
+        telemetry_section = cast(
+            "dict[str, object] | None",
+            config_data.get("telemetry") if isinstance(config_data.get("telemetry"), dict) else None,
+        )
+        if telemetry_section is not None and not telemetry_section.get("consented_version"):
+            telemetry_section["consented_version"] = get_skulk_version()
         # Validate by attempting to parse with Pydantic
         from skulk.store.config import SkulkConfig
 

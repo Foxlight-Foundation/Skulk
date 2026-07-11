@@ -111,6 +111,16 @@ const Button = styled.button<{ $primary?: boolean }>`
   font-weight: ${({ $primary }) => ($primary ? 600 : 400)};
 `;
 
+/** UUID even on non-secure origins (LAN HTTP dashboards lack crypto.randomUUID). */
+export function generateInstallId(): string {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 function markSeen(): void {
   try {
     localStorage.setItem(TELEMETRY_CONSENT_SEEN_KEY, new Date().toISOString());
@@ -161,7 +171,7 @@ export function TelemetryConsentModal() {
     const telemetry: TelemetryConfig = {
       consent: telemetryOn ? 'enabled' : 'disabled',
       diagnostics_consent: diagnosticsOn ? 'enabled' : 'disabled',
-      install_id: telemetryOn || diagnosticsOn ? crypto.randomUUID() : '',
+      install_id: telemetryOn || diagnosticsOn ? generateInstallId() : '',
       consented_at: new Date().toISOString(),
       consented_version: '',
       ingest_url:
@@ -179,9 +189,9 @@ export function TelemetryConsentModal() {
   if (!visible) return null;
 
   return (
-    <Backdrop role="dialog" aria-modal="true">
+    <Backdrop role="dialog" aria-modal="true" aria-labelledby="telemetry-consent-title">
       <Card>
-        <Title>{t('telemetry.consent.title', 'Help make Skulk better?')}</Title>
+        <Title id="telemetry-consent-title">{t('telemetry.consent.title', 'Help make Skulk better?')}</Title>
         <Body>
           {t(
             'telemetry.consent.body',
