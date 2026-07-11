@@ -205,6 +205,7 @@ export function App() {
   const { t } = useSkulkTranslation();
   const {
     topology,
+    localNodeId,
     connected,
     downloads,
     nodeDisk,
@@ -213,8 +214,12 @@ export function App() {
     nodeThunderbolt,
     nodeThunderboltBridge,
     nodeRdmaCtl,
+    nodeCapabilities,
     thunderboltBridgeCycles,
   } = useClusterState();
+  const realtimeTranscriptionAvailable = Boolean(
+    localNodeId && nodeCapabilities[localNodeId]?.includes('stt.realtime'),
+  );
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Phone-width header: nav and icon actions collapse into the hamburger
   // sheet. The open flag resets when the viewport grows past the breakpoint
@@ -664,7 +669,10 @@ export function App() {
                 onChat={(modelId) => { dispatch(chatActions.selectModel(modelId)); setActiveRoute('chat'); }}
               />
             ) : activeRoute === 'chat' ? (
-              <ChatView readyInstances={instanceCards} />
+              <ChatView
+                readyInstances={instanceCards}
+                realtimeTranscriptionAvailable={realtimeTranscriptionAvailable}
+              />
             ) : activeRoute === 'operator' ? (
               <OperatorPage />
             ) : topology ? (

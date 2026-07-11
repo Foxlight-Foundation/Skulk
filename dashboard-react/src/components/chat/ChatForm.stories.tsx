@@ -10,6 +10,14 @@ const sttModel: ChatSpeechModelOption = {
   responseFormats: ['wav'],
 };
 
+const realtimeSttModel: ChatSpeechModelOption = {
+  modelId: 'mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit',
+  label: 'Voxtral-Mini-4B-Realtime-2602-4bit',
+  defaultResponseFormat: 'wav',
+  responseFormats: ['wav'],
+  supportsRealtime: true,
+};
+
 const ttsModel: ChatSpeechModelOption = {
   modelId: 'mlx-community/Kokoro-82M-bf16',
   label: 'Kokoro-82M-bf16',
@@ -21,7 +29,11 @@ const meta: Meta<typeof ChatForm> = {
   title: 'Chat/ChatForm',
   component: ChatForm,
   parameters: { layout: 'centered' },
-  decorators: [(Story) => <div style={{ width: 600, padding: 24, background: '#000' }}><Story /></div>],
+  decorators: [(Story) => (
+    <div style={{ width: 'min(600px, calc(100vw - 48px))', padding: 24, background: '#000' }}>
+      <Story />
+    </div>
+  )],
 };
 
 export default meta;
@@ -63,6 +75,17 @@ export const SttOnly: Story = {
     transcriptionModels: [sttModel],
     selectedTranscriptionModelId: sttModel.modelId,
     onTranscribeAudio: async () => 'recorded transcript',
+  },
+};
+
+export const RealtimeStt: Story = {
+  args: {
+    onSend: () => {},
+    modelLabel: 'Qwen3-30B-A3B-4bit',
+    transcriptionModels: [realtimeSttModel],
+    selectedTranscriptionModelId: realtimeSttModel.modelId,
+    realtimeTranscriptionAvailable: true,
+    onTranscribeAudio: async () => 'batch fallback transcript',
   },
 };
 
