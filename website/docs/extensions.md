@@ -224,12 +224,12 @@ The call contract:
   the hot path and calls are never event-sourced. Calling your own node is an
   in-process fast path with identical guards.
 
-## Streaming a capability (`stream_capability` / `handle_stream`)
+## Streaming a capability
 
-The first executable streaming mode is `server_streaming`: one validated call
-payload followed by provider output. This is the shape needed by TTS. A
-provider implements `handle_stream` and begins at sequence one because Skulk
-owns the admission lifecycle and emits `started` at sequence zero:
+All three streaming modes are executable. `server_streaming` providers
+implement `handle_stream`; `client_streaming` and `bidirectional` providers
+implement `handle_input_stream`. Skulk owns sequence-zero `started` in every
+active direction, so provider output begins at sequence one:
 
 ```python
 from collections.abc import AsyncIterator
@@ -283,6 +283,7 @@ session = await context.stream_capability(
 if not session.open_result.ok:
     print(session.open_result.error.code)
 else:
+    assert session.input is None  # server_streaming has no caller direction
     async for frame in session.frames:
         if isinstance(frame.media, InlineMediaAttachment):
             play(frame.media.data)
@@ -291,7 +292,7 @@ else:
 The opening request is control-sized and direct to the provider node. Output
 does not stream over HTTP: it uses the separate `PROVIDER_DATA` type family,
 off the master, State, and event log. Same-node output short-circuits locally;
-remote output uses bounded independent per-owner/per-call queues. Structured
+remote frames use bounded independent per-owner/call/direction queues. Structured
 payloads are validated against `output_chunk_schema`; inline media remains raw
 bytes outside JSON and is capped at 1 MiB per frame. Use a staged
 `BlobMediaAttachment` for large immutable objects.
@@ -300,6 +301,43 @@ Skulk enforces exact call identity and sequence, one deadline across admission
 and streaming, exactly one terminal, bounded reorder/gap handling, and explicit
 cancellation when the caller closes the iterator early. A raising or malformed
 handler fails only its own stream with a typed terminal.
+
+For `client_streaming` and `bidirectional`, the returned session has a
+`CapabilityStreamInput` sink. `send_chunk()` accepts schema-validated metadata
+and optional raw media. `complete()` emits the caller terminal and is an input
+half-close: provider output remains active for a final transcript or additional
+progress. `cancel()` terminates the logical call instead.
+
+```python
+session = await context.stream_capability(
+    node.node_id,
+    stt.id,
+    stt.version,
+    descriptor_revision(stt),
+    {"model": model_id},
+)
+if session.open_result.ok and session.input is not None:
+    await session.input.send_chunk(
+        payload={"format": "pcm_s16le"},
+        media=InlineMediaAttachment(
+            data=pcm_frame,
+            media_type="audio/pcm",
+            codec="pcm_s16le",
+            sample_rate=16000,
+            channels=1,
+        ),
+    )
+    await session.input.complete()
+    async for frame in session.frames:
+        consume_transcript(frame)
+```
+
+The provider receives the ordered caller lifecycle through
+`handle_input_stream(context, call, input_frames)`. Input chunks are validated
+against `input_chunk_schema`; a client-streaming provider can return one
+structured payload on its `completed` frame, validated against `output_schema`,
+while a bidirectional provider emits chunks validated against
+`output_chunk_schema`.
 
 A streaming provider whose availability depends on live state can additionally
 implement `admit_stream(context, call)`. This dynamic admission hook runs after
@@ -339,10 +377,9 @@ An external extension cannot replace the reserved built-in `tts@1.0.0`
 contract; first-party providers take deterministic precedence when extension
 registries are combined.
 
-`client_streaming` and `bidirectional` descriptors remain discoverable but are
-not executable yet. Realtime STT follows with ordered input media frames and an
-explicit caller half-close; a provider must not advertise progressive output
-until its underlying model actually produces it.
+The transport now supports realtime STT's ordered input media and explicit
+half-close. The built-in STT facade remains the next consumer; it must not
+advertise progressive output until its underlying model actually produces it.
 
 ## Guarantees
 

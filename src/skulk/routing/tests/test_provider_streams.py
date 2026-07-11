@@ -52,7 +52,24 @@ def test_provider_topic_preserves_arbitrary_inline_media_bytes() -> None:
     assert PROVIDER_DATA.routing_key is not None
     assert PROVIDER_DATA.routing_key(restored) == "caller-node"
     assert PROVIDER_DATA.stream_key is not None
-    assert PROVIDER_DATA.stream_key(restored) == "tts-call"
+    assert (
+        PROVIDER_DATA.stream_key(restored)
+        == "tts-call:provider_to_caller"
+    )
+
+
+def test_provider_directions_have_independent_pressure_keys() -> None:
+    assert PROVIDER_DATA.stream_key is not None
+    output = _media_packet()
+    input_packet = ProviderStreamPacket(
+        owner_node=NodeId("provider-node"),
+        frame=output.frame.model_copy(
+            update={"direction": "caller_to_provider"}
+        ),
+    )
+
+    assert PROVIDER_DATA.stream_key(output) == "tts-call:provider_to_caller"
+    assert PROVIDER_DATA.stream_key(input_packet) == "tts-call:caller_to_provider"
 
 
 def test_provider_packet_decoder_rejects_truncated_header() -> None:
@@ -123,7 +140,7 @@ async def test_remote_provider_packet_egresses_with_call_isolation_key() -> None
     assert outbound is not None
     assert outbound.topic == PROVIDER_DATA.topic
     assert outbound.routing_key == "caller-node"
-    assert outbound.stream_key == "tts-call"
+    assert outbound.stream_key == "tts-call:provider_to_caller"
     assert PROVIDER_DATA.deserialize(outbound.data) == packet
 
 

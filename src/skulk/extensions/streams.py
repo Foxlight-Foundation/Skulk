@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated, Literal, cast, final
 
+import anyio
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from skulk.extensions.calls import CapabilityResult
@@ -159,12 +160,185 @@ class CapabilityStreamCancel(BaseModel):
 
 
 @final
+class CapabilityStreamInput:
+    """Caller-owned input direction for a client-streaming provider call.
+
+    The sink owns lifecycle and sequence numbers so callers cannot accidentally
+    create gaps or duplicate terminals. ``complete`` is an input half-close: it
+    ends only ``caller_to_provider`` and leaves provider output active.
+    """
+
+    def __init__(
+        self,
+        *,
+        call_id: str,
+        deadline_at: float,
+        send_frame: Callable[[CapabilityStreamFrame], Awaitable[None]],
+    ) -> None:
+        """Create an unopened input direction for one admitted call."""
+
+        self.call_id = call_id
+        self._deadline_at = deadline_at
+        self._send_frame = send_frame
+        self._next_sequence = 0
+        self._closed = False
+        self._terminal_sent = False
+        self._lock = anyio.Lock()
+
+    @property
+    def closed(self) -> bool:
+        """Whether this input direction rejects further caller sends."""
+
+        return self._closed
+
+    async def start(self) -> None:
+        """Emit the caller direction's required sequence-zero opener."""
+
+        async with self._lock:
+            # Provider output may fail and close the sink while this task waits
+            # to acquire the lock. That terminal output is authoritative; an
+            # input opener is no longer needed and must not escape as a caller
+            # exception instead of letting the queued terminal be consumed.
+            if self._closed:
+                return
+            if self._next_sequence != 0:
+                raise RuntimeError("provider input direction is already started")
+            await self._emit("started")
+
+    async def send_chunk(
+        self,
+        *,
+        payload: dict[str, object] | None = None,
+        media: MediaAttachment | None = None,
+    ) -> None:
+        """Send one structured or binary media input chunk.
+
+        Args:
+            payload: JSON metadata validated against ``input_chunk_schema`` by
+                the provider node.
+            media: Optional inline bytes or staged blob reference.
+
+        Raises:
+            RuntimeError: The input direction is closed or was not started.
+            ValueError: Neither payload nor media was supplied.
+            TimeoutError: The call's single deadline budget has expired.
+        """
+
+        if payload is None and media is None:
+            raise ValueError("provider input chunk requires payload or media")
+        async with self._lock:
+            self._require_open()
+            await self._emit("chunk", payload=payload, media=media)
+
+    async def complete(self) -> None:
+        """Half-close caller input while leaving provider output active."""
+
+        async with self._lock:
+            self._require_open()
+            await self._emit("completed")
+            self._terminal_sent = True
+            self._closed = True
+
+    async def cancel(
+        self,
+        message: str = "caller cancelled the provider input stream",
+    ) -> None:
+        """Cancel the logical call from the caller input direction."""
+
+        async with self._lock:
+            if self._closed:
+                return
+            if self._next_sequence == 0:
+                raise RuntimeError("provider input direction is not started")
+            await self._emit(
+                "cancelled",
+                error=CapabilityStreamError(code="cancelled", message=message),
+            )
+            self._terminal_sent = True
+            self._closed = True
+
+    def close_locally(self) -> None:
+        """Prevent late sends after the provider output direction terminates."""
+
+        # Cleanup must not wait behind a send holding ``_lock``: on a saturated
+        # same-node channel that send may depend on the DATA consumer currently
+        # closing this stream. One already in-flight frame may finish and will
+        # be dropped as late by the removed provider state.
+        self._closed = True
+
+    async def finish_local_close(self) -> None:
+        """Best-effort publish cancellation after synchronous local closure.
+
+        The API schedules this in a separate task so waiting for an in-flight
+        send cannot block the DATA consumer responsible for draining that send.
+        """
+
+        async with self._lock:
+            if self._next_sequence == 0 or self._terminal_sent:
+                return
+            try:
+                await self._emit(
+                    "cancelled",
+                    error=CapabilityStreamError(
+                        code="cancelled",
+                        message="provider output closed the caller input stream",
+                    ),
+                )
+            except (
+                TimeoutError,
+                anyio.BrokenResourceError,
+                anyio.ClosedResourceError,
+            ):
+                return
+            self._terminal_sent = True
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("provider input direction is closed")
+        if self._next_sequence == 0:
+            raise RuntimeError("provider input direction is not started")
+
+    async def _emit(
+        self,
+        kind: StreamFrameKind,
+        *,
+        payload: dict[str, object] | None = None,
+        media: MediaAttachment | None = None,
+        error: CapabilityStreamError | None = None,
+    ) -> None:
+        remaining = self._deadline_at - anyio.current_time()
+        if remaining <= 0:
+            self._closed = True
+            raise TimeoutError("provider stream deadline expired before input send")
+        frame = CapabilityStreamFrame(
+            call_id=self.call_id,
+            direction="caller_to_provider",
+            sequence=self._next_sequence,
+            kind=kind,
+            payload=payload,
+            media=media,
+            error=error,
+        )
+        try:
+            with anyio.fail_after(remaining):
+                await self._send_frame(frame)
+        except TimeoutError:
+            self._closed = True
+            raise
+        except (anyio.BrokenResourceError, anyio.ClosedResourceError):
+            self._closed = True
+            raise
+        self._next_sequence += 1
+
+
+@final
 @dataclass(frozen=True)
 class CapabilityStreamSession:
-    """Opening result plus the one-shot output iterator for a provider stream."""
+    """Opening result, optional input sink, and one-shot output iterator."""
 
     open_result: CapabilityResult
     frames: AsyncIterator[CapabilityStreamFrame]
+    input: CapabilityStreamInput | None = None
 
 
 def encode_capability_stream_frame(

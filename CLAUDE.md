@@ -139,7 +139,7 @@ Components communicate via typed pub/sub topics (src/skulk/routing/topics.py):
 - `COMMANDS`: Workers/API send commands to master
 - `STATE_SYNC_MESSAGES`: Followers request the current session snapshot before replaying the retained tail
 - `DATA`: Generated token/image/embedding/transcription/audio output, off the event log and master hot path. `DataChunk` carries `{command_id, kind, chunk?, sequence, owner_node}` with an explicit `started -> chunk* -> completed|failed|cancelled` lifecycle. `RunnerSupervisor` emits start and exactly one terminal; `API._apply_data` orders/deduplicates frames and converts unresolved gaps into terminal transport errors plus producer cancellation. Zenoh keys by `data/<owner_node>` and short-circuits same-node output. Remote egress uses bounded independent per-command workers with owner/process admission caps and a five-second publish deadline, so a slow or missing owner cannot stall another local or remote stream; saturation fails only the affected stream rather than silently returning incomplete output. `NodeDiagnostics.data_plane` and the dashboard expose lifecycle, first-byte/span, ordering, queue, drop, and publish metrics. Existing OpenAI audio edges retain base64/JSON; provider streaming uses `extensions/streams.py` JSON headers plus raw inline media or staged blob references. This is a wire change: deploy same-version fleets only.
-- `PROVIDER_DATA`: Extension-provider output in its own type family, off the event log/master/State. `ProviderStreamPacket` routes by caller node and call id; wire framing is a bounded length-prefixed JSON lifecycle header plus optional raw media bytes (1 MiB inline cap) or a staged blob reference. It shares DATA's same-node short circuit, dedicated Zenoh loop, per-owner/per-call bounded queues, admission caps, publish deadline, rejection behavior, and egress diagnostics. `ExtensionContext.stream_capability` opens a server-streaming call through a control-sized peer API request, then receives `started -> chunk* -> terminal` here with schema/sequence/deadline enforcement and explicit cancellation. Client-streaming/bidirectional descriptors remain discovery-only until realtime STT input + half-close support lands. Same-version fleet required.
+- `PROVIDER_DATA`: Extension-provider media in its own type family, off the event log/master/State. `ProviderStreamPacket` routes each direction to its receiving node; wire framing is a bounded length-prefixed JSON lifecycle header plus optional raw media bytes (1 MiB inline cap) or a staged blob reference. It shares DATA's same-node short circuit and dedicated Zenoh loop, with bounded queues keyed by owner/call/direction, admission caps, publish deadline, rejection behavior, and egress diagnostics. `ExtensionContext.stream_capability` opens through a control-sized peer API request and returns output frames plus a caller input sink for client-streaming/bidirectional modes. Both directions enforce `started -> chunk* -> terminal`; caller `complete()` half-closes input without ending provider output. Same-version fleet required.
 - `ELECTION_MESSAGES`: Election protocol messages
 - `CONNECTION_MESSAGES`: libp2p connection updates
 - `TELEMETRY`: Workers gossip `NodeTelemetry` (last-write-wins node readings — `NodeResources`: participation role + backends; `node_memory` + `node_system` since slice 2; `node_identities` + `node_disk` + `node_rdma_ctl` since slice 3) into an in-memory `TelemetryView`, NOT the event log. Control/telemetry/data plane separation (#279); read by the planner for placement and merged into `GET /state` for the dashboard. Those maps live here, not in `State`. The context-admission ceiling is stamped onto the instance at placement time (`context_token_limit`) since telemetry is unordered. NOTE: the **connectivity** readings (`node_network`, `node_thunderbolt`, `node_thunderbolt_bridge`, and the derived `thunderbolt_bridge_cycles`) deliberately STAY on the control plane: `apply()` builds the RDMA topology graph and TB-bridge cycles from them and the planner reads `node_network` for host selection, so they must be ordered, not LWW telemetry (#279 slice 3 scoping). `TELEMETRY_PLANE_INFO` in `telemetry.py` is the source of truth for which `GatheredInfo` variants ride telemetry. `node_system` (`SystemPerformanceProfile`) carries a collector-agnostic `accelerator` block (`AcceleratorMetrics`: vendor/name/utilization_ratio/vram/power/temp/clock, `None` when unmeasured) filled at the collector boundary: mactop on Apple, and a new AMD/Linux passive-sysfs collector (`LinuxGpuMetrics`, `utils/info_gatherer/linux_gpu.py`) so non-Mac GPU nodes are not a telemetry blind spot.
@@ -295,17 +295,21 @@ Map the final score to the review severity:
   or a narrower edge case. Note it for follow-up, but do not fix it in the
   current PR unless explicitly requested.
 - **2 — Low**: `2.5 >= score > 1.7`. Nice-to-have improvement, minor refactor,
-  cosmetic inconsistency, or speculative concern. Ignore for the current PR.
+  cosmetic inconsistency, or speculative concern. Do not fix in the current PR.
 - **1 — Informational / Nitpick**: `score <= 1.7`. Style preference, wording,
-  or clearly non-blocking observation. Ignore.
+  or clearly non-blocking observation. Do not fix in the current PR.
 
-Only fix comments rated 4 or 5. Do not iterate on minor wording, style, or speculative improvements from automated reviewers (e.g., Copilot). Time spent on low-severity feedback is time not spent on real work.
+Only fix comments rated 4 or 5. Do not iterate on minor wording, style, or
+speculative improvements from automated reviewers (e.g., Copilot). For every
+comment rated 1–3, reply with the severity-based rationale for not changing the
+current PR, note any follow-up when appropriate, and resolve the thread. Time
+spent implementing low-severity feedback is time not spent on real work.
 
 ### PR Review Loop
 
 Foxlight PRs are never opened as drafts. After opening or updating a PR, keep it
 ready for review, check for merge conflicts and failing checks, and continue
-watching review/check state until no unresolved severity 4 or 5 comments remain.
+watching review/check state until no unresolved review threads remain.
 If a branch is not ready for review, do not open the PR yet.
 
 PR descriptions, review replies, and validation notes must not include private
@@ -317,18 +321,24 @@ and behavior exercised) and keep raw environment details in private logs or
 notes.
 
 When working an open pull request, use this review loop until no unresolved
-severity 4 or 5 comments remain:
+review threads remain:
 
 1. Inspect the PR for new review comments, unresolved threads, and failing checks.
 2. Evaluate each comment using the severity rubric above.
-3. Ignore severity 1–2 comments.
-4. Note severity 3 comments for future work, but do not fix them in the current PR.
+3. For severity 1–2 comments, do not change code; reply with the severity and
+   concise rationale, then resolve the thread.
+4. For severity 3 comments, note any appropriate follow-up, reply with the
+   severity and rationale for deferring it, then resolve the thread.
 5. Fix severity 4–5 comments with the smallest correct change.
 6. Add or update focused tests for every correctness fix on a critical path.
 7. Run focused validation before replying on the PR.
-8. Reply on each addressed thread with the concrete fix or rationale.
-9. Resolve only threads that are actually addressed by code and validation.
-10. Repeat until there are no unresolved severity 4–5 comments, or stop and escalate if the fix becomes ambiguous, validation fails, or the required change would sprawl beyond the PR scope.
+8. For every fixed comment, reply with the concrete fix and validation, then
+   resolve the thread.
+9. Never merge with unresolved review threads, including comments intentionally
+   declined because of severity.
+10. Repeat until there are no unresolved review threads, or stop and escalate if
+    a severity 4–5 fix becomes ambiguous, validation fails, or the required
+    change would sprawl beyond the PR scope.
 
 ### Before Every Commit
 

@@ -1273,14 +1273,15 @@ since there is no call id to correlate a typed result to. Extensions
 normally use this through their context's `call_capability` rather than
 calling the endpoint directly.
 
-### Open a server-streaming capability on this node
+### Open a streaming capability on this node
 
 ```
 POST /v1/capabilities/stream
 ```
 
 This is the control-sized node-to-node opening verb for a provider descriptor
-whose `io_mode` is `server_streaming`. The request body is the same pinned
+whose `io_mode` is `server_streaming`, `client_streaming`, or `bidirectional`.
+The request body is the same pinned
 `CapabilityCall` envelope used by unary calls. Skulk checks target identity,
 handler/version/revision, the 1 MiB request limit, the descriptor's input
 schema, the per-node stream concurrency bound, and the single deadline budget.
@@ -1288,8 +1289,9 @@ Providers may then perform dynamic admission, such as checking that a requested
 model is mounted and healthy, inside those same bounds and before lifecycle
 creation.
 It then returns a typed `CapabilityResult`: `ok: true` with
-`{"admitted": true}` means the stream was admitted; a pre-admission rejection
-uses the same typed call errors as the unary endpoint and creates no stream.
+`{"admitted": true, "io_mode": "..."}` means the stream was admitted; a
+pre-admission rejection uses the same typed call errors as the unary endpoint
+and creates no stream.
 
 Output is **not** an HTTP response stream. After admission, the provider emits
 `started`, ordered `chunk` frames, and exactly one `completed`, `failed`, or
@@ -1298,14 +1300,14 @@ JSON-schema validated against `output_chunk_schema`; realtime media is an
 optional raw binary attachment capped at 1 MiB per frame, while large immutable
 results use staged blob references. The topic is node-addressed to
 `caller_node`, short-circuits same-node calls, and uses the DATA plane's bounded
-per-owner/per-call Zenoh queues for remote calls. Extensions consume the whole
+per-owner/call/direction Zenoh queues for remote calls. Extensions consume the
 flow through `ExtensionContext.stream_capability(...)`, which returns a
-`CapabilityStreamSession` containing the typed opening result and one output
-iterator.
-
-`client_streaming` and `bidirectional` descriptors remain discoverable but are
-not executable through this endpoint yet. Realtime STT input frames and
-half-close semantics are the next provider-stream phase.
+`CapabilityStreamSession` containing the typed opening result, one output
+iterator, and an `input` sink only for client-streaming/bidirectional calls.
+`input.send_chunk()` moves structured metadata plus optional raw media to the
+provider; `input.complete()` half-closes caller input without closing provider
+output. Input cancellation, invalid schema, unresolved sequence gaps, and queue
+pressure produce a typed terminal for only that call.
 
 ### Cancel an admitted capability stream
 

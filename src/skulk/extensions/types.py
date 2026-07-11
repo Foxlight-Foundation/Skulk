@@ -176,6 +176,28 @@ class CapabilityStreamHandler(Protocol):
 
 
 @runtime_checkable
+class CapabilityInputStreamHandler(Protocol):
+    """Optional provider facet for client-streaming or bidirectional calls."""
+
+    def handle_input_stream(
+        self,
+        context: "ExtensionContext",
+        call: CapabilityCall,
+        input_frames: AsyncIterator[CapabilityStreamFrame],
+    ) -> AsyncIterator[CapabilityStreamFrame]:
+        """Consume ordered caller frames and yield the provider output direction.
+
+        ``input_frames`` begins with ``started`` and ends with exactly one
+        ``completed``, ``failed``, or ``cancelled`` frame. Caller ``completed``
+        is a half-close, not cancellation. Provider output follows the same
+        sequence-one-through-terminal contract as
+        :class:`CapabilityStreamHandler` because Skulk owns output ``started``.
+        """
+
+        ...
+
+
+@runtime_checkable
 class CapabilityStreamAdmissionHandler(Protocol):
     """Optional dynamic validation before a provider stream is admitted."""
 
@@ -196,7 +218,7 @@ class CapabilityStreamAdmissionHandler(Protocol):
 
 
 class StreamCapability(Protocol):
-    """Async callable opening a server-streaming provider capability."""
+    """Async callable opening any executable streaming provider capability."""
 
     async def __call__(
         self,
@@ -208,7 +230,7 @@ class StreamCapability(Protocol):
         *,
         timeout_seconds: float | None = None,
     ) -> CapabilityStreamSession:
-        """Open a provider stream and return its typed result plus frames."""
+        """Open a stream and return output plus an input sink when negotiated."""
         ...
 
 
@@ -279,8 +301,8 @@ class ExtensionContext:
             capability descriptors (schemas, I/O modes, versions) on demand.
         call_capability: The generic call verb: invokes a capability on a
             provider node with a typed result (fabric-citizenship Phase 2b).
-        stream_capability: Open a server-streaming capability whose output
-            travels on the provider DATA topic (fabric-citizenship Phase 3).
+        stream_capability: Open a streaming capability whose active input and
+            output directions travel on provider DATA (Phase 3).
     """
 
     node_id: NodeId

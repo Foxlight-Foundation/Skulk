@@ -526,14 +526,16 @@ The contract is deliberately small (`src/skulk/extensions/`):
   `stream_capability(node, id, version, revision, payload)`. A control-sized
   peer-API request performs opening admission; an optional dynamic-admission
   hook can reject changing backend/model conditions before `started`. Then
-  `PROVIDER_DATA` carries the
-  output directly to the caller node (master and State remain outside the hot
-  path). Skulk owns `started`, validates handler sequence and chunk schemas,
-  requires one terminal, preserves raw inline media outside JSON, expires gaps,
-  and explicitly cancels a provider when the caller stops consuming. The first
-  executable mode is unary-input/server-streaming-output for TTS-shaped calls;
-  client-streaming/bidirectional STT remains discoverable but not executable
-  until input-frame and half-close support lands.
+  `PROVIDER_DATA` carries both active directions directly between caller and
+  provider nodes (master and State remain outside the hot path). Skulk owns
+  `started`, validates handler sequence and direction-specific chunk schemas,
+  requires one terminal per active direction, preserves raw inline media
+  outside JSON, expires gaps, and explicitly cancels abandoned calls.
+  `CapabilityStreamInput.complete()` is caller input half-close: it terminates
+  only `caller_to_provider`, leaving provider output active. Remote pressure is
+  isolated by owner, call, and direction. The transport now executes
+  server-streaming, client-streaming, and bidirectional descriptors; the first
+  built-in client consumer is the planned realtime STT facade.
 - Production API nodes prepend first-party providers to the guarded extension
   registry. The first is `tts@1.0.0`, a facade over mounted core `mlx_audio`
   serving rather than a duplicate runtime. First-party contracts take

@@ -105,7 +105,7 @@ DATA = TypedTopic(
 
 
 def _provider_owner_key(packet: ProviderStreamPacket) -> str:
-    """Route provider output to the node that opened the stream."""
+    """Route a provider frame to the node receiving its direction."""
 
     return str(packet.owner_node)
 
@@ -115,7 +115,9 @@ PROVIDER_DATA = TypedTopic(
     PublishPolicy.Always,
     ProviderStreamPacket,
     routing_key=_provider_owner_key,
-    stream_key=lambda packet: packet.frame.call_id,
+    stream_key=lambda packet: (
+        f"{packet.frame.call_id}:{packet.frame.direction}"
+    ),
     is_terminal=lambda packet: packet.frame.is_terminal,
     serializer=encode_provider_stream_packet,
     deserializer=decode_provider_stream_packet,

@@ -145,7 +145,7 @@ Current and planned speech contracts:
 | --- | --- | --- |
 | `tts@1.0.0` | server streaming | Built-in facade implemented; experimental until fleet validation passes |
 | batch STT | unary | Planned; complete bounded audio or staged blob input |
-| realtime STT | client streaming / bidirectional | Planned after input frames and half-close land |
+| realtime STT | client streaming / bidirectional | Transport ready; built-in facade planned |
 
 ### Composition Examples
 
@@ -220,10 +220,11 @@ caller-provided filesystem paths.
 
 ## Implementation Backlog
 
-1. Validate the built-in `tts@1.0.0` facade locally and cross-node, including
-   progressive playback, cancellation, deadline, pressure, and terminal gates.
-2. Add caller-to-provider media frames and explicit input half-close for
-   `client_streaming` / `bidirectional` descriptors.
+1. **Complete:** validate the built-in `tts@1.0.0` facade locally and
+   cross-node, including progressive playback, cancellation, deadline,
+   pressure, and terminal gates.
+2. **Complete:** caller-to-provider media frames and explicit input half-close
+   for `client_streaming` / `bidirectional` descriptors.
 3. Add a built-in realtime STT facade only for models whose runner can open a
    true streaming session; batch-backed models must not advertise progressive
    output.
