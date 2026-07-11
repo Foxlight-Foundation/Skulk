@@ -171,7 +171,6 @@ async def test_batch_stt_provider_transcribes_binary_input_after_half_close(
             {
                 "model": str(card.model_id),
                 "filename": "speech.wav",
-                "content_type": "audio/wav",
             },
             timeout_seconds=2.0,
         )
@@ -185,6 +184,7 @@ async def test_batch_stt_provider_transcribes_binary_input_after_half_close(
         task_group.cancel_scope.cancel()
 
     assert len(commands) == 1
+    assert commands[0].task_params.content_type == "audio/wav"
     assert b"".join(
         base64.b64decode(chunk.data.encode("ascii")) for chunk in input_chunks
     ) == audio
@@ -283,6 +283,36 @@ async def test_batch_stt_input_cancel_emits_cancelled_terminal() -> None:
     assert frames[-1].error is not None
     assert frames[-1].error.code == "cancelled"
     assert frames[-1].error.message == "caller stopped recording"
+
+
+@pytest.mark.anyio
+async def test_batch_stt_empty_input_emits_invalid_frame_terminal() -> None:
+    api = _build_api()
+    card = _stt_card()
+    api.state = _state(card)
+    api._sync_builtin_speech_capability()
+    frames: list[CapabilityStreamFrame] = []
+
+    async with api._tg as task_group:
+        task_group.start_soon(api._apply_provider_data)
+        session = await api._extension_context.stream_capability(
+            NodeId("api-node"),
+            STT_CAPABILITY_DESCRIPTOR.id,
+            STT_CAPABILITY_DESCRIPTOR.version,
+            descriptor_revision(STT_CAPABILITY_DESCRIPTOR),
+            {"model": str(card.model_id)},
+            timeout_seconds=2.0,
+        )
+        assert session.open_result.ok is True
+        assert session.input is not None
+        await session.input.complete()
+        frames = [frame async for frame in session.frames]
+        task_group.cancel_scope.cancel()
+
+    assert [frame.kind for frame in frames] == ["started", "failed"]
+    assert frames[-1].error is not None
+    assert frames[-1].error.code == "invalid_frame"
+    assert frames[-1].error.message == "batch STT audio input is empty"
 
 
 @pytest.mark.anyio

@@ -8935,12 +8935,13 @@ class API:
     async def _collect_builtin_stt_audio(
         self,
         input_frames: AsyncIterator[CapabilityStreamFrame],
-    ) -> bytes:
+    ) -> tuple[bytes, str]:
         """Collect one bounded encoded clip from ordered provider media frames."""
 
         audio_parts: list[bytes] = []
         total_bytes = 0
         completed = False
+        media_type: str | None = None
         async for frame in input_frames:
             if frame.kind == "started":
                 continue
@@ -8949,6 +8950,19 @@ class API:
                     raise ValueError(
                         "batch STT requires inline binary media attachments; "
                         "managed blob resolution is not available yet"
+                    )
+                frame_media_type = _normalize_upload_content_type(
+                    frame.media.media_type
+                )
+                if frame_media_type not in _AUDIO_UPLOAD_CONTENT_TYPES:
+                    raise ValueError(
+                        f"unsupported batch STT media type: {frame_media_type}"
+                    )
+                if media_type is None:
+                    media_type = frame_media_type
+                elif media_type != frame_media_type:
+                    raise ValueError(
+                        "batch STT media frames must use one consistent media type"
                     )
                 total_bytes += len(frame.media.data)
                 if total_bytes > _MAX_AUDIO_UPLOAD_BYTES:
@@ -8974,7 +8988,8 @@ class API:
         audio_bytes = b"".join(audio_parts)
         if not audio_bytes:
             raise ValueError("batch STT audio input is empty")
-        return audio_bytes
+        assert media_type is not None
+        return audio_bytes, media_type
 
     async def _stream_builtin_stt(
         self,
@@ -8990,7 +9005,9 @@ class API:
                 f"batch STT availability changed after admission: {exc}"
             ) from exc
         try:
-            audio_bytes = await self._collect_builtin_stt_audio(input_frames)
+            audio_bytes, media_type = await self._collect_builtin_stt_audio(
+                input_frames
+            )
         except _BuiltinSttInputCancelledError as exc:
             yield CapabilityStreamFrame(
                 call_id=call.call_id,
@@ -9000,6 +9017,37 @@ class API:
                 error=CapabilityStreamError(code="cancelled", message=str(exc)),
             )
             return
+        except ValueError as exc:
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="failed",
+                error=CapabilityStreamError(
+                    code="invalid_frame",
+                    message=str(exc),
+                ),
+            )
+            return
+        if (
+            task_params.content_type is not None
+            and task_params.content_type != media_type
+        ):
+            yield CapabilityStreamFrame(
+                call_id=call.call_id,
+                direction="provider_to_caller",
+                sequence=1,
+                kind="failed",
+                error=CapabilityStreamError(
+                    code="invalid_frame",
+                    message=(
+                        "batch STT attachment media type does not match opening "
+                        "content_type"
+                    ),
+                ),
+            )
+            return
+        task_params = task_params.model_copy(update={"content_type": media_type})
         chunks = await self._execute_audio_transcription(task_params, audio_bytes)
         text = "".join(chunk.text for chunk in chunks).strip()
         language = next(
