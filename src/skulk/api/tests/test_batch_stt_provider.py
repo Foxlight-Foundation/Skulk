@@ -200,9 +200,10 @@ async def test_batch_stt_provider_transcribes_binary_input_after_half_close(
 @pytest.mark.anyio
 async def test_batch_stt_admission_requires_requested_model_runner_ready() -> None:
     api = _build_api()
-    ready = _state(_stt_card())
+    card = _stt_card()
+    ready = _state(card)
     loading = _state(
-        _stt_card("mlx-community/parakeet-loading"),
+        card,
         runner_status=RunnerLoading(layers_loaded=0, total_layers=1),
         suffix="-loading",
     )
@@ -244,7 +245,7 @@ async def test_batch_stt_admission_requires_requested_model_runner_ready() -> No
             STT_CAPABILITY_DESCRIPTOR.id,
             STT_CAPABILITY_DESCRIPTOR.version,
             descriptor_revision(STT_CAPABILITY_DESCRIPTOR),
-            {"model": "mlx-community/parakeet-loading"},
+            {"model": str(card.model_id)},
             timeout_seconds=2.0,
         )
         assert session.open_result.ok is False

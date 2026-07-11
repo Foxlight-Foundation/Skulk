@@ -3279,31 +3279,39 @@ class API:
 
         if not self._builtin_speech_provider_enabled:
             return False
-        for instance in self.state.instances.values():
+
+        def instance_is_ready(instance: Instance) -> bool:
             if len(instance.shard_assignments.node_to_runner) != 1:
-                continue
-            if (
-                model_id is not None
-                and instance.shard_assignments.model_id != model_id
-            ):
-                continue
+                return False
             card = self._model_card_for_instance(instance)
             if card is None:
-                continue
+                return False
             profile = resolve_model_capability_profile(card.model_id, model_card=card)
             if not profile.supports_transcription:
-                continue
+                return False
             placement_runners = tuple(
                 instance.shard_assignments.node_to_runner.values()
             )
-            if placement_runners and all(
+            return bool(placement_runners) and all(
                 isinstance(
                     self.state.runners.get(runner_id), (RunnerReady, RunnerRunning)
                 )
                 for runner_id in placement_runners
-            ):
-                return True
-        return False
+            )
+
+        if model_id is None:
+            return any(instance_is_ready(instance) for instance in self.state.instances.values())
+        matching_instances = tuple(
+            instance
+            for instance in self.state.instances.values()
+            if instance.shard_assignments.model_id == model_id
+        )
+        # AudioTranscription is not instance-pinned: the master may choose any
+        # mounted instance of the model. Admission is truthful only if every
+        # candidate it could choose is ready at this snapshot.
+        return bool(matching_instances) and all(
+            instance_is_ready(instance) for instance in matching_instances
+        )
 
     def _sync_builtin_speech_capability(self) -> None:
         """Advertise speech facades only while core capacity can serve them."""
