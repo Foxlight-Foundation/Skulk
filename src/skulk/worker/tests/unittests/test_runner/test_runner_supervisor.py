@@ -38,7 +38,7 @@ from skulk.shared.types.tasks import (
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from skulk.shared.types.worker.instances import BoundInstance, InstanceId
 from skulk.shared.types.worker.runners import RunnerFailed, RunnerId, RunnerRunning
-from skulk.utils.channels import channel, mp_channel
+from skulk.utils.channels import MpSender, channel, mp_channel
 from skulk.worker.runner.runner_supervisor import RunnerSupervisor
 from skulk.worker.tests.unittests.conftest import get_bound_mlx_ring_instance
 
@@ -98,6 +98,16 @@ class _ReapTrackingProcess:
 
     def close(self) -> None:
         self.closed = True
+
+
+class _FailingRealtimeSender:
+    """IPC sender stub for multiprocessing queue-close race coverage."""
+
+    def __init__(self, failure: Exception) -> None:
+        self._failure = failure
+
+    async def send_async(self, _frame: RealtimeAudioInputFrame) -> None:
+        raise self._failure
 
 
 @pytest.mark.asyncio
@@ -382,14 +392,18 @@ async def test_check_runner_emits_errors_for_inflight_generation_and_realtime() 
 
 
 @pytest.mark.asyncio
-async def test_realtime_audio_closed_ipc_invokes_runner_failure_handling() -> None:
+@pytest.mark.parametrize(
+    "failure",
+    [anyio.ClosedResourceError(), ValueError("closed"), OSError("closed")],
+)
+async def test_realtime_audio_closed_ipc_invokes_runner_failure_handling(
+    failure: Exception,
+) -> None:
     """A closed audio pipe must not escape into the worker task group."""
 
     event_sender, _ = channel[Event]()
     task_sender, _ = mp_channel[Task]()
     cancel_sender, _ = mp_channel[TaskId]()
-    realtime_sender, _ = mp_channel[RealtimeAudioInputFrame]()
-    realtime_sender.close()
     _, ev_recv = mp_channel[Event]()
     _, diag_recv = mp_channel[RunnerDiagnosticUpdate]()
     bound_instance = get_bound_mlx_ring_instance(
@@ -408,7 +422,10 @@ async def test_realtime_audio_closed_ipc_invokes_runner_failure_handling() -> No
         _task_sender=task_sender,
         _event_sender=event_sender,
         _cancel_sender=cancel_sender,
-        _realtime_audio_sender=realtime_sender,
+        _realtime_audio_sender=cast(
+            "MpSender[RealtimeAudioInputFrame]",
+            cast(object, _FailingRealtimeSender(failure)),
+        ),
     )
     failures: list[Exception] = []
 
@@ -426,7 +443,7 @@ async def test_realtime_audio_closed_ipc_invokes_runner_failure_handling() -> No
     )
 
     assert len(failures) == 1
-    assert isinstance(failures[0], anyio.ClosedResourceError)
+    assert failures[0] is failure
     event_sender.close()
 
 

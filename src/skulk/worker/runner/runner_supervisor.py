@@ -511,7 +511,7 @@ class RunnerSupervisor:
             raise RuntimeError("runner has no realtime audio IPC sender")
         try:
             await self._realtime_audio_sender.send_async(frame)
-        except ClosedResourceError as exc:
+        except (ClosedResourceError, ValueError, OSError) as exc:
             await self._check_runner(exc)
 
     async def cancel_task(self, task_id: TaskId):
