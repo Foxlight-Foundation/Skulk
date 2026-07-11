@@ -72,6 +72,11 @@ from skulk.api.adapters.responses import (
     responses_request_to_text_generation,
 )
 from skulk.api.data_plane import DataPlaneObserver
+from skulk.api.field_telemetry import (
+    FieldTelemetryCollector,
+    prepare_telemetry_config_update,
+    tap_generation_stream,
+)
 from skulk.api.keepalive import with_sse_keepalive
 from skulk.api.model_search import search_hugging_face_models
 from skulk.api.node_health import compute_node_health
@@ -326,7 +331,11 @@ from skulk.shared.types.events import (
     TracesMerged,
 )
 from skulk.shared.types.memory import Memory
-from skulk.shared.types.profiling import MemoryUsage, read_wired_memory_bytes
+from skulk.shared.types.profiling import (
+    MemoryUsage,
+    SystemPerformanceProfile,
+    read_wired_memory_bytes,
+)
 from skulk.shared.types.state import State
 from skulk.shared.types.telemetry import (
     TelemetryView,
@@ -344,6 +353,7 @@ from skulk.shared.types.worker.runners import RunnerId, RunnerReady, RunnerRunni
 from skulk.shared.types.worker.shards import Sharding
 from skulk.shared.version import get_skulk_version, get_skulk_version_label
 from skulk.store.config import (
+    TelemetryConfig,
     load_skulk_config,
     resolve_config_path,
     resolve_node_staging,
@@ -1139,6 +1149,16 @@ class API:
         self._skulk_config = skulk_config
         self._store_client = store_client
         self._config_path = resolve_config_path()
+        # Field telemetry (opt-in, consent-gated in skulk.yaml). The config
+        # provider re-reads the file per check so dashboard consent changes
+        # apply without a restart; the hardware provider snapshots the
+        # telemetry plane. Node ids feed only in-process death diffing.
+        self._telemetry_config_cache: "TelemetryConfig | None" = None
+        self._telemetry_config_cached_until = 0.0
+        self._field_telemetry = FieldTelemetryCollector(
+            config_provider=self._current_telemetry_config,
+            hardware_provider=self._telemetry_hardware_snapshot,
+        )
         self._model_optimizer: "ModelOptimizer | None" = None
         self._runner_diagnostics_provider: (
             Callable[[], Sequence[RunnerSupervisorDiagnostics]] | None
@@ -1717,6 +1737,18 @@ class API:
             summary="Get cluster tracing state",
             description="Return whether runtime tracing is currently enabled for new requests across the cluster session.",
         )(self.get_tracing_state)
+        self.app.get(
+            "/v1/telemetry/preview",
+            tags=["State & Tracing"],
+            summary="Preview pending field telemetry",
+            description=(
+                "Return the current field-telemetry consent state and the exact"
+                " pending sample batch that would be sent to the ingest service,"
+                " so operators can inspect precisely what leaves the cluster."
+                " Collection is opt-in and content-free (metrics, hardware"
+                " classes, and error classes only)."
+            ),
+        )(self.get_telemetry_preview)
         self.app.put(
             "/v1/tracing",
             tags=["State & Tracing"],
@@ -2852,6 +2884,14 @@ class API:
         command = await self._send_text_generation_with_images(task_params)
 
         chunk_stream = self._token_chunk_stream(command.command_id)
+        # Field telemetry (opt-in): consent-gated inside the collector, so
+        # this wrap is a plain passthrough when telemetry is off.
+        chunk_stream = tap_generation_stream(
+            self._field_telemetry,
+            str(task_params.model),
+            None,
+            chunk_stream,
+        )
         if self._extensions is not None and self._extensions.has_chat_middleware:
             chunk_stream = self._extensions.tap_chat_stream(
                 self._extension_context, task_params, chunk_stream
@@ -5677,6 +5717,8 @@ class API:
                 tg.start_soon(self._pause_on_new_election)
                 tg.start_soon(self._cleanup_expired_images)
                 tg.start_soon(self._prune_old_traces)
+                # Opt-in field telemetry: consent-gated, fail-silent, bounded.
+                tg.start_soon(self._field_telemetry.flush_loop)
                 print_startup_banner(self.port)
                 tg.start_soon(self.run_api, shutdown_ev)
                 try:
@@ -7973,6 +8015,43 @@ class API:
             return DEFAULT_KV_CACHE_BACKEND
         return configured_backend
 
+    def _current_telemetry_config(self) -> "TelemetryConfig | None":
+        """Read the current telemetry consent from skulk.yaml (never raises).
+
+        Cached for a few seconds: the enabled-check runs per generation, and
+        a YAML parse on that hot path would be wasted work. Dashboard consent
+        changes still apply within the TTL.
+        """
+        now = time.monotonic()
+        if now < self._telemetry_config_cached_until:
+            return self._telemetry_config_cache
+        try:
+            config = load_skulk_config(self._config_path)
+            self._telemetry_config_cache = (
+                config.telemetry if config is not None else None
+            )
+        except Exception:  # noqa: BLE001 - consent read must never break the API
+            self._telemetry_config_cache = None
+        self._telemetry_config_cached_until = now + 5.0
+        return self._telemetry_config_cache
+
+    def _telemetry_hardware_snapshot(
+        self,
+    ) -> dict[str, tuple[SystemPerformanceProfile | None, int | None]]:
+        """Per-node (system profile, ram bytes) for hardware classification."""
+        snapshot: dict[str, tuple[SystemPerformanceProfile | None, int | None]] = {}
+        for node_id in self.state.last_seen:
+            memory = self._telemetry_view.node_memory.get(node_id)
+            snapshot[str(node_id)] = (
+                self._telemetry_view.node_system.get(node_id),
+                memory.ram_total.in_bytes if memory is not None else None,
+            )
+        return snapshot
+
+    async def get_telemetry_preview(self) -> JSONResponse:
+        """Return consent state and the exact pending telemetry batch."""
+        return JSONResponse(self._field_telemetry.preview())
+
     async def get_config(self) -> JSONResponse:
         if not self._config_path.exists():
             return JSONResponse(
@@ -8021,9 +8100,11 @@ class API:
             config_data = dict(body)
         # Preserve existing secrets if not provided in this update
         # (GET /config strips them for security, so saves won't have them)
+        existing_config_object: dict[str, object] | None = None
         if self._config_path.exists():
             try:
                 existing = _load_yaml_object(self._config_path)
+                existing_config_object = existing
                 if "hf_token" not in config_data and "hf_token" in existing:
                     config_data["hf_token"] = existing["hf_token"]
                 # Preserve logging config when omitted from the request
@@ -8034,6 +8115,12 @@ class API:
                     config_data["experiments"] = existing["experiments"]
             except Exception:
                 pass
+        # Telemetry section normalization (preserve on partial saves, stamp
+        # consented_version only once decided, backfill install_id): pure
+        # logic lives in field_telemetry.prepare_telemetry_config_update.
+        # Reuses the YAML object already loaded for the secrets-preservation
+        # block above; None when the file was absent or unreadable.
+        prepare_telemetry_config_update(config_data, existing_config_object)
         # Validate by attempting to parse with Pydantic
         from skulk.store.config import SkulkConfig
 
@@ -8048,6 +8135,8 @@ class API:
         with self._config_path.open("w") as f:
             f.write(config_yaml)
         self._skulk_config = parsed_config
+        # A consent change must apply immediately, not after the TTL.
+        self._telemetry_config_cached_until = 0.0
         self._sync_builtin_speech_capability()
         # Broadcast to all nodes via gossipsub — strip hf_token (secret).
         import copy

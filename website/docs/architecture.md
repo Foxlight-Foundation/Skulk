@@ -570,6 +570,30 @@ mixed-version clusters, and the fix is the same (upgrade the fleet and its
 extensions together). `SKULK_EXTENSIONS_DISABLE=1` is a node-local kill
 switch that skips discovery entirely.
 
+## Field telemetry (opt-in)
+
+Skulk can report anonymous performance and reliability samples to Foxlight's
+benchmarks ledger, strictly opt-in and off by default. The first time an
+operator opens the dashboard they are asked once (a browser-local marker
+prevents re-asking; dismissing collects nothing), and both switches stay
+permanently available in Settings. Consent persists in `skulk.yaml`, so it
+survives restarts.
+
+When enabled, the API node's collector records one sample per completed
+generation: the model id, canonical hardware classes (for example
+`apple-m4-24gb`), time to first token, decode throughput, token counts, and
+a failure class when a generation errors. Node deaths are peer-observed (a
+crashed node cannot report itself, but its peers see it vanish), so
+reliability is measured alongside speed. Samples never include prompts,
+outputs, node identifiers, addresses, or operator strings, and the ingest
+service enforces the same allowlist independently. Batches flush every
+minute, fail silent, and are bounded so telemetry can never affect
+inference. Operators can inspect the exact pending batch at
+`GET /v1/telemetry/preview`, disable collection at any time, and delete
+everything previously sent using their install id, a random key that only
+they hold. `SKULK_TELEMETRY_DISABLE=1` hard-disables collection on a node
+regardless of fleet settings.
+
 ## Experimental features
 
 Skulk stages in-development features behind a single node-local switch,

@@ -31,11 +31,30 @@ export interface ExperimentsConfig {
   stt_realtime: boolean;
 }
 
+/** Consent state for opt-in field telemetry (persisted in skulk.yaml). */
+export type TelemetryConsent = 'unasked' | 'enabled' | 'disabled';
+
+/**
+ * Field-telemetry settings. `consent` gates anonymous performance +
+ * reliability samples; `diagnostics_consent` is the SEPARATE gate for
+ * future crash diagnostics. `install_id` is the anonymous rate-limit key
+ * and the deletion capability (rotatable).
+ */
+export interface TelemetryConfig {
+  consent: TelemetryConsent;
+  diagnostics_consent: TelemetryConsent;
+  install_id: string;
+  consented_at: string;
+  consented_version: string;
+  ingest_url: string;
+}
+
 export interface FullConfig {
   model_store?: StoreConfig;
   inference?: InferenceConfig;
   logging?: LoggingConfig;
   experiments?: ExperimentsConfig;
+  telemetry?: TelemetryConfig;
   hf_token?: string;
 }
 

@@ -273,11 +273,35 @@ Lives in `src/skulk/api/main.py` (route registration in `API.__init__`).
 | `/node_id` | GET | Local node identity |
 | `/config` | GET / PUT | Cluster config (sanitized) |
 
+### Field telemetry (opt-in)
+
+- Consent lives in `skulk.yaml` under `telemetry:` (tri-state `consent`:
+  `unasked` / `enabled` / `disabled`; separate `diagnostics_consent`;
+  `install_id` = random UUID, the anonymous rate-limit key AND deletion
+  capability; `consented_at` / `consented_version` stamps; `ingest_url`).
+  Persisted in the file so it survives restarts (State is rebuilt per
+  session); edited via the dashboard (first-run consent modal, then
+  Settings). Nothing is queued or sent while `unasked` or `disabled`.
+- Collector: `src/skulk/api/field_telemetry.py` on the API node. Taps the
+  chat-completions chunk stream (innermost wrap, before the extensions tap),
+  records one sample per generation (model id, canonical hardware classes
+  like `apple-m4-24gb`, TTFT, decode tok/s, token COUNTS, `error_class`
+  enum), plus peer-observed `node-death` samples by diffing the visible node
+  set between flushes. Bounded queue (1000, drop-on-overflow, drops
+  counted), 60s fail-silent flush to `POST <ingest_url>/v1/telemetry`,
+  batch kept on failure. Content-free by construction; the ingest service
+  enforces the same allowlist independently.
+- Dashboard: first-run consent modal (localStorage `skulk-telemetry-consent-seen`
+  is the browser-local no-nag marker; dismissal leaves the fleet setting
+  `unasked`), permanent toggles in Settings, and `GET /v1/telemetry/preview`
+  shows the exact pending batch.
+
 ### Tracing
 
 | Endpoint | Method | What |
 |---|---|---|
 | `/v1/tracing` | GET / PUT | Cluster tracing on/off |
+| `/v1/telemetry/preview` | GET | Field-telemetry consent state + the exact pending sample batch |
 | `/v1/traces` | GET | List local traces |
 | `/v1/traces/cluster` | GET | List traces from all reachable peers |
 | `/v1/traces/{task_id}` | GET | Get one local trace |
@@ -483,6 +507,7 @@ Only `SKULK_*` names are read. The legacy `EXO_*` deprecation runway was removed
 | `SKULK_GROUP_CONNECT_DEADLINE_SECONDS` | Hard deadline for distributed group formation (`mx.distributed.init`, default 120s). Ring init with `strict=True` blocks forever when a neighbor socket fails the post-TCP rank handshake (#265); on expiry the runner exits via the wedge path, the worker gives the instance up on first failure (#260), and a fresh placement mints a new ring port (also clearing stale-socket handshake collisions) |
 | `SKULK_WARMUP_DEADLINE_SECONDS` / `SKULK_WARMUP_DEADLINE_SECONDS` | Hard deadline for runner warmup (default 300s). A wedged Metal eval parks warmup forever at 0% CPU and silently blocks all dispatch; the watchdog hard-exits the runner instead (supervisor reports RunnerFailed, node keeps working) |
 | `SKULK_EXTENSIONS_DISABLE` | `1` skips extension (plugin) discovery entirely on this node; see Extensions component section |
+| `SKULK_TELEMETRY_DISABLE` | `1` hard-disables field telemetry on this node regardless of the fleet consent setting |
 | `SKULK_ENABLE_EXPERIMENTAL_MODE` | Node-local master gate for in-development features (off unless truthy: `1`/`true`/`yes`/`on`). Read by `experimental_mode_enabled` (`src/skulk/shared/experimental.py`); surfaced in `GET /config` as `effective.experimental_mode_enabled`. When on, the dashboard reveals the "Experiments" settings section (the staging area where a work-in-progress feature adds its own toggle so its UX is built alongside it); when off, the section is hidden and every experimental feature stays inert, so a released build carries unfinished work without exposing it. The gate is deliberately feature-agnostic: feature-specific toggles live in `skulk.yaml` under `experiments`, currently including `experiments.tts_streaming` for the experimental TTS `stream=true` transport. |
 | `SKULK_MLX_HANG_DEBUG` / `SKULK_MLX_HANG_DEBUG` | Emit periodic stack traces from stuck phases |
 | `SKULK_MLX_HANG_DEBUG_INTERVAL_SECONDS` | Interval for above (default 30s) |

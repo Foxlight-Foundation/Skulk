@@ -24,6 +24,7 @@ import { ToastContainer } from './components/status/ToastContainer';
 import { NetworkMesh } from './components/common/NetworkMesh';
 import { ObservabilityPanel } from './components/observability/ObservabilityPanel';
 import { SettingsPanel } from './components/layout/SettingsPanel';
+import { TelemetryConsentModal } from './components/layout/TelemetryConsentModal';
 import { ModelStorePage } from './components/pages/DownloadsPage';
 import { ChatView } from './components/pages/ChatView';
 import { OperatorPage } from './components/pages/OperatorPage';
@@ -692,6 +693,7 @@ export function App() {
         <ToastContainer />
         <ObservabilityPanel />
         <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+        <TelemetryConsentModal />
       </Shell>
     </ThemeProvider>
   );

@@ -329,6 +329,8 @@ class SkulkConfig(FrozenModel):
         experiments: Opt-in toggles for in-development features. These are
             inert unless ``SKULK_ENABLE_EXPERIMENTAL_MODE`` is also enabled on
             the node.
+        telemetry: Field-telemetry consent and settings.  ``None`` means the
+            operator has never been asked (nothing is queued or sent).
         hf_token: HuggingFace API token.  Stripped from ``GET /config``
             responses for security.
     """
@@ -339,6 +341,7 @@ class SkulkConfig(FrozenModel):
     tracing: "TracingConfig | None" = None
     connectivity: ConnectivityConfig | None = None
     experiments: ExperimentsConfig | None = None
+    telemetry: "TelemetryConfig | None" = None
     hf_token: str | None = None
 
 
@@ -363,6 +366,46 @@ class LoggingConfig(FrozenModel):
 
     enabled: bool = False
     ingest_url: str = ""
+
+
+@final
+class TelemetryConfig(FrozenModel):
+    """Opt-in field-telemetry consent and settings.
+
+    Consent is acquired through the dashboard's first-run modal and persists
+    here (in ``skulk.yaml``) so it survives restarts; cluster ``State`` is
+    rebuilt per session and would forget it. Nothing is ever queued or sent
+    while ``consent`` is ``unasked`` or ``disabled`` (the collector keeps
+    only an in-process node-set baseline for death diffing, which never
+    leaves the process), and the node-local
+    ``SKULK_TELEMETRY_DISABLE=1`` kill switch overrides everything.
+
+    Attributes:
+        consent: Tri-state performance/reliability telemetry consent.
+            ``unasked`` (default) shows the dashboard consent modal and
+            collects nothing; only ``enabled`` collects.
+        diagnostics_consent: SEPARATE tri-state consent for crash
+            diagnostics (scrubbed tracebacks to a private store; not yet
+            collected in this version). Enabling telemetry never enables
+            this.
+        install_id: Random UUID generated when either consent is first
+            enabled (client-side, or backfilled server-side on save).
+            The anonymous rate-limit/dedup key AND the deletion capability:
+            it never appears on the public site, so presenting it to the
+            ingest API proves ownership. Rotatable and clearable from the
+            dashboard.
+        consented_at: ISO-8601 stamp of the consent decision.
+        consented_version: Skulk version that acquired consent, so a future
+            material change to what is collected can deliberately re-ask.
+        ingest_url: Telemetry ingest API base URL.
+    """
+
+    consent: Literal["unasked", "enabled", "disabled"] = "unasked"
+    diagnostics_consent: Literal["unasked", "enabled", "disabled"] = "unasked"
+    install_id: str = ""
+    consented_at: str = ""
+    consented_version: str = ""
+    ingest_url: str = "https://skulk-ledger-ingest.thomastupper92618.workers.dev"
 
 
 @final

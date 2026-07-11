@@ -9,6 +9,13 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- Opt-in field telemetry (off by default): a first-run dashboard consent
+  modal and permanent Settings toggles control anonymous performance and
+  reliability samples (model id, hardware class, timing, token counts,
+  failure classes; never prompts, outputs, or machine identity). Consent
+  persists in `skulk.yaml`; `GET /v1/telemetry/preview` shows the exact
+  pending batch; `SKULK_TELEMETRY_DISABLE=1` hard-disables per node.
+
 - **Extensions can call capabilities (the generic call verb).** The unary loop
   of the provider surface is complete: a provider extension that implements
   `handle_call` becomes callable, and any extension invokes a discovered
