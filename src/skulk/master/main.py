@@ -1233,6 +1233,9 @@ class Master:
                                 )
                             )
                         case TaskCancelled():
+                            self._realtime_instance_by_command.pop(
+                                command.cancelled_command_id, None
+                            )
                             if (
                                 task_id := self.command_task_mapping.get(
                                     command.cancelled_command_id

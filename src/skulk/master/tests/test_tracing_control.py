@@ -25,6 +25,7 @@ from skulk.shared.types.commands import (
     RealtimeAudioTranscription,
     SetTracingEnabled,
     SpeechSynthesis,
+    TaskCancelled,
     TaskFinished,
     TextGeneration,
 )
@@ -36,6 +37,7 @@ from skulk.shared.types.events import (
     TaskCreated,
     TaskDeleted,
     TaskFailed,
+    TaskStatusUpdated,
     TracingStateChanged,
 )
 from skulk.shared.types.memory import Memory
@@ -45,6 +47,7 @@ from skulk.shared.types.tasks import (
     RealtimeAudioTranscription as RealtimeAudioTranscriptionTask,
 )
 from skulk.shared.types.tasks import SpeechSynthesis as SpeechSynthesisTask
+from skulk.shared.types.tasks import TaskStatus
 from skulk.shared.types.tasks import TextGeneration as TextGenerationTask
 from skulk.shared.types.text_generation import InputMessage, TextGenerationTaskParams
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
@@ -495,6 +498,58 @@ async def test_realtime_stt_reservation_releases_on_task_finished() -> None:
 
     assert isinstance(first_created, TaskCreated)
     assert isinstance(first_deleted, TaskDeleted)
+    assert isinstance(second_created, TaskCreated)
+    assert isinstance(second_created.task, RealtimeAudioTranscriptionTask)
+    assert second_created.task.command_id == second.command_id
+
+
+@pytest.mark.asyncio
+async def test_realtime_stt_reservation_releases_on_task_cancelled() -> None:
+    """Cancellation before runner dispatch must release master admission."""
+
+    master, node_id, command_sender, event_receiver = _build_master()
+    instance = _single_node_transcription_instance(node_id)
+    master.state = master.state.model_copy(
+        update={"instances": {instance.instance_id: instance}}
+    )
+
+    def command(command_id: str) -> RealtimeAudioTranscription:
+        return RealtimeAudioTranscription(
+            command_id=CommandId(command_id),
+            owner_node=NodeId("remote-api"),
+            target_instance_id=instance.instance_id,
+            task_params=RealtimeAudioTranscriptionTaskParams(
+                model=instance.shard_assignments.model_id,
+                input_sample_rate=16000,
+                transcription_delay_ms=480,
+            ),
+        )
+
+    first = command("first-cancelled-realtime")
+    second = command("second-after-cancel")
+    first_created: Event | None = None
+    first_cancelled: Event | None = None
+    second_created: Event | None = None
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(master._command_processor)  # pyright: ignore[reportPrivateUsage]
+        await command_sender.send(ForwarderCommand(origin=SystemId("API"), command=first))
+        first_created = await event_receiver.receive()
+        await command_sender.send(
+            ForwarderCommand(
+                origin=SystemId("API"),
+                command=TaskCancelled(cancelled_command_id=first.command_id),
+            )
+        )
+        first_cancelled = await event_receiver.receive()
+        await command_sender.send(
+            ForwarderCommand(origin=SystemId("API"), command=second)
+        )
+        second_created = await event_receiver.receive()
+        task_group.cancel_scope.cancel()
+
+    assert isinstance(first_created, TaskCreated)
+    assert isinstance(first_cancelled, TaskStatusUpdated)
+    assert first_cancelled.task_status is TaskStatus.Cancelled
     assert isinstance(second_created, TaskCreated)
     assert isinstance(second_created.task, RealtimeAudioTranscriptionTask)
     assert second_created.task.command_id == second.command_id
