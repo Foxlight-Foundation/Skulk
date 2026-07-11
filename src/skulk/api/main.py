@@ -3134,7 +3134,11 @@ class API:
         return False
 
     def _realtime_stt_instance(
-        self, model_id: ModelId | None = None
+        self,
+        model_id: ModelId | None = None,
+        *,
+        call_id: str | None = None,
+        require_idle: bool = False,
     ) -> tuple[InstanceId, ModelCard, NodeId] | None:
         """Return eligible cluster realtime STT capacity and its hosting node."""
 
@@ -3150,6 +3154,19 @@ class API:
             return None
         candidates: list[tuple[bool, str, str, InstanceId, ModelCard, NodeId]] = []
         for instance_id, instance in self.state.instances.items():
+            if require_idle and (
+                any(
+                    active.reserved_instance_id == instance_id
+                    for active_call_id, active in self._active_capability_streams.items()
+                    if active_call_id != call_id
+                )
+                or any(
+                    task.instance_id == instance_id
+                    and task.task_status not in _TERMINAL_TASK_STATUSES
+                    for task in self.state.tasks.values()
+                )
+            ):
+                continue
             if (
                 model_id is not None
                 and instance.shard_assignments.model_id != model_id
@@ -8713,33 +8730,24 @@ class API:
         params = RealtimeAudioTranscriptionTaskParams.model_validate(
             {**payload, "input_sample_rate": sample_rate}
         )
-        selected = self._realtime_stt_instance(params.model)
-        if selected is None:
+        if self._realtime_stt_instance(params.model) is None:
             raise HTTPException(
                 status_code=404,
                 detail=(
                     f"No reachable realtime STT instance for model {params.model}"
                 ),
             )
+        selected = self._realtime_stt_instance(
+            params.model,
+            call_id=call.call_id,
+            require_idle=True,
+        )
+        if selected is None:
+            raise HTTPException(
+                status_code=409,
+                detail="All realtime STT runners for this model are already busy",
+            )
         instance_id, _, target_node = selected
-        if any(
-            active.reserved_instance_id == instance_id
-            for active_call_id, active in self._active_capability_streams.items()
-            if active_call_id != call.call_id
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail="The realtime STT runner is already reserved by another stream",
-            )
-        if any(
-            task.instance_id == instance_id
-            and task.task_status not in _TERMINAL_TASK_STATUSES
-            for task in self.state.tasks.values()
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail="The realtime STT runner is already serving another task",
-            )
         return params, instance_id, target_node
 
     async def _admit_builtin_realtime_stt_stream(
@@ -8833,6 +8841,9 @@ class API:
     ) -> None:
         """Send one PCM frame through the local fast path or remote DATA path."""
 
+        if target_node == self.node_id and self._realtime_audio_sender is not None:
+            await self._realtime_audio_sender.send(frame)
+            return
         if self._realtime_audio_packet_sender is not None:
             await self._realtime_audio_packet_sender.send(
                 RealtimeAudioPacket(
@@ -8844,9 +8855,6 @@ class API:
                     data=frame.data,
                 )
             )
-            return
-        if target_node == self.node_id and self._realtime_audio_sender is not None:
-            await self._realtime_audio_sender.send(frame)
             return
         raise RuntimeError("realtime audio worker ingress is unavailable")
 

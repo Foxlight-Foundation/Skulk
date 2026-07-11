@@ -42,6 +42,10 @@ from skulk.shared.types.common import CommandId, NodeId
 from skulk.shared.types.events import IndexedEvent, RunnerStatusUpdated
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
+from skulk.shared.types.tasks import (
+    RealtimeAudioTranscription as RealtimeAudioTranscriptionTask,
+)
+from skulk.shared.types.tasks import TaskId, TaskStatus
 from skulk.shared.types.telemetry import TelemetryView
 from skulk.shared.types.worker.instances import InstanceId, MlxRingInstance
 from skulk.shared.types.worker.runners import (
@@ -79,9 +83,11 @@ def _local_state(
     *,
     runner_status: RunnerStatus | None = None,
     hosting_node: NodeId | None = None,
+    runner_name: str = "speech-runner",
+    instance_name: str = "speech-instance",
 ) -> State:
-    runner_id = RunnerId("speech-runner")
-    instance_id = InstanceId("speech-instance")
+    runner_id = RunnerId(runner_name)
+    instance_id = InstanceId(instance_name)
     hosting_node = hosting_node or NodeId("api-node")
     return State(
         instances={
@@ -293,6 +299,26 @@ async def test_realtime_stt_failed_input_preserves_failure_semantics() -> None:
         )
 
     assert realtime_receiver.collect() == []
+
+
+@pytest.mark.anyio
+async def test_same_node_realtime_audio_uses_bounded_local_ingress() -> None:
+    """Same-node PCM must backpressure on the bounded API-worker channel."""
+
+    api, realtime_receiver, _ = _build_api()
+    packet_sender, packet_receiver = channel[RealtimeAudioPacket](4)
+    api._realtime_audio_packet_sender = packet_sender
+    frame = RealtimeAudioInputFrame(
+        command_id=CommandId("same-node-bounded-ingress"),
+        sequence=1,
+        kind="chunk",
+        data=b"\x00\x00",
+    )
+
+    await api._send_realtime_audio_input(NodeId("api-node"), frame)
+
+    assert await realtime_receiver.receive() == frame
+    assert packet_receiver.collect() == []
 
 
 @pytest.mark.anyio
@@ -520,6 +546,66 @@ async def test_realtime_stt_admission_reserves_local_instance(
         assert second.open_result.error.code == "overloaded"
         await first.input.cancel("test complete")
         _ = [frame async for frame in first.frames]
+        task_group.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_realtime_stt_admission_skips_busy_instance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Admission selects an idle runner when an earlier candidate is busy."""
+
+    api, _, _ = _build_api()
+    card = _realtime_card()
+    first = _local_state(card)
+    second = _local_state(
+        card,
+        runner_name="speech-runner-two",
+        instance_name="speech-instance-two",
+    )
+    busy_task = RealtimeAudioTranscriptionTask(
+        task_id=TaskId("busy-realtime-task"),
+        instance_id=InstanceId("speech-instance"),
+        command_id=CommandId("busy-realtime-command"),
+        owner_node=NodeId("other-api"),
+        task_status=TaskStatus.Running,
+        task_params=RealtimeAudioTranscriptionTaskParams(
+            model=card.model_id,
+            input_sample_rate=16000,
+        ),
+    )
+    api.state = State(
+        instances={**first.instances, **second.instances},
+        runners={**first.runners, **second.runners},
+        tasks={busy_task.task_id: busy_task},
+    )
+    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
+    _enable_realtime(api, tmp_path)
+    api._sync_builtin_speech_capability()
+    commands: list[RealtimeAudioTranscription] = []
+
+    async def send(command: object) -> None:
+        if isinstance(command, RealtimeAudioTranscription):
+            commands.append(command)
+
+    monkeypatch.setattr(api, "_send", send)
+    async with api._tg as task_group:
+        task_group.start_soon(api._apply_provider_data)
+        session = await api._extension_context.stream_capability(
+            NodeId("api-node"),
+            REALTIME_STT_CAPABILITY_DESCRIPTOR.id,
+            REALTIME_STT_CAPABILITY_DESCRIPTOR.version,
+            descriptor_revision(REALTIME_STT_CAPABILITY_DESCRIPTOR),
+            {"model": str(card.model_id), "sample_rate": 16000},
+            timeout_seconds=2.0,
+        )
+
+        assert session.open_result.ok is True
+        assert session.input is not None
+        assert commands[0].target_instance_id == InstanceId("speech-instance-two")
+        await session.input.cancel("test complete")
+        _ = [frame async for frame in session.frames]
         task_group.cancel_scope.cancel()
 
 
