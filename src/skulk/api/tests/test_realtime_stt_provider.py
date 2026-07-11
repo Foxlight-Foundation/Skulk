@@ -39,7 +39,7 @@ from skulk.shared.types.commands import (
     TaskFinished,
 )
 from skulk.shared.types.common import CommandId, NodeId
-from skulk.shared.types.events import IndexedEvent, RunnerStatusUpdated
+from skulk.shared.types.events import IndexedEvent, NodeTimedOut, RunnerStatusUpdated
 from skulk.shared.types.memory import Memory
 from skulk.shared.types.state import State
 from skulk.shared.types.tasks import (
@@ -309,6 +309,36 @@ def test_realtime_stt_discovery_rejects_multi_host_instance(
 
     api._sync_builtin_speech_capability()
 
+    assert api._telemetry_view.local_advertised_capabilities == set()
+
+
+@pytest.mark.anyio
+async def test_node_timeout_withdraws_remote_realtime_stt_advertisement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Pruning the last remote runner must withdraw stale discovery state."""
+
+    api, _ = _build_remote_api()
+    remote_node = NodeId("worker-node")
+    api.state = _local_state(_realtime_card(), hosting_node=remote_node)
+    monkeypatch.setenv(EXPERIMENTAL_MODE_ENV_VAR, "1")
+    _enable_realtime(api, tmp_path)
+    api._sync_builtin_speech_capability()
+    assert api._telemetry_view.local_advertised_capabilities == {"stt.realtime"}
+    event_sender = api.event_receiver.clone_sender()
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(api._apply_state)
+        await event_sender.send(
+            IndexedEvent(idx=0, event=NodeTimedOut(node_id=remote_node))
+        )
+        with anyio.fail_after(1):
+            while api._telemetry_view.local_advertised_capabilities:
+                await anyio.sleep(0)
+        task_group.cancel_scope.cancel()
+
+    assert api.state.instances == {}
     assert api._telemetry_view.local_advertised_capabilities == set()
 
 

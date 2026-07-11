@@ -320,6 +320,7 @@ from skulk.shared.types.events import (
     IndexedEvent,
     InstanceCreated,
     InstanceDeleted,
+    NodeTimedOut,
     RunnerStatusUpdated,
     StateSnapshotHydrated,
     TaskFailed,
@@ -5804,6 +5805,7 @@ class API:
                     (
                         InstanceCreated,
                         InstanceDeleted,
+                        NodeTimedOut,
                         RunnerStatusUpdated,
                         StateSnapshotHydrated,
                     ),
