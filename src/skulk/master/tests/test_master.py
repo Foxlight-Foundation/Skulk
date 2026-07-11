@@ -34,6 +34,7 @@ from skulk.shared.types.events import (
     NodeGatheredInfo,
     TaskCreated,
     TaskDeleted,
+    TaskFailed,
     TaskStatusUpdated,
 )
 from skulk.shared.types.memory import Memory
@@ -456,6 +457,69 @@ async def test_task_deleted_event_clears_command_mapping() -> None:
         tg.cancel_scope.cancel()
 
     assert command_id not in master.command_task_mapping
+
+
+@pytest.mark.asyncio
+async def test_terminal_task_event_releases_realtime_reservation() -> None:
+    """Runner terminal state releases capacity without API cleanup."""
+
+    keypair = get_node_id_keypair()
+    node_id = NodeId(keypair.to_node_id())
+    session_id = SessionId(master_node_id=node_id, election_clock=0)
+    global_sender, _global_receiver = channel[GlobalForwarderEvent]()
+    _command_sender, command_receiver = channel[ForwarderCommand]()
+    local_event_sender, local_event_receiver = channel[LocalForwarderEvent]()
+    _request_sender, state_sync_receiver = channel[StateSyncMessage]()
+    state_sync_sender, _response_receiver = channel[StateSyncMessage]()
+    download_sender, _download_receiver = channel[ForwarderDownloadCommand]()
+    event_sender, _event_receiver = channel[Event]()
+    master = Master(
+        node_id,
+        session_id,
+        event_sender=event_sender,
+        global_event_sender=global_sender,
+        local_event_receiver=local_event_receiver,
+        command_receiver=command_receiver,
+        state_sync_receiver=state_sync_receiver,
+        state_sync_sender=state_sync_sender,
+        download_command_sender=download_sender,
+    )
+
+    command_id = CommandId("realtime-terminal-command")
+    task = TextGenerationTask(
+        task_id=TaskId("realtime-terminal-task"),
+        instance_id=InstanceId("realtime-terminal-instance"),
+        command_id=command_id,
+        task_params=TextGenerationTaskParams(
+            model=ModelId("test-model"),
+            input=[InputMessage(role="user", content="hi")],
+        ),
+    )
+    master.state = master.state.model_copy(update={"tasks": {task.task_id: task}})
+    master.command_task_mapping[command_id] = task.task_id
+    master._realtime_instance_by_command[command_id] = task.instance_id  # pyright: ignore[reportPrivateUsage]
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(master._event_processor)  # pyright: ignore[reportPrivateUsage]
+        await local_event_sender.send(
+            LocalForwarderEvent(
+                origin=SystemId("Worker"),
+                origin_idx=0,
+                session=session_id,
+                event=TaskFailed(
+                    task_id=task.task_id,
+                    error_type="runner_failed",
+                    error_message="runner stopped",
+                ),
+            )
+        )
+        with anyio.fail_after(2):
+            while command_id in master._realtime_instance_by_command:  # pyright: ignore[reportPrivateUsage]
+                await anyio.sleep(0.01)
+        task_group.cancel_scope.cancel()
+
+    assert command_id in master.command_task_mapping
+    assert command_id not in master._realtime_instance_by_command  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.asyncio

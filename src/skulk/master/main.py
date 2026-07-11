@@ -1530,6 +1530,20 @@ class Master:
                                     command_id, None
                                 )
 
+                    if isinstance(event, TaskFailed) or (
+                        isinstance(event, TaskStatusUpdated)
+                        and event.task_status
+                        not in (TaskStatus.Pending, TaskStatus.Running)
+                    ):
+                        for command_id, task_id in self.command_task_mapping.items():
+                            if task_id == event.task_id:
+                                # Terminal task state is authoritative even if
+                                # the owning API disappears before TaskFinished.
+                                # Preserve command mapping for eventual deletion.
+                                self._realtime_instance_by_command.pop(
+                                    command_id, None
+                                )
+
                     # Refuse to index task-lifecycle events that are state
                     # no-ops (the task is already gone). Without this cap a
                     # single misbehaving emitter could mint unbounded
