@@ -291,6 +291,15 @@ def _local_usable_vram() -> Memory | None:
         # NVIDIA fallthrough (rented CUDA nodes): same discrete-VRAM sizing so
         # the worker's last-minute guard agrees with the master's admission.
         # NVIDIA reports no UMA/GTT signature, so the discrete path applies.
+        # Gated on the node actually ADVERTISING a CUDA llama.cpp backend:
+        # with pynvml present but only llama_cpp-cpu advertised (env unset,
+        # or the GPU wheel clobbered so the probe dropped the tag), the
+        # master admits against system RAM, and sizing the local guard
+        # against VRAM would falsely refuse CPU placements that fit.
+        from skulk.shared.backends import probe_node_backends
+
+        if "llama_cpp-cuda" not in probe_node_backends():
+            return None
         nvml = load_nvml()
         if nvml is None or not has_nvidia_gpu(nvml):
             return None
