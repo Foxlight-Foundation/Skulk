@@ -95,7 +95,8 @@ class TelemetrySample(BaseModel, frozen=True):
     """One wire-contract sample (snake_case fields match the ingest API).
 
     Attributes:
-        kind: ``generation`` | ``node-death`` | ``runner-restart``.
+        kind: ``generation`` or ``node-death``. (The wire contract also
+            admits ``runner-restart``; this collector does not emit it yet.)
         at: ISO-8601 timestamp of the observation.
         model_id: Model identifier (generation samples only).
         engine: Engine family when known.
@@ -214,13 +215,16 @@ class FieldTelemetryCollector:
         """Record one completed (or failed) generation. No-op without consent."""
         if not self.enabled:
             return
+        snapshot_size = len(self._hardware_provider())
         self._append(
             TelemetrySample(
                 kind="generation",
                 at=_now_iso(),
                 model_id=model_id,
                 hardware=tuple(sorted(set(self._current_classes()))),
-                node_count=node_count,
+                # Placement size when the caller knows it; otherwise the
+                # visible cluster size (an honest upper bound, never zero).
+                node_count=node_count if node_count is not None else (snapshot_size or None),
                 ttft_s=ttft_s,
                 decode_tps=decode_tps,
                 prompt_tokens=prompt_tokens,
@@ -360,17 +364,17 @@ async def tap_generation_stream(
                 ttft_s = time.monotonic() - started
             stats = cast("object | None", getattr(chunk, "stats", None))
             if stats is not None:
-                decode_tps = (
-                    float(cast(float, getattr(stats, "generation_tps", 0.0)))
-                    or decode_tps
+                tps = cast("float | None", getattr(stats, "generation_tps", None))
+                if tps is not None:
+                    decode_tps = float(tps)
+                prompt = cast("int | None", getattr(stats, "prompt_tokens", None))
+                if prompt is not None:
+                    prompt_tokens = int(prompt)
+                generated = cast(
+                    "int | None", getattr(stats, "generation_tokens", None)
                 )
-                prompt_tokens = (
-                    int(cast(int, getattr(stats, "prompt_tokens", 0))) or prompt_tokens
-                )
-                output_tokens = (
-                    int(cast(int, getattr(stats, "generation_tokens", 0)))
-                    or output_tokens
-                )
+                if generated is not None:
+                    output_tokens = int(generated)
             finish = cast("str | None", getattr(chunk, "finish_reason", None))
             if finish is not None:
                 completed = True

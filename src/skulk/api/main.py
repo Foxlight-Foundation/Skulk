@@ -1139,6 +1139,8 @@ class API:
         # provider re-reads the file per check so dashboard consent changes
         # apply without a restart; the hardware provider snapshots the
         # telemetry plane. Node ids feed only in-process death diffing.
+        self._telemetry_config_cache: "TelemetryConfig | None" = None
+        self._telemetry_config_cached_until = 0.0
         self._field_telemetry = FieldTelemetryCollector(
             config_provider=self._current_telemetry_config,
             hardware_provider=self._telemetry_hardware_snapshot,
@@ -7894,12 +7896,24 @@ class API:
         return configured_backend
 
     def _current_telemetry_config(self) -> "TelemetryConfig | None":
-        """Read the CURRENT telemetry consent from skulk.yaml (never raises)."""
+        """Read the current telemetry consent from skulk.yaml (never raises).
+
+        Cached for a few seconds: the enabled-check runs per generation, and
+        a YAML parse on that hot path would be wasted work. Dashboard consent
+        changes still apply within the TTL.
+        """
+        now = time.monotonic()
+        if now < self._telemetry_config_cached_until:
+            return self._telemetry_config_cache
         try:
             config = load_skulk_config(self._config_path)
-            return config.telemetry if config is not None else None
+            self._telemetry_config_cache = (
+                config.telemetry if config is not None else None
+            )
         except Exception:  # noqa: BLE001 - consent read must never break the API
-            return None
+            self._telemetry_config_cache = None
+        self._telemetry_config_cached_until = now + 5.0
+        return self._telemetry_config_cache
 
     def _telemetry_hardware_snapshot(
         self,

@@ -142,7 +142,9 @@ export function TelemetryConsentModal() {
   const [eligible] = useState(() => !hasSeen());
 
   const consent = fullConfig?.telemetry?.consent ?? 'unasked';
-  const visible = !loading && !dismissed && consent === 'unasked' && eligible;
+  // fullConfig must be LOADED: saving over a failed fetch would PUT a
+  // config missing every other section.
+  const visible = !loading && fullConfig != null && !dismissed && consent === 'unasked' && eligible;
 
   // Showing the modal is what stamps the no-nag marker: even a hard refresh
   // mid-decision never asks this browser twice.
@@ -167,8 +169,11 @@ export function TelemetryConsentModal() {
         'https://skulk-ledger-ingest.thomastupper92618.workers.dev',
     };
     const updated: FullConfig = { ...(fullConfig ?? {}), telemetry };
-    await saveFullConfig(updated);
-    close();
+    const ok = await saveFullConfig(updated);
+    // A failed save must NOT dismiss: the browser is already marked seen,
+    // so closing here would strand the operator with no modal and no saved
+    // consent. Settings remains the fallback either way.
+    if (ok !== false) close();
   }, [close, diagnosticsOn, fullConfig, saveFullConfig, telemetryOn]);
 
   if (!visible) return null;
