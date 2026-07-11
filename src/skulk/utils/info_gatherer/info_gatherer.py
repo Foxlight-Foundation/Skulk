@@ -45,6 +45,12 @@ from .linux_gpu import (
     read_system_profile,
 )
 from .mactop import MacmonMetrics, MactopMetrics
+from .nvidia_gpu import (
+    has_nvidia_gpu,
+    load_nvml,
+    prefer_nvidia_telemetry,
+)
+from .nvidia_gpu import read_system_profile as read_nvidia_system_profile
 from .system_info import (
     get_friendly_name,
     get_model_and_chip,
@@ -860,30 +866,43 @@ class InfoGatherer:
             await anyio.sleep(self.disk_poll_interval)
 
     async def _monitor_gpu_linux(self):
-        """Publish normalized AMD/Linux GPU telemetry from passive sysfs reads.
+        """Publish normalized Linux GPU telemetry (AMD sysfs, then NVIDIA NVML).
 
-        Resolves the amdgpu device once; if none is present (no GPU, or a driver
-        that does not expose ``gpu_busy_percent``) the node simply reports no
-        accelerator, which the dashboard renders as "not reported". Reads are
-        passive sysfs, never a GPU-colliding poll (see ``linux_gpu.py`` and the
-        macmon crash mechanism it avoids).
+        Resolves the accelerator once: the amdgpu sysfs device when present,
+        otherwise NVML device 0 (rented CUDA nodes). If neither exists the
+        node simply reports no accelerator, which the dashboard renders as
+        "not reported". All reads are passive (sysfs files or NVML queries),
+        never a GPU-colliding poll (see ``linux_gpu.py`` and the macmon crash
+        mechanism it avoids).
         """
         if self.gpu_linux_poll_interval is None:
             return
-        device = find_amd_gpu_device()
+        # Mixed-GPU hosts: SKULK_GPU_TELEMETRY_VENDOR=nvidia skips the AMD
+        # sysfs adapter (e.g. an iGPU) so the NVIDIA dGPU reports instead.
+        device = None if prefer_nvidia_telemetry() else find_amd_gpu_device()
+        nvml = None
         if device is None:
-            logger.info(
-                "no AMD GPU sysfs device (gpu_busy_percent) found; skipping GPU "
-                "telemetry on this node"
-            )
-            return
-        logger.info(f"reporting GPU telemetry from {device}")
+            # No AMD sysfs device: try NVML for an NVIDIA accelerator (rented
+            # CUDA nodes). Same passive-reads-only rule, same profile shape.
+            nvml = load_nvml()
+            if nvml is None or not has_nvidia_gpu(nvml):
+                logger.info(
+                    "no AMD GPU sysfs device and no NVML device found; skipping "
+                    "GPU telemetry on this node"
+                )
+                return
+            logger.info("reporting GPU telemetry from NVML device 0")
+        else:
+            logger.info(f"reporting GPU telemetry from {device}")
         while True:
             try:
                 with fail_after(5):
-                    await self.info_sender.send(
-                        LinuxGpuMetrics(system_profile=read_system_profile(device))
-                    )
+                    if device is not None:
+                        profile = read_system_profile(device)
+                    else:
+                        assert nvml is not None  # guaranteed by the setup above
+                        profile = read_nvidia_system_profile(nvml)
+                    await self.info_sender.send(LinuxGpuMetrics(system_profile=profile))
             except (ClosedResourceError, BrokenResourceError):
                 # Consumer gone (worker shutdown/replacement): a stop signal,
                 # not a gathering fault; must escape this per-iteration

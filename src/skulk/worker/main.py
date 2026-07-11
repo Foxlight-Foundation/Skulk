@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import io
+import sys
 import time
 from collections import defaultdict, deque
 from collections.abc import Container, Mapping
@@ -261,18 +262,55 @@ def _local_usable_vram() -> Memory | None:
       GPU's GTT-mapped system RAM counts toward the pool. The live GPU-wireable
       snapshot matches the ceiling the master derives from gossiped telemetry.
 
+    NVIDIA nodes (no amdgpu sysfs, NVML present) take the same discrete-GPU
+    path from NVML readings; NVIDIA exposes no UMA/GTT signature here.
     Returns ``None`` on Apple unified-memory nodes (no amdgpu device), which keep
     the system-RAM path. The master is the backend authority that decides a shard
     belongs on this GPU node in the first place.
     """
+    # Both collectors are Linux-only; bail before any import attempt so
+    # macOS shard-fit checks never pay repeated pynvml import probes.
+    if sys.platform != "linux":
+        return None
+
     from skulk.utils.info_gatherer.linux_gpu import (
         find_amd_gpu_device,
         read_accelerator_metrics,
     )
+    from skulk.utils.info_gatherer.nvidia_gpu import (
+        has_nvidia_gpu,
+        load_nvml,
+        prefer_nvidia_telemetry,
+    )
+    from skulk.utils.info_gatherer.nvidia_gpu import (
+        read_accelerator_metrics as read_nvidia_accelerator_metrics,
+    )
 
-    device = find_amd_gpu_device()
+    device = None if prefer_nvidia_telemetry() else find_amd_gpu_device()
     if device is None:
-        return None
+        # NVIDIA fallthrough (rented CUDA nodes): same discrete-VRAM sizing so
+        # the worker's last-minute guard agrees with the master's admission.
+        # NVIDIA reports no UMA/GTT signature, so the discrete path applies.
+        # Gated on the node actually ADVERTISING a CUDA llama.cpp backend:
+        # with pynvml present but only llama_cpp-cpu advertised (env unset,
+        # or the GPU wheel clobbered so the probe dropped the tag), the
+        # master admits against system RAM, and sizing the local guard
+        # against VRAM would falsely refuse CPU placements that fit.
+        from skulk.shared.backends import probe_node_backends
+
+        if "llama_cpp-cuda" not in probe_node_backends():
+            return None
+        nvml = load_nvml()
+        if nvml is None or not has_nvidia_gpu(nvml):
+            return None
+        nvidia = read_nvidia_accelerator_metrics(nvml)
+        if not nvidia.vram_total_bytes or nvidia.vram_total_bytes <= 0:
+            return None
+        nvidia_available = max(
+            0, nvidia.vram_total_bytes - (nvidia.vram_used_bytes or 0)
+        )
+        nvidia_ceiling = int(nvidia.vram_total_bytes * GPU_VRAM_WORKING_SET_FRACTION)
+        return Memory.from_bytes(min(nvidia_available, nvidia_ceiling))
     accelerator = read_accelerator_metrics(device)
     total = accelerator.vram_total_bytes
     if not total or total <= 0:

@@ -9,6 +9,15 @@ This project records release notes here and mirrors public-facing notes in
 
 ### Added
 
+- NVIDIA / CUDA node support (platform plumbing): a passive NVML telemetry
+  collector (`utils/info_gatherer/nvidia_gpu.py`) fills the normalized
+  accelerator profile on NVIDIA nodes (the Linux GPU monitor tries AMD
+  sysfs first, then NVML), and `deployment/cuda/install-deps.sh` provisions
+  a driver-equipped machine (e.g. a rented GPU pod) into a serving node
+  with the CUDA llama-cpp-python build and optional CUDA `llama-server`.
+  Backend advertisement reuses the existing `SKULK_LLAMA_CPP_BACKENDS=cuda`
+  declaration with build cross-checking.
+
 - Opt-in field telemetry (off by default): a first-run dashboard consent
   modal and permanent Settings toggles control anonymous performance and
   reliability samples (model id, hardware class, timing, token counts,
