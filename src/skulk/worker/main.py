@@ -280,12 +280,13 @@ def _local_usable_vram() -> Memory | None:
     from skulk.utils.info_gatherer.nvidia_gpu import (
         has_nvidia_gpu,
         load_nvml,
+        prefer_nvidia_telemetry,
     )
     from skulk.utils.info_gatherer.nvidia_gpu import (
         read_accelerator_metrics as read_nvidia_accelerator_metrics,
     )
 
-    device = find_amd_gpu_device()
+    device = None if prefer_nvidia_telemetry() else find_amd_gpu_device()
     if device is None:
         # NVIDIA fallthrough (rented CUDA nodes): same discrete-VRAM sizing so
         # the worker's last-minute guard agrees with the master's admission.

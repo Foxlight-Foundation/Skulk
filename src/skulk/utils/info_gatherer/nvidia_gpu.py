@@ -17,6 +17,7 @@ small :class:`NvmlLike` surface so tests inject a fake and never need a GPU.
 
 from __future__ import annotations
 
+import os
 from functools import cache
 from typing import Protocol, cast, final
 
@@ -40,6 +41,17 @@ class NvmlLike(Protocol):
     def nvmlDeviceGetPowerUsage(self, handle: object) -> int: ...  # noqa: N802
     def nvmlDeviceGetTemperature(self, handle: object, sensor: int) -> int: ...  # noqa: N802
     def nvmlDeviceGetClockInfo(self, handle: object, clock: int) -> int: ...  # noqa: N802
+
+
+#: Mixed-GPU hosts (e.g. AMD iGPU + NVIDIA dGPU): single-adapter telemetry
+#: must pick one. Default order is AMD sysfs first (fleet-stable), then
+#: NVML; operators on mixed hosts steer with SKULK_GPU_TELEMETRY_VENDOR.
+GPU_TELEMETRY_VENDOR_ENV = "SKULK_GPU_TELEMETRY_VENDOR"
+
+
+def prefer_nvidia_telemetry() -> bool:
+    """True when the operator pins GPU telemetry to the NVIDIA adapter."""
+    return os.environ.get(GPU_TELEMETRY_VENDOR_ENV, "").strip().lower() == "nvidia"
 
 
 #: NVML constants used below (values fixed by the NVML ABI; duplicated so the

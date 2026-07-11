@@ -95,7 +95,9 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
   # the CPU-only PyPI wheel is exactly the failure --check exists to catch.
   LLAMA_PROBE='import llama_cpp, sys; sys.exit(0 if llama_cpp.llama_supports_gpu_offload() else 3)'
   if [ -f "pyproject.toml" ] && command -v uv >/dev/null 2>&1; then
-    LLAMA_CHECK_CMD=(uv run python -c "$LLAMA_PROBE")
+    # --no-sync: a plain `uv run` syncs the env first, which could ITSELF
+    # restore the CPU-only wheel that this probe exists to detect.
+    LLAMA_CHECK_CMD=(uv run --no-sync python -c "$LLAMA_PROBE")
   else
     LLAMA_CHECK_CMD=(python3 -c "$LLAMA_PROBE")
   fi

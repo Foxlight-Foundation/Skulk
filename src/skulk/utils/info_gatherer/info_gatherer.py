@@ -48,6 +48,7 @@ from .mactop import MacmonMetrics, MactopMetrics
 from .nvidia_gpu import (
     has_nvidia_gpu,
     load_nvml,
+    prefer_nvidia_telemetry,
 )
 from .nvidia_gpu import read_system_profile as read_nvidia_system_profile
 from .system_info import (
@@ -876,7 +877,9 @@ class InfoGatherer:
         """
         if self.gpu_linux_poll_interval is None:
             return
-        device = find_amd_gpu_device()
+        # Mixed-GPU hosts: SKULK_GPU_TELEMETRY_VENDOR=nvidia skips the AMD
+        # sysfs adapter (e.g. an iGPU) so the NVIDIA dGPU reports instead.
+        device = None if prefer_nvidia_telemetry() else find_amd_gpu_device()
         nvml = None
         if device is None:
             # No AMD sysfs device: try NVML for an NVIDIA accelerator (rented
