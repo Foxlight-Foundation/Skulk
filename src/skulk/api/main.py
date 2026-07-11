@@ -7981,9 +7981,11 @@ class API:
             config_data = dict(body)
         # Preserve existing secrets if not provided in this update
         # (GET /config strips them for security, so saves won't have them)
+        existing_config_object: dict[str, object] | None = None
         if self._config_path.exists():
             try:
                 existing = _load_yaml_object(self._config_path)
+                existing_config_object = existing
                 if "hf_token" not in config_data and "hf_token" in existing:
                     config_data["hf_token"] = existing["hf_token"]
                 # Preserve logging config when omitted from the request
@@ -7997,13 +7999,9 @@ class API:
         # Telemetry section normalization (preserve on partial saves, stamp
         # consented_version only once decided, backfill install_id): pure
         # logic lives in field_telemetry.prepare_telemetry_config_update.
-        existing_for_telemetry: dict[str, object] | None = None
-        if self._config_path.exists():
-            try:
-                existing_for_telemetry = _load_yaml_object(self._config_path)
-            except Exception:  # noqa: BLE001 - preservation is best-effort
-                existing_for_telemetry = None
-        prepare_telemetry_config_update(config_data, existing_for_telemetry)
+        # Reuses the YAML object already loaded for the secrets-preservation
+        # block above; None when the file was absent or unreadable.
+        prepare_telemetry_config_update(config_data, existing_config_object)
         # Validate by attempting to parse with Pydantic
         from skulk.store.config import SkulkConfig
 

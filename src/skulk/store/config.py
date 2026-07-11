@@ -326,7 +326,7 @@ class SkulkConfig(FrozenModel):
             inert unless ``SKULK_ENABLE_EXPERIMENTAL_MODE`` is also enabled on
             the node.
         telemetry: Field-telemetry consent and settings.  ``None`` means the
-            operator has never been asked (nothing is collected).
+            operator has never been asked (nothing is queued or sent).
         hf_token: HuggingFace API token.  Stripped from ``GET /config``
             responses for security.
     """
